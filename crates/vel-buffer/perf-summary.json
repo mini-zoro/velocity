@@ -1,0 +1,58 @@
+{
+  "type_10000": {
+    "runs": 7,
+    "median": 870042.0,
+    "p95": 911666.0,
+    "unit": "ns",
+    "max_rss_bytes": 120963072
+  },
+  "type_100000": {
+    "runs": 7,
+    "median": 9704208.0,
+    "p95": 10278958.0,
+    "unit": "ns",
+    "max_rss_bytes": 151568384
+  },
+  "find_10000": {
+    "runs": 7,
+    "median": 27833.0,
+    "p95": 48875.0,
+    "unit": "ns",
+    "max_rss_bytes": 322895872
+  },
+  "undo_10000": {
+    "runs": 7,
+    "median": 1103167.0,
+    "p95": 1142875.0,
+    "unit": "ns",
+    "max_rss_bytes": 121225216
+  },
+  "delete_50mb": {
+    "runs": 7,
+    "median": 686208.0,
+    "p95": 809667.0,
+    "unit": "ns",
+    "max_rss_bytes": 120209408
+  },
+  "undo_50mb": {
+    "runs": 7,
+    "median": 834.0,
+    "p95": 958.0,
+    "unit": "ns",
+    "max_rss_bytes": 120078336
+  },
+  "map_100000": {
+    "runs": 7,
+    "median": 3916583.0,
+    "p95": 4160041.0,
+    "unit": "ns",
+    "max_rss_bytes": 130547712
+  },
+  "undo_metadata": {
+    "runs": 7,
+    "median": 48.0489,
+    "p95": 48.0489,
+    "unit": "B/caret",
+    "max_rss_bytes": 0
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "vel-buffer"
+description = "Shared text buffers, selections, undo and editor operations for Velocity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+vel-text = { path = "../vel-text" }
+memchr = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+libc = "0.2"
+
+[[bench]]
+name = "perf"
+harness = false
+
+[lints]
+workspace = true
