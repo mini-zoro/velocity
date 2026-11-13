@@ -1,0 +1,89 @@
+{
+  "rust": {
+    "path": "/Users/zoro/dev/velocity/spikes/data/rust-10mb.rs",
+    "bytes": 10000000,
+    "sha256": "d5f3d0c59a12ba34446e540cfd7b5e1a3eab6c03176f3aff048281f12e031380",
+    "source": "existing generated corpus"
+  },
+  "javascript": {
+    "path": "/Users/zoro/dev/velocity/spikes/data/javascript-10mb.js",
+    "bytes": 10000000,
+    "sha256": "400c06f10bba70bb06b45041cf059fdf14c12b85c65f1471f4d7e46acbf8a79a",
+    "source": "existing generated corpus"
+  },
+  "json": {
+    "path": "/Users/zoro/dev/velocity/spikes/data/json-20mb.json",
+    "bytes": 20117640,
+    "sha256": "ddf09db9da7c68a1b8e072bafb8f74a2de77214e4353661ba81b80884bdfb623",
+    "source": "existing generated corpus"
+  },
+  "markdown": {
+    "path": "/Users/zoro/dev/velocity/spikes/data/markdown-5mb.md",
+    "bytes": 5000000,
+    "sha256": "62fde7c6ddbd39ebe98050bc446f3259566121e9e10fa68ebebbed0fb8058e6c",
+    "source": "existing generated corpus"
+  },
+  "python": {
+    "path": "/Users/zoro/dev/velocity/prototypes/sregex/data/python-5mb.py",
+    "bytes": 5036973,
+    "sha256": "afbb08566b90b6026457b81b082954064dfe8ab73ce6b28854aa02907b659721",
+    "source": "official syntax tests, scope assertions stripped, repeated whole seeds",
+    "seed_bytes": 40951,
+    "repetitions": 123,
+    "sources": [
+      "Python/tests/syntax_test_conflicts.py",
+      "Python/tests/syntax_test_indentation_case.py",
+      "Python/tests/syntax_test_python.py",
+      "Python/tests/syntax_test_python_strings.py",
+      "Python/tests/syntax_test_scope_tstrings.py"
+    ]
+  },
+  "cpp": {
+    "path": "/Users/zoro/dev/velocity/prototypes/sregex/data/cpp-5mb.cpp",
+    "bytes": 5117175,
+    "sha256": "c0eb8c7c021829f6aea6c7fcc9796fd9d79fa9783e4963eacabcbb08ba0f1251",
+    "source": "official syntax tests, scope assertions stripped, repeated whole seeds",
+    "seed_bytes": 204687,
+    "repetitions": 25,
+    "sources": [
+      "C++/syntax_test_accessor.c",
+      "C++/syntax_test_accessor.cpp",
+      "C++/syntax_test_c.c",
+      "C++/syntax_test_cpp.cpp",
+      "C++/tests/syntax_test_indent_classes.c++",
+      "C++/tests/syntax_test_indent_common.c++",
+      "C++/tests/syntax_test_indent_extern.hpp",
+      "C++/tests/syntax_test_parentheses_in_macro_arguments.h"
+    ]
+  },
+  "yaml": {
+    "path": "/Users/zoro/dev/velocity/prototypes/sregex/data/yaml-5mb.yaml",
+    "bytes": 5005611,
+    "sha256": "da7202d0739a1dee46dbe7a57c04779ef5ed138655bbca876cb11979f1e7ed14",
+    "source": "official syntax tests, scope assertions stripped, repeated whole seeds",
+    "seed_bytes": 9873,
+    "repetitions": 507,
+    "sources": [
+      "YAML/tests/syntax_test_block.yaml",
+      "YAML/tests/syntax_test_directives.yaml",
+      "YAML/tests/syntax_test_flow-plain.yaml",
+      "YAML/tests/syntax_test_flow.yaml",
+      "YAML/tests/syntax_test_general.yaml",
+      "YAML/tests/syntax_test_properties.yaml",
+      "YAML/tests/syntax_test_types.yaml"
+    ]
+  },
+  "html": {
+    "path": "/Users/zoro/dev/velocity/prototypes/sregex/data/html-5mb.html",
+    "bytes": 5001969,
+    "sha256": "75d5a85f7957eace008b6fdf28a2c820c161385d8d08073bd91aa12a1c2ec445",
+    "source": "official syntax tests, scope assertions stripped, repeated whole seeds",
+    "seed_bytes": 34027,
+    "repetitions": 147,
+    "sources": [
+      "HTML/tests/syntax_test_indent.html",
+      "HTML/tests/syntax_test_scope.html",
+      "HTML/tests/syntax_test_scope_conflicts.html"
+    ]
+  }
+}

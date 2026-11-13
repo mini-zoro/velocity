@@ -1,0 +1,342 @@
+[
+  {
+    "B": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "fancy": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "line": "a‌b",
+    "onig": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "pattern": "\\b",
+    "pos": 0
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "fancy": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "line": "a‌b",
+    "onig": {
+      "captures": [
+        [
+          1,
+          1
+        ]
+      ],
+      "end": 1,
+      "pattern": 0,
+      "start": 1
+    },
+    "pattern": "\\b",
+    "pos": 1
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "fancy": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "line": "a‌b",
+    "onig": {
+      "captures": [
+        [
+          4,
+          4
+        ]
+      ],
+      "end": 4,
+      "pattern": 0,
+      "start": 4
+    },
+    "pattern": "\\b",
+    "pos": 4
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "fancy": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "line": "a‌b",
+    "onig": {
+      "captures": [
+        [
+          5,
+          5
+        ]
+      ],
+      "end": 5,
+      "pattern": 0,
+      "start": 5
+    },
+    "pattern": "\\b",
+    "pos": 5
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "ß",
+    "onig": {
+      "captures": [
+        [
+          0,
+          2
+        ]
+      ],
+      "end": 2,
+      "pattern": 0,
+      "start": 0
+    },
+    "pattern": "(?i:ss)",
+    "pos": 0
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "ß",
+    "onig": null,
+    "pattern": "(?i:ss)",
+    "pos": 2
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "fancy": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "line": "x\n",
+    "onig": {
+      "captures": [
+        [
+          0,
+          0
+        ]
+      ],
+      "end": 0,
+      "pattern": 0,
+      "start": 0
+    },
+    "pattern": "^",
+    "pos": 0
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "x\n",
+    "onig": null,
+    "pattern": "^",
+    "pos": 1
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "x\n",
+    "onig": null,
+    "pattern": "^",
+    "pos": 2
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          0,
+          1
+        ]
+      ],
+      "end": 1,
+      "pattern": 0,
+      "start": 0
+    },
+    "fancy": {
+      "captures": [
+        [
+          0,
+          1
+        ]
+      ],
+      "end": 1,
+      "pattern": 0,
+      "start": 0
+    },
+    "line": "<",
+    "onig": {
+      "captures": [
+        [
+          0,
+          1
+        ]
+      ],
+      "end": 1,
+      "pattern": 0,
+      "start": 0
+    },
+    "pattern": "\\<",
+    "pos": 0
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "<",
+    "onig": null,
+    "pattern": "\\<",
+    "pos": 1
+  },
+  {
+    "B": {
+      "captures": [
+        [
+          0,
+          3
+        ]
+      ],
+      "end": 3,
+      "pattern": 0,
+      "start": 0
+    },
+    "fancy": {
+      "captures": [
+        [
+          0,
+          3
+        ]
+      ],
+      "end": 3,
+      "pattern": 0,
+      "start": 0
+    },
+    "line": "://",
+    "onig": {
+      "captures": [
+        [
+          0,
+          3
+        ]
+      ],
+      "end": 3,
+      "pattern": 0,
+      "start": 0
+    },
+    "pattern": ":/{,2}",
+    "pos": 0
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "://",
+    "onig": null,
+    "pattern": ":/{,2}",
+    "pos": 1
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "://",
+    "onig": null,
+    "pattern": ":/{,2}",
+    "pos": 2
+  },
+  {
+    "B": null,
+    "fancy": null,
+    "line": "://",
+    "onig": null,
+    "pattern": ":/{,2}",
+    "pos": 3
+  }
+]

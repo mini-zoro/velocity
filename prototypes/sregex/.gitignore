@@ -1,0 +1,16 @@
+/target/
+/data/
+/.cargo-home/
+/output/*.log
+/output/*.tmp
+/backups/
+__pycache__/
+
+# Large raw benchmark outputs (regenerate with the scripts in scripts/; summaries are in RESULTS.md)
+/output/smoke*.json
+/output/diff.json
+/output/bench.json
+/output/compile-*.json
+/output/inventory.json
+/output/cache16.json
+/output/strict-check.json
