@@ -1,0 +1,858 @@
+//! Metal-only wgpu implementation. The retained WindowHandle outlives the surface.
+use crate::{
+    atlas::*,
+    cache::*,
+    font::{Fonts, rgba},
+    scene::*,
+    timing::{MAX_MEASURED_FRAMES, Queries},
+};
+use bytemuck::{Pod, Zeroable};
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use vel_platform::{Rect, WindowHandle};
+use wgpu::util::DeviceExt;
+
+const ATLAS_SIDE: u32 = 1024;
+const MAX_PAGES: usize = 8;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct Instance {
+    rect: [f32; 4],
+    uv: [f32; 4],
+    color: Color,
+    clip: [f32; 4],
+    params: [f32; 4],
+    meta: [f32; 4],
+}
+#[derive(Clone, Copy, Debug)]
+struct Raster {
+    left: i32,
+    top: i32,
+    color: bool,
+}
+/// CPU presentation boundaries for one successful frame.
+#[derive(Clone, Debug)]
+pub struct FrameTimes {
+    /// GPU commands submitted (not completed).
+    pub submitted: Instant,
+    /// queue.present returned (not scanout).
+    pub presented: Instant,
+    /// Drawable acquisition time in milliseconds.
+    pub acquire_ms: f64,
+    /// Encode + submit time, excluding acquisition.
+    pub encode_submit_ms: f64,
+    /// Present-call duration.
+    pub present_call_ms: f64,
+}
+/// Metal renderer, reusable scene buffers, lazy array atlas and layout cache.
+#[derive(Debug)]
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    instance: wgpu::Instance,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    window: WindowHandle,
+    pipeline: wgpu::RenderPipeline,
+    bind_layout: wgpu::BindGroupLayout,
+    bind: wgpu::BindGroup,
+    sampler: wgpu::Sampler,
+    screen: wgpu::Buffer,
+    atlas: PagedAtlas,
+    texture: wgpu::Texture,
+    texture_pages: u32,
+    rasters: HashMap<GlyphKey, Raster>,
+    blanks: HashSet<GlyphKey>,
+    instances: wgpu::Buffer,
+    capacity: u64,
+    data: Vec<Instance>,
+    batches: BatchPlan,
+    layouts: LineLayoutCache,
+    queries: Option<Queries>,
+    offscreen: Option<wgpu::Texture>,
+    background: Color,
+    cache: Option<wgpu::PipelineCache>,
+    cache_path: Option<PathBuf>,
+    /// Adapter, feature support, pipeline timings and cache status.
+    pub info: Value,
+}
+impl Renderer {
+    /// Creates a Fifo surface directly from our CAMetalLayer. `phase` records
+    /// initialization milestones without coupling this crate to a JSONL sink.
+    pub fn new(
+        window: WindowHandle,
+        timestamps: bool,
+        cache_dir: &Path,
+        mut phase: impl FnMut(&'static str),
+    ) -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        phase("wgpu_instance");
+        // SAFETY: this is our live CAMetalLayer. `window` is retained in Renderer
+        // until after surface drops; all use and destruction occur on the main thread.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                window.metal_layer_ptr(),
+            ))
+        }
+        .map_err(|e| e.to_string())?;
+        phase("surface_created");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        phase("adapter");
+        let has_queries =
+            timestamps && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let has_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
+        let mut features = wgpu::Features::empty();
+        if has_queries {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if has_cache {
+            features |= wgpu::Features::PIPELINE_CACHE;
+        }
+        let start = Instant::now();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Velocity Metal"),
+            required_features: features,
+            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        let device_ms = ms(start.elapsed());
+        phase("device_queue");
+        let capabilities = surface.get_capabilities(&adapter);
+        if !capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Fifo)
+            || !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
+        {
+            return Err("Metal surface must support Fifo and COPY_DST for synchronous first-frame presentation".into());
+        }
+        let size = window.content_size();
+        let scale = window.scale_factor();
+        let mut config = surface
+            .get_default_config(
+                &adapter,
+                (size.width * scale).round().max(1.) as u32,
+                (size.height * scale).round().max(1.) as u32,
+            )
+            .ok_or("no surface configuration")?;
+        config.present_mode = wgpu::PresentMode::Fifo;
+        config.desired_maximum_frame_latency = 1;
+        config.usage |= wgpu::TextureUsages::COPY_DST;
+        if capabilities
+            .formats
+            .contains(&wgpu::TextureFormat::Bgra8Unorm)
+        {
+            config.format = wgpu::TextureFormat::Bgra8Unorm;
+        }
+        surface.configure(&device, &config);
+        phase("surface_configured");
+        let info = adapter.get_info();
+        let cache_path = has_cache.then(|| {
+            cache_dir.join(format!(
+                "{}.bin",
+                wgpu::util::pipeline_cache_key(&info).unwrap_or_else(|| "metal".into())
+            ))
+        });
+        let cache_bytes = cache_path.as_ref().and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.is_file() && m.len() <= 64 * 1024 * 1024)
+                .and_then(|_| std::fs::read(p).ok())
+        });
+        let cache = if has_cache {
+            // SAFETY: the cache directory is app-owned; only get_data output is
+            // written here. wgpu validates adapter/version and fallback rejects stale data.
+            Some(unsafe {
+                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("Velocity persisted PSO"),
+                    data: cache_bytes.as_deref(),
+                    fallback: true,
+                })
+            })
+        } else {
+            None
+        };
+        let screen = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("physical viewport"),
+            contents: bytemuck::cast_slice(&[config.width as f32, config.height as f32, 0., 0.]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let texture = make_texture(&device, 1);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atlas linear clamp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atlas array + viewport"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let bind = make_bind(&device, &bind_layout, &texture, &sampler, &screen);
+        let start = Instant::now();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Velocity instanced primitives"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("quads.wgsl").into()),
+        });
+        let shader_ms = ms(start.elapsed());
+        phase("shader_module");
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let attrs = wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4];
+        let start = Instant::now();
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Velocity editor primitives"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Instance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &attrs,
+                })],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: cache.as_ref(),
+        });
+        let pipeline_ms = ms(start.elapsed());
+        phase("pipeline_ready");
+        let capacity = 1024 * 1024;
+        let instances = make_instances(&device, capacity);
+        let queries = has_queries.then(|| Queries::new(&device, &queue));
+        let info = json!({"adapter":info.name,"backend":format!("{:?}",info.backend),"driver":info.driver,"present_mode":"fifo","desired_maximum_frame_latency":1,"timestamp_query_enabled":has_queries,"pipeline_cache_supported":has_cache,"pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},"pipeline_cache_loaded_bytes":cache_bytes.as_ref().map_or(0,Vec::len),"device_creation_ms":device_ms,"shader_module_ms":shader_ms,"pipeline_creation_ms":pipeline_ms,"surface_format":format!("{:?}",config.format)});
+        Ok(Self {
+            surface,
+            instance,
+            device,
+            queue,
+            config,
+            window,
+            pipeline,
+            bind_layout,
+            bind,
+            sampler,
+            screen,
+            atlas: PagedAtlas::new(ATLAS_SIDE, MAX_PAGES),
+            texture,
+            texture_pages: 1,
+            rasters: HashMap::new(),
+            blanks: HashSet::new(),
+            instances,
+            capacity,
+            data: Vec::new(),
+            batches: BatchPlan::default(),
+            layouts: LineLayoutCache::new(2048),
+            queries,
+            offscreen: None,
+            background: Scene::default().background,
+            cache,
+            cache_path,
+            info,
+        })
+    }
+    /// Resizes without stretching; the next frame uses fresh physical geometry.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height)
+        {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.queue.write_buffer(
+            &self.screen,
+            0,
+            bytemuck::cast_slice(&[width as f32, height as f32, 0., 0.]),
+        );
+        self.offscreen = None;
+    }
+    /// Physical framebuffer dimensions.
+    pub fn physical_size(&self) -> [u32; 2] {
+        [self.config.width, self.config.height]
+    }
+    /// Allocation diagnostics (texture storage excludes driver overhead).
+    pub fn atlas_info(&self) -> Value {
+        json!({"side":ATLAS_SIDE,"pages":self.atlas.pages(),"allocated_array_layers":self.texture_pages,"allocated_texture_bytes":u64::from(ATLAS_SIDE).pow(2)*4*u64::from(self.texture_pages),"glyph_keys":self.atlas.len(),"page_evictions":self.atlas.evictions(),"layout_cache_entries":self.layouts.len(),"instance_buffer_bytes":self.capacity,"offscreen_bytes":if self.offscreen.is_some(){u64::from(self.config.width)*u64::from(self.config.height)*4}else{0},"draw_calls":self.batches.len()})
+    }
+    fn grow_texture(&mut self, pages: u32) {
+        if pages <= self.texture_pages {
+            return;
+        }
+        let texture = make_texture(&self.device, pages);
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_texture(
+            self.texture.as_image_copy(),
+            texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: ATLAS_SIDE,
+                height: ATLAS_SIDE,
+                depth_or_array_layers: self.texture_pages,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        self.texture = texture;
+        self.texture_pages = pages;
+        self.bind = make_bind(
+            &self.device,
+            &self.bind_layout,
+            &self.texture,
+            &self.sampler,
+            &self.screen,
+        );
+    }
+    fn glyph(
+        &mut self,
+        fonts: &mut Fonts,
+        key: GlyphKey,
+    ) -> Result<Option<(AtlasEntry, Raster)>, String> {
+        if self.blanks.contains(&key) {
+            return Ok(None);
+        }
+        if let Some(entry) = self.atlas.get(key)
+            && let Some(raster) = self.rasters.get(&key)
+        {
+            return Ok(Some((entry, *raster)));
+        }
+        let Some(image) = fonts.rasterize(key.face, key.id, key.px64 as f32 / 64., key.bucket)
+        else {
+            if self.blanks.len() >= 4096 {
+                self.blanks.clear();
+            }
+            self.blanks.insert(key);
+            return Ok(None);
+        };
+        let raster = Raster {
+            left: image.placement.left,
+            top: image.placement.top,
+            color: image.content == swash::scale::image::Content::Color,
+        };
+        let entry = self.atlas.allocate(
+            key,
+            image.placement.width,
+            image.placement.height,
+            if raster.color {
+                PageKind::Color
+            } else {
+                PageKind::Mask
+            },
+        )?;
+        self.grow_texture(self.atlas.pages().max(1) as u32);
+        // Upload a transparent border even when recycling a page with old pixels.
+        let slot = entry.slot;
+        let width = slot.width + 2;
+        let height = slot.height + 2;
+        let source = rgba(&image);
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        for y in 0..slot.height as usize {
+            let src = y * slot.width as usize * 4;
+            let dst = ((y + 1) * width as usize + 1) * 4;
+            pixels[dst..dst + slot.width as usize * 4]
+                .copy_from_slice(&source[src..src + slot.width as usize * 4]);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: slot.x - 1,
+                    y: slot.y - 1,
+                    z: entry.page,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        if self.rasters.len() > 32_768 {
+            self.rasters.clear();
+        }
+        self.rasters.insert(key, raster);
+        Ok(Some((entry, raster)))
+    }
+    fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
+        self.atlas.begin_frame();
+        self.data.clear();
+        self.batches.clear();
+        self.background = scene.background;
+        for (layer_index, layer) in scene.layers.iter().enumerate() {
+            let first = self.data.len() as u32;
+            for r in &layer.shadows {
+                self.data.push(quad(
+                    r.rect,
+                    r.clip,
+                    r.color,
+                    scale,
+                    [r.radius * scale, r.blur * scale, 0., 0.],
+                    PrimitiveKind::Shadow,
+                ));
+            }
+            self.batch(layer_index, PrimitiveKind::Shadow, first);
+            let first = self.data.len() as u32;
+            for r in &layer.rects {
+                self.data.push(quad(
+                    r.rect,
+                    r.clip,
+                    r.color,
+                    scale,
+                    [r.radius * scale, 0., 0., 0.],
+                    PrimitiveKind::Rect,
+                ));
+            }
+            self.batch(layer_index, PrimitiveKind::Rect, first);
+            let first = self.data.len() as u32;
+            for run in &layer.text {
+                let px64 = (run.size * scale * 64.).round() as u32;
+                let style = LayoutStyle {
+                    px64,
+                    font_epoch: 0,
+                };
+                let glyphs = if let Some(g) = self.layouts.get(&run.text, style) {
+                    g
+                } else {
+                    let g: Arc<[_]> = fonts.shape(&run.text, px64 as f32 / 64.).into();
+                    self.layouts.insert(&run.text, style, Arc::clone(&g));
+                    g
+                };
+                for g in glyphs.iter() {
+                    let (x, bucket) = subpixel_x(run.x * scale + g.x);
+                    let key = GlyphKey {
+                        face: g.face,
+                        id: g.id,
+                        px64,
+                        bucket,
+                    };
+                    if let Some((entry, raster)) = self.glyph(fonts, key)? {
+                        let s = entry.slot;
+                        let side = ATLAS_SIDE as f32;
+                        let mut q = quad(
+                            Rect {
+                                x: (x + raster.left as f32) as f64,
+                                y: ((run.baseline * scale).round() - raster.top as f32 - g.y)
+                                    as f64,
+                                width: s.width as f64,
+                                height: s.height as f64,
+                            },
+                            run.clip,
+                            if raster.color {
+                                [1., 1., 1., run.color[3]]
+                            } else {
+                                run.color
+                            },
+                            1.,
+                            [0.; 4],
+                            PrimitiveKind::Glyph,
+                        );
+                        q.clip = clip(run.clip, scale);
+                        q.uv = [
+                            s.x as f32 / side,
+                            s.y as f32 / side,
+                            s.width as f32 / side,
+                            s.height as f32 / side,
+                        ];
+                        q.meta[1] = entry.page as f32;
+                        self.data.push(q);
+                    }
+                }
+            }
+            self.batch(layer_index, PrimitiveKind::Glyph, first);
+            let first = self.data.len() as u32;
+            for u in &layer.underlines {
+                self.data.push(quad(
+                    u.rect,
+                    u.clip,
+                    u.color,
+                    scale,
+                    [0., 0., u.thickness * scale, f32::from(u.squiggle)],
+                    PrimitiveKind::Underline,
+                ));
+            }
+            self.batch(layer_index, PrimitiveKind::Underline, first);
+        }
+        let required = std::mem::size_of_val(self.data.as_slice()) as u64;
+        if required > self.capacity {
+            self.capacity = required.next_power_of_two();
+            self.instances = make_instances(&self.device, self.capacity);
+        }
+        if required > 0 {
+            self.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
+        }
+        Ok(())
+    }
+    fn batch(&mut self, layer: usize, kind: PrimitiveKind, first: u32) {
+        let end = self.data.len() as u32;
+        if end > first {
+            self.batches
+                .push(layer, kind, first..end)
+                .expect("renderer builds contiguous batches in painter order");
+        }
+    }
+    fn encode(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        query: Option<u32>,
+    ) {
+        let timestamp_writes =
+            self.queries
+                .as_ref()
+                .zip(query)
+                .map(|(q, i)| wgpu::RenderPassTimestampWrites {
+                    query_set: &q.set,
+                    beginning_of_pass_write_index: Some(i * 2),
+                    end_of_pass_write_index: Some(i * 2 + 1),
+                });
+        let c = self.background;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("editor primitives"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: c[0] as f64,
+                        g: c[1] as f64,
+                        b: c[2] as f64,
+                        a: c[3] as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            timestamp_writes,
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        for batch in self.batches.as_slice() {
+            pass.draw(0..6, batch.instances.clone());
+        }
+    }
+    /// Builds and submits the complete first text frame while the window is
+    /// hidden. No drawable acquisition occurs on this path.
+    pub fn pre_render(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut Fonts,
+        scale: f32,
+    ) -> Result<(), String> {
+        self.prepare(scene, fonts, scale)?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("first frame before orderFront"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode(&mut encoder, &view, None);
+        self.queue.submit([encoder.finish()]);
+        self.offscreen = Some(texture);
+        Ok(())
+    }
+    /// Whether a correctly sized first-frame texture is ready to present.
+    pub fn has_prepared_frame(&self) -> bool {
+        self.offscreen.is_some()
+    }
+    /// Presents the prebuilt first frame. Retryable acquisition failures preserve
+    /// it for a bounded timer retry; successful submission releases its storage.
+    pub fn present_prepared(&mut self) -> Result<Option<FrameTimes>, String> {
+        self.draw(true, None)
+    }
+    /// Draws a normal scene and optionally records a GPU render-pass timestamp.
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut Fonts,
+        scale: f32,
+        query: Option<u32>,
+    ) -> Result<Option<FrameTimes>, String> {
+        self.prepare(scene, fonts, scale)?;
+        self.draw(false, query)
+    }
+    fn draw(&mut self, first: bool, query: Option<u32>) -> Result<Option<FrameTimes>, String> {
+        if query.is_some_and(|i| i >= MAX_MEASURED_FRAMES) {
+            return Err("GPU query index exceeds benchmark capacity".into());
+        }
+        let start = Instant::now();
+        let texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                // SAFETY: the retained window still owns this CAMetalLayer on this thread.
+                self.surface = unsafe {
+                    self.instance.create_surface_unsafe(
+                        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                            self.window.metal_layer_ptr(),
+                        ),
+                    )
+                }
+                .map_err(|e| e.to_string())?;
+                self.surface.configure(&self.device, &self.config);
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err("surface acquisition validation error".into());
+            }
+        };
+        let acquired = Instant::now();
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        if first {
+            let offscreen = self
+                .offscreen
+                .as_ref()
+                .ok_or("first frame was not prepared")?;
+            encoder.copy_texture_to_texture(
+                offscreen.as_image_copy(),
+                texture.texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            self.encode(
+                &mut encoder,
+                &texture.texture.create_view(&Default::default()),
+                query,
+            );
+        }
+        if let Some((q, i)) = self.queries.as_mut().zip(query) {
+            encoder.resolve_query_set(&q.set, i * 2..i * 2 + 2, &q.resolve, u64::from(i) * 256);
+            encoder.copy_buffer_to_buffer(
+                &q.resolve,
+                u64::from(i) * 256,
+                &q.readback,
+                u64::from(i) * 16,
+                16,
+            );
+            q.recorded = q.recorded.max(i + 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        let submitted = Instant::now();
+        let present_start = Instant::now();
+        self.queue.present(texture);
+        let presented = Instant::now();
+        if first {
+            self.offscreen = None;
+        }
+        Ok(Some(FrameTimes {
+            submitted,
+            presented,
+            acquire_ms: ms(acquired - start),
+            encode_submit_ms: ms(submitted - acquired),
+            present_call_ms: ms(presented - present_start),
+        }))
+    }
+    /// Reads all recorded timestamp pairs once after the measured run.
+    pub fn gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
+        self.queries
+            .as_ref()
+            .map(|q| q.read(&self.device))
+            .transpose()
+    }
+    /// Waits for GPU completion outside any measured frame.
+    pub fn wait_idle(&self) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(15)),
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    /// Atomically saves actual wgpu cache data if the adapter supports it.
+    /// On wgpu 30 Metal this is a no-op and `info` reports the unsupported feature.
+    pub fn persist_pipeline_cache(&self) -> Result<(), String> {
+        if let Some((bytes, path)) = self
+            .cache
+            .as_ref()
+            .and_then(|c| c.get_data())
+            .zip(self.cache_path.as_ref())
+        {
+            let parent = path.parent().ok_or("invalid cache path")?;
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temp, bytes)
+                .and_then(|()| std::fs::rename(&temp, path))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.
+}
+fn make_instances(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reused scene instances"),
+        size,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+fn make_texture(device: &wgpu::Device, pages: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("growing RGBA glyph array"),
+        size: wgpu::Extent3d {
+            width: ATLAS_SIDE,
+            height: ATLAS_SIDE,
+            depth_or_array_layers: pages,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+fn make_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    texture: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+    screen: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glyph pages and viewport"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: screen.as_entire_binding(),
+            },
+        ],
+    })
+}
+fn clip(r: Rect, s: f32) -> [f32; 4] {
+    [
+        r.x as f32 * s,
+        r.y as f32 * s,
+        (r.x + r.width) as f32 * s,
+        (r.y + r.height) as f32 * s,
+    ]
+}
+fn quad(r: Rect, c: Rect, color: Color, s: f32, params: [f32; 4], kind: PrimitiveKind) -> Instance {
+    Instance {
+        rect: [
+            r.x as f32 * s,
+            r.y as f32 * s,
+            r.width as f32 * s,
+            r.height as f32 * s,
+        ],
+        uv: [0.; 4],
+        color,
+        clip: clip(c, s),
+        params,
+        meta: [
+            match kind {
+                PrimitiveKind::Shadow => 0.,
+                PrimitiveKind::Rect => 1.,
+                PrimitiveKind::Glyph => 2.,
+                PrimitiveKind::Underline => 3.,
+            },
+            0.,
+            0.,
+            0.,
+        ],
+    }
+}

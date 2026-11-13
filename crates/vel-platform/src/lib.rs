@@ -1,0 +1,241 @@
+//! Native macOS windows and input, with device-free coordinates and IME queries.
+//!
+//! All editor coordinates exposed to AppKit are UTF-16 code units. View geometry
+//! uses logical points, top-left origin; only the native bridge converts to screen
+//! coordinates. No AppKit or Metal objects are constructed by unit tests.
+
+mod input;
+#[cfg(target_os = "macos")]
+mod macos;
+pub mod metrics;
+#[cfg(target_os = "macos")]
+pub use macos::WindowHandle;
+#[cfg(not(target_os = "macos"))]
+mod stub;
+pub use input::*;
+#[cfg(not(target_os = "macos"))]
+pub use stub::WindowHandle;
+
+use std::time::Instant;
+
+/// A position in logical points, with a top-left origin in the content view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Point {
+    /// Horizontal position.
+    pub x: f64,
+    /// Vertical position.
+    pub y: f64,
+}
+/// Logical content size, independent of Retina scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Size {
+    /// Width in points.
+    pub width: f64,
+    /// Height in points.
+    pub height: f64,
+}
+/// A rectangle in logical points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rect {
+    /// Left edge.
+    pub x: f64,
+    /// Top edge.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
+}
+impl Rect {
+    /// Keeps a candidate anchor inside the visible content, including offscreen carets.
+    pub fn clamped(self, size: Size) -> Self {
+        let width = self.width.max(1.).min(size.width.max(1.));
+        let height = self.height.max(1.).min(size.height.max(1.));
+        Self {
+            x: self.x.clamp(0., (size.width - width).max(0.)),
+            y: self.y.clamp(0., (size.height - height).max(0.)),
+            width,
+            height,
+        }
+    }
+}
+/// Effective system appearance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    /// Light background.
+    Light,
+    /// Dark background.
+    #[default]
+    Dark,
+}
+/// Configuration for the single editor window.
+#[derive(Clone, Debug)]
+pub struct WindowOptions {
+    /// Initial title (bundle-less execution is supported).
+    pub title: String,
+    /// Requested logical size. The actual size is reported separately.
+    pub size: Size,
+}
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self {
+            title: "Velocity".into(),
+            size: Size {
+                width: 1200.,
+                height: 800.,
+            },
+        }
+    }
+}
+/// Why a synchronous frame was requested.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameReason {
+    /// Prepare and submit the complete offscreen first frame before orderFront.
+    StartupPrepare,
+    /// Acquire/copy/present immediately after orderFront in the same launch callback.
+    StartupPresent,
+    /// Native input can be submitted immediately, without waiting for vsync.
+    Input,
+    /// Dirty animation or scroll driven by the view's CADisplayLink.
+    DisplayLink,
+    /// A one-shot monotonic deadline, used by automatic measurement modes.
+    Timer,
+    /// Size, backing scale, appearance or exposure changed.
+    Resize,
+}
+/// Borrowed synchronous frame callback context.
+#[derive(Debug)]
+pub struct FrameContext<'a> {
+    /// Retained window/layer owner.
+    pub window: &'a WindowHandle,
+    /// Callback receipt timestamp, before any layout or rendering.
+    pub received: Instant,
+    /// Scheduling source.
+    pub reason: FrameReason,
+}
+/// Actual display presentation of an acquired drawable.
+#[derive(Clone, Copy, Debug)]
+pub struct Presentation {
+    /// Monotonic acquisition sequence (starts at zero).
+    pub drawable: u64,
+    /// Metal's actual presentedTime, in the CACurrentMediaTime timebase.
+    pub presented_time: f64,
+    /// presentedTime translated to Rust's monotonic clock at callback receipt.
+    pub scanout: Instant,
+    /// Receipt time, reported separately from scanout.
+    pub callback: Instant,
+}
+/// Application callbacks. The app owns text; the platform owns native objects.
+///
+/// `on_start`, both startup frames, and orderFront happen within one
+/// applicationDidFinishLaunching callback. `request_frame` coalesces work; idle
+/// display links are paused. App callbacks never run from Metal handler threads.
+pub trait AppHandler: 'static {
+    /// Initialize the renderer while the native window is still hidden.
+    fn on_start(&mut self, _window: &WindowHandle) -> Result<(), String> {
+        Ok(())
+    }
+    /// Observe a native lifecycle phase for startup instrumentation.
+    fn on_platform_phase(&mut self, _phase: &'static str) {}
+    /// Receive a physical key after AppKit input-method interpretation.
+    fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) {}
+    /// Apply insert/marked/unmark updates, including native replacement ranges.
+    fn on_text_input(&mut self, _window: &WindowHandle, _event: TextInput) {}
+    /// Execute a standard responder command (also used by the Edit menu).
+    fn on_command(&mut self, _window: &WindowHandle, _command: Command) {}
+    /// Receive mouse button/drag events.
+    fn on_mouse(&mut self, _window: &WindowHandle, _event: MouseEvent) {}
+    /// Receive precise scroll deltas and both gesture and momentum phases.
+    fn on_scroll(&mut self, _window: &WindowHandle, _event: ScrollEvent) {}
+    /// Update geometry on resize and backing changes.
+    fn on_resize(&mut self, _window: &WindowHandle, _size: Size, _scale: f64) {}
+    /// Draw requested work; errors stop the event loop and are returned by run.
+    fn on_frame(&mut self, context: &mut FrameContext<'_>) -> Result<(), String>;
+    /// Observe system light/dark changes.
+    fn on_appearance(&mut self, _window: &WindowHandle, _appearance: Appearance) {}
+    /// Approve a user initiated close/quit. Automatic completion uses `quit`.
+    fn on_quit_requested(&mut self) -> bool {
+        true
+    }
+    /// Return an O(1) text snapshot and document-relative UTF-16 ranges.
+    fn text_input_state(&self) -> TextInputState {
+        TextInputState::default()
+    }
+    /// Geometry of the first visual fragment of a requested UTF-16 range.
+    fn text_input_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
+        let state = self.text_input_state();
+        (
+            state.caret,
+            Utf16Range::new(range.location.min(state.text.len_utf16()), 0),
+        )
+    }
+    /// Hit-test a view point into a document-relative UTF-16 offset.
+    fn character_index_for_point(&self, _point: Point) -> Option<usize> {
+        None
+    }
+}
+/// Main-thread native application bootstrap.
+#[derive(Debug)]
+pub struct Platform;
+impl Platform {
+    /// Runs until close, explicit completion, or a callback failure. macOS 14+.
+    pub fn run(app: impl AppHandler) -> Result<(), String> {
+        Self::run_with_options(WindowOptions::default(), app)
+    }
+    /// Runs with the requested initial window size and title.
+    pub fn run_with_options(options: WindowOptions, app: impl AppHandler) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            macos::run(options, Box::new(app))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (options, app);
+            Err("Velocity's native platform requires macOS 14 or later".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    #[test]
+    fn candidate_anchor_clamps_offscreen_carets_in_logical_points() {
+        let size = Size {
+            width: 1200.,
+            height: 800.,
+        };
+        let anchor = Rect {
+            x: -500.,
+            y: 1600.,
+            width: 1.,
+            height: 20.,
+        }
+        .clamped(size);
+        assert_eq!(
+            anchor,
+            Rect {
+                x: 0.,
+                y: 780.,
+                width: 1.,
+                height: 20.
+            }
+        );
+        let fractional = Rect {
+            x: 100.25,
+            y: 200.5,
+            width: 1.,
+            height: 20.,
+        };
+        assert_eq!(fractional.clamped(size), fractional);
+        // The native bridge converts these points to screen coordinates; scale
+        // never changes the app-side anchor or creates a second Retina multiplier.
+        assert_eq!(
+            fractional.clamped(Size {
+                width: 600.,
+                height: 400.
+            }),
+            fractional
+        );
+    }
+}
