@@ -78,6 +78,12 @@ impl ParseState {
     pub fn is_speculative(&self) -> bool {
         self.engine.is_speculative()
     }
+
+    /// Relocates a stable checkpoint after inserted/deleted lines. Returns false if an
+    /// active branch's absolute replay history would need rebasing; reparse that region.
+    pub fn resume_at(&mut self, next_line: usize) -> bool {
+        Arc::make_mut(&mut self.engine).relocate(next_line)
+    }
     /// The shared immutable syntax collection this state references.
     pub fn syntax_set(&self) -> &Arc<SyntaxSet> {
         &self.set

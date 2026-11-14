@@ -59,15 +59,18 @@ python3 crates/vel-syntax/scripts/report.py
 The runner evaluates assertion **spans**: all asserted columns must match for a
 case to pass. It parses annotation lines, recognizes pure assertions and compact
 headers, handles past-EOL character columns, and applies branch corrections
-before checking assertions. Symbol/reference assertions and modified tests are
-reported as skips. The regression test checks the full pinned corpus, per-syntax
+before checking assertions. Symbol/reference assertions, partial-symbol exhaustiveness, and all reindent modifiers now execute.
+Counts for scopes, symbols, and whole-file indentation variants are reported separately; the
+current corpus has no skips. The regression test checks the full pinned corpus, per-syntax
 counts, the denominator and the skip count. Baseline updates require improvement
 without per-syntax regressions. `tests/last-run.json` preserves evidence.
 
 Limitations: `.tmLanguage` begin/end/while conversion explicitly returns
 `LoadingError::UnimplementedTmLanguage`; zip packages are a later extension.
-Symbol indexing and reindent execution are not implemented. Two selector-tail
-compatibility failures remain in the JavaScript corpus. Numeric selector scores
+All 688 symbol assertions pass. The two JavaScript annotation-tail failures are fixed with a
+narrow `() {}` prose-suffix interpretation, without weakening negative scope matching.
+Reindentation remains partially compatible; the exact failing variants and first mismatches
+are recorded in RESULTS.md. Numeric selector scores
 remain an approximation of public specificity rules.
 
 The loader, linker and interpreter adapt MIT-licensed syntect source, including
@@ -77,3 +80,35 @@ and inheritance work. See [LICENSE-syntect](LICENSE-syntect) and the
 [upstream change](https://github.com/trishume/syntect/pull/705). The public corpus
 is used in place under its existing license; no syntax/theme assets are copied.
 Velocity's scope and regex crates are independent of syntect's runtime and dumps.
+
+## Scope metadata and reindentation
+
+`MetadataSet::load_directories(&[packages, user_preferences])` loads XML/binary tmPreferences
+in deterministic path order, with later roots overriding equal scores. `metadata_for(&stack)`
+merges each setting independently, and shellVariables merge by variable name. `Metadata::string`
+and `boolean` expose indentation patterns, completion/preserve flags, and symbol visibility;
+unknown settings remain in the plist-valued map. XML CDATA is preserved explicitly because the
+plist dependency currently drops those events. No Sublime Default package preferences are used;
+the small base symbol conventions are our own implementation of the public scope naming guide.
+
+`indent::scoped_spans(&set, syntax, text)` parses a document and applies branch corrections.
+Feed those byte ranges to `metadata.symbols(text, &spans)` for local/global definitions and
+indexed references with transformed names. SymbolTransformation supports sed-style substitution
+programs, comments, capture references, global flags, and case conversion. Empty global matches
+retry a nonempty match at the same position, including TOML's reluctant whitespace rule.
+
+`indent::reindent(text, &spans, &metadata, IndentOptions { tab_size: 4, spaces: true })` returns
+reindented text. It uses scope-selected Oniguruma patterns, excludes comment/string brackets,
+tracks continuation and brace contexts, preserves configured text, and respects tab stops.
+It is not yet fully ST-compatible for the remaining complex cases in RESULTS.md. The runner
+counts each requested whole-file variant once and reparses stripped text for
+reindent-unindented; it never infers success from the input's existing whitespace.
+
+`evaluate_with_metadata` supports independently supplied fixtures. `syntest::run` loads package
+metadata once. Baseline migration preserves every previously passing scope case, then locks
+scope/symbol/reindent counts independently per file. Newly evaluated indentation failures are
+recorded as failures rather than hidden as skips or used to lower the scope baseline.
+
+For an editor-owned incremental service, use vel-highlight rather than rebuilding checkpoints
+and branch rewind handling in the UI. Its README documents transaction, undo/redo, viewport,
+scheme-generation, and stale-result contracts.

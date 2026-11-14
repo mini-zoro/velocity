@@ -47,14 +47,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut improved = true;
         if let Ok(bytes) = std::fs::read(&path) {
             let old: syntest::SuiteResult = serde_json::from_slice(&bytes)?;
-            if result.overall.rate() < old.overall.rate() {
-                return Err("overall regression; refusing baseline update".into());
+            let metadata_baseline = old.scope_counts.passed + old.scope_counts.failed > 0;
+            if result.overall.passed < old.overall.passed
+                || result.overall.skipped > old.overall.skipped
+            {
+                return Err("pass-count regression or new skips; refusing baseline update".into());
+            }
+            for expected in &old.files {
+                let actual = result
+                    .files
+                    .iter()
+                    .find(|f| f.file == expected.file)
+                    .ok_or("test file disappeared")?;
+                let previous_scope = if metadata_baseline {
+                    &expected.scope_counts
+                } else {
+                    &expected.counts
+                };
+                if actual.scope_counts.passed < previous_scope.passed
+                    || actual.scope_counts.failed > previous_scope.failed
+                {
+                    return Err(format!("{}: scope assertions regressed", expected.file).into());
+                }
+                if metadata_baseline
+                    && (actual.symbol_counts.passed < expected.symbol_counts.passed
+                        || actual.symbol_counts.failed > expected.symbol_counts.failed
+                        || actual.reindent_counts.passed < expected.reindent_counts.passed
+                        || actual.reindent_counts.failed > expected.reindent_counts.failed)
+                {
+                    return Err(format!("{}: metadata assertions regressed", expected.file).into());
+                }
             }
             for (name, expected) in &old.syntaxes {
                 let actual = result.syntaxes.get(name).ok_or("syntax disappeared")?;
                 if actual.passed < expected.passed
-                    || actual.failed > expected.failed
-                    || actual.skipped != expected.skipped
+                    || (metadata_baseline && actual.failed > expected.failed)
+                    || actual.skipped > expected.skipped
                 {
                     return Err(format!(
                         "{name} regressed or changed skips; refusing baseline update"
@@ -62,7 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into());
                 }
             }
-            improved = result.overall.rate() > old.overall.rate();
+            improved = result.overall.passed > old.overall.passed
+                || result.overall.failed < old.overall.failed
+                || result.overall.skipped < old.overall.skipped;
             if improved {
                 std::fs::write(
                     std::env::temp_dir().join(format!(

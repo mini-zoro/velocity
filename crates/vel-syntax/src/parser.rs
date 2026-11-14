@@ -493,6 +493,14 @@ struct RegexMatch<'a> {
 /// Maps the pattern to the start index, which is -1 if not found.
 type SearchCache = vel_regex::SearchCache;
 
+thread_local! {
+    // Scratch is not semantic parser state. A pool permits recursive branch replay to
+    // borrow a second workspace without aliasing the caller's captures/search entries.
+    static SEARCH_WORKSPACES: std::cell::RefCell<Vec<(SearchCache, Region)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
 /// What one `push:` of several contexts clears in
 /// a version 1 syntax: all of their `clear_scopes` added up, applied once,
 /// before any of their meta scopes.
@@ -798,6 +806,14 @@ impl InterpreterState {
         !self.branch_points.is_empty()
     }
 
+    pub(crate) fn relocate(&mut self, next_line: usize) -> bool {
+        if self.is_speculative() && self.line_number != next_line {
+            return false;
+        }
+        self.line_number = next_line;
+        true
+    }
+
     /// Inner parsing loop: processes `line` with the current parser state and
     /// returns the scope-stack operations.  Does **not** touch `pending_lines`
     /// or `flushed_ops`, so it is safe to call recursively from `handle_fail`
@@ -838,8 +854,10 @@ impl InterpreterState {
             self.first_line = false;
         }
 
-        let mut regions = Region::new();
-        let mut search_cache = SearchCache::default();
+        let (mut search_cache, mut regions) = SEARCH_WORKSPACES
+            .with(|pool| pool.borrow_mut().pop())
+            .unwrap_or_default();
+        search_cache.reset_line();
         // Used for detecting loops with push/pop, see long comment above.
         let mut non_consuming_push_at = (0, 0, 0);
         // Fresh for every call, replays included — a
@@ -890,6 +908,8 @@ impl InterpreterState {
 
         // See `outer_skipped` above.
         self.skipped_branches = outer_skipped;
+
+        SEARCH_WORKSPACES.with(|pool| pool.borrow_mut().push((search_cache, regions)));
 
         Ok(res)
     }

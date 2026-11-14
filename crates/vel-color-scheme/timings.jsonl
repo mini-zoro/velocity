@@ -1,0 +1,10 @@
+{"run":0,"lookup":"scope_stack","lookups_per_second":51174737.59488027,"allocations":0}
+{"run":0,"lookup":"interned_id","lookups_per_second":1008674601.5735325}
+{"run":1,"lookup":"scope_stack","lookups_per_second":64431571.531904936,"allocations":0}
+{"run":1,"lookup":"interned_id","lookups_per_second":1009744029.8884232}
+{"run":2,"lookup":"scope_stack","lookups_per_second":63783882.65224967,"allocations":0}
+{"run":2,"lookup":"interned_id","lookups_per_second":1008149273.8401595}
+{"run":3,"lookup":"scope_stack","lookups_per_second":64213427.76234672,"allocations":0}
+{"run":3,"lookup":"interned_id","lookups_per_second":1006373767.6198435}
+{"run":4,"lookup":"scope_stack","lookups_per_second":56289693.24008518,"allocations":0}
+{"run":4,"lookup":"interned_id","lookups_per_second":1009251403.9191655}

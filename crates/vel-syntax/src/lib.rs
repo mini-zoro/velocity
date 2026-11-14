@@ -1,6 +1,8 @@
 //! Sublime syntax loading, interpretation and official scope-test evaluation.
 //! Lines include their terminating newline; operation offsets are UTF-8 bytes.
 mod cache;
+pub mod indent;
+pub mod metadata;
 mod parser;
 mod state;
 pub mod syntax_definition;
@@ -8,6 +10,9 @@ mod syntax_set;
 pub mod syntest;
 mod yaml_load;
 pub use cache::CacheStatus;
+pub use metadata::{
+    Metadata, MetadataError, MetadataSet, ScopedSpan, Symbol, SymbolTransformation,
+};
 pub use parser::{ParsingError, ScopeOperations};
 pub use state::{LineOps, ParseState, Rewind};
 pub use syntax_definition::SyntaxDefinition;

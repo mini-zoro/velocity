@@ -1,0 +1,20 @@
+[package]
+name = "vel-color-scheme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vel-scope = { path = "../vel-scope" }
+vel-config = { path = "../vel-config" }
+serde_json = "1"
+plist = "1"
+csscolorparser = "0.8"
+fnv = "1"
+thiserror = "2"
+

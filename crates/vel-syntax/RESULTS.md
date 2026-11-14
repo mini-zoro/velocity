@@ -1,289 +1,274 @@
-# 语法引擎 v1：官方语料正确性与性能
+# Lane B, round 4: syntax metadata and highlighting
 
-语料：仓库固定的 `third_party/sublime-packages`，202 个定义、242 个测试文件。
-本 lane 的源码和报告仅位于三个新增 crate，另更新根 Cargo.lock；未修改语料、spec、spikes，未提交。公开文档、MIT syntect 源码与 PR #705 为允许参考；许可和归属见 README。
+> Reviewed round-three baseline: **125,875 passed / 2 failed / 720 skipped**. The reviewer's correction that partial-symbols files still require scope assertions remains in force.
 
-载入 **202/202**，载入/继承警告 **0**；断言跨度通过 **125,452/125,454 (99.9984%)**，失败 **2**，显式跳过 **1,143**。语法/运行错误文件 **0**，语料 panic **0**。
+Pinned public corpus: **202 syntaxes, 242 test files, 259 tmPreferences files**. Loading warnings: 0; error files: 0.
 
-字符列另计：通过 586,575，失败 54。跨度内任一字符失败，整个断言记失败。跳过不计入通过率分母。
+| Category | Passed | Failed | Skipped | Unit |
+| --- | ---: | ---: | ---: | --- |
+| Scopes | 125,877 | 0 | 0 | assertion span |
+| Symbols/references | 688 | 0 | 0 | assertion / unannotated symbol |
+| Reindent | 26 | 9 | 0 | whole-file variant |
+| Total | 126,591 | 9 | 0 | sum of the above |
 
-> **评审更正（2026-11-14）**：原运行器把头部带 `partial-symbols` 修饰符的文件整文件跳过，但该修饰符只放宽符号断言，
-> 作用域断言仍应检查（例如 Diff 测试有 149 个 `^`/`<-` 作用域断言）。修正后只有 `reindent*` 文件整文件跳过：
-> **通过 125,875 / 失败 2 / 跳过 720（99.998%）**，新纳入的 423 个作用域断言全部通过；`tests/baseline.json` 已按此更新。
-> 评审另做了变异测试：篡改一条测试预期 → 报 1 个失败；把 Rust 语法里的 `keyword.declaration.struct` 改名 → 报 7 个失败；
-> 运行器能可靠发现错误。下文其余数字为修正前的记录。
+Overall: **126,591/126,600 (99.99289%)**. Scope columns: 590,758 passed / 0 failed.
+The expanded denominator includes previously unexecuted metadata tests. Existing scope passes never decrease; both previous failures now pass. A lower combined percentage than the old scope-only rate does not hide a scope regression.
 
-## 与稳定 syntect 5.3 / onig 的比较
+## Metadata behavior
 
-旧 spike 只测八个 canonical 语法，不能声称有全 242 文件的 syntect 总体率。旧版只载入 78/202；本实现载入 202/202。
+XML/binary plist preferences merge independently per key by selector score and resource order. Shell variables merge by name. All requested indentation, symbol, completion and preservation settings remain available through Metadata; unknown plist keys are retained. The plist XML dependency drops CDATA events, so the loader preserves them as equivalent escaped character data before parsing.
 
-| 语言 | vel 通过 / 失败 | vel 通过率 | syntect 通过 / 失败 / 未执行 | syntect 已执行通过率 |
-|---|---:|---:|---:|---:|
-| Rust | 2426 / 0 | 100.000% | 2402 / 11 / 0 | 99.54% |
-| JSON | 135 / 0 | 100.000% | 133 / 2 / 0 | 98.52% |
-| YAML | 607 / 0 | 100.000% | 603 / 4 / 0 | 99.34% |
-| Python | 6312 / 0 | 100.000% | 1311 / 399 / 4602 | 76.67% |
-| JavaScript | 3011 / 2 | 99.934% | 0 / 0 / 3013 | 未载入 |
-| C++ | 1755 / 0 | 100.000% | 1079 / 676 / 0 | 61.48% |
-| Markdown | 4869 / 0 | 100.000% | 668 / 4209 / 0 | 13.70% |
-| HTML | 1012 / 0 | 100.000% | 0 / 0 / 1012 | 未载入 |
+All 688 symbol assertions pass, including quoted transformed names, local/global definitions, indexed references, partial-symbol files, and exhaustive checking for unannotated symbols. Adjacent nested symbol spans coalesce and transformations support captures, case conversion, and global zero-width/nonempty retry semantics. The base symbol conventions are clean-room implementations of public scope naming; no application Default preferences are used.
 
-旧八语言合计：6196/11497 = **53.89%** 已执行通过；把 8627 个未执行也计入计划分母，则为 **30.79%**。Python 旧结果只执行了约 27%，不是完整结果。
+The two JavaScript '-comment() {}' annotation tails are interpreted narrowly as a selector followed by pasted empty-function prose. A regression test verifies that actual comment scopes still fail this negative assertion. The ordinary Haskell '-->' source comment with no symbol type is not misclassified as a symbol assertion.
 
-当前 runner 修正纯断言识别、完整 header 尾 token、跨行回放与过行尾列定位，故某些语言的断言数与旧 spike 略有差别（Rust 2426 对旧 2413，Markdown 4869 对旧 4877）。未通过分母伪装为同一 harness 的逐项差分。
+All 31 reindent files execute, totaling 35 requested whole-file variants. reindent runs both unchanged and unindented checks; reindent-unindented strips whitespace and reparses the resulting text before indentation. One whole-file comparison is one case, regardless of file length. Remaining mismatches are failures, not skips. The corpus guard locks scopes, symbols, and reindent separately per file; baseline migration permits newly tested failures without weakening existing scope thresholds.
 
-## 剩余问题与跳过原因
+## Remaining reindent failures
 
-唯一剩余失败类别是 **selector 尾缀兼容性（2 个）**：JavaScript 两条官方断言包含 `-comment() {}`；当前严格 selector 解析拒绝这一尾缀。未改写断言或把失败转为跳过。其实际作用域在 JSON 中完整记录。
+| File | Variant | First differing line | Evidence |
+| --- | --- | ---: | --- |
+| C++/tests/syntax_test_indent_common.c++ | reindent-unchanged | 747 | expected "    while /*(*/ () v++; /*(*/ // ; \"comment\" ()", got "        while /*(*/ () v++; /*(*/ // ; \"comment\" ()" |
+| CSS/tests/syntax_test_indentation.css | reindent-unchanged | 77 | expected "} /**/ .foo /**/ {              /*", got "    } /**/ .foo /**/ {              /*" |
+| JavaScript/tests/syntax_test_js_indent_common.js | reindent-unchanged | 542 | expected "    if (v.isNull() == true) { return fun(v) }     /**/ // ; \"comment\" ()", got "        if (v.isNull() == true) { return fun(v) }     /**/ // ; \"comment\" ()" |
+| JavaScript/tests/syntax_test_jsx_indent.jsx | reindent-unchanged | 7 | expected "            <meta encoding=\"utf-8\" />", got "        <meta encoding=\"utf-8\" />" |
+| PHP/tests/syntax_test_indentation.php | reindent-unchanged | 88 | expected "    statement;", got "statement;" |
+| PHP/tests/syntax_test_indentation.php | reindent-unindented | 88 | expected "    statement;", got "statement;" |
+| ShellScript/Bash/tests/syntax_test_reindent_case.bash | reindent-unchanged | 12 | expected "    ;;", got ";;" |
+| ShellScript/Bash/tests/syntax_test_reindent_heredoc.bash | reindent-unchanged | 52 | expected "\t\theredoc2=<<-'EOF' ; if true goto", got "\theredoc2=<<-'EOF' ; if true goto" |
+| ShellScript/Zsh/tests/syntax_test_reindent_case.zsh | reindent-unchanged | 14 | expected "    ;;", got ";;" |
 
-- `JavaScript/tests/syntax_test_js.js:236`：`-comment() {}`；源行 235、字符列 4，实际 `source.js meta.group.js meta.mapping.js meta.function.js meta.string.js string.quoted.single.js punctuation.definition.string.begin.js`。
-- `JavaScript/tests/syntax_test_js.js:239`：`-comment() {}`；源行 238、字符列 4，实际 `source.js meta.group.js meta.mapping.js meta.function.js meta.string.js string.quoted.double.js punctuation.definition.string.begin.js`。
+These expose incomplete compatibility for nested continuation/control indentation, CSS comment transitions, JSX tags, PHP embedding, and shell case/heredoc rules. The indentation engine is usable but is not fully conformant; retain this evidence when extending it. Symbol/scope success does not imply unasserted tokens or all editor behavior are identical to ST.
 
-另有 664 条 `@` / `>` 符号或引用标注未实现索引，明确跳过。34 个 modifier 文件跳过，共记录 479 个跳过单位：reindent 文件无 scope 断言时计文件级 1，partial-symbols 按标注数计。它们没有算作成功。
+`.tmLanguage` conversion and zip syntax loading remain prior-round limitations. Numeric selector scoring remains the approximation documented by vel-scope. Full-file default palettes, style rendering flags, and editor scheduling are provided by vel-color-scheme / vel-highlight, not the syntax runner.
 
-`.tmLanguage` 转换返回明确的 unimplemented 错误；zip 包尚未实现。selector 数值评分的精确公式未经 ST 验证，源码以 `ST-BEHAVIOR: unverified` 标注。
+Runner regex counters: `{"compilations": 20019, "compile_errors": 0, "search_errors": 404}`. Resource-limit events remain explicit counters and are treated as no-match; they are not a claim that every regex path completed without limits.
 
-本次 runner 正则诊断：`{"compilations": 19892, "compile_errors": 0, "search_errors": 404}`。命中 Onig 限制按无匹配处理并计数，绝不 panic。
+## Parser performance
 
-## 性能（每项至少 5 次）
+Release, macOS 26.1 arm64, rustc 1.99.1. Every timing below has five runs. No sysctl was called; the parallel lane can affect scheduling. Input: 10,000,000 Rust bytes / 297,030 lines. These parser-only timings exclude styling and UI work.
 
-macOS 26.1 / arm64，rustc 1.99.1，release，单线程完整解析。缓存批次使用已暖文件系统。没有调用 sysctl；其他并行 lane 的活动可能影响时序。
+| Measurement | Five-run median | Budget / reviewed comparison |
+| --- | ---: | --- |
+| Rust parser | 1.502 MB/s; 44,605 lines/s | 1.408 MB/s reviewed baseline; +6.65% throughput |
+| YAML loading | 843.446 ms | 1500 ms |
+| Cached index + source content hashes | 11.215 ms | 20 ms |
+| Stable edit convergence, parser only | 0.00675 ms | one reparsed line |
+| Forced fresh 100-line parse | 2.285 ms | still exceeds 2 ms; service bounds synchronous work and uses cached convergence |
 
-输入为 `spikes/data/rust-10mb.rs`，10,000,000 字节、297,030 行。预热 regex 后计时，不着色，不去重输入，包含解释器、scope ops、状态 hash 与栈共享的开销。
+Search/capture workspaces now reuse allocated capacity across lines and nested branch replay. This does not serialize scratch into checkpoints or change semantic parser equality. End-to-end service timings, including five actual background-thread runs, are in ../vel-highlight/RESULTS.md. Warm style resolution and its zero-allocation check are in ../vel-color-scheme/README.md.
 
-| 项目 | 五次中位数 | 目标/参照 |
-|---|---:|---|
-| Rust parse-only | **1.408 MB/s / 41,811 行/s** | syntect 1.02 MB/s / 约 30k 行/s |
-| YAML 构建全部 202 个定义 | **816.363 ms** | ≤1500 ms |
-| 校验内容哈希并读取 binary index | **11.328 ms** | ≤20 ms；包含 IO、源文件哈希、payload 校验与索引反序列化 |
-| 一字符编辑后状态收敛 | **0.0086 ms** | ≤2 ms；五次均重新解析 1 行后收敛 |
-| 强制解析完整 100 行窗口 | **2.489 ms** | 超过 2 ms；不依赖收敛时仍有差距 |
+Raw parser seconds: `[6.555462, 6.659136292, 6.754229666, 6.71377925, 6.582419958]`. Regex counters over warm-up and five runs: `{"compilations": 80296, "compile_errors": 0, "search_errors": 6}`. All observations are in tests/timings.json.
 
-这是一次稳定上下文的字符替换，并非所有编辑的最坏界限。跨行 branch、字符串边界变化等可能需要更多行。吞吐相对旧数字约 **1.38×**；不同会话、相同语料的比较，不是同时运行的对照实验。
+## All 202 loaded syntaxes
 
-原始 parse 秒数：`[7.163809042, 7.0995165, 7.068728166, 7.199893125, 7.104121625]`；cache ms：`[12.51775, 11.360833000000001, 11.327584, 11.123917, 11.051458]`；其余逐次数据见 `tests/timings.json`。
+Counts include metadata assertions attributed by the declared syntax path. A dash means no executed assertions; it is not reported as 100%.
 
-吞吐预热及五轮累计的 regex 诊断：`{"compilations": 80296, "compile_errors": 0, "search_errors": 6}`。这些长输入中的资源上限事件如实记为无匹配；不推断为语法断言全部正确。
+| Syntax | Passed | Failed | Skipped | Pass rate |
+| --- | ---: | ---: | ---: | ---: |
+| ASP | 0 | 0 | 0 | — |
+| ActionScript 2.0 | 184 | 0 | 0 | 100.0000% |
+| AppleScript | 513 | 0 | 0 | 100.0000% |
+| Bash | 11134 | 2 | 0 | 99.9820% |
+| Bash (for Markdown) | 0 | 0 | 0 | — |
+| Batch File | 3918 | 0 | 0 | 100.0000% |
+| Batch File (Compound) | 0 | 0 | 0 | — |
+| BibTeX | 107 | 0 | 0 | 100.0000% |
+| Binary | 0 | 0 | 0 | — |
+| C | 876 | 0 | 0 | 100.0000% |
+| C# | 9425 | 0 | 0 | 100.0000% |
+| C++ | 1757 | 1 | 0 | 99.9431% |
+| CSS | 3514 | 1 | 0 | 99.9716% |
+| CSS (Go) | 0 | 0 | 0 | — |
+| CSS (PHP) | 0 | 0 | 0 | — |
+| CSS (Rails) | 48 | 0 | 0 | 100.0000% |
+| CSS (for ASP) | 0 | 0 | 0 | — |
+| CSS (for HAML) | 0 | 0 | 0 | — |
+| CSS (for JS template) | 0 | 0 | 0 | — |
+| CSS (for JSP) | 0 | 0 | 0 | — |
+| CSS (for PHP Interpolated) | 0 | 0 | 0 | — |
+| CSS (for PHP double-quoted) | 0 | 0 | 0 | — |
+| CSS (for PHP single-quoted) | 0 | 0 | 0 | — |
+| CSS (for Ruby) | 0 | 0 | 0 | — |
+| CSS (for TS template) | 0 | 0 | 0 | — |
+| CSS inside Go backtick string | 0 | 0 | 0 | — |
+| Cabal | 421 | 0 | 0 | 100.0000% |
+| Cargo Build Results | 0 | 0 | 0 | — |
+| Cassandra Query Language | 399 | 0 | 0 | 100.0000% |
+| Clojure | 1699 | 0 | 0 | 100.0000% |
+| ClojureScript | 0 | 0 | 0 | — |
+| D | 3110 | 0 | 0 | 100.0000% |
+| DMD Output | 0 | 0 | 0 | — |
+| DTD | 0 | 0 | 0 | — |
+| Diff | 311 | 0 | 0 | 100.0000% |
+| Diff (Basic) | 0 | 0 | 0 | — |
+| Diff (for Markdown) | 0 | 0 | 0 | — |
+| Diff (for PHP Interpolated) | 0 | 0 | 0 | — |
+| Erlang | 4350 | 0 | 0 | 100.0000% |
+| Git Attributes | 176 | 0 | 0 | 100.0000% |
+| Git Blame Ignore Revisions | 37 | 0 | 0 | 100.0000% |
+| Git Code Owners | 92 | 0 | 0 | 100.0000% |
+| Git Commit | 258 | 0 | 0 | 100.0000% |
+| Git Commit Message | 137 | 0 | 0 | 100.0000% |
+| Git Common | 0 | 0 | 0 | — |
+| Git Config | 566 | 0 | 0 | 100.0000% |
+| Git Diff | 220 | 0 | 0 | 100.0000% |
+| Git Ignore | 285 | 0 | 0 | 100.0000% |
+| Git Link | 53 | 0 | 0 | 100.0000% |
+| Git Log | 162 | 0 | 0 | 100.0000% |
+| Git Mailmap | 45 | 0 | 0 | 100.0000% |
+| Git Rebase Todo | 392 | 0 | 0 | 100.0000% |
+| Go | 4402 | 0 | 0 | 100.0000% |
+| Go (Embedded Backtick String) | 0 | 0 | 0 | — |
+| Go (Embedded CSS) | 0 | 0 | 0 | — |
+| Go (Embedded HTML) | 0 | 0 | 0 | — |
+| Go (Embedded JSON) | 0 | 0 | 0 | — |
+| Go (Embedded JavaScript) | 0 | 0 | 0 | — |
+| Go (Embedded Regex) | 0 | 0 | 0 | — |
+| Go (Embedded SQL) | 0 | 0 | 0 | — |
+| Go (Embedded T-SQL) | 0 | 0 | 0 | — |
+| Go (Embedded XML) | 0 | 0 | 0 | — |
+| Graphviz (DOT) | 226 | 0 | 0 | 100.0000% |
+| Groovy | 295 | 0 | 0 | 100.0000% |
+| HAML | 368 | 0 | 0 | 100.0000% |
+| HTML | 1013 | 0 | 0 | 100.0000% |
+| HTML (ASP) | 993 | 0 | 0 | 100.0000% |
+| HTML (Erlang) | 60 | 0 | 0 | 100.0000% |
+| HTML (Go) | 169 | 0 | 0 | 100.0000% |
+| HTML (JSP) | 701 | 0 | 0 | 100.0000% |
+| HTML (Plain) | 0 | 0 | 0 | — |
+| HTML (Rails) | 167 | 0 | 0 | 100.0000% |
+| HTML (Tcl) | 0 | 0 | 0 | — |
+| HTML (for HAML) | 0 | 0 | 0 | — |
+| HTML (for HSX) | 0 | 0 | 0 | — |
+| HTML (for JS template) | 0 | 0 | 0 | — |
+| HTML (for PHP Interpolated) | 0 | 0 | 0 | — |
+| HTML (for Ruby) | 0 | 0 | 0 | — |
+| HTML (for TS template) | 0 | 0 | 0 | — |
+| HTML inside Go backtick string | 0 | 0 | 0 | — |
+| Haskell | 3492 | 0 | 0 | 100.0000% |
+| JSON | 135 | 0 | 0 | 100.0000% |
+| JSON (Go) | 0 | 0 | 0 | — |
+| JSON (PHP) | 0 | 0 | 0 | — |
+| JSON (Rails) | 0 | 0 | 0 | — |
+| JSON (for ASP) | 0 | 0 | 0 | — |
+| JSON (for HAML) | 0 | 0 | 0 | — |
+| JSON (for JS template) | 0 | 0 | 0 | — |
+| JSON (for JSP) | 0 | 0 | 0 | — |
+| JSON (for PHP Interpolated) | 0 | 0 | 0 | — |
+| JSON (for TS template) | 0 | 0 | 0 | — |
+| JSON inside Go backtick string | 0 | 0 | 0 | — |
+| JSX | 619 | 1 | 0 | 99.8387% |
+| JSX (Plain) | 0 | 0 | 0 | — |
+| Java | 8904 | 0 | 0 | 100.0000% |
+| Java (for HTML) | 0 | 0 | 0 | — |
+| Java (for JSP) | 0 | 0 | 0 | — |
+| Java Properties | 84 | 0 | 0 | 100.0000% |
+| JavaDoc | 0 | 0 | 0 | — |
+| JavaScript | 3013 | 1 | 0 | 99.9668% |
+| JavaScript (Go) | 0 | 0 | 0 | — |
+| JavaScript (PHP) | 0 | 0 | 0 | — |
+| JavaScript (Plain) | 0 | 0 | 0 | — |
+| JavaScript (Rails) | 31 | 0 | 0 | 100.0000% |
+| JavaScript (for ASP) | 0 | 0 | 0 | — |
+| JavaScript (for Go Embedded Backtick Strings) | 0 | 0 | 0 | — |
+| JavaScript (for HAML) | 0 | 0 | 0 | — |
+| JavaScript (for JS template) | 0 | 0 | 0 | — |
+| JavaScript (for JSP) | 0 | 0 | 0 | — |
+| JavaScript (for PHP Interpolated) | 0 | 0 | 0 | — |
+| JavaScript (for PHP double-quoted) | 0 | 0 | 0 | — |
+| JavaScript (for PHP single-quoted) | 0 | 0 | 0 | — |
+| JavaScript (for Ruby) | 0 | 0 | 0 | — |
+| JavaScript (for TS template) | 0 | 0 | 0 | — |
+| LaTeX | 1827 | 0 | 0 | 100.0000% |
+| LaTeX Log | 80 | 0 | 0 | 100.0000% |
+| Lisp | 1995 | 0 | 0 | 100.0000% |
+| Literate Haskell | 32 | 0 | 0 | 100.0000% |
+| Lua | 915 | 0 | 0 | 100.0000% |
+| MATLAB | 631 | 0 | 0 | 100.0000% |
+| Make Output | 0 | 0 | 0 | — |
+| Makefile | 552 | 0 | 0 | 100.0000% |
+| Markdown | 4883 | 0 | 0 | 100.0000% |
+| Markdown (Go) | 160 | 0 | 0 | 100.0000% |
+| Markdown (for HAML) | 0 | 0 | 0 | — |
+| MultiMarkdown | 26 | 0 | 0 | 100.0000% |
+| MySQL | 3735 | 0 | 0 | 100.0000% |
+| OCaml | 238 | 0 | 0 | 100.0000% |
+| OCamllex | 0 | 0 | 0 | — |
+| OCamlyacc | 41 | 0 | 0 | 100.0000% |
+| Objective-C | 710 | 0 | 0 | 100.0000% |
+| Objective-C++ | 1513 | 0 | 0 | 100.0000% |
+| PHP | 4466 | 2 | 0 | 99.9552% |
+| PHP Source | 0 | 0 | 0 | — |
+| PHP Source (for PHP) | 0 | 0 | 0 | — |
+| Pascal | 397 | 0 | 0 | 100.0000% |
+| Perl | 4592 | 0 | 0 | 100.0000% |
+| PostgreSQL | 710 | 0 | 0 | 100.0000% |
+| Python | 6313 | 0 | 0 | 100.0000% |
+| R | 334 | 0 | 0 | 100.0000% |
+| R Console | 0 | 0 | 0 | — |
+| Rd (R Documentation) | 0 | 0 | 0 | — |
+| RegExp (for Python raw-f-string) | 0 | 0 | 0 | — |
+| RegExp inside Go backtick string | 0 | 0 | 0 | — |
+| Regex (for C# literal string) | 0 | 0 | 0 | — |
+| Regex (for C# verbatim string) | 0 | 0 | 0 | — |
+| Regular Expression | 548 | 0 | 0 | 100.0000% |
+| Regular Expression (Basic) | 0 | 0 | 0 | — |
+| Regular Expression (Perl inside angle brackets) | 0 | 0 | 0 | — |
+| Regular Expression (Perl inside braces) | 0 | 0 | 0 | — |
+| Regular Expression (Perl inside parens) | 0 | 0 | 0 | — |
+| Regular Expression (Perl inside square brackets) | 0 | 0 | 0 | — |
+| Regular Expression (Perl) | 0 | 0 | 0 | — |
+| Regular Expression Replacement | 36 | 0 | 0 | 100.0000% |
+| Regular Expressions (C#) | 206 | 0 | 0 | 100.0000% |
+| Regular Expressions (JavaScript) | 0 | 0 | 0 | — |
+| Regular Expressions (PHP) | 0 | 0 | 0 | — |
+| Regular Expressions (Python) | 0 | 0 | 0 | — |
+| Ruby | 1151 | 0 | 0 | 100.0000% |
+| Ruby (Rails) | 20 | 0 | 0 | 100.0000% |
+| Ruby (for HAML) | 0 | 0 | 0 | — |
+| Rust | 2440 | 0 | 0 | 100.0000% |
+| SQL | 0 | 0 | 0 | — |
+| SQL (Basic) | 0 | 0 | 0 | — |
+| SQL (Rails) | 37 | 0 | 0 | 100.0000% |
+| SQL (for C# raw string) | 0 | 0 | 0 | — |
+| SQL (for C# verbatim format string) | 0 | 0 | 0 | — |
+| SQL (for C# verbatim string) | 0 | 0 | 0 | — |
+| SQL (for C#) | 0 | 0 | 0 | — |
+| SQL (for JS template) | 0 | 0 | 0 | — |
+| SQL (for PHP Interpolated) | 0 | 0 | 0 | — |
+| SQL (for PHP) | 0 | 0 | 0 | — |
+| SQL (for Ruby) | 0 | 0 | 0 | — |
+| SQL (for TS template) | 0 | 0 | 0 | — |
+| SQL inside Go backtick string | 0 | 0 | 0 | — |
+| Scala | 1704 | 0 | 0 | 100.0000% |
+| Shell | 5 | 0 | 0 | 100.0000% |
+| Shell (for Makefile) | 0 | 0 | 0 | — |
+| ShellScript (for Ruby) | 0 | 0 | 0 | — |
+| Sublime File Pattern | 144 | 0 | 0 | 100.0000% |
+| T-SQL | 1660 | 0 | 0 | 100.0000% |
+| T-SQL inside Go backtick string | 0 | 0 | 0 | — |
+| TOML | 660 | 0 | 0 | 100.0000% |
+| TOML (for Python) | 0 | 0 | 0 | — |
+| TSX | 662 | 0 | 0 | 100.0000% |
+| TSX (Plain) | 0 | 0 | 0 | — |
+| Tcl | 201 | 0 | 0 | 100.0000% |
+| TeX | 794 | 0 | 0 | 100.0000% |
+| TeX (DocStrip) | 46 | 0 | 0 | 100.0000% |
+| Textile | 655 | 0 | 0 | 100.0000% |
+| TypeScript | 2307 | 0 | 0 | 100.0000% |
+| TypeScript (Plain) | 0 | 0 | 0 | — |
+| XML | 1485 | 0 | 0 | 100.0000% |
+| XML (for PHP Interpolated) | 0 | 0 | 0 | — |
+| XML inside Go backtick string | 0 | 0 | 0 | — |
+| YAML | 607 | 0 | 0 | 100.0000% |
+| YAML (Go) | 95 | 0 | 0 | 100.0000% |
+| YAML (for PHP Interpolated) | 0 | 0 | 0 | — |
+| Zsh | 8075 | 1 | 0 | 99.9876% |
+| Zsh (for Markdown) | 0 | 0 | 0 | — |
+| camlp4 | 0 | 0 | 0 | — |
+| reStructuredText | 42 | 0 | 0 | 100.0000% |
 
-上下文体按语法独立压缩，首次进入时才解码，索引元数据无需解码全部上下文。这增加 YAML 构建时的一次性压缩开销，但显著减少缓存载入的 IO、校验和复制；两项仍均在预算内。
+Reproduce with cargo run --release -p vel-syntax --bin syntax-tests; cargo run --release -p vel-syntax --bin syntax-bench; python3 crates/vel-syntax/scripts/report.py. tests/last-run.json contains every file/category and the first mismatch evidence. tests/baseline.json is the monotonic regression gate, not a claim of zero known failures.
 
-## 编辑器接入
-
-共享 `Arc<SyntaxSet>`；每个文档持有 `ParseState` 和独立的 `ScopeStack`。行输入保留 `\n`，ops 为字节偏移，作用域选择器可复用解析后的对象。保存行末 checkpoint 后，状态相等即可停止增量重解析。
-
-`LineOps.rewind.from_line` 与 `corrections` 均从 0 开始；按序替换已缓存的 ops，同一行最后一次修正生效，再从最早修正行重建 scope stacks。branch 最多回退 128 行。
-
-`MatcherBackend` / `PatternMatcher` 是实际解析路径的替换点，已经用注入工厂的测试证明。P2 可插入 MultiDfa；必须保留最早起点、同位规则顺序、空匹配策略、排除规则、完整行 lookbehind / \G 和胜者捕获语义。
-
-## 全部 202 个语法
-
-无测试断言的语法不虚报 100%；用“—”标记。按 header 指定的语法归类，不按测试所在目录猜语言。
-
-| 语法 | 已载入 | 通过 | 失败 | 跳过 | 通过率 | 主要原因 |
-|---|:---:|---:|---:|---:|---:|---|
-| ASP | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| ActionScript 2.0 | 是 | 184 | 0 | 0 | 100.0000% | — |
-| AppleScript | 是 | 513 | 0 | 0 | 100.0000% | — |
-| Bash | 是 | 11090 | 0 | 46 | 100.0000% | — |
-| Bash (for Markdown) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Batch File | 是 | 3918 | 0 | 0 | 100.0000% | — |
-| Batch File (Compound) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| BibTeX | 是 | 100 | 0 | 7 | 100.0000% | — |
-| Binary | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| C | 是 | 876 | 0 | 0 | 100.0000% | — |
-| C# | 是 | 9355 | 0 | 70 | 100.0000% | — |
-| C++ | 是 | 1755 | 0 | 3 | 100.0000% | — |
-| CSS | 是 | 3514 | 0 | 1 | 100.0000% | — |
-| CSS (Go) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (Rails) | 是 | 48 | 0 | 0 | 100.0000% | — |
-| CSS (for ASP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for JS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for JSP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for PHP double-quoted) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for PHP single-quoted) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for Ruby) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS (for TS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| CSS inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Cabal | 是 | 421 | 0 | 0 | 100.0000% | — |
-| Cargo Build Results | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Cassandra Query Language | 是 | 399 | 0 | 0 | 100.0000% | — |
-| Clojure | 是 | 1699 | 0 | 0 | 100.0000% | — |
-| ClojureScript | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| D | 是 | 3110 | 0 | 0 | 100.0000% | — |
-| DMD Output | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| DTD | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Diff | 是 | 0 | 0 | 311 | — | 仅显式跳过/无 scope 用例 |
-| Diff (Basic) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Diff (for Markdown) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Diff (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Erlang | 是 | 4350 | 0 | 0 | 100.0000% | — |
-| Git Attributes | 是 | 176 | 0 | 0 | 100.0000% | — |
-| Git Blame Ignore Revisions | 是 | 37 | 0 | 0 | 100.0000% | — |
-| Git Code Owners | 是 | 92 | 0 | 0 | 100.0000% | — |
-| Git Commit | 是 | 258 | 0 | 0 | 100.0000% | — |
-| Git Commit Message | 是 | 137 | 0 | 0 | 100.0000% | — |
-| Git Common | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Git Config | 是 | 566 | 0 | 0 | 100.0000% | — |
-| Git Diff | 是 | 88 | 0 | 132 | 100.0000% | — |
-| Git Ignore | 是 | 285 | 0 | 0 | 100.0000% | — |
-| Git Link | 是 | 53 | 0 | 0 | 100.0000% | — |
-| Git Log | 是 | 162 | 0 | 0 | 100.0000% | — |
-| Git Mailmap | 是 | 45 | 0 | 0 | 100.0000% | — |
-| Git Rebase Todo | 是 | 392 | 0 | 0 | 100.0000% | — |
-| Go | 是 | 4402 | 0 | 0 | 100.0000% | — |
-| Go (Embedded Backtick String) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded CSS) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded HTML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded JSON) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded JavaScript) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded Regex) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded SQL) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded T-SQL) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Go (Embedded XML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Graphviz (DOT) | 是 | 210 | 0 | 16 | 100.0000% | — |
-| Groovy | 是 | 295 | 0 | 0 | 100.0000% | — |
-| HAML | 是 | 368 | 0 | 0 | 100.0000% | — |
-| HTML | 是 | 1012 | 0 | 1 | 100.0000% | — |
-| HTML (ASP) | 是 | 993 | 0 | 0 | 100.0000% | — |
-| HTML (Erlang) | 是 | 60 | 0 | 0 | 100.0000% | — |
-| HTML (Go) | 是 | 169 | 0 | 0 | 100.0000% | — |
-| HTML (JSP) | 是 | 701 | 0 | 0 | 100.0000% | — |
-| HTML (Plain) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (Rails) | 是 | 167 | 0 | 0 | 100.0000% | — |
-| HTML (Tcl) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for HSX) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for JS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for Ruby) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML (for TS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| HTML inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Haskell | 是 | 3492 | 0 | 1 | 100.0000% | — |
-| JSON | 是 | 135 | 0 | 0 | 100.0000% | — |
-| JSON (Go) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (Rails) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for ASP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for JS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for JSP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON (for TS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSON inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JSX | 是 | 619 | 0 | 1 | 100.0000% | — |
-| JSX (Plain) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Java | 是 | 8903 | 0 | 1 | 100.0000% | — |
-| Java (for HTML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Java (for JSP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Java Properties | 是 | 84 | 0 | 0 | 100.0000% | — |
-| JavaDoc | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript | 是 | 3011 | 2 | 1 | 99.9336% | selector 尾缀 |
-| JavaScript (Go) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (Plain) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (Rails) | 是 | 31 | 0 | 0 | 100.0000% | — |
-| JavaScript (for ASP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for Go Embedded Backtick Strings) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for JS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for JSP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for PHP double-quoted) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for PHP single-quoted) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for Ruby) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| JavaScript (for TS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| LaTeX | 是 | 1446 | 0 | 381 | 100.0000% | — |
-| LaTeX Log | 是 | 80 | 0 | 0 | 100.0000% | — |
-| Lisp | 是 | 1995 | 0 | 0 | 100.0000% | — |
-| Literate Haskell | 是 | 32 | 0 | 0 | 100.0000% | — |
-| Lua | 是 | 915 | 0 | 0 | 100.0000% | — |
-| MATLAB | 是 | 624 | 0 | 6 | 100.0000% | — |
-| Make Output | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Makefile | 是 | 552 | 0 | 0 | 100.0000% | — |
-| Markdown | 是 | 4869 | 0 | 14 | 100.0000% | — |
-| Markdown (Go) | 是 | 160 | 0 | 0 | 100.0000% | — |
-| Markdown (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| MultiMarkdown | 是 | 26 | 0 | 0 | 100.0000% | — |
-| MySQL | 是 | 3735 | 0 | 0 | 100.0000% | — |
-| OCaml | 是 | 238 | 0 | 0 | 100.0000% | — |
-| OCamllex | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| OCamlyacc | 是 | 41 | 0 | 0 | 100.0000% | — |
-| Objective-C | 是 | 708 | 0 | 2 | 100.0000% | — |
-| Objective-C++ | 是 | 1511 | 0 | 2 | 100.0000% | — |
-| PHP | 是 | 4465 | 0 | 2 | 100.0000% | — |
-| PHP Source | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| PHP Source (for PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Pascal | 是 | 371 | 0 | 26 | 100.0000% | — |
-| Perl | 是 | 4590 | 0 | 1 | 100.0000% | — |
-| PostgreSQL | 是 | 710 | 0 | 0 | 100.0000% | — |
-| Python | 是 | 6312 | 0 | 1 | 100.0000% | — |
-| R | 是 | 334 | 0 | 0 | 100.0000% | — |
-| R Console | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Rd (R Documentation) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| RegExp (for Python raw-f-string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| RegExp inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regex (for C# literal string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regex (for C# verbatim string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression | 是 | 548 | 0 | 0 | 100.0000% | — |
-| Regular Expression (Basic) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression (Perl inside angle brackets) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression (Perl inside braces) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression (Perl inside parens) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression (Perl inside square brackets) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression (Perl) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expression Replacement | 是 | 36 | 0 | 0 | 100.0000% | — |
-| Regular Expressions (C#) | 是 | 206 | 0 | 0 | 100.0000% | — |
-| Regular Expressions (JavaScript) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expressions (PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Regular Expressions (Python) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Ruby | 是 | 1151 | 0 | 0 | 100.0000% | — |
-| Ruby (Rails) | 是 | 20 | 0 | 0 | 100.0000% | — |
-| Ruby (for HAML) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Rust | 是 | 2426 | 0 | 14 | 100.0000% | — |
-| SQL | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (Basic) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (Rails) | 是 | 37 | 0 | 0 | 100.0000% | — |
-| SQL (for C# raw string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for C# verbatim format string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for C# verbatim string) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for C#) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for JS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for PHP) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for Ruby) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL (for TS template) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| SQL inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Scala | 是 | 1704 | 0 | 0 | 100.0000% | — |
-| Shell | 是 | 5 | 0 | 0 | 100.0000% | — |
-| Shell (for Makefile) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| ShellScript (for Ruby) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Sublime File Pattern | 是 | 144 | 0 | 0 | 100.0000% | — |
-| T-SQL | 是 | 1651 | 0 | 8 | 100.0000% | — |
-| T-SQL inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| TOML | 是 | 651 | 0 | 9 | 100.0000% | — |
-| TOML (for Python) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| TSX | 是 | 662 | 0 | 0 | 100.0000% | — |
-| TSX (Plain) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Tcl | 是 | 201 | 0 | 0 | 100.0000% | — |
-| TeX | 是 | 794 | 0 | 0 | 100.0000% | — |
-| TeX (DocStrip) | 是 | 46 | 0 | 0 | 100.0000% | — |
-| Textile | 是 | 608 | 0 | 47 | 100.0000% | — |
-| TypeScript | 是 | 2307 | 0 | 0 | 100.0000% | — |
-| TypeScript (Plain) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| XML | 是 | 1485 | 0 | 0 | 100.0000% | — |
-| XML (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| XML inside Go backtick string | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| YAML | 是 | 607 | 0 | 0 | 100.0000% | — |
-| YAML (Go) | 是 | 95 | 0 | 0 | 100.0000% | — |
-| YAML (for PHP Interpolated) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| Zsh | 是 | 8037 | 0 | 39 | 100.0000% | — |
-| Zsh (for Markdown) | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| camlp4 | 是 | 0 | 0 | 0 | — | 无 scope 用例 |
-| reStructuredText | 是 | 42 | 0 | 0 | 100.0000% | — |
-
-复现：`cargo run --release -p vel-syntax --bin syntax-tests`；`cargo run --release -p vel-syntax --bin syntax-bench`；`python3 crates/vel-syntax/scripts/report.py`。
-
-回归门槛位于 `tests/baseline.json`；`cargo test -p vel-scope -p vel-regex -p vel-syntax --release` 实际运行全 242 文件并逐语法检查不得倒退。
+Editor API: see ../vel-highlight/README.md. Metadata-only callers use MetadataSet::metadata_for, indent::scoped_spans, MetadataSet::symbols, and indent::reindent.
