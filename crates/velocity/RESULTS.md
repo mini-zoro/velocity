@@ -1,3 +1,123 @@
+# Round 7 results: workbench, sessions, projects and builds
+
+Implemented and headless-verified; **uncommitted**. Users can arrange draggable pane grids,
+clone a shared document with independent selections/scroll and shared undo, multi-select tabs
+for side-by-side display, move/close selected sheets, and open independent native windows.
+The View menu adds full screen and distraction-free settings. Project Open/Save As/Edit/Close,
+Recent/Quick Switch and per-project workspaces are wired. CLI project/stdin/new/add/wait requests
+forward over one private local socket; wait completes when the requested sheets close.
+
+Sessions retain dirty/untitled text, normal command-level undo/redo, layouts, folds, selections,
+syntax, query/replacement history, sidebar and recent paths. Hidden clean tabs restore lazily.
+Hot Exit policies differ for explicit close, crash recovery and quit. A debounced worker writes
+atomically with file/directory fsync; storage failures remain recoverable and do not claim a
+successful dirty Hot Exit. New tests start with absent profiles and cover read-only storage,
+corrupt JSON, wrong schemas, and a file occupying a required directory. Corrupt bytes are kept
+aside where writable, otherwise preserved in place with a diagnostic. Optional corrupt user
+settings/keymaps/metadata do not make startup depend on successful profile repair.
+
+Build systems support project/resource definitions, platform/variant merging and documented
+variables/substitutions. Cmd+B / Cmd+Shift+B / Cancel run an asynchronous process group with
+bounded stdout/stderr delivery and retained output; cancellation and task teardown reap the
+process tree. Output syntax/wrap, status/elapsed time, F4/Shift+F4, double-click navigation and
+inline text diagnostics are integrated. The original [example project](fixtures/workbench.sublime-project)
+has failure/success/cancel fixtures without writing build artifacts.
+
+This lane changes velocity, vel-ui, vel-config, vel-commands, vel-platform, the new vel-build
+and vel-session, plus Cargo.lock. Lane B sources and owned color schemes were consumed read-only.
+No GUI/AppKit window, Metal device, display wake or unlock was started in this session.
+
+**All 132 Rust tests pass:** application 72, UI 5, config 8, commands 5, platform 6,
+build 6, session 7, fileio 7, search 8 and render 8. Scoped fmt, clippy `-D warnings`, rustdoc
+`-D warnings`, release build, measurement-parser self-test and bundle shell syntax pass.
+Exact runnable validation/native commands are at the top of [RUNBOOK.md](RUNBOOK.md);
+[MANUAL_TEST.md](MANUAL_TEST.md#round-7--workbenchsessionbuild-acceptance-native-review-pending)
+contains the pending human checklist. No native acceptance result is inferred from unit tests.
+
+## Five sequential CPU runs
+
+Same copied release binary for workbench and preceding-round regression suites:
+`5c6262d9eeacd88dc856bec9fb328ebea4c5b3cec881a40acfcd44eac5da1e91`.
+Host: `Darwin-25.1.0-arm64-arm-64bit-Mach-O`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+[Machine-readable results](timings-round7.json) retain source hashes, all runs, quantiles,
+boundaries, comparison data and references to preceding series. Raw workbench
+[summary](output/round7-cpu-20261114T073311.813812Z/summary.json), [first run](output/round7-cpu-20261114T073311.813812Z/run-1.jsonl)
+and all other runs retain every sample/outlier. Measurements omit the debug layer.
+
+| Workload | Budget | Measured p50 / p95 / max (ms) | Samples |
+| --- | --- | --- | --- |
+| 50-file durable worker save | ≤20 ms | 0.361 / 0.775 / 1.665 | 50 |
+| 50-file first-window CPU restore | ≤300 ms native first window | 176.070 / 179.153 / 179.892 | 5 |
+| Four-group typing, command + CPU scenes | p50 ≤2 / p95 ≤4 ms | 1.698 / 1.925 / 8.284 | 1,500 |
+| Four-group scroll CPU scenes | p95 ≤2 ms | 1.533 / 1.670 / 8.909 | 1,500 |
+
+All ten per-run saves start from one snapshot of 50 files: ten hidden 11,000,000-byte files,
+five small dirty documents with undo, and 35 other clean files. The first save creates an
+absent profile/Sessions directory. Worker timing includes validation/encoding, 64 KiB buffered
+JSON, temporary-file IO, POSIX file fsync, rename and directory fsync; fixture/snapshot creation
+and queue delay are excluded. The files are generated outside the timer. This is not a claim
+about a session containing 50 large dirty histories.
+
+Every restore installs one selected document and leaves **49 lazy**, including all ten large
+files. First CPU scene readiness ranges 159.757–180.756 ms.
+The restore figure includes session read/parse, resources/assets and selected-file installation.
+It excludes native window creation, fonts, GPU and scanout; **the complete ≤300 ms native target
+remains unmeasured**. Use `--bench-startup --restore-session` in the runbook to measure it.
+
+Four groups occupy 3840×2160 logical points, four 1920×1080 viewports into one highlighted
+10k-line Rust buffer. Each has its own layout/selection/scroll and a different visible interval.
+Exact viewport styles and backend readiness are prepared before timing. Typing includes keymap,
+command/journal/shared-buffer transfers and four CPU scenes; the immediate post-key scene can
+use current-text fallback. Scroll times four exact scenes after scroll/highlight preparation.
+Asynchronous catch-up, native input, fonts, uploads, GPU and presentation are excluded. Native
+input-to-present and minimap GPU budgets remain pending reviewer hardware runs. Outliers above
+the p95 limits are retained in the table and raw data.
+
+## Round-6 workload comparison
+
+The original [round-6 record](timings-round6.json) is unchanged. The final binary repeats its
+single-view workload five times: 3,000 scroll, 2,500 typing, 500 rewrap and 100 fold/unfold
+samples. The script retains its historical `round6-cpu` output prefix; this directory contains
+the **round-7 binary**: [summary](output/round6-cpu-20261114T073612.389128Z/summary.json).
+
+| CPU workload | Round 6 p50 / p95 (ms) | Round 7 p50 / p95 (ms) | Change p50 / p95 |
+| --- | --- | --- | --- |
+| scroll | 0.438896 / 0.737346 | 0.475000 / 0.618422 | +8.23% / -16.13% |
+| typing | 1.903354 / 3.341221 | 1.852667 / 2.137978 | -2.66% / -36.01% |
+| rewrap | 0.006271 / 0.008583 | 0.006042 / 0.006834 | -3.64% / -20.38% |
+| fold | 9.091916 / 10.602915 | 8.787063 / 9.733515 | -3.35% / -8.20% |
+| unfold | 0.904917 / 1.180403 | 0.859854 / 1.004718 | -4.98% / -14.88% |
+
+**Performance review remains required before merging:** scroll p50 exceeds the 5% regression rule in CONTRIBUTING.md. The absolute typing/scroll budgets pass in these CPU workloads. The regression is recorded and has not been waived.
+
+Earlier complete series are retained in timings-round7.json, including the pre-final native
+bookkeeping builds and a rerun of the archived round-6 binary. One archived-control run briefly
+overlapped a headless smoke check, so that series is diagnostic evidence rather than an isolated
+control. Concurrent lane-B work and host scheduling were not controlled; no causal attribution
+or universal performance improvement is claimed. Existing 1/1,000-caret headless smoke modes
+also completed; mixed Unicode/newline/wrapping smoke timings are not native latency evidence.
+
+## History API handoff and native limits
+
+No vel-buffer sources changed. The public-API journal restores normal text undo/redo, save
+points and before/after selections, with worker-side UTF-8 deltas and bounded history. It cannot
+faithfully serialize private soft-selection history, change-map history or original edit-owner
+ViewIds; some commands' internal transaction grouping can differ. Live clone undo continues to
+use the native shared Buffer history. This is an explicit Hot Exit fidelity gap.
+
+Requested API: `Buffer::export_history() -> owned, versioned HistorySnapshot` and checked
+`Buffer::restore_history(text, snapshot, view_id_map)`. Preserve groups/steps, forward/inverse
+edits, owners, selections, cursor, saved identity, limits and per-view soft history. Export should
+hold O(1) owned snapshots for worker serialization. Payload/validation details are in
+[vel-session/README.md](../vel-session/README.md#public-buffer-history-adapter-and-requested-api).
+
+Native windows/focus/close/quit, IME in lower/right panes, drag/tab connectors, full screen,
+distraction-free appearance, CLI wait/forwarding, streamed process output, error badges and
+crash/Hot Exit recovery still require the reviewer checklist. Rust compilation and headless
+coverage establish their wiring and state behavior, not their visible/native acceptance.
+
+---
+
 # Round 6 results: syntax, language editing and core views
 
 Implemented and headless-verified, **uncommitted**. Users now see syntax colors, real

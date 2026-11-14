@@ -2,18 +2,25 @@
 #[cfg(target_os = "macos")]
 mod app;
 mod bench;
+mod build;
 mod cli;
 mod editing;
 mod editor;
 mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
+mod instance;
 mod language;
 mod layout;
 mod panels;
 mod report;
+mod session;
 mod stats;
 mod view;
+mod workbench;
+mod workbench_bench;
+#[cfg(test)]
+mod workbench_tests;
 mod workspace;
 use cli::{Mode, Options};
 use report::{Clock, Reporter, Watchdog, ms};
@@ -43,6 +50,70 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         print!("{}", cli::HELP);
         return Ok(());
     };
+    let data_dir = options
+        .data_dir
+        .clone()
+        .or_else(workspace::Workspace::default_data_dir);
+    let mut stdin = None;
+    if options.mode == Mode::Interactive && options.files.iter().any(|f| f.path == Path::new("-")) {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .map_err(|e| e.to_string())?;
+        stdin = Some(input);
+    }
+    let instance = if options.mode == Mode::Interactive {
+        let request = instance::Request::new(&options, stdin.clone())?;
+        match instance::Instance::start(data_dir.as_deref(), &request) {
+            Ok(instance::Start::Forwarded) => return Ok(()),
+            Ok(instance::Start::Primary(instance)) => {
+                if std::env::var_os("VELOCITY_GUI_PROCESS").is_none() {
+                    drop(instance);
+                    let mut command = std::process::Command::new(
+                        std::env::current_exe().map_err(|e| e.to_string())?,
+                    );
+                    command
+                        .env("VELOCITY_GUI_PROCESS", "1")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null());
+                    if let Some(data) = &data_dir {
+                        command.arg("--data-dir").arg(data);
+                    }
+                    command.args([
+                        "--width",
+                        &options.width.to_string(),
+                        "--height",
+                        &options.height.to_string(),
+                    ]);
+                    if options.log_input {
+                        command.arg("--log-input");
+                    }
+                    let mut child = command.spawn().map_err(|e| e.to_string())?;
+                    let at = Instant::now();
+                    loop {
+                        if instance::Instance::forward_existing(data_dir.as_deref(), &request)? {
+                            return Ok(());
+                        }
+                        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                            return Err(format!(
+                                "native application exited before accepting files: {status}"
+                            ));
+                        }
+                        if at.elapsed() > std::time::Duration::from_secs(30) {
+                            return Err("native application did not open its local socket".into());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                Some(instance)
+            }
+            Err(e) => {
+                eprintln!("velocity: single-instance forwarding unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut clock = Clock::new(entered, wall);
     let reporter = Reporter::new(options.mode, options.output.as_deref(), entered)?;
     let _watchdog = options
@@ -55,15 +126,17 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         if options.mode == Mode::HeadlessFeatures {
             return feature_bench::run(&reporter, &options);
         }
+        if options.mode == Mode::HeadlessWorkbench {
+            return workbench_bench::run(&reporter, &options);
+        }
         if options.mode != Mode::Headless {
             vel_platform::display_status().check()?;
             clock.mark("display_preflight_passed");
         }
-        let (text, source) = if matches!(options.mode, Mode::Interactive | Mode::Open) {
-            if options.files.iter().any(|f| f.path == Path::new("-")) {
-                let mut input = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
-                    .map_err(|e| e.to_string())?;
+        let (text, source) = if options.restore_session {
+            (Text::new(), "restored session".into())
+        } else if matches!(options.mode, Mode::Interactive | Mode::Open) {
+            if let Some(input) = &stdin {
                 (Text::from(input.as_str()), "stdin".into())
             } else {
                 (
@@ -96,22 +169,95 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                     height: options.height as f64,
                 },
             };
-            let mut workspace = workspace::Workspace::new(
-                text,
-                options
-                    .data_dir
-                    .clone()
-                    .or_else(workspace::Workspace::default_data_dir),
-                options.project.clone(),
+            let sessions = std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(
+                if options.mode == Mode::Interactive || options.restore_session {
+                    data_dir.as_deref()
+                } else {
+                    None
+                },
+            )));
+            let mut restored_ui = None;
+            let restored = sessions.borrow().restored.clone();
+            let first = if (options.mode == Mode::Interactive || options.restore_session)
+                && options.project.is_none()
+                && options.files.is_empty()
+            {
+                restored.windows.first().cloned()
+            } else {
+                None
+            };
+            let project = options.project.clone().or_else(|| {
+                first
+                    .as_ref()
+                    .and_then(|w| w.project.as_ref())
+                    .filter(|p| p.is_file())
+                    .cloned()
+            });
+            let initial_workspace = workspace::Workspace::new(
+                if stdin.is_some() { Text::new() } else { text },
+                data_dir.clone(),
+                project.clone(),
                 options.mode == Mode::Interactive,
-            )?;
+            );
+            let mut workspace = match initial_workspace {
+                Ok(workspace) => workspace,
+                Err(e) if options.project.is_none() && first.is_some() => {
+                    let mut workspace = workspace::Workspace::new(
+                        Text::new(),
+                        data_dir.clone(),
+                        None,
+                        options.mode == Mode::Interactive,
+                    )?;
+                    workspace.messages.push(format!("Restored project: {e}"));
+                    workspace
+                }
+                Err(e) => return Err(e),
+            };
+            workspace.recent_files = restored.recent_files.clone();
+            workspace.recent_folders = restored.recent_folders.clone();
+            workspace.recent_projects = restored.recent_projects.clone();
+            if let Some(path) = workspace.project_path().map(Path::to_owned) {
+                workbench::remember(&mut workspace.recent_projects, path);
+            }
+            workspace
+                .messages
+                .append(&mut sessions.borrow_mut().messages);
+            if let Some(window) = &first {
+                if let Err(e) = workspace.restore_window(window, &restored.documents) {
+                    workspace.messages.push(format!("Session restore: {e}"));
+                } else {
+                    restored_ui = Some(window.clone());
+                }
+            } else if options.mode == Mode::Interactive
+                && let Some(project) = &options.project
+            {
+                let recovery = vel_session::load(&vel_session::project::workspace_path(project));
+                workspace.messages.extend(recovery.messages);
+                if let Some(window) = recovery.session.windows.first() {
+                    if let Err(e) = workspace.restore_window(window, &recovery.session.documents) {
+                        workspace.messages.push(e);
+                    } else {
+                        restored_ui = Some(window.clone());
+                    }
+                }
+            }
+            if let Some(input) = &stdin {
+                workspace
+                    .editor_mut()
+                    .run("insert", &json!({"characters":input}))?;
+            }
             if matches!(options.mode, Mode::Interactive | Mode::Open) {
                 for location in &options.files {
                     if location.path != Path::new("-") {
-                        workspace.open(location.clone())?;
+                        if location.path.is_dir() {
+                            let mut panels = panels::Panels::new(&workspace, false);
+                            panels.add_folder(&mut workspace, location.path.clone())?;
+                        } else {
+                            workspace.open(location.clone())?;
+                        }
                     }
                 }
-            } else {
+            } else if !options.restore_session {
                 let path = options
                     .file
                     .as_ref()
@@ -128,14 +274,28 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 .clone();
                 workspace.set_file_type(&syntax)?;
             }
-            let app = app::App::new(
+            if options.groups > 1 {
+                workbench::configure_groups(&mut workspace, options.groups)?;
+            }
+            let mut app = app::App::new(
                 options.clone(),
                 clock,
                 reporter.clone(),
                 workspace,
                 Arc::clone(&done),
+                sessions,
             );
+            if let Some(window) = &restored_ui {
+                app.restore_ui(window);
+            }
+            if first.is_some() {
+                app.restore_remaining(restored.windows.iter().skip(1).cloned().collect());
+            }
+            app.set_instance(instance);
             Platform::run_with_options(window, app)?;
+            if options.mode == Mode::Interactive {
+                done.store(true, Ordering::Release);
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -255,6 +415,32 @@ impl vel_platform::AppHandler for Unsupported {
         unreachable!()
     }
 }
+fn app_scene_translate(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
+    let shift = |r: &mut vel_platform::Rect| {
+        r.x += x;
+        r.y += y;
+    };
+    for layer in &mut scene.layers {
+        for rect in &mut layer.rects {
+            shift(&mut rect.rect);
+            shift(&mut rect.clip);
+        }
+        for shadow in &mut layer.shadows {
+            shift(&mut shadow.rect);
+            shift(&mut shadow.clip);
+        }
+        for underline in &mut layer.underlines {
+            shift(&mut underline.rect);
+            shift(&mut underline.clip);
+        }
+        for text in &mut layer.text {
+            text.x += x as f32;
+            text.baseline += y as f32;
+            shift(&mut text.clip);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

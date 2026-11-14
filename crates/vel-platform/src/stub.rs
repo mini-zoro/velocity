@@ -4,6 +4,27 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Native windows require macOS.
+    pub fn new_window(
+        &self,
+        _options: crate::WindowOptions,
+        _app: impl crate::AppHandler,
+    ) -> Result<Self, String> {
+        Err("native windows require macOS".into())
+    }
+    /// No native close on unsupported platforms.
+    pub fn request_close(&self) {}
+    /// No native window on unsupported platforms.
+    pub fn close(&self) {}
+    /// No native window on unsupported platforms.
+    pub fn focus(&self) {}
+    /// Unsupported platforms have no full-screen native window.
+    pub fn is_full_screen(&self) -> bool {
+        false
+    }
+    /// No native full screen on unsupported platforms.
+    pub fn toggle_full_screen(&self) {}
+
     /// Unsupported platforms do not acquire native drawables.
     pub fn last_acquired_drawable(&self) -> Option<u64> {
         None

@@ -12,6 +12,7 @@ pub enum Mode {
     Memory,
     Headless,
     HeadlessFeatures,
+    HeadlessWorkbench,
     Panels,
 }
 impl Mode {
@@ -25,6 +26,7 @@ impl Mode {
             Self::Memory => "memory",
             Self::Headless => "headless",
             Self::HeadlessFeatures => "headless-view-features",
+            Self::HeadlessWorkbench => "headless-workbench",
             Self::Panels => "panels",
         }
     }
@@ -36,6 +38,11 @@ impl Mode {
 #[derive(Clone, Debug)]
 pub struct Options {
     pub mode: Mode,
+    pub new_window: bool,
+    pub add_to_window: bool,
+    pub wait: bool,
+    pub groups: usize,
+    pub restore_session: bool,
     pub width: u32,
     pub height: u32,
     pub lines: usize,
@@ -53,6 +60,11 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             mode: Mode::Interactive,
+            new_window: false,
+            add_to_window: false,
+            wait: false,
+            groups: 1,
+            restore_session: false,
             width: 1200,
             height: 800,
             lines: 0,
@@ -88,6 +100,7 @@ impl Options {
                 "--bench-memory" => Some(Mode::Memory),
                 "--headless-smoke" => Some(Mode::Headless),
                 "--headless-view-features" => Some(Mode::HeadlessFeatures),
+                "--headless-workbench" => Some(Mode::HeadlessWorkbench),
                 "--bench-panels" => Some(Mode::Panels),
                 _ => None,
             };
@@ -103,6 +116,20 @@ impl Options {
                 "--help" | "-h" => return Ok(None),
                 "--" => positional_only = true,
                 "--log-input" => options.log_input = true,
+                "--restore-session" => options.restore_session = true,
+                "-n" | "--new-window" => options.new_window = true,
+                "-a" | "--add" => options.add_to_window = true,
+                "-w" | "--wait" => options.wait = true,
+                "--groups" => {
+                    options.groups = args
+                        .next()
+                        .ok_or("--groups needs a count")?
+                        .parse()
+                        .map_err(|_| "invalid group count")?;
+                    if !matches!(options.groups, 1..=4) {
+                        return Err("--groups must be 1..4".into());
+                    }
+                }
                 "--large" => {
                     options.width = 3000;
                     options.height = 1800;
@@ -196,7 +223,7 @@ impl Options {
     }
 }
 /// File path with one-based CLI row/scalar column suffixes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileLocation {
     pub path: PathBuf,
     pub line: usize,
@@ -228,7 +255,7 @@ impl FileLocation {
     }
 }
 
-pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
+pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {

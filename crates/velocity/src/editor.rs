@@ -28,6 +28,15 @@ struct Composition {
     selection: Selection,
     explicit: bool,
 }
+#[derive(Clone, Debug)]
+pub struct SharedLayoutEdit {
+    pub buffer: vel_buffer::BufferId,
+    pub from: vel_buffer::ChangeId,
+    pub to: vel_buffer::ChangeId,
+    pub before: Text,
+    pub after: Text,
+    pub changes: ChangeSet,
+}
 #[derive(Debug)]
 pub struct Editor {
     pub language: crate::language::LanguageCell,
@@ -36,6 +45,11 @@ pub struct Editor {
     pub reindent_job: Option<mpsc::Receiver<ReindentResult>>,
     pub read_only: bool,
     pub buffer: Buffer,
+    pub history: vel_session::History,
+    pub shared_shadow: bool,
+    pub layout_edits: std::rc::Rc<RefCell<std::collections::VecDeque<SharedLayoutEdit>>>,
+    pub layout_version: vel_buffer::ChangeId,
+    history_hint: String,
     pub id: ViewId,
     // O(1) snapshot used by layout and native queries, including preedit preview.
     pub text: Text,
@@ -63,16 +77,28 @@ impl Editor {
                 serde_json::to_value(EditorSettings::default()).expect("settings"),
             )
             .expect("settings");
-        let mut keymap = Keymap::default();
-        keymap
-            .append(include_str!(
-                "../resources/Packages/Default/Velocity.sublime-keymap"
-            ))
-            .expect("our keymap");
+        static DEFAULT_KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+        let keymap = DEFAULT_KEYMAP
+            .get_or_init(|| {
+                let mut keymap = Keymap::default();
+                keymap
+                    .append(include_str!(
+                        "../resources/Packages/Default/Velocity.sublime-keymap"
+                    ))
+                    .expect("our keymap");
+                keymap
+            })
+            .clone();
         let preferences = settings.editor();
         let settings_revision = settings.revision();
+        let history = vel_session::History::new(&buffer, id);
         Self {
-            language: RefCell::new(None),
+            history,
+            shared_shadow: false,
+            layout_edits: std::rc::Rc::new(RefCell::new(std::collections::VecDeque::new())),
+            layout_version: vel_buffer::ChangeId(0),
+            history_hint: String::new(),
+            language: std::rc::Rc::new(RefCell::new(None)),
             layout: RefCell::new(crate::layout::Layout::default()),
             language_buffer: None,
             reindent_job: None,
@@ -94,6 +120,24 @@ impl Editor {
             revision: 0,
         }
     }
+    pub fn adopt_document(&mut self) {
+        self.language_buffer = Some(self.buffer.id());
+        let current = &self.buffer.view(self.id).settings;
+        if current.tab_size != self.preferences.tab_size
+            || current.translate_tabs_to_spaces != self.preferences.translate_tabs_to_spaces
+            || current.word_separators != self.preferences.word_separators
+        {
+            self.buffer.set_settings(
+                self.id,
+                vel_buffer::Settings {
+                    tab_size: self.preferences.tab_size,
+                    translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
+                    word_separators: self.preferences.word_separators.clone(),
+                },
+            );
+            self.history.break_group();
+        }
+    }
     pub fn sync(&mut self) {
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
@@ -107,9 +151,32 @@ impl Editor {
                 },
             );
         }
-        let reset = self.language.borrow().as_ref().is_some_and(|l| {
-            l.version != self.buffer.change_id() || self.language_buffer != Some(self.buffer.id())
-        });
+        if !self.shared_shadow && self.layout_version != self.buffer.change_id() {
+            let edits = self.layout_edits.borrow();
+            for edit in edits.iter().filter(|e| e.buffer == self.buffer.id()) {
+                if edit.from == self.layout_version {
+                    self.layout
+                        .borrow_mut()
+                        .prepare_change((edit.buffer, edit.from));
+                    self.layout.borrow_mut().change(
+                        &edit.before,
+                        &edit.after,
+                        (edit.buffer, edit.to),
+                        &edit.changes,
+                    );
+                    self.layout_version = edit.to;
+                }
+            }
+            if self.layout_version != self.buffer.change_id() {
+                self.layout.borrow_mut().invalidate();
+                self.layout_version = self.buffer.change_id();
+            }
+        }
+        let reset = !self.shared_shadow
+            && self.language.borrow().as_ref().is_some_and(|l| {
+                l.version != self.buffer.change_id()
+                    || self.language_buffer != Some(self.buffer.id())
+            });
         if reset {
             let previous = self.language.borrow_mut().take().expect("language");
             let result = crate::language::Language::new(
@@ -139,6 +206,10 @@ impl Editor {
         self.anchor = primary.a;
         self.caret = primary.b;
         self.revision = self.buffer.change_id().0;
+        if !self.shared_shadow {
+            self.history
+                .observe(&self.buffer, self.id, &self.history_hint);
+        }
     }
     pub fn attach_language(
         &mut self,
@@ -213,6 +284,9 @@ impl Editor {
     }
     pub fn set_selection(&mut self, selection: Selection) {
         self.unmark();
+        if !self.shared_shadow && self.buffer.view(self.id).sel() != &selection {
+            self.history.break_group();
+        }
         self.buffer.set_selection(self.id, selection);
         self.sync();
     }
@@ -409,6 +483,52 @@ impl Editor {
 }
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        self.history.before_command(&self.buffer, self.id);
+        self.history_hint = if name == "insert" {
+            let text = args["characters"].as_str().unwrap_or("");
+            let mut class = None;
+            let mut mixed = false;
+            for c in text.chars() {
+                let next = if c == '\n' {
+                    "newline"
+                } else if c.is_whitespace() {
+                    "space"
+                } else if self.preferences.word_separators.contains(c) {
+                    "punct"
+                } else {
+                    "word"
+                };
+                if class.is_some_and(|old| old != next) {
+                    mixed = true;
+                }
+                class = Some(next);
+            }
+            format!(
+                "typing:{}",
+                if mixed {
+                    "mixed"
+                } else {
+                    class.unwrap_or("mixed")
+                }
+            )
+        } else {
+            if matches!(
+                name,
+                "move"
+                    | "move_to"
+                    | "select_all"
+                    | "single_selection"
+                    | "find_under_expand"
+                    | "find_under_expand_skip"
+                    | "find_all_under"
+                    | "select_lines"
+                    | "expand_selection"
+                    | "split_selection_into_lines"
+            ) {
+                self.history.break_group();
+            }
+            name.to_owned()
+        };
         self.language_command(name, args)
     }
     fn command_finished(&mut self) {

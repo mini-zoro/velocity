@@ -42,7 +42,69 @@ impl fmt::Debug for WindowHandle {
             .finish()
     }
 }
+thread_local! {
+    static WINDOWS: RefCell<Vec<Retained<Delegate>>> = const { RefCell::new(Vec::new()) };
+}
 impl WindowHandle {
+    /// Creates another independently owned native window on the same AppKit loop.
+    pub fn new_window(
+        &self,
+        options: WindowOptions,
+        app: impl AppHandler,
+    ) -> Result<WindowHandle, String> {
+        let host = create_host(self.0.mtm, &options, Box::new(app))?;
+        let delegate = create_delegate(self.0.mtm, host.clone(), options);
+        WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
+        delegate.launch()?;
+        Ok(host.handle())
+    }
+    /// Requests normal per-window close handling, including unsaved changes.
+    pub fn request_close(&self) {
+        self.0.dispatch(Event::CloseRequested);
+    }
+    /// Closes one approved window while other windows keep running.
+    pub fn close(&self) {
+        self.0.stopped.set(true);
+        self.0.visible.set(false);
+        self.0.pace();
+        if let Some(timer) = self.0.timer.take() {
+            timer.invalidate();
+        }
+        if let Some(window) = self.0.window.get() {
+            window.orderOut(None);
+        }
+        let any = WINDOWS.with(|windows| {
+            windows
+                .borrow()
+                .iter()
+                .any(|d| !d.ivars().host.stopped.get())
+        });
+        if !any {
+            self.quit();
+        }
+    }
+    /// Brings this window forward for an interactive file/project request.
+    pub fn focus(&self) {
+        if let Some(window) = self.0.window.get() {
+            window.makeKeyAndOrderFront(None);
+        }
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(self.0.mtm).activateIgnoringOtherApps(true);
+    }
+    /// Reads native full-screen state, including changes from the green window control.
+    pub fn is_full_screen(&self) -> bool {
+        self.0
+            .window
+            .get()
+            .is_some_and(|w| w.styleMask().contains(NSWindowStyleMask::FullScreen))
+    }
+    /// Enters/exits native full screen without enabling macOS window tabs.
+    pub fn toggle_full_screen(&self) {
+        if let Some(window) = self.0.window.get() {
+            window.toggleFullScreen(None);
+        }
+    }
+
     /// Sequence of the most recently acquired Metal drawable, for scanout correlation.
     pub fn last_acquired_drawable(&self) -> Option<u64> {
         self.0
@@ -269,7 +331,7 @@ enum Event {
     Scroll(ScrollEvent),
     Resize,
     Appearance(Appearance),
-    QuitRequested,
+    CloseRequested,
 }
 struct Host {
     mtm: MainThreadMarker,
@@ -339,13 +401,20 @@ impl Host {
                 Event::Scroll(e) => app.on_scroll(&w, e),
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
-                Event::QuitRequested => {
-                    if app.on_quit_requested(&w) {
-                        w.quit();
+                Event::CloseRequested => {
+                    if app.on_window_close_requested(&w) {
+                        w.close();
                     }
                 }
             }
             *self.input.borrow_mut() = app.text_input_state();
+            if self.stopped.get() {
+                break;
+            }
+        }
+        if self.stopped.get() {
+            self.app.borrow_mut().take();
+            *self.input.borrow_mut() = TextInputState::default();
         }
         self.dispatching.set(false);
         self.flush_ime_coordinates();
@@ -769,7 +838,27 @@ define_class!(
         }
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            self.close_requested();
+            let hosts = WINDOWS.with(|windows| {
+                windows
+                    .borrow()
+                    .iter()
+                    .map(|d| d.ivars().host.clone())
+                    .collect::<Vec<_>>()
+            });
+            for host in &hosts {
+                if host.stopped.get() {
+                    continue;
+                }
+                let Ok(mut slot) = host.app.try_borrow_mut() else {
+                    return NSApplicationTerminateReply::TerminateCancel;
+                };
+                if let Some(app) = slot.as_mut()
+                    && !app.on_quit_requested(&host.handle())
+                {
+                    return NSApplicationTerminateReply::TerminateCancel;
+                }
+            }
+            self.ivars().host.handle().quit();
             NSApplicationTerminateReply::TerminateCancel
         }
     }
@@ -819,7 +908,7 @@ define_class!(
 impl Delegate {
     fn close_requested(&self) {
         let h = &self.ivars().host;
-        h.dispatch(Event::QuitRequested);
+        h.dispatch(Event::CloseRequested);
     }
     fn launch(&self) -> Result<(), String> {
         let h = &self.ivars().host;
@@ -882,7 +971,9 @@ impl Delegate {
         h.layer.set(layer).map_err(|_| "layer initialized twice")?;
         h.resize();
         h.phase("window_layer_ready");
-        build_menu(mtm);
+        if NSApplication::sharedApplication(mtm).mainMenu().is_none() {
+            build_menu(mtm);
+        }
         // SAFETY: macOS 14 availability was checked before run; tick: accepts CADisplayLink.
         let link = unsafe { view.displayLinkWithTarget_selector(&view, sel!(tick:)) };
         link.setPaused(true);
@@ -1018,6 +1109,52 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     {
         return Err("invalid window size".into());
     }
+    let host = create_host(mtm, &options, app)?;
+    let delegate = create_delegate(mtm, host.clone(), options);
+    WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
+    let nsapp = NSApplication::sharedApplication(mtm);
+    host.phase("nsapplication_ready");
+    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
+    nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    nsapp.run();
+    let windows = WINDOWS.with(|windows| std::mem::take(&mut *windows.borrow_mut()));
+    let mut error = None;
+    for delegate in windows {
+        let host = &delegate.ivars().host;
+        if let Some(link) = host.link.get() {
+            link.invalidate();
+        }
+        if let Some(timer) = host.timer.take() {
+            timer.invalidate();
+        }
+        host.app.borrow_mut().take();
+        if let Some(window) = host.window.get() {
+            window.setDelegate(None);
+            window.orderOut(None);
+            window.setContentView(None);
+        }
+        if let Some(e) = host.error.borrow_mut().take() {
+            error.get_or_insert(e);
+        }
+    }
+    nsapp.setDelegate(None);
+    nsapp.setMainMenu(None);
+    error.map_or(Ok(()), Err)
+}
+
+fn create_host(
+    mtm: MainThreadMarker,
+    options: &WindowOptions,
+    app: Box<dyn AppHandler>,
+) -> Result<Rc<Host>, String> {
+    if !options.size.width.is_finite()
+        || !options.size.height.is_finite()
+        || options.size.width <= 0.
+        || options.size.height <= 0.
+    {
+        return Err("invalid window size".into());
+    }
     let host = Rc::new(Host {
         mtm,
         app: RefCell::new(Some(app)),
@@ -1044,32 +1181,18 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         menu_commands: RefCell::new(Vec::new()),
         input: RefCell::new(TextInputState::default()),
     });
+    Ok(host)
+}
+fn create_delegate(
+    mtm: MainThreadMarker,
+    host: Rc<Host>,
+    options: WindowOptions,
+) -> Retained<Delegate> {
     let delegate = Delegate::alloc(mtm).set_ivars(DelegateIvars {
         host: Rc::clone(&host),
         options,
     });
     // SAFETY: NSObject initializer, after all ivars were initialized.
     let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
-    let nsapp = NSApplication::sharedApplication(mtm);
-    host.phase("nsapplication_ready");
-    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
-    nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    nsapp.run();
-    if let Some(link) = host.link.get() {
-        link.invalidate();
-    }
-    if let Some(timer) = host.timer.take() {
-        timer.invalidate();
-    }
-    // Drop renderer/surface before the view and its retained CAMetalLayer.
-    host.app.borrow_mut().take();
-    if let Some(window) = host.window.get() {
-        window.setDelegate(None);
-        window.orderOut(None);
-        window.setContentView(None);
-    }
-    nsapp.setDelegate(None);
-    nsapp.setMainMenu(None);
-    host.error.borrow_mut().take().map_or(Ok(()), Err)
+    delegate
 }

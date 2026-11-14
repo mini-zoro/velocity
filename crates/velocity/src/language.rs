@@ -193,6 +193,29 @@ impl Assets {
         // First launch: create the user package tree (as Sublime Text does). Failing to create
         // it must never prevent startup, and missing directories are simply not scanned.
         let _ = std::fs::create_dir_all(user_packages.join("User"));
+        fn has_metadata(dir: &Path) -> bool {
+            std::fs::read_dir(dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry.file_type().is_ok_and(|ty| {
+                        if ty.is_dir() {
+                            has_metadata(&entry.path())
+                        } else {
+                            ty.is_file()
+                                && entry
+                                    .path()
+                                    .extension()
+                                    .is_some_and(|e| e == "tmPreferences")
+                        }
+                    })
+                })
+        }
+        if !has_metadata(&user_packages) {
+            return Ok(base.clone());
+        }
         let roots: Vec<PathBuf> = [root, user_packages]
             .into_iter()
             .filter(|p| p.is_dir())
@@ -674,8 +697,9 @@ pub struct Language {
     text: Text,
     scheme_revision: u64,
     requested: Option<(ChangeId, u64, Vec<Range<usize>>)>,
+    visible_views: BTreeMap<vel_buffer::ViewId, Vec<Range<usize>>>,
 }
-pub type LanguageCell = RefCell<Option<Language>>;
+pub type LanguageCell = std::rc::Rc<RefCell<Option<Language>>>;
 impl Language {
     pub fn new(
         assets: Arc<Assets>,
@@ -722,6 +746,7 @@ impl Language {
             text,
             scheme_revision: 0,
             requested: None,
+            visible_views: BTreeMap::new(),
         })
     }
     pub fn change(&mut self, text: Text, version: ChangeId, changes: ChangeSet, tab: usize) {
@@ -834,6 +859,36 @@ impl Language {
             self.styled.retain(|row, _| batch.lines.contains(row));
         }
         changed
+    }
+    pub fn retain_visible_views(&mut self, views: &BTreeSet<vel_buffer::ViewId>) {
+        let before = self.visible_views.len();
+        self.visible_views.retain(|id, _| views.contains(id));
+        if self.visible_views.len() != before {
+            self.requested = None;
+        }
+    }
+    pub fn request_view(&mut self, id: vel_buffer::ViewId, lines: Vec<Range<usize>>) {
+        if self.visible_views.get(&id) == Some(&lines)
+            && self.requested.as_ref().is_some_and(|(version, scheme, _)| {
+                *version == self.version && *scheme == self.scheme_revision
+            })
+        {
+            return;
+        }
+        self.visible_views.insert(id, lines);
+        let mut ranges: Vec<_> = self.visible_views.values().flatten().cloned().collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut()
+                && range.start <= last.end
+            {
+                last.end = last.end.max(range.end);
+            } else {
+                merged.push(range);
+            }
+        }
+        self.request_visible(merged);
     }
     pub fn request_visible(&mut self, lines: Vec<Range<usize>>) {
         let identity = (self.version, self.scheme_revision, lines.clone());

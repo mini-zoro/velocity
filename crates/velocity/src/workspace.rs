@@ -20,32 +20,51 @@ use vel_fileio::{self as fileio, ChangeTracker, Format, LoadTask, Loaded, Watche
 use vel_text::Text;
 #[derive(Debug)]
 pub struct Tab {
+    pub shared_dirty: bool,
+    pub restored_format_dirty: bool,
+    pub previous_document: Option<vel_buffer::BufferId>,
+    pub restored_document: Option<u64>,
+    pub disk_saved: Option<vel_session::DiskStamp>,
+    pub sheet: u64,
+    pub session_document: u64,
+    pub document: vel_buffer::BufferId,
+    pub shared_view: vel_buffer::ViewId,
+    pub lazy: Option<(vel_session::Document, vel_session::ViewState)>,
     language_settings_revision: u64,
     needs_detection: bool,
     pub transient: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
     pub format: Format,
-    saved_format: Format,
+    pub(crate) saved_format: Format,
     pub tracker: ChangeTracker,
     pub scroll: (f64, f64),
     pub loading: Option<LoadTask>,
     location: Option<FileLocation>,
     external_load: bool,
     load_started: Option<Instant>,
-    disk_stamp: Option<(u64, SystemTime)>,
+    pub(crate) disk_stamp: Option<(u64, SystemTime)>,
     pub external: Option<Loaded>,
 }
 impl Tab {
-    fn new(text: Text, settings: &Settings, keymap: &str) -> Result<Self, String> {
+    pub(crate) fn new(text: Text, settings: &Settings, keymap: &Keymap) -> Result<Self, String> {
         let mut editor = Editor::new(text);
         let tracker = ChangeTracker::new(&editor.buffer);
         editor.settings = settings.clone();
         editor.sync();
-        editor.keymap = Keymap::default();
-        editor.keymap.append(keymap)?;
-        let format = fileio::default_format(&settings.editor())?;
+        editor.keymap = keymap.clone();
+        let format = fileio::default_format(&settings.editor()).unwrap_or_default();
         Ok(Self {
+            shared_dirty: false,
+            restored_format_dirty: false,
+            previous_document: None,
+            restored_document: None,
+            disk_saved: None,
+            sheet: crate::workbench::next_sheet(),
+            session_document: crate::workbench::next_sheet(),
+            document: editor.buffer.id(),
+            shared_view: editor.id,
+            lazy: None,
             language_settings_revision: u64::MAX,
             needs_detection: true,
             transient: false,
@@ -63,8 +82,15 @@ impl Tab {
             external: None,
         })
     }
+    pub fn install_restored(&mut self, loaded: Loaded) {
+        self.install(loaded);
+    }
     pub fn dirty(&self) -> bool {
-        self.editor.buffer.is_dirty() || self.format != self.saved_format
+        self.shared_dirty
+            || self.restored_format_dirty
+            || self.lazy.as_ref().is_some_and(|(d, _)| d.dirty)
+            || self.editor.buffer.is_dirty()
+            || self.format != self.saved_format
     }
     pub fn label(&self) -> String {
         let name = self
@@ -94,6 +120,9 @@ impl Tab {
         self.editor.id = self.editor.buffer.new_view();
         self.editor.read_only = false;
         self.editor.sync();
+        self.previous_document = Some(self.document);
+        self.document = self.editor.buffer.id();
+        self.shared_view = self.editor.id;
         self.needs_detection = true;
         self.saved_format = loaded.format.clone();
         self.format = loaded.format;
@@ -107,6 +136,7 @@ impl Tab {
         });
         self.editor.set_selection(Selection::from_regions(regions));
         self.disk_stamp = self.path.as_deref().and_then(stamp);
+        self.disk_saved = self.path.as_deref().and_then(vel_session::DiskStamp::read);
         if let Some(location) = self.location.take() {
             self.goto(&location);
         }
@@ -129,6 +159,16 @@ pub struct Workspace {
     syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
     schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
     pub dark: bool,
+    pub workbench: vel_ui::workbench::Workbench,
+    pub distraction_free: bool,
+    pub fullscreen: bool,
+    pub build_systems: Vec<vel_build::BuildSystem>,
+    pub build_system: Option<String>,
+    pub project_model: vel_session::project::Project,
+    pub recent_files: Vec<PathBuf>,
+    pub recent_folders: Vec<PathBuf>,
+    pub recent_projects: Vec<PathBuf>,
+    pub(crate) distraction_settings: serde_json::Map<String, Value>,
     pub folders: Vec<vel_search::project::Folder>,
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -137,11 +177,11 @@ pub struct Workspace {
     pub palette: Vec<PaletteItem>,
     pub messages: Vec<String>,
     pub telemetry: Vec<Value>,
-    settings: Settings,
-    keymap: String,
-    watcher: Option<Watcher>,
-    data_dir: Option<PathBuf>,
-    project: Option<PathBuf>,
+    pub(crate) settings: Settings,
+    pub(crate) keymap: Keymap,
+    pub(crate) watcher: Option<Watcher>,
+    pub(crate) data_dir: Option<PathBuf>,
+    pub(crate) project: Option<PathBuf>,
     config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
 }
 fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
@@ -219,8 +259,11 @@ impl Workspace {
                 PathBuf::from("<embedded>"),
             );
         }
-        if let Some(data) = &data_dir {
-            resources.load(data)?;
+        let mut resource_messages = Vec::new();
+        if let Some(data) = &data_dir
+            && let Err(e) = resources.load(data)
+        {
+            resource_messages.push(format!("user resources: {e}"));
         }
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
@@ -229,7 +272,17 @@ impl Workspace {
         let mut config_stamp = Vec::new();
         for resource in resources.matching(".sublime-settings") {
             let file = resource.path.rsplit('/').next().unwrap_or("");
-            let doc = Document::parse(resource.text()?)?;
+            let doc = match resource.text().and_then(Document::parse) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    resource_messages.push(format!("{}: {e}", resource.path));
+                    continue;
+                }
+            };
+            if !doc.value.is_object() {
+                resource_messages.push(format!("{}: settings must be an object", resource.path));
+                continue;
+            }
             if resource.origin.exists() {
                 config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
             }
@@ -262,6 +315,60 @@ impl Workspace {
         }
         settings.replace(Layer::User, Value::Object(user))?;
         settings.replace(Layer::Syntax, Value::Object(syntax))?;
+        let mut distraction_settings = serde_json::json!({"line_numbers":false,"gutter":false,"draw_centered":true,"wrap_width":80,"word_wrap":true,"scroll_past_end":true,"show_minimap":false}).as_object().expect("object").clone();
+        for resource in resources.matching("Distraction Free.sublime-settings") {
+            if let Ok(doc) = resource.text().and_then(Document::parse)
+                && let Some(values) = doc.value.as_object()
+            {
+                distraction_settings.extend(values.clone());
+            }
+        }
+        let mut build_systems = Vec::new();
+        for resource in resources.matching(".sublime-build") {
+            let name = resource
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(".sublime-build");
+            match resource
+                .text()
+                .and_then(|source| vel_build::BuildSystem::parse(name, source))
+            {
+                Ok(build) => build_systems.push(build),
+                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+            }
+        }
+        // Public permissively licensed build resources are loaded as-is.
+        for (name, source) in [
+            (
+                "Cargo",
+                include_str!("../../../third_party/sublime-packages/Rust/Cargo.sublime-build"),
+            ),
+            (
+                "Python",
+                include_str!("../../../third_party/sublime-packages/Python/Python.sublime-build"),
+            ),
+            (
+                "Make",
+                include_str!("../../../third_party/sublime-packages/Makefile/Make.sublime-build"),
+            ),
+        ] {
+            if !build_systems.iter().any(|b| b.name == name) {
+                build_systems.push(vel_build::BuildSystem::parse(name, source)?);
+            }
+        }
+        let project_model = project
+            .as_deref()
+            .map(vel_session::project::Project::load)
+            .transpose()?
+            .unwrap_or_default();
+        for value in &project_model.build_systems {
+            let name = value["name"]
+                .as_str()
+                .ok_or("project build system needs name")?;
+            build_systems.push(vel_build::BuildSystem::from_value(name, value.clone())?);
+        }
         let mut folder_values = Vec::new();
         if let Some(path) = &project {
             let doc = Document::parse(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
@@ -337,28 +444,68 @@ impl Workspace {
             if resource.path.contains("(Windows)") || resource.path.contains("(Linux)") {
                 continue;
             }
-            let doc = Document::parse(resource.text()?)?;
-            keys.extend(doc.value.as_array().ok_or("keymap array")?.clone());
+            let doc = match resource.text().and_then(Document::parse) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    resource_messages.push(format!("{}: {e}", resource.path));
+                    continue;
+                }
+            };
+            let check = resource.text().and_then(|s| Keymap::default().append(s));
+            if let Err(e) = check {
+                resource_messages.push(format!("{}: {e}", resource.path));
+                continue;
+            }
+            if let Some(values) = doc.value.as_array() {
+                keys.extend(values.clone());
+            }
             if resource.origin.exists() {
                 config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
             }
         }
         for resource in resources.matching(".sublime-menu") {
             if resource.path.ends_with("/Main.sublime-menu") {
-                ui::merge_menu(&mut menus, ui::parse(resource.text()?)?);
+                match resource.text().and_then(ui::parse) {
+                    Ok(items) => ui::merge_menu(&mut menus, items),
+                    Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+                }
             }
         }
         for resource in resources.matching(".sublime-mousemap") {
-            mousemap.extend(ui::parse_mousemap(resource.text()?)?);
+            match resource.text().and_then(ui::parse_mousemap) {
+                Ok(items) => mousemap.extend(items),
+                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+            }
         }
         for resource in resources.matching(".sublime-commands") {
-            palette.extend(ui::parse::<PaletteItem>(resource.text()?)?);
+            match resource.text().and_then(ui::parse::<PaletteItem>) {
+                Ok(items) => palette.extend(items),
+                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+            }
+        }
+        if let Some(tools) = menus.iter_mut().find(|m| m.id == "tools") {
+            let choices=std::iter::once(("Automatic",serde_json::json!({"name":"Automatic"}))).chain(build_systems.iter().map(|b|(b.name.as_str(),serde_json::json!({"name":b.name})))).map(|(caption,args)|serde_json::json!({"caption":caption,"command":"set_build_system","args":args})).collect::<Vec<_>>();
+            if let Some(item) = tools
+                .children
+                .iter_mut()
+                .find(|m| m.command.as_deref() == Some("show_build_systems"))
+            {
+                item.caption = "Build System".into();
+                item.command = None;
+                item.children = serde_json::from_value(serde_json::json!(choices))
+                    .map_err(|e| e.to_string())?;
+            }
         }
         ui::extend_palette(&mut palette, &menus);
-        let assets = crate::language::Assets::with_user_metadata(
-            &crate::language::Assets::bundled()?,
-            data_dir.as_deref(),
-        )?;
+        let bundled = crate::language::Assets::bundled()?;
+        let assets =
+            match crate::language::Assets::with_user_metadata(&bundled, data_dir.as_deref()) {
+                Ok(assets) => assets,
+                Err(e) => {
+                    resource_messages.push(format!("user metadata: {e}"));
+                    bundled
+                }
+            };
         for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
             palette.push(PaletteItem {
                 caption: format!("Set Syntax: {}", syntax.name),
@@ -374,7 +521,10 @@ impl Workspace {
                 if resource.origin.exists() {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
                 }
-                scheme_resources.push((resource.path.clone(), resource.text()?.to_owned()));
+                match resource.text() {
+                    Ok(source) => scheme_resources.push((resource.path.clone(), source.to_owned())),
+                    Err(e) => resource_messages.push(e),
+                }
             }
         }
         let mut schemes = BTreeMap::new();
@@ -387,7 +537,32 @@ impl Workspace {
                         .map(|(p, s)| (p.as_str(), s.as_str())),
                     name,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string());
+                match scheme {
+                    Ok(scheme) => {
+                        schemes.insert(name.to_owned(), Arc::new(scheme));
+                    }
+                    Err(e) => resource_messages.push(format!("{name}: {e}")),
+                }
+            }
+        }
+        for (name, source) in [
+            (
+                "Velocity Dark.sublime-color-scheme",
+                include_str!(
+                    "../resources/Packages/Color Scheme - Velocity/Velocity Dark.sublime-color-scheme"
+                ),
+            ),
+            (
+                "Velocity Light.sublime-color-scheme",
+                include_str!(
+                    "../resources/Packages/Color Scheme - Velocity/Velocity Light.sublime-color-scheme"
+                ),
+            ),
+        ] {
+            if !schemes.contains_key(name) {
+                let scheme = vel_color_scheme::load_resources([(name, source)], name)
+                    .map_err(|e| e.to_string())?;
                 schemes.insert(name.to_owned(), Arc::new(scheme));
             }
         }
@@ -402,7 +577,13 @@ impl Workspace {
         }
         let parents: Vec<_> = config_stamp
             .iter()
-            .filter_map(|(p, _)| p.parent().map(Path::to_owned))
+            .filter_map(|(p, _)| {
+                if project.as_ref() == Some(p) {
+                    None
+                } else {
+                    p.parent().map(Path::to_owned)
+                }
+            })
             .collect();
         for parent in parents {
             config_stamp.push((parent.clone(), stamp(&parent)));
@@ -420,9 +601,11 @@ impl Workspace {
         }
         config_stamp.sort_by(|a, b| a.0.cmp(&b.0));
         config_stamp.dedup_by(|a, b| a.0 == b.0);
-        let keymap = serde_json::to_string(&keys).map_err(|e| e.to_string())?;
+        let keymap_source = serde_json::to_string(&keys).map_err(|e| e.to_string())?;
+        let mut keymap = Keymap::default();
+        keymap.append(&keymap_source)?;
         let tab = Tab::new(text, &settings, &keymap)?;
-        let mut messages = Vec::new();
+        let mut messages = resource_messages;
         let watcher = if watch {
             match Watcher::new() {
                 Ok(w) => Some(w),
@@ -439,6 +622,16 @@ impl Workspace {
             syntax_settings,
             schemes,
             dark: true,
+            workbench: vel_ui::workbench::Workbench::default(),
+            distraction_free: false,
+            fullscreen: false,
+            build_systems,
+            build_system: None,
+            project_model,
+            distraction_settings,
+            recent_files: Vec::new(),
+            recent_folders: Vec::new(),
+            recent_projects: Vec::new(),
             folders,
             tabs: vec![tab],
             active: 0,
@@ -454,6 +647,7 @@ impl Workspace {
             project,
             config_stamp,
         };
+        workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
         workspace.configure_language(0, None, true)?;
         Ok(workspace)
     }
@@ -461,6 +655,9 @@ impl Workspace {
         &self.tabs[self.active].editor
     }
     pub fn editor_mut(&mut self) -> &mut Editor {
+        if let Err(e) = self.prepare_sheet(self.active) {
+            self.messages.push(e);
+        }
         &mut self.tabs[self.active].editor
     }
     pub fn language_busy(&self) -> bool {
@@ -478,6 +675,8 @@ impl Workspace {
     pub fn new_file(&mut self) -> Result<(), String> {
         self.tabs
             .push(Tab::new(Text::new(), &self.settings, &self.keymap)?);
+        self.workbench.groups[self.workbench.active]
+            .add(self.tabs.last().expect("tab").sheet, false);
         self.active = self.tabs.len() - 1;
         self.configure_language(self.active, None, false)?;
         Ok(())
@@ -486,7 +685,7 @@ impl Workspace {
         if index < self.tabs.len() {
             self.editor_mut().unmark();
             self.editor_mut().keymap.cancel();
-            self.active = index;
+            self.activate_sheet(index);
         }
     }
     pub fn open(&mut self, location: FileLocation) -> Result<(), String> {
@@ -495,7 +694,11 @@ impl Workspace {
     pub fn preview(&mut self, location: FileLocation) -> Result<(), String> {
         let target = absolute(&location.path)?;
         if !self.tabs.iter().any(|t| t.path.as_ref() == Some(&target))
-            && let Some(index) = self.tabs.iter().position(|t| t.transient && !t.dirty())
+            && let Some(index) = self.tabs.iter().position(|t| {
+                t.transient
+                    && !t.dirty()
+                    && self.workbench.group_of(t.sheet) == Some(self.workbench.active)
+            })
         {
             self.close(index)?;
         }
@@ -541,16 +744,23 @@ impl Workspace {
             && !self.tabs[0].editor.buffer.is_dirty()
             && self.tabs[0].editor.text.len_bytes() == 0
         {
+            self.workbench
+                .groups
+                .iter_mut()
+                .for_each(|g| g.remove(self.tabs[0].sheet));
             self.tabs[0] = tab;
             self.active = 0;
         } else {
             self.tabs.push(tab);
             self.active = self.tabs.len() - 1;
         }
+        self.workbench.groups[self.workbench.active].add(self.tabs[self.active].sheet, false);
+        crate::workbench::remember(&mut self.recent_files, path);
         self.configure_language(self.active, None, true)?;
         Ok(())
     }
     pub fn save(&mut self, index: usize, path: Option<PathBuf>) -> Result<(), String> {
+        self.prepare_sheet(index)?;
         let tab = &mut self.tabs[index];
         tab.transient = false;
         if tab.loading.is_some() || tab.editor.read_only {
@@ -576,10 +786,13 @@ impl Workspace {
             settings.atomic_save,
         )?;
         tab.editor.buffer.mark_saved();
+        tab.editor.sync();
         tab.saved_format = tab.format.clone();
+        tab.restored_format_dirty = false;
         tab.tracker.mark_saved(&tab.editor.buffer);
         tab.path = Some(target.clone());
         tab.disk_stamp = stamp(&target);
+        tab.disk_saved = vel_session::DiskStamp::read(&target);
         if let Some(w) = self.watcher.as_mut() {
             w.watch(&target)?;
         }
@@ -589,17 +802,26 @@ impl Workspace {
         Ok(())
     }
     pub fn close(&mut self, index: usize) -> Result<(), String> {
+        self.prepare_close_sheet(index)?;
+        let sheet = self.tabs[index].sheet;
+        for group in &mut self.workbench.groups {
+            group.remove(sheet);
+        }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.new_file()?;
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        self.select(self.active);
         Ok(())
     }
     /// Polls jobs/notifications and reports whether scene content changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         for tab in &mut self.tabs {
+            if tab.lazy.is_some() || tab.editor.shared_shadow {
+                continue;
+            }
             changed |= tab.editor.poll_language();
             if let Some(language) = tab.editor.language.borrow_mut().as_mut() {
                 self.messages.append(&mut language.errors);
@@ -646,6 +868,8 @@ impl Workspace {
                     for path in paths {
                         for tab in &mut self.tabs {
                             if tab.loading.is_some()
+                                || tab.lazy.is_some()
+                                || tab.editor.shared_shadow
                                 || tab.path.as_ref() != Some(&path)
                                 || tab.disk_stamp == stamp(&path)
                             {
@@ -691,6 +915,7 @@ impl Workspace {
                 }
             }
         }
+        self.reconcile_installs();
         if self.config_stamp.iter().any(|(p, s)| stamp(p) != *s) {
             match Self::new(
                 Text::new(),
@@ -703,6 +928,9 @@ impl Workspace {
                     self.syntax_settings = config.syntax_settings;
                     self.schemes = config.schemes;
                     self.folders = config.folders;
+                    self.distraction_settings = config.distraction_settings;
+                    self.build_systems = config.build_systems;
+                    self.project_model = config.project_model;
                     self.settings = config.settings;
                     self.keymap = config.keymap;
                     self.menus = config.menus;
@@ -717,10 +945,7 @@ impl Workspace {
                         }
                         tab.editor.sync();
                         tab.language_settings_revision = u64::MAX;
-                        let mut keymap = Keymap::default();
-                        if keymap.append(&self.keymap).is_ok() {
-                            tab.editor.keymap = keymap;
-                        }
+                        tab.editor.keymap = self.keymap.clone();
                     }
                     changed = true;
                 }
@@ -733,6 +958,9 @@ impl Workspace {
             }
         }
         for index in 0..self.tabs.len() {
+            if self.tabs[index].lazy.is_some() {
+                continue;
+            }
             if self.tabs[index].needs_detection
                 || self.tabs[index].language_settings_revision
                     != self.tabs[index].editor.settings.revision()
@@ -782,7 +1010,7 @@ impl Workspace {
         }
         Ok(())
     }
-    fn configure_language(
+    pub(crate) fn configure_language(
         &mut self,
         index: usize,
         explicit: Option<&str>,
@@ -853,6 +1081,15 @@ impl Workspace {
                     .get(&format!("{basename}.sublime-color-scheme"))
             })
             .cloned()
+            .or_else(|| {
+                self.schemes
+                    .get(if self.dark {
+                        "Velocity Dark.sublime-color-scheme"
+                    } else {
+                        "Velocity Light.sublime-color-scheme"
+                    })
+                    .cloned()
+            })
             .ok_or_else(|| format!("Unknown color scheme {selected}"))?;
         if previous.as_deref() != Some(syntax.as_str())
             || !tab
@@ -880,6 +1117,8 @@ impl Workspace {
             && reload
         {
             self.tabs[index].install(loaded);
+            self.reconcile_installs();
+            let _ = self.prepare_sheet(self.active);
         }
     }
     pub fn default_data_dir() -> Option<PathBuf> {

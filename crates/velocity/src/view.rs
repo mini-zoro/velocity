@@ -53,6 +53,7 @@ pub struct View {
     pub minimap_hover: bool,
     pub minimap_drag: bool,
     pub gutter_hover: bool,
+    pub tab_height: f64,
     base_cell: f64,
     base_ascent: f64,
     started: Instant,
@@ -76,6 +77,7 @@ impl View {
             minimap_hover: false,
             minimap_drag: false,
             gutter_hover: false,
+            tab_height: TAB_HEIGHT,
             base_cell: cell,
             base_ascent: ascent,
             started: Instant::now(),
@@ -129,7 +131,13 @@ impl View {
         self.size.width - self.minimap_width(e)
     }
     fn margin(&self, e: &Editor) -> f64 {
-        e.settings.number("margin", 8.).max(0.)
+        let margin = e.settings.number("margin", 8.).max(0.);
+        if e.settings.bool("draw_centered", false) {
+            let columns = e.settings.usize("wrap_width", 80).max(1);
+            margin.max((self.right(e) - self.gutter(e) - columns as f64 * self.cell) / 2.)
+        } else {
+            margin
+        }
     }
     pub fn gutter(&self, e: &Editor) -> f64 {
         if !e.preferences.gutter {
@@ -141,7 +149,7 @@ impl View {
         }
     }
     pub fn rows(&self) -> usize {
-        ((self.size.height - TAB_HEIGHT - 8.).max(1.) / self.line_height)
+        ((self.size.height - self.tab_height - 8.).max(1.) / self.line_height)
             .floor()
             .max(1.) as usize
     }
@@ -191,14 +199,14 @@ impl View {
     pub fn clamp_scroll(&mut self, e: &Editor) {
         self.apply_style(e);
         let past = if e.preferences.scroll_past_end {
-            (self.size.height - TAB_HEIGHT - self.line_height).max(0.)
+            (self.size.height - self.tab_height - self.line_height).max(0.)
         } else {
             0.
         };
         self.scroll_y = self.scroll_y.clamp(
             0.,
             (e.layout.borrow().total() as f64 * self.line_height - self.size.height
-                + TAB_HEIGHT
+                + self.tab_height
                 + 8.
                 + past)
                 .max(0.),
@@ -216,7 +224,7 @@ impl View {
         Rect {
             x: self.gutter(e) + self.margin(e) + layout.column(&e.text, byte) as f64 * self.cell
                 - self.scroll_x,
-            y: TAB_HEIGHT + 4. + visual as f64 * self.line_height - self.scroll_y,
+            y: self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y,
             width: 1.,
             height: self.line_height,
         }
@@ -229,7 +237,7 @@ impl View {
             .usize("scroll_context_lines", 0)
             .min(self.rows() / 2) as f64
             * self.line_height;
-        let top = TAB_HEIGHT + 4. + context;
+        let top = self.tab_height + 4. + context;
         let bottom = self.size.height - 4. - context;
         if r.y < top {
             self.scroll_y += r.y - top;
@@ -245,7 +253,7 @@ impl View {
         self.clamp_scroll(e);
     }
     pub fn hit_test(&self, e: &Editor, p: Point) -> usize {
-        let row = ((p.y - TAB_HEIGHT - 4. + self.scroll_y) / self.line_height)
+        let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
             .floor()
             .max(0.) as usize;
         let col = ((p.x - self.gutter(e) - self.margin(e) + self.scroll_x) / self.cell).max(0.);
@@ -305,7 +313,7 @@ impl View {
         dragging: bool,
         up: bool,
     ) -> Result<bool, String> {
-        self.minimap_hover = point.x >= self.right(e) && point.y >= TAB_HEIGHT;
+        self.minimap_hover = point.x >= self.right(e) && point.y >= self.tab_height;
         self.gutter_hover = point.x >= 0. && point.x < self.gutter(e);
         if up {
             let consumed = self.minimap_drag;
@@ -316,8 +324,9 @@ impl View {
         }
         if (down && self.minimap_hover) || (dragging && self.minimap_drag) {
             self.minimap_drag = true;
-            let fraction =
-                ((point.y - TAB_HEIGHT) / (self.size.height - TAB_HEIGHT).max(1.)).clamp(0., 1.);
+            let fraction = ((point.y - self.tab_height)
+                / (self.size.height - self.tab_height).max(1.))
+            .clamp(0., 1.);
             let row = (fraction * e.text.len_lines() as f64) as usize;
             let byte = e.text.line_to_byte(row.min(e.text.len_lines() - 1));
             self.scroll_y = (e.layout.borrow().visual_at(&e.text, byte).0 as f64
@@ -330,9 +339,9 @@ impl View {
         if down
             && self.gutter_hover
             && e.settings.bool("fold_buttons", true)
-            && point.y >= TAB_HEIGHT
+            && point.y >= self.tab_height
         {
-            let visual = ((point.y - TAB_HEIGHT - 4. + self.scroll_y) / self.line_height)
+            let visual = ((point.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
                 .floor()
                 .max(0.) as usize;
             let row = e.layout.borrow().locate(visual).0;
@@ -396,7 +405,7 @@ impl View {
             drop(layout);
             if let Some(l) = e.language.borrow_mut().as_mut() {
                 l.poll();
-                l.request_visible(ranges);
+                l.request_view(e.id, ranges);
             }
         }
         let language = e.language.borrow();
@@ -415,9 +424,9 @@ impl View {
         let left = gutter + self.margin(e);
         let clip = Rect {
             x: gutter,
-            y: TAB_HEIGHT,
+            y: self.tab_height,
             width: (right - gutter).max(0.),
-            height: (self.size.height - TAB_HEIGHT).max(0.),
+            height: (self.size.height - self.tab_height).max(0.),
         };
         let mut layer = Layer::default();
         let mut carets = Layer::default();
@@ -426,7 +435,7 @@ impl View {
             &mut layer,
             Rect {
                 x: 0.,
-                y: TAB_HEIGHT,
+                y: self.tab_height,
                 width: self.size.width,
                 height: clip.height,
             },
@@ -437,7 +446,7 @@ impl View {
             &mut layer,
             Rect {
                 x: 0.,
-                y: TAB_HEIGHT,
+                y: self.tab_height,
                 width: gutter,
                 height: clip.height,
             },
@@ -457,7 +466,7 @@ impl View {
                 &mut layer,
                 Rect {
                     x: left + *column as f64 * self.cell - self.scroll_x,
-                    y: TAB_HEIGHT,
+                    y: self.tab_height,
                     width: 1.,
                     height: clip.height,
                 },
@@ -480,7 +489,7 @@ impl View {
             let segment = layout.segment(&e.text, row, subrow);
             let line = e.text.line(row).to_string();
             let start = e.text.line_to_byte(row);
-            let y = TAB_HEIGHT + 4. + visual as f64 * self.line_height - self.scroll_y;
+            let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
             let baseline = y + self.ascent + 3. + e.settings.number("line_padding_top", 0.).max(0.);
             if e.preferences.highlight_line && caret_visuals.contains(&visual) {
                 fill(
@@ -878,7 +887,7 @@ impl View {
                 for range in [&pair.open, &pair.close] {
                     let a = self.rect_at(e, range.start);
                     let b = self.rect_at(e, range.end);
-                    if a.y >= TAB_HEIGHT - self.line_height && a.y <= self.size.height {
+                    if a.y >= self.tab_height - self.line_height && a.y <= self.size.height {
                         underline(
                             layer,
                             Rect {
@@ -909,9 +918,9 @@ impl View {
         }
         let bounds = Rect {
             x: self.size.width - width,
-            y: TAB_HEIGHT,
+            y: self.tab_height,
             width,
-            height: (self.size.height - TAB_HEIGHT).max(1.),
+            height: (self.size.height - self.tab_height).max(1.),
         };
         fill(
             layer,

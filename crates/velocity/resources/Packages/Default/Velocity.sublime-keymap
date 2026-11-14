@@ -1198,5 +1198,165 @@
     "args": {
       "level": 1
     }
+  },
+
+  {
+    "keys": [
+      "super+b"
+    ],
+    "command": "build"
+  },
+  {
+    "keys": [
+      "super+shift+b"
+    ],
+    "command": "build",
+    "args": {
+      "select": true
+    }
+  },
+  {
+    "keys": [
+      "f4"
+    ],
+    "command": "next_result"
+  },
+  {
+    "keys": [
+      "shift+f4"
+    ],
+    "command": "prev_result"
+  },
+  {
+    "keys": [
+      "ctrl+super+p"
+    ],
+    "command": "quick_switch_project"
+  },
+  {
+    "keys": [
+      "ctrl+super+f"
+    ],
+    "command": "toggle_full_screen"
+  },
+  {
+    "keys": [
+      "super+shift+alt+enter"
+    ],
+    "command": "toggle_distraction_free"
+  },
+  {
+    "keys": [
+      "super+j",
+      "super+shift+left"
+    ],
+    "command": "select_tab_to_left"
+  },
+  {
+    "keys": [
+      "super+j",
+      "super+shift+right"
+    ],
+    "command": "select_tab_to_right"
+  },
+  {
+    "keys": [
+      "super+j",
+      "super+up"
+    ],
+    "command": "select_single_tab"
+  },
+  {
+    "keys": [
+      "super+j",
+      "super+shift+["
+    ],
+    "command": "focus_selected_tab",
+    "args": {
+      "forward": false
+    }
+  },
+  {
+    "keys": [
+      "super+j",
+      "super+shift+]"
+    ],
+    "command": "focus_selected_tab",
+    "args": {
+      "forward": true
+    }
+  },
+  {
+    "keys": [
+      "ctrl+1"
+    ],
+    "command": "focus_group",
+    "args": {
+      "group": 0
+    }
+  },
+  {
+    "keys": [
+      "ctrl+shift+1"
+    ],
+    "command": "move_to_group",
+    "args": {
+      "group": 0
+    }
+  },
+  {
+    "keys": [
+      "ctrl+2"
+    ],
+    "command": "focus_group",
+    "args": {
+      "group": 1
+    }
+  },
+  {
+    "keys": [
+      "ctrl+shift+2"
+    ],
+    "command": "move_to_group",
+    "args": {
+      "group": 1
+    }
+  },
+  {
+    "keys": [
+      "ctrl+3"
+    ],
+    "command": "focus_group",
+    "args": {
+      "group": 2
+    }
+  },
+  {
+    "keys": [
+      "ctrl+shift+3"
+    ],
+    "command": "move_to_group",
+    "args": {
+      "group": 2
+    }
+  },
+  {
+    "keys": [
+      "ctrl+4"
+    ],
+    "command": "focus_group",
+    "args": {
+      "group": 3
+    }
+  },
+  {
+    "keys": [
+      "ctrl+shift+4"
+    ],
+    "command": "move_to_group",
+    "args": {
+      "group": 3
+    }
   }
+
 ]

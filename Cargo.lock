@@ -1619,6 +1619,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-build"
+version = "0.0.0"
+dependencies = [
+ "globset",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vel-config",
+]
+
+[[package]]
 name = "vel-color-scheme"
 version = "0.0.0"
 dependencies = [
@@ -1794,6 +1807,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-session"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vel-buffer",
+ "vel-config",
+ "vel-text",
+ "vel-ui",
+]
+
+[[package]]
 name = "vel-snippet"
 version = "0.0.0"
 dependencies = [
@@ -1845,6 +1872,7 @@ dependencies = [
 name = "vel-ui"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "serde_json",
  "unicode-segmentation",
  "unicode-width",
@@ -1860,12 +1888,14 @@ dependencies = [
 name = "velocity"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
  "unicode-segmentation",
  "unicode-width",
  "vel-buffer",
+ "vel-build",
  "vel-color-scheme",
  "vel-commands",
  "vel-config",
@@ -1875,6 +1905,7 @@ dependencies = [
  "vel-render",
  "vel-scope",
  "vel-search",
+ "vel-session",
  "vel-syntax",
  "vel-text",
  "vel-ui",

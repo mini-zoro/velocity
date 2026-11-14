@@ -65,5 +65,10 @@
   "fold_buttons": true,
   "fade_fold_buttons": true,
   "show_minimap": true,
-  "always_show_minimap_viewport": true
+  "always_show_minimap_viewport": true,
+  "hot_exit": "always",
+  "remember_open_files": true,
+  "close_windows_when_empty": false,
+  "open_files_in_new_window": false,
+  "show_errors_inline": true
 }

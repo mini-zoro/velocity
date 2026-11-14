@@ -1,0 +1,19 @@
+[package]
+name = "vel-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[dependencies]
+libc = "=0.2.191"
+vel-buffer = { path = "../vel-buffer" }
+vel-text = { path = "../vel-text", default-features = false }
+vel-ui = { path = "../vel-ui" }
+vel-config = { path = "../vel-config" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tempfile = "=3.27.0"

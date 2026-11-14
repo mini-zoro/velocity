@@ -38,3 +38,9 @@ completed primitive command, including nested chains and successful redo-or-repe
 editor uses these hooks for exact incremental insert/snippet/paste/delete transactions,
 language comments/indentation and visual wrapped-line movement. Unobserved buffer operations
 and undo/redo rebuild the editor's highlighting snapshot at the command boundary.
+
+
+Round 7 registers layouts/groups, neighboring panes, clone_file, tab selection/movement,
+project lifecycle/quick switch, build-system selection/exec/cancel/results, full screen and
+distraction-free actions. The window host owns implementation and enablement; text editing and
+per-buffer undo remain in vel-buffer. Native windows are created on one application event loop.

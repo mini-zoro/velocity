@@ -11,6 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+libc = "=0.2.191"
+vel-build = { path = "../vel-build" }
+vel-session = { path = "../vel-session" }
 vel-highlight = { path = "../vel-highlight" }
 vel-syntax = { path = "../vel-syntax" }
 vel-scope = { path = "../vel-scope" }

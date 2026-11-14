@@ -75,3 +75,11 @@ WindowHandle exposes current keyboard focus, effective appearance and the last a
 drawable sequence. The editor uses these to paint inactive selections, select the initial
 scheme before first presentation, and correlate exact highlighted frames with native scanout.
 All three have deterministic unsupported-platform stubs.
+
+
+Round 7 adds `WindowHandle::new_window` on the current AppKit loop, `request_close`/`close`,
+`toggle_full_screen` and a separate `AppHandler::on_window_close_requested` hook. Windows own
+independent hosts/layers/renderers. Application quit validates every live window before stopping
+the loop; a window close releases its editor/worker state while siblings remain alive. Native
+window tabs remain disabled. Unit tests still construct no AppKit or Metal objects; the
+multi-window/full-screen bridge is compiled here and requires the velocity human checklist.

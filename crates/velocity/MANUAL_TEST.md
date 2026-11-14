@@ -154,3 +154,30 @@ RUNBOOK commands on an awake, unlocked display; attach actual physical dimension
 | Edit/undo before and inside folds; unfold, unfold all; toggle fold-button fading | Named fold regions track edits; viewport and candidate geometry stay valid | |
 | Show/hide minimap, click, drag beyond its bounds and release; resize or edit/newline | Token colors match the document; viewport scrolls without changing selections; indicator and border obey settings | |
 | Run automatic open/scroll/typing with default and 4K physical sizes, then Metal validation | Positive highlighted scanout, full CPU timing, isolated minimap GPU timing and clean validation; no external input in automatic runs | |
+
+
+## Round 7 — workbench/session/build acceptance (native review pending)
+
+Run the isolated-profile commands at the top of RUNBOOK.md. Fill the last column with evidence,
+actual scale/size/refresh and any failure; these rows have not been executed in the sandbox.
+
+| Action | Expected behavior | Reviewer observation |
+| --- | --- | --- |
+| Launch with a non-existent data directory | Empty editor opens, User tree may be created, no missing-Packages exception | |
+| Launch with corrupt session / read-only profile / a file occupying the data path | Empty usable editor; corrupt original preserved; IO failures reported without data loss | |
+| All seven layout presets, normalized custom cells, splitters and New/Close Pane | Cells cover content, divider hits respect spanning cells, tabs stay with their groups | |
+| Cmd-click / Shift-click / Tab Selection commands | Selected sheets appear horizontally inside one group with connector styling | |
+| Sidebar Cmd/Shift multi-select; Goto Cmd+Enter | Additive sheets stay visible and previews pin on acceptance | |
+| Move/close multiple selected tabs | Order/selection preserved; the last dirty shared views ask once when policy requires | |
+| Clone File, separate carets/scroll/folds, type/undo/redo, close current owner | One document/history, independent view state, no stale text or detached-view panic | |
+| IME in lower/right group, scroll inactive selected sheet, return focus | Candidate anchor, hit testing, selection and view-local scroll use correct offsets | |
+| Cmd+Shift+N; close one window; CLI -n/-a/-w and stdin | One application, independent windows; wait ends when requested sheets close | |
+| Full screen; distraction-free from normal and already-full-screen; customize its settings | Chrome/settings restore correctly and sidebar visibility is remembered per mode | |
+| Quit/relaunch dirty/untitled text, redo, folds, syntax, sidebar and search state | Retained state restored, hidden clean tabs lazy; known private-history limits documented | |
+| Hot Exit always / only_on_quit / disabled; remember_open_files false | Close/quit/crash policies follow RUNBOOK; disabled never silently discards dirty project docs | |
+| Edit a dirty document on disk while quit, then restore | Buffer text retained as dirty, restored undo history dropped | |
+| Open/Save As/Close/Edit/Quick Switch Project; nested fresh destination | Folder rules, inline builds and unknown keys preserved; workspace tied to project | |
+| Leave a project idle after editing | Debounced session writes complete without an autosave/settings-reload loop | |
+| Cmd+B with Workbench Example; F4/Shift+F4; output double-click | Both streams appear, exit/time shown, correct diagnostic location and inline badge | |
+| Build With variants, Cancel Process Tree, quiet, syntax and wrapping | Variant overrides apply, tree terminates, UI stays responsive, output follows settings | |
+| Native automatic startup/typing/scroll with four groups | Positive scanout/complete JSONL; budgets from RESULTS/RUNBOOK assessed with no missing timestamps | |

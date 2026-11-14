@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 6. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 7. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -84,3 +84,31 @@ pass timings when timestamp queries are available.
 
 `python3 crates/velocity/scripts/measure-views.py --runs 5` records five sequential CPU runs
 with one copied release binary, raw JSONL, environment/source hashes and pooled quantiles.
+
+
+Round 7 adds persistent pane layouts (Single, Columns 2/3/4, Rows 2/3, Grid 4), draggable
+splitters, independent tab bars, neighboring-group commands and clone views with shared buffer
+undo and view-local selections/scroll. Cmd-click/Shift-click select tabs for side-by-side display
+within a group; the sidebar and Goto Cmd-Enter support additive selection. Selected sheets can
+move between groups or close together. Cmd-Shift-N opens another native window in this process.
+Full screen and distraction-free mode use the View menu; the latter loads its own settings layer.
+
+Sessions save on a debounced worker and flush on quit. Dirty/untitled text, normal command
+undo/redo, folds, selections, syntax overrides and window/project UI return on launch; hidden
+clean tabs load lazily. Missing, read-only and corrupt data directories have regression coverage.
+The undo adapter's exact fidelity limits and requested vel-buffer serialization API are in
+[vel-session](../vel-session/README.md); private soft history/edit-owner IDs are not serialized.
+
+Project Open/Save As/Close/Edit/Recent/Quick Switch and `.sublime-workspace` files are wired.
+`velocity -n/-a/-w`, `--project` and stdin use a local socket and a single native application;
+`-w` completes when the requested sheets close. Build/Cmd-B, Build With/Cmd-Shift-B, Cancel,
+F4/Shift-F4 and output double-clicks run/navigate `.sublime-build` and project-inline definitions.
+The output panel streams both pipes, supports syntax/wrap and displays exit status/time; error
+locations receive simple text badges. Try the original `fixtures/workbench.sublime-project`.
+
+`--headless-workbench` measures a 50-file session (10 hidden 11 MB files), lazy first-window CPU
+restore, and 300 typing/scroll samples with four highlighted Rust viewports. It initializes no
+native fonts, window or GPU. `scripts/measure-workbench.py --runs 5` retains one binary, source
+fingerprints, raw JSONL, individual runs and pooled quantiles. `--groups 4` also applies to native
+typing/scroll modes; `--bench-startup --restore-session --data-dir PATH` measures actual session
+startup scanout outside the sandbox. Exact commands and pending native checks are in RUNBOOK.md.

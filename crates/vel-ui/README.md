@@ -54,3 +54,12 @@ The main document now supplies detected syntax text in the status bar; its right
 opens a filtered Set Syntax quick panel. Syntax choices use the existing palette/focus/input
 widgets. Shared labels explicitly request regular font traits, while document runs may carry
 bold/italic variants. Editor wrap, fold, syntax and minimap geometry live in velocity.
+
+
+Round 7 adds `workbench::{Layout, Group, Workbench}`. Normalized tiled cells reject gaps,
+overlaps, invalid indices and non-finite coordinates. Presets, cell projection, cardinal
+neighbors, splitter hit testing/dragging and pane splitting/merging are device-free. Divider
+segments respect spanning cells. Stable sheet IDs separate tab order, selected sheets,
+keyboard focus and shift anchor. Primary-click toggles, shift ranges and selected-sheet movement
+retain display order. The theme seam includes `tab_connector` with `selected` and `tab_control`
+with `focused`, `selected`, `transient` and `dirty`. Rendering/native interaction is in velocity.

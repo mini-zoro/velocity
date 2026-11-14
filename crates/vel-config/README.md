@@ -41,3 +41,11 @@ ContextProvider::scopes_ready defaults to true for synchronous clients. Asynchro
 clients return false until current-version scopes arrive: both positive and negative selector
 predicates then fail, preventing quote-pairing contexts from treating pending scopes as code.
 Other context keys remain usable while scopes are pending.
+
+
+Round 7 adds a `DistractionFree` settings layer between Project and View, loaded from
+`Distraction Free.sublime-settings`. Effective values/observers revert when the layer is removed.
+Parsed `Keymap` values are cloneable so fresh session placeholders reuse compiled contexts and
+tries. Each clone retains its own pending chord state; the application's cached template starts
+at the root. Application-wide Hot Exit/remember/open-window settings bypass project/syntax/view
+layers in the workbench adapter. Malformed optional user resources become startup diagnostics.

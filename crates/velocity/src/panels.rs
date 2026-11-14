@@ -41,10 +41,11 @@ pub enum Overlay {
     Goto,
     Palette,
     Syntax,
+    Choices,
 }
 #[derive(Debug)]
 struct Preview {
-    buffer: BufferId,
+    sheet: u64,
     selection: Selection,
     scroll: (f64, f64),
     transient: bool,
@@ -81,8 +82,14 @@ pub struct Panels {
     side_open: Option<usize>,
     pub side_scroll: Scroll,
     pub side_rows: Vec<SideRow>,
-    pub split: Option<BufferId>,
-    pub tab_scroll: f64,
+    pub primary_click: bool,
+    pub build_results: Vec<(usize, FileLocation)>,
+    pub build_output_offset: usize,
+    pub find_history: Vec<String>,
+    pub replace_history: Vec<String>,
+    pub chrome: bool,
+    choice_items: Vec<vel_config::ui::PaletteItem>,
+    side_anchor: Option<usize>,
     pub dragging_tab: Option<usize>,
     pub options: text::Options,
     pub in_selection: bool,
@@ -98,6 +105,10 @@ pub struct Panels {
     replace_signature: Option<(String, text::Options, String, String)>,
     pub replacement_plan: Option<Vec<files::FileChange>>,
     pub output: String,
+    pub output_editor: Option<crate::editor::Editor>,
+    pub output_view: crate::view::View,
+    pub output_reset: bool,
+    output_mirrored: usize,
     pub input_caption: String,
     pub input_done: Option<Invocation>,
     focus_input: usize,
@@ -160,8 +171,14 @@ impl Default for Panels {
             side_open: None,
             side_scroll: Scroll::default(),
             side_rows: vec![],
-            split: None,
-            tab_scroll: 0.,
+            primary_click: false,
+            build_results: Vec::new(),
+            build_output_offset: 0,
+            find_history: Vec::new(),
+            replace_history: Vec::new(),
+            chrome: true,
+            choice_items: Vec::new(),
+            side_anchor: None,
             dragging_tab: None,
             result_view: files::Results::default(),
             quick_pending: false,
@@ -178,6 +195,10 @@ impl Default for Panels {
             replace_signature: None,
             replacement_plan: None,
             output: String::new(),
+            output_editor: None,
+            output_view: crate::view::View::new(Size::default(), 7.8, 12.),
+            output_reset: false,
+            output_mirrored: 0,
             input_caption: String::new(),
             input_done: None,
             focus_input: 0,
@@ -237,6 +258,128 @@ impl Panels {
         self.loading.clear();
         self.rebuild_side(workspace);
     }
+    pub fn configure_output(
+        &mut self,
+        workspace: &Workspace,
+        syntax: Option<&str>,
+        word_wrap: bool,
+    ) {
+        let mut editor = crate::editor::Editor::new(vel_text::Text::new());
+        editor.settings = workspace.editor().settings.clone();
+        for (key, value) in [
+            ("word_wrap", json!(word_wrap)),
+            ("line_numbers", json!(false)),
+            ("gutter", json!(false)),
+            ("show_minimap", json!(false)),
+            ("highlight_line", json!(false)),
+            ("draw_indent_guides", json!(false)),
+            ("rulers", json!([])),
+            ("draw_centered", json!(false)),
+            ("scroll_past_end", json!(false)),
+        ] {
+            editor
+                .settings
+                .set(vel_config::settings::Layer::View, key, value);
+        }
+        editor.sync();
+        editor.read_only = true;
+        editor.buffer.set_history_limits(vel_buffer::HistoryLimits {
+            entries: 0,
+            bytes: 0,
+            ..Default::default()
+        });
+        if let Some(language) = workspace.editor().language.borrow().as_ref() {
+            let reference = syntax
+                .and_then(|s| {
+                    vel_highlight::detect_syntax(&workspace.assets.syntaxes, "", "", Some(s))
+                })
+                .unwrap_or_else(|| workspace.assets.syntaxes.find_syntax_plain_text());
+            if let Err(e) = editor.attach_language(
+                workspace.assets.clone(),
+                &reference.path,
+                language.scheme.clone(),
+            ) {
+                self.message = e;
+            }
+        }
+        self.output_editor = Some(editor);
+        self.output_mirrored = 0;
+        self.output_reset = false;
+        self.output_view.tab_height = 0.;
+        self.output_view.focused = false;
+    }
+    fn sync_output(&mut self) -> bool {
+        let Some(editor) = self.output_editor.as_mut() else {
+            return false;
+        };
+        let mut changed = editor.poll_language();
+        if self.output_reset || self.output_mirrored != self.output.len() {
+            let (range, value) = if self.output_reset || self.output_mirrored > self.output.len() {
+                (0..editor.text.len_bytes(), self.output.clone())
+            } else {
+                (
+                    editor.text.len_bytes()..editor.text.len_bytes(),
+                    self.output[self.output_mirrored..].to_owned(),
+                )
+            };
+            editor.apply_edits(vec![(range, value)], None, vel_buffer::EditKind::Other);
+            editor.sync();
+            self.output_mirrored = self.output.len();
+            self.output_reset = false;
+            changed = true;
+        }
+        changed
+    }
+    pub fn choices(&mut self, workspace: &mut Workspace, items: Vec<vel_config::ui::PaletteItem>) {
+        self.cancel_overlay(workspace);
+        self.choice_items = items;
+        self.overlay = Some(Overlay::Choices);
+        self.quick_input.set("");
+        self.prepared.clear();
+        self.focus.show(Surface::Overlay, true);
+        self.query_quick(workspace);
+    }
+    fn remember_search(&mut self, include_empty_replace: bool) {
+        fn push(history: &mut Vec<String>, value: String) {
+            history.retain(|s| *s != value);
+            history.push(value);
+            let excess = history.len().saturating_sub(100);
+            history.drain(..excess);
+        }
+        let query = self.query.value();
+        if !query.is_empty() {
+            push(&mut self.find_history, query);
+        }
+        let replace = self.replace.value();
+        if include_empty_replace || !replace.is_empty() || !self.replace_history.is_empty() {
+            push(&mut self.replace_history, replace);
+        }
+    }
+    pub fn capture_session(&mut self, window: &mut vel_session::Window) {
+        self.remember_search(false);
+        window.sidebar_visible = self.side_visible;
+        window.sidebar_expanded = self.expanded.iter().cloned().collect();
+        window.sidebar_scroll = self.side_scroll.offset;
+        window.find_history = self.find_history.clone();
+        window.replace_history = self.replace_history.clone();
+    }
+    pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
+        self.side_visible = window.sidebar_visible;
+        self.expanded = window.sidebar_expanded.iter().cloned().collect();
+        self.side_scroll.offset = window.sidebar_scroll;
+        self.find_history = window.find_history.clone();
+        self.replace_history = window.replace_history.clone();
+        if let Some(value) = self.find_history.last() {
+            self.query.set(value);
+        }
+        if let Some(value) = self.replace_history.last() {
+            self.replace.set(value);
+        }
+        for path in &window.sidebar_expanded {
+            self.load_directory(workspace, path);
+        }
+        self.chrome = !window.distraction_free;
+    }
     pub fn add_folder(&mut self, workspace: &mut Workspace, path: PathBuf) -> Result<(), String> {
         let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         if !path.is_dir() {
@@ -275,6 +418,7 @@ impl Panels {
             self.restart_index(workspace);
             self.load_directory(workspace, &path);
         }
+        crate::workbench::remember(&mut workspace.recent_folders, path);
         self.side_visible = true;
         Ok(())
     }
@@ -423,6 +567,10 @@ impl Panels {
         self.overlay.is_some()
             || self.file_task.is_some()
             || self.replace_rx.is_some()
+            || self
+                .output_editor
+                .as_ref()
+                .is_some_and(|e| e.language.borrow().as_ref().is_some_and(|l| l.busy()))
             || (self.search.is_some() && !self.all_matches_ready)
     }
     pub fn ranking_pending(&self) -> bool {
@@ -542,7 +690,7 @@ impl Panels {
                     Overlay::Goto
                 });
                 self.preview = Some(Preview {
-                    buffer: workspace.editor().buffer.id(),
+                    sheet: workspace.tabs[workspace.active].sheet,
                     scroll: workspace.tabs[workspace.active].scroll,
                     transient: workspace.tabs[workspace.active].transient,
                     selection: workspace
@@ -586,6 +734,7 @@ impl Panels {
                         "incremental_find" => Panel::Incremental,
                         "find_in_files" => Panel::Files,
                         "find_results" => Panel::Results,
+                        "output.exec" => Panel::Output,
                         _ => Panel::Find,
                     }
                 });
@@ -647,7 +796,7 @@ impl Panels {
                     ),
                 )?;
             }
-            "close_split" => self.split = None,
+
             "toggle_find_option" => {
                 match args["option"]
                     .as_str()
@@ -821,6 +970,7 @@ impl Panels {
         }
     }
     fn find_next(&mut self, workspace: &mut Workspace, backwards: bool) {
+        self.remember_search(false);
         if let Some(search) = &self.search {
             if !self.all_matches_ready {
                 self.pending_navigation = Some(backwards);
@@ -846,6 +996,7 @@ impl Panels {
         all: bool,
         viewport: Range<usize>,
     ) -> Result<(), String> {
+        self.remember_search(true);
         if workspace.editor().read_only {
             return Err("document is read only".into());
         }
@@ -886,7 +1037,10 @@ impl Panels {
         self.quick_pending = true;
         self.quick_revision = self.quick_input.buffer.change_id().0;
         self.quick.items.clear();
-        if matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax)) {
+        if matches!(
+            self.overlay,
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+        ) {
             let source = if self.overlay == Some(Overlay::Syntax) {
                 "syntax"
             } else {
@@ -897,8 +1051,12 @@ impl Panels {
                 return;
             }
             self.prepared = source.into();
-            self.palette_indices = workspace
-                .palette
+            let palette = if self.overlay == Some(Overlay::Choices) {
+                &self.choice_items
+            } else {
+                &workspace.palette
+            };
+            self.palette_indices = palette
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| {
@@ -919,7 +1077,7 @@ impl Panels {
                 self.palette_indices
                     .iter()
                     .map(|i| {
-                        let p = &workspace.palette[*i];
+                        let p = &palette[*i];
                         let mut c = fuzzy::Candidate::new(&p.caption);
                         c.recent = self
                             .palette_recent
@@ -1133,10 +1291,7 @@ impl Panels {
             }
         }
         if let Some(preview) = self.preview.take()
-            && let Some(index) = workspace
-                .tabs
-                .iter()
-                .position(|t| t.editor.buffer.id() == preview.buffer)
+            && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == preview.sheet)
         {
             workspace.select(index);
             workspace.editor_mut().set_selection(preview.selection);
@@ -1154,11 +1309,20 @@ impl Panels {
         workspace: &mut Workspace,
         side: bool,
     ) -> Result<Option<Invocation>, String> {
-        if matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax)) {
+        if matches!(
+            self.overlay,
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+        ) {
             let invocation = self
                 .quick
                 .current()
-                .and_then(|i| workspace.palette.get(i))
+                .and_then(|i| {
+                    if self.overlay == Some(Overlay::Choices) {
+                        self.choice_items.get(i)
+                    } else {
+                        workspace.palette.get(i)
+                    }
+                })
                 .map(|p| p.invocation.clone());
             if let Some(invocation) = &invocation {
                 self.uses += 1;
@@ -1169,10 +1333,7 @@ impl Panels {
             }
             self.overlay = None;
             if let Some(source) = self.preview.take()
-                && let Some(tab) = workspace
-                    .tabs
-                    .iter_mut()
-                    .find(|t| t.editor.buffer.id() == source.buffer)
+                && let Some(tab) = workspace.tabs.iter_mut().find(|t| t.sheet == source.sheet)
             {
                 tab.transient = source.transient;
             }
@@ -1183,16 +1344,25 @@ impl Panels {
         if self.overlay.is_some() {
             self.preview_current(workspace)?;
             if let Some(source) = &self.preview
-                && let Some(index) = workspace
-                    .tabs
-                    .iter()
-                    .position(|t| t.editor.buffer.id() == source.buffer)
+                && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == source.sheet)
                 && index != workspace.active
             {
                 workspace.tabs[index].transient = source.transient;
             }
-            if side && let Some(preview) = &self.preview {
-                self.split = Some(preview.buffer);
+            if side
+                && let Some(preview) = &self.preview
+                && let Some(group) = workspace.workbench.group_of(preview.sheet)
+            {
+                if group != workspace.workbench.active {
+                    workspace.workbench.move_selected(group)?;
+                    workspace.focus_current_group()?;
+                }
+                if let Some(index) = workspace.sheet_index(preview.sheet) {
+                    workspace.tabs[index].transient = false;
+                }
+                workspace.workbench.groups[group]
+                    .selected
+                    .insert(preview.sheet);
             }
             workspace.tabs[workspace.active].transient = false;
             if let Some(path) = &workspace.tabs[workspace.active].path {
@@ -1359,6 +1529,7 @@ impl Panels {
         }
         if self.panel == Some(Panel::Output) {
             match key.name.as_str() {
+                "f4" => return Ok((false, None)),
                 "up" => self.result_scroll.scroll(-24.),
                 "down" => self.result_scroll.scroll(24.),
                 "pageup" => self.result_scroll.scroll(-self.result_scroll.viewport),
@@ -1407,6 +1578,7 @@ impl Panels {
         Ok((true, None))
     }
     fn start_files(&mut self, workspace: &Workspace) -> Result<(), String> {
+        self.remember_search(false);
         let search = Search::new(&self.query.value(), self.options)?;
         let base = workspace
             .folders
@@ -1609,7 +1781,15 @@ impl Panels {
         {
             self.quick_pending = false;
             self.quick_elapsed_ms = ranked.elapsed.as_secs_f64() * 1000.;
-            let palette = matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax));
+            let palette = matches!(
+                self.overlay,
+                Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+            );
+            let palette_items = if self.overlay == Some(Overlay::Choices) {
+                &self.choice_items
+            } else {
+                &workspace.palette
+            };
             let items = ranked
                 .hits
                 .into_iter()
@@ -1635,13 +1815,13 @@ impl Panels {
                             workspace
                                 .editor()
                                 .keymap
-                                .hint(&workspace.palette[index].invocation)
+                                .hint(&palette_items[index].invocation)
                                 .unwrap_or_default()
                         } else {
                             String::new()
                         },
                         details: if palette {
-                            workspace.palette[index].invocation.command.clone()
+                            palette_items[index].invocation.command.clone()
                         } else {
                             self.paths
                                 .get(hit.index)
@@ -1701,6 +1881,7 @@ impl Panels {
         } else {
             self.result_view.rows.len()
         };
+        changed |= self.sync_output();
         changed
     }
     pub fn layout(&mut self, size: Size) -> Rect {
@@ -1721,7 +1902,7 @@ impl Panels {
         .min((size.height - 80.).max(0.));
         self.panel_bounds = Rect {
             x: side,
-            y: size.height - STATUS - bottom,
+            y: size.height - if self.chrome { STATUS } else { 0. } - bottom,
             width: (size.width - side).max(1.),
             height: bottom,
         };
@@ -1763,7 +1944,12 @@ impl Panels {
             input.reveal();
         }
         self.quick_input.reveal();
-        self.result_scroll.row_height = 24.;
+        self.result_scroll.row_height =
+            if self.panel == Some(Panel::Output) && self.output_editor.is_some() {
+                self.output_view.line_height
+            } else {
+                24.
+            };
         self.result_scroll.viewport = (bottom - 34.).max(1.);
         self.result_scroll.scroll(0.);
         // Retained controls expose live theme attributes and shared hit testing.
@@ -2300,7 +2486,7 @@ impl Panels {
                             );
                         }
                     }
-                } else {
+                } else if self.output_editor.is_none() {
                     for (i, line) in self
                         .output
                         .lines()
@@ -2413,63 +2599,86 @@ impl Panels {
                 }
             }
         }
-        let status = Rect {
-            x: 0.,
-            y: self.size.height - STATUS,
-            width: self.size.width,
-            height: STATUS,
-        };
-        fill(&mut layer, status, status, [0.12, 0.16, 0.21, 1.]);
-        let editor = workspace.editor();
-        let row = editor.text.byte_to_line(editor.caret);
-        let start = editor.text.line_to_byte(row);
-        let column = editor.text.slice(start..editor.caret).len_chars() + 1;
-        let tab = &workspace.tabs[workspace.active];
-        let selected: usize = editor
-            .regions()
-            .iter()
-            .map(|r| editor.text.slice(r.to_range()).len_chars())
-            .sum();
-        label(
-            &mut layer,
-            &format!(
-                "Ln {}, Col {}  ·  {} selections / {} chars  ·  {}  ·  {}  ·  {}: {}",
-                row + 1,
-                column,
-                editor.regions().len(),
-                selected,
-                tab.format.encoding,
-                tab.format.line_ending.name(),
-                if editor.preferences.translate_tabs_to_spaces {
-                    "Spaces"
-                } else {
-                    "Tabs"
+        if self.chrome {
+            let status = Rect {
+                x: 0.,
+                y: self.size.height - STATUS,
+                width: self.size.width,
+                height: STATUS,
+            };
+            fill(&mut layer, status, status, [0.12, 0.16, 0.21, 1.]);
+            let editor = workspace.editor();
+            let row = editor.text.byte_to_line(editor.caret);
+            let start = editor.text.line_to_byte(row);
+            let column = editor.text.slice(start..editor.caret).len_chars() + 1;
+            let tab = &workspace.tabs[workspace.active];
+            let selected: usize = editor
+                .regions()
+                .iter()
+                .map(|r| editor.text.slice(r.to_range()).len_chars())
+                .sum();
+            label(
+                &mut layer,
+                &format!(
+                    "Ln {}, Col {}  ·  {} selections / {} chars  ·  {}  ·  {}  ·  {}: {}",
+                    row + 1,
+                    column,
+                    editor.regions().len(),
+                    selected,
+                    tab.format.encoding,
+                    tab.format.line_ending.name(),
+                    if editor.preferences.translate_tabs_to_spaces {
+                        "Spaces"
+                    } else {
+                        "Tabs"
+                    },
+                    editor.preferences.tab_size
+                ),
+                10.,
+                status.y + 17.,
+                Rect {
+                    width: (self.size.width - 180.).max(0.),
+                    ..status
                 },
-                editor.preferences.tab_size
-            ),
-            10.,
-            status.y + 17.,
-            Rect {
-                width: (self.size.width - 180.).max(0.),
-                ..status
-            },
-            [0.77, 0.83, 0.9, 1.],
-        );
-        let name = editor
-            .language
-            .borrow()
-            .as_ref()
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "Plain Text".into());
-        label(
-            &mut layer,
-            &name,
-            (self.size.width - 170.).max(10.),
-            status.y + 17.,
-            status,
-            [0.77, 0.83, 0.9, 1.],
-        );
+                [0.77, 0.83, 0.9, 1.],
+            );
+            let name = editor
+                .language
+                .borrow()
+                .as_ref()
+                .map(|l| l.name.clone())
+                .unwrap_or_else(|| "Plain Text".into());
+            label(
+                &mut layer,
+                &name,
+                (self.size.width - 170.).max(10.),
+                status.y + 17.,
+                status,
+                [0.77, 0.83, 0.9, 1.],
+            );
+        }
         scene.layers.push(layer);
+        if self.panel == Some(Panel::Output)
+            && let Some(editor) = &self.output_editor
+        {
+            let body = Rect {
+                x: self.panel_bounds.x,
+                y: self.panel_bounds.y + 30.,
+                width: self.panel_bounds.width,
+                height: (self.panel_bounds.height - 30.).max(1.),
+            };
+            self.output_view.size = Size {
+                width: body.width,
+                height: body.height,
+            };
+            self.output_view.scroll_y = self.result_scroll.offset;
+            self.output_view.apply_style(editor);
+            self.result_scroll.row_height = self.output_view.line_height;
+            self.result_scroll.rows = editor.layout.borrow().total();
+            let mut output = self.output_view.scene(editor);
+            crate::app_scene_translate(&mut output, body.x, body.y);
+            scene.layers.extend(output.layers);
+        }
         if self.overlay.is_some() {
             let mut overlay = Layer::default();
             fill(
@@ -2512,6 +2721,7 @@ impl Panels {
         self.tree.pointer(point, Some(down));
         if down
             && self.overlay.is_none()
+            && self.chrome
             && point.y >= self.size.height - STATUS
             && point.x >= self.size.width - 180.
         {
@@ -2546,7 +2756,18 @@ impl Panels {
             self.panel_focused = true;
             self.focus.show(Surface::Panel, true);
             if down {
-                if self.panel == Some(Panel::Results) {
+                if self.panel == Some(Panel::Output)
+                    && double
+                    && point.y >= self.panel_bounds.y + 30.
+                {
+                    let row = ((point.y - self.panel_bounds.y - 30. + self.result_scroll.offset)
+                        / 24.) as usize;
+                    if let Some((_, location)) =
+                        self.build_results.iter().find(|(line, _)| *line == row)
+                    {
+                        workspace.open(location.clone())?;
+                    }
+                } else if self.panel == Some(Panel::Results) {
                     if point.y >= self.panel_bounds.y + 30. {
                         let row = ((point.y - self.panel_bounds.y - 30.
                             + self.result_scroll.offset)
@@ -2606,7 +2827,7 @@ impl Panels {
             if down {
                 let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / 24.) as usize;
                 if (1..=workspace.tabs.len()).contains(&row) {
-                    workspace.select(row - 1);
+                    workspace.click_sheet(row - 1, self.primary_click, extend);
                     self.side_open = Some(row - 1);
                     if double {
                         workspace.tabs[workspace.active].transient = false;
@@ -2615,7 +2836,44 @@ impl Panels {
                     self.side_open = None;
                     self.side_selected = (row - workspace.tabs.len() - 2)
                         .min(self.side_rows.len().saturating_sub(1));
-                    self.activate_side(workspace, double)?;
+                    if extend && let Some(anchor) = self.side_anchor {
+                        for index in anchor.min(self.side_selected)..=anchor.max(self.side_selected)
+                        {
+                            if let Some(row) = self.side_rows.get(index)
+                                && !row.directory
+                            {
+                                workspace.open_additive(FileLocation {
+                                    path: row.path.clone(),
+                                    line: 1,
+                                    column: 1,
+                                })?;
+                            }
+                        }
+                    } else if self.primary_click {
+                        if let Some(row) = self.side_rows.get(self.side_selected)
+                            && !row.directory
+                        {
+                            if let Some(index) = workspace
+                                .tabs
+                                .iter()
+                                .position(|t| t.path.as_ref() == Some(&row.path))
+                            {
+                                workspace.click_sheet(index, true, false);
+                            } else {
+                                workspace.open_additive(FileLocation {
+                                    path: row.path.clone(),
+                                    line: 1,
+                                    column: 1,
+                                })?;
+                            }
+                        } else {
+                            self.activate_side(workspace, double)?;
+                        }
+                        self.side_anchor = Some(self.side_selected);
+                    } else {
+                        self.activate_side(workspace, double)?;
+                        self.side_anchor = Some(self.side_selected);
+                    }
                 }
                 self.side_focused = true;
             }
@@ -2626,7 +2884,7 @@ impl Panels {
             self.panel_focused = false;
             self.focus.show(Surface::Panel, false);
         }
-        Ok(point.y >= self.size.height - STATUS)
+        Ok(self.chrome && point.y >= self.size.height - STATUS)
     }
     pub fn scroll(&mut self, point: Point, delta: f64) -> bool {
         if self.overlay.is_some() {

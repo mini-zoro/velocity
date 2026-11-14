@@ -1,0 +1,16 @@
+// Original workbench/build fixture. The process prints one diagnostic, never changes a file.
+{
+  "folders": [{"path": ".", "name": "Workbench fixtures", "file_exclude_patterns": ["*.sublime-workspace"]}],
+  "settings": {"word_wrap": false, "show_errors_inline": true},
+  "build_systems": [{
+    "name": "Workbench Example",
+    "cmd": ["/bin/sh", "-c", "printf 'workbench-error.txt:2:1: Example build diagnostic\\n'; sleep 1; exit 1"],
+    "working_dir": "$project_path",
+    "file_regex": "^([^:]+):([0-9]+):([0-9]+): (.*)$",
+    "word_wrap": true,
+    "variants": [
+      {"name": "Success", "cmd": ["/bin/sh", "-c", "printf 'Success\\n'"]},
+      {"name": "Cancel Process Tree", "cmd": ["/bin/sh", "-c", "sleep 30 & echo 'Cancel this build from Tools'; wait"]}
+    ]
+  }]
+}

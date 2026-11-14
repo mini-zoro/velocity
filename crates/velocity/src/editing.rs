@@ -47,6 +47,7 @@ impl Editor {
             )
         });
         let old = self.buffer.text().clone();
+        let before_version = self.buffer.change_id();
         self.layout
             .borrow_mut()
             .prepare_change((self.buffer.id(), self.buffer.change_id()));
@@ -72,6 +73,19 @@ impl Editor {
             (self.buffer.id(), self.buffer.change_id()),
             &changes,
         );
+        let mut shared = self.layout_edits.borrow_mut();
+        shared.push_back(crate::editor::SharedLayoutEdit {
+            buffer: self.buffer.id(),
+            from: before_version,
+            to: self.buffer.change_id(),
+            before: old,
+            after: self.buffer.text().clone(),
+            changes,
+        });
+        while shared.len() > 64 {
+            shared.pop_front();
+        }
+        self.layout_version = self.buffer.change_id();
     }
     fn replace_selections(&mut self, values: Vec<(String, Range<usize>)>, kind: EditKind) {
         let selection = self.buffer.view(self.id).sel();

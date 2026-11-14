@@ -267,13 +267,13 @@ pub enum Resolution {
     /// An enabled binding consumed the key.
     Command(Invocation),
 }
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 struct Node {
     children: HashMap<Key, usize>,
     candidates: Vec<usize>,
 }
 /// Trie lookup only visits bindings sharing this prefix. Later appended entries win.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Keymap {
     bindings: Vec<Binding>,
     nodes: Vec<Node>,

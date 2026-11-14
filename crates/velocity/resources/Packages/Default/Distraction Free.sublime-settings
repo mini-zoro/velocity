@@ -1,0 +1,10 @@
+// Mode-specific editor settings, authored from public behavior.
+{
+  "line_numbers": false,
+  "gutter": false,
+  "draw_centered": true,
+  "wrap_width": 80,
+  "word_wrap": true,
+  "scroll_past_end": true,
+  "show_minimap": false
+}

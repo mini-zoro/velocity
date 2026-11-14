@@ -70,7 +70,7 @@ pub enum Appearance {
     #[default]
     Dark,
 }
-/// Configuration for the single editor window.
+/// Configuration for a native editor window.
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     /// Initial title (bundle-less execution is supported).
@@ -168,6 +168,10 @@ pub trait AppHandler: 'static {
     /// Approve a user initiated close/quit. Automatic completion uses `quit`.
     fn on_quit_requested(&mut self, _window: &WindowHandle) -> bool {
         true
+    }
+    /// Approve closing this window, distinct from quitting the application.
+    fn on_window_close_requested(&mut self, window: &WindowHandle) -> bool {
+        self.on_quit_requested(window)
     }
     /// Return an O(1) text snapshot and document-relative UTF-16 ranges.
     fn text_input_state(&self) -> TextInputState {

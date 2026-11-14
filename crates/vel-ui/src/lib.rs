@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 pub mod input;
+pub mod workbench;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,

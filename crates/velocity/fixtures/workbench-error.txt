@@ -1,0 +1,3 @@
+Workbench build fixture
+The example diagnostic points to this line.
+F4, Shift+F4 and a double-click on the build output should navigate here.

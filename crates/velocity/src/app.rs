@@ -1,4 +1,5 @@
 //! Native application handler and buffered benchmark observations.
+use crate::app_scene_translate as translate_scene;
 use crate::{
     bench::{Bench, SCROLL_FRAMES, TYPING_INSERTIONS},
     cli::{Mode, Options},
@@ -43,9 +44,22 @@ pub struct App {
     panels: crate::panels::Panels,
     window_size: Size,
     content: Rect,
-    secondary: View,
-    last_active: Option<vel_buffer::BufferId>,
-    view_buffer: Option<vel_buffer::BufferId>,
+    sheet_views: std::collections::BTreeMap<u64, View>,
+    sheet_bounds: std::collections::BTreeMap<u64, Rect>,
+    group_bounds: Vec<Rect>,
+    workbench_bounds: Rect,
+    tab_hits: Vec<(u64, Rect)>,
+    dragging_splitter: Option<vel_ui::workbench::Splitter>,
+    builds: crate::build::Builds,
+    normal_sidebar: bool,
+    distraction_sidebar: Option<bool>,
+    fullscreen_before_distraction: bool,
+    sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
+    session_id: u64,
+    session_due: Option<Instant>,
+    restored_windows: Vec<vel_session::Window>,
+    waiters: Vec<crate::instance::Waiter>,
+    view_buffer: Option<u64>,
     options: Options,
     clock: Clock,
     reporter: Reporter,
@@ -73,6 +87,7 @@ impl App {
         reporter: Reporter,
         mut workspace: Workspace,
         done: Arc<AtomicBool>,
+        sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     ) -> Self {
         if options.mode == Mode::Typing {
             crate::install_carets(workspace.editor_mut(), options.carets);
@@ -85,7 +100,13 @@ impl App {
             8.,
             12.,
         );
+        let session_id = sessions.borrow_mut().register();
         Self {
+            sessions,
+            session_id,
+            session_due: Some(Instant::now()),
+            restored_windows: Vec::new(),
+            waiters: Vec::new(),
             exact_scene: false,
             exact_drawables: Default::default(),
             content_scanout: None,
@@ -107,8 +128,16 @@ impl App {
                 width: view.size.width,
                 height: view.size.height,
             },
-            secondary: View::new(view.size, 8., 12.),
-            last_active: None,
+            sheet_views: Default::default(),
+            sheet_bounds: Default::default(),
+            group_bounds: Vec::new(),
+            workbench_bounds: Rect::default(),
+            tab_hits: Vec::new(),
+            dragging_splitter: None,
+            builds: crate::build::Builds::default(),
+            normal_sidebar: true,
+            distraction_sidebar: None,
+            fullscreen_before_distraction: false,
             view_buffer: None,
             options,
             clock,
@@ -130,6 +159,233 @@ impl App {
             first_scanout: FirstScanout::default(),
             waiting_since: None,
         }
+    }
+    pub fn restore_ui(&mut self, window: &vel_session::Window) {
+        self.panels.restore_session(&self.workspace, window);
+        self.normal_sidebar = window.normal_sidebar.unwrap_or(true);
+        self.distraction_sidebar = window.distraction_sidebar;
+        self.fullscreen_before_distraction = window.fullscreen_before_distraction;
+    }
+    pub fn restore_remaining(&mut self, windows: Vec<vel_session::Window>) {
+        self.restored_windows = windows;
+    }
+    pub fn set_instance(&mut self, instance: Option<crate::instance::Instance>) {
+        self.sessions.borrow_mut().instance = instance;
+    }
+    fn hot_exit(&self) -> vel_session::HotExit {
+        vel_session::HotExit::parse(self.workspace.global_string("hot_exit", "always"))
+    }
+    fn checkpoint(&mut self, quitting: bool) -> Result<(), String> {
+        self.checkpoint_reason(quitting, false)
+    }
+    fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
+        let active = self.workspace.active;
+        self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
+        let (mut window, documents) = self.workspace.snapshot()?;
+        self.panels.capture_session(&mut window);
+        window.normal_sidebar = Some(self.normal_sidebar);
+        window.distraction_sidebar = self.distraction_sidebar;
+        window.fullscreen_before_distraction = self.fullscreen_before_distraction;
+        let hot = self.hot_exit();
+        let remember = self.workspace.global_bool("remember_open_files", true);
+        self.sessions.borrow_mut().publish(
+            self.session_id,
+            window,
+            documents,
+            [
+                self.workspace.recent_files.clone(),
+                self.workspace.recent_folders.clone(),
+                self.workspace.recent_projects.clone(),
+            ],
+            crate::session::Policy {
+                hot,
+                quitting,
+                remember,
+                closing,
+            },
+        )?;
+        self.session_due = None;
+        Ok(())
+    }
+    fn save_workspace_checkpoint(&mut self) -> Result<(), String> {
+        self.checkpoint(true)?;
+        self.sessions.borrow().flush()
+    }
+    fn open_native_window(
+        &mut self,
+        w: &WindowHandle,
+        restored: Option<vel_session::Window>,
+    ) -> Result<WindowHandle, String> {
+        let project = restored.as_ref().and_then(|s| s.project.clone());
+        let mut workspace = Workspace::new(
+            vel_text::Text::new(),
+            self.workspace.data_path().map(Path::to_owned),
+            project,
+            true,
+        )?;
+        workspace.recent_files = self.workspace.recent_files.clone();
+        workspace.recent_folders = self.workspace.recent_folders.clone();
+        workspace.recent_projects = self.workspace.recent_projects.clone();
+        if let Some(window) = &restored {
+            let documents = self.sessions.borrow().restored.documents.clone();
+            workspace.restore_window(window, &documents)?;
+        }
+        let mut options = self.options.clone();
+        options.files.clear();
+        options.file = None;
+        options.project = None;
+        let mut app = App::new(
+            options.clone(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            self.reporter.clone(),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            self.sessions.clone(),
+        );
+        if let Some(window) = &restored {
+            app.restore_ui(window);
+        }
+        w.new_window(
+            WindowOptions {
+                title: "Velocity".into(),
+                size: Size {
+                    width: options.width as f64,
+                    height: options.height as f64,
+                },
+            },
+            app,
+        )
+    }
+    fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
+        let remaining = std::mem::take(&mut self.restored_windows);
+        for window in remaining {
+            if let Err(e) = self.open_native_window(w, Some(window)) {
+                self.workspace.messages.push(e);
+            }
+        }
+        let requests = {
+            let sessions = self.sessions.borrow();
+            if sessions
+                .active_window
+                .is_none_or(|id| id == self.session_id)
+            {
+                sessions
+                    .instance
+                    .as_ref()
+                    .map(|i| i.drain())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
+        for incoming in requests {
+            if let Err(e) = self.receive_request(w, incoming) {
+                self.workspace.messages.push(format!("CLI request: {e}"));
+            }
+        }
+        self.waiters
+            .retain_mut(|waiter| !waiter.complete(&self.workspace));
+        let messages = self.sessions.borrow_mut().poll();
+        for message in messages {
+            self.panels.message = message.clone();
+            self.reporter
+                .emit(json!({"kind":"session_error","message":message}))?;
+        }
+        if self.session_due.is_some_and(|due| Instant::now() >= due)
+            && let Err(e) = self.checkpoint(false)
+        {
+            self.panels.message = format!("Session save failed: {e}");
+            self.session_due = None;
+        }
+        Ok(())
+    }
+    fn receive_request(
+        &mut self,
+        w: &WindowHandle,
+        incoming: crate::instance::Incoming,
+    ) -> Result<(), String> {
+        let new_window = incoming.request.new_window
+            || (!incoming.request.add
+                && self
+                    .workspace
+                    .editor()
+                    .settings
+                    .bool("open_files_in_new_window", false));
+        if new_window {
+            let workspace = Workspace::new(
+                vel_text::Text::new(),
+                self.workspace.data_path().map(Path::to_owned),
+                None,
+                true,
+            )?;
+            let mut options = self.options.clone();
+            options.files.clear();
+            options.file = None;
+            options.project = None;
+            let mut app = App::new(
+                options.clone(),
+                Clock::new(Instant::now(), std::time::SystemTime::now()),
+                self.reporter.clone(),
+                workspace,
+                Arc::new(AtomicBool::new(false)),
+                self.sessions.clone(),
+            );
+            app.accept_request(incoming)?;
+            w.new_window(
+                WindowOptions {
+                    title: "Velocity".into(),
+                    size: Size {
+                        width: options.width as f64,
+                        height: options.height as f64,
+                    },
+                },
+                app,
+            )?;
+        } else {
+            self.accept_request(incoming)?;
+            w.focus();
+            self.changed(w, Instant::now(), true);
+        }
+        Ok(())
+    }
+    fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
+        let request = incoming.request.clone();
+        let mut ids = std::collections::BTreeSet::new();
+        if let Some(project) = request.project {
+            if !self.hot_exit().retain(false) && self.workspace.tabs.iter().any(|t| t.dirty()) {
+                return Err(
+                    "Save or close dirty files before switching this window's project, or use -n"
+                        .into(),
+                );
+            }
+            self.checkpoint_reason(false, true)?;
+            self.sessions.borrow().flush()?;
+            self.workspace.open_project(project)?;
+            self.panels = crate::panels::Panels::new(&self.workspace, true);
+        }
+        for location in request.files {
+            if location.path.is_dir() {
+                self.panels.add_folder(&mut self.workspace, location.path)?;
+            } else {
+                self.workspace.open(location)?;
+                ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+            }
+        }
+        if let Some(text) = request.stdin {
+            self.workspace.new_file()?;
+            self.workspace
+                .editor_mut()
+                .run("insert", &json!({"characters":text}))?;
+            ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+        }
+        if ids.is_empty() {
+            ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+        }
+        if let Some(waiter) = crate::instance::Waiter::acknowledge(incoming, &self.workspace, ids)?
+        {
+            self.waiters.push(waiter);
+        }
+        Ok(())
     }
     fn show_error(&self, w: &WindowHandle, message: &str) {
         let _ = self
@@ -228,6 +484,41 @@ impl App {
         }
     }
     fn can_close(&mut self, w: &WindowHandle, index: usize) -> bool {
+        if self
+            .workspace
+            .tabs
+            .iter()
+            .filter(|t| t.document == self.workspace.tabs[index].document)
+            .count()
+            > 1
+        {
+            return true;
+        }
+        self.can_close_document(w, index)
+    }
+    fn can_close_many(&mut self, w: &WindowHandle, indices: &[usize]) -> bool {
+        self.workspace.sync_shared();
+        let mut seen = std::collections::BTreeSet::new();
+        for index in indices {
+            let doc = self.workspace.tabs[*index].document;
+            if !seen.insert(doc)
+                || self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| t.document == doc && !indices.contains(&i))
+            {
+                continue;
+            }
+            if !self.can_close_document(w, *index) {
+                return false;
+            }
+        }
+        true
+    }
+    fn can_close_document(&mut self, w: &WindowHandle, index: usize) -> bool {
+        let _ = self.workspace.prepare_sheet(index);
         self.workspace.tabs[index].editor.unmark();
         if !self.workspace.tabs[index].dirty() {
             return true;
@@ -263,6 +554,145 @@ impl App {
         ));
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
+        if name == "toggle_distraction_free" {
+            self.workspace.fullscreen = w.is_full_screen();
+        }
+        if self.workspace.workbench_action(name, args)? {
+            if name == "toggle_distraction_free" {
+                self.panels.chrome = !self.workspace.distraction_free;
+                if self.workspace.distraction_free {
+                    self.normal_sidebar = self.panels.side_visible;
+                    self.fullscreen_before_distraction = self.workspace.fullscreen;
+                    self.panels.side_visible = self.distraction_sidebar.unwrap_or(false);
+                    if !self.workspace.fullscreen {
+                        self.workspace.fullscreen = true;
+                        w.toggle_full_screen();
+                    }
+                } else {
+                    self.distraction_sidebar = Some(self.panels.side_visible);
+                    self.panels.side_visible = self.normal_sidebar;
+                    if !self.fullscreen_before_distraction && self.workspace.fullscreen {
+                        self.workspace.fullscreen = false;
+                        w.toggle_full_screen();
+                    }
+                }
+            }
+            return Ok(());
+        }
+        match name {
+            "toggle_full_screen" => {
+                self.workspace.fullscreen = !self.workspace.fullscreen;
+                w.toggle_full_screen();
+                return Ok(());
+            }
+            "close_selected_tabs" => {
+                let mut selected = self.workspace.selected_indices();
+                if self.can_close_many(w, &selected) {
+                    selected.sort_unstable();
+                    for index in selected.into_iter().rev() {
+                        self.workspace.close(index)?;
+                    }
+                }
+                return Ok(());
+            }
+            "show_build_systems" => {
+                let items = crate::build::Builds::choices(&self.workspace, false);
+                self.panels.choices(&mut self.workspace, items);
+                return Ok(());
+            }
+            "build" | "exec" => {
+                if args["cancel"].as_bool() == Some(true) || args["kill"].as_bool() == Some(true) {
+                    if let Some(task) = &self.builds.task {
+                        task.cancel();
+                    }
+                } else if args["select"].as_bool() == Some(true) {
+                    let items = crate::build::Builds::choices(&self.workspace, true);
+                    self.panels.choices(&mut self.workspace, items);
+                } else {
+                    self.builds.start(&self.workspace, &mut self.panels, args)?;
+                }
+                return Ok(());
+            }
+            "cancel_build" => {
+                if let Some(task) = &self.builds.task {
+                    task.cancel();
+                }
+                return Ok(());
+            }
+            "next_result" | "prev_result" => {
+                self.builds
+                    .navigate(&mut self.workspace, name == "next_result")?;
+                return Ok(());
+            }
+            "prompt_open_project" | "open_project" => {
+                let path = args["file"]
+                    .as_str()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| w.open_files().into_iter().next());
+                if let Some(path) = path {
+                    if !self.hot_exit().retain(false)
+                        && !self
+                            .can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+                    {
+                        return Ok(());
+                    }
+                    self.checkpoint_reason(false, true)?;
+                    self.sessions.borrow().flush()?;
+                    self.workspace.open_project(path)?;
+                    self.panels = crate::panels::Panels::new(&self.workspace, true);
+                }
+                return Ok(());
+            }
+            "save_project_as" => {
+                if let Some(path) = args["file"]
+                    .as_str()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| w.save_file("project.sublime-project"))
+                {
+                    self.workspace.save_project_as(path)?;
+                }
+                return Ok(());
+            }
+            "close_project" => {
+                if !self.hot_exit().retain(false)
+                    && !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+                {
+                    return Ok(());
+                }
+                self.checkpoint_reason(false, true)?;
+                self.sessions.borrow().flush()?;
+                self.workspace.close_project()?;
+                self.panels = crate::panels::Panels::new(&self.workspace, true);
+                return Ok(());
+            }
+            "edit_project" => {
+                if let Some(path) = self.workspace.project_path().map(Path::to_owned) {
+                    self.workspace.open(crate::cli::FileLocation {
+                        path,
+                        line: 1,
+                        column: 1,
+                    })?;
+                }
+                return Ok(());
+            }
+            "quick_switch_project" | "recent_projects" => {
+                let items = self
+                    .workspace
+                    .recent_projects
+                    .iter()
+                    .map(|p| vel_config::ui::PaletteItem {
+                        caption: p.display().to_string(),
+                        invocation: vel_config::keymap::Invocation {
+                            command: "open_project".into(),
+                            args: json!({"file":p}),
+                        },
+                    })
+                    .collect();
+                self.panels.choices(&mut self.workspace, items);
+                return Ok(());
+            }
+            _ => {}
+        }
         if matches!(name, "open_dir" | "add_folder") && args["dir"].is_null() {
             if let Some(path) = w.open_directory() {
                 self.panels.add_folder(&mut self.workspace, path)?;
@@ -307,29 +737,50 @@ impl App {
             }
             "close" | "close_file" => {
                 if self.can_close(w, active) {
+                    let last = self.workspace.tabs.len() == 1;
                     self.workspace.close(active)?;
+                    if last
+                        && self
+                            .workspace
+                            .editor()
+                            .settings
+                            .bool("close_windows_when_empty", false)
+                    {
+                        w.request_close();
+                    }
                 }
             }
-            "next_view" => self
-                .workspace
-                .select((active + 1) % self.workspace.tabs.len()),
-            "prev_view" => self
-                .workspace
-                .select((active + self.workspace.tabs.len() - 1) % self.workspace.tabs.len()),
-            "select_by_index" => self.workspace.select(
-                args["index"]
+            "next_view" | "prev_view" => {
+                let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
+                if !group.sheets.is_empty() {
+                    let current = group
+                        .sheets
+                        .iter()
+                        .position(|s| *s == self.workspace.tabs[active].sheet)
+                        .unwrap_or(0);
+                    let next = (current as isize + if name == "next_view" { 1 } else { -1 })
+                        .rem_euclid(group.sheets.len() as isize)
+                        as usize;
+                    if let Some(index) = self.workspace.sheet_index(group.sheets[next]) {
+                        self.workspace.select(index);
+                    }
+                }
+            }
+            "select_by_index" => {
+                let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
+                if let Some(sheet) = args["index"]
                     .as_u64()
-                    .ok_or("select_by_index needs index")? as usize,
-            ),
+                    .and_then(|i| group.sheets.get(i as usize))
+                    && let Some(index) = self.workspace.sheet_index(*sheet)
+                {
+                    self.workspace.select(index);
+                }
+            }
             "new_window" => {
-                std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-                    .spawn()
-                    .map_err(|e| e.to_string())?;
+                self.open_native_window(w, None)?;
             }
             "close_window" => {
-                if self.on_quit_requested(w) {
-                    w.quit();
-                }
+                w.request_close();
             }
             "increase_font_size" | "decrease_font_size" | "reset_font_size" => {
                 let size = self.workspace.editor().settings.editor().font_size;
@@ -393,26 +844,35 @@ impl App {
         }
         Ok(())
     }
-    fn tab_width(&self) -> f64 {
-        180.
-    }
     fn sync_active_view(&mut self) {
-        let current = self.workspace.editor().buffer.id();
+        let current = self.workspace.tabs[self.workspace.active].sheet;
         if self.view_buffer != Some(current) {
-            if let Some(old) = self.view_buffer
-                && let Some(tab) = self
-                    .workspace
-                    .tabs
-                    .iter_mut()
-                    .find(|t| t.editor.buffer.id() == old)
-            {
-                tab.scroll = (self.view.scroll_x, self.view.scroll_y);
+            if let Some(old) = self.view_buffer {
+                if let Some(index) = self.workspace.sheet_index(old) {
+                    self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
+                }
+                let replacement = View::new(
+                    self.view.size,
+                    self.fonts.as_ref().map_or(8., |f| f.cell as f64),
+                    self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
+                );
+                self.sheet_views
+                    .insert(old, std::mem::replace(&mut self.view, replacement));
+            }
+            if let Some(view) = self.sheet_views.remove(&current) {
+                self.view = view;
             }
             let scroll = self.workspace.tabs[self.workspace.active].scroll;
             self.view.scroll_x = scroll.0;
             self.view.scroll_y = scroll.1;
             self.view_buffer = Some(current);
-            self.view.reveal(self.workspace.editor());
+            if let Some(bounds) = self.sheet_bounds.get(&current) {
+                self.content = *bounds;
+                self.view.size = Size {
+                    width: bounds.width,
+                    height: bounds.height,
+                };
+            }
         }
         if let Some(scroll) = self.panels.restore_scroll.take() {
             self.view.scroll_x = scroll.0;
@@ -443,168 +903,306 @@ impl App {
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
         self.sync_active_view();
-        let interactive = matches!(self.options.mode, Mode::Interactive | Mode::Panels);
-        let mut content = if interactive {
-            self.panels.layout(self.window_size)
-        } else {
-            Rect {
+        let interactive = matches!(self.options.mode, Mode::Interactive | Mode::Panels)
+            || self.options.groups > 1;
+        if !interactive {
+            self.content = Rect {
                 x: 0.,
                 y: 0.,
                 width: self.window_size.width,
                 height: self.window_size.height,
+            };
+            self.view.size = self.window_size;
+            let scene = self.view.scene(self.workspace.editor());
+            self.exact_scene = self.view.exact(self.workspace.editor())
+                && self.workspace.tabs[self.workspace.active].loading.is_none();
+            return scene;
+        }
+        self.workspace.sync_shared();
+        let mut visible = std::collections::BTreeMap::<
+            vel_buffer::BufferId,
+            std::collections::BTreeSet<vel_buffer::ViewId>,
+        >::new();
+        for id in self
+            .workspace
+            .workbench
+            .groups
+            .iter()
+            .flat_map(|g| g.visible())
+        {
+            if let Some(i) = self.workspace.sheet_index(id) {
+                let tab = &self.workspace.tabs[i];
+                visible
+                    .entry(tab.document)
+                    .or_default()
+                    .insert(tab.shared_view);
             }
-        };
-        let mut second_scene = None;
-        if let Some(id) = self.panels.split {
-            if let Some(tab) = self
-                .workspace
-                .tabs
-                .iter()
-                .find(|t| t.editor.buffer.id() == id)
+        }
+        for (document, views) in visible {
+            if let Some(tab) = self.workspace.tabs.iter().find(|t| t.document == document)
+                && let Some(language) = tab.editor.language.borrow_mut().as_mut()
             {
-                self.secondary.size = Size {
-                    width: content.width / 2.,
-                    height: content.height,
-                };
-                self.secondary.scroll_x = tab.scroll.0;
-                self.secondary.scroll_y = tab.scroll.1;
-                second_scene = Some((self.secondary.scene(&tab.editor), content.x));
-                content.x += content.width / 2.;
-                content.width /= 2.;
-            } else {
-                self.panels.split = None;
+                language.retain_visible_views(&views);
             }
         }
-        self.content = content;
-        self.view.size = Size {
-            width: content.width,
-            height: content.height,
-        };
-        self.view.find_matches.clear();
-        self.view.focused = self.window_focused
-            && (!interactive || (self.panels.input().is_none() && !self.panels.side_focused));
-        if interactive {
-            self.view.apply_style(self.workspace.editor());
-            let viewport = self.view.viewport(self.workspace.editor());
-            let first = self
-                .panels
-                .highlights
-                .partition_point(|r| r.end < viewport.start);
-            self.view.find_matches.extend(
-                self.panels.highlights[first..]
-                    .iter()
-                    .take_while(|r| r.start <= viewport.end)
-                    .cloned(),
-            );
-        }
-        let mut scene = self.view.scene(self.workspace.editor());
-        self.exact_scene = self.view.exact(self.workspace.editor())
-            && self.workspace.tabs[self.workspace.active].loading.is_none();
-        translate_scene(&mut scene, content.x, 0.);
-        if let Some((mut second, x)) = second_scene {
-            translate_scene(&mut second, x, 0.);
-            second.layers.extend(scene.layers);
-            scene = second;
-        }
-        let mut tabs = SceneLayer::default();
-        let side = if interactive && self.panels.side_visible {
-            220f64.min(self.window_size.width * 0.3)
-        } else {
-            0.
-        };
-        let all = Rect {
-            x: side,
-            y: 0.,
-            width: self.window_size.width - side,
-            height: crate::view::TAB_HEIGHT,
-        };
-        vel_ui::fill(&mut tabs, all, all, [0.1, 0.11, 0.14, 1.]);
-        let active_id = self.workspace.editor().buffer.id();
-        if self.last_active != Some(active_id) {
-            let left = self.workspace.active as f64 * self.tab_width();
-            if left < self.panels.tab_scroll {
-                self.panels.tab_scroll = left;
-            }
-            if left + self.tab_width() > self.panels.tab_scroll + all.width {
-                self.panels.tab_scroll = left + self.tab_width() - all.width;
-            }
-            self.last_active = Some(active_id);
-        }
-        self.panels.tab_scroll = self.panels.tab_scroll.clamp(
-            0.,
-            (self.workspace.tabs.len() as f64 * self.tab_width() - all.width).max(0.),
-        );
-        for (index, tab) in self.workspace.tabs.iter().enumerate() {
-            let x = side + index as f64 * self.tab_width() - self.panels.tab_scroll;
-            if x + self.tab_width() < all.x || x > all.x + all.width {
+        let bounds = self.panels.layout(self.window_size);
+        self.workbench_bounds = bounds;
+        self.sheet_bounds.clear();
+        self.group_bounds.clear();
+        self.tab_hits.clear();
+        let active = self.workspace.active;
+        let focused = self.workspace.tabs[active].sheet;
+        let mut scene = vel_render::scene::Scene::default();
+        let mut chrome = SceneLayer::default();
+        let mut exact = true;
+        let groups = self.workspace.workbench.groups.clone();
+        for (group_index, group) in groups.iter().enumerate() {
+            let Some(group_bounds) = self.workspace.workbench.layout.rect(group_index, bounds)
+            else {
                 continue;
-            }
-            let rect = Rect {
-                x,
-                y: 0.,
-                width: self.tab_width() - 1.,
-                height: all.height,
             };
-            vel_ui::fill(
-                &mut tabs,
-                rect,
-                all,
-                if index == self.workspace.active {
-                    [0.2, 0.22, 0.27, 1.]
+            self.group_bounds.push(group_bounds);
+            let visible = group.visible();
+            let count = visible.len().max(1);
+            for (position, sheet) in visible.iter().enumerate() {
+                let Some(index) = self.workspace.sheet_index(*sheet) else {
+                    continue;
+                };
+                let rect = Rect {
+                    x: group_bounds.x + position as f64 * group_bounds.width / count as f64,
+                    y: group_bounds.y,
+                    width: group_bounds.width / count as f64,
+                    height: group_bounds.height,
+                };
+                self.sheet_bounds.insert(*sheet, rect);
+                if let Err(e) = self.workspace.prepare_sheet(index) {
+                    self.workspace.messages.push(e);
+                    continue;
+                }
+                let mut other;
+                let view = if *sheet == focused {
+                    self.content = rect;
+                    &mut self.view
                 } else {
-                    [0.12, 0.13, 0.16, 1.]
-                },
-            );
-            let label = if let Some((read, total)) = tab.progress() {
-                format!("Loading {}%", read.saturating_mul(100) / total.max(1))
-            } else {
-                format!("{}{}", if tab.transient { "◦ " } else { "" }, tab.label())
-            };
-            vel_ui::label(
-                &mut tabs,
-                &label,
-                x + 8.,
-                20.,
-                Rect {
-                    width: rect.width - 25.,
-                    ..rect
-                },
-                [0.85, 0.88, 0.93, 1.],
-            );
-            vel_ui::label(
-                &mut tabs,
-                "×",
-                x + self.tab_width() - 20.,
-                20.,
-                all,
-                [0.7, 0.75, 0.8, 1.],
-            );
-            let id = 100 + index as u64;
-            let node = self
-                .panels
-                .tree
-                .nodes
-                .entry(id)
-                .or_insert_with(|| vel_ui::Node::new("tab_control"));
-            node.rect = rect;
-            node.visible = true;
-            self.panels.tree.roots.insert(0, id);
-            node.attributes
-                .retain(|a| matches!(*a, "hover" | "pressed"));
-            if index == self.workspace.active {
-                node.attributes.insert("selected");
+                    other = self.sheet_views.remove(sheet).unwrap_or_else(|| {
+                        View::new(
+                            Size {
+                                width: rect.width,
+                                height: rect.height,
+                            },
+                            self.fonts.as_ref().map_or(8., |f| f.cell as f64),
+                            self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
+                        )
+                    });
+                    other.scroll_x = self.workspace.tabs[index].scroll.0;
+                    other.scroll_y = self.workspace.tabs[index].scroll.1;
+                    &mut other
+                };
+                view.size = Size {
+                    width: rect.width,
+                    height: rect.height,
+                };
+                view.appearance = if self.workspace.dark {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                };
+                view.tab_height = if self.workspace.distraction_free {
+                    0.
+                } else {
+                    crate::view::TAB_HEIGHT
+                };
+                view.focused = *sheet == focused
+                    && self.window_focused
+                    && self.panels.input().is_none()
+                    && !self.panels.side_focused;
+                view.find_matches.clear();
+                view.apply_style(&self.workspace.tabs[index].editor);
+                if *sheet == focused {
+                    let viewport = view.viewport(&self.workspace.tabs[index].editor);
+                    let first = self
+                        .panels
+                        .highlights
+                        .partition_point(|r| r.end < viewport.start);
+                    view.find_matches.extend(
+                        self.panels.highlights[first..]
+                            .iter()
+                            .take_while(|r| r.start <= viewport.end)
+                            .cloned(),
+                    );
+                }
+                let mut part = view.scene(&self.workspace.tabs[index].editor);
+                exact &= view.exact(&self.workspace.tabs[index].editor)
+                    && self.workspace.tabs[index].loading.is_none();
+                if self.workspace.tabs[index]
+                    .editor
+                    .settings
+                    .bool("show_errors_inline", true)
+                {
+                    let editor = &self.workspace.tabs[index].editor;
+                    let path = &self.workspace.tabs[index].path;
+                    let mut badges = SceneLayer::default();
+                    let clip = Rect {
+                        x: 0.,
+                        y: view.tab_height,
+                        width: rect.width,
+                        height: (rect.height - view.tab_height).max(0.),
+                    };
+                    for d in self
+                        .builds
+                        .diagnostics
+                        .iter()
+                        .filter(|d| path.as_ref() == Some(&d.path))
+                    {
+                        let row = d.line.saturating_sub(1).min(editor.text.len_lines() - 1);
+                        let at = editor.text.line_to_byte(row);
+                        let position = view.rect_at(editor, at);
+                        if position.y >= view.tab_height && position.y < rect.height {
+                            let badge = Rect {
+                                x: (rect.width * 0.45).max(30.),
+                                y: position.y,
+                                width: rect.width * 0.55,
+                                height: view.line_height,
+                            };
+                            vel_ui::fill(&mut badges, badge, clip, [0.35, 0.12, 0.12, 0.92]);
+                            vel_ui::label(
+                                &mut badges,
+                                &d.message,
+                                badge.x + 4.,
+                                badge.y + view.ascent,
+                                clip,
+                                [1., 0.77, 0.73, 1.],
+                            );
+                        }
+                    }
+                    part.layers.push(badges);
+                }
+                if *sheet != focused {
+                    self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+                    let view = std::mem::replace(view, View::new(Size::default(), 8., 12.));
+                    self.sheet_views.insert(*sheet, view);
+                }
+                translate_scene(&mut part, rect.x, rect.y);
+                scene.layers.extend(part.layers);
             }
-            if tab.dirty() {
-                node.attributes.insert("dirty");
-            }
-            if tab.transient {
-                node.attributes.insert("transient");
+            if !self.workspace.distraction_free {
+                let bar = Rect {
+                    height: crate::view::TAB_HEIGHT,
+                    ..group_bounds
+                };
+                vel_ui::fill(&mut chrome, bar, bar, [0.1, 0.11, 0.14, 1.]);
+                let scroll = group
+                    .tab_scroll
+                    .clamp(0., (group.sheets.len() as f64 * 180. - bar.width).max(0.));
+                for (position, sheet) in group.sheets.iter().enumerate() {
+                    let Some(index) = self.workspace.sheet_index(*sheet) else {
+                        continue;
+                    };
+                    let tab = &self.workspace.tabs[index];
+                    let rect = Rect {
+                        x: bar.x + position as f64 * 180. - scroll,
+                        y: bar.y,
+                        width: 179.,
+                        height: bar.height,
+                    };
+                    if rect.x + rect.width <= bar.x || rect.x >= bar.x + bar.width {
+                        continue;
+                    }
+                    let hit = Rect {
+                        x: rect.x.max(bar.x),
+                        width: (rect.x + rect.width).min(bar.x + bar.width) - rect.x.max(bar.x),
+                        ..rect
+                    };
+                    self.tab_hits.push((*sheet, hit));
+                    let selected = group.selected.contains(sheet);
+                    vel_ui::fill(
+                        &mut chrome,
+                        rect,
+                        bar,
+                        if selected {
+                            [0.2, 0.22, 0.27, 1.]
+                        } else {
+                            [0.12, 0.13, 0.16, 1.]
+                        },
+                    );
+                    let caption = if let Some((read, total)) = tab.progress() {
+                        format!("Loading {}%", read.saturating_mul(100) / total.max(1))
+                    } else {
+                        format!("{}{}", if tab.transient { "◦ " } else { "" }, tab.label())
+                    };
+                    vel_ui::label(
+                        &mut chrome,
+                        &caption,
+                        rect.x + 8.,
+                        rect.y + 20.,
+                        Rect {
+                            width: (rect.width - 25.).min(bar.x + bar.width - rect.x),
+                            ..rect
+                        },
+                        [0.85, 0.88, 0.93, 1.],
+                    );
+                    vel_ui::label(
+                        &mut chrome,
+                        "×",
+                        rect.x + 160.,
+                        rect.y + 20.,
+                        bar,
+                        [0.7, 0.75, 0.8, 1.],
+                    );
+                    let id = 100 + *sheet;
+                    let node = self
+                        .panels
+                        .tree
+                        .nodes
+                        .entry(id)
+                        .or_insert_with(|| vel_ui::Node::new("tab_control"));
+                    node.rect = hit;
+                    node.visible = true;
+                    node.attributes
+                        .retain(|a| matches!(*a, "hover" | "pressed"));
+                    if selected {
+                        node.attributes.insert("selected");
+                    }
+                    if *sheet == focused {
+                        node.attributes.insert("focused");
+                    }
+                    if tab.dirty() {
+                        node.attributes.insert("dirty");
+                    }
+                    if tab.transient {
+                        node.attributes.insert("transient");
+                    }
+                    self.panels.tree.roots.insert(0, id);
+                    if selected && group.selected.len() > 1 {
+                        let connector = Rect {
+                            y: rect.y + rect.height - 2.,
+                            height: 2.,
+                            ..rect
+                        };
+                        vel_ui::fill(&mut chrome, connector, bar, [0.4, 0.7, 0.95, 1.]);
+                        let id = (5 << 40) + *sheet;
+                        let node = self
+                            .panels
+                            .tree
+                            .nodes
+                            .entry(id)
+                            .or_insert_with(|| vel_ui::Node::new("tab_connector"));
+                        node.rect = connector;
+                        node.visible = true;
+                        node.interactive = false;
+                        node.attributes.insert("selected");
+                    }
+                }
             }
         }
-        scene.layers.push(tabs);
-        if interactive {
-            self.panels.paint(&self.workspace, &mut scene);
+        for (_, divider) in self.workspace.workbench.layout.dividers(bounds, 2.) {
+            vel_ui::fill(&mut chrome, divider, bounds, [0.28, 0.3, 0.35, 1.]);
         }
+        let _ = self.workspace.prepare_sheet(active);
+        self.workspace.sync_shared();
+        self.exact_scene = exact;
+        scene.layers.push(chrome);
+        self.panels.paint(&self.workspace, &mut scene);
         scene
     }
     fn log_input(&self, kind: &str, event: impl std::fmt::Debug) {
@@ -616,6 +1214,10 @@ impl App {
     fn changed(&mut self, w: &WindowHandle, received: Instant, reveal: bool) {
         if reveal {
             self.view.reset_caret();
+        }
+        self.workspace.sync_shared();
+        if self.options.mode == Mode::Interactive {
+            self.session_due = Some(Instant::now() + Duration::from_millis(300));
         }
         self.sync_active_view();
         self.input_at.get_or_insert(received);
@@ -693,10 +1295,15 @@ impl App {
     }
     fn finish(&mut self, w: &WindowHandle) -> Result<(), String> {
         w.set_animating(false);
-        self.renderer
+        if let Err(message) = self
+            .renderer
             .as_ref()
             .ok_or("renderer missing")?
-            .persist_pipeline_cache()?;
+            .persist_pipeline_cache()
+        {
+            self.reporter
+                .emit(json!({"kind":"cache_error","message":message}))?;
+        }
         self.reporter.emit(json!({"kind":"final_render_state","atlas":self.renderer.as_ref().map(Renderer::atlas_info),"fonts":self.fonts.as_ref().map(Fonts::metadata),"external_input_events":self.external_input}))?;
         self.reporter
             .emit(json!({"kind":"complete","complete":true,"output":self.reporter.path}))?;
@@ -865,13 +1472,15 @@ impl AppHandler for App {
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.window_size = w.content_size();
-        self.secondary = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.view.appearance = w.appearance();
-        self.secondary.appearance = w.appearance();
         self.workspace
             .set_appearance(w.appearance() == Appearance::Dark)?;
         self.view.reveal(self.workspace.editor());
-        let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/pipeline-cache");
+        let cache_dir = self
+            .workspace
+            .data_path()
+            .map(|p| p.join("Cache/Renderer"))
+            .unwrap_or_else(|| std::env::temp_dir().join("velocity-renderer-cache"));
         self.renderer = Some(Renderer::new(
             w.clone(),
             self.options.mode == Mode::Scroll,
@@ -883,6 +1492,11 @@ impl AppHandler for App {
         }
         self.font_face = self.workspace.editor().preferences.font_face.clone();
         self.fonts = Some(fonts);
+        if self.options.mode == Mode::Interactive
+            && (self.workspace.fullscreen || self.workspace.distraction_free)
+        {
+            w.toggle_full_screen();
+        }
         Ok(())
     }
     fn on_key(&mut self, w: &WindowHandle, event: KeyEvent) -> bool {
@@ -944,6 +1558,24 @@ impl AppHandler for App {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
+        match name {
+            "focus_group" | "move_to_group"
+                if args["group"]
+                    .as_u64()
+                    .is_none_or(|g| g as usize >= self.workspace.workbench.groups.len()) =>
+            {
+                return false;
+            }
+            "close_pane" | "close_split" if self.workspace.workbench.groups.len() < 2 => {
+                return false;
+            }
+            "cancel_build" if self.builds.task.is_none() => return false,
+            "next_result" | "prev_result" if self.builds.diagnostics.is_empty() => return false,
+            "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
+                return false;
+            }
+            _ => {}
+        }
         if self.panels.input().is_some()
             && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
         {
@@ -1017,12 +1649,39 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        if event.kind == MouseKind::Down {
+            self.dragging_splitter =
+                self.workspace
+                    .workbench
+                    .layout
+                    .splitter(event.position, self.workbench_bounds, 4.);
+            if self.dragging_splitter.is_some() {
+                return;
+            }
+        }
+        if let Some(splitter) = self.dragging_splitter {
+            if event.kind == MouseKind::Drag {
+                let bounds = self.workbench_bounds;
+                let position = if splitter.vertical {
+                    (event.position.x - bounds.x) / bounds.width
+                } else {
+                    (event.position.y - bounds.y) / bounds.height
+                };
+                self.workspace.workbench.layout.drag(splitter, position);
+                self.changed(w, Instant::now(), false);
+                return;
+            }
+            if event.kind == MouseKind::Up {
+                self.dragging_splitter = None;
+                return;
+            }
+        }
         if event.kind == MouseKind::Move {
             let _ = self.view.pointer(
                 self.workspace.editor_mut(),
                 Point {
                     x: event.position.x - self.content.x,
-                    y: event.position.y,
+                    y: event.position.y - self.content.y,
                 },
                 false,
                 false,
@@ -1033,6 +1692,7 @@ impl AppHandler for App {
             return;
         }
         let viewport = self.viewport();
+        self.panels.primary_click = event.modifiers.command();
         match self.panels.mouse(
             &mut self.workspace,
             event.position,
@@ -1057,23 +1717,41 @@ impl AppHandler for App {
                 return;
             }
         }
-        let side = if self.panels.side_visible {
-            220f64.min(self.window_size.width * 0.3)
-        } else {
-            0.
-        };
-        if event.kind == MouseKind::Down && event.position.y < crate::view::TAB_HEIGHT {
-            let local = event.position.x - side + self.panels.tab_scroll;
-            let index = (local / self.tab_width()).max(0.) as usize;
-            if index < self.workspace.tabs.len() {
-                if local % self.tab_width() > self.tab_width() - 20. {
-                    if self.can_close(w, index) {
-                        let _ = self.workspace.close(index);
+        if event.kind == MouseKind::Down
+            && let Some((sheet, rect)) = self
+                .tab_hits
+                .iter()
+                .find(|(_, rect)| vel_ui::contains(*rect, event.position))
+                .copied()
+        {
+            if let Some(index) = self.workspace.sheet_index(sheet) {
+                if event.position.x >= rect.x + rect.width - 20. {
+                    let mut indices = if self.workspace.workbench.group_of(sheet).is_some_and(|g| {
+                        self.workspace.workbench.groups[g].selected.contains(&sheet)
+                    }) {
+                        let group = self.workspace.workbench.group_of(sheet).expect("group");
+                        self.workspace.workbench.groups[group]
+                            .visible()
+                            .iter()
+                            .filter_map(|s| self.workspace.sheet_index(*s))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![index]
+                    };
+                    if self.can_close_many(w, &indices) {
+                        indices.sort_unstable();
+                        for index in indices.into_iter().rev() {
+                            let _ = self.workspace.close(index);
+                        }
                     }
                 } else {
                     self.workspace.tabs[self.workspace.active].scroll =
                         (self.view.scroll_x, self.view.scroll_y);
-                    self.workspace.select(index);
+                    self.workspace.click_sheet(
+                        index,
+                        event.modifiers.command(),
+                        event.modifiers.shift(),
+                    );
                     self.panels.dragging_tab = Some(index);
                     if event.click_count >= 2 {
                         self.workspace.tabs[index].transient = false;
@@ -1086,20 +1764,56 @@ impl AppHandler for App {
         if event.kind == MouseKind::Drag
             && let Some(from) = self.panels.dragging_tab
         {
-            let to = (((event.position.x - side + self.panels.tab_scroll) / self.tab_width())
-                .max(0.) as usize)
-                .min(self.workspace.tabs.len() - 1);
-            if from != to {
-                let tab = self.workspace.tabs.remove(from);
-                self.workspace.tabs.insert(to, tab);
-                self.workspace.active = to;
-                self.panels.dragging_tab = Some(to);
+            if let Some(target) = self
+                .group_bounds
+                .iter()
+                .position(|b| vel_ui::contains(*b, event.position))
+            {
+                if target != self.workspace.workbench.active {
+                    let _ = self.workspace.workbench.move_selected(target);
+                    let _ = self.workspace.focus_current_group();
+                } else if let Some((sheet, _)) = self
+                    .tab_hits
+                    .iter()
+                    .find(|(_, rect)| vel_ui::contains(*rect, event.position))
+                {
+                    let moved = self.workspace.tabs.get(from).map(|t| t.sheet);
+                    let group = &mut self.workspace.workbench.groups[target];
+                    if let Some(moved) = moved
+                        && moved != *sheet
+                        && let Some(to) = group.sheets.iter().position(|s| s == sheet)
+                    {
+                        group.sheets.retain(|s| *s != moved);
+                        group.sheets.insert(to.min(group.sheets.len()), moved);
+                    }
+                }
                 self.changed(w, Instant::now(), false);
             }
             return;
         }
         if event.kind == MouseKind::Up {
             self.panels.dragging_tab = None;
+        }
+        if event.kind == MouseKind::Down
+            && let Some((&sheet, _)) = self
+                .sheet_bounds
+                .iter()
+                .find(|(_, rect)| vel_ui::contains(**rect, event.position))
+            && let Some(index) = self.workspace.sheet_index(sheet)
+            && index != self.workspace.active
+        {
+            self.workspace.tabs[self.workspace.active].scroll =
+                (self.view.scroll_x, self.view.scroll_y);
+            if let Some(group) = self.workspace.workbench.group_of(sheet) {
+                self.workspace.workbench.active = group;
+                self.workspace.workbench.groups[group].focused = Some(sheet);
+            }
+            if let Err(e) = self.workspace.prepare_sheet(index) {
+                self.show_error(w, &e);
+                return;
+            }
+            self.workspace.active = index;
+            self.sync_active_view();
         }
         let command = self
             .workspace
@@ -1148,27 +1862,11 @@ impl AppHandler for App {
         if event.button != 0 {
             return;
         }
-        if event.kind == MouseKind::Down
-            && event.position.x < self.content.x
-            && let Some(id) = self.panels.split
-        {
-            if let Some(index) = self
-                .workspace
-                .tabs
-                .iter()
-                .position(|t| t.editor.buffer.id() == id)
-            {
-                self.panels.split = Some(self.workspace.editor().buffer.id());
-                self.workspace.select(index);
-                self.changed(w, Instant::now(), true);
-            }
-            return;
-        }
         match self.view.pointer(
             self.workspace.editor_mut(),
             Point {
                 x: event.position.x - self.content.x,
-                y: event.position.y,
+                y: event.position.y - self.content.y,
             },
             event.kind == MouseKind::Down,
             event.kind == MouseKind::Drag,
@@ -1188,7 +1886,7 @@ impl AppHandler for App {
             self.workspace.editor(),
             Point {
                 x: event.position.x - self.content.x,
-                y: event.position.y,
+                y: event.position.y - self.content.y,
             },
         );
         match event.kind {
@@ -1220,9 +1918,15 @@ impl AppHandler for App {
         } else {
             self.view.line_height
         };
-        if event.position.y < crate::view::TAB_HEIGHT {
-            self.panels.tab_scroll =
-                (self.panels.tab_scroll - (event.delta_x + event.delta_y) * scale).max(0.);
+        if let Some(group) = self.group_bounds.iter().position(|r| {
+            event.position.y >= r.y
+                && event.position.y < r.y + crate::view::TAB_HEIGHT
+                && vel_ui::contains(*r, event.position)
+        }) {
+            self.workspace.workbench.groups[group].tab_scroll =
+                (self.workspace.workbench.groups[group].tab_scroll
+                    - (event.delta_x + event.delta_y) * scale)
+                    .max(0.);
             self.changed(w, Instant::now(), false);
             return;
         }
@@ -1230,20 +1934,25 @@ impl AppHandler for App {
             self.changed(w, Instant::now(), false);
             return;
         }
-        if event.position.x < self.content.x
-            && let Some(id) = self.panels.split
-            && let Some(index) = self
-                .workspace
-                .tabs
-                .iter()
-                .position(|t| t.editor.buffer.id() == id)
+        if let Some((&sheet, _)) = self
+            .sheet_bounds
+            .iter()
+            .find(|(_, rect)| vel_ui::contains(**rect, event.position))
+            && sheet != self.workspace.tabs[self.workspace.active].sheet
+            && let Some(index) = self.workspace.sheet_index(sheet)
         {
-            self.secondary.scroll(
-                &self.workspace.tabs[index].editor,
-                -event.delta_x * scale,
-                -event.delta_y * scale,
-            );
-            self.workspace.tabs[index].scroll = (self.secondary.scroll_x, self.secondary.scroll_y);
+            let active = self.workspace.active;
+            if self.workspace.prepare_sheet(index).is_ok()
+                && let Some(view) = self.sheet_views.get_mut(&sheet)
+            {
+                view.scroll(
+                    &self.workspace.tabs[index].editor,
+                    -event.delta_x * scale,
+                    -event.delta_y * scale,
+                );
+                self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+            }
+            let _ = self.workspace.prepare_sheet(active);
             self.changed(w, Instant::now(), false);
             return;
         }
@@ -1255,6 +1964,9 @@ impl AppHandler for App {
         self.changed(w, Instant::now(), false);
     }
     fn on_resize(&mut self, w: &WindowHandle, size: Size, scale: f64) {
+        if self.options.mode == Mode::Interactive {
+            self.workspace.fullscreen = w.is_full_screen();
+        }
         self.window_size = size;
         self.view.size = size;
         self.view.clamp_scroll(self.workspace.editor());
@@ -1268,7 +1980,9 @@ impl AppHandler for App {
     }
     fn on_appearance(&mut self, w: &WindowHandle, appearance: Appearance) {
         self.view.appearance = appearance;
-        self.secondary.appearance = appearance;
+        for view in self.sheet_views.values_mut() {
+            view.appearance = appearance;
+        }
         if let Err(e) = self
             .workspace
             .set_appearance(appearance == Appearance::Dark)
@@ -1291,17 +2005,29 @@ impl AppHandler for App {
         let focused = w.is_focused();
         let focus_changed = self.window_focused != focused;
         self.window_focused = focused;
-        self.secondary.focused = false;
+        if focused && self.options.mode == Mode::Interactive {
+            self.sessions.borrow_mut().active_window = Some(self.session_id);
+        }
         if self.startup_done && matches!(self.options.mode, Mode::Interactive | Mode::Open) {
             let loading_before = self.workspace.tabs.iter().any(|t| t.loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
             let mut changed = self.workspace.poll() || focus_changed;
+            changed |= self.builds.poll(&mut self.panels);
+            if changed && self.options.mode == Mode::Interactive && self.session_due.is_none() {
+                self.session_due = Some(Instant::now() + Duration::from_millis(300));
+            }
+            if self.options.mode == Mode::Interactive {
+                self.poll_workbench(w)?;
+            }
+            if focus_changed {
+                w.set_menu(&native_menu(&self.workspace.menus));
+            }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
             if let Err(error) = self.replacement_confirmation(w) {
                 self.show_error(w, &error);
             }
-            if self.panels.busy() {
+            if self.panels.busy() || self.builds.task.is_some() {
                 w.request_frame_at(Instant::now() + Duration::from_millis(8));
             }
             if active_was_loading && self.workspace.tabs[self.workspace.active].loading.is_none() {
@@ -1354,7 +2080,10 @@ impl AppHandler for App {
                 Instant::now()
                     + Duration::from_millis(if caret_animation {
                         16
-                    } else if self.workspace.language_busy() || self.panels.busy() {
+                    } else if self.workspace.language_busy()
+                        || self.panels.busy()
+                        || self.builds.task.is_some()
+                    {
                         8
                     } else {
                         200
@@ -1557,20 +2286,69 @@ impl AppHandler for App {
         Ok(())
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
-        if self.options.mode == Mode::Interactive {
-            for index in 0..self.workspace.tabs.len() {
-                if !self.can_close(w, index) {
+        self.workspace.fullscreen = w.is_full_screen();
+        if self.options.mode != Mode::Interactive {
+            let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
+            return true;
+        }
+        for index in 0..self.workspace.tabs.len() {
+            let _ = self.workspace.prepare_sheet(index);
+            self.workspace.tabs[index].editor.unmark();
+        }
+        let _ = self.workspace.prepare_sheet(self.workspace.active);
+        if self.hot_exit().retain(true) {
+            if let Err(error) = self.save_workspace_checkpoint() {
+                if self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
+                {
+                    self.show_error(w,&format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
                     return false;
                 }
+                self.panels.message = error;
+            }
+        } else {
+            if !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {
+                return false;
+            }
+            if let Err(error) = self.save_workspace_checkpoint() {
+                self.panels.message = error;
             }
         }
-        let record = if self.options.mode.automatic() {
-            json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false})
+        true
+    }
+    fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        self.workspace.fullscreen = w.is_full_screen();
+        if self.options.mode != Mode::Interactive {
+            return self.on_quit_requested(w);
+        }
+        let retain = self.hot_exit().retain(false);
+        if retain {
+            if let Err(error) = self
+                .checkpoint_reason(false, true)
+                .and_then(|()| self.sessions.borrow().flush())
+            {
+                if self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
+                {
+                    self.show_error(w, &format!("Could not save closed window: {error}"));
+                    return false;
+                }
+                self.panels.message = error;
+            }
         } else {
-            self.done.store(true, Ordering::Release);
-            json!({"kind":"complete","complete":true})
-        };
-        let _ = self.reporter.emit(record);
+            if !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {
+                return false;
+            }
+            let _ = self.checkpoint_reason(false, true);
+        }
+        self.sessions.borrow_mut().close(self.session_id, retain);
+        let _ = self.sessions.borrow().flush();
         true
     }
     fn text_input_state(&self) -> TextInputState {
@@ -1581,6 +2359,7 @@ impl AppHandler for App {
             .view
             .rect_at(self.workspace.editor(), self.workspace.editor().caret);
         caret.x += self.content.x;
+        caret.y += self.content.y;
         TextInputState {
             text: self.workspace.editor().text.clone(),
             selected: self.workspace.editor().selected_utf16(),
@@ -1594,6 +2373,7 @@ impl AppHandler for App {
         }
         let (mut rect, range) = self.view.range_rect(self.workspace.editor(), range);
         rect.x += self.content.x;
+        rect.y += self.content.y;
         (rect, range)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
@@ -1608,36 +2388,10 @@ impl AppHandler for App {
                     self.workspace.editor(),
                     Point {
                         x: point.x - self.content.x,
-                        y: point.y,
+                        y: point.y - self.content.y,
                     },
                 )),
         )
-    }
-}
-
-fn translate_scene(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
-    let shift = |rect: &mut Rect| {
-        rect.x += x;
-        rect.y += y;
-    };
-    for layer in &mut scene.layers {
-        for rect in &mut layer.rects {
-            shift(&mut rect.rect);
-            shift(&mut rect.clip);
-        }
-        for shadow in &mut layer.shadows {
-            shift(&mut shadow.rect);
-            shift(&mut shadow.clip);
-        }
-        for underline in &mut layer.underlines {
-            shift(&mut underline.rect);
-            shift(&mut underline.clip);
-        }
-        for text in &mut layer.text {
-            text.x += x as f32;
-            text.baseline += y as f32;
-            shift(&mut text.clip);
-        }
     }
 }
 
@@ -1656,4 +2410,72 @@ fn native_menu(items: &[vel_config::ui::MenuItem]) -> Vec<MenuEntry> {
             children: native_menu(&item.children),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod workbench_scenes {
+    use super::*;
+    fn app(workspace: Workspace) -> App {
+        let reporter = Reporter::new(Mode::HeadlessWorkbench, None, Instant::now()).unwrap();
+        App::new(
+            Options::default(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            reporter,
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
+        )
+    }
+    #[test]
+    fn four_groups_render_per_group_tabs_and_keep_actual_buffer_on_focused_sheet() {
+        let mut workspace =
+            Workspace::new(vel_text::Text::from("hello\nworld"), None, None, false).unwrap();
+        crate::workbench::configure_groups(&mut workspace, 4).unwrap();
+        let mut app = app(workspace);
+        let scene = app.scene();
+        assert!(!scene.layers.is_empty());
+        assert_eq!(app.sheet_bounds.len(), 4);
+        assert_eq!(app.group_bounds.len(), 4);
+        assert!(app.group_bounds[2].y > app.group_bounds[0].y);
+        assert_eq!(
+            app.workspace.editor().buffer.id(),
+            app.workspace.tabs[app.workspace.active].document
+        );
+        assert_eq!(
+            app.panels
+                .tree
+                .nodes
+                .values()
+                .filter(|n| n.visible && n.class == "tab_control")
+                .count(),
+            4
+        );
+    }
+    #[test]
+    fn multi_selected_sheets_render_in_one_group_with_connector_hooks() {
+        let mut workspace = Workspace::new(vel_text::Text::from("one"), None, None, false).unwrap();
+        workspace.new_file().unwrap();
+        workspace.new_file().unwrap();
+        workspace.click_sheet(0, false, false);
+        workspace.click_sheet(2, false, true);
+        let mut app = app(workspace);
+        app.scene();
+        assert_eq!(app.group_bounds.len(), 1);
+        assert_eq!(app.sheet_bounds.len(), 3);
+        assert_eq!(
+            app.panels
+                .tree
+                .nodes
+                .values()
+                .filter(|n| n.visible && n.class == "tab_connector")
+                .count(),
+            3
+        );
+        let width = app.group_bounds[0].width / 3.;
+        assert!(
+            app.sheet_bounds
+                .values()
+                .all(|r| (r.width - width).abs() < 0.01)
+        );
+    }
 }

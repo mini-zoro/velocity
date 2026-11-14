@@ -17,6 +17,8 @@ pub enum Layer {
     Syntax,
     /// Project values.
     Project,
+    /// Mode-specific editor overrides from Distraction Free.sublime-settings.
+    DistractionFree,
     /// View overrides.
     View,
 }
@@ -25,7 +27,7 @@ type Observer = Arc<dyn Fn(&str, Option<&Value>) + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct Settings {
     revision: u64,
-    layers: [Map<String, Value>; 6],
+    layers: [Map<String, Value>; 7],
     observers: BTreeMap<String, Observer>,
 }
 impl fmt::Debug for Settings {

@@ -1,4 +1,4 @@
-// Velocity native menu, limited to implemented actions.
+// Velocity menus, authored from public command behavior.
 [
   {
     "caption": "File",
@@ -9,7 +9,7 @@
         "command": "new_file"
       },
       {
-        "caption": "Open\u2026",
+        "caption": "Open…",
         "command": "prompt_open_file"
       },
       {
@@ -17,7 +17,7 @@
         "command": "save"
       },
       {
-        "caption": "Save As\u2026",
+        "caption": "Save As…",
         "command": "prompt_save_as"
       },
       {
@@ -27,6 +27,14 @@
       {
         "caption": "Close File",
         "command": "close_file"
+      },
+      {
+        "caption": "New Window",
+        "command": "new_window"
+      },
+      {
+        "caption": "Close Window",
+        "command": "close_window"
       }
     ]
   },
@@ -99,6 +107,245 @@
       {
         "caption": "Smaller Font",
         "command": "decrease_font_size"
+      },
+      {
+        "caption": "Layout",
+        "children": [
+          {
+            "caption": "Single",
+            "command": "set_layout",
+            "args": {
+              "preset": "single"
+            }
+          },
+          {
+            "caption": "Columns: 2",
+            "command": "set_layout",
+            "args": {
+              "preset": "columns2"
+            }
+          },
+          {
+            "caption": "Columns: 3",
+            "command": "set_layout",
+            "args": {
+              "preset": "columns3"
+            }
+          },
+          {
+            "caption": "Columns: 4",
+            "command": "set_layout",
+            "args": {
+              "preset": "columns4"
+            }
+          },
+          {
+            "caption": "Rows: 2",
+            "command": "set_layout",
+            "args": {
+              "preset": "rows2"
+            }
+          },
+          {
+            "caption": "Rows: 3",
+            "command": "set_layout",
+            "args": {
+              "preset": "rows3"
+            }
+          },
+          {
+            "caption": "Grid: 4",
+            "command": "set_layout",
+            "args": {
+              "preset": "grid4"
+            }
+          }
+        ]
+      },
+      {
+        "caption": "Tab Selection",
+        "children": [
+          {
+            "caption": "Select All Tabs",
+            "command": "select_all_tabs"
+          },
+          {
+            "caption": "Select Focused Tab Only",
+            "command": "select_single_tab"
+          },
+          {
+            "caption": "Add Tab to Left",
+            "command": "select_tab_to_left"
+          },
+          {
+            "caption": "Add Tab to Right",
+            "command": "select_tab_to_right"
+          },
+          {
+            "caption": "Focus Previous Selected Tab",
+            "command": "focus_selected_tab"
+          },
+          {
+            "caption": "Close Selected Tabs",
+            "command": "close_selected_tabs"
+          }
+        ]
+      },
+      {
+        "caption": "Move Selected Tabs to Group",
+        "children": [
+          {
+            "caption": "1",
+            "command": "move_to_group",
+            "args": {
+              "group": 0
+            }
+          },
+          {
+            "caption": "2",
+            "command": "move_to_group",
+            "args": {
+              "group": 1
+            }
+          },
+          {
+            "caption": "3",
+            "command": "move_to_group",
+            "args": {
+              "group": 2
+            }
+          },
+          {
+            "caption": "4",
+            "command": "move_to_group",
+            "args": {
+              "group": 3
+            }
+          }
+        ]
+      },
+      {
+        "caption": "Focus Group",
+        "children": [
+          {
+            "caption": "1",
+            "command": "focus_group",
+            "args": {
+              "group": 0
+            }
+          },
+          {
+            "caption": "2",
+            "command": "focus_group",
+            "args": {
+              "group": 1
+            }
+          },
+          {
+            "caption": "3",
+            "command": "focus_group",
+            "args": {
+              "group": 2
+            }
+          },
+          {
+            "caption": "4",
+            "command": "focus_group",
+            "args": {
+              "group": 3
+            }
+          }
+        ]
+      },
+      {
+        "caption": "New Pane",
+        "command": "new_pane",
+        "args": {
+          "direction": "right"
+        }
+      },
+      {
+        "caption": "Close Pane",
+        "command": "close_pane"
+      },
+      {
+        "caption": "Clone File",
+        "command": "clone_file"
+      },
+      {
+        "caption": "Toggle Full Screen",
+        "command": "toggle_full_screen"
+      },
+      {
+        "caption": "Toggle Distraction Free",
+        "command": "toggle_distraction_free"
+      }
+    ]
+  },
+  {
+    "caption": "Project",
+    "id": "project",
+    "children": [
+      {
+        "caption": "Open Project…",
+        "command": "prompt_open_project"
+      },
+      {
+        "caption": "Save Project As…",
+        "command": "save_project_as"
+      },
+      {
+        "caption": "Close Project",
+        "command": "close_project"
+      },
+      {
+        "caption": "Add Folder…",
+        "command": "add_folder"
+      },
+      {
+        "caption": "Edit Project",
+        "command": "edit_project"
+      },
+      {
+        "caption": "Recent Projects…",
+        "command": "recent_projects"
+      },
+      {
+        "caption": "Quick Switch Project…",
+        "command": "quick_switch_project"
+      }
+    ]
+  },
+  {
+    "caption": "Tools",
+    "id": "tools",
+    "children": [
+      {
+        "caption": "Build System…",
+        "command": "show_build_systems"
+      },
+      {
+        "caption": "Build",
+        "command": "build"
+      },
+      {
+        "caption": "Build With…",
+        "command": "build",
+        "args": {
+          "select": true
+        }
+      },
+      {
+        "caption": "Cancel Build",
+        "command": "cancel_build"
+      },
+      {
+        "caption": "Next Result",
+        "command": "next_result"
+      },
+      {
+        "caption": "Previous Result",
+        "command": "prev_result"
       }
     ]
   }

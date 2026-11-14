@@ -1,3 +1,146 @@
+# Round 7: workbench, sessions, projects and builds
+
+Run from `/Users/zoro/dev/velocity`. Do not commit. This round changes velocity, vel-ui,
+vel-config, vel-commands, vel-platform and the new vel-build/vel-session, plus Cargo.lock.
+Other lanes' working-tree changes and Color Scheme - Velocity are left untouched.
+
+```sh
+cd /Users/zoro/dev/velocity
+cargo fmt -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session --check
+cargo clippy -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session --all-targets -- -D warnings
+cargo test -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session -p vel-fileio -p vel-search -p vel-render
+RUSTDOCFLAGS='-D warnings' cargo doc -p velocity -p vel-ui -p vel-config -p vel-commands -p vel-platform -p vel-build -p vel-session --no-deps
+cargo build --release -p velocity
+python3 crates/velocity/scripts/measure.py --self-test
+python3 crates/velocity/scripts/measure-workbench.py --runs 5
+```
+
+The last command is CPU-only and uses **3840×2160 logical points**, four 1920×1080 viewports,
+a 10k-line Rust document, one real shared Buffer and one highlight/analysis service. Each
+viewport has its own selection/scroll/layout cache and shows a different line interval. Every
+typing/scroll sample waits for exact viewport styles and backend readiness **outside** the
+timer. Typing times keymap/command, journal, buffer ownership and four CPU scenes; the immediate
+post-key scene may use current-text fallback. Scroll times four exact CPU scenes after the
+scroll state and asynchronous highlighting are prepared. Fonts, native input, uploads, GPU,
+presentation and waiting for workers are excluded. Raw samples, all outliers, one copied binary,
+source hashes, per-run results and pooled quantiles are retained in the printed output directory.
+No native rendering or scanout is inferred from these results.
+
+Each run also creates **50 files, including ten hidden 11,000,000-byte files and five small dirty
+files with undo**. Fixture IO is outside timing. Save includes background validation/encoding,
+buffered JSON, temporary-file write, POSIX file fsync, rename and directory fsync. The initial
+save starts with a non-existent profile/Sessions directory. Restore times session IO/parse,
+resource/assets setup and selected document installation in a new Workspace; CPU first-scene
+readiness is separate. It reports the number of loaded/lazy files. This is a CPU proxy for the
+300 ms first-window target; the native mode below is required to assess the complete target.
+The save budget is 20 ms, restore 300 ms, four-group typing p50/p95 2/4 ms, scroll p95 2 ms.
+All measurements and boundaries are in RESULTS.md and timings-round7.json.
+
+Regression comparison with the preceding single-view workload (CPU only):
+
+```sh
+python3 crates/velocity/scripts/measure-views.py --runs 5
+./target/release/velocity --headless-smoke --carets 1
+./target/release/velocity --headless-smoke --carets 1000
+```
+
+## Native reviewer measurements — outside the sandbox
+
+Use an awake, unlocked visible display. First produce an isolated, initially absent profile and
+50-file session without any GUI. The directory names below are new on every run.
+
+```sh
+cd /Users/zoro/dev/velocity
+cargo build --release -p velocity
+VELOCITY_R7=$(mktemp -d /tmp/velocity-r7-review.XXXXXX)
+python3 crates/velocity/scripts/measure-workbench.py --runs 1 --output-dir "$VELOCITY_R7/cpu"
+VELOCITY_R7_PROFILE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runs"][0]["data_dir"])' "$VELOCITY_R7/cpu/summary.json")
+./target/release/velocity --bench-startup --restore-session --data-dir "$VELOCITY_R7_PROFILE" --output "$VELOCITY_R7/restore.jsonl" --timeout 300
+./target/release/velocity --bench-typing --groups 4 --carets 1 --width 2048 --height 1089 --lines 0 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_R7/typing-profile" --output "$VELOCITY_R7/typing-4groups.jsonl" --timeout 300
+./target/release/velocity --bench-typing --groups 4 --carets 1000 --width 2048 --height 1089 --lines 0 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_R7/typing1000-profile" --output "$VELOCITY_R7/typing1000-4groups.jsonl" --timeout 300
+./target/release/velocity --bench-scroll --groups 4 --width 2048 --height 1089 --lines 0 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_R7/scroll-profile" --output "$VELOCITY_R7/scroll-4groups.jsonl" --timeout 300
+MTL_DEBUG_LAYER=1 ./target/release/velocity --bench-startup --restore-session --data-dir "$VELOCITY_R7_PROFILE" --output "$VELOCITY_R7/metal-validation.jsonl" --timeout 300
+```
+
+Repeat with new output names at least five times. At scale 2, 2048×1089 logical is 4096×2178
+physical; record **actual_physical_size**, scale and refresh rate because window constraints
+can reduce it. Native startup correlates a positive presentedTime and includes AppKit/fonts/GPU
+work. The first-window budget is 300 ms. Native typing uses receipt/injection → present-return
+(p50/p95 2/4 ms), not OS/HID delivery. Native scroll CPU p95 is 2 ms. Minimap GPU p95 is 1 ms;
+per-frame multi-pane pass samples should be checked in the native output. Missing timestamps,
+blocked displays, retries, watchdog errors and Metal validation output are not passes. No GUI,
+Metal, display wake or unlock was attempted in the agent session.
+
+## Human feature review
+
+```sh
+./target/release/velocity --data-dir "$VELOCITY_R7/fresh-profile" --project crates/velocity/fixtures/workbench.sublime-project crates/velocity/fixtures/workbench-error.txt
+./target/release/velocity -n --data-dir "$VELOCITY_R7/fresh-profile"
+./target/release/velocity -a --data-dir "$VELOCITY_R7/fresh-profile" crates/velocity/fixtures
+./target/release/velocity -w --data-dir "$VELOCITY_R7/fresh-profile" crates/velocity/fixtures/workbench-error.txt
+printf 'unsaved stdin 你好\n' | ./target/release/velocity --data-dir "$VELOCITY_R7/fresh-profile" -
+```
+
+The first interactive CLI detaches the native application and forwards its request to the local
+socket. Subsequent invocations reuse that process. `-w` holds the client until the requested
+sheets close (or their window/application closes). It never polls the disk as a substitute for
+closing. `-n` creates another native window; `-a` adds folders/opens files in an existing window.
+The socket is private to the current user and profile and lives in the OS temporary directory,
+so an absent or read-only profile does not block forwarding. Explicitly missing CLI files are
+reported without terminating the editor. Automatic measurement modes bypass forwarding.
+
+Choose **Workbench Example** in Tools → Build System, then Cmd+B. A diagnostic should stream
+before the one-second exit, F4/Shift+F4 and output double-click should navigate to line 2, and a
+text badge should appear there. Cmd+Shift+B exposes Success and Cancel Process Tree variants.
+Run the latter and cancel; the UI must remain responsive and all child processes should end.
+The fixture does not write build artifacts. Default public Cargo/Python/Make build resources and
+User `.sublime-build` files are also available; unsupported custom targets report an error.
+
+Use View → Layout presets, drag both grid dividers, focus/move groups (Ctrl+1…4 / Ctrl+Shift+1…4),
+Clone File, New/Close Pane, Cmd/Shift-click tabs and sidebar entries, and Goto Cmd+Enter. Selected
+tabs divide a group horizontally; group splits remain independent. Cmd+J is a Tab Selection chord
+prefix; the menu/palette also expose these commands. Check separate clone selections/scroll,
+shared undo after closing an owner view, batch movement/close, and IME geometry in lower/right panes.
+
+Project Open/Save As/Edit/Close and Ctrl+Cmd+P should preserve folder rules and unknown project
+keys, and restore a per-project workspace. Save As into a previously absent directory. Ensure
+closing/switching projects under disabled/only-on-quit policy offers Save/Cancel/Discard before
+replacing dirty documents. A workspace autosave must not cause repeated settings reloads.
+
+Quit/relaunch with dirty, untitled and clean tabs, undo/redo, folds, syntax overrides, query and
+replacement text, sidebar expansion/scroll, multiple windows and layouts. Try `hot_exit` values
+`always`, `only_on_quit` and `disabled`, plus `remember_open_files: false`. Change an edited file
+externally while the app is quit: retained text should stay dirty and its restored undo stack
+should be empty. Check native full screen and distraction-free entry/exit, including a custom
+`Packages/User/Distraction Free.sublime-settings` and sidebar visibility remembered per mode.
+
+With the application quit, use an isolated profile to test corrupt/read-only storage:
+
+```sh
+mkdir -p "$VELOCITY_R7/corrupt/Sessions"
+printf '{truncated' > "$VELOCITY_R7/corrupt/Sessions/Session.sublime-session"
+./target/release/velocity --data-dir "$VELOCITY_R7/corrupt"
+mkdir -p "$VELOCITY_R7/readonly"
+chmod 555 "$VELOCITY_R7/readonly"
+./target/release/velocity --data-dir "$VELOCITY_R7/readonly"
+```
+
+Corruption starts empty and keeps the corrupt file aside. Read-only startup remains usable;
+clean windows may close, while dirty Hot Exit failures retain the live buffer and explain the
+failed write. Restore write permission afterwards with `chmod 755 "$VELOCITY_R7/readonly"`.
+Never run these destructive fixtures against a real profile. MANUAL_TEST.md has the fill-in rows.
+
+## Buffer serialization handoff
+
+No vel-buffer source was changed. The current public-API journal restores normal command-level
+text undo/redo, save points and selections, but cannot serialize private soft-history events,
+change maps or edit-owner ViewIds exactly. Generic internal transaction grouping may differ.
+The exact requested export/import payload and ownership-remapping API are in
+[vel-session/README.md](../vel-session/README.md#public-buffer-history-adapter-and-requested-api).
+This limitation is explicit; full native history fidelity is pending that API.
+
+---
+
 # Round 6: syntax, language editing and view features
 
 Run from `/Users/zoro/dev/velocity`. Keep lane B's concurrent files unchanged and do not
