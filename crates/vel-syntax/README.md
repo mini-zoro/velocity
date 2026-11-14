@@ -67,8 +67,8 @@ without per-syntax regressions. `tests/last-run.json` preserves evidence.
 
 Limitations: `.tmLanguage` begin/end/while conversion explicitly returns
 `LoadingError::UnimplementedTmLanguage`; zip packages are a later extension.
-All 688 symbol assertions pass. The two JavaScript annotation-tail failures are fixed with a
-narrow `() {}` prose-suffix interpretation, without weakening negative scope matching.
+All 688 symbol assertions pass. Unparseable annotation tails use the general longest
+parseable selector prefix; `() {}` has no special handling and negative selectors remain strict.
 Reindentation remains partially compatible; the exact failing variants and first mismatches
 are recorded in RESULTS.md. Numeric selector scores
 remain an approximation of public specificity rules.
@@ -112,3 +112,23 @@ recorded as failures rather than hidden as skips or used to lower the scope base
 For an editor-owned incremental service, use vel-highlight rather than rebuilding checkpoints
 and branch rewind handling in the UI. Its README documents transaction, undo/redo, viewport,
 scheme-generation, and stale-result contracts.
+
+## Ordered regex backend and streaming hot path
+
+The default context factory is `vel_regex::MultiDfa`: lazy, shared ordered sets with a
+32 MiB pool budget and Oniguruma fallback. Install `OnigBackend::default()` through
+`with_matcher_backend` for the reference path. The backend keeps original rule indices,
+empty-match policies, exclusions, captures and search-start semantics. Unicode input stays
+in Oniguruma so its word boundaries (including ²³¹¼½¾) are reproduced exactly.
+
+`ParseState::parse_line_into(line, &mut LineOps)` retains output capacity. Small captures and
+capture operations use inline storage. Stable, non-speculative transitions are memoized per
+document (4096 entries, at most 4 MiB of source text), with shared operation arrays. Checkpoints
+share this cache but semantic equality ignores it. Absolute replay counters are restored before
+interpreting a cache miss. `with_line_cache_capacity(0)` disables this optimization for backend
+comparisons; branch corrections and warnings are never memoized.
+
+`tests/differential.rs` compares every official LineOps, correction and rewind with Oniguruma,
+and separately checks memoized transitions. `regex-bench --diff-only --verify-matches` also
+compares every regex match/capture and all eight complete large fixtures. Measurements and
+limits are in [../vel-regex/PERF.md](../vel-regex/PERF.md).

@@ -1703,8 +1703,10 @@ dependencies = [
  "fnv",
  "memchr",
  "onig",
+ "regex-automata",
  "regex-syntax",
  "serde",
+ "smallvec",
  "thiserror",
 ]
 
@@ -1767,6 +1769,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "smallvec",
  "thiserror",
  "vel-regex",
  "vel-scope",

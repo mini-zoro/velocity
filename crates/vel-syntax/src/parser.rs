@@ -542,7 +542,7 @@ fn build_capture_ops(
     capture_map: &CaptureMapping,
     regions: &Region,
     version: u32,
-) -> Vec<(usize, ScopeStackOp)> {
+) -> smallvec::SmallVec<[(usize, ScopeStackOp); 8]> {
     // In a version 1 syntax a capture that goes
     // *backwards* gets no scope at all, and this applied every one of them.
     //
@@ -570,12 +570,12 @@ fn build_capture_ops(
     // capture index rather than trusting it, and only the groups that carry
     // scopes take part — an unscoped group is not something ST could report a
     // position for either.
-    let mut ordered: Vec<&(usize, Vec<Scope>)> = capture_map.iter().collect();
+    let mut ordered: smallvec::SmallVec<[&(usize, Vec<Scope>); 8]> = capture_map.iter().collect();
     if version < 2 {
         ordered.sort_by_key(|(cap_index, _)| *cap_index);
     }
     let mut last_start = 0;
-    let mut map: Vec<((usize, i32), ScopeStackOp)> = Vec::new();
+    let mut map: smallvec::SmallVec<[((usize, i32), ScopeStackOp); 8]> = smallvec::SmallVec::new();
     for &(cap_index, ref scopes) in ordered.into_iter() {
         if let Some((cap_start, cap_end)) = regions.pos(cap_index) {
             if cap_start == cap_end {
@@ -743,6 +743,15 @@ impl InterpreterState {
         line: &str,
         syntax_set: &SyntaxSet,
     ) -> Result<ParseLineOutput, ParsingError> {
+        self.parse_line_reusing(line, syntax_set, Vec::new())
+    }
+
+    pub(crate) fn parse_line_reusing(
+        &mut self,
+        line: &str,
+        syntax_set: &SyntaxSet,
+        ops: ScopeOperations,
+    ) -> Result<ParseLineOutput, ParsingError> {
         if self.stack.is_empty() {
             return Err(ParsingError::MissingMainContext);
         }
@@ -762,7 +771,7 @@ impl InterpreterState {
         });
         self.line_number += 1;
 
-        let ops = self.parse_line_inner(line, syntax_set)?;
+        let ops = self.parse_line_inner_from_reusing(line, syntax_set, 0, None, ops)?;
 
         // Collect any corrected ops produced by a cross-line `fail` during the
         // parse above.  These are stored by `handle_fail` in `self.flushed_ops`.
@@ -842,8 +851,19 @@ impl InterpreterState {
         // to suppress there. See `ReplayRequest::skip`.
         skip: Option<(usize, String)>,
     ) -> Result<Vec<(usize, ScopeStackOp)>, ParsingError> {
+        self.parse_line_inner_from_reusing(line, syntax_set, start_at, skip, Vec::new())
+    }
+
+    fn parse_line_inner_from_reusing(
+        &mut self,
+        line: &str,
+        syntax_set: &SyntaxSet,
+        start_at: usize,
+        skip: Option<(usize, String)>,
+        mut res: ScopeOperations,
+    ) -> Result<ScopeOperations, ParsingError> {
         let mut match_start = start_at;
-        let mut res = Vec::new();
+        res.clear();
 
         if start_at == 0 && self.first_line {
             let cur_level = &self.stack[self.stack.len() - 1];
@@ -1462,7 +1482,8 @@ impl InterpreterState {
                         .captures
                         .as_ref()
                         .map(|m| build_capture_ops(m, &reg_match.regions, version))
-                        .unwrap_or_default(),
+                        .unwrap_or_default()
+                        .into_vec(),
                 };
                 self.branch_points.push(bp);
                 // `pop: N + branch:` is a lookahead, like
@@ -1488,7 +1509,7 @@ impl InterpreterState {
                 unreachable!()
             }
         } else {
-            synthetic_op = pat.operation.clone();
+            synthetic_op = MatchOperation::None;
         }
 
         let op_to_use = if is_branch {

@@ -14,22 +14,22 @@
     "failed_cells": 0
   },
   "reindent_counts": {
-    "passed": 26,
-    "failed": 9,
+    "passed": 30,
+    "failed": 5,
     "skipped": 0,
     "passed_cells": 0,
     "failed_cells": 0
   },
   "regex_metrics": {
-    "compilations": 20019,
+    "compilations": 18444,
     "compile_errors": 0,
-    "search_errors": 404
+    "search_errors": 499
   },
   "loaded": 202,
   "test_files": 242,
   "overall": {
-    "passed": 126591,
-    "failed": 9,
+    "passed": 126595,
+    "failed": 5,
     "skipped": 0,
     "passed_cells": 590758,
     "failed_cells": 0
@@ -57,8 +57,8 @@
       "failed_cells": 0
     },
     "Bash": {
-      "passed": 11134,
-      "failed": 2,
+      "passed": 11136,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 40882,
       "failed_cells": 0
@@ -960,8 +960,8 @@
       "failed_cells": 0
     },
     "PHP": {
-      "passed": 4466,
-      "failed": 2,
+      "passed": 4468,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 21338,
       "failed_cells": 0
@@ -2639,11 +2639,11 @@
       },
       "examples": [
         {
-          "line": 747,
-          "source_line": 747,
+          "line": 770,
+          "source_line": 770,
           "column": 0,
           "selector": "reindent-unchanged",
-          "actual": "expected \"    while /*(*/ () v++; /*(*/ // ; \\\"comment\\\" ()\", got \"        while /*(*/ () v++; /*(*/ // ; \\\"comment\\\" ()\""
+          "actual": "expected \"        v++ /*(*/ // ; \\\"comment\\\" ()\", got \"    v++ /*(*/ // ; \\\"comment\\\" ()\""
         }
       ],
       "error": null,
@@ -4755,11 +4755,11 @@
       },
       "examples": [
         {
-          "line": 542,
-          "source_line": 542,
+          "line": 682,
+          "source_line": 682,
           "column": 0,
           "selector": "reindent-unchanged",
-          "actual": "expected \"    if (v.isNull() == true) { return fun(v) }     /**/ // ; \\\"comment\\\" ()\", got \"        if (v.isNull() == true) { return fun(v) }     /**/ // ; \\\"comment\\\" ()\""
+          "actual": "expected \"    case                         // comments\", got \"        case                         // comments\""
         }
       ],
       "error": null,
@@ -5218,11 +5218,11 @@
       },
       "examples": [
         {
-          "line": 7,
-          "source_line": 7,
+          "line": 34,
+          "source_line": 34,
           "column": 0,
           "selector": "reindent-unchanged",
-          "actual": "expected \"            <meta encoding=\\\"utf-8\\\" />\", got \"        <meta encoding=\\\"utf-8\\\" />\""
+          "actual": "expected \"                indented=\\\"attribute\\\"\", got \"            indented=\\\"attribute\\\"\""
         }
       ],
       "error": null,
@@ -6539,8 +6539,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 2,
+        "passed": 2,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -6548,28 +6548,13 @@
       "file": "PHP/tests/syntax_test_indentation.php",
       "syntax": "Packages/PHP/PHP.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 2,
+        "passed": 2,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 88,
-          "source_line": 88,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"    statement;\", got \"statement;\""
-        },
-        {
-          "line": 88,
-          "source_line": 88,
-          "column": 0,
-          "selector": "reindent-unindented",
-          "actual": "expected \"    statement;\", got \"statement;\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -8654,8 +8639,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -8663,21 +8648,13 @@
       "file": "ShellScript/Bash/tests/syntax_test_reindent_case.bash",
       "syntax": "Packages/ShellScript/Bash.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 12,
-          "source_line": 12,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"    ;;\", got \";;\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -8732,8 +8709,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -8741,21 +8718,13 @@
       "file": "ShellScript/Bash/tests/syntax_test_reindent_heredoc.bash",
       "syntax": "Packages/ShellScript/Bash.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 52,
-          "source_line": 52,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"\\t\\theredoc2=<<-'EOF' ; if true goto\", got \"\\theredoc2=<<-'EOF' ; if true goto\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -9037,11 +9006,11 @@
       },
       "examples": [
         {
-          "line": 14,
-          "source_line": 14,
+          "line": 107,
+          "source_line": 107,
           "column": 0,
           "selector": "reindent-unchanged",
-          "actual": "expected \"    ;;\", got \";;\""
+          "actual": "expected \"case $var {\", got \"    case $var {\""
         }
       ],
       "error": null,

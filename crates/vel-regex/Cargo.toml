@@ -13,7 +13,9 @@ workspace = true
 onig = { version = "6.5.3", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 regex-syntax = "0.8.11"
+regex-automata = "0.4.18"
 thiserror = "2"
 memchr = "2.8.3"
 aho-corasick = "1.1.5"
 fnv = "1"
+smallvec = "1"

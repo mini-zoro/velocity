@@ -74,7 +74,7 @@ is the caller's policy. Returning None for an invalid explicit override is inten
 
 The v1 service uses dense checkpoints (N=1), including every visible line. ParseState is shared
 and copy-on-write; repeated operation arrays and scope stacks are interned in bounded caches
-(4096 entries each). A reusable String collects only the current rope line. Newline changes
+(4096 entries each). A reusable String collects only the current rope line, and parse_line_into retains LineOps capacity. Stable line transitions use the parser's bounded document cache; speculative corrections still replay normally. Newline changes
 splice line records; an ordinary character replacement does not scan the document tail.
 Multiple pending edits retain the furthest invalidated region, preventing premature convergence.
 After the final changed line, equal stable parser state plus equal full scope stack validates
@@ -104,7 +104,7 @@ comment edits, multiple queued edits, multi-range edits, branch rewinds after li
 scheme changes during pending edits, stale results, zero-budget fallback, and syntax detection.
 The official syntax corpus and metadata/reindent evidence remain in vel-syntax/RESULTS.md.
 
-Measurements use release on arm64 macOS, five runs, the actual 10 MB Rust fixture, no sysctl.
+Measurements use release on arm64 macOS, five runs, the actual 10 MB Rust fixture, no sysctl. The default matcher is now MultiDfa, and stable parser transitions are memoized. Backend-isolated comparisons and compile/memory evidence are in ../vel-regex/PERF.md.
 `timings.json` contains 500 core edit samples, another 500 edits through the real worker
 service, and five runs each of core and actual background full-file highlighting. The edit case starts
 with a fully highlighted 10k-line snapshot, changes one ASCII letter on line 5000, then

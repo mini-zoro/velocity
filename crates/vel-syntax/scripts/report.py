@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate round-four evidence, preserving monotonic scope counts and explicit failures."""
+"""Regenerate corpus and highlighting evidence with monotonic per-file counts."""
 import json
 import math
 import os
@@ -15,7 +15,7 @@ timing = json.loads((crate / "tests/timings.json").read_text())
 assert data["loaded"] == 202 and data["test_files"] == 242
 assert timing["runs"] >= 5
 assert data["overall"]["passed"] >= baseline["overall"]["passed"]
-assert data["scope_counts"]["passed"] >= 125875 and data["scope_counts"]["failed"] <= 2
+assert data["scope_counts"]["passed"] == 125877 and data["scope_counts"]["failed"] == 0
 assert data["overall"]["skipped"] == 0
 
 def write_atomic(path, text):
@@ -32,9 +32,9 @@ counts = data["overall"]
 planned = counts["passed"] + counts["failed"]
 preferences = len(list((crate / "../../third_party/sublime-packages").rglob("*.tmPreferences")))
 out = [
-    "# Lane B, round 4: syntax metadata and highlighting",
+    "# Lane B, round 5: regex backend, parser throughput and metadata",
     "",
-    "> Reviewed round-three baseline: **125,875 passed / 2 failed / 720 skipped**. The reviewer's correction that partial-symbols files still require scope assertions remains in force.",
+    "> Reviewed round-four baseline: **scopes 125,877/0, symbols 688/0, reindent 26/9, zero skips**. Partial-symbols files still evaluate scope assertions; annotation tails use the general longest-parseable-prefix rule.",
     "",
     f"Pinned public corpus: **202 syntaxes, 242 test files, {preferences} tmPreferences files**. Loading warnings: {len(data['warnings'])}; error files: {sum(f['error'] is not None for f in data['files'])}.",
     "",
@@ -52,7 +52,7 @@ for key, name, unit in [
 out += [
     "",
     f"Overall: **{counts['passed']:,}/{planned:,} ({100*counts['passed']/planned:.5f}%)**. Scope columns: {counts['passed_cells']:,} passed / {counts['failed_cells']} failed.",
-    "The expanded denominator includes previously unexecuted metadata tests. Existing scope passes never decrease; both previous failures now pass. A lower combined percentage than the old scope-only rate does not hide a scope regression.",
+    "The denominator remains 126,600. All prior per-file scope/symbol/reindent passes are preserved, and four previously failing reindent variants now pass.",
     "",
     "## Metadata behavior",
     "",
@@ -60,7 +60,7 @@ out += [
     "",
     "All 688 symbol assertions pass, including quoted transformed names, local/global definitions, indexed references, partial-symbol files, and exhaustive checking for unannotated symbols. Adjacent nested symbol spans coalesce and transformations support captures, case conversion, and global zero-width/nonempty retry semantics. The base symbol conventions are clean-room implementations of public scope naming; no application Default preferences are used.",
     "",
-    "The two JavaScript '-comment() {}' annotation tails are interpreted narrowly as a selector followed by pasted empty-function prose. A regression test verifies that actual comment scopes still fail this negative assertion. The ordinary Haskell '-->' source comment with no symbol type is not misclassified as a symbol assertion.",
+    "Assertion selectors use the longest prefix accepted by the selector grammar when trailing text is unparseable. This is a general rule; the literal suffix '() {}' has no special handling. Negative selectors still reject actual comment scopes. Partial-symbols files execute their scope assertions.",
     "",
     "All 31 reindent files execute, totaling 35 requested whole-file variants. reindent runs both unchanged and unindented checks; reindent-unindented strips whitespace and reparses the resulting text before indentation. One whole-file comparison is one case, regardless of file length. Remaining mismatches are failures, not skips. The corpus guard locks scopes, symbols, and reindent separately per file; baseline migration permits newly tested failures without weakening existing scope thresholds.",
     "",
@@ -75,7 +75,7 @@ for file in data["files"]:
             out.append(f"| {escaped(file['file'])} | {failure['selector']} | {failure['line']} | {escaped(failure['actual'])} |")
 out += [
     "",
-    "These expose incomplete compatibility for nested continuation/control indentation, CSS comment transitions, JSX tags, PHP embedding, and shell case/heredoc rules. The indentation engine is usable but is not fully conformant; retain this evidence when extending it. Symbol/scope success does not imply unasserted tokens or all editor behavior are identical to ST.",
+    "Remaining failures expose nested continuation/control indentation, CSS comment transitions, JSX attributes and Zsh brace-style cases. Both PHP variants, Bash case indentation and Bash heredoc indentation now pass. Scope-selected metadata is preserved; continuation bodies on the same line no longer arm another indentation step. The indentation engine is usable but is not fully conformant; retain this evidence when extending it. Symbol/scope success does not imply unasserted tokens or all editor behavior are identical to ST.",
     "",
     "`.tmLanguage` conversion and zip syntax loading remain prior-round limitations. Numeric selector scoring remains the approximation documented by vel-scope. Full-file default palettes, style rendering flags, and editor scheduling are provided by vel-color-scheme / vel-highlight, not the syntax runner.",
     "",
@@ -83,7 +83,7 @@ out += [
     "",
     "## Parser performance",
     "",
-    "Release, macOS 26.1 arm64, rustc 1.99.1. Every timing below has five runs. No sysctl was called; the parallel lane can affect scheduling. Input: 10,000,000 Rust bytes / 297,030 lines. These parser-only timings exclude styling and UI work.",
+    "Release, macOS 26.1 arm64, rustc 1.99.1. Every timing below has five runs. No sysctl was called; the parallel lane can affect scheduling. Input: 10,000,000 Rust bytes / 297,030 lines. These parser-only timings use reusable LineOps and bounded stable-transition memoization, and exclude styling and UI work. Backend-isolated measurements (memoization disabled for both engines), per-context profiles, cold compilation and full differential coverage are recorded in ../vel-regex/PERF.md.",
     "",
     "| Measurement | Five-run median | Budget / reviewed comparison |",
     "| --- | ---: | --- |",
@@ -91,9 +91,9 @@ out += [
     f"| YAML loading | {timing['yaml_median_ms']:.3f} ms | 1500 ms |",
     f"| Cached index + source content hashes | {timing['cache_median_ms']:.3f} ms | 20 ms |",
     f"| Stable edit convergence, parser only | {timing['convergence_median_ms']:.5f} ms | one reparsed line |",
-    f"| Forced fresh 100-line parse | {timing['window_median_ms']:.3f} ms | still exceeds 2 ms; service bounds synchronous work and uses cached convergence |",
+    f"| Forced fresh 100-line parse | {timing['window_median_ms']:.3f} ms | checkpoint replay with the shared stable-line cache; service bounds synchronous work |",
     "",
-    "Search/capture workspaces now reuse allocated capacity across lines and nested branch replay. This does not serialize scratch into checkpoints or change semantic parser equality. End-to-end service timings, including five actual background-thread runs, are in ../vel-highlight/RESULTS.md. Warm style resolution and its zero-allocation check are in ../vel-color-scheme/README.md.",
+    "Search/capture workspaces and output vectors reuse allocated capacity across lines and nested branch replay. Stable line transitions share interned operations in a bounded document cache. The allocations integration test counts zero Rust allocations over 10,000 warmed simple streaming lines, both with memoization disabled and enabled; native Oniguruma C allocation is outside that counter. This does not serialize scratch into checkpoints or change semantic parser equality. End-to-end service timings, including five actual background-thread runs, are in ../vel-highlight/RESULTS.md. Warm style resolution and its zero-allocation check are in ../vel-color-scheme/README.md.",
     "",
     f"Raw parser seconds: `{timing['parse_seconds']}`. Regex counters over warm-up and five runs: `{json.dumps(timing['regex_metrics'], sort_keys=True)}`. All observations are in tests/timings.json.",
     "",
@@ -137,11 +137,11 @@ report = [
     "",
     "| Case | Result | Budget |",
     "| --- | ---: | --- |",
-    f"| Worker service edit submission → exact visible batch, pooled p95 of {len(worker_samples)} samples | **{worker_p95:.5f} ms** | ≤2 ms |",
-    f"| Stable one-letter edit, 10k lines, visible 100, pooled p95 of {len(samples)} samples | **{p95:.5f} ms** | ≤2 ms |",
+    f"| Worker service edit submission → exact visible batch, pooled p95 of {len(worker_samples)} samples | **{worker_p95:.5f} ms** | ≤0.2 ms |",
+    f"| Stable one-letter edit, 10k lines, visible 100, pooled p95 of {len(samples)} samples | **{p95:.5f} ms** | ≤0.2 ms |",
     f"| Median of the five per-run edit p95s | {statistics.median(r['p95_ms'] for r in edit):.5f} ms | ≤2 ms |",
     f"| Worst individual edit sample | {max(samples):.5f} ms | all samples completed their requested viewport |",
-    f"| Warm scope-stack style resolution | **{statistics.median(r['lookups_per_second'] for r in style)/1e6:.2f}M/s** | ≥20M/s; zero allocations in every 5M-lookup run |",
+    f"| Warm scope-stack style resolution (prior cache benchmark) | **{statistics.median(r['lookups_per_second'] for r in style)/1e6:.2f}M/s** | ≥20M/s; zero allocations in every 5M-lookup run |",
     f"| Full 10 MB Rust, core including styles/checkpoints | {statistics.median(r['seconds'] for r in full):.3f} s | report only |",
     f"| Full 10 MB Rust, actual background service | **{statistics.median(r['seconds'] for r in background):.3f} s** | report only |",
     "",
@@ -153,7 +153,7 @@ report = [
     "",
     "The background measurement starts a real HighlightService thread, polls its nonblocking progress once per millisecond, and waits for every line to validate. It includes thread startup, 1 ms work slicing, yielding and completion observation; it excludes syntax-set and Text construction. The first background run includes initially cold regex paths; following runs share compiled patterns. It does not request a 297k-line viewport or allocate a renderer-sized result. Core measurements warm Rust paths first and call finish directly.",
     "",
-    "timings-before-interning.json is the five-run comparison before repeated operation arrays and end-of-line scope stacks were interned. Dense N=1 checkpoints remain proportional to line count. Scope/cache hits are allocation-free; complete line parsing and returned batches still allocate. The 2 ms synchronous deadline is cooperative between lines: a single pathological regex call is not preemptible. A forced fresh parser-only 100-line window still takes 2.285 ms, so missing viewports fall back and complete asynchronously.",
+    "timings-before-interning.json is the five-run comparison before repeated operation arrays and end-of-line scope stacks were interned. Dense N=1 checkpoints remain proportional to line count. The warmed parser allocation fixture is allocation-free with and without memoization; cache misses, speculative snapshots, styles and returned batches can allocate. The 2 ms synchronous deadline is cooperative between lines: a single pathological regex call is not preemptible. The parser-only checkpoint-window measurements are in vel-syntax/tests/timings.json; they now reuse the shared stable-line cache. Missing viewports still fall back and complete asynchronously.",
     "",
     "The regression tests compare against complete fresh highlighting after Unicode/newline edits, disjoint pending changes, branch backtracking, and palette swaps. A background rewind republishes an already completed visible window; scheme generations and buffer versions filter stale results. The original scope corpus is 125,877/0, symbol assertions 688/0; reindent has known failures described in ../vel-syntax/RESULTS.md.",
     "",

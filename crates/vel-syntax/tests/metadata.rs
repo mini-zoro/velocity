@@ -9,6 +9,36 @@ fn preferences(scope: &str, settings: &str) -> String {
     )
 }
 #[test]
+fn preserved_text_does_not_execute_shell_control_indentation() {
+    let mut metadata = MetadataSet::new();
+    metadata
+        .add_plist(
+            preferences(
+                "source.shell meta.string.heredoc",
+                "<key>preserveIndent</key><true/>",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let text = "        esac\n   case x in\n     {\n       ?>\n";
+    let spans = vec![ScopedSpan {
+        range: 0..text.len(),
+        scopes: "source.shell.fixture meta.string.heredoc"
+            .parse::<ScopeStack>()
+            .unwrap()
+            .scopes,
+    }];
+    assert_eq!(
+        vel_syntax::indent::reindent(
+            text,
+            &spans,
+            &metadata,
+            vel_syntax::indent::IndentOptions::default()
+        ),
+        text
+    );
+}
+#[test]
 fn cdata_and_independent_setting_precedence() {
     let mut set = MetadataSet::new();
     set.add_plist(preferences("source.fixture",r#"<key>shellVariables</key><array><dict><key>name</key><string>TM_COMMENT_START</string><key>value</key><string>// </string></dict><dict><key>name</key><string>TM_COMMENT_END_2</string><key>value</key><string>*/</string></dict></array><key>increaseIndentPattern</key><string><![CDATA[\{[ &]*$]]></string><key>cancelCompletion</key><true/><key>preserveIndent</key><false/><key>indentParens</key><true/>"#).as_bytes()).unwrap();

@@ -1,6 +1,6 @@
-# Lane B, round 4: syntax metadata and highlighting
+# Lane B, round 5: regex backend, parser throughput and metadata
 
-> Reviewed round-three baseline: **125,875 passed / 2 failed / 720 skipped**. The reviewer's correction that partial-symbols files still require scope assertions remains in force.
+> Reviewed round-four baseline: **scopes 125,877/0, symbols 688/0, reindent 26/9, zero skips**. Partial-symbols files still evaluate scope assertions; annotation tails use the general longest-parseable-prefix rule.
 
 Pinned public corpus: **202 syntaxes, 242 test files, 259 tmPreferences files**. Loading warnings: 0; error files: 0.
 
@@ -8,11 +8,11 @@ Pinned public corpus: **202 syntaxes, 242 test files, 259 tmPreferences files**.
 | --- | ---: | ---: | ---: | --- |
 | Scopes | 125,877 | 0 | 0 | assertion span |
 | Symbols/references | 688 | 0 | 0 | assertion / unannotated symbol |
-| Reindent | 26 | 9 | 0 | whole-file variant |
-| Total | 126,591 | 9 | 0 | sum of the above |
+| Reindent | 30 | 5 | 0 | whole-file variant |
+| Total | 126,595 | 5 | 0 | sum of the above |
 
-Overall: **126,591/126,600 (99.99289%)**. Scope columns: 590,758 passed / 0 failed.
-The expanded denominator includes previously unexecuted metadata tests. Existing scope passes never decrease; both previous failures now pass. A lower combined percentage than the old scope-only rate does not hide a scope regression.
+Overall: **126,595/126,600 (99.99605%)**. Scope columns: 590,758 passed / 0 failed.
+The denominator remains 126,600. All prior per-file scope/symbol/reindent passes are preserved, and four previously failing reindent variants now pass.
 
 ## Metadata behavior
 
@@ -20,7 +20,7 @@ XML/binary plist preferences merge independently per key by selector score and r
 
 All 688 symbol assertions pass, including quoted transformed names, local/global definitions, indexed references, partial-symbol files, and exhaustive checking for unannotated symbols. Adjacent nested symbol spans coalesce and transformations support captures, case conversion, and global zero-width/nonempty retry semantics. The base symbol conventions are clean-room implementations of public scope naming; no application Default preferences are used.
 
-The two JavaScript '-comment() {}' annotation tails are interpreted narrowly as a selector followed by pasted empty-function prose. A regression test verifies that actual comment scopes still fail this negative assertion. The ordinary Haskell '-->' source comment with no symbol type is not misclassified as a symbol assertion.
+Assertion selectors use the longest prefix accepted by the selector grammar when trailing text is unparseable. This is a general rule; the literal suffix '() {}' has no special handling. Negative selectors still reject actual comment scopes. Partial-symbols files execute their scope assertions.
 
 All 31 reindent files execute, totaling 35 requested whole-file variants. reindent runs both unchanged and unindented checks; reindent-unindented strips whitespace and reparses the resulting text before indentation. One whole-file comparison is one case, regardless of file length. Remaining mismatches are failures, not skips. The corpus guard locks scopes, symbols, and reindent separately per file; baseline migration permits newly tested failures without weakening existing scope thresholds.
 
@@ -28,37 +28,33 @@ All 31 reindent files execute, totaling 35 requested whole-file variants. reinde
 
 | File | Variant | First differing line | Evidence |
 | --- | --- | ---: | --- |
-| C++/tests/syntax_test_indent_common.c++ | reindent-unchanged | 747 | expected "    while /*(*/ () v++; /*(*/ // ; \"comment\" ()", got "        while /*(*/ () v++; /*(*/ // ; \"comment\" ()" |
+| C++/tests/syntax_test_indent_common.c++ | reindent-unchanged | 770 | expected "        v++ /*(*/ // ; \"comment\" ()", got "    v++ /*(*/ // ; \"comment\" ()" |
 | CSS/tests/syntax_test_indentation.css | reindent-unchanged | 77 | expected "} /**/ .foo /**/ {              /*", got "    } /**/ .foo /**/ {              /*" |
-| JavaScript/tests/syntax_test_js_indent_common.js | reindent-unchanged | 542 | expected "    if (v.isNull() == true) { return fun(v) }     /**/ // ; \"comment\" ()", got "        if (v.isNull() == true) { return fun(v) }     /**/ // ; \"comment\" ()" |
-| JavaScript/tests/syntax_test_jsx_indent.jsx | reindent-unchanged | 7 | expected "            <meta encoding=\"utf-8\" />", got "        <meta encoding=\"utf-8\" />" |
-| PHP/tests/syntax_test_indentation.php | reindent-unchanged | 88 | expected "    statement;", got "statement;" |
-| PHP/tests/syntax_test_indentation.php | reindent-unindented | 88 | expected "    statement;", got "statement;" |
-| ShellScript/Bash/tests/syntax_test_reindent_case.bash | reindent-unchanged | 12 | expected "    ;;", got ";;" |
-| ShellScript/Bash/tests/syntax_test_reindent_heredoc.bash | reindent-unchanged | 52 | expected "\t\theredoc2=<<-'EOF' ; if true goto", got "\theredoc2=<<-'EOF' ; if true goto" |
-| ShellScript/Zsh/tests/syntax_test_reindent_case.zsh | reindent-unchanged | 14 | expected "    ;;", got ";;" |
+| JavaScript/tests/syntax_test_js_indent_common.js | reindent-unchanged | 682 | expected "    case                         // comments", got "        case                         // comments" |
+| JavaScript/tests/syntax_test_jsx_indent.jsx | reindent-unchanged | 34 | expected "                indented=\"attribute\"", got "            indented=\"attribute\"" |
+| ShellScript/Zsh/tests/syntax_test_reindent_case.zsh | reindent-unchanged | 107 | expected "case $var {", got "    case $var {" |
 
-These expose incomplete compatibility for nested continuation/control indentation, CSS comment transitions, JSX tags, PHP embedding, and shell case/heredoc rules. The indentation engine is usable but is not fully conformant; retain this evidence when extending it. Symbol/scope success does not imply unasserted tokens or all editor behavior are identical to ST.
+Remaining failures expose nested continuation/control indentation, CSS comment transitions, JSX attributes and Zsh brace-style cases. Both PHP variants, Bash case indentation and Bash heredoc indentation now pass. Scope-selected metadata is preserved; continuation bodies on the same line no longer arm another indentation step. The indentation engine is usable but is not fully conformant; retain this evidence when extending it. Symbol/scope success does not imply unasserted tokens or all editor behavior are identical to ST.
 
 `.tmLanguage` conversion and zip syntax loading remain prior-round limitations. Numeric selector scoring remains the approximation documented by vel-scope. Full-file default palettes, style rendering flags, and editor scheduling are provided by vel-color-scheme / vel-highlight, not the syntax runner.
 
-Runner regex counters: `{"compilations": 20019, "compile_errors": 0, "search_errors": 404}`. Resource-limit events remain explicit counters and are treated as no-match; they are not a claim that every regex path completed without limits.
+Runner regex counters: `{"compilations": 18444, "compile_errors": 0, "search_errors": 499}`. Resource-limit events remain explicit counters and are treated as no-match; they are not a claim that every regex path completed without limits.
 
 ## Parser performance
 
-Release, macOS 26.1 arm64, rustc 1.99.1. Every timing below has five runs. No sysctl was called; the parallel lane can affect scheduling. Input: 10,000,000 Rust bytes / 297,030 lines. These parser-only timings exclude styling and UI work.
+Release, macOS 26.1 arm64, rustc 1.99.1. Every timing below has five runs. No sysctl was called; the parallel lane can affect scheduling. Input: 10,000,000 Rust bytes / 297,030 lines. These parser-only timings use reusable LineOps and bounded stable-transition memoization, and exclude styling and UI work. Backend-isolated measurements (memoization disabled for both engines), per-context profiles, cold compilation and full differential coverage are recorded in ../vel-regex/PERF.md.
 
 | Measurement | Five-run median | Budget / reviewed comparison |
 | --- | ---: | --- |
-| Rust parser | 1.502 MB/s; 44,605 lines/s | 1.408 MB/s reviewed baseline; +6.65% throughput |
-| YAML loading | 843.446 ms | 1500 ms |
-| Cached index + source content hashes | 11.215 ms | 20 ms |
-| Stable edit convergence, parser only | 0.00675 ms | one reparsed line |
-| Forced fresh 100-line parse | 2.285 ms | still exceeds 2 ms; service bounds synchronous work and uses cached convergence |
+| Rust parser | 2.475 MB/s; 73,501 lines/s | 1.408 MB/s reviewed baseline; +75.75% throughput |
+| YAML loading | 882.556 ms | 1500 ms |
+| Cached index + source content hashes | 26.457 ms | 20 ms |
+| Stable edit convergence, parser only | 0.00013 ms | one reparsed line |
+| Forced fresh 100-line parse | 0.010 ms | checkpoint replay with the shared stable-line cache; service bounds synchronous work |
 
-Search/capture workspaces now reuse allocated capacity across lines and nested branch replay. This does not serialize scratch into checkpoints or change semantic parser equality. End-to-end service timings, including five actual background-thread runs, are in ../vel-highlight/RESULTS.md. Warm style resolution and its zero-allocation check are in ../vel-color-scheme/README.md.
+Search/capture workspaces and output vectors reuse allocated capacity across lines and nested branch replay. Stable line transitions share interned operations in a bounded document cache. The allocations integration test counts zero Rust allocations over 10,000 warmed simple streaming lines, both with memoization disabled and enabled; native Oniguruma C allocation is outside that counter. This does not serialize scratch into checkpoints or change semantic parser equality. End-to-end service timings, including five actual background-thread runs, are in ../vel-highlight/RESULTS.md. Warm style resolution and its zero-allocation check are in ../vel-color-scheme/README.md.
 
-Raw parser seconds: `[6.555462, 6.659136292, 6.754229666, 6.71377925, 6.582419958]`. Regex counters over warm-up and five runs: `{"compilations": 80296, "compile_errors": 0, "search_errors": 6}`. All observations are in tests/timings.json.
+Raw parser seconds: `[4.003842958, 4.041190542, 4.105135458, 4.106061167, 4.004366833]`. Regex counters over warm-up and five runs: `{"compilations": 80291, "compile_errors": 0, "search_errors": 6}`. All observations are in tests/timings.json.
 
 ## All 202 loaded syntaxes
 
@@ -69,7 +65,7 @@ Counts include metadata assertions attributed by the declared syntax path. A das
 | ASP | 0 | 0 | 0 | — |
 | ActionScript 2.0 | 184 | 0 | 0 | 100.0000% |
 | AppleScript | 513 | 0 | 0 | 100.0000% |
-| Bash | 11134 | 2 | 0 | 99.9820% |
+| Bash | 11136 | 0 | 0 | 100.0000% |
 | Bash (for Markdown) | 0 | 0 | 0 | — |
 | Batch File | 3918 | 0 | 0 | 100.0000% |
 | Batch File (Compound) | 0 | 0 | 0 | — |
@@ -198,7 +194,7 @@ Counts include metadata assertions attributed by the declared syntax path. A das
 | OCamlyacc | 41 | 0 | 0 | 100.0000% |
 | Objective-C | 710 | 0 | 0 | 100.0000% |
 | Objective-C++ | 1513 | 0 | 0 | 100.0000% |
-| PHP | 4466 | 2 | 0 | 99.9552% |
+| PHP | 4468 | 0 | 0 | 100.0000% |
 | PHP Source | 0 | 0 | 0 | — |
 | PHP Source (for PHP) | 0 | 0 | 0 | — |
 | Pascal | 397 | 0 | 0 | 100.0000% |

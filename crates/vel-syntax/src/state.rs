@@ -4,8 +4,9 @@ use crate::{
     parser::{InterpreterState, ScopeOperations},
 };
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 /// Earliest previously emitted line whose highlighting changed. Lines are zero-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +15,7 @@ pub struct Rewind {
     pub from_line: usize,
 }
 /// Byte-indexed scope operations and any corrections from branch backtracking.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LineOps {
     /// Operations for the supplied line, in application order.
     pub ops: ScopeOperations,
@@ -40,6 +41,52 @@ pub struct ParseState {
     set: Arc<SyntaxSet>,
     engine: Arc<InterpreterState>,
     fingerprint: u64,
+    next_line: usize,
+    lines: Arc<Mutex<LineCache>>,
+}
+#[derive(Debug)]
+struct CachedLine {
+    text: Box<str>,
+    before: Arc<InterpreterState>,
+    after: Arc<InterpreterState>,
+    fingerprint: u64,
+    ops: Arc<[(usize, crate::ScopeStackOp)]>,
+}
+#[derive(Debug)]
+struct LineCache {
+    capacity: usize,
+    bytes: usize,
+    entries: HashMap<u64, CachedLine>,
+    order: VecDeque<u64>,
+    operations: HashSet<Arc<[(usize, crate::ScopeStackOp)]>>,
+}
+impl LineCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            operations: HashSet::new(),
+        }
+    }
+    fn insert(&mut self, key: u64, line: CachedLine) {
+        const BYTES: usize = 4 * 1024 * 1024;
+        if line.text.len() > BYTES || self.entries.contains_key(&key) {
+            return;
+        }
+        while self.entries.len() >= self.capacity || self.bytes + line.text.len() > BYTES {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&old) {
+                self.bytes -= entry.text.len();
+            }
+        }
+        self.bytes += line.text.len();
+        self.order.push_back(key);
+        self.entries.insert(key, line);
+    }
 }
 impl ParseState {
     /// Binds a new interpreter to a syntax belonging to `set`.
@@ -50,29 +97,102 @@ impl ParseState {
             set,
             engine,
             fingerprint,
+            next_line: 0,
+            lines: Arc::new(Mutex::new(LineCache::new(4096))),
         }
+    }
+    /// Bounds memoized stable line transitions. Zero disables memoization, which is
+    /// useful for backend differentials and isolated matcher throughput measurements.
+    /// Cloned checkpoints share the cache; it is excluded from semantic equality.
+    pub fn with_line_cache_capacity(mut self, capacity: usize) -> Self {
+        self.lines = Arc::new(Mutex::new(LineCache::new(capacity)));
+        self
     }
     /// Parses a contiguous UTF-8 line, preserving all speculative branch state.
     pub fn parse_line(&mut self, line: &str) -> Result<LineOps, ParsingError> {
+        let mut output = LineOps::default();
+        self.parse_line_into(line, &mut output)?;
+        Ok(output)
+    }
+    /// Parses a line while retaining the operation and correction vector capacities.
+    /// Use this for streaming parsing; ordinary, non-speculative lines reuse storage.
+    pub fn parse_line_into(&mut self, line: &str, out: &mut LineOps) -> Result<(), ParsingError> {
+        let stable = !self.engine.is_speculative();
+        let key = if stable {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            self.fingerprint.hash(&mut hash);
+            line.hash(&mut hash);
+            let key = hash.finish();
+            let cache = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.capacity == 0 {
+                None
+            } else {
+                if let Some(entry) = cache.entries.get(&key)
+                    && entry.text.as_ref() == line
+                    && entry.before.semantic_eq(&self.engine)
+                {
+                    out.ops.clear();
+                    out.ops.extend_from_slice(&entry.ops);
+                    out.corrections.clear();
+                    out.warnings.clear();
+                    out.rewind = None;
+                    self.engine = entry.after.clone();
+                    self.fingerprint = entry.fingerprint;
+                    self.next_line += 1;
+                    return Ok(());
+                }
+                Some(key)
+            }
+        } else {
+            None
+        };
+        let before = key.map(|_| self.engine.clone());
         let engine = Arc::make_mut(&mut self.engine);
-        let output = engine.parse_line(line, &self.set);
+        if stable {
+            engine.relocate(self.next_line);
+        }
+        let output = engine.parse_line_reusing(line, &self.set, std::mem::take(&mut out.ops));
         self.fingerprint = engine.fingerprint();
         let output = output?;
-        let corrections: Vec<_> = output
-            .replayed
-            .into_iter()
-            .map(|(n, ops)| (n - 1, ops))
-            .collect();
-        Ok(LineOps {
-            rewind: corrections
-                .iter()
-                .map(|(n, _)| *n)
-                .min()
-                .map(|from_line| Rewind { from_line }),
-            ops: output.ops,
-            corrections,
-            warnings: output.warnings,
-        })
+        out.corrections.clear();
+        out.corrections
+            .extend(output.replayed.into_iter().map(|(n, ops)| (n - 1, ops)));
+        out.rewind = out
+            .corrections
+            .iter()
+            .map(|(n, _)| *n)
+            .min()
+            .map(|from_line| Rewind { from_line });
+        out.ops = output.ops;
+        out.warnings = output.warnings;
+        self.next_line += 1;
+        if let Some(key) = key
+            && !self.engine.is_speculative()
+            && out.rewind.is_none()
+            && out.warnings.is_empty()
+        {
+            let mut cache = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+            let ops = if let Some(shared) = cache.operations.get(out.ops.as_slice()) {
+                shared.clone()
+            } else {
+                let ops: Arc<[_]> = Arc::from(out.ops.as_slice());
+                if cache.operations.len() < cache.capacity {
+                    cache.operations.insert(ops.clone());
+                }
+                ops
+            };
+            cache.insert(
+                key,
+                CachedLine {
+                    text: line.into(),
+                    before: before.expect("memoization enabled"),
+                    after: self.engine.clone(),
+                    fingerprint: self.fingerprint,
+                    ops,
+                },
+            );
+        }
+        Ok(())
     }
     /// Whether a later `fail` may correct previously emitted operations.
     pub fn is_speculative(&self) -> bool {
@@ -82,7 +202,11 @@ impl ParseState {
     /// Relocates a stable checkpoint after inserted/deleted lines. Returns false if an
     /// active branch's absolute replay history would need rebasing; reparse that region.
     pub fn resume_at(&mut self, next_line: usize) -> bool {
-        Arc::make_mut(&mut self.engine).relocate(next_line)
+        if self.engine.is_speculative() && self.next_line != next_line {
+            return false;
+        }
+        self.next_line = next_line;
+        true
     }
     /// The shared immutable syntax collection this state references.
     pub fn syntax_set(&self) -> &Arc<SyntaxSet> {

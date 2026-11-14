@@ -90,6 +90,7 @@ pub fn reindent(
     let mut next = 0usize;
     let mut temporary = None;
     let mut brackets: Vec<(char, usize, bool)> = Vec::new();
+    let mut case_bases = Vec::new();
     let mut span_index = 0;
     for line in text.split_inclusive('\n') {
         let body = line.trim_start_matches([' ', '\t']);
@@ -132,14 +133,34 @@ pub fn reindent(
         if candidates.is_empty() {
             candidates.push(scopes);
         }
+        // Preservation applies to the line's leading scope. A heredoc delimiter
+        // later in a shell statement must not suppress that statement's block rule.
+        let leading_metadata = metadata.for_stacks(&[candidates[0]]);
+        // Leading whitespace carries the context before a closing token pops it.
+        // Include that context when selecting increase/decrease patterns (e.g. a
+        // shell clause terminator is still indented with its clause body).
+        if leading > 0
+            && scopes.iter().any(|scope| {
+                scope
+                    .build_string()
+                    .starts_with("punctuation.terminator.clause")
+            })
+            && let Some(span) = spans
+                .iter()
+                .take(span_index + 1)
+                .rfind(|span| span.range.start <= offset && offset < span.range.end)
+        {
+            candidates.push(&span.scopes);
+        }
         let m = metadata.for_stacks(&candidates);
         let blank = body.trim().is_empty();
         let sql_comment = comment
             && scopes
                 .iter()
                 .any(|s| s.build_string().starts_with("source.sql"));
-        let preserve = m.boolean("preserveIndent").unwrap_or(false) || (comment && !sql_comment);
-        let excluded = metadata.matches_pattern(&m, "unIndentedLinePattern", &code);
+        let preserve = leading_metadata.boolean("preserveIndent").unwrap_or(false)
+            || (comment && !sql_comment);
+        let excluded = metadata.matches_pattern(&leading_metadata, "unIndentedLinePattern", &code);
         let mut balanced = code.as_bytes().to_vec();
         let mut pairs = Vec::new();
         for (i, c) in code.char_indices() {
@@ -190,10 +211,19 @@ pub fn reindent(
                 }
             })
         };
-        if code.trim() == "?>" {
+        if !preserve && !excluded && code.trim() == "?>" {
             indent = next;
         }
-        if body.starts_with('{') && temporary.is_some() {
+        let shell = scopes
+            .iter()
+            .any(|scope| scope.build_string().starts_with("source.shell"));
+        let keyword = code.split_whitespace().next().unwrap_or("");
+        if !preserve && !excluded && shell && keyword == "esac" {
+            indent = case_bases
+                .pop()
+                .unwrap_or_else(|| indent.saturating_sub(size));
+        }
+        if !preserve && !excluded && body.starts_with('{') && temporary.is_some() {
             indent = temporary.take().unwrap();
         }
         // A language whose blocks are defined by whitespace must retain explicit dedents.
@@ -220,6 +250,7 @@ pub fn reindent(
         if !blank && !excluded && !preserve {
             let before = brackets.len();
             let mut closed_condition = None;
+            let mut condition_end = None;
             let mut closed_base = None;
             let mut auto_open = false;
             let mut local_index = span_index;
@@ -265,6 +296,7 @@ pub fn reindent(
                             );
                             if brackets[i].2 {
                                 closed_condition = Some(brackets[i].1);
+                                condition_end = Some(leading + at + ch.len_utf8());
                             }
                             brackets.truncate(i);
                         }
@@ -278,9 +310,18 @@ pub fn reindent(
                 next = indent;
             }
             if increase || (brackets.len() > before && auto_open) {
-                next = brackets
-                    .last()
-                    .map_or(indent + size, |(_, base, _)| base + size);
+                next = if brackets.len() > before
+                    || (auto_open
+                        && closed_base.is_some_and(|base| {
+                            brackets.last().is_some_and(|(_, saved, _)| *saved == base)
+                        }))
+                {
+                    brackets
+                        .last()
+                        .map_or(indent + size, |(_, base, _)| base + size)
+                } else {
+                    indent + size
+                };
             }
             if brackets.len() > before && body.starts_with("extern ") {
                 brackets.truncate(before);
@@ -288,23 +329,34 @@ pub fn reindent(
             } else if brackets.len() < before {
                 next = closed_base.unwrap_or(indent);
             }
+            let needs_body = condition_end.is_none_or(|end| code[end..].trim().is_empty());
             if let Some(base) = closed_condition
-                && !code.trim_end().ends_with('{')
+                && needs_body
             {
                 temporary = Some(base);
                 next = base + size;
             }
-            if one_line && !disable && !increase && brackets.len() == before {
+            if one_line && needs_body && !disable && !increase && brackets.len() == before {
                 temporary = Some(indent);
                 next = indent + size;
             }
         }
-        if matches!(code.trim(), "<?php" | "<?") {
+        if !preserve && !excluded && matches!(code.trim(), "<?php" | "<?") {
             next = indent;
         }
-        if scopes
-            .iter()
-            .any(|s| s.build_string().starts_with("source.shell"))
+        if !preserve
+            && !excluded
+            && shell
+            && keyword == "case"
+            && !code.split_whitespace().any(|word| word == "esac")
+        {
+            case_bases.push(indent);
+        }
+        if !preserve
+            && !excluded
+            && scopes
+                .iter()
+                .any(|s| s.build_string().starts_with("source.shell"))
             && code.split_whitespace().any(|s| s == "esac")
         {
             next = indent;

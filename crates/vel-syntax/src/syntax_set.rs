@@ -16,10 +16,10 @@ use crate::syntax_definition::ContextId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock};
 use vel_regex::Regex;
-use vel_regex::{MatcherBackend, OnigBackend, PatternSet, PatternSpec, Region};
+use vel_regex::{MatcherBackend, MultiDfa, PatternSet, PatternSpec, Region};
 
 fn default_backend() -> Arc<dyn MatcherBackend> {
-    Arc::new(OnigBackend::default())
+    Arc::new(MultiDfa::default())
 }
 #[derive(Debug)]
 pub(crate) struct ContextPatterns {
@@ -1542,6 +1542,20 @@ impl FirstLineCache {
 }
 
 impl SyntaxSet {
+    /// Returns a flattened static context matcher for diagnostics and microbenchmarks.
+    /// `syntax` must belong to this set. Runtime backreferences require a live parser
+    /// binding and remain unresolved here; ordinary parsing supplies those bindings.
+    pub fn context_matcher(
+        &self,
+        syntax: &SyntaxReference,
+        name: &str,
+    ) -> Result<Option<PatternSet>, ParsingError> {
+        let Some(id) = syntax.context_ids().get(name) else {
+            return Ok(None);
+        };
+        self.context_patterns(*id, None)
+            .map(|context| Some(context.matcher.clone()))
+    }
     /// Chooses the ordered-context matching backend. Configure before creating parser states.
     pub fn with_matcher_backend(mut self, backend: Arc<dyn MatcherBackend>) -> Self {
         self.matcher_backend = backend;
@@ -1599,7 +1613,16 @@ impl SyntaxSet {
         }
         let compiled = Arc::new(ContextPatterns {
             rules,
-            matcher: self.matcher_backend.build(patterns),
+            matcher: {
+                let syntax = &self.syntaxes[id.syntax_index];
+                let name = syntax
+                    .context_ids()
+                    .iter()
+                    .find_map(|(name, context)| (*context == id).then_some(name.as_str()))
+                    .unwrap_or("<anonymous>");
+                self.matcher_backend
+                    .build_named(patterns, &format!("{}::{name}", syntax.name))
+            },
         });
         if is_static {
             let _ = context.compiled.0.set(compiled.clone());

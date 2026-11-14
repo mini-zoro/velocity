@@ -114,6 +114,7 @@ pub struct DocumentHighlighter {
     must_parse_to: usize,
     stats: HighlightStats,
     line_scratch: String,
+    parse_scratch: vel_syntax::LineOps,
     operation_cache: HashSet<Arc<[(usize, ScopeStackOp)]>>,
     scope_cache: HashSet<Arc<ScopeStack>>,
 }
@@ -179,6 +180,7 @@ impl DocumentHighlighter {
             must_parse_to: 0,
             stats: HighlightStats::default(),
             line_scratch: String::new(),
+            parse_scratch: vel_syntax::LineOps::default(),
             operation_cache: HashSet::new(),
             scope_cache: HashSet::new(),
         }
@@ -370,13 +372,13 @@ impl DocumentHighlighter {
         for chunk in self.text.line(row).chunks() {
             self.line_scratch.push_str(chunk);
         }
-        let output = self
-            .state
-            .parse_line(&self.line_scratch)
+        self.state
+            .parse_line_into(&self.line_scratch, &mut self.parse_scratch)
             .map_err(|e| Error::Parse(e.to_string()))?;
+        let output = &mut self.parse_scratch;
         self.stats.parsed_lines += 1;
         let mut rewind = output.rewind.map(|r| r.from_line);
-        for (n, ops) in output.corrections {
+        for (n, ops) in output.corrections.drain(..) {
             if n >= row {
                 continue;
             }
@@ -431,7 +433,7 @@ impl DocumentHighlighter {
         let operations = if let Some(operations) = self.operation_cache.get(output.ops.as_slice()) {
             operations.clone()
         } else {
-            let operations: Arc<[_]> = output.ops.into();
+            let operations: Arc<[_]> = Arc::from(output.ops.as_slice());
             if self.operation_cache.len() < 4096 {
                 self.operation_cache.insert(operations.clone());
             }

@@ -11,6 +11,10 @@ use std::{
     },
 };
 
+mod frontend;
+mod multi;
+pub use multi::{MultiDfa, MultiDfaConfig, MultiDfaStats};
+
 /// A recoverable compilation failure. Broken patterns never match.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -40,7 +44,7 @@ pub fn metrics() -> Metrics {
 /// Capture regions in byte offsets, including capture zero.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Region {
-    spans: Vec<Option<(usize, usize)>>,
+    spans: smallvec::SmallVec<[Option<(usize, usize)>; 4]>,
 }
 impl Region {
     /// Creates empty capture storage.
@@ -49,7 +53,9 @@ impl Region {
     }
     /// Creates captures supplied by an alternative backend; slot zero is the whole match.
     pub fn from_spans(spans: Vec<Option<(usize, usize)>>) -> Self {
-        Self { spans }
+        Self {
+            spans: spans.into(),
+        }
     }
     /// Gets a participating capture's span.
     pub fn pos(&self, index: usize) -> Option<(usize, usize)> {
@@ -66,6 +72,10 @@ impl Region {
 }
 /// A compiled single pattern. Implementations must search the whole haystack from `start`.
 pub trait CompiledPattern: fmt::Debug + Send + Sync {
+    /// Number of capture slots including group zero, when known without a search.
+    fn capture_slots(&self) -> Option<usize> {
+        None
+    }
     /// Returns a span; populate captures only when requested. A limit error is recoverable.
     fn search(
         &self,
@@ -147,6 +157,9 @@ impl RegexBackend for OnigBackend {
     }
 }
 impl CompiledPattern for OnigPattern {
+    fn capture_slots(&self) -> Option<usize> {
+        Some(self.regex.captures_len() + 1)
+    }
     fn search(
         &self,
         line: &str,
@@ -216,12 +229,14 @@ impl CompiledPattern for OnigPattern {
     }
 }
 struct Inner {
+    onig_semantics: bool,
     position_dependent: bool,
     prefilter: OnceLock<Option<Prefilter>>,
     source: String,
     backend: Arc<dyn RegexBackend>,
     empty: OnceLock<Result<Arc<dyn CompiledPattern>, CompileError>>,
     nonempty: OnceLock<Result<Arc<dyn CompiledPattern>, CompileError>>,
+    candidate: OnceLock<Option<frontend::Candidate>>,
 }
 impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -242,7 +257,7 @@ impl Regex {
         if let Some(inner) = pool.get(&source).and_then(Weak::upgrade) {
             return Self(inner);
         }
-        let regex = Self::with_backend(source.clone(), Arc::new(OnigBackend::default()));
+        let regex = Self::make(source.clone(), Arc::new(OnigBackend::default()), true);
         pool.insert(source, Arc::downgrade(&regex.0));
         regex
     }
@@ -261,14 +276,19 @@ impl Regex {
     }
     /// Uses an application-supplied regex backend.
     pub fn with_backend(source: String, backend: Arc<dyn RegexBackend>) -> Self {
+        Self::make(source, backend, false)
+    }
+    fn make(source: String, backend: Arc<dyn RegexBackend>, onig_semantics: bool) -> Self {
         let position_dependent = source.contains(r"\G") || source.contains(r"\K");
         Self(Arc::new(Inner {
+            onig_semantics,
             position_dependent,
             prefilter: OnceLock::new(),
             source,
             backend,
             empty: OnceLock::new(),
             nonempty: OnceLock::new(),
+            candidate: OnceLock::new(),
         }))
     }
     /// Original Oniguruma pattern source.
@@ -337,7 +357,9 @@ impl Regex {
             .prefilter
             .get_or_init(|| Prefilter::extract(self.regex_str()))
             .as_ref()
-            .is_some_and(|p| !p.maybe(&line.as_bytes()[start..end]))
+            // Keep the full tail for a necessary-literal filter. The native
+            // engine applies its own search-range semantics afterwards.
+            .is_some_and(|p| !p.maybe(&line.as_bytes()[start..]))
         {
             #[cfg(debug_assertions)]
             if let Ok(compiled) = self.compiled(allow_empty) {
@@ -423,6 +445,7 @@ pub struct SearchCache {
     backend_state: Option<Box<dyn std::any::Any + Send>>,
     entries: NextMatches,
     haystack: Option<(usize, usize)>,
+    generation: u64,
 }
 impl fmt::Debug for SearchCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -448,6 +471,7 @@ impl SearchCache {
     pub fn reset_line(&mut self) {
         self.entries.clear();
         self.haystack = None;
+        self.generation = self.generation.wrapping_add(1);
     }
     /// Invalidates cached results after backtracking or a changed search boundary.
     pub fn clear(&mut self) {
@@ -458,6 +482,7 @@ impl SearchCache {
         if self.haystack != Some(key) {
             self.entries.clear();
             self.haystack = Some(key);
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 }
@@ -530,9 +555,34 @@ impl PatternMatcher for OnigSet {
         cache: &mut SearchCache,
         excluded: &[usize],
     ) -> Option<Match> {
+        self.find_candidates(line, start, cache, excluded, 0..self.0.len())
+    }
+}
+impl OnigSet {
+    fn find_candidates(
+        &self,
+        line: &str,
+        start: usize,
+        cache: &mut SearchCache,
+        excluded: &[usize],
+        candidates: impl Iterator<Item = usize>,
+    ) -> Option<Match> {
+        let (pattern, span) =
+            self.find_candidate_spans(line, start, cache, excluded, candidates)?;
+        self.capture_match(line, start, pattern, span)
+    }
+    fn find_candidate_spans(
+        &self,
+        line: &str,
+        start: usize,
+        cache: &mut SearchCache,
+        excluded: &[usize],
+        candidates: impl Iterator<Item = usize>,
+    ) -> Option<(usize, (usize, usize))> {
         cache.bind(line);
         let mut best = None;
-        for (index, spec) in self.0.iter().enumerate() {
+        for index in candidates {
+            let spec = &self.0[index];
             if excluded.contains(&index) {
                 continue;
             }
@@ -561,7 +611,15 @@ impl PatternMatcher for OnigSet {
                 }
             }
         }
-        let (pattern, (begin, end)) = best?;
+        best
+    }
+    fn capture_match(
+        &self,
+        line: &str,
+        start: usize,
+        pattern: usize,
+        (begin, end): (usize, usize),
+    ) -> Option<Match> {
         let mut captures = Region::new();
         if !self.0[pattern].regex.winner_captures(
             line,
@@ -646,6 +704,10 @@ pub struct PatternSpec {
 pub trait MatcherBackend: fmt::Debug + Send + Sync {
     /// Compiles a context's ordered patterns, retaining winner-only capture semantics.
     fn build(&self, patterns: Vec<PatternSpec>) -> PatternSet;
+    /// Builds a context with an optional diagnostic label; default factories ignore it.
+    fn build_named(&self, patterns: Vec<PatternSpec>, _name: &str) -> PatternSet {
+        self.build(patterns)
+    }
 }
 impl MatcherBackend for OnigBackend {
     fn build(&self, patterns: Vec<PatternSpec>) -> PatternSet {
@@ -694,7 +756,10 @@ impl Prefilter {
         {
             return None;
         }
-        let hir = regex_syntax::Parser::new().parse(source).ok()?;
+        // Onig x-mode retains spaces inside classes; Rust x-mode does not. Use
+        // the conservative dialect front end before deriving a rejecting filter.
+        let normalized = frontend::normalize(source).ok()?;
+        let hir = regex_syntax::Parser::new().parse(&normalized).ok()?;
         let seq = regex_syntax::hir::literal::Extractor::new().extract(&hir);
         let literals = seq.literals()?;
         if literals.is_empty() || literals.len() > 64 || seq.min_literal_len()? == 0 {

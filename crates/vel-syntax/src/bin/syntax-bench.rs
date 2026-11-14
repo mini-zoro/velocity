@@ -1,7 +1,7 @@
 //! Five-run, parse-only and incremental editor benchmarks without sysctl.
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Instant};
-use vel_syntax::{ParseState, SyntaxSet};
+use vel_syntax::{LineOps, ParseState, SyntaxSet};
 fn median(xs: &[f64]) -> f64 {
     let mut sorted = xs.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -34,15 +34,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Rust syntax missing")?;
     let lines: Vec<_> = source.split_inclusive('\n').collect();
     let mut warm = ParseState::new(set.clone(), syntax);
+    let mut output = LineOps::default();
     for line in &lines {
-        std::hint::black_box(warm.parse_line(line)?);
+        warm.parse_line_into(line, &mut output)?;
+        std::hint::black_box(&output);
     }
     let mut parse_seconds = Vec::new();
     for _ in 0..5 {
         let mut state = ParseState::new(set.clone(), syntax);
+        let mut output = LineOps::default();
         let t = Instant::now();
         for line in &lines {
-            std::hint::black_box(state.parse_line(line)?);
+            state.parse_line_into(line, &mut output)?;
+            std::hint::black_box(&output);
         }
         parse_seconds.push(t.elapsed().as_secs_f64());
     }

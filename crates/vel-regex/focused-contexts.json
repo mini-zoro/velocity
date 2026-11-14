@@ -1,0 +1,82 @@
+{
+  "contexts": null,
+  "instrumented": false,
+  "large_diff": [],
+  "micro_contexts": true,
+  "multi": {
+    "adaptive_onig_sets": 0,
+    "classifications": 382089,
+    "compilations": 2,
+    "compile_ms": [
+      3.063459,
+      8.75375
+    ],
+    "evictions": 0,
+    "fallbacks": 1,
+    "pattern_sets": 2,
+    "peak_bytes": 263579,
+    "resident_bytes": 182627
+  },
+  "official": [],
+  "quick": false,
+  "regex": {
+    "compilations": 13566,
+    "compile_errors": 0,
+    "search_errors": 0
+  },
+  "syntaxes": 202,
+  "timings": [
+    {
+      "bytes": 199959,
+      "context": "statements",
+      "language": "rust",
+      "multi_seconds": [
+        0.131326917,
+        0.135908917,
+        0.128669416,
+        0.127013041,
+        0.127287333
+      ],
+      "onig_seconds": [
+        0.156497708,
+        0.140911041,
+        0.139453542,
+        0.137859417,
+        0.139876625
+      ],
+      "queries": [
+        54848,
+        54848,
+        54848,
+        54848,
+        54848
+      ]
+    },
+    {
+      "bytes": 199983,
+      "context": "global",
+      "language": "cpp",
+      "multi_seconds": [
+        0.142905208,
+        0.146652667,
+        0.147199292,
+        0.143969125,
+        0.142649542
+      ],
+      "onig_seconds": [
+        0.142459583,
+        0.160025792,
+        0.1438075,
+        0.145175291,
+        0.153091208
+      ],
+      "queries": [
+        54750,
+        54750,
+        54750,
+        54750,
+        54750
+      ]
+    }
+  ]
+}
