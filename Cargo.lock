@@ -1642,6 +1642,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-complete"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "vel-buffer",
+ "vel-highlight",
+ "vel-index",
+ "vel-scope",
+ "vel-snippet",
+ "vel-text",
+]
+
+[[package]]
 name = "vel-config"
 version = "0.0.0"
 dependencies = [
@@ -1670,10 +1684,33 @@ dependencies = [
 name = "vel-highlight"
 version = "0.0.0"
 dependencies = [
+ "fnv",
  "serde_json",
  "thiserror",
  "vel-buffer",
  "vel-color-scheme",
+ "vel-scope",
+ "vel-syntax",
+ "vel-text",
+]
+
+[[package]]
+name = "vel-index"
+version = "0.0.0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "globset",
+ "ignore",
+ "libc",
+ "notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "vel-color-scheme",
+ "vel-highlight",
+ "vel-regex",
  "vel-scope",
  "vel-syntax",
  "vel-text",
@@ -1753,6 +1790,19 @@ dependencies = [
  "tempfile",
  "vel-buffer",
  "vel-fileio",
+ "vel-text",
+]
+
+[[package]]
+name = "vel-snippet"
+version = "0.0.0"
+dependencies = [
+ "quick-xml",
+ "thiserror",
+ "unicode-width",
+ "vel-buffer",
+ "vel-regex",
+ "vel-syntax",
  "vel-text",
 ]
 

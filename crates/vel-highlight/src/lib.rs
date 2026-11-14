@@ -14,7 +14,12 @@ use std::{
 use vel_buffer::{Bias, ChangeId, ChangeSet};
 use vel_color_scheme::{ColorScheme, Highlighter, Style};
 use vel_scope::{ScopeStack, ScopeStackOp};
-use vel_syntax::{ParseState, SyntaxReference, SyntaxSet};
+use vel_syntax::{MetadataSet, ParseState, SyntaxReference, SyntaxSet};
+mod scopes;
+use scopes::ScopeInterner;
+pub use scopes::{
+    ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine, SymbolList,
+};
 use vel_text::Text;
 
 /// Maximum synchronous catch-up time; a single regex search is cooperative, not preemptible.
@@ -48,6 +53,8 @@ pub struct HighlightBatch {
     pub lines: Range<usize>,
     /// One entry per line in the clipped interval.
     pub highlighted: Vec<StyledLine>,
+    /// Scope output from the very same parse, with matching version and line interval.
+    pub scopes: ScopeSnapshot,
     /// True only when every returned line is exact.
     pub complete: bool,
 }
@@ -94,6 +101,9 @@ struct LineRecord {
     scopes: Arc<ScopeStack>,
     checkpoint: Option<ParseState>,
     spans: Arc<[StyleSpan]>,
+    runs: Arc<[ScopeRun]>,
+    end_stack: ScopeStackId,
+    has_symbols: bool,
 }
 /// Stateful engine, also usable without threads in tests or editor-owned scheduling.
 /// Dense checkpoints (N=1) include every visible line and permit single-line convergence.
@@ -117,6 +127,7 @@ pub struct DocumentHighlighter {
     parse_scratch: vel_syntax::LineOps,
     operation_cache: HashSet<Arc<[(usize, ScopeStackOp)]>>,
     scope_cache: HashSet<Arc<ScopeStack>>,
+    scope_interner: ScopeInterner,
 }
 /// Detects syntax by explicit name/path/scope/token, then whole filename, compound extension,
 /// then first-line expression. Hidden extensions participate; no filesystem reads are needed.
@@ -183,7 +194,78 @@ impl DocumentHighlighter {
             parse_scratch: vel_syntax::LineOps::default(),
             operation_cache: HashSet::new(),
             scope_cache: HashSet::new(),
+            scope_interner: ScopeInterner::new(Arc::new(MetadataSet::new())),
         }
+    }
+    /// Selects package/User preferences before parsing. Existing checkpoints are invalidated.
+    pub fn with_metadata(mut self, metadata: Arc<MetadataSet>) -> Self {
+        self.scope_interner = ScopeInterner::new(metadata);
+        self.records.fill(None);
+        self.frontier = 0;
+        self.reusable_to = 0;
+        self.state = self.initial.clone();
+        self.scopes = ScopeStack::new();
+        self
+    }
+    /// Scopes for validated lines only, without any parser work.
+    pub fn scope_snapshot(&self, lines: Range<usize>) -> ScopeSnapshot {
+        let end = lines.end.min(self.text.len_lines());
+        let start = lines.start.min(end);
+        ScopeSnapshot {
+            version: self.version,
+            text: self.text.clone(),
+            range: start..end,
+            stacks: self.scope_interner.stacks.clone(),
+            lines: (start..end)
+                .map(|line| {
+                    let record = self.records[line].as_ref().filter(|_| line < self.frontier);
+                    ScopedLine {
+                        line,
+                        runs: record.map_or_else(|| Arc::from([]), |r| r.runs.clone()),
+                        end_stack: record.map_or(ScopeStackId(0), |r| r.end_stack),
+                        exact: record.is_some(),
+                    }
+                })
+                .collect(),
+        }
+    }
+    /// Query one validated line; no synchronous catch-up.
+    pub fn scope_at(&self, line: usize, byte: usize) -> Option<ScopeStackId> {
+        self.scope_snapshot(line..line.saturating_add(1))
+            .scope_at(line, byte)
+    }
+    /// Maximal equal-stack region within validated scope output, using absolute byte coordinates.
+    pub fn extract_scope(&self, point: usize) -> Option<Range<usize>> {
+        self.scope_snapshot(0..self.frontier).extract_scope(point)
+    }
+    /// Selector specificity at an absolute byte point; no parser work.
+    pub fn match_selector(
+        &self,
+        point: usize,
+        selector: &vel_scope::Selector,
+    ) -> Option<vel_scope::MatchScore> {
+        let row = (point <= self.text.len_bytes()).then(|| self.text.byte_to_line(point))?;
+        self.scope_snapshot(row..row + 1)
+            .match_selector(point, selector)
+    }
+    /// Metadata-selected document/index symbols, maintained with the line records.
+    pub fn symbols(&self) -> Result<SymbolList, Error> {
+        Ok(SymbolList {
+            version: self.version,
+            complete: self.frontier == self.records.len(),
+            symbols: self.scope_interner.symbols(
+                &self.text,
+                self.records[..self.frontier]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, record)| {
+                        record
+                            .as_ref()
+                            .filter(|r| r.has_symbols)
+                            .map(|r| (row, r.runs.as_ref()))
+                    }),
+            )?,
+        })
     }
     /// Current snapshot identity.
     pub fn version(&self) -> ChangeId {
@@ -213,6 +295,7 @@ impl DocumentHighlighter {
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) -> Result<(), Error> {
         self.scheme_revision += 1;
         self.resolver = Highlighter::new(scheme);
+        self.scope_interner.invalidate_styles();
         // Unvalidated suffix spans still use the previous palette. They must be reparsed
         // or recolored before reuse, even if their parsing checkpoints converge.
         self.reusable_to = self.frontier;
@@ -222,10 +305,22 @@ impl DocumentHighlighter {
                 break;
             };
             let ops = record.ops.clone();
-            let line = self.text.line(row).to_string();
-            let spans = style_line(&line, &ops, &mut scopes, &mut self.resolver)?;
+            let line = self
+                .text
+                .slice(complete_line_range(&self.text, row))
+                .to_string();
+            let rendered = style_line(
+                &line,
+                &ops,
+                &mut scopes,
+                &mut self.resolver,
+                &mut self.scope_interner,
+            )?;
             let record = self.records[row].as_mut().unwrap();
-            record.spans = spans;
+            record.spans = rendered.spans;
+            record.runs = rendered.runs;
+            record.end_stack = rendered.end_stack;
+            record.has_symbols = self.scope_interner.has_symbols(&record.runs);
             record.scopes = Arc::new(scopes.clone());
         }
         Ok(())
@@ -369,7 +464,11 @@ impl DocumentHighlighter {
     fn parse_next(&mut self) -> Result<(), Error> {
         let row = self.frontier;
         self.line_scratch.clear();
-        for chunk in self.text.line(row).chunks() {
+        for chunk in self
+            .text
+            .slice(complete_line_range(&self.text, row))
+            .chunks()
+        {
             self.line_scratch.push_str(chunk);
         }
         self.state
@@ -406,20 +505,33 @@ impl DocumentHighlighter {
                     .as_ref()
                     .ok_or_else(|| Error::Parse("missing branch history".into()))?;
                 let ops = record.ops.clone();
-                let line = self.text.line(n).to_string();
-                let spans = style_line(&line, &ops, &mut scopes, &mut self.resolver)?;
+                let line = self
+                    .text
+                    .slice(complete_line_range(&self.text, n))
+                    .to_string();
+                let rendered = style_line(
+                    &line,
+                    &ops,
+                    &mut scopes,
+                    &mut self.resolver,
+                    &mut self.scope_interner,
+                )?;
                 let record = self.records[n].as_mut().unwrap();
-                record.spans = spans;
+                record.spans = rendered.spans;
+                record.runs = rendered.runs;
+                record.end_stack = rendered.end_stack;
+                record.has_symbols = self.scope_interner.has_symbols(&record.runs);
                 record.scopes = Arc::new(scopes.clone());
                 record.checkpoint = None;
             }
             self.scopes = scopes;
         }
-        let spans = style_line(
+        let rendered = style_line(
             &self.line_scratch,
             &output.ops,
             &mut self.scopes,
             &mut self.resolver,
+            &mut self.scope_interner,
         )?;
         let converged = row + 1 >= self.must_parse_to
             && !self.state.is_speculative()
@@ -452,7 +564,10 @@ impl DocumentHighlighter {
             ops: operations,
             scopes,
             checkpoint: Some(self.state.clone()),
-            spans,
+            spans: rendered.spans,
+            has_symbols: self.scope_interner.has_symbols(&rendered.runs),
+            runs: rendered.runs,
+            end_stack: rendered.end_stack,
         });
         self.frontier += 1;
         if converged && self.reusable_to > self.frontier {
@@ -486,7 +601,7 @@ impl DocumentHighlighter {
                 self.records[row].as_ref().unwrap().spans.clone()
             } else {
                 default_spans(
-                    self.text.line(row).len_bytes(),
+                    complete_line_range(&self.text, row).len(),
                     self.resolver.scheme().default_style(),
                 )
             };
@@ -502,8 +617,18 @@ impl DocumentHighlighter {
             lines: start..end,
             complete: highlighted.iter().all(|l| l.exact),
             highlighted,
+            scopes: self.scope_snapshot(start..end),
         }
     }
+}
+fn complete_line_range(text: &Text, line: usize) -> Range<usize> {
+    let start = text.line_to_byte(line);
+    let end = if line + 1 < text.len_lines() {
+        text.line_to_byte(line + 1)
+    } else {
+        text.len_bytes()
+    };
+    start..end
 }
 fn default_spans(len: usize, style: Style) -> Arc<[StyleSpan]> {
     if len == 0 {
@@ -515,22 +640,48 @@ fn default_spans(len: usize, style: Style) -> Arc<[StyleSpan]> {
         }])
     }
 }
+#[derive(Debug)]
+struct RenderedLine {
+    spans: Arc<[StyleSpan]>,
+    runs: Arc<[ScopeRun]>,
+    end_stack: ScopeStackId,
+}
 fn style_line(
     line: &str,
     ops: &[(usize, ScopeStackOp)],
     stack: &mut ScopeStack,
     resolver: &mut Highlighter,
-) -> Result<Arc<[StyleSpan]>, Error> {
+    interner: &mut ScopeInterner,
+) -> Result<RenderedLine, Error> {
+    if line.len() > u32::MAX as usize {
+        return Err(Error::Parse(
+            "line exceeds compact scope range (4 GiB)".into(),
+        ));
+    }
+    let mut runs: Vec<ScopeRun> = Vec::with_capacity(ops.len() / 2 + 1);
     let mut spans: Vec<StyleSpan> = Vec::with_capacity(ops.len() / 2 + 1);
     let mut at = 0;
-    let emit = |range: Range<usize>,
-                stack: &ScopeStack,
-                resolver: &mut Highlighter,
-                spans: &mut Vec<StyleSpan>| {
+    let mut emit = |range: Range<usize>,
+                    stack: &ScopeStack,
+                    resolver: &mut Highlighter,
+                    spans: &mut Vec<StyleSpan>| {
         if range.is_empty() {
             return;
         }
-        let style = resolver.style_for(stack);
+        let id = interner.intern(stack);
+        if let Some(last) = runs.last_mut()
+            && last.stack == id
+            && last.end as usize == range.start
+        {
+            last.end = range.end as u32;
+        } else {
+            runs.push(ScopeRun {
+                start: range.start as u32,
+                end: range.end as u32,
+                stack: id,
+            });
+        }
+        let style = interner.style(id, stack, resolver);
         let mut append = |range: Range<usize>, style: Style| {
             if let Some(last) = spans.last_mut()
                 && last.range.end == range.start
@@ -576,7 +727,11 @@ fn style_line(
         at = byte;
     }
     emit(at..line.len(), stack, resolver, &mut spans);
-    Ok(spans.into())
+    Ok(RenderedLine {
+        spans: spans.into(),
+        runs: runs.into(),
+        end_stack: interner.intern(stack),
+    })
 }
 #[derive(Debug)]
 enum Command {
@@ -676,12 +831,69 @@ impl HighlightService {
             highlighted: (start..end)
                 .map(|row| StyledLine {
                     line: row,
-                    spans: default_spans(self.text.line(row).len_bytes(), self.default_style),
+                    spans: default_spans(
+                        complete_line_range(&self.text, row).len(),
+                        self.default_style,
+                    ),
                     exact: false,
                 })
                 .collect(),
+            scopes: ScopeSnapshot {
+                version,
+                text: self.text.clone(),
+                range: start..end,
+                stacks: ScopeStacks::default(),
+                lines: (start..end)
+                    .map(|line| ScopedLine {
+                        line,
+                        runs: Arc::from([]),
+                        end_stack: ScopeStackId(0),
+                        exact: false,
+                    })
+                    .collect(),
+            },
             complete: start == end,
         })
+    }
+    /// Nonblocking scopes without parser work; None while the worker owns the state or is stale.
+    pub fn scope_snapshot(&self, version: ChangeId, lines: Range<usize>) -> Option<ScopeSnapshot> {
+        if version != self.version {
+            return None;
+        }
+        let state = self.shared.try_lock().ok()?;
+        (state.version == version).then(|| state.scope_snapshot(lines))
+    }
+    /// Nonblocking single-point query. Resolve the returned ID through a scope snapshot.
+    pub fn scope_at(&self, version: ChangeId, line: usize, byte: usize) -> Option<ScopeStackId> {
+        self.scope_snapshot(version, line..line.saturating_add(1))?
+            .scope_at(line, byte)
+    }
+    /// Nonblocking scope-region query over currently validated lines.
+    pub fn extract_scope(&self, version: ChangeId, point: usize) -> Option<Range<usize>> {
+        let state = self.shared.try_lock().ok()?;
+        (version == self.version && state.version == version)
+            .then(|| state.extract_scope(point))
+            .flatten()
+    }
+    /// Nonblocking selector query, including specificity score.
+    pub fn match_selector(
+        &self,
+        version: ChangeId,
+        point: usize,
+        selector: &vel_scope::Selector,
+    ) -> Option<vel_scope::MatchScore> {
+        let state = self.shared.try_lock().ok()?;
+        (version == self.version && state.version == version)
+            .then(|| state.match_selector(point, selector))
+            .flatten()
+    }
+    /// Nonblocking symbol-list snapshot. Use on an editor dispatcher for large files.
+    pub fn symbols(&self, version: ChangeId) -> Option<Result<SymbolList, Error>> {
+        if version != self.version {
+            return None;
+        }
+        let state = self.shared.try_lock().ok()?;
+        (state.version == version).then(|| state.symbols())
     }
     /// Polls completed viewport work, discarding all results for previous buffer versions.
     pub fn try_recv(&self) -> Option<Result<HighlightBatch, Error>> {

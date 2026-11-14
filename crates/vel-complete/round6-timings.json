@@ -1,0 +1,177 @@
+[
+  {
+    "case": "complete_100k",
+    "run": 0,
+    "query": "wc99",
+    "ms": 1.412167,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 0,
+    "query": "candidate42",
+    "ms": 2.06925,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 0,
+    "query": "word",
+    "ms": 1.7265,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 0,
+    "query": "zzzz",
+    "ms": 0.6369579999999999,
+    "hits": 0
+  },
+  {
+    "case": "complete_100k",
+    "run": 0,
+    "query": "",
+    "ms": 1.6015000000000001,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 1,
+    "query": "wc99",
+    "ms": 1.249333,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 1,
+    "query": "candidate42",
+    "ms": 1.9228750000000001,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 1,
+    "query": "word",
+    "ms": 1.658584,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 1,
+    "query": "zzzz",
+    "ms": 0.67475,
+    "hits": 0
+  },
+  {
+    "case": "complete_100k",
+    "run": 1,
+    "query": "",
+    "ms": 1.639208,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 2,
+    "query": "wc99",
+    "ms": 1.324583,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 2,
+    "query": "candidate42",
+    "ms": 1.960083,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 2,
+    "query": "word",
+    "ms": 1.621333,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 2,
+    "query": "zzzz",
+    "ms": 0.640208,
+    "hits": 0
+  },
+  {
+    "case": "complete_100k",
+    "run": 2,
+    "query": "",
+    "ms": 1.611833,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 3,
+    "query": "wc99",
+    "ms": 1.267167,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 3,
+    "query": "candidate42",
+    "ms": 2.007583,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 3,
+    "query": "word",
+    "ms": 1.715833,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 3,
+    "query": "zzzz",
+    "ms": 0.653791,
+    "hits": 0
+  },
+  {
+    "case": "complete_100k",
+    "run": 3,
+    "query": "",
+    "ms": 1.683625,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 4,
+    "query": "wc99",
+    "ms": 1.299,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 4,
+    "query": "candidate42",
+    "ms": 2.092292,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 4,
+    "query": "word",
+    "ms": 1.598167,
+    "hits": 64
+  },
+  {
+    "case": "complete_100k",
+    "run": 4,
+    "query": "zzzz",
+    "ms": 0.680416,
+    "hits": 0
+  },
+  {
+    "case": "complete_100k",
+    "run": 4,
+    "query": "",
+    "ms": 1.693959,
+    "hits": 64
+  }
+]

@@ -1,0 +1,6 @@
+{
+  "root": "/private/tmp/velocity-index-corpus-krcruaxf",
+  "files": 10000,
+  "bytes": 139497024,
+  "selection": "first 10,000 lexicographically sorted .rs paths from local cargo registry, <=2 MiB, hardlinked in a temporary corpus"
+}

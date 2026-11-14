@@ -16,6 +16,7 @@ vel-scope = { path = "../vel-scope" }
 vel-text = { path = "../vel-text", default-features = false }
 vel-buffer = { path = "../vel-buffer" }
 thiserror = "2"
+fnv = "1"
 
 [dev-dependencies]
 serde_json = "1"

@@ -126,3 +126,79 @@ cargo run --release -p vel-highlight --example highlight_bench
 cargo run --release -p vel-highlight --example highlight_bench -- --background-only
 cargo run --release -p vel-highlight --example highlight_bench -- --worker-edits-only
 ```
+
+## Round-six editing scopes and symbols: remove the second parser
+
+Every `HighlightBatch` now carries `batch.scopes: ScopeSnapshot`, from the same corrected
+LineOps used for colors. `ScopedLine.runs` stores `(start: u32, end: u32, ScopeStackId)` in
+12 bytes per run. The shared stack table resolves IDs to active outermost-first scopes.
+Styles and symbol flags use the same interned ID; colors can merge spans without losing scope
+boundaries. Stack IDs are document-local and stable across edits and palette changes. Saved
+snapshots own their table version, so later interning cannot change their meaning.
+
+```rust
+use vel_buffer::ChangeId;
+use vel_highlight::{HighlightService, ScopeProvider};
+use vel_scope::Selector;
+
+# fn editing(service: &HighlightService, version: ChangeId) -> Result<(), vel_highlight::Error> {
+let batch = service.request_lines(version, 0..50)?; // call from the existing dispatcher
+if let Some(id) = batch.scopes.scope_at(3, 5) {
+    let stack = batch.scopes.stacks.get(id).unwrap();
+    let is_comment = Selector::parse("comment").unwrap().matches(stack);
+    let score = batch.scopes.match_selector(5, &Selector::parse("source").unwrap());
+    let region = batch.scopes.extract_scope(5);
+    let active = batch.scopes.scopes_at(5); // absolute UTF-8 point
+#   let _ = (is_comment, score, region, active);
+}
+# Ok(())
+# }
+```
+
+`scope_snapshot(version, lines)` returns a nonblocking, current-version read without advancing
+the parser; it is None while the worker owns the state or has not applied the requested version.
+Unavailable lines have no runs and `exact == false`; scope queries return None there, including
+in color-fallback batches. `scope_at`, `extract_scope` and `match_selector` also have service
+conveniences with explicit versions, and DocumentHighlighter equivalents for owned scheduling.
+`extract_scope` describes the maximal equal active stack in the validated/requested interval;
+request a larger interval if its result reaches an interval boundary. EOF can be an empty region.
+
+Load the shared public/User MetadataSet once and call
+`DocumentHighlighter::new(...).with_metadata(metadata.clone())` before starting the service.
+`service.symbols(version)` returns a versioned `SymbolList`; filter `symbol.local` and use
+`symbol.name` for Goto Symbol in File. `index_name`/indexed/reference flags remain available.
+Line records incrementally maintain candidate membership through edits, line splices,
+convergence and branch repairs. List assembly joins contiguous candidates across lines and
+applies the cached `symbolTransformation` / `symbolIndexTransformation` programs without
+parsing again. Assembling a whole-file list/scope snapshot is a background operation proportional
+to validated lines/symbols; do it on the existing dispatcher/analysis worker, then publish it.
+
+Lane A's concrete migration from `velocity/src/language.rs`:
+
+1. Remove its `ScopeCache`, per-line ParseState/ScopeStack checkpoints, local parse/replay path
+   and the second-parser part of `AnalysisTask`.
+2. Forward scopes together with each viewport batch; keep the current version and branch-repair
+   invalidation protocol. For the whole-file analysis pass, acquire a validated full scope
+   snapshot on the dispatcher and pass it to the existing bracket/fold/overview sweep.
+3. Replace `LanguageState::scopes` and selector-context lookups with ScopeProvider/scoped runs.
+   Convert the returned scopes to ScopeStack only when calling `metadata_for` for comment or
+   indentation variables. Skip unavailable scopes and retry after matching batches arrive.
+4. Use `service.symbols(version)` instead of `metadata.symbols` over a separately parsed file.
+   Bracket matching, folding and minimap geometry remain lane A's analysis, reading the published
+   runs and existing colors. Preserve edit/undo/redo ChangeSets as described above; recreate
+   the service if that transaction history is unavailable.
+5. Resource loading: add vel-index/vel-complete/vel-snippet dependencies; publish project edits,
+   prepared buffer words and scope snapshots to their workers. For highlighted buffers, pass
+   complete snapshots/SymbolList to `vel_index::analyze_scopes` on the analysis worker, then
+   call `update_buffer_analysis`; this also avoids reparsing unsaved text in the project index.
+   Apply completion/snippet edit
+   plans once at the normal Buffer transaction boundary and retain snippet Session in the view.
+
+Runs and style spans include LF. Round six corrects a previous implementation mismatch:
+`Text::line()` excludes LF, so the service now slices start-of-line through the next line start
+before parsing/recoloring. Renderers that slice `Text::line()` must clip run/style ends to the
+body length. This also restores newline-sensitive context transitions and contiguous multiline
+scope/symbol regions. A line above 4 GiB is rejected explicitly instead of truncating run offsets.
+
+New regression/performance evidence is in [../vel-index/ROUND6.md](../vel-index/ROUND6.md), with
+raw five-run measurements in `round6-timings.json`. Previous round evidence remains intact.

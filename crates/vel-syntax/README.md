@@ -132,3 +132,9 @@ comparisons; branch corrections and warnings are never memoized.
 and separately checks memoized transitions. `regex-bench --diff-only --verify-matches` also
 compares every regex match/capture and all eight complete large fixtures. Measurements and
 limits are in [../vel-regex/PERF.md](../vel-regex/PERF.md).
+
+`MetadataSet::fingerprint()` returns a stable digest of preference rule text, settings and
+resource order for the project index cache. Runtime metadata/regex caches and process-local
+scope IDs do not enter that digest. `vel-highlight::ScopeSnapshot` now supplies the editor's
+corrected scopes and incremental symbol candidates from its existing parse; editor integration
+should consume it instead of calling `indent::scoped_spans` a second time.

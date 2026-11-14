@@ -47,6 +47,7 @@ impl Metadata {
 }
 #[derive(Debug)]
 struct Entry {
+    selector_text: String,
     selector: Selector,
     metadata: Metadata,
 }
@@ -122,6 +123,7 @@ impl MetadataSet {
                 metadata.settings.insert(key.into(), Value::Boolean(b));
             }
             set.entries.push(Entry {
+                selector_text: selector.into(),
                 selector: Selector::parse(selector).unwrap(),
                 metadata,
             });
@@ -189,11 +191,26 @@ impl MetadataSet {
             }
         }
         self.entries.push(Entry {
+            selector_text: scope.into(),
             selector: Selector::parse(scope).map_err(|e| MetadataError(e.to_string()))?,
             metadata,
         });
         self.cache.get_mut().unwrap().clear();
         Ok(())
+    }
+    /// Stable digest of preference rules for persistent index invalidation. Includes resource
+    /// order and selector text; excludes process-local scope IDs and runtime caches.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        for entry in &self.entries {
+            let value = format!(
+                "{:?}\0{:?}\0{:?}",
+                entry.selector_text, entry.metadata.shell_variables, entry.metadata.settings
+            );
+            hash.update(&(value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        *hash.finalize().as_bytes()
     }
     /// Merges settings by specificity, with later resources winning equal scores.
     pub fn metadata_for(&self, scopes: &ScopeStack) -> Metadata {

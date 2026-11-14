@@ -175,3 +175,22 @@ fn annotation_function_suffix_does_not_weaken_negative_selectors() {
     let input = "// SYNTAX TEST \"Packages/Fixture/Fixture.sublime-syntax\"\n   comment\n// ^^^^^^^ -comment() {}\n";
     assert_eq!(syntest::evaluate(&set, input, "fixture").counts.failed, 1);
 }
+
+#[test]
+fn metadata_fingerprint_is_stable_across_cache_population_and_sensitive_to_rules() {
+    let mut a = MetadataSet::new();
+    let mut b = MetadataSet::new();
+    assert_eq!(a.fingerprint(), b.fingerprint());
+    let rule = preferences("source.fixture", "<key>showInSymbolList</key><true/>");
+    a.add_plist(rule.as_bytes()).unwrap();
+    b.add_plist(rule.as_bytes()).unwrap();
+    let before = a.fingerprint();
+    let _ = a.metadata_for(&vel_syntax::ScopeStack::from_vec(vec![
+        vel_syntax::Scope::new("source.fixture").unwrap(),
+    ]));
+    assert_eq!(a.fingerprint(), before);
+    assert_eq!(a.fingerprint(), b.fingerprint());
+    b.add_plist(preferences("source.fixture", "<key>showInSymbolList</key><false/>").as_bytes())
+        .unwrap();
+    assert_ne!(a.fingerprint(), b.fingerprint());
+}

@@ -169,7 +169,7 @@ fn budget_fallback_and_detection() {
     assert!(!result.complete);
     assert_eq!(result.lines, 0..2);
     assert!(!result.highlighted[0].exact);
-    assert_eq!(result.highlighted[0].spans[0].range, 0..13);
+    assert_eq!(result.highlighted[0].spans[0].range, 0..14);
 }
 #[test]
 fn cross_line_backtracking_repairs_previously_returned_styles() {
