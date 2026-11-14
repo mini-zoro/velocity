@@ -1,0 +1,88 @@
+//! Executes official package scope assertions and emits reproducible JSON evidence.
+use std::path::PathBuf;
+use vel_syntax::{SyntaxSet, syntest};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let filter = args
+        .iter()
+        .find(|s| !s.starts_with('-'))
+        .map(String::as_str);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/sublime-packages");
+    let now = std::time::Instant::now();
+    let set = SyntaxSet::load_directories(&[&root])?;
+    eprintln!(
+        "Loaded {} syntaxes in {:.1} ms ({} warnings)",
+        set.syntaxes().len(),
+        now.elapsed().as_secs_f64() * 1000.,
+        set.warnings().len()
+    );
+    let result = syntest::run(&set, &root, filter);
+    for (name, c) in &result.syntaxes {
+        if c.passed + c.failed + c.skipped > 0 {
+            println!(
+                "{name}: {} passed / {} failed / {} skipped ({:.3}%)",
+                c.passed,
+                c.failed,
+                c.skipped,
+                c.rate() * 100.
+            );
+        }
+    }
+    println!(
+        "TOTAL: {} syntaxes, {} files, {} passed / {} failed / {} skipped ({:.3}%)",
+        result.loaded,
+        result.test_files,
+        result.overall.passed,
+        result.overall.failed,
+        result.overall.skipped,
+        result.overall.rate() * 100.
+    );
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/last-run.json");
+    std::fs::write(path, serde_json::to_vec_pretty(&result)?)?;
+    if args.iter().any(|s| s == "--update-baseline") {
+        if filter.is_some() {
+            return Err("baseline updates require the complete corpus".into());
+        }
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/baseline.json");
+        let mut improved = true;
+        if let Ok(bytes) = std::fs::read(&path) {
+            let old: syntest::SuiteResult = serde_json::from_slice(&bytes)?;
+            if result.overall.rate() < old.overall.rate() {
+                return Err("overall regression; refusing baseline update".into());
+            }
+            for (name, expected) in &old.syntaxes {
+                let actual = result.syntaxes.get(name).ok_or("syntax disappeared")?;
+                if actual.passed < expected.passed
+                    || actual.failed > expected.failed
+                    || actual.skipped != expected.skipped
+                {
+                    return Err(format!(
+                        "{name} regressed or changed skips; refusing baseline update"
+                    )
+                    .into());
+                }
+            }
+            improved = result.overall.rate() > old.overall.rate();
+            if improved {
+                std::fs::write(
+                    std::env::temp_dir().join(format!(
+                        "velocity-syntax-baseline-{}.previous.json",
+                        std::process::id()
+                    )),
+                    bytes,
+                )?;
+            }
+        }
+        if improved {
+            let temporary = path.with_extension("json.tmp");
+            std::fs::write(&temporary, serde_json::to_vec_pretty(&result)?)?;
+            std::fs::rename(temporary, path)?;
+        } else {
+            eprintln!("Baseline unchanged: assertion counts have not improved.");
+        }
+    }
+    if result.files.iter().any(|f| f.error.is_some()) {
+        std::process::exit(1);
+    }
+    Ok(())
+}

@@ -1,0 +1,4838 @@
+{
+  "regex_metrics": {
+    "compilations": 19934,
+    "compile_errors": 0,
+    "search_errors": 404
+  },
+  "loaded": 202,
+  "test_files": 242,
+  "overall": {
+    "passed": 125875,
+    "failed": 2,
+    "skipped": 720,
+    "passed_cells": 590704,
+    "failed_cells": 54
+  },
+  "syntaxes": {
+    "ASP": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "ActionScript 2.0": {
+      "passed": 184,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1054,
+      "failed_cells": 0
+    },
+    "AppleScript": {
+      "passed": 513,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 3139,
+      "failed_cells": 0
+    },
+    "Bash": {
+      "passed": 11090,
+      "failed": 0,
+      "skipped": 46,
+      "passed_cells": 40882,
+      "failed_cells": 0
+    },
+    "Bash (for Markdown)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Batch File": {
+      "passed": 3918,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 18521,
+      "failed_cells": 0
+    },
+    "Batch File (Compound)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "BibTeX": {
+      "passed": 100,
+      "failed": 0,
+      "skipped": 7,
+      "passed_cells": 520,
+      "failed_cells": 0
+    },
+    "Binary": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "C": {
+      "passed": 876,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2718,
+      "failed_cells": 0
+    },
+    "C#": {
+      "passed": 9355,
+      "failed": 0,
+      "skipped": 70,
+      "passed_cells": 47181,
+      "failed_cells": 0
+    },
+    "C++": {
+      "passed": 1755,
+      "failed": 0,
+      "skipped": 3,
+      "passed_cells": 6005,
+      "failed_cells": 0
+    },
+    "CSS": {
+      "passed": 3514,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 18306,
+      "failed_cells": 0
+    },
+    "CSS (Go)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (Rails)": {
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 262,
+      "failed_cells": 0
+    },
+    "CSS (for ASP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for JS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for JSP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for PHP double-quoted)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for PHP single-quoted)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for Ruby)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS (for TS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "CSS inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Cabal": {
+      "passed": 421,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2202,
+      "failed_cells": 0
+    },
+    "Cargo Build Results": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Cassandra Query Language": {
+      "passed": 399,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2502,
+      "failed_cells": 0
+    },
+    "Clojure": {
+      "passed": 1699,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 8568,
+      "failed_cells": 0
+    },
+    "ClojureScript": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "D": {
+      "passed": 3110,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 10002,
+      "failed_cells": 0
+    },
+    "DMD Output": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "DTD": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Diff": {
+      "passed": 294,
+      "failed": 0,
+      "skipped": 17,
+      "passed_cells": 2561,
+      "failed_cells": 0
+    },
+    "Diff (Basic)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Diff (for Markdown)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Diff (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Erlang": {
+      "passed": 4350,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 15193,
+      "failed_cells": 0
+    },
+    "Git Attributes": {
+      "passed": 176,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 929,
+      "failed_cells": 0
+    },
+    "Git Blame Ignore Revisions": {
+      "passed": 37,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 411,
+      "failed_cells": 0
+    },
+    "Git Code Owners": {
+      "passed": 92,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 430,
+      "failed_cells": 0
+    },
+    "Git Commit": {
+      "passed": 258,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 4367,
+      "failed_cells": 0
+    },
+    "Git Commit Message": {
+      "passed": 137,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1487,
+      "failed_cells": 0
+    },
+    "Git Common": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Git Config": {
+      "passed": 566,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 3775,
+      "failed_cells": 0
+    },
+    "Git Diff": {
+      "passed": 217,
+      "failed": 0,
+      "skipped": 3,
+      "passed_cells": 2581,
+      "failed_cells": 0
+    },
+    "Git Ignore": {
+      "passed": 285,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1027,
+      "failed_cells": 0
+    },
+    "Git Link": {
+      "passed": 53,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 299,
+      "failed_cells": 0
+    },
+    "Git Log": {
+      "passed": 162,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2299,
+      "failed_cells": 0
+    },
+    "Git Mailmap": {
+      "passed": 45,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 249,
+      "failed_cells": 0
+    },
+    "Git Rebase Todo": {
+      "passed": 392,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 3630,
+      "failed_cells": 0
+    },
+    "Go": {
+      "passed": 4402,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 19192,
+      "failed_cells": 0
+    },
+    "Go (Embedded Backtick String)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded CSS)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded HTML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded JSON)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded JavaScript)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded Regex)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded SQL)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded T-SQL)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Go (Embedded XML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Graphviz (DOT)": {
+      "passed": 210,
+      "failed": 0,
+      "skipped": 16,
+      "passed_cells": 1039,
+      "failed_cells": 0
+    },
+    "Groovy": {
+      "passed": 295,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1283,
+      "failed_cells": 0
+    },
+    "HAML": {
+      "passed": 368,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2154,
+      "failed_cells": 0
+    },
+    "HTML": {
+      "passed": 1012,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 5510,
+      "failed_cells": 0
+    },
+    "HTML (ASP)": {
+      "passed": 993,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 5574,
+      "failed_cells": 0
+    },
+    "HTML (Erlang)": {
+      "passed": 60,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 235,
+      "failed_cells": 0
+    },
+    "HTML (Go)": {
+      "passed": 169,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1037,
+      "failed_cells": 0
+    },
+    "HTML (JSP)": {
+      "passed": 701,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 4670,
+      "failed_cells": 0
+    },
+    "HTML (Plain)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (Rails)": {
+      "passed": 167,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1298,
+      "failed_cells": 0
+    },
+    "HTML (Tcl)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for HSX)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for JS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for Ruby)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML (for TS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "HTML inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Haskell": {
+      "passed": 3492,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 14930,
+      "failed_cells": 0
+    },
+    "JSON": {
+      "passed": 135,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 523,
+      "failed_cells": 0
+    },
+    "JSON (Go)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (Rails)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for ASP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for JS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for JSP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON (for TS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSON inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JSX": {
+      "passed": 619,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 2941,
+      "failed_cells": 0
+    },
+    "JSX (Plain)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Java": {
+      "passed": 8903,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 44441,
+      "failed_cells": 0
+    },
+    "Java (for HTML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Java (for JSP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Java Properties": {
+      "passed": 84,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 593,
+      "failed_cells": 0
+    },
+    "JavaDoc": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript": {
+      "passed": 3011,
+      "failed": 2,
+      "skipped": 1,
+      "passed_cells": 16104,
+      "failed_cells": 54
+    },
+    "JavaScript (Go)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (Plain)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (Rails)": {
+      "passed": 31,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 171,
+      "failed_cells": 0
+    },
+    "JavaScript (for ASP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for Go Embedded Backtick Strings)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for JS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for JSP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for PHP double-quoted)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for PHP single-quoted)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for Ruby)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "JavaScript (for TS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "LaTeX": {
+      "passed": 1446,
+      "failed": 0,
+      "skipped": 381,
+      "passed_cells": 9714,
+      "failed_cells": 0
+    },
+    "LaTeX Log": {
+      "passed": 80,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1063,
+      "failed_cells": 0
+    },
+    "Lisp": {
+      "passed": 1995,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 8222,
+      "failed_cells": 0
+    },
+    "Literate Haskell": {
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 148,
+      "failed_cells": 0
+    },
+    "Lua": {
+      "passed": 915,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 4192,
+      "failed_cells": 0
+    },
+    "MATLAB": {
+      "passed": 624,
+      "failed": 0,
+      "skipped": 6,
+      "passed_cells": 3028,
+      "failed_cells": 0
+    },
+    "Make Output": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Makefile": {
+      "passed": 552,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1615,
+      "failed_cells": 0
+    },
+    "Markdown": {
+      "passed": 4869,
+      "failed": 0,
+      "skipped": 14,
+      "passed_cells": 25836,
+      "failed_cells": 0
+    },
+    "Markdown (Go)": {
+      "passed": 160,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1011,
+      "failed_cells": 0
+    },
+    "Markdown (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "MultiMarkdown": {
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 231,
+      "failed_cells": 0
+    },
+    "MySQL": {
+      "passed": 3735,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 28549,
+      "failed_cells": 0
+    },
+    "OCaml": {
+      "passed": 238,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1022,
+      "failed_cells": 0
+    },
+    "OCamllex": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "OCamlyacc": {
+      "passed": 41,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 101,
+      "failed_cells": 0
+    },
+    "Objective-C": {
+      "passed": 708,
+      "failed": 0,
+      "skipped": 2,
+      "passed_cells": 2291,
+      "failed_cells": 0
+    },
+    "Objective-C++": {
+      "passed": 1511,
+      "failed": 0,
+      "skipped": 2,
+      "passed_cells": 4772,
+      "failed_cells": 0
+    },
+    "PHP": {
+      "passed": 4465,
+      "failed": 0,
+      "skipped": 2,
+      "passed_cells": 21338,
+      "failed_cells": 0
+    },
+    "PHP Source": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "PHP Source (for PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Pascal": {
+      "passed": 371,
+      "failed": 0,
+      "skipped": 26,
+      "passed_cells": 2274,
+      "failed_cells": 0
+    },
+    "Perl": {
+      "passed": 4590,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 16537,
+      "failed_cells": 0
+    },
+    "PostgreSQL": {
+      "passed": 710,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 5547,
+      "failed_cells": 0
+    },
+    "Python": {
+      "passed": 6312,
+      "failed": 0,
+      "skipped": 1,
+      "passed_cells": 27957,
+      "failed_cells": 0
+    },
+    "R": {
+      "passed": 334,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1089,
+      "failed_cells": 0
+    },
+    "R Console": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Rd (R Documentation)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "RegExp (for Python raw-f-string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "RegExp inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regex (for C# literal string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regex (for C# verbatim string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression": {
+      "passed": 548,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2031,
+      "failed_cells": 0
+    },
+    "Regular Expression (Basic)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression (Perl inside angle brackets)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression (Perl inside braces)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression (Perl inside parens)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression (Perl inside square brackets)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression (Perl)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expression Replacement": {
+      "passed": 36,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 170,
+      "failed_cells": 0
+    },
+    "Regular Expressions (C#)": {
+      "passed": 206,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 816,
+      "failed_cells": 0
+    },
+    "Regular Expressions (JavaScript)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expressions (PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Regular Expressions (Python)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Ruby": {
+      "passed": 1151,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 4647,
+      "failed_cells": 0
+    },
+    "Ruby (Rails)": {
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 98,
+      "failed_cells": 0
+    },
+    "Ruby (for HAML)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Rust": {
+      "passed": 2426,
+      "failed": 0,
+      "skipped": 14,
+      "passed_cells": 12117,
+      "failed_cells": 0
+    },
+    "SQL": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (Basic)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (Rails)": {
+      "passed": 37,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 290,
+      "failed_cells": 0
+    },
+    "SQL (for C# raw string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for C# verbatim format string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for C# verbatim string)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for C#)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for JS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for PHP)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for Ruby)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL (for TS template)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "SQL inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Scala": {
+      "passed": 1704,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 5612,
+      "failed_cells": 0
+    },
+    "Shell": {
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 13,
+      "failed_cells": 0
+    },
+    "Shell (for Makefile)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "ShellScript (for Ruby)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Sublime File Pattern": {
+      "passed": 144,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 521,
+      "failed_cells": 0
+    },
+    "T-SQL": {
+      "passed": 1651,
+      "failed": 0,
+      "skipped": 8,
+      "passed_cells": 10376,
+      "failed_cells": 0
+    },
+    "T-SQL inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "TOML": {
+      "passed": 651,
+      "failed": 0,
+      "skipped": 9,
+      "passed_cells": 2907,
+      "failed_cells": 0
+    },
+    "TOML (for Python)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "TSX": {
+      "passed": 662,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 3124,
+      "failed_cells": 0
+    },
+    "TSX (Plain)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Tcl": {
+      "passed": 201,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 1206,
+      "failed_cells": 0
+    },
+    "TeX": {
+      "passed": 794,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 4067,
+      "failed_cells": 0
+    },
+    "TeX (DocStrip)": {
+      "passed": 46,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 378,
+      "failed_cells": 0
+    },
+    "Textile": {
+      "passed": 608,
+      "failed": 0,
+      "skipped": 47,
+      "passed_cells": 1894,
+      "failed_cells": 0
+    },
+    "TypeScript": {
+      "passed": 2307,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 10820,
+      "failed_cells": 0
+    },
+    "TypeScript (Plain)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "XML": {
+      "passed": 1485,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 8473,
+      "failed_cells": 0
+    },
+    "XML (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "XML inside Go backtick string": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "YAML": {
+      "passed": 607,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 2655,
+      "failed_cells": 0
+    },
+    "YAML (Go)": {
+      "passed": 95,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 513,
+      "failed_cells": 0
+    },
+    "YAML (for PHP Interpolated)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "Zsh": {
+      "passed": 8037,
+      "failed": 0,
+      "skipped": 39,
+      "passed_cells": 28463,
+      "failed_cells": 0
+    },
+    "Zsh (for Markdown)": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "camlp4": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
+      "failed_cells": 0
+    },
+    "reStructuredText": {
+      "passed": 42,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 181,
+      "failed_cells": 0
+    }
+  },
+  "files": [
+    {
+      "file": "ASP/syntax_test_asp.asp",
+      "syntax": "Packages/ASP/HTML (ASP).sublime-syntax",
+      "counts": {
+        "passed": 993,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 5574,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ActionScript/tests/syntax_test_scope_conflicts.as",
+      "syntax": "Packages/ActionScript/ActionScript.sublime-syntax",
+      "counts": {
+        "passed": 27,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 109,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ActionScript/tests/syntax_test_scopes.as",
+      "syntax": "Packages/ActionScript/ActionScript.sublime-syntax",
+      "counts": {
+        "passed": 157,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 945,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "AppleScript/tests/syntax_test_applescript.applescript",
+      "syntax": "Packages/AppleScript/AppleScript.sublime-syntax",
+      "counts": {
+        "passed": 400,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2790,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "AppleScript/tests/syntax_test_scope_conflicts.applescript",
+      "syntax": "Packages/AppleScript/AppleScript.sublime-syntax",
+      "counts": {
+        "passed": 113,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 349,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Batch File/tests/syntax_test_batch_file.bat",
+      "syntax": "Packages/Batch File/Batch File.sublime-syntax",
+      "counts": {
+        "passed": 3918,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 18521,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_indentation.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#10.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 167,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1175,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#11.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 565,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4171,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#12.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 78,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 406,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#13.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 6,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 24,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#14.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 243,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1388,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#7.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 1063,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4750,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#8.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 444,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2547,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_C#9.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 793,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4516,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_Comments.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 105,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 834,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_GeneralStructure.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 3839,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 16737,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_Generics.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 156,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 520,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_Operators.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 379,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1077,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_PreprocessorDirectives.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 146,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1246,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_Strings.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 689,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4484,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_Using.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 242,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1231,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_c#.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 251,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 864,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_c#15.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 116,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 667,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_dotnetrun.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 355,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_query.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 189,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_scope_regexp.regexp",
+      "syntax": "Packages/C#/Embeddings/Regex (for C#).sublime-syntax",
+      "counts": {
+        "passed": 206,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 816,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C#/tests/syntax_test_symbols.cs",
+      "syntax": "Packages/C#/C#.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 69,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C++/syntax_test_accessor.c",
+      "syntax": "Packages/C++/C.sublime-syntax",
+      "counts": {
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 8,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C++/syntax_test_accessor.cpp",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 17,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C++/syntax_test_c.c",
+      "syntax": "Packages/C++/C.sublime-syntax",
+      "counts": {
+        "passed": 872,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2710,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C++/syntax_test_cpp.cpp",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 1741,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 5983,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "C++/tests/syntax_test_indent_classes.c++",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "C++/tests/syntax_test_indent_common.c++",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "C++/tests/syntax_test_indent_extern.hpp",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "C++/tests/syntax_test_parentheses_in_macro_arguments.h",
+      "syntax": "Packages/C++/C++.sublime-syntax",
+      "counts": {
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 5,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "CSS/tests/syntax_test_css.css",
+      "syntax": "Packages/CSS/CSS.sublime-syntax",
+      "counts": {
+        "passed": 3412,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 17968,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "CSS/tests/syntax_test_indentation.css",
+      "syntax": "Packages/CSS/CSS.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "CSS/tests/syntax_test_merge.css",
+      "syntax": "Packages/CSS/CSS.sublime-syntax",
+      "counts": {
+        "passed": 102,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 338,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Clojure/tests/syntax_test_clojure.clj",
+      "syntax": "Packages/Clojure/Clojure.sublime-syntax",
+      "counts": {
+        "passed": 1448,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 7762,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Clojure/tests/syntax_test_clojure_old.clj",
+      "syntax": "Packages/Clojure/Clojure.sublime-syntax",
+      "counts": {
+        "passed": 79,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 226,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Clojure/tests/syntax_test_conflicts.clj",
+      "syntax": "Packages/Clojure/Clojure.sublime-syntax",
+      "counts": {
+        "passed": 169,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 523,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Clojure/tests/syntax_test_shebang.clj",
+      "syntax": "Packages/Clojure/Clojure.sublime-syntax",
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 57,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "D/tests/syntax_test_d.d",
+      "syntax": "Packages/D/D.sublime-syntax",
+      "counts": {
+        "passed": 3050,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 9889,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "D/tests/syntax_test_old.d",
+      "syntax": "Packages/D/D.sublime-syntax",
+      "counts": {
+        "passed": 52,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 53,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "D/tests/syntax_test_shebang.d",
+      "syntax": "Packages/D/D.sublime-syntax",
+      "counts": {
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 60,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Diff/tests/syntax_test_diff.diff",
+      "syntax": "Packages/Diff/Diff.sublime-syntax",
+      "counts": {
+        "passed": 294,
+        "failed": 0,
+        "skipped": 17,
+        "passed_cells": 2561,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Diff/tests/syntax_test_switch_to_git.diff",
+      "syntax": "Packages/Git Formats/Git Diff.sublime-syntax",
+      "counts": {
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 201,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Erlang/syntax_test_erlang.erl",
+      "syntax": "Packages/Erlang/Erlang.sublime-syntax",
+      "counts": {
+        "passed": 4350,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 15193,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Erlang/syntax_test_erlang.yaws",
+      "syntax": "Packages/Erlang/HTML (Erlang).sublime-syntax",
+      "counts": {
+        "passed": 60,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 235,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_attributes",
+      "syntax": "Git Attributes.sublime-syntax",
+      "counts": {
+        "passed": 176,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 929,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_blame_ignore_revs",
+      "syntax": "Git Blame Ignore Revisions.sublime-syntax",
+      "counts": {
+        "passed": 37,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 411,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_codeowners",
+      "syntax": "Git Code Owners.sublime-syntax",
+      "counts": {
+        "passed": 92,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 430,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_commit",
+      "syntax": "Git Commit.sublime-syntax",
+      "counts": {
+        "passed": 248,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4203,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_commit_message",
+      "syntax": "Git Commit Message.sublime-syntax",
+      "counts": {
+        "passed": 137,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1487,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_config",
+      "syntax": "Git Config.sublime-syntax",
+      "counts": {
+        "passed": 566,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3775,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_diff.patch",
+      "syntax": "Packages/Git Formats/Git Diff.sublime-syntax",
+      "counts": {
+        "passed": 129,
+        "failed": 0,
+        "skipped": 3,
+        "passed_cells": 1568,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_diff_combined.patch",
+      "syntax": "Packages/Git Formats/Git Diff.sublime-syntax",
+      "counts": {
+        "passed": 28,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 474,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_diff_renames.patch",
+      "syntax": "Packages/Git Formats/Git Diff.sublime-syntax",
+      "counts": {
+        "passed": 48,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 338,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_ignore",
+      "syntax": "Git Ignore.sublime-syntax",
+      "counts": {
+        "passed": 285,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1027,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_link",
+      "syntax": "Git Link.sublime-syntax",
+      "counts": {
+        "passed": 53,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 299,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_log",
+      "syntax": "Git Log.sublime-syntax",
+      "counts": {
+        "passed": 162,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2299,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_mailmap",
+      "syntax": "Git Mailmap.sublime-syntax",
+      "counts": {
+        "passed": 45,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 249,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_merge",
+      "syntax": "Git Commit.sublime-syntax",
+      "counts": {
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 123,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_rebase",
+      "syntax": "Git Rebase.sublime-syntax",
+      "counts": {
+        "passed": 392,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3630,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Git Formats/tests/syntax_test_git_tag",
+      "syntax": "Git Commit.sublime-syntax",
+      "counts": {
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 41,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Go/tests/syntax_test_go.go",
+      "syntax": "Go.sublime-syntax",
+      "counts": {
+        "passed": 4402,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 19192,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Go/tests/syntax_test_template.html",
+      "syntax": "Packages/Go/HTML (Go).sublime-syntax",
+      "counts": {
+        "passed": 169,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1037,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Go/tests/syntax_test_template.md",
+      "syntax": "Packages/Go/Markdown (Go).sublime-syntax",
+      "counts": {
+        "passed": 160,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1011,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Go/tests/syntax_test_template.yaml",
+      "syntax": "Packages/Go/YAML (Go).sublime-syntax",
+      "counts": {
+        "passed": 95,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 513,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Graphviz/tests/syntax_test_conflicts.dot",
+      "syntax": "Packages/Graphviz/DOT.sublime-syntax",
+      "counts": {
+        "passed": 80,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 320,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Graphviz/tests/syntax_test_scopes.dot",
+      "syntax": "Packages/Graphviz/DOT.sublime-syntax",
+      "counts": {
+        "passed": 129,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 718,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Graphviz/tests/syntax_test_symbols.dot",
+      "syntax": "Packages/Graphviz/DOT.sublime-syntax",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 16,
+        "passed_cells": 1,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Groovy/syntax_test_groovy.groovy",
+      "syntax": "Packages/Groovy/Groovy.sublime-syntax",
+      "counts": {
+        "passed": 80,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 287,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Groovy/tests/syntax_test_Strings.groovy",
+      "syntax": "Packages/Groovy/Groovy.sublime-syntax",
+      "counts": {
+        "passed": 158,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 757,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Groovy/tests/syntax_test_jenkins.Jenkinsfile",
+      "syntax": "Packages/Groovy/Groovy.sublime-syntax",
+      "counts": {
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 239,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "HTML/tests/syntax_test_indent.html",
+      "syntax": "Packages/HTML/HTML.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "HTML/tests/syntax_test_scope.html",
+      "syntax": "Packages/HTML/HTML.sublime-syntax",
+      "counts": {
+        "passed": 721,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4508,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "HTML/tests/syntax_test_scope_conflicts.html",
+      "syntax": "Packages/HTML/HTML.sublime-syntax",
+      "counts": {
+        "passed": 291,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1002,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Haskell/tests/syntax_test_cabal.cabal",
+      "syntax": "Packages/Haskell/Cabal.sublime-syntax",
+      "counts": {
+        "passed": 421,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2202,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Haskell/tests/syntax_test_haskell.hs",
+      "syntax": "Packages/Haskell/Haskell.sublime-syntax",
+      "counts": {
+        "passed": 3489,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 14873,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Haskell/tests/syntax_test_literate.lhs",
+      "syntax": "Packages/Haskell/Literate Haskell.sublime-syntax",
+      "counts": {
+        "passed": 32,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 148,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Haskell/tests/syntax_test_shebang.hs",
+      "syntax": "Packages/Haskell/Haskell.sublime-syntax",
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 57,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JSON/syntax_test_json.json",
+      "syntax": "Packages/JSON/JSON.sublime-syntax",
+      "counts": {
+        "passed": 135,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 523,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Java/tests/syntax_test_java.java",
+      "syntax": "Packages/Java/Java.sublime-syntax",
+      "counts": {
+        "passed": 8903,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 44441,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Java/tests/syntax_test_java_indentation.java",
+      "syntax": "Packages/Java/Java.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "Java/tests/syntax_test_java_properties.properties",
+      "syntax": "Packages/Java/JavaProperties.sublime-syntax",
+      "counts": {
+        "passed": 84,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 593,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Java/tests/syntax_test_jsp.jsp",
+      "syntax": "Packages/Java/HTML (JSP).sublime-syntax",
+      "counts": {
+        "passed": 701,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4670,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 1069,
+        "failed": 2,
+        "skipped": 0,
+        "passed_cells": 4982,
+        "failed_cells": 54
+      },
+      "examples": [
+        {
+          "line": 236,
+          "source_line": 235,
+          "column": 4,
+          "selector": "-comment() {}",
+          "actual": "source.js meta.group.js meta.mapping.js meta.function.js meta.string.js string.quoted.single.js punctuation.definition.string.begin.js"
+        },
+        {
+          "line": 239,
+          "source_line": 238,
+          "column": 4,
+          "selector": "-comment() {}",
+          "actual": "source.js meta.group.js meta.mapping.js meta.function.js meta.string.js string.quoted.double.js punctuation.definition.string.begin.js"
+        }
+      ],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_bindings.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 205,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 804,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_class.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 198,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 918,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_control.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 387,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1821,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_import_export.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 174,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1654,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_indent_common.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_indent_embed.md",
+      "syntax": "Packages/Markdown/Markdown.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_indent_embed.php",
+      "syntax": "Packages/PHP/PHP.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_jsdoc.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 21,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 49,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_not_typescript.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 20,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_regexp.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 155,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 489,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_support_builtin.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 220,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1837,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_support_console.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 29,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 151,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_support_dom.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 81,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_support_node.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 69,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 536,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_js_template.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 471,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2759,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_jsx.jsx",
+      "syntax": "Packages/JavaScript/JSX.sublime-syntax",
+      "counts": {
+        "passed": 232,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1120,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_jsx_control.ts",
+      "syntax": "Packages/JavaScript/JSX.sublime-syntax",
+      "counts": {
+        "passed": 387,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1821,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_jsx_indent.jsx",
+      "syntax": "Packages/JavaScript/JSX.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_shebang.js",
+      "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_shebang.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_tsx.tsx",
+      "syntax": "Packages/JavaScript/TSX.sublime-syntax",
+      "counts": {
+        "passed": 275,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1303,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_tsx_control.ts",
+      "syntax": "Packages/JavaScript/TSX.sublime-syntax",
+      "counts": {
+        "passed": 387,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1821,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_typescript.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 1344,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 5896,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_typescript_control.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 387,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1821,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_typescript_declarations.d.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 158,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 760,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_typescript_not_tsx.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 36,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 96,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "JavaScript/tests/syntax_test_typescript_template.ts",
+      "syntax": "Packages/JavaScript/TypeScript.sublime-syntax",
+      "counts": {
+        "passed": 379,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2244,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_bibtex.bib",
+      "syntax": "Packages/LaTeX/Bibtex.sublime-syntax",
+      "counts": {
+        "passed": 100,
+        "failed": 0,
+        "skipped": 7,
+        "passed_cells": 520,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_docstrip.ins",
+      "syntax": "Packages/LaTeX/DocStrip.sublime-syntax",
+      "counts": {
+        "passed": 46,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 378,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_latex.log",
+      "syntax": "LaTeX Log.sublime-syntax",
+      "counts": {
+        "passed": 80,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1063,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_latex.tex",
+      "syntax": "Packages/LaTeX/LaTeX.sublime-syntax",
+      "counts": {
+        "passed": 1127,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 6955,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_latex.xparse.tex",
+      "syntax": "Packages/LaTeX/LaTeX.sublime-syntax",
+      "counts": {
+        "passed": 319,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2759,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_symbol.tex",
+      "syntax": "Packages/LaTeX/LaTeX.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 381,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_tex.math.tex",
+      "syntax": "Packages/LaTeX/TeX.sublime-syntax",
+      "counts": {
+        "passed": 176,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 515,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "LaTeX/tests/syntax_test_tex.tex",
+      "syntax": "Packages/LaTeX/TeX.sublime-syntax",
+      "counts": {
+        "passed": 618,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3552,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Lisp/tests/syntax_test_lisp.lisp",
+      "syntax": "Packages/Lisp/Lisp.sublime-syntax",
+      "counts": {
+        "passed": 1995,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 8222,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Lua/tests/syntax_test_lua.lua",
+      "syntax": "Packages/Lua/Lua.sublime-syntax",
+      "counts": {
+        "passed": 457,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2359,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Lua/tests/syntax_test_lua_support.lua",
+      "syntax": "Packages/Lua/Lua.sublime-syntax",
+      "counts": {
+        "passed": 458,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1833,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Makefile/syntax_test_makefile.mak",
+      "syntax": "Packages/Makefile/Makefile.sublime-syntax",
+      "counts": {
+        "passed": 552,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1615,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Markdown/tests/syntax_test_markdown.md",
+      "syntax": "Packages/Markdown/Markdown.sublime-syntax",
+      "counts": {
+        "passed": 4860,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 25796,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Markdown/tests/syntax_test_multimarkdown.md",
+      "syntax": "Packages/Markdown/MultiMarkdown.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 36,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Markdown/tests/syntax_test_multimarkdown_frontmatter.md",
+      "syntax": "Packages/Markdown/MultiMarkdown.sublime-syntax",
+      "counts": {
+        "passed": 23,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 194,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Markdown/tests/syntax_test_multimarkdown_no_frontmatter.md",
+      "syntax": "Packages/Markdown/MultiMarkdown.sublime-syntax",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Markdown/tests/syntax_test_symbols.md",
+      "syntax": "Packages/Markdown/Markdown.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 13,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Matlab/syntax_test_indentation.matlab",
+      "syntax": "Packages/Matlab/Matlab.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent"
+    },
+    {
+      "file": "Matlab/syntax_test_matlab.matlab",
+      "syntax": "Packages/Matlab/Matlab.sublime-syntax",
+      "counts": {
+        "passed": 624,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 3028,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Matlab/syntax_test_symbols.matlab",
+      "syntax": "Packages/Matlab/Matlab.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 5,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "OCaml/syntax_test_ml.ml",
+      "syntax": "Packages/OCaml/OCaml.sublime-syntax",
+      "counts": {
+        "passed": 238,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1022,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "OCaml/syntax_test_mly.mly",
+      "syntax": "Packages/OCaml/OCamlyacc.sublime-syntax",
+      "counts": {
+        "passed": 41,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 101,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_accessor.m",
+      "syntax": "Packages/Objective-C/Objective-C.sublime-syntax",
+      "counts": {
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 8,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_accessor.mm",
+      "syntax": "Packages/Objective-C/Objective-C++.sublime-syntax",
+      "counts": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 17,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_objc++.mm",
+      "syntax": "Packages/Objective-C/Objective-C++.sublime-syntax",
+      "counts": {
+        "passed": 1502,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4755,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_objc++_symbols.mm",
+      "syntax": "Packages/Objective-C/Objective-C++.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 2,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_objc.m",
+      "syntax": "Packages/Objective-C/Objective-C.sublime-syntax",
+      "counts": {
+        "passed": 704,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2283,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Objective-C/syntax_test_objc_symbols.m",
+      "syntax": "Packages/Objective-C/Objective-C.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 2,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "PHP/tests/syntax_test_indentation.php",
+      "syntax": "Packages/PHP/PHP.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent"
+    },
+    {
+      "file": "PHP/tests/syntax_test_php.php",
+      "syntax": "Packages/PHP/PHP.sublime-syntax",
+      "counts": {
+        "passed": 4465,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 21338,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Pascal/tests/syntax_test_pascal.pas",
+      "syntax": "Packages/Pascal/Pascal.sublime-syntax",
+      "counts": {
+        "passed": 342,
+        "failed": 0,
+        "skipped": 25,
+        "passed_cells": 2192,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Pascal/tests/syntax_test_scope_conflicts.pas",
+      "syntax": "Packages/Pascal/Pascal.sublime-syntax",
+      "counts": {
+        "passed": 29,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 82,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Perl/syntax_test_perl.pl",
+      "syntax": "Packages/Perl/Perl.sublime-syntax",
+      "counts": {
+        "passed": 4590,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 16537,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Perl/tests/syntax_test_indentation.pl",
+      "syntax": "Packages/Perl/Perl.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent"
+    },
+    {
+      "file": "Python/tests/syntax_test_conflicts.py",
+      "syntax": "Packages/Python/Python.sublime-syntax",
+      "counts": {
+        "passed": 514,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2288,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Python/tests/syntax_test_indentation_case.py",
+      "syntax": "Packages/Python/Python.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "Python/tests/syntax_test_python.py",
+      "syntax": "Packages/Python/Python.sublime-syntax",
+      "counts": {
+        "passed": 3212,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 14384,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Python/tests/syntax_test_python_strings.py",
+      "syntax": "Packages/Python/Python.sublime-syntax",
+      "counts": {
+        "passed": 1930,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 8885,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Python/tests/syntax_test_scope_tstrings.py",
+      "syntax": "Packages/Python/Python.sublime-syntax",
+      "counts": {
+        "passed": 656,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2400,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "R/syntax_test_r.R",
+      "syntax": "Packages/R/R.sublime-syntax",
+      "counts": {
+        "passed": 334,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1089,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.builder",
+      "syntax": "Packages/Rails/Ruby (Rails).sublime-syntax",
+      "counts": {
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 98,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.css.erb",
+      "syntax": "Packages/Rails/CSS (Rails).sublime-syntax",
+      "counts": {
+        "passed": 48,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 262,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.haml",
+      "syntax": "Packages/Rails/HAML.sublime-syntax",
+      "counts": {
+        "passed": 368,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2154,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.html.erb",
+      "syntax": "Packages/Rails/HTML (Rails).sublime-syntax",
+      "counts": {
+        "passed": 167,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1298,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.js.erb",
+      "syntax": "Packages/Rails/JavaScript (Rails).sublime-syntax",
+      "counts": {
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 171,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rails/tests/syntax_test_rails.sql.erb",
+      "syntax": "Packages/Rails/SQL (Rails).sublime-syntax",
+      "counts": {
+        "passed": 37,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 290,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Regular Expressions/tests/syntax_test_conflicts.re",
+      "syntax": "Packages/Regular Expressions/RegExp.sublime-syntax",
+      "counts": {
+        "passed": 102,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 588,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Regular Expressions/tests/syntax_test_file_patterns",
+      "syntax": "Packages/Regular Expressions/File Pattern.sublime-syntax",
+      "counts": {
+        "passed": 144,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 521,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Regular Expressions/tests/syntax_test_regex_replace",
+      "syntax": "Regex Replace.sublime-syntax",
+      "counts": {
+        "passed": 36,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 170,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Regular Expressions/tests/syntax_test_regexp.re",
+      "syntax": "Packages/Regular Expressions/RegExp.sublime-syntax",
+      "counts": {
+        "passed": 446,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1443,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "RestructuredText/syntax_test_restructuredtext.rst",
+      "syntax": "Packages/RestructuredText/reStructuredText.sublime-syntax",
+      "counts": {
+        "passed": 42,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 181,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Ruby/syntax_test_ruby.rb",
+      "syntax": "Packages/Ruby/Ruby.sublime-syntax",
+      "counts": {
+        "passed": 1151,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4647,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/symbols/syntax_test_symbols.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 14,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_attributes.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 109,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 856,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_closures.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 169,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1063,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_comments.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 14,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 93,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_conflicts.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 39,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 99,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_control_flow.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 58,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 211,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_dyn.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 24,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 99,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_enum.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 46,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 281,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_expr.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 117,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 245,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_frontmatter.md",
+      "syntax": "Packages/Markdown/Markdown.sublime-syntax",
+      "counts": {
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 40,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_frontmatter.rs",
+      "syntax": "Rust.sublime-syntax",
+      "counts": {
+        "passed": 10,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 19,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_functions.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 109,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 469,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_generics.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 380,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2190,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_identifiers.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 60,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 283,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_literals.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 201,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 888,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_macros.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 291,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1417,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_match.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 36,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 99,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_misc.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 212,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_modules.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 68,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 230,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_punct.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 86,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 116,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_raw.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 45,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 293,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_shebang.rs",
+      "syntax": "Rust.sublime-syntax",
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 37,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_struct.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 72,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 354,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_traits.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 174,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1323,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_types.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 197,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 883,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_union.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 32,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 146,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Rust/tests/syntax_test_visibility.rs",
+      "syntax": "Packages/Rust/Rust.sublime-syntax",
+      "counts": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 211,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "SQL/tests/indentation/syntax_test_indentation_tsql.sql",
+      "syntax": "Packages/SQL/TSQL.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent"
+    },
+    {
+      "file": "SQL/tests/symbols/syntax_test_symbols_tsql.sql",
+      "syntax": "Packages/SQL/TSQL.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 7,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "SQL/tests/syntax/syntax_test_cassandra.cql",
+      "syntax": "Packages/SQL/Cassandra.sublime-syntax",
+      "counts": {
+        "passed": 399,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2502,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "SQL/tests/syntax/syntax_test_mysql.sql",
+      "syntax": "Packages/SQL/MySQL.sublime-syntax",
+      "counts": {
+        "passed": 3735,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 28549,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "SQL/tests/syntax/syntax_test_postgres.psql",
+      "syntax": "Packages/SQL/PostgreSQL.sublime-syntax",
+      "counts": {
+        "passed": 710,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 5547,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "SQL/tests/syntax/syntax_test_tsql.sql",
+      "syntax": "Packages/SQL/TSQL.sublime-syntax",
+      "counts": {
+        "passed": 1651,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 10376,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Scala/tests/syntax_test_scala.scala",
+      "syntax": "Packages/Scala/Scala.sublime-syntax",
+      "counts": {
+        "passed": 1254,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 4228,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Scala/tests/syntax_test_scala3.scala",
+      "syntax": "Packages/Scala/Scala.sublime-syntax",
+      "counts": {
+        "passed": 337,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1059,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Scala/tests/syntax_test_scope_conflicts.scala",
+      "syntax": "Packages/Scala/Scala.sublime-syntax",
+      "counts": {
+        "passed": 113,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 325,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_case.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_for.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_heredoc.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_if.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_select.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_until.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_reindent_while.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_scope.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 11090,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 40882,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ShellScript/Bash/tests/syntax_test_symbol.bash",
+      "syntax": "Packages/ShellScript/Bash.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 39,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ShellScript/Shell/tests/syntax_test_scope.sh",
+      "syntax": "Packages/ShellScript/Shell-Unix-Generic.sublime-syntax",
+      "counts": {
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 13,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_case.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_for.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_foreach.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_if.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_repeat.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_select.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_until.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_reindent_while.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 1,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": "reindent-unchanged"
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_scope.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 8037,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 28463,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "ShellScript/Zsh/tests/syntax_test_symbol.zsh",
+      "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 31,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TCL/syntax_test_tcl.tcl",
+      "syntax": "Packages/TCL/Tcl.sublime-syntax",
+      "counts": {
+        "passed": 193,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1018,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TCL/tests/syntax_test_shebang_jimsh",
+      "syntax": "Tcl.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 45,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TCL/tests/syntax_test_shebang_tclsh",
+      "syntax": "Tcl.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 45,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TCL/tests/syntax_test_shebang_tclsh8",
+      "syntax": "Tcl.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 47,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TCL/tests/syntax_test_shebang_tclsh86",
+      "syntax": "Tcl.sublime-syntax",
+      "counts": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 51,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TOML/tests/syntax_test_scopes.toml",
+      "syntax": "Packages/TOML/TOML.sublime-syntax",
+      "counts": {
+        "passed": 651,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 2907,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "TOML/tests/syntax_test_symbols.toml",
+      "syntax": "Packages/TOML/TOML.sublime-syntax",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 9,
+        "passed_cells": 0,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Textile/tests/syntax_test_scope_conflicts.textile",
+      "syntax": "Packages/Textile/Textile.sublime-syntax",
+      "counts": {
+        "passed": 241,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 487,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Textile/tests/syntax_test_scopes.textile",
+      "syntax": "Packages/Textile/Textile.sublime-syntax",
+      "counts": {
+        "passed": 366,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 1406,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "Textile/tests/syntax_test_symbols.textile",
+      "syntax": "Packages/Textile/Textile.sublime-syntax",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 47,
+        "passed_cells": 1,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "XML/syntax_test_xml.xml",
+      "syntax": "Packages/XML/XML.sublime-syntax",
+      "counts": {
+        "passed": 1485,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 8473,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_block.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 115,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 584,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_directives.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 44,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 206,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_flow-plain.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 46,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 230,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_flow.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 185,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 726,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_general.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 36,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 108,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_properties.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 21,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 143,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    },
+    {
+      "file": "YAML/tests/syntax_test_types.yaml",
+      "syntax": "Packages/YAML/YAML.sublime-syntax",
+      "counts": {
+        "passed": 160,
+        "failed": 0,
+        "skipped": 0,
+        "passed_cells": 658,
+        "failed_cells": 0
+      },
+      "examples": [],
+      "error": null,
+      "skip_reason": null
+    }
+  ],
+  "warnings": []
+}
