@@ -69,3 +69,9 @@ Kernel process birth, RSS and TASK_VM_INFO REV1 physical footprint need no windo
 server. Their ABIs and error/short-reply checks are tested headlessly, along with
 UTF-16 range handling. Native delivery, press-and-hold, reconversion, resize and
 multi-display behavior require the hardware checklist in velocity/MANUAL_TEST.md.
+
+
+WindowHandle exposes current keyboard focus, effective appearance and the last acquired
+drawable sequence. The editor uses these to paint inactive selections, select the initial
+scheme before first presentation, and correlate exact highlighted frames with native scanout.
+All three have deterministic unsupported-platform stubs.

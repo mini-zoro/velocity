@@ -3,6 +3,14 @@ use vel_platform::Rect;
 
 /// Straight-alpha linear RGBA.
 pub type Color = [f32; 4];
+/// Face traits requested by a token. Glyph/layout caches include both flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FontStyle {
+    /// Select a bold face through CoreText.
+    pub bold: bool,
+    /// Select an italic face through CoreText.
+    pub italic: bool,
+}
 /// A solid or rounded rectangle.
 #[derive(Clone, Debug)]
 pub struct SolidRect {
@@ -18,6 +26,8 @@ pub struct SolidRect {
 /// A single-baseline text run; tab expansion belongs to the UI layout.
 #[derive(Clone, Debug)]
 pub struct TextRun {
+    /// Requested weight and slant.
+    pub style: FontStyle,
     /// Text to shape, with no tabs or newlines.
     pub text: String,
     /// Left baseline origin in logical points.
@@ -34,6 +44,8 @@ pub struct TextRun {
 /// Straight underline or sinusoidal diagnostic squiggle.
 #[derive(Clone, Debug)]
 pub struct Underline {
+    /// Dotted stroke. Takes precedence over a wave.
+    pub stippled: bool,
     /// Bounds; height is amplitude for a squiggle.
     pub rect: Rect,
     /// Stroke thickness in points.
@@ -63,6 +75,8 @@ pub struct Shadow {
 /// Use separate layers when a later solid must cover earlier glyphs.
 #[derive(Clone, Debug, Default)]
 pub struct Layer {
+    /// Marks the overview layer for isolated GPU timestamp measurements.
+    pub minimap: bool,
     /// Shadows behind other primitives.
     pub shadows: Vec<Shadow>,
     /// Selection, gutter, caret and rounded panels.

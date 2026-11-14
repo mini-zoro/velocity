@@ -21,6 +21,55 @@ pub fn font_location(name: &str) -> Result<(std::path::PathBuf, String, NativeFo
     Ok((path, postscript, font))
 }
 
+/// Resolves real bold/italic faces within the fallback family, retaining CoreText's face.
+#[cfg(target_os = "macos")]
+pub fn font_variant(
+    name: &str,
+    style: crate::scene::FontStyle,
+) -> Result<(std::path::PathBuf, String, NativeFont), String> {
+    use objc2_core_foundation::CFURL;
+    use objc2_core_text::{CTFontSymbolicTraits, kCTFontURLAttribute};
+    let (_, _, original) = font_location(name)?;
+    let mut traits = CTFontSymbolicTraits::empty();
+    if style.bold {
+        traits |= CTFontSymbolicTraits::TraitBold;
+    }
+    if style.italic {
+        traits |= CTFontSymbolicTraits::TraitItalic;
+    }
+    // SAFETY: original is retained, and the null matrix preserves its transform.
+    let font = unsafe {
+        original.copy_with_symbolic_traits(
+            13.,
+            std::ptr::null(),
+            traits,
+            CTFontSymbolicTraits::TraitBold | CTFontSymbolicTraits::TraitItalic,
+        )
+    }
+    .ok_or("font family has no requested weight/slant")?;
+    // SAFETY: immutable attributes are read from a live retained CTFont.
+    let (url, name) = unsafe {
+        (
+            font.attribute(kCTFontURLAttribute),
+            font.post_script_name().to_string(),
+        )
+    };
+    let path = url
+        .and_then(|a| a.downcast::<CFURL>().ok())
+        .and_then(|u| u.to_file_path())
+        .ok_or("variant font has no file URL")?;
+    Ok((path, name, font))
+}
+
+/// Font variants require CoreText on the native platform.
+#[cfg(not(target_os = "macos"))]
+pub fn font_variant(
+    _: &str,
+    _: crate::scene::FontStyle,
+) -> Result<(std::path::PathBuf, String, NativeFont), String> {
+    Err("CoreText unavailable".into())
+}
+
 /// Rasterize an OS font glyph when swash cannot read that font's outline/bitmap format.
 /// The result uses the same top-down placement and straight-alpha contract as swash.
 #[cfg(target_os = "macos")]

@@ -48,3 +48,9 @@ cargo test -p vel-ui
 cargo clippy -p vel-ui --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc -p vel-ui --no-deps
 ```
+
+
+The main document now supplies detected syntax text in the status bar; its rightmost 180pt
+opens a filtered Set Syntax quick panel. Syntax choices use the existing palette/focus/input
+widgets. Shared labels explicitly request regular font traits, while document runs may carry
+bold/italic variants. Editor wrap, fold, syntax and minimap geometry live in velocity.

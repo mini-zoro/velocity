@@ -30,3 +30,11 @@ Round 5 registers window actions for overlays, input/output/find panels, file se
 find-next/previous/all/under, slurp strings, search flags, side-bar visibility/focus and project
 folders. The host implements these workflows using vel-search and vel-ui; the registry remains
 independent of both. Panel text edits use the same text commands against their own buffer.
+
+
+Language/view adapters may intercept text commands through Host::intercept_text_command;
+the registry still records macros and repeat state. Host::command_finished observes every
+completed primitive command, including nested chains and successful redo-or-repeat. The
+editor uses these hooks for exact incremental insert/snippet/paste/delete transactions,
+language comments/indentation and visual wrapped-line movement. Unobserved buffer operations
+and undo/redo rebuild the editor's highlighting snapshot at the command boundary.

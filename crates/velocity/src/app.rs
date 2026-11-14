@@ -34,6 +34,12 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    exact_scene: bool,
+    exact_drawables: std::collections::BTreeSet<u64>,
+    content_scanout: Option<Instant>,
+    highlighted_scanout: Option<Instant>,
+    language_warmed: bool,
+    window_focused: bool,
     panels: crate::panels::Panels,
     window_size: Size,
     content: Rect,
@@ -80,6 +86,12 @@ impl App {
             12.,
         );
         Self {
+            exact_scene: false,
+            exact_drawables: Default::default(),
+            content_scanout: None,
+            highlighted_scanout: None,
+            language_warmed: false,
+            window_focused: true,
             panels: {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
@@ -157,6 +169,16 @@ impl App {
             return;
         }
         if self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+            && !matches!(
+                name,
+                "toggle_comment"
+                    | "reindent"
+                    | "fold"
+                    | "unfold"
+                    | "fold_by_level"
+                    | "unfold_all"
+                    | "fold_tag_attributes"
+            )
             && let Some(input) = self.panels.input_mut()
         {
             input.set_clipboard(w.clipboard_text().unwrap_or_default());
@@ -398,15 +420,7 @@ impl App {
         }
     }
     fn viewport(&self) -> std::ops::Range<usize> {
-        let text = &self.workspace.editor().text;
-        let first = (self.view.scroll_y / self.view.line_height).floor().max(0.) as usize;
-        let first = first.min(text.len_lines() - 1);
-        let last = (first + self.view.rows() + 2).min(text.len_lines());
-        text.line_to_byte(first)..if last < text.len_lines() {
-            text.line_to_byte(last)
-        } else {
-            text.len_bytes()
-        }
+        self.view.viewport(self.workspace.editor())
     }
     fn replacement_confirmation(&mut self, w: &WindowHandle) -> Result<(), String> {
         if let Some(plan) = self.panels.replacement_plan.take() {
@@ -466,10 +480,26 @@ impl App {
             width: content.width,
             height: content.height,
         };
-        let mut scene = self.view.scene(self.workspace.editor());
+        self.view.find_matches.clear();
+        self.view.focused = self.window_focused
+            && (!interactive || (self.panels.input().is_none() && !self.panels.side_focused));
         if interactive {
-            self.paint_matches(&mut scene);
+            self.view.apply_style(self.workspace.editor());
+            let viewport = self.view.viewport(self.workspace.editor());
+            let first = self
+                .panels
+                .highlights
+                .partition_point(|r| r.end < viewport.start);
+            self.view.find_matches.extend(
+                self.panels.highlights[first..]
+                    .iter()
+                    .take_while(|r| r.start <= viewport.end)
+                    .cloned(),
+            );
         }
+        let mut scene = self.view.scene(self.workspace.editor());
+        self.exact_scene = self.view.exact(self.workspace.editor())
+            && self.workspace.tabs[self.workspace.active].loading.is_none();
         translate_scene(&mut scene, content.x, 0.);
         if let Some((mut second, x)) = second_scene {
             translate_scene(&mut second, x, 0.);
@@ -577,50 +607,6 @@ impl App {
         }
         scene
     }
-    fn paint_matches(&self, scene: &mut vel_render::scene::Scene) {
-        let editor = self.workspace.editor();
-        let viewport = self.viewport();
-        let first = self
-            .panels
-            .highlights
-            .partition_point(|r| r.end < viewport.start);
-        let Some(layer) = scene.layers.first_mut() else {
-            return;
-        };
-        let clip = Rect {
-            x: self.view.gutter(editor),
-            y: crate::view::TAB_HEIGHT,
-            width: self.view.size.width,
-            height: self.view.size.height - crate::view::TAB_HEIGHT,
-        };
-        for hit in self.panels.highlights[first..]
-            .iter()
-            .take_while(|h| h.start <= viewport.end)
-        {
-            let begin = hit.start.max(viewport.start);
-            let end = hit.end.min(viewport.end);
-            if begin > end {
-                continue;
-            }
-            for row in editor.text.byte_to_line(begin)..=editor.text.byte_to_line(end) {
-                let start = editor.text.line_to_byte(row);
-                let last = start + editor.text.line_len_bytes(row);
-                let a = self.view.rect_at(editor, begin.max(start).min(last));
-                let b = self.view.rect_at(editor, end.min(last).max(start));
-                vel_ui::fill(
-                    layer,
-                    Rect {
-                        x: a.x,
-                        y: a.y,
-                        width: (b.x - a.x).max(2.),
-                        height: self.view.line_height,
-                    },
-                    clip,
-                    [0.45, 0.31, 0.09, 0.75],
-                );
-            }
-        }
-    }
     fn log_input(&self, kind: &str, event: impl std::fmt::Debug) {
         if self.options.log_input {
             let state = self.text_input_state();
@@ -628,6 +614,9 @@ impl App {
         }
     }
     fn changed(&mut self, w: &WindowHandle, received: Instant, reveal: bool) {
+        if reveal {
+            self.view.reset_caret();
+        }
         self.sync_active_view();
         self.input_at.get_or_insert(received);
         if reveal {
@@ -642,6 +631,8 @@ impl App {
         self.changed(w, received, true);
     }
     fn start_report(&mut self, w: &WindowHandle, p: Presentation) -> Result<(), String> {
+        self.content_scanout = Some(p.scanout);
+        self.observe_highlight(p)?;
         self.clock.mark_at("first_real_scanout", p.scanout);
         self.renderer
             .as_mut()
@@ -667,7 +658,9 @@ impl App {
         match self.options.mode {
             Mode::Startup => self.finish(w)?,
             Mode::Open => {
-                if self.workspace.tabs.iter().all(|t| t.loading.is_none()) {
+                if self.workspace.tabs.iter().all(|t| t.loading.is_none())
+                    && self.highlighted_scanout.is_some()
+                {
                     self.finish(w)?;
                 } else {
                     w.request_frame_at(Instant::now() + Duration::from_millis(16));
@@ -721,6 +714,12 @@ impl App {
                         self.samples.len()
                     ));
                 }
+                let minimap_gpu = self
+                    .renderer
+                    .as_ref()
+                    .ok_or("renderer missing")?
+                    .minimap_gpu_times()?;
+                self.reporter.emit(json!({"kind":"minimap_gpu_summary","render_pass_ms":minimap_gpu.as_deref().and_then(summarize),"p95_budget_ms":1,"boundary":"isolated minimap layer render pass; excludes document, tabs, uploads, resolve/readback, and presentation","available":minimap_gpu.is_some()}))?;
                 let gpu = self
                     .renderer
                     .as_ref()
@@ -789,6 +788,12 @@ impl App {
         times: FrameTimes,
         received: Instant,
     ) -> Result<(), String> {
+        if self.exact_scene
+            && self.highlighted_scanout.is_none()
+            && let Some(drawable) = times.drawable
+        {
+            self.exact_drawables.insert(drawable);
+        }
         if !self.first_present {
             self.first_present = true;
             self.clock.mark_at("first_submit", times.submitted);
@@ -835,6 +840,19 @@ impl App {
         }
         Ok(())
     }
+    fn observe_highlight(&mut self, p: Presentation) -> Result<(), String> {
+        if self.highlighted_scanout.is_none()
+            && p.presented_time > 0.
+            && p.presented_time.is_finite()
+            && self.exact_drawables.contains(&p.drawable)
+            && let Some(content) = self.content_scanout
+        {
+            self.highlighted_scanout = Some(p.scanout);
+            self.exact_drawables.clear();
+            self.reporter.emit(json!({"kind":"first_highlighted_screen","after_content_scanout_ms":ms(p.scanout.saturating_duration_since(content)),"budget_ms":150,"drawable":p.drawable,"bytes":self.workspace.editor().text.len_bytes(),"boundary":"positive presentedTime of a version-matched exact styled viewport, minus first content scanout"}))?;
+        }
+        Ok(())
+    }
 }
 impl AppHandler for App {
     fn on_platform_phase(&mut self, phase: &'static str) {
@@ -848,6 +866,10 @@ impl AppHandler for App {
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.window_size = w.content_size();
         self.secondary = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
+        self.view.appearance = w.appearance();
+        self.secondary.appearance = w.appearance();
+        self.workspace
+            .set_appearance(w.appearance() == Appearance::Dark)?;
         self.view.reveal(self.workspace.editor());
         let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/pipeline-cache");
         self.renderer = Some(Renderer::new(
@@ -996,6 +1018,16 @@ impl AppHandler for App {
             return;
         }
         if event.kind == MouseKind::Move {
+            let _ = self.view.pointer(
+                self.workspace.editor_mut(),
+                Point {
+                    x: event.position.x - self.content.x,
+                    y: event.position.y,
+                },
+                false,
+                false,
+                false,
+            );
             self.panels.tree.pointer(event.position, None);
             w.request_frame();
             return;
@@ -1132,6 +1164,26 @@ impl AppHandler for App {
             }
             return;
         }
+        match self.view.pointer(
+            self.workspace.editor_mut(),
+            Point {
+                x: event.position.x - self.content.x,
+                y: event.position.y,
+            },
+            event.kind == MouseKind::Down,
+            event.kind == MouseKind::Drag,
+            event.kind == MouseKind::Up,
+        ) {
+            Ok(true) => {
+                self.changed(w, Instant::now(), false);
+                return;
+            }
+            Err(e) => {
+                self.show_error(w, &e);
+                return;
+            }
+            _ => {}
+        }
         let at = self.view.hit_test(
             self.workspace.editor(),
             Point {
@@ -1216,6 +1268,13 @@ impl AppHandler for App {
     }
     fn on_appearance(&mut self, w: &WindowHandle, appearance: Appearance) {
         self.view.appearance = appearance;
+        self.secondary.appearance = appearance;
+        if let Err(e) = self
+            .workspace
+            .set_appearance(appearance == Appearance::Dark)
+        {
+            self.show_error(w, &e);
+        }
         w.request_frame();
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
@@ -1223,10 +1282,20 @@ impl AppHandler for App {
             return Ok(());
         }
         let w = ctx.window;
+        let observations = w.take_presentations();
+        if self.startup_done {
+            for p in &observations {
+                self.observe_highlight(*p)?;
+            }
+        }
+        let focused = w.is_focused();
+        let focus_changed = self.window_focused != focused;
+        self.window_focused = focused;
+        self.secondary.focused = false;
         if self.startup_done && matches!(self.options.mode, Mode::Interactive | Mode::Open) {
             let loading_before = self.workspace.tabs.iter().any(|t| t.loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
-            let mut changed = self.workspace.poll();
+            let mut changed = self.workspace.poll() || focus_changed;
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
             if let Err(error) = self.replacement_confirmation(w) {
@@ -1246,6 +1315,7 @@ impl AppHandler for App {
             }
             if self.options.mode == Mode::Open
                 && self.workspace.tabs.iter().all(|t| t.loading.is_none())
+                && self.highlighted_scanout.is_some()
             {
                 if !self.workspace.messages.is_empty() {
                     return Err(self.workspace.messages.join("; "));
@@ -1274,8 +1344,23 @@ impl AppHandler for App {
             for message in std::mem::take(&mut self.workspace.messages) {
                 self.show_error(w, &message);
             }
-            w.request_frame_at(Instant::now() + Duration::from_millis(200));
-            if ctx.reason == FrameReason::Timer && !changed && !loading_before {
+            let caret_animation = self
+                .workspace
+                .editor()
+                .settings
+                .string("caret_style", "solid")
+                != "solid";
+            w.request_frame_at(
+                Instant::now()
+                    + Duration::from_millis(if caret_animation {
+                        16
+                    } else if self.workspace.language_busy() || self.panels.busy() {
+                        8
+                    } else {
+                        200
+                    }),
+            );
+            if ctx.reason == FrameReason::Timer && !changed && !loading_before && !caret_animation {
                 return Ok(());
             }
         }
@@ -1294,7 +1379,6 @@ impl AppHandler for App {
             }
             self.font_face = name;
         }
-        let observations = w.take_presentations();
         if !self.startup_done {
             let before_callback = self.first_scanout.first_callback;
             let skipped = self.first_scanout.skipped_drawables;
@@ -1310,6 +1394,30 @@ impl AppHandler for App {
             if let Some(p) = real {
                 self.start_report(w, p)?;
                 return Ok(());
+            }
+        }
+        if self.startup_done
+            && !self.language_warmed
+            && matches!(self.options.mode, Mode::Scroll | Mode::Typing)
+        {
+            self.workspace.poll();
+            let ready = self
+                .workspace
+                .editor()
+                .language
+                .borrow()
+                .as_ref()
+                .is_some_and(|l| l.ready() && l.highlight_complete());
+            if !ready {
+                w.request_frame_at(Instant::now() + Duration::from_millis(8));
+                return Ok(());
+            }
+            self.language_warmed = true;
+            self.reporter.emit(json!({"kind":"language_ready","syntax":self.workspace.editor().language.borrow().as_ref().map(|l| l.name.clone()),"minimap":self.workspace.editor().settings.bool("show_minimap",true),"bytes":self.workspace.editor().text.len_bytes()}))?;
+            if let Some(b) = self.bench.as_mut()
+                && b.mode == Mode::Typing
+            {
+                b.schedule_next(Instant::now());
             }
         }
         if ctx.reason == FrameReason::StartupPrepare {

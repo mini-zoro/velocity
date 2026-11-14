@@ -1,3 +1,92 @@
+# Round 6 results: syntax, language editing and core views
+
+Implemented and headless-verified, **uncommitted**. Users now see syntax colors, real
+bold/italic faces and underline decorations, original live dark/light schemes, detected syntax
+in the status bar and Set Syntax palette choices. Cmd+/ and Cmd+Alt+/ toggle language comments;
+Enter/reindent use metadata; Cmd+R previews transformed file symbols. Scope-aware pairing and
+bracket/tag matching ignore strings/comments. Unicode word wrapping, visual vertical movement,
+tracked folds, token minimap scrolling and whitespace/guides/rulers/caret/view settings are wired
+through the editor. Project-wide symbol indexing remains deferred by the spec.
+
+This lane edited velocity, vel-ui, vel-render, vel-platform, vel-config, vel-commands and the
+shared Cargo.lock. Lane B's concurrent sources and owned color-scheme resources were consumed
+read-only. One HighlightService is owned per buffer and shared by splits; an editor dispatcher
+keeps its cooperative catch-up off the UI thread. Version/scheme checks reject stale styles.
+Scope prefixes become available while a separate worker finishes symbols/folds/tags/minimap;
+selector predicates require current scope coverage at every caret. No AppKit window, Metal
+device, display wake or unlock was started in this session.
+
+**Validation: 100 Rust tests pass** across eight lane-A crates: commands 5, config 8, fileio 7,
+platform 6, render 8, search 8, UI 3, application 55. New cases cover metadata commands and stale
+reindent, real scopes/quote contexts, symbols/preview cancellation, syntax/settings/appearance,
+style/font/minimap propagation, bracket/tag independence, Unicode wrapping and vertical movement,
+fold tracking/undo, minimap row relocation/dragging and wrapped IME preview/commit geometry.
+Targeted fmt, clippy --all-targets with -D warnings and rustdoc with -D warnings pass for all
+six edited crates. Release build, telemetry parser/completeness self-test, bundle shell syntax
+and diff whitespace checks pass. GPU/Metal validation and the native checklist remain pending.
+
+Five sequential release CPU runs began **2026-11-14 05:21:28 UTC**, Darwin 25.1.0 arm64,
+rustc 1.99.1. Every run used one copied binary (SHA-256 and source fingerprints are in
+[timings-round6.json](timings-round6.json)); lane B remained active. Quantiles below pool every
+sample using linear interpolation. No outlier was removed.
+
+| CPU workload | Samples | p50, ms | p95, ms | Max, ms | Spec target / comparison |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Actual 10,000,000-byte Rust first exact screen after default CPU scene | 5 | 13.317 | 16.562 | 16.645 | <=150 ms; native scanout pending |
+| Exact highlighted viewport + minimap, 3840×2160 logical scene | 3,000 | 0.439 | 0.737 | 10.422 | p95 <=2 ms; CPU scene only |
+| 1 caret, highlighted 10k-line Rust, keymap → edit → CPU scene | 2,500 | 1.903 | 3.341 | 86.102 | p50 <=2 / p95 <=4 ms; present-return pending |
+| 1-character rewrap, 100k lines, exactly one row rewrapped | 500 | 0.00627 | 0.00858 | 0.02255 | <=1 ms |
+| Fold all, 100k lines, real command/regions/projection | 100 | 9.092 | 10.603 | 16.390 | <=20 ms |
+| Unfold all, same document | 100 | 0.905 | 1.180 | 4.339 | <=20 ms |
+| Minimap GPU at 4K | — | — | — | — | <=1 ms; reviewer measurement pending |
+
+The pooled CPU proxies meet the numerical targets. **Individual typing p95s were 2.349,
+6.040, 4.0006, 2.233 and 2.198 ms**: runs 2 and 3 exceeded 4 ms, so repeatability is not an
+unqualified pass. All five medians were below 2 ms. The largest typing sample was 86.1025 ms;
+its scene stage was 85.9241 ms. Edit-stage p95s ranged 0.069–0.209 ms, and the bulk of measured
+latency was scene construction. Concurrent work was present, but the causes of the tail samples
+were not isolated. The raw evidence preserves them for review.
+
+Scroll waits for exact version-matched viewport styles outside each timer, then times a CPU
+scene including the minimap; it does not include asynchronous highlight delivery. The logical
+3840×2160 viewport exceeds the logical area of a conventional 4K Retina window and makes no
+physical display claim. Typing waits for exact highlighting before each key; the ensuing scene
+may use current-text fallback until the worker supplies new-version spans. Its timer includes
+keymap dispatch, transaction and CPU scene, and excludes native event receipt, shaping/raster,
+uploads, GPU and presentation. Rewrap excludes the preceding buffer transaction. Fold/unfold
+includes commands, named regions and layout projection, with painting outside the timer.
+
+Durable aggregate: [timings-round6.json](timings-round6.json). Raw JSONL, environment, stdout
+and the measured binary are retained in
+[the run directory](output/round6-cpu-20261114T052128.851998Z/summary.json).
+[measure-views.py](scripts/measure-views.py) reproduces five runs without initializing GUI/GPU.
+Earlier timing experiments remain in output; the table above describes the final binary.
+
+Reviewer GUI commands and exact native boundaries are at the top of [RUNBOOK.md](RUNBOOK.md).
+Open now correlates the exact highlighted drawable with positive presentedTime; Scroll has an
+isolated minimap timestamp pass. These native paths have only been compiled. Record actual
+physical size/scale/refresh, repeat five times and fill [MANUAL_TEST.md](MANUAL_TEST.md).
+No native typing, scanout, GPU budget or visual-quality result is inferred from CPU checks.
+
+Current limits: undo/redo and generic buffer operations whose transaction descriptors are not
+exposed rebuild the syntax service and wrap snapshot; normal insert/snippet/paste/delete and
+language edits preserve exact ChangeSets. The one-character benchmark covers the incremental
+path. Full symbol/fold/tag aggregation runs on a worker after scope convergence. Existing
+metadata reindent compatibility gaps are documented in [vel-syntax/RESULTS.md](../vel-syntax/RESULTS.md).
+Paragraph bidi and project symbol indexing are outside this round.
+
+Optional lane-B API requests, with no functional blocker:
+
+- vel-highlight: enqueue-only requests for multiple viewport intervals and versioned scope
+  snapshots, including branch corrections, would remove our dispatcher/duplicate scope worker.
+- vel-syntax: cached multiple roots or additional in-memory definitions, retaining lazy
+  contexts/stable resource paths, would remove the temporary source tree that adds our
+  original Plain Text fallback to the public syntax corpus.
+
+Historical round-5 and earlier evidence follows.
+
+---
+
 # Round 5 results: widgets, Goto, palette, find/replace, file search and side bar
 
 Status: implemented and headless-verified; GUI/Metal measurements remain pending. No GUI,

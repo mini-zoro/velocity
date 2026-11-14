@@ -35,3 +35,9 @@ cargo run --release -p vel-config --example keymap_bench
 The microbenchmark resolves one million events over 1,000 indexed bindings and reports mean
 microseconds, including command argument cloning. It is a CPU measurement, not native input
 or GPU latency. Property tests exercise arbitrary Unicode settings values and lossless edits.
+
+
+ContextProvider::scopes_ready defaults to true for synchronous clients. Asynchronous editor
+clients return false until current-version scopes arrive: both positive and negative selector
+predicates then fail, preventing quote-pairing contexts from treating pending scopes as code.
+Other context keys remain usable while scopes are pending.

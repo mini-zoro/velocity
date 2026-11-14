@@ -38,6 +38,8 @@ struct Raster {
 /// CPU presentation boundaries for one successful frame.
 #[derive(Clone, Debug)]
 pub struct FrameTimes {
+    /// Native drawable sequence, permitting exact frame-to-scanout correlation.
+    pub drawable: Option<u64>,
     /// GPU commands submitted (not completed).
     pub submitted: Instant,
     /// queue.present returned (not scanout).
@@ -74,6 +76,8 @@ pub struct Renderer {
     batches: BatchPlan,
     layouts: LineLayoutCache,
     queries: Option<Queries>,
+    minimap_queries: Option<Queries>,
+    minimap_batches: std::ops::Range<usize>,
     offscreen: Option<wgpu::Texture>,
     background: Color,
     cache: Option<wgpu::PipelineCache>,
@@ -277,6 +281,7 @@ impl Renderer {
         let capacity = 1024 * 1024;
         let instances = make_instances(&device, capacity);
         let queries = has_queries.then(|| Queries::new(&device, &queue));
+        let minimap_queries = has_queries.then(|| Queries::new(&device, &queue));
         let info = json!({"adapter":info.name,"backend":format!("{:?}",info.backend),"driver":info.driver,"present_mode":"fifo","desired_maximum_frame_latency":1,"timestamp_query_enabled":has_queries,"pipeline_cache_supported":has_cache,"pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},"pipeline_cache_loaded_bytes":cache_bytes.as_ref().map_or(0,Vec::len),"device_creation_ms":device_ms,"shader_module_ms":shader_ms,"pipeline_creation_ms":pipeline_ms,"surface_format":format!("{:?}",config.format)});
         Ok(Self {
             surface,
@@ -301,6 +306,8 @@ impl Renderer {
             batches: BatchPlan::default(),
             layouts: LineLayoutCache::new(2048),
             queries,
+            minimap_queries,
+            minimap_batches: 0..0,
             offscreen: None,
             background: Scene::default().background,
             cache,
@@ -448,6 +455,7 @@ impl Renderer {
         self.atlas.begin_frame();
         self.data.clear();
         self.batches.clear();
+        self.minimap_batches = 0..0;
         self.background = scene.background;
         for (layer_index, layer) in scene.layers.iter().enumerate() {
             let first = self.data.len() as u32;
@@ -478,13 +486,16 @@ impl Renderer {
             for run in &layer.text {
                 let px64 = (run.size * scale * 64.).round() as u32;
                 let style = LayoutStyle {
+                    font_style: run.style,
                     px64,
                     font_epoch: 0,
                 };
                 let glyphs = if let Some(g) = self.layouts.get(&run.text, style) {
                     g
                 } else {
-                    let g: Arc<[_]> = fonts.shape(&run.text, px64 as f32 / 64.).into();
+                    let g: Arc<[_]> = fonts
+                        .shape_styled(&run.text, px64 as f32 / 64., run.style)
+                        .into();
                     self.layouts.insert(&run.text, style, Arc::clone(&g));
                     g
                 };
@@ -537,11 +548,27 @@ impl Renderer {
                     u.clip,
                     u.color,
                     scale,
-                    [0., 0., u.thickness * scale, f32::from(u.squiggle)],
+                    [
+                        0.,
+                        0.,
+                        u.thickness * scale,
+                        if u.stippled {
+                            2.
+                        } else {
+                            f32::from(u.squiggle)
+                        },
+                    ],
                     PrimitiveKind::Underline,
                 ));
             }
             self.batch(layer_index, PrimitiveKind::Underline, first);
+            if layer.minimap {
+                let first = self
+                    .batches
+                    .as_slice()
+                    .partition_point(|b| b.layer < layer_index);
+                self.minimap_batches = first..self.batches.len();
+            }
         }
         let required = std::mem::size_of_val(self.data.as_slice()) as u64;
         if required > self.capacity {
@@ -568,40 +595,70 @@ impl Renderer {
         view: &wgpu::TextureView,
         query: Option<u32>,
     ) {
-        let timestamp_writes =
-            self.queries
-                .as_ref()
-                .zip(query)
-                .map(|(q, i)| wgpu::RenderPassTimestampWrites {
-                    query_set: &q.set,
-                    beginning_of_pass_write_index: Some(i * 2),
-                    end_of_pass_write_index: Some(i * 2 + 1),
-                });
+        let batches = self.batches.as_slice();
+        let separate = query.is_some() && !self.minimap_batches.is_empty();
+        let ranges = if separate {
+            vec![
+                0..self.minimap_batches.start,
+                self.minimap_batches.clone(),
+                self.minimap_batches.end..batches.len(),
+            ]
+        } else {
+            std::iter::once(0..batches.len()).collect()
+        };
         let c = self.background;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("editor primitives"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: c[0] as f64,
-                        g: c[1] as f64,
-                        b: c[2] as f64,
-                        a: c[3] as f64,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            timestamp_writes,
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind, &[]);
-        pass.set_vertex_buffer(0, self.instances.slice(..));
-        for batch in self.batches.as_slice() {
-            pass.draw(0..6, batch.instances.clone());
+        for (part, range) in ranges.iter().enumerate() {
+            let timestamp_writes = if separate && part == 1 {
+                self.minimap_queries.as_ref().zip(query).map(|(q, i)| {
+                    wgpu::RenderPassTimestampWrites {
+                        query_set: &q.set,
+                        beginning_of_pass_write_index: Some(i * 2),
+                        end_of_pass_write_index: Some(i * 2 + 1),
+                    }
+                })
+            } else {
+                self.queries
+                    .as_ref()
+                    .zip(query)
+                    .map(|(q, i)| wgpu::RenderPassTimestampWrites {
+                        query_set: &q.set,
+                        beginning_of_pass_write_index: (part == 0).then_some(i * 2),
+                        end_of_pass_write_index: (part + 1 == ranges.len()).then_some(i * 2 + 1),
+                    })
+            };
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(if separate && part == 1 {
+                    "minimap only"
+                } else {
+                    "editor primitives"
+                }),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if part == 0 {
+                            wgpu::LoadOp::Clear(wgpu::Color {
+                                r: c[0] as f64,
+                                g: c[1] as f64,
+                                b: c[2] as f64,
+                                a: c[3] as f64,
+                            })
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                timestamp_writes,
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_vertex_buffer(0, self.instances.slice(..));
+            for batch in &batches[range.clone()] {
+                pass.draw(0..6, batch.instances.clone());
+            }
         }
     }
     /// Builds and submits the complete first text frame while the window is
@@ -690,6 +747,7 @@ impl Renderer {
             }
         };
         let acquired = Instant::now();
+        let drawable = self.window.last_acquired_drawable();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if first {
             let offscreen = self
@@ -723,12 +781,27 @@ impl Renderer {
             );
             q.recorded = q.recorded.max(i + 1);
         }
+        if !first
+            && !self.minimap_batches.is_empty()
+            && let Some((q, i)) = self.minimap_queries.as_mut().zip(query)
+        {
+            encoder.resolve_query_set(&q.set, i * 2..i * 2 + 2, &q.resolve, u64::from(i) * 256);
+            encoder.copy_buffer_to_buffer(
+                &q.resolve,
+                u64::from(i) * 256,
+                &q.readback,
+                u64::from(i) * 16,
+                16,
+            );
+            q.recorded = q.recorded.max(i + 1);
+        }
         self.queue.submit([encoder.finish()]);
         let submitted = Instant::now();
         let present_start = Instant::now();
         self.queue.present(texture);
         let presented = Instant::now();
         Ok(Some(FrameTimes {
+            drawable,
             submitted,
             presented,
             acquire_ms: ms(acquired - start),
@@ -740,6 +813,14 @@ impl Renderer {
     pub fn gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
         self.queries
             .as_ref()
+            .map(|q| q.read(&self.device))
+            .transpose()
+    }
+    /// Isolated minimap render-pass timestamps, excluding the main editor and tabs.
+    pub fn minimap_gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
+        self.minimap_queries
+            .as_ref()
+            .filter(|q| q.recorded > 0)
             .map(|q| q.read(&self.device))
             .transpose()
     }

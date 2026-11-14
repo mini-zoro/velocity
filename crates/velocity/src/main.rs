@@ -3,7 +3,13 @@
 mod app;
 mod bench;
 mod cli;
+mod editing;
 mod editor;
+mod feature_bench;
+#[cfg(test)]
+mod feature_tests;
+mod language;
+mod layout;
 mod panels;
 mod report;
 mod stats;
@@ -46,6 +52,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        if options.mode == Mode::HeadlessFeatures {
+            return feature_bench::run(&reporter, &options);
+        }
         if options.mode != Mode::Headless {
             vel_platform::display_status().check()?;
             clock.mark("display_preflight_passed");
@@ -102,6 +111,22 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                         workspace.open(location.clone())?;
                     }
                 }
+            } else {
+                let path = options
+                    .file
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "sample.rs".into());
+                let syntax = vel_highlight::detect_syntax(
+                    &workspace.assets.syntaxes,
+                    &path,
+                    &workspace.editor().text.line(0).to_string(),
+                    None,
+                )
+                .unwrap_or_else(|| workspace.assets.syntaxes.find_syntax_plain_text())
+                .name
+                .clone();
+                workspace.set_file_type(&syntax)?;
             }
             let app = app::App::new(
                 options.clone(),

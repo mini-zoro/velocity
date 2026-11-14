@@ -1,5 +1,9 @@
 //! Buffer-backed editing, command routing and transient IME preview.
-use std::ops::Range;
+use std::{
+    cell::RefCell,
+    ops::Range,
+    sync::{Arc, mpsc},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vel_buffer::{Buffer, Change, ChangeSet, Region, Selection, ViewId, ops};
@@ -12,6 +16,11 @@ use vel_config::{
 use vel_platform::{Command, TextInput, Utf16Range};
 use vel_text::Text;
 
+pub type ReindentResult = (
+    vel_buffer::BufferId,
+    vel_buffer::ChangeId,
+    Result<Vec<(Range<usize>, String)>, String>,
+);
 #[derive(Debug)]
 struct Composition {
     original: Range<usize>,
@@ -21,6 +30,10 @@ struct Composition {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub language: crate::language::LanguageCell,
+    pub layout: RefCell<crate::layout::Layout>,
+    language_buffer: Option<vel_buffer::BufferId>,
+    pub reindent_job: Option<mpsc::Receiver<ReindentResult>>,
     pub read_only: bool,
     pub buffer: Buffer,
     pub id: ViewId,
@@ -59,6 +72,10 @@ impl Editor {
         let preferences = settings.editor();
         let settings_revision = settings.revision();
         Self {
+            language: RefCell::new(None),
+            layout: RefCell::new(crate::layout::Layout::default()),
+            language_buffer: None,
+            reindent_job: None,
             read_only: false,
             buffer,
             id,
@@ -81,6 +98,36 @@ impl Editor {
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
+            self.buffer.set_settings(
+                self.id,
+                vel_buffer::Settings {
+                    tab_size: self.preferences.tab_size,
+                    translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
+                    word_separators: self.preferences.word_separators.clone(),
+                },
+            );
+        }
+        let reset = self.language.borrow().as_ref().is_some_and(|l| {
+            l.version != self.buffer.change_id() || self.language_buffer != Some(self.buffer.id())
+        });
+        if reset {
+            let previous = self.language.borrow_mut().take().expect("language");
+            let result = crate::language::Language::new(
+                previous.assets.clone(),
+                &previous.syntax,
+                self.buffer.text().clone(),
+                self.buffer.change_id(),
+                previous.scheme.clone(),
+                self.preferences.tab_size,
+            );
+            match result {
+                Ok(language) => *self.language.borrow_mut() = Some(language),
+                Err(e) => self
+                    .actions
+                    .push(("language_error".into(), json!({"message": e}))),
+            }
+            self.language_buffer = Some(self.buffer.id());
+            self.layout.borrow_mut().invalidate();
         }
         self.text = self.buffer.text().clone();
         let primary = self
@@ -92,6 +139,55 @@ impl Editor {
         self.anchor = primary.a;
         self.caret = primary.b;
         self.revision = self.buffer.change_id().0;
+    }
+    pub fn attach_language(
+        &mut self,
+        assets: Arc<crate::language::Assets>,
+        syntax: &str,
+        scheme: Arc<vel_color_scheme::ColorScheme>,
+    ) -> Result<(), String> {
+        let language = crate::language::Language::new(
+            assets,
+            syntax,
+            self.buffer.text().clone(),
+            self.buffer.change_id(),
+            scheme,
+            self.preferences.tab_size,
+        )?;
+        *self.language.borrow_mut() = Some(language);
+        self.language_buffer = Some(self.buffer.id());
+        Ok(())
+    }
+    pub fn poll_language(&mut self) -> bool {
+        let mut changed = self
+            .language
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|l| l.poll());
+        if let Some((buffer, version, edits)) =
+            self.reindent_job.as_ref().and_then(|rx| rx.try_recv().ok())
+        {
+            self.reindent_job = None;
+            if buffer == self.buffer.id()
+                && version == self.buffer.change_id()
+                && !self.read_only
+                && self.marked.is_none()
+            {
+                match edits {
+                    Ok(edits) => {
+                        self.apply_edits(edits, None, vel_buffer::EditKind::Other);
+                        self.sync();
+                        changed = true;
+                    }
+                    Err(error) => {
+                        if let Some(language) = self.language.borrow_mut().as_mut() {
+                            language.errors.push(error);
+                        }
+                    }
+                }
+            }
+        }
+        changed
     }
     pub fn regions(&self) -> Vec<Region> {
         if let Some(composition) = &self.composition {
@@ -312,6 +408,12 @@ impl Editor {
     }
 }
 impl Host for Editor {
+    fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        self.language_command(name, args)
+    }
+    fn command_finished(&mut self) {
+        self.sync();
+    }
     fn buffer(&mut self) -> (&mut Buffer, ViewId) {
         (&mut self.buffer, self.id)
     }
@@ -331,6 +433,19 @@ impl Host for Editor {
 }
 struct EditorContext<'a>(&'a Editor);
 impl ContextProvider for EditorContext<'_> {
+    fn scopes_ready(&self) -> bool {
+        if self.0.marked.is_some() {
+            return false;
+        }
+        self.0.language.borrow().as_ref().is_none_or(|l| {
+            self.0
+                .buffer
+                .view(self.0.id)
+                .sel()
+                .iter()
+                .all(|r| l.scopes_ready_at(&self.0.text, r.b))
+        })
+    }
     fn values(&self, key: &str) -> Vec<Value> {
         let e = self.0;
         let selections = e.buffer.view(e.id).sel();
@@ -373,7 +488,12 @@ impl ContextProvider for EditorContext<'_> {
             .view(self.0.id)
             .sel()
             .iter()
-            .map(|r| PlainScope.matches(selector, r.b))
+            .map(|r| {
+                self.0.language.borrow().as_ref().map_or_else(
+                    || PlainScope.matches(selector, r.b),
+                    |l| l.selector(&self.0.text, selector, r.b),
+                )
+            })
             .collect()
     }
 }
@@ -412,7 +532,11 @@ pub fn selector_command(command: Command) -> (&'static str, Value) {
 }
 /// Visual monospace columns with configurable tab stops.
 pub fn cells_with_tab(text: &str, tab: usize) -> usize {
-    let mut col = 0;
+    cells_with_tab_at(text, tab, 0)
+}
+pub fn cells_with_tab_at(text: &str, tab: usize, initial: usize) -> usize {
+    let tab = tab.max(1);
+    let mut col = initial;
     for g in text.graphemes(true) {
         col += if g == "\t" {
             tab - col % tab
@@ -420,12 +544,13 @@ pub fn cells_with_tab(text: &str, tab: usize) -> usize {
             g.width().max(1)
         };
     }
-    col
+    col - initial
 }
 #[cfg(test)]
 pub fn cells(text: &str) -> usize {
     cells_with_tab(text, 4)
 }
+#[cfg(test)]
 pub fn byte_at_cell_with_tab(text: &str, target: usize, tab: usize) -> usize {
     let mut col = 0;
     for (i, g) in text.grapheme_indices(true) {

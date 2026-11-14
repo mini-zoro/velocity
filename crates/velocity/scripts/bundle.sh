@@ -12,6 +12,8 @@ mkdir -p "$VELOCITY_STAGE/Contents/MacOS" "$VELOCITY_STAGE/Contents/Resources"
 cp "${CARGO_TARGET_DIR:-target}/release/velocity" "$VELOCITY_STAGE/Contents/MacOS/velocity"
 cp crates/velocity/Info.plist "$VELOCITY_STAGE/Contents/Info.plist"
 cp crates/velocity/fixtures/ime-and-unicode.rs "$VELOCITY_STAGE/Contents/Resources/ime-and-unicode.rs"
+# Public, permissively licensed syntax definitions and metadata, with their notices.
+cp -R third_party/sublime-packages "$VELOCITY_STAGE/Contents/Resources/Syntaxes"
 if [ -e "$VELOCITY_DEST" ]; then
     mv "$VELOCITY_DEST" "$VELOCITY_DEST.backup.$(date +%Y%m%d%H%M%S).$$"
 fi

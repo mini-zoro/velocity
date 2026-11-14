@@ -4,6 +4,18 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Unsupported platforms do not acquire native drawables.
+    pub fn last_acquired_drawable(&self) -> Option<u64> {
+        None
+    }
+    /// Deterministic appearance for headless clients.
+    pub fn appearance(&self) -> crate::Appearance {
+        crate::Appearance::Dark
+    }
+    /// Unsupported platforms have no focused native window.
+    pub fn is_focused(&self) -> bool {
+        false
+    }
     /// No native menus on this platform.
     pub fn set_menu(&self, _entries: &[crate::MenuEntry]) {}
     /// No native chooser on this platform.

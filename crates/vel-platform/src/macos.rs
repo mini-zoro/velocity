@@ -43,6 +43,35 @@ impl fmt::Debug for WindowHandle {
     }
 }
 impl WindowHandle {
+    /// Sequence of the most recently acquired Metal drawable, for scanout correlation.
+    pub fn last_acquired_drawable(&self) -> Option<u64> {
+        self.0
+            .layer
+            .get()
+            .and_then(|l| l.ivars().sequence.load(Ordering::Relaxed).checked_sub(1))
+    }
+    /// Current effective macOS appearance, including before the first redraw.
+    pub fn appearance(&self) -> Appearance {
+        let Some(view) = self.0.view.get() else {
+            return Appearance::Dark;
+        };
+        // SAFETY: AppKit's immutable appearance constants are read on the main thread.
+        let (dark, light) = unsafe { (NSAppearanceNameDarkAqua, NSAppearanceNameAqua) };
+        if view
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[dark, light]))
+            .as_deref()
+            == Some(dark)
+        {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        }
+    }
+    /// Whether this native window currently receives keyboard input.
+    pub fn is_focused(&self) -> bool {
+        self.0.window.get().is_some_and(|w| w.isKeyWindow())
+    }
     /// Coalesces a redraw and wakes the paused display link.
     pub fn request_frame(&self) {
         self.0.dirty.set(true);

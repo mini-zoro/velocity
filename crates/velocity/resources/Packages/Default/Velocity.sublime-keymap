@@ -1,4 +1,4 @@
-// Velocity key bindings, authored from scratch for the commands we implement.
+// Velocity key bindings, authored from scratch.
 [
   {
     "keys": [
@@ -690,6 +690,12 @@
         "operator": "regex_match",
         "operand": "\\s*([)\\]}].*)?",
         "match_all": true
+      },
+      {
+        "key": "selector",
+        "operator": "not_equal",
+        "operand": "string, comment",
+        "match_all": true
       }
     ]
   },
@@ -742,6 +748,12 @@
         "key": "following_text",
         "operator": "regex_match",
         "operand": "\\s*([)\\]}].*)?",
+        "match_all": true
+      },
+      {
+        "key": "selector",
+        "operator": "not_equal",
+        "operand": "string, comment",
         "match_all": true
       }
     ]
@@ -796,6 +808,12 @@
         "operator": "regex_match",
         "operand": "\\s*([)\\]}].*)?",
         "match_all": true
+      },
+      {
+        "key": "selector",
+        "operator": "not_equal",
+        "operand": "string, comment",
+        "match_all": true
       }
     ]
   },
@@ -848,6 +866,12 @@
         "key": "following_text",
         "operator": "regex_match",
         "operand": "\\s*([)\\]}].*)?",
+        "match_all": true
+      },
+      {
+        "key": "selector",
+        "operator": "not_equal",
+        "operand": "string, comment",
         "match_all": true
       }
     ]
@@ -902,6 +926,12 @@
         "operator": "regex_match",
         "operand": "\\s*([)\\]}].*)?",
         "match_all": true
+      },
+      {
+        "key": "selector",
+        "operator": "not_equal",
+        "operand": "string, comment",
+        "match_all": true
       }
     ]
   },
@@ -950,26 +980,223 @@
       "to": "line"
     }
   },
-  {"keys": ["super+p"], "command": "show_overlay", "args": {"overlay": "goto"}},
-  {"keys": ["super+shift+p"], "command": "show_overlay", "args": {"overlay": "command_palette"}},
-  {"keys": ["super+r"], "command": "show_overlay", "args": {"overlay": "goto", "text": "@"}},
-  {"keys": ["ctrl+g"], "command": "goto_line", "args": {}},
-  {"keys": ["super+f"], "command": "show_panel", "args": {"panel": "find"}},
-  {"keys": ["super+alt+f"], "command": "show_panel", "args": {"panel": "replace"}},
-  {"keys": ["super+i"], "command": "show_panel", "args": {"panel": "incremental_find"}},
-  {"keys": ["super+shift+f"], "command": "show_panel", "args": {"panel": "find_in_files"}},
-  {"keys": ["super+g"], "command": "find_next", "args": {}},
-  {"keys": ["super+shift+g"], "command": "find_prev", "args": {}},
-  {"keys": ["alt+enter"], "command": "find_all", "args": {}},
-  {"keys": ["super+e"], "command": "slurp_find_string", "args": {}},
-  {"keys": ["super+shift+e"], "command": "slurp_replace_string", "args": {}},
-  {"keys": ["super+k", "super+b"], "command": "toggle_side_bar", "args": {}},
-  {"keys": ["ctrl+0"], "command": "focus_side_bar", "args": {}},
-  {"keys": ["alt+super+r"], "command": "toggle_find_option", "args": {"option": "regex"}},
-  {"keys": ["alt+super+c"], "command": "toggle_find_option", "args": {"option": "case_sensitive"}},
-  {"keys": ["alt+super+w"], "command": "toggle_find_option", "args": {"option": "whole_word"}},
-  {"keys": ["super+alt+g"], "command": "find_under"},
-  {"keys": ["super+alt+shift+g"], "command": "find_under_prev"},
-  {"keys": ["ctrl+shift+h"], "command": "replace_next"},
-  {"keys": ["ctrl+alt+enter"], "command": "replace_all"}
+  {
+    "keys": [
+      "super+p"
+    ],
+    "command": "show_overlay",
+    "args": {
+      "overlay": "goto"
+    }
+  },
+  {
+    "keys": [
+      "super+shift+p"
+    ],
+    "command": "show_overlay",
+    "args": {
+      "overlay": "command_palette"
+    }
+  },
+  {
+    "keys": [
+      "super+r"
+    ],
+    "command": "show_overlay",
+    "args": {
+      "overlay": "goto",
+      "text": "@"
+    }
+  },
+  {
+    "keys": [
+      "ctrl+g"
+    ],
+    "command": "goto_line",
+    "args": {}
+  },
+  {
+    "keys": [
+      "super+f"
+    ],
+    "command": "show_panel",
+    "args": {
+      "panel": "find"
+    }
+  },
+  {
+    "keys": [
+      "super+alt+f"
+    ],
+    "command": "show_panel",
+    "args": {
+      "panel": "replace"
+    }
+  },
+  {
+    "keys": [
+      "super+i"
+    ],
+    "command": "show_panel",
+    "args": {
+      "panel": "incremental_find"
+    }
+  },
+  {
+    "keys": [
+      "super+shift+f"
+    ],
+    "command": "show_panel",
+    "args": {
+      "panel": "find_in_files"
+    }
+  },
+  {
+    "keys": [
+      "super+g"
+    ],
+    "command": "find_next",
+    "args": {}
+  },
+  {
+    "keys": [
+      "super+shift+g"
+    ],
+    "command": "find_prev",
+    "args": {}
+  },
+  {
+    "keys": [
+      "alt+enter"
+    ],
+    "command": "find_all",
+    "args": {}
+  },
+  {
+    "keys": [
+      "super+e"
+    ],
+    "command": "slurp_find_string",
+    "args": {}
+  },
+  {
+    "keys": [
+      "super+shift+e"
+    ],
+    "command": "slurp_replace_string",
+    "args": {}
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+b"
+    ],
+    "command": "toggle_side_bar",
+    "args": {}
+  },
+  {
+    "keys": [
+      "ctrl+0"
+    ],
+    "command": "focus_side_bar",
+    "args": {}
+  },
+  {
+    "keys": [
+      "alt+super+r"
+    ],
+    "command": "toggle_find_option",
+    "args": {
+      "option": "regex"
+    }
+  },
+  {
+    "keys": [
+      "alt+super+c"
+    ],
+    "command": "toggle_find_option",
+    "args": {
+      "option": "case_sensitive"
+    }
+  },
+  {
+    "keys": [
+      "alt+super+w"
+    ],
+    "command": "toggle_find_option",
+    "args": {
+      "option": "whole_word"
+    }
+  },
+  {
+    "keys": [
+      "super+alt+g"
+    ],
+    "command": "find_under"
+  },
+  {
+    "keys": [
+      "super+alt+shift+g"
+    ],
+    "command": "find_under_prev"
+  },
+  {
+    "keys": [
+      "ctrl+shift+h"
+    ],
+    "command": "replace_next"
+  },
+  {
+    "keys": [
+      "ctrl+alt+enter"
+    ],
+    "command": "replace_all"
+  },
+  {
+    "keys": [
+      "super+/"
+    ],
+    "command": "toggle_comment",
+    "args": {
+      "block": false
+    }
+  },
+  {
+    "keys": [
+      "super+alt+/"
+    ],
+    "command": "toggle_comment",
+    "args": {
+      "block": true
+    }
+  },
+  {
+    "keys": [
+      "super+alt+["
+    ],
+    "command": "fold"
+  },
+  {
+    "keys": [
+      "super+alt+]"
+    ],
+    "command": "unfold"
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+0"
+    ],
+    "command": "unfold_all"
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+1"
+    ],
+    "command": "fold_by_level",
+    "args": {
+      "level": 1
+    }
+  }
 ]

@@ -71,6 +71,28 @@ fn layers_observe_only_effective_changes_and_keep_wrong_types_local() {
     assert!(settings.editor().line_numbers);
 }
 struct Context;
+struct PendingScopes;
+impl ContextProvider for PendingScopes {
+    fn scopes_ready(&self) -> bool {
+        false
+    }
+    fn values(&self, _: &str) -> Vec<Value> {
+        vec![]
+    }
+    fn selector_matches(&self, _: &str) -> Vec<bool> {
+        vec![false]
+    }
+}
+#[test]
+fn asynchronous_scopes_do_not_satisfy_negative_or_positive_selectors() {
+    for operator in ["equal", "not_equal"] {
+        let context: vel_config::keymap::Context = serde_json::from_value(
+            json!({"key":"selector","operator":operator,"operand":"string, comment"}),
+        )
+        .unwrap();
+        assert!(!context.matches(&PendingScopes));
+    }
+}
 impl ContextProvider for Context {
     fn values(&self, key: &str) -> Vec<Value> {
         match key {

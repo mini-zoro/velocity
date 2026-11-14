@@ -1,3 +1,110 @@
+# Round 6: syntax, language editing and view features
+
+Run from `/Users/zoro/dev/velocity`. Keep lane B's concurrent files unchanged and do not
+commit. Round-6 code touches velocity, vel-ui, vel-render, vel-platform, vel-config and
+vel-commands, plus the shared root lockfile. Resources under Color Scheme - Velocity are
+consumed without editing them. Older round sections below are historical.
+
+```sh
+cd /Users/zoro/dev/velocity
+cargo fmt -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands --check
+cargo clippy -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands --all-targets -- -D warnings
+cargo test -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands -p vel-fileio -p vel-search
+RUSTDOCFLAGS='-D warnings' cargo doc -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-commands --no-deps
+cargo build --release -p velocity
+VELOCITY_ROUND6_CPU=$(mktemp -d /tmp/velocity-round6-cpu.XXXXXX)
+./target/release/velocity --headless-view-features --output "$VELOCITY_ROUND6_CPU/features.jsonl"
+python3 crates/velocity/scripts/measure-views.py --runs 5
+```
+
+The CPU mode uses the actual 10,000,000-byte Rust fixture for first-screen highlighting
+and 600 scroll scenes at **3840×2160 logical points**. Each timed scroll scene has
+exact viewport styles; asynchronous delivery occurs before its timer. This is a deliberately larger CPU
+viewport than a 1920×1080 logical Retina window; no physical display is inferred. Typing
+uses 500 real keymap/command transactions in a fully highlighted 10k-line Rust document,
+waiting for an exact styled viewport and backend catch-up before each timed key. The timer includes edit submission and
+CPU scene construction; rendering may consume current-text fallback while a batch arrives.
+It excludes native input receipt, font shaping/rasterization, uploads, GPU and presentation.
+The rewrap timer starts after a one-character transaction in 100k lines and checks that
+exactly one line rewrapped. Fold/unfold measures real commands, named regions and projection
+rebuild over 99,999 nonempty lines plus the final empty line; painting is outside that timer.
+All samples and boundaries are emitted as JSONL, including typing edit/scene stage statistics.
+The Python wrapper copies one release binary, runs it sequentially, retains raw samples and
+records binary/source hashes and interpolated pooled quantiles. It never overwrites results.
+Use at least five sequential runs, retain outliers and record concurrent lane activity.
+
+Final round-6 results: [RESULTS.md](RESULTS.md) and [timings-round6.json](timings-round6.json). All 100 lane-A tests and required strict
+checks pass. Five CPU runs retain all outliers; two individual typing p95s exceed
+4 ms despite the pooled p95 meeting the target. Native results remain pending.
+
+## Reviewer GUI commands — run outside the sandbox
+
+Use an awake, unlocked, visible display. These commands exit automatically. No GUI/Metal
+measurement or display wake was attempted in the agent session.
+
+```sh
+cd /Users/zoro/dev/velocity
+cargo build --release -p velocity
+VELOCITY_ROUND6_GUI=$(mktemp -d /tmp/velocity-round6-gui.XXXXXX)
+mkdir -p "$VELOCITY_ROUND6_GUI/data/Packages/User"
+./target/release/velocity --bench-open spikes/data/rust-10mb.rs --data-dir "$VELOCITY_ROUND6_GUI/data" --output "$VELOCITY_ROUND6_GUI/open.jsonl" --timeout 300
+./target/release/velocity --bench-scroll --lines 0 --width 2048 --height 1089 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_ROUND6_GUI/data" --output "$VELOCITY_ROUND6_GUI/scroll-4k.jsonl" --timeout 300
+./target/release/velocity --bench-typing --carets 1 --lines 0 --width 2048 --height 1089 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_ROUND6_GUI/data" --output "$VELOCITY_ROUND6_GUI/typing-4k.jsonl" --timeout 300
+MTL_DEBUG_LAYER=1 ./target/release/velocity --bench-open spikes/data/rust-10mb.rs --data-dir "$VELOCITY_ROUND6_GUI/data" --output "$VELOCITY_ROUND6_GUI/metal-validation.jsonl" --timeout 300
+./target/release/velocity crates/velocity/fixtures/ime-and-unicode.rs --data-dir "$VELOCITY_ROUND6_GUI/data" --log-input
+```
+
+At scale 2, 2048×1089 logical is 4096×2178 physical. Window constraints can reduce it;
+**record startup.actual_physical_size**, scale and refresh rate. Use corresponding logical
+sizes on a 1× display. Performance runs above omit the debug layer; retain the validation
+run separately. Repeat the open/scroll/typing commands with fresh output names for five runs.
+Fill MANUAL_TEST.md for native fonts, IME, focus, appearance and pointer behavior.
+
+Open waits for positive native scanout of an exact, current-version highlighted viewport.
+`first_highlighted_screen.after_content_scanout_ms` compares that drawable with first content
+scanout (≤150 ms). Drawable sequence correlation also handles skipped/zero-time callbacks;
+present-return is never relabeled as scanout. Scroll and typing wait for document highlighting
+and analysis before collecting samples. Scroll reports `minimap_gpu_summary.render_pass_ms`
+for the isolated minimap pass (p95 ≤1 ms), plus full-frame GPU and CPU metrics. Native scroll
+CPU p95 must be ≤2 ms. Typing's `inject_to_present_return` must have p50 ≤2 / p95 ≤4 ms.
+Its scripted timer boundary is app receipt, not OS/HID input; the full boundary is in JSONL.
+Missing timestamps, external input, occlusion/display failures and watchdog exits are not passes.
+
+## Integration and current limits
+
+Each buffer owns one HighlightService; split views reuse its results. A dispatcher moves the
+service's cooperative 2ms request and indivisible regex calls off the UI thread. Exact
+transaction descriptors feed inserts/snippets/paste/delete and language edits; undo/redo and
+unobserved generic buffer operations rebuild from the current snapshot. Scope parsing uses a
+separate incremental worker with convergence and branch corrections. It publishes current scope prefixes while parsing and refreshes corrected prefixes before
+assembling symbols/folds; stale versions/schemes cannot populate the view.
+Selector bindings require coverage of every caret; pending scopes fail both positive and
+negative selector predicates. Large result retirement
+runs off-thread. The original plain-text YAML fallback is composed into a caller-owned cached
+source tree; optional bundles copy public syntaxes/metadata with their license notices.
+
+Wrap geometry uses graphemes, configurable tabs, word boundaries and a prefix-count tree.
+Same-line edits rewrap only edited lines. Physical row splicing may rebuild counts, but does
+not rewrap the unchanged suffix. Unwrapped folds project tracked named regions without laying
+out hidden text; highlight requests cover only visible intervals. A bounded, collision-checked
+cell-layout cache reuses unchanged Unicode geometry. The minimap retains sampled token spans,
+updates edited samples/row mappings incrementally and refreshes exact colors on worker delivery.
+Full symbol/fold/tag aggregation runs on workers after scope convergence. Generic commands
+and undo/redo use the documented snapshot-rebuild fallback when the shared buffer does not
+expose transaction descriptors; those paths are outside the one-character rewrap measurement. The inherited
+vel-syntax reindent compatibility gaps remain documented in its RESULTS.md. No project symbol
+index or paragraph bidi is claimed by this round.
+
+Lane-B API requests (optional cleanup; no functional blocker):
+
+- vel-highlight: expose an enqueue-only viewport request, plus versioned scope snapshots at
+  positions/lines. This would remove the extra dispatcher and duplicate scope interpreter
+  while preserving nonblocking UI access, multiple visible intervals, corrections and
+  scheme/version filtering.
+- vel-syntax: allow multiple roots/additional in-memory definitions in load_cached while
+  retaining lazy contexts and stable resource paths. This removes the temporary composed
+  source tree used to include our Plain Text fallback.
+
 # Round 5: panels, navigation, project tree and search
 
 All commands start in `/Users/zoro/dev/velocity`. Do not commit this lane's work. The new

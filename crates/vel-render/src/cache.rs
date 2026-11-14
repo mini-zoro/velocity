@@ -8,6 +8,8 @@ use std::{
 /// Font size and font-set identity affecting layout.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct LayoutStyle {
+    /// Weight/slant; distinct faces must never share layout entries.
+    pub font_style: crate::scene::FontStyle,
     /// Physical font size in 1/64 pixels.
     pub px64: u32,
     /// Changes when the font set/configuration changes.
@@ -91,6 +93,7 @@ mod tests {
     fn content_and_style_invalidate_and_lru_is_bounded() {
         let mut c = LineLayoutCache::new(2);
         let s = LayoutStyle {
+            font_style: Default::default(),
             px64: 832,
             font_epoch: 0,
         };

@@ -159,6 +159,9 @@ impl Context {
     /// Evaluates a predicate using any/all semantics over the current selections.
     pub fn matches(&self, provider: &dyn ContextProvider) -> bool {
         if self.key == "selector" {
+            if !provider.scopes_ready() {
+                return false;
+            }
             let selector = self.operand.as_str().unwrap_or("");
             let values = provider.selector_matches(selector);
             let predicate = |v: bool| if self.operator == "not_equal" { !v } else { v };
@@ -193,6 +196,11 @@ impl Context {
 }
 /// Supplies lazy context values; text predicates may return one value per selection.
 pub trait ContextProvider {
+    /// Whether current-version scopes are available. Unknown scopes cannot satisfy
+    /// positive or negative selector predicates while asynchronous parsing catches up.
+    fn scopes_ready(&self) -> bool {
+        true
+    }
     /// Current value(s), or an empty vector for an unknown key.
     fn values(&self, key: &str) -> Vec<Value>;
     /// Scope selector results, one per selection.

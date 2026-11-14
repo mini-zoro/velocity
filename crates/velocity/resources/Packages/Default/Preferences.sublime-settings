@@ -1,4 +1,4 @@
-// Velocity defaults. These files are original, not copied from another editor.
+// Velocity defaults, authored from public behavior documentation.
 {
   "tab_size": 4,
   "translate_tabs_to_spaces": false,
@@ -19,8 +19,51 @@
   "highlight_line": true,
   "auto_match_enabled": true,
   "atomic_save": true,
-  "folder_exclude_patterns": [".git", "target"],
-  "file_exclude_patterns": ["*.velocity-backup-*"],
-  "binary_file_patterns": ["*.png", "*.jpg", "*.gif", "*.pdf", "*.zip", "*.exe", "*.dylib"],
-  "show_side_bar": true
+  "folder_exclude_patterns": [
+    ".git",
+    "target"
+  ],
+  "file_exclude_patterns": [
+    "*.velocity-backup-*"
+  ],
+  "binary_file_patterns": [
+    "*.png",
+    "*.jpg",
+    "*.gif",
+    "*.pdf",
+    "*.zip",
+    "*.exe",
+    "*.dylib"
+  ],
+  "show_side_bar": true,
+  "color_scheme": "auto",
+  "dark_color_scheme": "Velocity Dark.sublime-color-scheme",
+  "light_color_scheme": "Velocity Light.sublime-color-scheme",
+  "font_options": [],
+  "detect_indentation": true,
+  "word_wrap": "auto",
+  "wrap_width": 0,
+  "wrap_width_style": "auto",
+  "indent_subsequent_lines": true,
+  "draw_indent_guides": true,
+  "indent_guide_options": [
+    "draw_normal",
+    "draw_active"
+  ],
+  "caret_extra_width": 0,
+  "line_padding_top": 0,
+  "line_padding_bottom": 0,
+  "scroll_context_lines": 3,
+  "relative_line_numbers": false,
+  "margin": 8,
+  "match_brackets": true,
+  "match_brackets_content": true,
+  "match_brackets_square": true,
+  "match_brackets_braces": true,
+  "match_brackets_angle": false,
+  "match_tags": true,
+  "fold_buttons": true,
+  "fade_fold_buttons": true,
+  "show_minimap": true,
+  "always_show_minimap_viewport": true
 }

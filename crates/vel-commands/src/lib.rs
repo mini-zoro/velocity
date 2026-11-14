@@ -30,6 +30,13 @@ pub trait Host {
     fn set_clipboard(&mut self, text: &str);
     /// Executes a window/application action, including scrolling.
     fn action(&mut self, name: &str, args: &Value) -> Result<(), String>;
+    /// Allows the view to supply language-aware edits and visual-line movement.
+    /// Return true after handling a command; the registry still records macros/repeat.
+    fn intercept_text_command(&mut self, _name: &str, _args: &Value) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Observes each command boundary, including nested chain/macro commands.
+    fn command_finished(&mut self) {}
     /// Whether a host action is enabled.
     fn action_enabled(&self, _name: &str, _args: &Value) -> bool {
         true
@@ -51,6 +58,13 @@ pub struct Registry {
     last: Option<(String, Value)>,
 }
 const TEXT: &[&str] = &[
+    "toggle_comment",
+    "reindent",
+    "fold",
+    "unfold",
+    "fold_by_level",
+    "unfold_all",
+    "fold_tag_attributes",
     "insert",
     "paste",
     "copy",
@@ -93,6 +107,8 @@ const TEXT: &[&str] = &[
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
+    "set_file_type",
+    "toggle_minimap",
     "show_overlay",
     "show_panel",
     "hide_panel",
@@ -248,6 +264,7 @@ impl Registry {
             "redo_or_repeat" => {
                 let (b, id) = host.buffer();
                 if b.redo(id) {
+                    host.command_finished();
                     return Ok(());
                 }
                 if let Some((name, args)) = self.last.clone() {
@@ -266,6 +283,7 @@ impl Registry {
         } else {
             text_command(name, args, host)?;
         }
+        host.command_finished();
         if self.recording {
             self.macro_commands.push((name.into(), args.clone()));
         }
@@ -297,6 +315,9 @@ fn string<'a>(args: &'a Value, key: &str, default: &'a str) -> &'a str {
     args[key].as_str().unwrap_or(default)
 }
 fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), String> {
+    if host.intercept_text_command(name, args)? {
+        return Ok(());
+    }
     if matches!(name, "copy" | "cut") {
         let (buffer, id) = host.buffer();
         let mut selection = buffer.view(id).sel().clone();

@@ -16,7 +16,7 @@ use vel_platform::{Command, Point, Rect, Size, TextInput};
 use vel_render::scene::{Layer, Scene};
 use vel_search::{
     files, fuzzy,
-    goto::{Query, Symbols, Target},
+    goto::{Query, Target},
     project::{Entry, Folder, Index, Rules},
     text::{self, Search},
 };
@@ -40,6 +40,7 @@ pub enum Panel {
 pub enum Overlay {
     Goto,
     Palette,
+    Syntax,
 }
 #[derive(Debug)]
 struct Preview {
@@ -99,7 +100,6 @@ pub struct Panels {
     pub output: String,
     pub input_caption: String,
     pub input_done: Option<Invocation>,
-    pub symbols: Option<Arc<dyn Symbols>>,
     focus_input: usize,
     selection_scope: Vec<Range<usize>>,
     scope_revision: Option<(BufferId, vel_buffer::ChangeId)>,
@@ -180,7 +180,6 @@ impl Default for Panels {
             output: String::new(),
             input_caption: String::new(),
             input_done: None,
-            symbols: None,
             focus_input: 0,
             selection_scope: vec![],
             scope_revision: None,
@@ -516,9 +515,28 @@ impl Panels {
         viewport: Range<usize>,
     ) -> Result<bool, String> {
         match name {
+            "set_file_type" => {
+                workspace.set_file_type(
+                    args["syntax"]
+                        .as_str()
+                        .ok_or("set_file_type needs syntax")?,
+                )?;
+            }
+            "toggle_minimap" => {
+                let editor = workspace.editor_mut();
+                let value = editor.settings.bool("show_minimap", true);
+                editor.settings.set(
+                    vel_config::settings::Layer::View,
+                    "show_minimap",
+                    json!(!value),
+                );
+                editor.sync();
+            }
             "show_overlay" | "goto_line" => {
                 self.cancel_overlay(workspace);
-                self.overlay = Some(if args["overlay"] == "command_palette" {
+                self.overlay = Some(if args["overlay"] == "syntax" {
+                    Overlay::Syntax
+                } else if args["overlay"] == "command_palette" {
                     Overlay::Palette
                 } else {
                     Overlay::Goto
@@ -868,17 +886,27 @@ impl Panels {
         self.quick_pending = true;
         self.quick_revision = self.quick_input.buffer.change_id().0;
         self.quick.items.clear();
-        if self.overlay == Some(Overlay::Palette) {
-            if self.prepared == "palette" {
+        if matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax)) {
+            let source = if self.overlay == Some(Overlay::Syntax) {
+                "syntax"
+            } else {
+                "palette"
+            };
+            if self.prepared == source {
                 self.fuzzy_worker.query(self.quick_input.value(), 100);
                 return;
             }
-            self.prepared = "palette".into();
+            self.prepared = source.into();
             self.palette_indices = workspace
                 .palette
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| {
+                    if self.overlay == Some(Overlay::Syntax)
+                        && p.invocation.command != "set_file_type"
+                    {
+                        return false;
+                    }
                     workspace
                         .editor()
                         .registry
@@ -915,9 +943,15 @@ impl Panels {
                 "symbol"
             };
             let source = format!(
-                "{kind}:{:?}:{}",
+                "{kind}:{:?}:{}:{}",
                 workspace.editor().buffer.id(),
-                workspace.editor().revision
+                workspace.editor().revision,
+                workspace
+                    .editor()
+                    .language
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|l| l.ready())
             );
             if self.prepared == source {
                 if self.local.is_none() {
@@ -945,13 +979,11 @@ impl Panels {
                     return;
                 }
                 Target::Symbol(term) => {
-                    let symbols = self
-                        .symbols
-                        .as_ref()
-                        .map(|s| s.symbols(&workspace.editor().text))
-                        .unwrap_or_default();
-                    self.message = if self.symbols.is_none() {
-                        "Symbol navigation is waiting for syntax metadata".into()
+                    let language = workspace.editor().language.borrow();
+                    let analysis = language.as_ref().and_then(|l| l.analysis.as_ref());
+                    let symbols = analysis.map(|a| a.symbols.clone()).unwrap_or_default();
+                    self.message = if analysis.is_none() {
+                        "Indexing symbols…".into()
                     } else {
                         String::new()
                     };
@@ -1070,10 +1102,15 @@ impl Panels {
             if let Some(hit) = hits.first() {
                 workspace.editor_mut().set_caret(hit.start, false);
             }
-        } else if let Target::Symbol(term) = target
-            && let Some(provider) = &self.symbols
-        {
-            let symbols = provider.symbols(&workspace.editor().text);
+        } else if let Target::Symbol(term) = target {
+            let symbols = workspace
+                .editor()
+                .language
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.analysis.as_ref())
+                .map(|a| a.symbols.clone())
+                .unwrap_or_default();
             let items: Vec<_> = symbols
                 .iter()
                 .map(|(s, _)| fuzzy::Candidate::new(s))
@@ -1117,7 +1154,7 @@ impl Panels {
         workspace: &mut Workspace,
         side: bool,
     ) -> Result<Option<Invocation>, String> {
-        if self.overlay == Some(Overlay::Palette) {
+        if matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax)) {
             let invocation = self
                 .quick
                 .current()
@@ -1503,6 +1540,14 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
+        if self.overlay == Some(Overlay::Goto)
+            && matches!(
+                Query::parse(&self.quick_input.value()).target,
+                Target::Symbol(_)
+            )
+        {
+            self.query_quick(workspace);
+        }
         let mut changed = false;
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
@@ -1564,7 +1609,7 @@ impl Panels {
         {
             self.quick_pending = false;
             self.quick_elapsed_ms = ranked.elapsed.as_secs_f64() * 1000.;
-            let palette = self.overlay == Some(Overlay::Palette);
+            let palette = matches!(self.overlay, Some(Overlay::Palette | Overlay::Syntax));
             let items = ranked
                 .hits
                 .into_iter()
@@ -2388,7 +2433,7 @@ impl Panels {
         label(
             &mut layer,
             &format!(
-                "Ln {}, Col {}  ·  {} selections / {} chars  ·  {}  ·  {}  ·  {}: {}  ·  Plain Text",
+                "Ln {}, Col {}  ·  {} selections / {} chars  ·  {}  ·  {}  ·  {}: {}",
                 row + 1,
                 column,
                 editor.regions().len(),
@@ -2403,6 +2448,23 @@ impl Panels {
                 editor.preferences.tab_size
             ),
             10.,
+            status.y + 17.,
+            Rect {
+                width: (self.size.width - 180.).max(0.),
+                ..status
+            },
+            [0.77, 0.83, 0.9, 1.],
+        );
+        let name = editor
+            .language
+            .borrow()
+            .as_ref()
+            .map(|l| l.name.clone())
+            .unwrap_or_else(|| "Plain Text".into());
+        label(
+            &mut layer,
+            &name,
+            (self.size.width - 170.).max(10.),
             status.y + 17.,
             status,
             [0.77, 0.83, 0.9, 1.],
@@ -2448,6 +2510,19 @@ impl Panels {
         viewport: Range<usize>,
     ) -> Result<bool, String> {
         self.tree.pointer(point, Some(down));
+        if down
+            && self.overlay.is_none()
+            && point.y >= self.size.height - STATUS
+            && point.x >= self.size.width - 180.
+        {
+            self.action(
+                workspace,
+                "show_overlay",
+                &json!({"overlay":"syntax"}),
+                viewport,
+            )?;
+            return Ok(true);
+        }
         if self.overlay.is_some() {
             if down && contains(self.quick_input.bounds, point) {
                 self.quick_input.click(point.x, extend);

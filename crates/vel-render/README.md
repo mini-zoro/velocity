@@ -18,7 +18,7 @@ PingFang SC and Apple Color Emoji resolved by CoreText, retaining the actual CTF
 Fallback selection preserves graphemes, adjacent same-face text is shaped with swash,
 and clusters are positioned on the editor grid. A collision-checked bounded LRU caches
 content hashes + size/font style. The UI also caches visible/recent tokenized lines.
-This is a unidirectional code-editor layout, without paragraph bidi or automatic wrap.
+This is a unidirectional code-editor layout, without paragraph bidi; the editor supplies grapheme-based wrapping and fold geometry.
 
 Swash rasterizes outlines and color bitmaps. If it cannot read the resolved font's
 bitmap/outline format (notably some PingFang faces), CoreText draws with the retained
@@ -55,3 +55,14 @@ clear + scene draws, excluding upload, timestamp resolve/readback, and presentat
 Tests validate the WGSL with naga and exercise packing, LRU/pinning, cache invalidation,
 UTF-16-facing editor layout and CoreText raster behavior without creating a device.
 The reviewer must check Metal validation, scanout, Retina/color quality and ProMotion.
+
+
+Round 6 adds real bold/italic CoreText variants for the primary and fallback families.
+TextRun carries font traits, and both shaping caches include them; glyph atlas keys already
+include the resolved face. Underlines support solid, stippled and wavy strokes. A minimap
+layer marker permits isolated render-pass timestamp pairs during native scroll benchmarks,
+with deferred readback after the run. The full-frame timestamps still span all passes.
+FrameTimes now includes the acquired drawable sequence so the editor can correlate an
+exact highlighted scene with positive native scanout. These paths compile and their CPU
+packing, shader and font logic run headlessly; Metal validation and GPU budgets require
+reviewer hardware runs.

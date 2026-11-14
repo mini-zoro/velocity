@@ -45,8 +45,9 @@ fn rounded_distance(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
         coverage = 1. - smoothstep(-0.5,0.5,d);
     } else if kind == 3u {
         let center = input.size.y * 0.5;
-        let wave = select(0.,sin(input.local.x * 1.5707963) * max(0.,center-input.params.z),input.params.w > 0.);
+        let wave = select(0.,sin(input.local.x * 1.5707963) * max(0.,center-input.params.z),input.params.w > 0. && input.params.w < 1.5);
         coverage = 1. - smoothstep(max(0.,input.params.z*0.5-0.5),input.params.z*0.5+0.5,abs(input.local.y-center-wave));
+        if input.params.w > 1.5 { coverage *= 1. - smoothstep(0.7,1.2,abs((input.local.x % 4.) - 2.)); }
     }
     return vec4(input.color.rgb,input.color.a * coverage);
 }

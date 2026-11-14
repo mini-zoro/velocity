@@ -82,6 +82,7 @@ pub struct ShapedGlyph {
 
 /// Lazy system fonts and reusable swash shaping/raster contexts.
 pub struct Fonts {
+    variants: HashMap<(u16, crate::scene::FontStyle), u16>,
     faces: Vec<Face>,
     fallbacks_loaded: bool,
     /// Missing-face/glyph diagnostics.
@@ -90,7 +91,7 @@ pub struct Fonts {
     coretext_faces: std::collections::HashSet<u16>,
     scaler: ScaleContext,
     shaper: ShapeContext,
-    shaped: HashMap<(String, u32), Vec<ShapedGlyph>>,
+    shaped: HashMap<(String, u32, crate::scene::FontStyle), Vec<ShapedGlyph>>,
     ascii: [u16; 128],
     /// Primary font advance at 13 points.
     pub cell: f32,
@@ -119,6 +120,7 @@ impl Fonts {
             .scale(13.)
             .advance_width(ascii[b'M' as usize]);
         Ok(Self {
+            variants: HashMap::new(),
             faces: vec![face],
             fallbacks_loaded: false,
             warnings: Vec::new(),
@@ -151,19 +153,60 @@ impl Fonts {
     }
     /// ASCII skips shaping; non-ASCII graphemes use a cached swash shaping path.
     pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
+        self.shape_styled(text, px, crate::scene::FontStyle::default())
+    }
+    fn variant(&mut self, base: u16, style: crate::scene::FontStyle) -> u16 {
+        if style == crate::scene::FontStyle::default() {
+            return base;
+        }
+        if let Some(face) = self.variants.get(&(base, style)) {
+            return *face;
+        }
+        let name = self.faces[base as usize].name.clone();
+        let face = match native::font_variant(&name, style)
+            .and_then(|(p, n, f)| Face::load(&p, &n, Some(f)))
+        {
+            Ok(face) => {
+                let index = self.faces.len() as u16;
+                self.faces.push(face);
+                index
+            }
+            Err(e) => {
+                self.warnings.push(format!("{name}: {e}"));
+                base
+            }
+        };
+        self.variants.insert((base, style), face);
+        face
+    }
+    /// Shapes using actual face variants, including each non-ASCII fallback family.
+    pub fn shape_styled(
+        &mut self,
+        text: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+    ) -> Vec<ShapedGlyph> {
         if text.is_ascii() {
+            let face = self.variant(0, style);
             return text
                 .bytes()
                 .enumerate()
                 .map(|(i, b)| ShapedGlyph {
-                    face: 0,
-                    id: self.ascii[b as usize],
+                    face,
+                    id: if face == 0 {
+                        self.ascii[b as usize]
+                    } else {
+                        self.faces[face as usize]
+                            .reference()
+                            .charmap()
+                            .map(char::from(b))
+                    },
                     x: i as f32 * self.cell * px / 13.,
                     y: 0.,
                 })
                 .collect();
         }
-        let key = (text.to_owned(), (px * 64.).round() as u32);
+        let key = (text.to_owned(), (px * 64.).round() as u32, style);
         if let Some(g) = self.shaped.get(&key) {
             return g.clone();
         }
@@ -192,6 +235,7 @@ impl Fonts {
             }
             .or_else(|| self.faces.iter().position(covers))
             .unwrap_or(0) as u16;
+            let face = self.variant(face, style);
             let end = start + cluster.len();
             if let Some(previous) = runs.last_mut()
                 && previous.2 == face
@@ -328,6 +372,23 @@ impl std::fmt::Debug for Fonts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bold_italic_use_distinct_real_faces_without_changing_grid_advance() {
+        let mut fonts = super::Fonts::load().unwrap();
+        let mut faces = std::collections::BTreeSet::new();
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let glyphs = fonts.shape_styled("Mono", 13., crate::scene::FontStyle { bold, italic });
+            assert_eq!(glyphs.len(), 4);
+            assert!((glyphs[3].x - fonts.cell * 3.).abs() < 0.001);
+            faces.insert(glyphs[0].face);
+            assert!(
+                fonts
+                    .rasterize(glyphs[0].face, glyphs[0].id, 13., 0)
+                    .is_some()
+            );
+        }
+        assert_eq!(faces.len(), 4);
+    }
     use super::*;
     #[test]
     fn ascii_fast_path_mixed_fallback_and_coretext_bitmap_are_headless() {

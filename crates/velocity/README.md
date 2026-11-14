@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS plain-text editor, lane A round 5. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 6. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -24,9 +24,9 @@ and viewport. Native Open/Save dialogs and Save/Cancel/Discard alerts complete f
 
 Settings and keymaps use comments/trailing-comma JSON, loose/zip resources and User overrides.
 Our resources/Packages/Default files are original. See the runbook for precedence, data paths
-and shortcuts. The plain-text `Highlighter` and scope provider are the syntax integration seams.
-Snippet field navigation and wrap_lines remain deferred. Layout is an unwrapped
-monospace grid; complex scripts, keyboard layouts and candidate geometry need human visual QA.
+and shortcuts. Highlighting uses versioned workers over the shared buffer. Snippet field navigation and
+wrap_lines remain deferred. Wrapping, folds and native IME geometry share a grapheme-based
+monospace layout; complex scripts and keyboard layouts still need human visual QA.
 
 `--bench-panels`, `--bench-startup`, `--bench-scroll`, `--bench-typing --carets 1|1000`, `--bench-memory` and
 `--bench-open file` exit automatically. Incremental JSONL separates actual scanout, callback
@@ -43,8 +43,8 @@ Round 5 adds Goto Anything, the command palette, find/replace and incremental fi
 Find in Files, an ignore-aware project side bar, scrolling/reorderable tabs and a status bar.
 Inputs use vel-buffer editing, undo and native IME. Goto previews use one transient tab;
 Escape restores the source selection, Enter pins it, and Cmd/Ctrl+Enter creates a simple split.
-`#term` searches words fuzzily. Symbol navigation has a provider hook awaiting next-round syntax
-integration; the status bar correctly remains Plain Text in this round.
+`#term` searches words fuzzily. Cmd+R lists current-file symbols from syntax metadata, with transformed names and previews.
+The status bar displays the detected syntax and opens its picker when clicked.
 
 Cmd+P / Cmd+Shift+P / Cmd+R / Ctrl+G navigate; Cmd+F / Cmd+Alt+F / Cmd+Shift+F open search;
 Cmd+G / Cmd+Shift+G find next/previous; Cmd+E / Cmd+Shift+E seed find/replacement;
@@ -60,3 +60,27 @@ locations. Replace in Files prepares its plan on a worker and requires native co
 Like all native modes it retains display preflight and a watchdog. No GUI result is claimed
 from headless measurements. See [vel-ui](../vel-ui/README.md) and [vel-search](../vel-search/README.md)
 for widget classes, ranking goldens, regex differences, cancellation and replacement guarantees.
+
+
+Round 6 integrates 203 syntaxes (including our original Plain Text fallback), syntax settings,
+Set Syntax palette entries, original auto dark/light schemes and token font decorations.
+Cmd+/ toggles line comments; Cmd+Alt+/ toggles block comments. Enter uses language indentation
+rules, and Reindent runs on a worker with stale-result protection. Matching brackets and tags
+ignore string/comment scopes. Selector bindings wait for current-version scopes.
+
+Word wrap supports a viewport width or configured column width, continuation indentation,
+CJK/emoji graphemes and visual Up/Down/Page movement. Indentation/bracket/block-scope folding
+uses tracked buffer regions; fold markers, Fold by Level, Unfold All and Fold Tag Attributes
+are available. The minimap paints styled token rectangles, tracks the viewport and supports
+click/drag scrolling. Settings control whitespace, guides, rulers, line padding/numbers,
+caret animations, margins and scrolling. See the round-6 section of RUNBOOK.md for exact
+CPU and reviewer GUI commands, evidence boundaries and lane-B API requests.
+
+`--headless-view-features` automatically measures the actual 10 MB Rust first screen, a
+3840×2160 logical CPU viewport with highlighting/minimap, typing, 100k-line rewrap and real
+fold/unfold commands. It does not initialize AppKit, fonts or Metal. Native Open now waits
+for positive scanout of an exact highlighted viewport; Scroll reports isolated minimap GPU
+pass timings when timestamp queries are available.
+
+`python3 crates/velocity/scripts/measure-views.py --runs 5` records five sequential CPU runs
+with one copied release binary, raw JSONL, environment/source hashes and pooled quantiles.

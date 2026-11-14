@@ -359,6 +359,7 @@ pub fn fill(layer: &mut Layer, rect: Rect, clip: Rect, color: [f32; 4]) {
 /// Adds one clipped UI text run (12pt grid).
 pub fn label(layer: &mut Layer, text: &str, x: f64, baseline: f64, clip: Rect, color: [f32; 4]) {
     layer.text.push(TextRun {
+        style: Default::default(),
         text: text.replace(['\n', '\r', '\t'], " "),
         x: x as f32,
         baseline: baseline as f32,
