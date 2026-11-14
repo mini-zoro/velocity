@@ -11,6 +11,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+vel-buffer = { path = "../vel-buffer" }
+vel-config = { path = "../vel-config" }
+vel-commands = { path = "../vel-commands" }
+vel-fileio = { path = "../vel-fileio" }
 vel-platform = { path = "../vel-platform" }
 vel-render = { path = "../vel-render" }
 vel-text = { path = "../vel-text", default-features = false }
@@ -18,3 +22,6 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.3"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

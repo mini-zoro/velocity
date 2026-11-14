@@ -6,12 +6,15 @@ import QuartzCore
 let velocityFloorEntry = CACurrentMediaTime()
 let velocityFloorWall = Date().timeIntervalSince1970
 var velocityFloorMarks: [[String: Any]] = []
-func mark(_ phase: String) {
-    velocityFloorMarks.append(["phase": phase, "main_ms": (CACurrentMediaTime() - velocityFloorEntry) * 1000])
+func mark(_ phase: String, at: Double = CACurrentMediaTime()) {
+    let milestone: [String: Any] = ["phase": phase, "main_ms": (at - velocityFloorEntry) * 1000]
+    velocityFloorMarks.append(milestone)
+    emit(["schema": 1, "kind": "milestone", "milestone": milestone])
 }
 func emit(_ record: [String: Any]) {
     let bytes = try! JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
     print(String(data: bytes, encoding: .utf8)!)
+    fflush(stdout)
 }
 var velocityFloorInfo = kinfo_proc()
 var velocityFloorSize = MemoryLayout<kinfo_proc>.size
@@ -23,10 +26,28 @@ DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
     emit(["schema": 1, "kind": "error", "complete": false, "message": "native floor watchdog expired"])
     exit(2)
 }
+func checkDisplay(_ window: NSWindow? = nil) {
+    let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+    var reasons: [String] = []
+    if CGDisplayIsAsleep(CGMainDisplayID()) != 0 { reasons.append("display asleep") }
+    if session?["CGSSessionScreenIsLocked"] as? Bool == true { reasons.append("screen locked") }
+    if session == nil { reasons.append("console session unavailable") }
+    if let window = window, !window.occlusionState.contains(.visible) { reasons.append("window occluded") }
+    if !reasons.isEmpty {
+        emit(["schema": 1, "kind": "error", "stage": "display_preflight", "complete": false, "message": reasons.joined(separator: ", ")])
+        exit(1)
+    }
+}
+checkDisplay()
 class VelocityFloorDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var layer: CAMetalLayer!
     var queue: MTLCommandQueue!
+    var skipped = 0
+    var firstCallback: Double?
+    var orderedAt = 0.0
+    var complete = false
+    var monitor: Timer?
     func applicationDidFinishLaunching(_ notification: Notification) {
         mark("did_finish_launching")
         window = NSWindow(contentRect: NSRect(x: 160, y: 160, width: 1200, height: 800), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -47,6 +68,17 @@ class VelocityFloorDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         mark("ordered_front")
+        orderedAt = CACurrentMediaTime()
+        monitor = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [self] _ in
+            checkDisplay(CACurrentMediaTime() - orderedAt >= 1 ? window : nil)
+            present()
+        }
+        present()
+    }
+    func present() {
+        if complete { return }
+        checkDisplay(CACurrentMediaTime() - orderedAt >= 1 ? window : nil)
+        layer.allowsNextDrawableTimeout = true
         guard let drawable = layer.nextDrawable() else {
             emit(["schema": 1, "kind": "error", "complete": false, "message": "no drawable"])
             exit(1)
@@ -60,13 +92,21 @@ class VelocityFloorDelegate: NSObject, NSApplicationDelegate {
         commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
         drawable.addPresentedHandler { presented in
             let actualScanout = presented.presentedTime
-            DispatchQueue.main.async {
-                let callback = CACurrentMediaTime()
+            let callback = CACurrentMediaTime()
+            DispatchQueue.main.async { [self] in
+                if firstCallback == nil { firstCallback = callback; mark("first_presented_callback", at: callback) }
                 guard actualScanout > 0 else {
-                    emit(["schema": 1, "kind": "error", "complete": false, "message": "drawable skipped"])
-                    exit(1)
+                    skipped += 1
+                    emit(["schema": 1, "kind": "drawable_skipped", "skipped_drawables": skipped,
+                          "first_callback_main_ms": (firstCallback! - velocityFloorEntry) * 1000])
+                    return
                 }
+                complete = true
+                monitor?.invalidate()
+                mark("first_real_scanout", at: actualScanout)
                 var record: [String: Any] = ["schema": 1, "kind": "native_floor", "mode": "native_floor", "complete": true,
+                    "first_real_scanout": actualScanout, "skipped_drawables": skipped,
+                    "first_callback_main_ms": (firstCallback! - velocityFloorEntry) * 1000,
                     "scanout_main_ms": (actualScanout - velocityFloorEntry) * 1000,
                     "presented_callback_main_ms": (callback - velocityFloorEntry) * 1000,
                     "scanout_to_callback_ms": (callback - actualScanout) * 1000,

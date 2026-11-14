@@ -1,3 +1,60 @@
+# Round 4 results: settings, commands and real editing
+
+Status: headless checks complete; native GUI/Metal measurements remain pending. No GUI,
+Metal device, display wake or screen-unlock operation was attempted in the sandbox.
+No changes to vel-buffer/vel-text APIs were needed. Defaults were authored from scratch.
+
+Delivered: vel-config, vel-commands, vel-fileio and native integration. Files open/save in
+tabs with encoding/BOM/line-ending retention, multi-caret edits/history, native file dialogs,
+contextual keymaps and pairing, save prompts, settings reload and external-change handling.
+Plain text is used until the syntax lane is integrated.
+
+Headless validation: 61 Rust tests across the six lane crates (commands 5, config 6, fileio 7,
+platform 6, render 7, application 30), including Unicode properties and the skipped-first-
+drawable state machine. cargo fmt, clippy with -D warnings, rustdoc with -D warnings,
+Python parser/dry-run checks, shell syntax and Swift helper compilation pass. Native
+notifications did not arrive in the initial sandbox watcher test; the watcher now also
+checks watched-file metadata, and atomic-replacement coverage passes with that fallback.
+
+Release CPU evidence (one process per workload, not a GUI budget result):
+
+| Workload | Observed |
+| --- | --- |
+| 1,000 indexed key bindings, 1,000,000 events | mean 0.1905 µs/lookup |
+| 100,000,000-byte generated UTF-8 load | worker queue 0.0668 ms; complete 157.437 ms |
+| Existing spikes/data/text-100mb.txt through vel-fileio | worker queue 0.0393 ms; complete 166.238 ms |
+| keymap → command → buffer → CPU scene, 1 caret, 50 samples | p50 0.3094 ms; p95 0.6330 ms |
+| same path, 1,000 carets, 50 samples | p50 2.2718 ms; p95 4.9673 ms |
+
+Raw summary: [round4-cpu-20261113T182158526934Z.jsonl](output/round4-cpu-20261113T182158526934Z.jsonl).
+Application logs: [1 caret](output/headless-1794594120757759-58865.jsonl),
+[1,000 carets](output/headless-1794594120787205-58866.jsonl).
+These samples use the GUI injector's Unicode/newline/ASCII mixture, including a two-scalar
+combining sequence. CPU timing excludes GPU/native input. It differs from the previous
+round's four-character smoke workload, so it establishes a new baseline rather than a
+like-for-like regression comparison. No GUI latency or startup budget is claimed.
+
+Startup fix: retained offscreen texture, cheap repeated copy/present, explicit skipped
+callbacks, first callback receipt and first_real_scanout. Milestones flush as they occur.
+CoreGraphics session/display checks run before launch; hosting-window occlusion is checked
+while waiting with a one-second orderFront grace. measure.py also preflights before each
+launch. The new Swift floor has the same retry/diagnostic behavior. Hardware must confirm
+both successful scanout and approximately two-second failure on blocked displays.
+
+Reviewer commands and the 100 MB asynchronous-open measurement are in RUNBOOK.md. Complete
+IME_TEST.md's new editing smoke checklist, including encodings, tabs, dirty close prompts,
+multicursor undo and external reload. Record actual native key equivalents, shifted keys,
+keypad/modifier taps, candidate windows and the requested display configurations.
+
+Known scope limits: Rust regex context syntax (no lookaround/backreferences); simple
+plain-text scope selectors; no palette UI/snippet field navigation/wrap_lines. Text macro
+state is per view. Native appearance, input geometry and keyboard layouts require GUI QA.
+
+The earlier round's evidence/template follows for historical reference; its demo limitations
+and smoke workload no longer describe the current implementation.
+
+---
+
 # Lane A/P1：原生 AppKit / wgpu 评审记录
 
 状态：**硬件待测**。沙箱没有 window server 和 Metal，未运行 GUI，不填写虚构的

@@ -1,70 +1,127 @@
-//! Demo single-selection editor. This deliberately has no vel-buffer dependency.
-use std::{collections::VecDeque, ops::Range};
+//! Buffer-backed editing, command routing and transient IME preview.
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use vel_buffer::{Buffer, Change, ChangeSet, Region, Selection, ViewId, ops};
+use vel_commands::{Host, Registry};
+use vel_config::{
+    Value, json,
+    keymap::{ContextProvider, Key, Keymap, PlainScope, Resolution, ScopeProvider},
+    settings::{EditorSettings, Layer, Settings},
+};
 use vel_platform::{Command, TextInput, Utf16Range};
 use vel_text::Text;
 
-#[derive(Clone, Debug)]
-struct Snapshot {
-    text: Text,
-    anchor: usize,
-    caret: usize,
+#[derive(Debug)]
+struct Composition {
+    original: Range<usize>,
+    contents: String,
+    selection: Selection,
+    explicit: bool,
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub read_only: bool,
+    pub buffer: Buffer,
+    pub id: ViewId,
+    // O(1) snapshot used by layout and native queries, including preedit preview.
     pub text: Text,
     pub anchor: usize,
     pub caret: usize,
     pub marked: Option<Range<usize>>,
-    origin: Option<Snapshot>,
-    undo: VecDeque<Snapshot>,
-    redo: Vec<Snapshot>,
-    preferred_cell: Option<usize>,
+    composition: Option<Composition>,
+    pub settings: Settings,
+    pub preferences: EditorSettings,
+    settings_revision: u64,
+    pub registry: Registry,
+    pub keymap: Keymap,
+    pub clipboard: String,
+    pub actions: Vec<(String, Value)>,
     pub revision: u64,
 }
 impl Editor {
     pub fn new(text: Text) -> Self {
+        let mut buffer = Buffer::new(text.clone());
+        let id = buffer.new_view();
+        let mut settings = Settings::default();
+        settings
+            .replace(
+                Layer::Default,
+                serde_json::to_value(EditorSettings::default()).expect("settings"),
+            )
+            .expect("settings");
+        let mut keymap = Keymap::default();
+        keymap
+            .append(include_str!(
+                "../resources/Packages/Default/Velocity.sublime-keymap"
+            ))
+            .expect("our keymap");
+        let preferences = settings.editor();
+        let settings_revision = settings.revision();
         Self {
+            read_only: false,
+            buffer,
+            id,
             text,
+            preferences,
+            settings_revision,
             anchor: 0,
             caret: 0,
             marked: None,
-            origin: None,
-            undo: VecDeque::new(),
-            redo: Vec::new(),
-            preferred_cell: None,
+            composition: None,
+            settings,
+            registry: Registry::standard(),
+            keymap,
+            clipboard: String::new(),
+            actions: Vec::new(),
             revision: 0,
         }
     }
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            text: self.text.clone(),
-            anchor: self.anchor,
-            caret: self.caret,
+    pub fn sync(&mut self) {
+        if self.settings_revision != self.settings.revision() {
+            self.preferences = self.settings.editor();
+            self.settings_revision = self.settings.revision();
+        }
+        self.text = self.buffer.text().clone();
+        let primary = self
+            .buffer
+            .view(self.id)
+            .sel()
+            .primary()
+            .expect("selection");
+        self.anchor = primary.a;
+        self.caret = primary.b;
+        self.revision = self.buffer.change_id().0;
+    }
+    pub fn regions(&self) -> Vec<Region> {
+        if let Some(composition) = &self.composition {
+            let changes = ChangeSet::new(vec![Change {
+                old_range: composition.original.clone(),
+                new_len: composition.contents.len(),
+            }]);
+            self.buffer
+                .view(self.id)
+                .sel()
+                .iter()
+                .map(|r| {
+                    if r == composition.selection.primary().expect("primary") {
+                        Region::new(self.anchor, self.caret)
+                    } else {
+                        changes.transform_region(r)
+                    }
+                })
+                .collect()
+        } else {
+            self.buffer.view(self.id).sel().iter().collect()
         }
     }
-    fn restore(&mut self, s: Snapshot) {
-        self.text = s.text;
-        self.anchor = s.anchor;
-        self.caret = s.caret;
-        self.marked = None;
-        self.origin = None;
-        self.preferred_cell = None;
-        self.revision += 1;
-    }
-    fn remember(&mut self, s: Snapshot) {
-        if self.undo.len() == 128 {
-            self.undo.pop_front();
-        }
-        self.undo.push_back(s);
-        self.redo.clear();
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.unmark();
+        self.buffer.set_selection(self.id, selection);
+        self.sync();
     }
     pub fn selection(&self) -> Range<usize> {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
-    }
-    pub fn selected_text(&self) -> String {
-        self.text.slice(self.selection()).to_string()
     }
     pub fn selected_utf16(&self) -> Utf16Range {
         Utf16Range::from_bytes(&self.text, self.selection())
@@ -74,26 +131,65 @@ impl Editor {
             .clone()
             .map(|r| Utf16Range::from_bytes(&self.text, r))
     }
-    fn replacement(&self, explicit: Option<Utf16Range>) -> Range<usize> {
-        explicit
-            .map(|r| r.bytes(&self.text))
-            .or_else(|| self.marked.clone())
-            .unwrap_or_else(|| self.selection())
+    pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
+        if self.read_only && self.registry.kind(name) == Some(vel_commands::Kind::TextCommand) {
+            return Ok(());
+        }
+        self.unmark();
+        self.sync();
+        let mut registry = std::mem::take(&mut self.registry);
+        let result = registry.run(name, args, self);
+        self.registry = registry;
+        self.sync();
+        result
+    }
+    pub fn context_matches(&self, context: &[vel_config::keymap::Context]) -> bool {
+        context.iter().all(|c| c.matches(&EditorContext(self)))
+    }
+    pub fn resolve_key(&mut self, key: &Key) -> Resolution {
+        if self.marked.is_some() {
+            return Resolution::Unbound;
+        }
+        let mut keymap = std::mem::take(&mut self.keymap);
+        let resolution = keymap.resolve(key, &EditorContext(self));
+        self.keymap = keymap;
+        resolution
+    }
+    pub fn key(&mut self, key: &Key) -> Result<bool, String> {
+        match self.resolve_key(key) {
+            Resolution::Unbound => Ok(false),
+            Resolution::Pending => Ok(true),
+            Resolution::Command(invocation) => {
+                self.run(&invocation.command, &invocation.args)?;
+                Ok(true)
+            }
+        }
     }
     pub fn text_input(&mut self, input: TextInput) {
         match input {
             TextInput::Insert { text, replacement } => {
-                let range = self.replacement(replacement);
-                let before = self.origin.take().unwrap_or_else(|| self.snapshot());
-                self.text.replace(range.clone(), &text);
-                self.caret = range.start + text.len();
-                self.anchor = self.caret;
-                self.marked = None;
-                if before.text != self.text {
-                    self.remember(before);
+                if let Some(composition) = self.composition.take() {
+                    let range = replacement.map(|r| r.bytes(&self.text));
+                    let mapped = range.map(|r| self.map_preview_range(r, &composition));
+                    self.marked = None;
+                    self.sync();
+                    if let Some(range) = mapped {
+                        self.buffer
+                            .set_selection(self.id, Selection::from_regions([Region::from(range)]));
+                    } else if composition.explicit {
+                        self.buffer.set_selection(
+                            self.id,
+                            Selection::from_regions([Region::from(composition.original)]),
+                        );
+                    } else {
+                        self.buffer.set_selection(self.id, composition.selection);
+                    }
+                } else if let Some(replacement) = replacement {
+                    let range = replacement.bytes(self.buffer.text());
+                    self.buffer
+                        .set_selection(self.id, Selection::from_regions([Region::from(range)]));
                 }
-                self.revision += 1;
-                self.preferred_cell = None;
+                let _ = self.run("insert", &json!({"characters":text}));
             }
             TextInput::Marked {
                 text,
@@ -101,224 +197,240 @@ impl Editor {
                 replacement,
             } => {
                 if text.is_empty() {
-                    if self.origin.is_some() {
+                    if self.composition.is_some() {
                         self.cancel_composition();
                     } else if replacement.is_some() {
                         self.text_input(TextInput::Insert { text, replacement });
                     }
                     return;
                 }
-                let range = self.replacement(replacement);
-                if self.origin.is_none() {
-                    self.origin = Some(self.snapshot());
-                }
-                self.text.replace(range.clone(), &text);
+                let original = if let Some(composition) = &self.composition {
+                    replacement
+                        .map(|r| self.map_preview_range(r.bytes(&self.text), composition))
+                        .unwrap_or_else(|| composition.original.clone())
+                } else {
+                    replacement
+                        .map(|r| r.bytes(&self.text))
+                        .unwrap_or_else(|| self.selection())
+                };
+                let selection = self
+                    .composition
+                    .as_ref()
+                    .map(|c| c.selection.clone())
+                    .unwrap_or_else(|| self.buffer.view(self.id).sel().clone());
+                let explicit =
+                    replacement.is_some() || self.composition.as_ref().is_some_and(|c| c.explicit);
+                self.text = self.buffer.text().clone();
+                self.text.replace(original.clone(), &text);
                 let relative = selected.bytes(&Text::from(text.as_str()));
-                self.anchor = range.start + relative.start;
-                self.caret = range.start + relative.end;
-                self.marked = Some(range.start..range.start + text.len());
+                self.anchor = original.start + relative.start;
+                self.caret = original.start + relative.end;
+                self.marked = Some(original.start..original.start + text.len());
+                self.composition = Some(Composition {
+                    original,
+                    contents: text,
+                    selection,
+                    explicit,
+                });
                 self.revision += 1;
-                self.preferred_cell = None;
             }
             TextInput::Unmark => self.unmark(),
         }
     }
+    fn map_preview_range(&self, range: Range<usize>, composition: &Composition) -> Range<usize> {
+        let start = composition.original.start;
+        let end = start + composition.contents.len();
+        let delta = composition.original.len() as isize - composition.contents.len() as isize;
+        let begin = if range.start < start {
+            range.start
+        } else if range.start < end {
+            start
+        } else {
+            range.start.wrapping_add_signed(delta)
+        };
+        let finish = if range.end <= start {
+            range.end
+        } else if range.end <= end {
+            composition.original.end
+        } else {
+            range.end.wrapping_add_signed(delta)
+        };
+        begin..finish
+    }
     pub fn unmark(&mut self) {
-        self.marked = None;
-        if let Some(before) = self.origin.take()
-            && before.text != self.text
-        {
-            self.remember(before);
+        if let Some(composition) = self.composition.take() {
+            self.marked = None;
+            self.sync();
+            if composition.explicit {
+                self.buffer.set_selection(
+                    self.id,
+                    Selection::from_regions([Region::from(composition.original)]),
+                );
+            } else {
+                self.buffer.set_selection(self.id, composition.selection);
+            }
+            let _ = self.run("insert", &json!({"characters":composition.contents}));
         }
-        self.revision += 1;
     }
     pub fn cancel_composition(&mut self) {
-        if let Some(origin) = self.origin.take() {
-            self.restore(origin);
-        } else {
-            self.marked = None;
-        }
+        self.composition = None;
+        self.marked = None;
+        self.sync();
     }
     pub fn set_caret(&mut self, at: usize, extend: bool) {
         self.unmark();
-        self.caret = self.text.floor_char_boundary(at);
-        if !extend {
-            self.anchor = self.caret;
-        }
-        self.preferred_cell = None;
+        let at = self.text.floor_char_boundary(at);
+        self.set_selection(Selection::from_regions([Region::new(
+            if extend { self.anchor } else { at },
+            at,
+        )]));
     }
-    fn move_to(&mut self, at: usize, extend: bool) {
-        self.caret = at;
-        if !extend {
-            self.anchor = at;
-        }
-    }
-    fn insert(&mut self, s: &str) {
-        self.text_input(TextInput::Insert {
-            text: s.into(),
-            replacement: None,
-        });
-    }
-    fn word_boundary(&self, forward: bool) -> usize {
-        let mut at = self.caret;
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        if forward {
-            while at < self.text.len_bytes() && !is_word(self.text.char_at(at)) {
-                at = self.text.next_grapheme_boundary(at);
-            }
-            while at < self.text.len_bytes() && is_word(self.text.char_at(at)) {
-                at = self.text.next_grapheme_boundary(at);
-            }
-        } else {
-            while at > 0 {
-                let prev = self.text.prev_grapheme_boundary(at);
-                if is_word(self.text.char_at(prev)) {
-                    break;
-                }
-                at = prev;
-            }
-            while at > 0 {
-                let prev = self.text.prev_grapheme_boundary(at);
-                if !is_word(self.text.char_at(prev)) {
-                    break;
-                }
-                at = prev;
-            }
-        }
-        at
+    pub fn add_caret(&mut self, at: usize) {
+        self.unmark();
+        let mut selection = self.buffer.view(self.id).sel().clone();
+        selection.add(Region::caret(self.text.floor_char_boundary(at)));
+        self.set_selection(selection);
     }
     pub fn select_word(&mut self, at: usize) {
         self.set_caret(at, false);
-        let start = self.word_boundary(false);
-        let end = self.word_boundary(true);
-        self.anchor = start;
-        self.caret = end;
+        ops::expand_selection(&mut self.buffer, self.id, ops::ExpandTo::Word);
+        self.sync();
     }
     pub fn select_line(&mut self, at: usize) {
-        self.unmark();
-        let row = self.text.byte_to_line(self.text.floor_char_boundary(at));
-        self.anchor = self.text.line_to_byte(row);
-        self.caret = if row + 1 < self.text.len_lines() {
-            self.text.line_to_byte(row + 1)
-        } else {
-            self.text.len_bytes()
-        };
+        self.set_caret(at, false);
+        ops::expand_selection(&mut self.buffer, self.id, ops::ExpandTo::Line);
+        self.sync();
     }
     pub fn command(&mut self, command: Command) {
-        use Command::*;
-        if command == Cancel {
+        if command == Command::Cancel {
             self.cancel_composition();
+            self.keymap.cancel();
             return;
         }
-        // IME consumes composition keys first. A delivered selector operates on
-        // the current preedit selection; navigation ends the composition once.
-        if self.marked.is_some() {
-            self.unmark();
-        }
-        match command {
-            DeleteBackward | DeleteForward => {
-                if self.selection().is_empty() {
-                    if command == DeleteBackward {
-                        self.anchor = self.text.prev_grapheme_boundary(self.caret);
-                    } else {
-                        self.anchor = self.text.next_grapheme_boundary(self.caret);
-                    }
-                }
-                if !self.selection().is_empty() {
-                    self.insert("");
-                }
-            }
-            Newline => self.insert("\n"),
-            Tab => self.insert("\t"),
-            Left(extend) | Right(extend) => {
-                let selection = self.selection();
-                let at = if !extend && !selection.is_empty() {
-                    if matches!(command, Left(_)) {
-                        selection.start
-                    } else {
-                        selection.end
-                    }
-                } else if matches!(command, Left(_)) {
-                    self.text.prev_grapheme_boundary(self.caret)
-                } else {
-                    self.text.next_grapheme_boundary(self.caret)
-                };
-                self.move_to(at, extend);
-                self.preferred_cell = None;
-            }
-            Up(extend) | Down(extend) => {
-                let row = self.text.byte_to_line(self.caret);
-                let start = self.text.line_to_byte(row);
-                let col = self
-                    .preferred_cell
-                    .unwrap_or_else(|| cells(&self.text.slice(start..self.caret).to_string()));
-                let target = if matches!(command, Up(_)) {
-                    row.saturating_sub(1)
-                } else {
-                    (row + 1).min(self.text.len_lines() - 1)
-                };
-                let line = self.text.line(target).to_string();
-                let at = self.text.line_to_byte(target) + byte_at_cell(&line, col);
-                self.move_to(at, extend);
-                self.preferred_cell = Some(col);
-            }
-            Home(extend) | End(extend) => {
-                let row = self.text.byte_to_line(self.caret);
-                let at = self.text.line_to_byte(row)
-                    + if matches!(command, End(_)) {
-                        self.text.line(row).len_bytes()
-                    } else {
-                        0
-                    };
-                self.move_to(at, extend);
-                self.preferred_cell = None;
-            }
-            WordLeft(extend) | WordRight(extend) => {
-                let at = self.word_boundary(matches!(command, WordRight(_)));
-                self.move_to(at, extend);
-                self.preferred_cell = None;
-            }
-            DocumentStart(extend) => self.move_to(0, extend),
-            DocumentEnd(extend) => self.move_to(self.text.len_bytes(), extend),
-            SelectAll => {
-                self.anchor = 0;
-                self.caret = self.text.len_bytes();
-            }
-            Undo => {
-                if let Some(previous) = self.undo.pop_back() {
-                    let current = self.snapshot();
-                    self.redo.push(current);
-                    self.restore(previous);
-                }
-            }
-            Redo => {
-                if let Some(next) = self.redo.pop() {
-                    let current = self.snapshot();
-                    self.undo.push_back(current);
-                    self.restore(next);
-                }
-            }
-            Copy | Cut | Paste | PageUp | PageDown | Cancel => {}
-        }
+        let (name, args) = selector_command(command);
+        let _ = self.run(name, &args);
     }
 }
-/// Visual monospace columns: four-column tab stops and Unicode grapheme widths.
-pub fn cells(text: &str) -> usize {
+impl Host for Editor {
+    fn buffer(&mut self) -> (&mut Buffer, ViewId) {
+        (&mut self.buffer, self.id)
+    }
+    fn settings(&self) -> EditorSettings {
+        self.preferences.clone()
+    }
+    fn clipboard(&mut self) -> String {
+        self.clipboard.clone()
+    }
+    fn set_clipboard(&mut self, text: &str) {
+        self.clipboard = text.into();
+    }
+    fn action(&mut self, name: &str, args: &Value) -> Result<(), String> {
+        self.actions.push((name.into(), args.clone()));
+        Ok(())
+    }
+}
+struct EditorContext<'a>(&'a Editor);
+impl ContextProvider for EditorContext<'_> {
+    fn values(&self, key: &str) -> Vec<Value> {
+        let e = self.0;
+        let selections = e.buffer.view(e.id).sel();
+        if let Some(key) = key.strip_prefix("setting.") {
+            return vec![e.settings.get(key).cloned().unwrap_or(Value::Null)];
+        }
+        match key {
+            "selection_empty" => selections.iter().map(|r| json!(r.empty())).collect(),
+            "num_selections" => vec![json!(selections.len())],
+            "preceding_text" | "following_text" | "text" => selections
+                .iter()
+                .map(|r| {
+                    let before_row = e.text.byte_to_line(r.begin());
+                    let after_row = e.text.byte_to_line(r.end());
+                    let start = e.text.line_to_byte(before_row);
+                    let end = e.text.line_to_byte(after_row) + e.text.line(after_row).len_bytes();
+                    json!(
+                        e.text
+                            .slice(match key {
+                                "preceding_text" => start..r.begin(),
+                                "following_text" => r.end()..end,
+                                _ => r.to_range(),
+                            })
+                            .to_string()
+                    )
+                })
+                .collect(),
+            "has_prev_field"
+            | "has_next_field"
+            | "overlay_visible"
+            | "panel_visible"
+            | "auto_complete_visible" => vec![json!(false)],
+            "is_recording_macro" => vec![json!(e.registry.is_recording())],
+            _ => vec![],
+        }
+    }
+    fn selector_matches(&self, selector: &str) -> Vec<bool> {
+        self.0
+            .buffer
+            .view(self.0.id)
+            .sel()
+            .iter()
+            .map(|r| PlainScope.matches(selector, r.b))
+            .collect()
+    }
+}
+pub fn selector_command(command: Command) -> (&'static str, Value) {
+    use Command::*;
+    match command {
+        DeleteBackward => ("left_delete", json!({})),
+        DeleteForward => ("right_delete", json!({})),
+        Newline => ("insert", json!({"characters":"\n"})),
+        Tab => ("insert_best_completion", json!({})),
+        Left(extend) | Right(extend) => (
+            "move",
+            json!({"by":"characters","forward":matches!(command,Right(_)),"extend":extend}),
+        ),
+        Up(extend) | Down(extend) => (
+            "move",
+            json!({"by":"lines","forward":matches!(command,Down(_)),"extend":extend}),
+        ),
+        WordLeft(extend) | WordRight(extend) => (
+            "move",
+            json!({"by":"word_ends","forward":matches!(command,WordRight(_)),"extend":extend}),
+        ),
+        Home(extend) => ("move_to", json!({"to":"bol","extend":extend})),
+        End(extend) => ("move_to", json!({"to":"eol","extend":extend})),
+        DocumentStart(extend) => ("move_to", json!({"to":"bof","extend":extend})),
+        DocumentEnd(extend) => ("move_to", json!({"to":"eof","extend":extend})),
+        PageUp | PageDown => ("move", json!({"by":"pages","forward":command==PageDown})),
+        Undo => ("undo", json!({})),
+        Redo => ("redo", json!({})),
+        Copy => ("copy", json!({})),
+        Cut => ("cut", json!({})),
+        Paste => ("paste", json!({})),
+        SelectAll => ("select_all", json!({})),
+        Cancel => ("single_selection", json!({})),
+    }
+}
+/// Visual monospace columns with configurable tab stops.
+pub fn cells_with_tab(text: &str, tab: usize) -> usize {
     let mut col = 0;
     for g in text.graphemes(true) {
         col += if g == "\t" {
-            4 - col % 4
+            tab - col % tab
         } else {
             g.width().max(1)
         };
     }
     col
 }
-pub fn byte_at_cell(text: &str, target: usize) -> usize {
+#[cfg(test)]
+pub fn cells(text: &str) -> usize {
+    cells_with_tab(text, 4)
+}
+pub fn byte_at_cell_with_tab(text: &str, target: usize, tab: usize) -> usize {
     let mut col = 0;
     for (i, g) in text.grapheme_indices(true) {
         let width = if g == "\t" {
-            4 - col % 4
+            tab - col % tab
         } else {
             g.width().max(1)
         };
@@ -333,7 +445,6 @@ pub fn byte_at_cell(text: &str, target: usize) -> usize {
     }
     text.len()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,8 +464,7 @@ mod tests {
     #[test]
     fn pinyin_commit_replaces_selection_once_and_undo_is_atomic() {
         let mut e = Editor::new(Text::from("a🦀z"));
-        e.anchor = 1;
-        e.caret = 5;
+        e.set_selection(Selection::from_regions([Region::new(1, 5)]));
         mark(&mut e, "nihao", Utf16Range::new(5, 0), None);
         assert_eq!(e.text.to_string(), "anihaoz");
         assert_eq!(e.marked_utf16(), Some(Utf16Range::new(1, 5)));
@@ -409,16 +519,17 @@ mod tests {
         e.command(Command::DeleteBackward);
         assert_eq!(e.text.line(0).to_string(), "a");
         e.command(Command::Down(false));
-        assert_eq!(e.caret, e.text.line_to_byte(1) + 3);
+        // vel-buffer chooses the left boundary on an exact CJK midpoint.
+        assert_eq!(e.caret, e.text.line_to_byte(1));
         e.command(Command::Down(false));
         assert_eq!(e.caret, e.text.line_to_byte(2) + 1);
     }
     #[test]
     fn tabs_and_double_width_hit_testing() {
         assert_eq!(cells("a\t你👩‍💻é"), 9);
-        assert_eq!(byte_at_cell("你x", 0), 0);
-        assert_eq!(byte_at_cell("你x", 1), 3);
-        assert_eq!(byte_at_cell("éx", 1), 3);
+        assert_eq!(byte_at_cell_with_tab("你x", 0, 4), 0);
+        assert_eq!(byte_at_cell_with_tab("你x", 1, 4), 3);
+        assert_eq!(byte_at_cell_with_tab("éx", 1, 4), 3);
     }
 }
 
@@ -481,5 +592,149 @@ mod transaction_tests {
         assert_eq!(editor.text.to_string(), "az");
         editor.command(Command::Undo);
         assert_eq!(editor.text.to_string(), "a🦀z");
+    }
+}
+
+/// Converts native events to the public keymap vocabulary. Composition bypasses this.
+pub fn binding_key(event: &vel_platform::KeyEvent) -> Option<Key> {
+    use vel_platform::KeyState;
+    if event.state == KeyState::Up {
+        return None;
+    }
+    if event.state == KeyState::FlagsChanged {
+        let (name, pressed) = match event.physical_code {
+            56 | 60 => ("shift", event.modifiers.shift()),
+            59 | 62 => ("ctrl", event.modifiers.control()),
+            58 | 61 => ("alt", event.modifiers.option()),
+            54 | 55 => ("super", event.modifiers.command()),
+            _ => return None,
+        };
+        return pressed.then(|| Key {
+            name: name.into(),
+            modifiers: 0,
+        });
+    }
+    let modifiers = u8::from(event.modifiers.control())
+        | (u8::from(event.modifiers.option()) * 2)
+        | (u8::from(event.modifiers.shift()) * 4)
+        | (u8::from(event.modifiers.command()) * 8);
+    let name = match event.physical_code {
+        36 => "enter".into(),
+        76 => "keypad_enter".into(),
+        49 => "space".into(),
+        122 => "f1".into(),
+        120 => "f2".into(),
+        99 => "f3".into(),
+        118 => "f4".into(),
+        96 => "f5".into(),
+        97 => "f6".into(),
+        98 => "f7".into(),
+        100 => "f8".into(),
+        101 => "f9".into(),
+        109 => "f10".into(),
+        103 => "f11".into(),
+        111 => "f12".into(),
+        105 => "f13".into(),
+        107 => "f14".into(),
+        113 => "f15".into(),
+        48 => "tab".into(),
+        51 => "backspace".into(),
+        117 => "delete".into(),
+        53 => "escape".into(),
+        123 => "left".into(),
+        124 => "right".into(),
+        125 => "down".into(),
+        126 => "up".into(),
+        115 => "home".into(),
+        119 => "end".into(),
+        116 => "pageup".into(),
+        121 => "pagedown".into(),
+        65 => "keypad_period".into(),
+        67 => "keypad_multiply".into(),
+        69 => "keypad_plus".into(),
+        75 => "keypad_divide".into(),
+        78 => "keypad_minus".into(),
+        81 => "keypad_equals".into(),
+        82 => "keypad0".into(),
+        83 => "keypad1".into(),
+        84 => "keypad2".into(),
+        85 => "keypad3".into(),
+        86 => "keypad4".into(),
+        87 => "keypad5".into(),
+        88 => "keypad6".into(),
+        89 => "keypad7".into(),
+        91 => "keypad8".into(),
+        92 => "keypad9".into(),
+        _ => {
+            let text = event.characters_ignoring_modifiers.to_lowercase();
+            if text.is_empty() || text.chars().any(char::is_control) {
+                return None;
+            }
+            text
+        }
+    };
+    Some(Key::from_parts(&name, modifiers))
+}
+
+#[cfg(test)]
+mod keymap_tests {
+    use super::*;
+    #[test]
+    fn default_pairing_skip_and_multiple_carets_use_contexts() {
+        let mut editor = Editor::new(Text::from("\n"));
+        editor.set_selection(Selection::from_regions([
+            Region::caret(0),
+            Region::caret(1),
+        ]));
+        assert!(editor.key(&Key::parse("(").unwrap()).unwrap());
+        assert_eq!(editor.text.to_string(), "()\n()");
+        assert_eq!(editor.regions(), [Region::caret(1), Region::caret(4)]);
+        assert!(editor.key(&Key::parse(")").unwrap()).unwrap());
+        assert_eq!(editor.regions(), [Region::caret(2), Region::caret(5)]);
+        assert_eq!(editor.text.to_string(), "()\n()");
+        editor
+            .settings
+            .set(Layer::View, "auto_match_enabled", json!(false));
+        editor.sync();
+        assert!(!editor.key(&Key::parse("(").unwrap()).unwrap());
+    }
+    #[test]
+    fn composition_preview_does_not_change_buffer_and_commit_targets_every_caret() {
+        let mut editor = Editor::new(Text::from("a\nb"));
+        editor.set_selection(Selection::from_regions([
+            Region::caret(1),
+            Region::caret(3),
+        ]));
+        editor.text_input(TextInput::Marked {
+            text: "ni".into(),
+            selected: Utf16Range::new(2, 0),
+            replacement: None,
+        });
+        assert_eq!(editor.buffer.text().to_string(), "a\nb");
+        assert_eq!(editor.text.to_string(), "a\nbni");
+        assert!(!editor.key(&Key::parse("super+d").unwrap()).unwrap());
+        editor.text_input(TextInput::Insert {
+            text: "你".into(),
+            replacement: None,
+        });
+        assert_eq!(editor.text.to_string(), "a你\nb你");
+        editor.command(Command::Undo);
+        assert_eq!(editor.text.to_string(), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    #[test]
+    fn text_contexts_use_selection_edges_in_both_directions() {
+        let mut editor = Editor::new(Text::from("beforeSELECTafter"));
+        for region in [Region::new(6, 12), Region::new(12, 6)] {
+            editor.set_selection(Selection::from_regions([region]));
+            let context = EditorContext(&editor);
+            assert_eq!(context.values("preceding_text"), vec![json!("before")]);
+            assert_eq!(context.values("following_text"), vec![json!("after")]);
+            assert_eq!(context.values("text"), vec![json!("SELECT")]);
+        }
     }
 }

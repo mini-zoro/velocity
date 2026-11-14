@@ -1,0 +1,105 @@
+// Velocity native menu, limited to implemented actions.
+[
+  {
+    "caption": "File",
+    "id": "file",
+    "children": [
+      {
+        "caption": "New File",
+        "command": "new_file"
+      },
+      {
+        "caption": "Open\u2026",
+        "command": "prompt_open_file"
+      },
+      {
+        "caption": "Save",
+        "command": "save"
+      },
+      {
+        "caption": "Save As\u2026",
+        "command": "prompt_save_as"
+      },
+      {
+        "caption": "Save All",
+        "command": "save_all"
+      },
+      {
+        "caption": "Close File",
+        "command": "close_file"
+      }
+    ]
+  },
+  {
+    "caption": "Edit",
+    "id": "edit",
+    "children": [
+      {
+        "caption": "Undo",
+        "command": "undo"
+      },
+      {
+        "caption": "Redo",
+        "command": "redo"
+      },
+      {
+        "caption": "-",
+        "command": "noop"
+      },
+      {
+        "caption": "Cut",
+        "command": "cut"
+      },
+      {
+        "caption": "Copy",
+        "command": "copy"
+      },
+      {
+        "caption": "Paste",
+        "command": "paste"
+      },
+      {
+        "caption": "Select All",
+        "command": "select_all"
+      },
+      {
+        "caption": "Select Next Match",
+        "command": "find_under_expand"
+      },
+      {
+        "caption": "Select All Matches",
+        "command": "find_all_under"
+      },
+      {
+        "caption": "Indent",
+        "command": "indent"
+      },
+      {
+        "caption": "Unindent",
+        "command": "unindent"
+      }
+    ]
+  },
+  {
+    "caption": "View",
+    "id": "view",
+    "children": [
+      {
+        "caption": "Next Tab",
+        "command": "next_view"
+      },
+      {
+        "caption": "Previous Tab",
+        "command": "prev_view"
+      },
+      {
+        "caption": "Larger Font",
+        "command": "increase_font_size"
+      },
+      {
+        "caption": "Smaller Font",
+        "command": "decrease_font_size"
+      }
+    ]
+  }
+]

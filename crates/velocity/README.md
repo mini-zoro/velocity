@@ -1,39 +1,40 @@
 # velocity
 
-Native macOS editor demonstration for lane A/P1. MIT OR Apache-2.0. Requires macOS
-14+ for view-bound CADisplayLink. See [RUNBOOK.md](RUNBOOK.md) for hardware review.
+Native macOS plain-text editor, lane A/P1 round 4. MIT OR Apache-2.0; macOS 14+.
+See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
+[IME_TEST.md](IME_TEST.md) for native input/editing acceptance.
 
 ```sh
 cargo build --release -p velocity
 ./target/release/velocity
-./target/release/velocity path/to/file.rs
+./target/release/velocity first.txt second.txt:8:3
+printf 'hello\n你好\n' | ./target/release/velocity -
 ```
 
-The default is a bundled original sample repeated to exactly 5,000 lines. An explicit
-file loads through vel_text::Text::from_reader; missing/invalid UTF-8 files are errors.
-`--lines N` optionally caps the input; zero (default) reads the whole explicit file.
-There is no dependency on vel-buffer. The toy editor owns one selection, persistent
-text snapshots for bounded Undo/Redo, grapheme movement/deletion, inline composition
-and its original snapshot for atomic IME undo/cancellation. Edits remain in memory.
+Velocity now opens and saves real files with UTF-8/BOM, UTF-16LE/BE, fallback encodings,
+majority line-ending detection and permission-preserving atomic saves. Files above 64 MiB
+load on workers with a progress tab. External changes reload clean views or prompt for dirty
+ones; notify has a bounded metadata fallback for restricted sessions.
 
-The view lays out only visible rows, with line numbers, a fixed gutter, current-line
-highlight, token colors, selection, caret and marked-text underline. Fractional scroll
-positions preserve precise trackpad/momentum movement. Tabs use four-column stops;
-Unicode grapheme widths drive hit-testing and candidate geometry. Line/run caches are
-bounded. This is not a full syntax engine, wrapped/bidi layout, file-save UI or multi-
-cursor buffer. Token coloring and measurement/statistics plumbing are adapted from the
-repository's MIT/Apache P0 prototype; native lifecycle, UTF-16 IME editing and vel-text
-integration are new.
+Editing uses vel-buffer's shared transactions, multi-selection model, grouped undo/redo and
+soft history. Keymaps, menus and IME commits enter the Sublime-named command layer. IME marked
+text is a transient primary preview; committing inserts once per caret, while an explicit
+native replacement range targets that region. Tabs keep their document, history, settings
+and viewport. Native Open/Save dialogs and Save/Cancel/Discard alerts complete file workflows.
 
-`--bench-startup`, `--bench-scroll`, `--bench-typing`, and `--bench-memory` all run and
-exit automatically. Schema-1 JSONL preserves P0's kind/milestones/statistics fields
-while adding actual scanout and independent footprint observations. Samples are
-buffered outside measured loops. Automatic runs have an independent watchdog, reject
-uncompleted output, and report outside input. `--log-input` records native keys,
-selectors, UTF-16 ranges and receipt→present-return; its synchronous I/O affects timing.
-`--headless-smoke` exercises edits/layout/statistics/kernel telemetry and never calls
-Platform::run or creates a GPU device.
+Settings and keymaps use comments/trailing-comma JSON, loose/zip resources and User overrides.
+Our resources/Packages/Default files are original. See the runbook for precedence, data paths
+and shortcuts. The plain-text `Highlighter` and scope provider are the syntax integration seams.
+Palette UI, snippet field navigation and wrap_lines remain deferred. Layout is an unwrapped
+monospace grid; complex scripts, keyboard layouts and candidate geometry need human visual QA.
 
-Only the three new crate directories and workspace Cargo.lock belong to this lane.
-Hardware budgets are pending; [RESULTS.md](RESULTS.md) is the Chinese review template,
-and [IME_TEST.md](IME_TEST.md) is the manual native-input checklist.
+`--bench-startup`, `--bench-scroll`, `--bench-typing --carets 1|1000`, `--bench-memory` and
+`--bench-open file` exit automatically. Incremental JSONL separates actual scanout, callback
+receipt, skipped drawables and present-return. Startup retries the prepared frame until a
+positive presentedTime and checks asleep/locked/occluded conditions instead of relying on the
+long watchdog. `--headless-smoke --carets 1|1000` tests the keymap/command/buffer/CPU scene path
+without AppKit/Metal initialization. Benchmarks retain the bundled 5,000-line workload;
+interactive launch starts with an empty document.
+
+[RESULTS.md](RESULTS.md) contains CPU evidence and the hardware review template. GUI startup,
+input-to-present, GPU timing, footprint and native behavior are still pending reviewer runs.

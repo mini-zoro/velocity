@@ -2,6 +2,8 @@
 """Unattended native benchmark matrix and strict JSONL validation (stdlib only)."""
 from __future__ import annotations
 import argparse
+import ctypes
+import ctypes.util
 from datetime import datetime, timezone
 import json
 import math
@@ -12,6 +14,42 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT = ROOT / "crates/velocity/output"
+
+
+def display_preflight():
+    """Read CoreGraphics session/display state, without creating GUI/Metal objects."""
+    if sys.platform != "darwin":
+        raise RuntimeError("GUI measurements require macOS")
+    cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cg.CGMainDisplayID.restype = ctypes.c_uint32
+    cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+    cg.CGDisplayIsAsleep.restype = ctypes.c_bool
+    cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+    cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+    cf.CFBooleanGetValue.restype = ctypes.c_bool
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    session = cg.CGSessionCopyCurrentDictionary()
+    key = cf.CFStringCreateWithCString(None, b"CGSSessionScreenIsLocked", 0x08000100)
+    try:
+        locked = cf.CFDictionaryGetValue(session, key) if session else None
+        reasons = []
+        if cg.CGDisplayIsAsleep(cg.CGMainDisplayID()):
+            reasons.append("display asleep")
+        if locked and cf.CFBooleanGetValue(locked):
+            reasons.append("screen locked")
+        if not session:
+            reasons.append("console session unavailable")
+        if reasons:
+            raise RuntimeError("display preflight failed: " + ", ".join(reasons))
+    finally:
+        cf.CFRelease(key)
+        if session:
+            cf.CFRelease(session)
 
 
 def summarize(values):
@@ -69,6 +107,10 @@ def validate(records, mode=None):
             raise ValueError(f"duplicate/missing {mode} sample ids")
         if totals[0].get("external_input_events", 0):
             raise ValueError("benchmark contaminated by external input")
+    if mode == "open":
+        opened = [r for r in records if r.get("kind") == "file_open" and r.get("phase") == "fully_loaded"]
+        if not opened or any(r.get("success") is False for r in opened):
+            raise ValueError("file opening did not finish successfully")
     if mode == "memory" and not any(r.get("kind") == "memory_summary" and r.get("sweep_complete") is True for r in records):
         raise ValueError("incomplete memory sweep")
 
@@ -80,10 +122,16 @@ def read_run(path, mode=None):
 
 
 def run_floor(binary, output, timeout):
-    result = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True, timeout=timeout, check=True)
+    display_preflight()
+    result = subprocess.run([str(binary)], cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+    output.write_text(result.stdout)
+    output.with_suffix(".stderr.txt").write_text(result.stderr)
+    if result.returncode:
+        raise RuntimeError(f"native floor failed: {result.stdout[-4000:]} {result.stderr[-1000:]}")
     try:
-        record = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
+        lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        record = next(r for r in lines if r.get("kind") == "native_floor")
+    except (json.JSONDecodeError, StopIteration):
         # Accept the unmodified P0 helper too, but keep its receipt boundary explicit.
         marks = {k: float(v) for k, v in re.findall(r"([A-Za-z0-9_+()]+)=([0-9.]+)", result.stdout)}
         if not marks.get("presented(scanout)", 0) > 0:
@@ -148,12 +196,19 @@ def main():
     if not args.only_startup:
         matrix += [("scroll-default", "scroll", []), ("scroll-4k", "scroll", ["--width", "2048", "--height", "1089"]),
                    ("typing-default", "typing", []), ("typing-4k", "typing", ["--width", "2048", "--height", "1089"]),
+                   ("typing-1000", "typing", ["--carets", "1000"]),
+                   ("typing-1000-4k", "typing", ["--carets", "1000", "--width", "2048", "--height", "1089"]),
                    ("memory", "memory", [])]
     commands = [(label, mode, [str(binary), f"--bench-{mode}", str(workload), "--lines", "5000", "--timeout", str(args.timeout), "--output", str(output / f"{label}.jsonl"), *extra]) for label, mode, extra in matrix]
     if args.dry_run:
         print(json.dumps({"build": ["cargo", "build", "--release", "-p", "velocity"], "commands": [c for _, _, c in commands], "floor": str(args.floor) if args.floor else None}, indent=2))
         return
     output.mkdir(parents=True, exist_ok=False)
+    try:
+        display_preflight()
+    except RuntimeError as error:
+        (output / "preflight.jsonl").write_text(json.dumps({"schema": 1, "kind": "error", "stage": "display_preflight", "complete": False, "message": str(error)}) + "\n")
+        raise
     if not args.input:
         workload.write_text("\n".join(f'pub fn line_{i:04}() -> usize {{ let value = {i}; value + 1 }} // native startup workload' for i in range(5000)))
     if not args.skip_build:
@@ -163,6 +218,11 @@ def main():
     for label, mode, command in commands:
         if args.floor and label.startswith("startup-warm"):
             floors.append(run_floor(args.floor.resolve(), output / f"floor-{len(floors)+1:02}.jsonl", args.timeout))
+        try:
+            display_preflight()
+        except RuntimeError as error:
+            (output / f"{label}.jsonl").write_text(json.dumps({"schema": 1, "kind": "error", "stage": "display_preflight", "mode": mode, "complete": False, "message": str(error)}) + "\n")
+            raise
         print("running:", label, flush=True)
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=args.timeout + 10)
         (output / f"{label}.stderr.txt").write_text(result.stderr)

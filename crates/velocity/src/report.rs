@@ -25,6 +25,7 @@ pub struct Clock {
     pub before_main_ms: Option<f64>,
     pub birth_error: Option<String>,
     pub milestones: Vec<Milestone>,
+    reporter: Option<Reporter>,
 }
 impl Clock {
     pub fn new(entered: Instant, wall_at_entry: SystemTime) -> Self {
@@ -47,7 +48,15 @@ impl Clock {
             before_main_ms,
             birth_error,
             milestones: vec![first],
+            reporter: None,
         }
+    }
+    pub fn attach(&mut self, reporter: Reporter) -> Result<(), String> {
+        for milestone in &self.milestones {
+            reporter.emit(json!({"kind":"milestone","milestone":milestone}))?;
+        }
+        self.reporter = Some(reporter);
+        Ok(())
     }
     pub fn mark(&mut self, phase: &str) {
         self.mark_at(phase, Instant::now());
@@ -61,6 +70,9 @@ impl Clock {
             process_ms: self.before_main_ms.map(|n| n + elapsed),
             delta_ms: elapsed - previous,
         });
+        if let Some(reporter) = &self.reporter {
+            let _ = reporter.emit(json!({"kind":"milestone","milestone":self.milestones.last()}));
+        }
     }
 }
 pub fn ms(d: Duration) -> f64 {
@@ -129,7 +141,10 @@ impl Reporter {
             .and_then(|()| sink.file.flush())
             .map_err(|e| e.to_string())?;
         // A piped consumer may close stdout; the on-disk record remains authoritative.
-        if let Err(e) = std::io::stdout().lock().write_all(&bytes)
+        if let Err(e) = std::io::stdout()
+            .lock()
+            .write_all(&bytes)
+            .and_then(|()| std::io::stdout().flush())
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
             return Err(e.to_string());
@@ -236,5 +251,64 @@ mod tests {
                 Some(before + c.milestones[1].main_ms)
             );
         }
+    }
+}
+
+/// Startup continues past skipped callbacks, preserving first receipt independently.
+#[derive(Debug, Default)]
+pub struct FirstScanout {
+    pub skipped_drawables: usize,
+    pub first_callback: Option<Instant>,
+    first_real: Option<vel_platform::Presentation>,
+}
+impl FirstScanout {
+    pub fn observe(
+        &mut self,
+        observations: &[vel_platform::Presentation],
+    ) -> Option<vel_platform::Presentation> {
+        if self.first_real.is_some() {
+            return self.first_real;
+        }
+        for observation in observations {
+            self.first_callback = Some(
+                self.first_callback
+                    .map_or(observation.callback, |at| at.min(observation.callback)),
+            );
+            if observation.presented_time > 0. && observation.presented_time.is_finite() {
+                if self
+                    .first_real
+                    .is_none_or(|real| observation.scanout < real.scanout)
+                {
+                    self.first_real = Some(*observation);
+                }
+            } else {
+                self.skipped_drawables += 1;
+            }
+        }
+        self.first_real
+    }
+}
+#[cfg(test)]
+mod scanout_tests {
+    use super::*;
+    #[test]
+    fn skipped_first_and_subsequent_drawables_do_not_complete_startup() {
+        let at = Instant::now();
+        let p = |drawable, presented_time, delay| vel_platform::Presentation {
+            drawable,
+            presented_time,
+            scanout: at + Duration::from_millis(delay),
+            callback: at + Duration::from_millis(delay + 5),
+        };
+        let mut progress = FirstScanout::default();
+        assert!(progress.observe(&[p(0, 0., 1)]).is_none());
+        assert!(progress.observe(&[p(1, 0., 3)]).is_none());
+        assert_eq!(progress.skipped_drawables, 2);
+        let real = progress.observe(&[p(2, 100., 20)]).unwrap();
+        assert_eq!(real.drawable, 2);
+        assert_eq!(progress.first_callback, Some(at + Duration::from_millis(6)));
+        assert_eq!(real.scanout, at + Duration::from_millis(20));
+        assert_eq!(progress.observe(&[p(3, 0., 30)]).unwrap().drawable, 2);
+        assert_eq!(progress.skipped_drawables, 2);
     }
 }

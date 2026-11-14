@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub enum Mode {
     Interactive,
     Startup,
+    Open,
     Scroll,
     Typing,
     Memory,
@@ -16,6 +17,7 @@ impl Mode {
         match self {
             Self::Interactive => "interactive",
             Self::Startup => "startup",
+            Self::Open => "open",
             Self::Scroll => "scroll",
             Self::Typing => "typing",
             Self::Memory => "memory",
@@ -34,6 +36,10 @@ pub struct Options {
     pub height: u32,
     pub lines: usize,
     pub file: Option<PathBuf>,
+    pub files: Vec<FileLocation>,
+    pub carets: usize,
+    pub data_dir: Option<PathBuf>,
+    pub project: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub log_input: bool,
     pub seed: u64,
@@ -47,6 +53,10 @@ impl Default for Options {
             height: 800,
             lines: 0,
             file: None,
+            files: Vec::new(),
+            carets: 1,
+            data_dir: None,
+            project: None,
             output: None,
             log_input: false,
             seed: 0x7665_6c6f_6369_7479,
@@ -62,13 +72,13 @@ impl Options {
         let mut positional_only = false;
         while let Some(arg) = args.next() {
             if positional_only {
-                if options.file.replace(arg.into()).is_some() {
-                    return Err("only one file may be supplied".into());
-                }
+                options.add_file(&arg);
+
                 continue;
             }
             let mode = match arg.as_str() {
                 "--bench-startup" => Some(Mode::Startup),
+                "--bench-open" => Some(Mode::Open),
                 "--bench-scroll" => Some(Mode::Scroll),
                 "--bench-typing" => Some(Mode::Typing),
                 "--bench-memory" => Some(Mode::Memory),
@@ -106,6 +116,23 @@ impl Options {
                         options.height = value;
                     }
                 }
+                "--carets" => {
+                    options.carets = args
+                        .next()
+                        .ok_or("--carets needs a count")?
+                        .parse()
+                        .map_err(|_| "invalid --carets")?;
+                    if !matches!(options.carets, 1 | 1000) {
+                        return Err("--carets must be 1 or 1000".into());
+                    }
+                }
+                "--data-dir" => {
+                    options.data_dir = Some(args.next().ok_or("--data-dir needs a path")?.into())
+                }
+                "--project" => {
+                    options.project = Some(args.next().ok_or("--project needs a path")?.into())
+                }
+                "-" => options.add_file("-"),
                 "--lines" => {
                     options.lines = args
                         .next()
@@ -140,17 +167,62 @@ impl Options {
                 }
                 _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
                 _ => {
-                    if options.file.replace(arg.into()).is_some() {
-                        return Err("only one file may be supplied".into());
-                    }
+                    options.add_file(&arg);
                 }
             }
         }
+        if options.mode.automatic() && options.files.len() > 1 {
+            return Err("benchmarks accept one input file".into());
+        }
+        if options.mode == Mode::Open
+            && (options.files.len() != 1 || options.files[0].path == std::path::Path::new("-"))
+        {
+            return Err("--bench-open requires one file path".into());
+        }
         Ok(Some(options))
+    }
+    fn add_file(&mut self, arg: &str) {
+        let location = FileLocation::parse(arg);
+        if self.file.is_none() {
+            self.file = Some(location.path.clone());
+        }
+        self.files.push(location);
+    }
+}
+/// File path with one-based CLI row/scalar column suffixes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLocation {
+    pub path: PathBuf,
+    pub line: usize,
+    pub column: usize,
+}
+impl FileLocation {
+    pub fn parse(arg: &str) -> Self {
+        let mut path = arg;
+        let mut line = 1;
+        let mut column = 1;
+        if let Some((prefix, last)) = arg.rsplit_once(':')
+            && let Ok(number) = last.parse::<usize>()
+        {
+            path = prefix;
+            line = number.max(1);
+            if let Some((prefix, previous)) = prefix.rsplit_once(':')
+                && let Ok(number) = previous.parse::<usize>()
+            {
+                path = prefix;
+                column = line;
+                line = number.max(1);
+            }
+        }
+        Self {
+            path: path.into(),
+            line,
+            column,
+        }
     }
 }
 
-pub const HELP: &str = "velocity [--bench-startup|--bench-scroll|--bench-typing|--bench-memory|--headless-smoke] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              first N lines; 0 = entire file (default); bundled sample = 5000\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
+pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--headless-smoke] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --carets 1|1000        typing/headless benchmark selection count\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {
@@ -173,7 +245,7 @@ mod tests {
             &["--width", "0"],
             &["--timeout", "0"],
             &["--present", "fast"],
-            &["a", "b"],
+            &["--bench-startup", "a", "b"],
             &["--seed"],
             &["--oops"],
         ] {
@@ -187,5 +259,32 @@ mod tests {
             Some(PathBuf::from("-hello"))
         );
         assert!(parse(&["--help"]).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+    #[test]
+    fn multiple_files_stdin_and_one_based_unicode_locations() {
+        let options = Options::parse(["file:2:3", "other:4", "-"].map(str::to_string))
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.files.len(), 3);
+        assert_eq!(
+            options.files[0],
+            FileLocation {
+                path: "file".into(),
+                line: 2,
+                column: 3
+            }
+        );
+        assert_eq!(options.files[1].line, 4);
+        assert_eq!(options.files[1].column, 1);
+        assert_eq!(options.files[2].path, PathBuf::from("-"));
+        assert_eq!(
+            FileLocation::parse("colon:name").path,
+            PathBuf::from("colon:name")
+        );
     }
 }

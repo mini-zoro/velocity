@@ -324,6 +324,14 @@ impl Renderer {
         );
         self.offscreen = None;
     }
+    /// Invalidates glyph/layout identities when the primary font family changes.
+    pub fn reset_fonts(&mut self) {
+        self.atlas = PagedAtlas::new(ATLAS_SIDE, MAX_PAGES);
+        self.layouts = LineLayoutCache::new(2048);
+        self.rasters.clear();
+        self.blanks.clear();
+        self.offscreen = None;
+    }
     /// Physical framebuffer dimensions.
     pub fn physical_size(&self) -> [u32; 2] {
         [self.config.width, self.config.height]
@@ -630,8 +638,11 @@ impl Renderer {
     pub fn has_prepared_frame(&self) -> bool {
         self.offscreen.is_some()
     }
-    /// Presents the prebuilt first frame. Retryable acquisition failures preserve
-    /// it for a bounded timer retry; successful submission releases its storage.
+    /// Releases the startup texture after a positive presentedTime observation.
+    pub fn release_prepared(&mut self) {
+        self.offscreen = None;
+    }
+    /// Presents the prebuilt first frame, retaining it for skipped-drawable retries.
     pub fn present_prepared(&mut self) -> Result<Option<FrameTimes>, String> {
         self.draw(true, None)
     }
@@ -717,9 +728,6 @@ impl Renderer {
         let present_start = Instant::now();
         self.queue.present(texture);
         let presented = Instant::now();
-        if first {
-            self.offscreen = None;
-        }
         Ok(Some(FrameTimes {
             submitted,
             presented,

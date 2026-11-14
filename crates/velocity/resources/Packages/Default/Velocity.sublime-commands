@@ -1,0 +1,17 @@
+[
+  {
+    "caption": "File: Save All",
+    "command": "save_all"
+  },
+  {
+    "caption": "Edit: Sort Lines",
+    "command": "sort_lines",
+    "args": {
+      "case_sensitive": true
+    }
+  },
+  {
+    "caption": "Edit: Reverse Lines",
+    "command": "reverse_lines"
+  }
+]

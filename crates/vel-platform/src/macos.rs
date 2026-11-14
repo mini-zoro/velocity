@@ -86,6 +86,53 @@ impl WindowHandle {
             w.setTitle(&NSString::from_str(title));
         }
     }
+    /// Installs resource-defined menus, retaining the standard application menu.
+    pub fn set_menu(&self, entries: &[MenuEntry]) {
+        let main = NSApplication::sharedApplication(self.0.mtm)
+            .mainMenu()
+            .expect("application menu");
+        while main.numberOfItems() > 1 {
+            main.removeItemAtIndex(1);
+        }
+        self.0.menu_commands.borrow_mut().clear();
+        append_menu(&self.0, &main, entries);
+    }
+    /// Opens a native multi-file chooser.
+    pub fn open_files(&self) -> Vec<std::path::PathBuf> {
+        let panel = NSOpenPanel::openPanel(self.0.mtm);
+        panel.setAllowsMultipleSelection(true);
+        panel.setCanChooseDirectories(false);
+        if panel.runModal() != NSModalResponseOK {
+            return Vec::new();
+        }
+        panel
+            .URLs()
+            .iter()
+            .filter_map(|u| u.path().map(|p| std::path::PathBuf::from(p.to_string())))
+            .collect()
+    }
+    /// Chooses a destination; cancellation leaves the document untouched.
+    pub fn save_file(&self, suggested: &str) -> Option<std::path::PathBuf> {
+        let panel = NSSavePanel::savePanel(self.0.mtm);
+        panel.setNameFieldStringValue(&NSString::from_str(suggested));
+        if panel.runModal() != NSModalResponseOK {
+            return None;
+        }
+        panel
+            .URL()
+            .and_then(|u| u.path())
+            .map(|p| p.to_string().into())
+    }
+    /// Displays a native alert and returns the zero-based chosen button.
+    pub fn alert(&self, message: &str, detail: &str, buttons: &[&str]) -> usize {
+        let alert = NSAlert::new(self.0.mtm);
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(detail));
+        for button in buttons {
+            alert.addButtonWithTitle(&NSString::from_str(button));
+        }
+        (alert.runModal() - 1000).max(0) as usize
+    }
     /// Current backing scale, updated before resize callbacks.
     pub fn scale_factor(&self) -> f64 {
         self.0.scale.get()
@@ -116,6 +163,28 @@ impl WindowHandle {
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default()
+    }
+    /// Checks the hosting display, session lock and live window occlusion state.
+    pub fn display_status(&self) -> DisplayStatus {
+        let display = self
+            .0
+            .window
+            .get()
+            .and_then(|w| w.screen())
+            .and_then(|screen| {
+                let key = NSString::from_str("NSScreenNumber");
+                screen.deviceDescription().objectForKey(&key).map(|number| {
+                    // SAFETY: NSScreenNumber is documented as an NSNumber display ID.
+                    unsafe { msg_send![&*number, unsignedIntValue] }
+                })
+            });
+        let mut status = crate::display::status_for_display(display);
+        status.window_occluded = self
+            .0
+            .window
+            .get()
+            .is_some_and(|w| !w.occlusionState().contains(NSWindowOcclusionState::Visible));
+        status
     }
     /// Reads a UTF-8 string from the general pasteboard.
     pub fn clipboard_text(&self) -> Option<String> {
@@ -152,6 +221,7 @@ enum Event {
     Key(KeyEvent),
     Text(TextInput),
     Command(Command),
+    NamedCommand(String, String),
     Mouse(MouseEvent),
     Scroll(ScrollEvent),
     Resize,
@@ -181,6 +251,7 @@ struct Host {
     timer: Cell<Option<Retained<NSTimer>>>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
+    menu_commands: RefCell<Vec<(String, String)>>,
     input: RefCell<TextInputState>,
 }
 impl Host {
@@ -215,7 +286,10 @@ impl Host {
             };
             let w = self.handle();
             match event {
-                Event::Key(e) => app.on_key(&w, e),
+                Event::Key(e) => {
+                    app.on_key(&w, e);
+                }
+                Event::NamedCommand(name, args) => app.on_named_command(&w, &name, &args),
                 Event::Text(e) => app.on_text_input(&w, e),
                 Event::Command(e) => app.on_command(&w, e),
                 Event::Mouse(e) => app.on_mouse(&w, e),
@@ -223,7 +297,7 @@ impl Host {
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
                 Event::QuitRequested => {
-                    if app.on_quit_requested() {
+                    if app.on_quit_requested(&w) {
                         w.quit();
                     }
                 }
@@ -232,6 +306,22 @@ impl Host {
         }
         self.dispatching.set(false);
         self.flush_ime_coordinates();
+    }
+    fn offer_key(self: &Rc<Self>, key: KeyEvent) -> bool {
+        if self.input.borrow().marked.is_some() || self.dispatching.get() || self.drawing.get() {
+            return false;
+        }
+        self.dispatching.set(true);
+        let handled = if let Some(app) = self.app.borrow_mut().as_mut() {
+            let handled = app.on_key(&self.handle(), key);
+            *self.input.borrow_mut() = app.text_input_state();
+            handled
+        } else {
+            false
+        };
+        self.dispatching.set(false);
+        self.drain();
+        handled
     }
     fn flush_ime_coordinates(&self) {
         if self.dispatching.get() || self.drawing.get() || !self.ime_geometry_dirty.replace(false) {
@@ -253,7 +343,11 @@ impl Host {
         {
             return;
         }
-        if !self.ready.get() || self.stopped.get() || self.drawing.replace(true) {
+        if self.dispatching.get()
+            || !self.ready.get()
+            || self.stopped.get()
+            || self.drawing.replace(true)
+        {
             return;
         }
         if !force && (!self.dirty.get() && !self.animating.get() || !self.visible.get()) {
@@ -367,13 +461,12 @@ define_class!(
                     let host_time = CACurrentMediaTime();
                     // SAFETY: Metal supplies a live MTLDrawable for the lifetime of this block call.
                     let presented_time = unsafe { drawable.as_ref() }.presentedTime();
-                    if presented_time > 0. && presented_time.is_finite() && host_time >= presented_time {
-                        let elapsed = Duration::from_secs_f64(host_time - presented_time);
-                        if let Some(scanout) = callback.checked_sub(elapsed) && let Ok(mut queue) = observations.lock() {
-                            // Bound interactive telemetry when the app elects not to drain it.
-                            if queue.len() == 4096 { queue.pop_front(); }
-                            queue.push_back(Presentation { drawable: sequence, presented_time, scanout, callback });
-                        }
+                    let scanout = if presented_time > 0. && presented_time.is_finite() && host_time >= presented_time {
+                        callback.checked_sub(Duration::from_secs_f64(host_time - presented_time)).unwrap_or(callback)
+                    } else { callback };
+                    if let Ok(mut queue) = observations.lock() {
+                        if queue.len() == 4096 { queue.pop_front(); }
+                        queue.push_back(Presentation { drawable: sequence, presented_time, scanout, callback });
                     }
                 });
                 // SAFETY: Metal copies this valid heap block; captured state outlives presentation.
@@ -421,11 +514,36 @@ define_class!(
             if let Some(h) = self.ivars().host.upgrade() {
                 let key = key_event(event, KeyState::Down);
                 h.input_depth.set(h.input_depth.get() + 1);
-                // Every key is interpreted first, before the platform-neutral key observer.
-                self.interpretKeyEvents(&NSArray::from_slice(&[event]));
-                h.dispatch(Event::Key(key));
+                let handled=h.offer_key(key);
+                if !handled { self.interpretKeyEvents(&NSArray::from_slice(&[event])); }
                 h.input_depth.set(h.input_depth.get() - 1); h.flush();
             }
+        }
+        #[unsafe(method(performKeyEquivalent:))]
+        fn key_equivalent(&self,event:&NSEvent)->bool {
+            if event.modifierFlags().intersects(NSEventModifierFlags::Command|NSEventModifierFlags::Control) {
+            self.ivars().host.upgrade().is_some_and(|h| {
+                h.input_depth.set(h.input_depth.get()+1);
+                let handled=h.offer_key(key_event(event,KeyState::Down));
+                h.input_depth.set(h.input_depth.get()-1);h.flush();handled
+            })
+            } else { false }
+        }
+        #[unsafe(method(velocityCommand:))]
+        fn named_command(&self, item: &NSMenuItem) {
+            if let Some(h) = self.ivars().host.upgrade() {
+                let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
+                if let Some((name,args)) = command { h.dispatch(Event::NamedCommand(name,args)); h.flush(); }
+            }
+        }
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            self.ivars().host.upgrade().is_some_and(|h| {
+                let commands=h.menu_commands.borrow();
+                commands.get(item.tag().max(0) as usize).is_some_and(|(name,args)| {
+                    h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(name,args)))
+                })
+            })
         }
         #[unsafe(method(keyUp:))] fn key_up(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::Up))); } }
         #[unsafe(method(flagsChanged:))] fn flags_changed(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::FlagsChanged))); } }
@@ -810,6 +928,38 @@ fn build_menu(mtm: MainThreadMarker) {
     }
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
 }
+fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
+    for entry in entries {
+        if entry.caption == "-" {
+            menu.addItem(&NSMenuItem::separatorItem(host.mtm));
+            continue;
+        }
+        // SAFETY: velocityCommand: has the one-sender menu action signature.
+        let item = unsafe {
+            menu.addItemWithTitle_action_keyEquivalent(
+                &NSString::from_str(&entry.caption),
+                entry.command.as_ref().map(|_| sel!(velocityCommand:)),
+                &NSString::from_str(""),
+            )
+        };
+        if let Some(command) = &entry.command {
+            let mut commands = host.menu_commands.borrow_mut();
+            item.setTag(commands.len() as isize);
+            commands.push((command.clone(), entry.args.clone()));
+            if let Some(view) = host.view.get() {
+                // SAFETY: host retains the view until every menu is torn down.
+                unsafe {
+                    item.setTarget(Some(view));
+                }
+            }
+        }
+        if !entry.children.is_empty() {
+            let child = NSMenu::new(host.mtm);
+            append_menu(host, &child, &entry.children);
+            item.setSubmenu(Some(&child));
+        }
+    }
+}
 pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("Platform::run must be called on the main thread")?;
     if !objc2::available!(macos = 14.0) {
@@ -845,6 +995,7 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         timer: Cell::new(None),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
+        menu_commands: RefCell::new(Vec::new()),
         input: RefCell::new(TextInputState::default()),
     });
     let delegate = Delegate::alloc(mtm).set_ivars(DelegateIvars {
@@ -873,5 +1024,6 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         window.setContentView(None);
     }
     nsapp.setDelegate(None);
+    nsapp.setMainMenu(None);
     host.error.borrow_mut().take().map_or(Ok(()), Err)
 }

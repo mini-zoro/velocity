@@ -4,6 +4,25 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// No native menus on this platform.
+    pub fn set_menu(&self, _entries: &[crate::MenuEntry]) {}
+    /// No native chooser on this platform.
+    pub fn open_files(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    /// No native chooser on this platform.
+    pub fn save_file(&self, _suggested: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// No native alert on this platform.
+    pub fn alert(&self, _message: &str, _detail: &str, _buttons: &[&str]) -> usize {
+        0
+    }
+
+    /// No native window exists on this platform.
+    pub fn display_status(&self) -> crate::DisplayStatus {
+        crate::display_status()
+    }
     /// Marks the window dirty.
     pub fn request_frame(&self) {}
     /// Schedules a one-shot wakeup.

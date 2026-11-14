@@ -4,10 +4,10 @@ mod app;
 mod bench;
 mod cli;
 mod editor;
-mod lexer;
 mod report;
 mod stats;
 mod view;
+mod workspace;
 use cli::{Mode, Options};
 use report::{Clock, Reporter, Watchdog, ms};
 use serde_json::json;
@@ -42,9 +42,28 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         .mode
         .automatic()
         .then(|| Watchdog::start(options.timeout_seconds, reporter.clone()));
+    clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
-        let (text, source) = load(options.file.as_deref(), options.lines)?;
+        if options.mode != Mode::Headless {
+            vel_platform::display_status().check()?;
+            clock.mark("display_preflight_passed");
+        }
+        let (text, source) = if matches!(options.mode, Mode::Interactive | Mode::Open) {
+            if options.files.iter().any(|f| f.path == Path::new("-")) {
+                let mut input = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+                    .map_err(|e| e.to_string())?;
+                (Text::from(input.as_str()), "stdin".into())
+            } else {
+                (
+                    Text::new(),
+                    "empty document; files opened through vel-fileio".into(),
+                )
+            }
+        } else {
+            load(options.file.as_deref(), options.lines)?
+        };
         clock.mark("text_loaded");
         reporter.emit(json!({"kind":"document","source":source,"bytes":text.len_bytes(),"lines":text.len_lines(),"line_limit":options.lines,"engine":"vel_text::Text","mode_automatic":options.mode.automatic()}))?;
         reporter.rss(
@@ -52,7 +71,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             json!({"bytes":text.len_bytes(),"lines":text.len_lines()}),
         )?;
         if options.mode == Mode::Headless {
-            return headless(&reporter, text);
+            return headless(&reporter, text, options.carets);
         }
         let done = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "macos")]
@@ -67,11 +86,27 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                     height: options.height as f64,
                 },
             };
+            let mut workspace = workspace::Workspace::new(
+                text,
+                options
+                    .data_dir
+                    .clone()
+                    .or_else(workspace::Workspace::default_data_dir),
+                options.project.clone(),
+                options.mode == Mode::Interactive,
+            )?;
+            if matches!(options.mode, Mode::Interactive | Mode::Open) {
+                for location in &options.files {
+                    if location.path != Path::new("-") {
+                        workspace.open(location.clone())?;
+                    }
+                }
+            }
             let app = app::App::new(
                 options.clone(),
                 clock,
                 reporter.clone(),
-                text,
+                workspace,
                 Arc::clone(&done),
             );
             Platform::run_with_options(window, app)?;
@@ -123,7 +158,7 @@ fn load(path: Option<&Path>, limit: usize) -> Result<(Text, String), String> {
         ))
     }
 }
-fn headless(reporter: &Reporter, text: Text) -> Result<(), String> {
+fn headless(reporter: &Reporter, text: Text, carets: usize) -> Result<(), String> {
     let mut editor = editor::Editor::new(text);
     let mut view = view::View::new(
         Size {
@@ -133,13 +168,20 @@ fn headless(reporter: &Reporter, text: Text) -> Result<(), String> {
         7.8,
         12.,
     );
+    install_carets(&mut editor, carets);
     let mut samples = Vec::new();
     for i in 0..50 {
         let at = Instant::now();
-        editor.text_input(vel_platform::TextInput::Insert {
-            text: if i % 2 == 0 { "你🦀é" } else { "x" }.into(),
-            replacement: None,
-        });
+        type_through_keymap(
+            &mut editor,
+            match i % 8 {
+                0 => "你",
+                1 => "🦀",
+                2 => "é",
+                3 => "\n",
+                _ => "x",
+            },
+        )?;
         let scene = view.scene(&editor);
         std::hint::black_box(scene);
         samples.push(ms(at.elapsed()));
@@ -150,9 +192,34 @@ fn headless(reporter: &Reporter, text: Text) -> Result<(), String> {
     if before != editor.text {
         return Err("headless undo/redo mismatch".into());
     }
-    reporter.emit(json!({"kind":"headless_summary","edit_and_scene_cpu_ms":stats::summarize(&samples),"samples":samples.len(),"gui_started":false,"gpu_started":false,"text_bytes":editor.text.len_bytes(),"text_lines":editor.text.len_lines()}))?;
+    reporter.emit(json!({"kind":"headless_summary","edit_and_scene_cpu_ms":stats::summarize(&samples),"samples":samples.len(),"carets":carets,"path":"keymap -> command -> vel-buffer -> CPU scene","gui_started":false,"gpu_started":false,"text_bytes":editor.text.len_bytes(),"text_lines":editor.text.len_lines()}))?;
     reporter.rss("headless_after_edits", json!({}))?;
     reporter.emit(json!({"kind":"complete","complete":true}))
+}
+fn install_carets(editor: &mut editor::Editor, count: usize) {
+    use vel_buffer::{Region, Selection};
+    if count == 1000 && editor.text.len_lines() < count {
+        editor.buffer = vel_buffer::Buffer::new("workload\n".repeat(count));
+        editor.id = editor.buffer.new_view();
+        editor.sync();
+    }
+    let selections =
+        Selection::from_regions((0..count).map(|row| Region::caret(editor.text.line_to_byte(row))));
+    editor.set_selection(selections);
+}
+fn type_through_keymap(editor: &mut editor::Editor, text: &str) -> Result<(), String> {
+    for character in text.chars() {
+        let name = match character {
+            '\n' => "enter".into(),
+            '\t' => "tab".into(),
+            c => c.to_string(),
+        };
+        let key = vel_config::keymap::Key::parse(&name)?;
+        if !editor.key(&key)? {
+            editor.run("insert", &json!({"characters":character.to_string()}))?;
+        }
+    }
+    Ok(())
 }
 #[cfg(not(target_os = "macos"))]
 struct Unsupported;

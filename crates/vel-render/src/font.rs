@@ -100,11 +100,15 @@ pub struct Fonts {
 impl Fonts {
     /// Loads only the primary monospace face; system fallbacks are lazy.
     pub fn load() -> Result<Self, String> {
+        Self::load_named("Menlo")
+    }
+    /// Loads a requested primary face through CoreText, retaining lazy fallbacks.
+    pub fn load_named(requested: &str) -> Result<Self, String> {
         let primary = Path::new("/System/Library/Fonts/Menlo.ttc");
-        let face = if primary.exists() {
+        let face = if requested == "Menlo" && primary.exists() {
             Face::load(primary, "Menlo-Regular", None)?
         } else {
-            let (path, name, font) = native::font_location("SFMono-Regular")?;
+            let (path, name, font) = native::font_location(requested)?;
             Face::load(&path, &name, Some(font))?
         };
         let font = face.reference();

@@ -49,7 +49,7 @@ python3 crates/velocity/scripts/measure.py \
 The script builds release velocity, generates a deterministic ASCII 5,000-line workload,
 then runs one cold-ish startup, 10 warm startups interleaved with 10 native-floor launches,
 600 scroll frames after 60 warmup frames (default and requested 4K sizes), 500 jittered
-insertions (default and requested 4K), and a full memory sweep. Each process exits on its
+insertions with 1 and 1,000 carets (default and requested 4K), and a full memory sweep. Each process exits on its
 own. It captures stderr, validates every run and writes startup-summary.jsonl in a new
 UTC-stamped output directory. Existing files are never overwritten by the app.
 
@@ -104,7 +104,7 @@ initialization. A timeout, missing scanout or external input invalidates a run.
 - Scroll CPU is callback receipt→queue submit including layout, glyph lookup, uploads and
   acquisition. GPU is clear + primitive render pass, with deferred readback after 600
   frames. Timestamp unavailability yields null plus an explicit status, not a zero.
-- Typing is one-shot NSTimer→the same TextInput editing handler as insertText→submit /
+- Typing is one-shot NSTimer→keymap lookup→command→vel-buffer→submit /
   present-return. It measures the app path, not HID delivery or display scanout. Seed and
   30..90 ms jitter are recorded. The injector mixes ASCII, Chinese, emoji, combining marks
   and newlines; confirm that exactly 500 unique sample indices exist.
@@ -145,3 +145,124 @@ Check Metal validation output and physical candidate-window placement.
 Return the entire stamped output directory (JSONL and stderr), completed IME checklist,
 and OS/display/load observations when resuming the session. Hardware budgets and native
 behavior remain unverified until those results are available.
+
+## Round 4: settings, commands, tabs and real file IO
+
+The previous single-selection demo is replaced by vel-buffer. All editing commands, IME
+commits and benchmark insertions enter the same command layer. Highlighting is plain text;
+`view::Highlighter` and `vel_config::keymap::ScopeProvider` are the later syntax seams.
+
+Run the complete lane checks (all are headless):
+
+```sh
+cargo fmt --all
+cargo clippy -p vel-config -p vel-commands -p vel-fileio -p vel-platform -p vel-render -p velocity --all-targets -- -D warnings
+cargo test -p vel-config -p vel-commands -p vel-fileio -p vel-platform -p vel-render -p velocity
+RUSTDOCFLAGS='-D warnings' cargo doc -p vel-config -p vel-commands -p vel-fileio -p vel-platform -p vel-render -p velocity --no-deps
+cargo run --release -p vel-config --example keymap_bench
+cargo run --release -p vel-fileio --example load_bench
+cargo run --release -p velocity -- --headless-smoke --carets 1
+cargo run --release -p velocity -- --headless-smoke --carets 1000
+```
+
+The headless workload now uses the same eight-way Unicode/newline/ASCII mixture as GUI typing.
+Its CPU scene timings cannot be compared directly with the older demo's four-character smoke
+samples. No GUI budget is established by these CPU measurements.
+
+The reviewer's asleep/locked display failure is fixed in both startup paths. Each milestone
+is a flushed JSONL record as it happens. The prepared Velocity texture survives each present
+until a positive `presentedTime` is observed. A skipped first drawable is expected and retried.
+`first_real_scanout` is the Metal host-time value; `scanout_main_ms` is its elapsed main-time
+counterpart. `first_callback_main_ms`, the first positive drawable's callback time, and
+`skipped_drawables` are separate. Native-floor emits JSONL too, including skipped callbacks.
+
+Before launching, measure.py and the app check `CGDisplayIsAsleep` and the console lock/session.
+While waiting, the app/helper also check hosting-window occlusion. Initial occlusion gets a
+one-second grace for orderFront; asleep/locked states fail immediately. Errors name the blocker
+instead of waiting for the long watchdog. A fallback watchdog still bounds unrelated native hangs.
+
+On the logged-in, awake Mac, keep the window visible and run:
+
+```sh
+cargo build --release -p velocity
+swiftc -O -module-cache-path /tmp/velocity-swift-module-cache \
+  crates/velocity/scripts/native-floor.swift -o crates/velocity/output/native-floor
+python3 crates/velocity/scripts/measure.py --self-test
+python3 crates/velocity/scripts/measure.py --floor crates/velocity/output/native-floor --runs 10
+./target/release/velocity --bench-typing --carets 1
+./target/release/velocity --bench-typing --carets 1000
+```
+
+The full matrix includes 1/1,000 carets at default/4K logical sizes, plus startup, scrolling,
+native floor and memory. Typing samples include keymap lookup → command → vel-buffer → submit/
+present-return. They remain app-receipt timings, not HID-to-scanout measurements.
+
+Measure the existing 100 MB fixture through the asynchronous editor-open path:
+
+```sh
+./target/release/velocity --bench-open spikes/data/text-100mb.txt
+```
+
+Or generate a separate ASCII fixture:
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+path = Path('crates/velocity/output/open-100mb.txt')
+if not path.exists():
+    block = b'plain text loading workload\n' * 2400
+    with path.open('xb') as stream:
+        left = 100_000_000
+        while left:
+            part = block[:left]
+            stream.write(part)
+            left -= len(part)
+PY
+./target/release/velocity --bench-open crates/velocity/output/open-100mb.txt
+```
+
+This mode exits after both actual first scanout and completed loading. Compare startup
+`scanout_main_ms` to 300 ms and `file_open/fully_loaded.elapsed_ms` to 1,000 ms. The first
+prepared frame contains a progress tab. CPU worker timing is also recorded; `fully_loaded`
+is receipt on the UI poll, so it includes up to 200 ms polling delay. Validate with
+`python3 crates/velocity/scripts/measure.py --validate path/to/open.jsonl`.
+
+Interactive examples:
+
+```sh
+./target/release/velocity crates/velocity/fixtures/sample.rs crates/velocity/fixtures/ime-and-unicode.rs:8:3
+printf 'hello\n你好\n' | ./target/release/velocity -
+./target/release/velocity --data-dir /path/to/Velocity-data --project /path/to/project.sublime-project
+```
+
+Default data directory: `~/Library/Application Support/Velocity`, or `VELOCITY_DATA_DIR`.
+Loose overrides go in `Packages/User/Preferences.sublime-settings` and
+`Packages/User/Default.sublime-keymap`; archives go in `Installed Packages`. Settings and
+keymaps reload after changes (including newly created User overrides). `Plain Text.sublime-settings`
+is the syntax layer for this round; project `settings` follow it. Per-view settings stay last.
+Regex context syntax is Rust regex; unsupported patterns produce an explicit resource error.
+Default resources in resources/Packages/Default were written for Velocity from scratch.
+
+Primary shortcuts:
+
+| Keys | Action |
+| --- | --- |
+| Cmd+N / O / S / Shift+S / W | New / Open / Save / Save As / Close tab |
+| Cmd+Alt+S | Save all |
+| Ctrl+Tab / Ctrl+Shift+Tab; Cmd+1…9 | Next / previous; choose tab |
+| Cmd+Z / Cmd+Shift+Z; Cmd+U / Cmd+Shift+U | Undo / redo; soft undo / redo |
+| Cmd+C / X / V / A | Clipboard / select all |
+| Cmd+D; Cmd+K, Cmd+D; Cmd+Ctrl+G | Add next match; skip; select all matches |
+| Cmd+click; Ctrl+Alt+Up/Down; Cmd+Shift+L | Add caret; add adjacent caret; split selection into lines |
+| Esc | Collapse to one selection; cancel active IME composition |
+| Cmd+L; Cmd+J; Cmd+Shift+D | Expand line; join lines; duplicate lines |
+| Cmd+[ / ]; Cmd+Ctrl+Up/Down | Unindent / indent; swap lines |
+| Tab / Shift+Tab; Enter | Tab or configured spaces / unindent; auto-indent newline |
+| Cmd+K, Cmd+U/L/B | Upper / lower case / toggle gutter |
+| Cmd+= / Cmd+- / Cmd+0 | Increase / decrease / reset font size |
+
+Arrow/Shift+arrow, Option+arrow/deletion, Cmd+arrows, Home/End and PageUp/PageDown are
+implemented. Minimal bracket/quote pairing and closing-character skip use contextual bindings.
+New/close window commands use a separate process/window; recorded text macros are per view.
+Palette UI, snippet field navigation, syntax highlighting and wrap_lines remain deferred.
+Use IME_TEST.md's editing smoke checklist before accepting native behavior.

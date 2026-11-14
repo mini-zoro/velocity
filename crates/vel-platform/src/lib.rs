@@ -4,7 +4,9 @@
 //! uses logical points, top-left origin; only the native bridge converts to screen
 //! coordinates. No AppKit or Metal objects are constructed by unit tests.
 
+mod display;
 mod input;
+pub use display::{DisplayStatus, display_status};
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod metrics;
@@ -113,14 +115,15 @@ pub struct FrameContext<'a> {
     /// Scheduling source.
     pub reason: FrameReason,
 }
-/// Actual display presentation of an acquired drawable.
+/// Presented-handler observation, including skipped drawables with a zero time.
 #[derive(Clone, Copy, Debug)]
 pub struct Presentation {
     /// Monotonic acquisition sequence (starts at zero).
     pub drawable: u64,
-    /// Metal's actual presentedTime, in the CACurrentMediaTime timebase.
+    /// Metal's presentedTime, in the CACurrentMediaTime timebase; zero means skipped.
     pub presented_time: f64,
-    /// presentedTime translated to Rust's monotonic clock at callback receipt.
+    /// Positive presentedTime translated to Rust's monotonic clock. For a skipped
+    /// drawable this equals callback receipt and must not be used as scanout.
     pub scanout: Instant,
     /// Receipt time, reported separately from scanout.
     pub callback: Instant,
@@ -137,8 +140,17 @@ pub trait AppHandler: 'static {
     }
     /// Observe a native lifecycle phase for startup instrumentation.
     fn on_platform_phase(&mut self, _phase: &'static str) {}
-    /// Receive a physical key after AppKit input-method interpretation.
-    fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) {}
+    /// Offer a key to the keymap before native interpretation, unless composing.
+    /// Returning true consumes it.
+    fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) -> bool {
+        false
+    }
+    /// Execute a command selected from a resource-defined native menu.
+    fn on_named_command(&mut self, _window: &WindowHandle, _name: &str, _args: &str) {}
+    /// Validate a native menu action in the current view.
+    fn command_enabled(&self, _name: &str, _args: &str) -> bool {
+        true
+    }
     /// Apply insert/marked/unmark updates, including native replacement ranges.
     fn on_text_input(&mut self, _window: &WindowHandle, _event: TextInput) {}
     /// Execute a standard responder command (also used by the Edit menu).
@@ -154,7 +166,7 @@ pub trait AppHandler: 'static {
     /// Observe system light/dark changes.
     fn on_appearance(&mut self, _window: &WindowHandle, _appearance: Appearance) {}
     /// Approve a user initiated close/quit. Automatic completion uses `quit`.
-    fn on_quit_requested(&mut self) -> bool {
+    fn on_quit_requested(&mut self, _window: &WindowHandle) -> bool {
         true
     }
     /// Return an O(1) text snapshot and document-relative UTF-16 ranges.
@@ -173,6 +185,18 @@ pub trait AppHandler: 'static {
     fn character_index_for_point(&self, _point: Point) -> Option<usize> {
         None
     }
+}
+/// Resource-defined native menu entry. Arguments remain opaque JSON to the platform.
+#[derive(Clone, Debug, Default)]
+pub struct MenuEntry {
+    /// Visible caption, or "-" for a separator.
+    pub caption: String,
+    /// Command registry name, absent on submenu parents.
+    pub command: Option<String>,
+    /// Serialized keyword arguments.
+    pub args: String,
+    /// Submenu contents.
+    pub children: Vec<MenuEntry>,
 }
 /// Main-thread native application bootstrap.
 #[derive(Debug)]
