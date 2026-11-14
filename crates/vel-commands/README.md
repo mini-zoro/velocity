@@ -25,3 +25,8 @@ clipboard, snippet fields, undo/redo and soft history, and check all window comm
 ```sh
 cargo test -p vel-commands
 ```
+
+Round 5 registers window actions for overlays, input/output/find panels, file search/replacement,
+find-next/previous/all/under, slurp strings, search flags, side-bar visibility/focus and project
+folders. The host implements these workflows using vel-search and vel-ui; the registry remains
+independent of both. Panel text edits use the same text commands against their own buffer.

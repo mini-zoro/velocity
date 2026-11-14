@@ -11,6 +11,7 @@ pub enum Mode {
     Typing,
     Memory,
     Headless,
+    Panels,
 }
 impl Mode {
     pub fn name(self) -> &'static str {
@@ -22,6 +23,7 @@ impl Mode {
             Self::Typing => "typing",
             Self::Memory => "memory",
             Self::Headless => "headless",
+            Self::Panels => "panels",
         }
     }
     pub fn automatic(self) -> bool {
@@ -83,6 +85,7 @@ impl Options {
                 "--bench-typing" => Some(Mode::Typing),
                 "--bench-memory" => Some(Mode::Memory),
                 "--headless-smoke" => Some(Mode::Headless),
+                "--bench-panels" => Some(Mode::Panels),
                 _ => None,
             };
             if let Some(mode) = mode {
@@ -222,7 +225,7 @@ impl FileLocation {
     }
 }
 
-pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--headless-smoke] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --carets 1|1000        typing/headless benchmark selection count\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
+pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --carets 1|1000        typing/headless benchmark selection count\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {

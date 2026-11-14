@@ -1,0 +1,577 @@
+//! Parallel grep-searcher traversal, streaming result lines and reviewable replacements.
+use crate::{
+    project::{Folder, Rules},
+    text::{Search, apply},
+};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use ignore::WalkState;
+use std::{
+    collections::BTreeSet,
+    io,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, TrySendError},
+    },
+    thread,
+    time::Duration,
+};
+use vel_text::Text;
+
+/// Parsed Where field. Commas separate roots/tokens/include globs/`-exclude` globs.
+#[derive(Clone, Debug, Default)]
+pub struct Where {
+    /// Explicit folders/files.
+    pub roots: Vec<PathBuf>,
+    /// Include current project roots.
+    pub project: bool,
+    /// Search live buffers instead of their on-disk contents.
+    pub open_files: bool,
+    include: GlobSet,
+    exclude: GlobSet,
+}
+impl Where {
+    /// Parses public tokens and glob syntax. Bare/empty Where defaults to `<project>`.
+    pub fn parse(input: &str, base: &Path) -> Result<Self, String> {
+        let mut result = Self::default();
+        let mut include = GlobSetBuilder::new();
+        let mut exclude = GlobSetBuilder::new();
+        for part in input.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let part = part.trim_matches('"');
+            match part {
+                "<project>" => result.project = true,
+                "<open files>" => result.open_files = true,
+                _ => {
+                    if let Some(pattern) = part.strip_prefix('-') {
+                        exclude.add(Glob::new(pattern).map_err(|e| e.to_string())?);
+                    } else if part.contains(['*', '?', '[']) {
+                        include.add(Glob::new(part).map_err(|e| e.to_string())?);
+                    } else {
+                        let path = Path::new(part);
+                        result.roots.push(if path.is_absolute() {
+                            path.into()
+                        } else {
+                            base.join(path)
+                        });
+                    }
+                }
+            }
+        }
+        result.project |= !result.open_files && result.roots.is_empty();
+        result.include = include.build().map_err(|e| e.to_string())?;
+        result.exclude = exclude.build().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+    /// Applies include and then exclude to full, root-relative and basename paths.
+    pub fn allows(&self, path: &Path, root: &Path) -> bool {
+        let name = Path::new(path.file_name().unwrap_or_default());
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        (self.include.is_empty()
+            || self.include.is_match(path)
+            || self.include.is_match(relative)
+            || self.include.is_match(name))
+            && !self.exclude.is_match(path)
+            && !self.exclude.is_match(relative)
+            && !self.exclude.is_match(name)
+    }
+}
+/// A searchable live buffer. Path may be a user-facing Untitled caption.
+#[derive(Clone, Debug)]
+pub struct OpenFile {
+    /// Display/jump identity.
+    pub path: PathBuf,
+    /// O(1) current buffer snapshot, including unsaved edits.
+    pub text: Text,
+}
+/// Worker search description.
+#[derive(Clone, Debug)]
+pub struct Request {
+    /// Compiled rope semantics; disk grep uses the same regex flags.
+    pub search: Search,
+    /// Where field.
+    pub scope: Where,
+    /// Ignore-aware project roots.
+    pub folders: Vec<Folder>,
+    /// Live buffers used by `<open files>`.
+    pub open: Vec<OpenFile>,
+    /// Context lines before/after each matching line.
+    pub context: usize,
+}
+/// One result/context line with a stable jump location and highlight spans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    /// Absolute file path/live-buffer identity.
+    pub path: PathBuf,
+    /// One-based line number.
+    pub number: usize,
+    /// Text without line endings.
+    pub text: String,
+    /// UTF-8 match columns; empty for context.
+    pub highlights: Vec<Range<usize>>,
+}
+impl Line {
+    /// Sublime-style line prefix. File headers are emitted by the result view on path changes.
+    pub fn formatted(&self) -> String {
+        format!(
+            "  {:>5}{} {}\n",
+            self.number,
+            if self.highlights.is_empty() { ' ' } else { ':' },
+            self.text
+        )
+    }
+    /// One-based scalar column of the first match.
+    pub fn column(&self) -> usize {
+        self.highlights.first().map_or(1, |r| {
+            self.text[..r.start.min(self.text.len())].chars().count() + 1
+        })
+    }
+}
+/// Device-free Find Results document: file headers, numbered context and match rows.
+#[derive(Clone, Debug, Default)]
+pub struct Results {
+    /// Append-only display rows, ready for virtualization.
+    pub rows: Vec<Row>,
+    last: Option<(PathBuf, usize)>,
+}
+/// One Find Results display row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// A file header; repeated when parallel streams switch files.
+    Header(PathBuf),
+    /// Nonadjacent context separator.
+    Gap,
+    /// Numbered match/context line and its jump target.
+    Line(Line),
+}
+impl Results {
+    /// Appends streaming lines without sorting/copying previous output.
+    pub fn push(&mut self, line: Line) {
+        if self
+            .last
+            .as_ref()
+            .is_none_or(|(path, _)| *path != line.path)
+        {
+            self.rows.push(Row::Header(line.path.clone()));
+        } else if self.last.as_ref().is_some_and(|(_, n)| line.number > n + 1) {
+            self.rows.push(Row::Gap);
+        }
+        self.last = Some((line.path.clone(), line.number));
+        self.rows.push(Row::Line(line));
+    }
+    /// Sublime-style plain-text representation, useful for copying/export/tests.
+    pub fn formatted(&self) -> String {
+        self.rows
+            .iter()
+            .map(|row| match row {
+                Row::Header(path) => format!("\n{}:\n", path.display()),
+                Row::Gap => "        …\n".into(),
+                Row::Line(line) => line.formatted(),
+            })
+            .collect()
+    }
+}
+/// Streaming events. Channels are bounded so the consumer controls memory growth.
+#[derive(Debug)]
+pub enum Event {
+    /// One match or context line.
+    Line(Line),
+    /// Traversal/decoding/IO failure, never silently counted as a successful file.
+    Error(String),
+    /// Terminal event with matching lines and searched files.
+    Done {
+        /// Number of matching lines.
+        matches: usize,
+        /// Files actually searched.
+        files: usize,
+    },
+}
+fn send(tx: &mpsc::SyncSender<Event>, stop: &AtomicBool, mut event: Event) -> bool {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        match tx.try_send(event) {
+            Ok(()) => return true,
+            Err(TrySendError::Disconnected(_)) => return false,
+            Err(TrySendError::Full(value)) => {
+                event = value;
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+struct GrepSink<'a> {
+    path: &'a Path,
+    matcher: &'a RegexMatcher,
+    tx: &'a mpsc::SyncSender<Event>,
+    stop: &'a AtomicBool,
+    matches: &'a AtomicUsize,
+}
+impl Sink for GrepSink<'_> {
+    type Error = io::Error;
+    fn matched(&mut self, _: &Searcher, found: &SinkMatch<'_>) -> io::Result<bool> {
+        let text = std::str::from_utf8(found.bytes())
+            .map_err(io::Error::other)?
+            .trim_end_matches(['\n', '\r'])
+            .to_owned();
+        let mut highlights = Vec::new();
+        self.matcher
+            .find_iter(text.as_bytes(), |m| {
+                highlights.push(m.start()..m.end());
+                true
+            })
+            .map_err(io::Error::other)?;
+        self.matches.fetch_add(1, Ordering::Relaxed);
+        Ok(send(
+            self.tx,
+            self.stop,
+            Event::Line(Line {
+                path: self.path.into(),
+                number: found.line_number().unwrap_or(1) as usize,
+                text,
+                highlights,
+            }),
+        ))
+    }
+    fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> io::Result<bool> {
+        let text = std::str::from_utf8(context.bytes())
+            .map_err(io::Error::other)?
+            .trim_end_matches(['\n', '\r'])
+            .to_owned();
+        Ok(send(
+            self.tx,
+            self.stop,
+            Event::Line(Line {
+                path: self.path.into(),
+                number: context.line_number().unwrap_or(1) as usize,
+                text,
+                highlights: Vec::new(),
+            }),
+        ))
+    }
+}
+/// Cancellable parallel file search. Dropping cancels blocked producers as well as walkers.
+#[derive(Debug)]
+pub struct Task {
+    /// Bounded streaming channel (consume regularly).
+    pub events: mpsc::Receiver<Event>,
+    stop: Arc<AtomicBool>,
+}
+impl Task {
+    /// Validates regex and spawns workers; no GUI or full-project result buffer is needed.
+    pub fn start(request: Request) -> Result<Self, String> {
+        if request.search.query.is_empty() {
+            return Err("Find in Files needs a nonempty query".into());
+        }
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(!request.search.options.case_sensitive)
+            .word(request.search.options.whole_word)
+            .fixed_strings(!request.search.options.regex)
+            .multi_line(true)
+            .build(&request.search.query)
+            .map_err(|e| e.to_string())?;
+        let (tx, events) = mpsc::sync_channel(128);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancelled = stop.clone();
+        thread::spawn(move || {
+            let matches = AtomicUsize::new(0);
+            let files = AtomicUsize::new(0);
+            let seen = std::sync::Mutex::new(BTreeSet::new());
+            // Live buffers take precedence over on-disk copies when both scope tokens are present.
+            if request.scope.open_files {
+                for open in &request.open {
+                    if !request.scope.allows(&open.path, Path::new("")) {
+                        continue;
+                    }
+                    seen.lock().expect("seen").insert(open.path.clone());
+                    files.fetch_add(1, Ordering::Relaxed);
+                    let hits = request.search.find(&open.text, &[]);
+                    let mut rows = BTreeSet::new();
+                    for hit in &hits {
+                        let row = open.text.byte_to_line(hit.start);
+                        for row in row.saturating_sub(request.context)
+                            ..=(row + request.context).min(open.text.len_lines() - 1)
+                        {
+                            rows.insert(row);
+                        }
+                    }
+                    for row in rows {
+                        let start = open.text.line_to_byte(row);
+                        let text = open.text.line(row).to_string();
+                        let highlights: Vec<_> = hits
+                            .iter()
+                            .filter(|h| h.start >= start && h.start <= start + text.len())
+                            .map(|h| h.start - start..(h.end - start).min(text.len()))
+                            .collect();
+                        if !highlights.is_empty() {
+                            matches.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if !send(
+                            &tx,
+                            &cancelled,
+                            Event::Line(Line {
+                                path: open.path.clone(),
+                                number: row + 1,
+                                text,
+                                highlights,
+                            }),
+                        ) {
+                            return;
+                        }
+                    }
+                }
+            }
+            let mut folders = if request.scope.project {
+                request.folders.clone()
+            } else {
+                Vec::new()
+            };
+            for path in &request.scope.roots {
+                let rules = request
+                    .folders
+                    .iter()
+                    .find(|f| path.starts_with(&f.path))
+                    .map_or_else(Rules::default, |f| f.rules.clone());
+                folders.push(Folder {
+                    path: path.clone(),
+                    name: path.display().to_string(),
+                    rules,
+                    follow_links: false,
+                });
+            }
+            for folder in folders {
+                folder
+                    .walker(&folder.path, None, true)
+                    .build_parallel()
+                    .run(|| {
+                        let mut searcher = SearcherBuilder::new()
+                            .line_number(true)
+                            .before_context(request.context)
+                            .after_context(request.context)
+                            .binary_detection(BinaryDetection::quit(b'\0'))
+                            .build();
+                        let tx = &tx;
+                        let stop = &cancelled;
+                        let scope = &request.scope;
+                        let matcher = &matcher;
+                        let seen = &seen;
+                        let matches = &matches;
+                        let files = &files;
+                        let root = &folder.path;
+                        Box::new(move |result| {
+                            if stop.load(Ordering::Relaxed) {
+                                return WalkState::Quit;
+                            }
+                            match result {
+                                Ok(entry)
+                                    if entry.file_type().is_some_and(|t| t.is_file())
+                                        && scope.allows(entry.path(), root) =>
+                                {
+                                    if !seen.lock().expect("seen").insert(entry.path().into()) {
+                                        return WalkState::Continue;
+                                    }
+                                    files.fetch_add(1, Ordering::Relaxed);
+                                    let sink = GrepSink {
+                                        path: entry.path(),
+                                        matcher,
+                                        tx,
+                                        stop,
+                                        matches,
+                                    };
+                                    if let Err(e) =
+                                        searcher.search_path(matcher, entry.path(), sink)
+                                    {
+                                        send(
+                                            tx,
+                                            stop,
+                                            Event::Error(format!(
+                                                "{}: {e}",
+                                                entry.path().display()
+                                            )),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    send(tx, stop, Event::Error(e.to_string()));
+                                }
+                                _ => {}
+                            }
+                            WalkState::Continue
+                        })
+                    });
+            }
+            send(
+                &tx,
+                &cancelled,
+                Event::Done {
+                    matches: matches.load(Ordering::Relaxed),
+                    files: files.load(Ordering::Relaxed),
+                },
+            );
+        });
+        Ok(Self { events, stop })
+    }
+}
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// A read-only prepared change. Confirmation belongs to the native application.
+#[derive(Debug)]
+pub struct FileChange {
+    /// Original file.
+    pub path: PathBuf,
+    before: Text,
+    format: vel_fileio::Format,
+    after: Text,
+    /// Number of replacements to show before confirmation.
+    pub count: usize,
+}
+impl FileChange {
+    /// Prepares replacements without writing. The application confirms the complete plan first.
+    pub fn prepare(path: PathBuf, search: &Search, replacement: &str) -> Result<Self, String> {
+        let loaded = vel_fileio::load(&path, "Western (Windows 1252)", |_| {})?;
+        let replacements = search.replacements(&loaded.text, replacement, &[]);
+        let mut buffer = vel_buffer::Buffer::new(loaded.text.clone());
+        let view = buffer.new_view();
+        apply(&mut buffer, view, &replacements);
+        Ok(Self {
+            path,
+            before: loaded.text,
+            format: loaded.format,
+            after: buffer.text().clone(),
+            count: replacements.len(),
+        })
+    }
+    /// After confirmation, rechecks original content/format, backs up original bytes, then saves atomically.
+    pub fn commit(self) -> Result<PathBuf, String> {
+        let current = vel_fileio::load(&self.path, "Western (Windows 1252)", |_| {})?;
+        if current.text != self.before || current.format != self.format {
+            return Err(format!(
+                "{} changed after replacement preview",
+                self.path.display()
+            ));
+        }
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let backup = self.path.with_file_name(format!(
+            "{}.velocity-backup-{suffix}",
+            self.path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+            .map_err(|e| e.to_string())?;
+        let mut source = std::fs::File::open(&self.path).map_err(|e| e.to_string())?;
+        io::copy(&mut source, &mut target).map_err(|e| e.to_string())?;
+        target.sync_all().map_err(|e| e.to_string())?;
+        vel_fileio::save(&self.path, &self.after, &self.format, true)?;
+        Ok(backup)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn where_stream_format_context_and_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.rs");
+        std::fs::write(&path, "before\nhello cat\nafter\n").unwrap();
+        let search = Search::new("cat", crate::text::Options::default()).unwrap();
+        let scope = Where::parse("<project>, *.rs, -ignored*", dir.path()).unwrap();
+        let folder = Folder {
+            path: dir.path().into(),
+            name: "root".into(),
+            rules: Rules::default(),
+            follow_links: false,
+        };
+        let task = Task::start(Request {
+            search: search.clone(),
+            scope,
+            folders: vec![folder],
+            open: vec![],
+            context: 1,
+        })
+        .unwrap();
+        let mut lines = Vec::new();
+        loop {
+            match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Line(line) => lines.push(line),
+                Event::Error(e) => panic!("{e}"),
+                Event::Done { matches, files } => {
+                    assert_eq!((matches, files), (1, 1));
+                    break;
+                }
+            }
+        }
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].formatted(), "      2: hello cat\n");
+        assert_eq!(lines[1].highlights, std::slice::from_ref(&(6..9)));
+        let mut view = Results::default();
+        for line in &lines {
+            view.push(line.clone());
+        }
+        assert_eq!(
+            view.formatted(),
+            format!(
+                "\n{}:\n      1  before\n      2: hello cat\n      3  after\n",
+                path.display()
+            )
+        );
+        let plan = FileChange::prepare(path.clone(), &search, "dog").unwrap();
+        assert_eq!(plan.count, 1);
+        let backup = plan.commit().unwrap();
+        assert!(std::fs::read_to_string(backup).unwrap().contains("cat"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("dog"));
+        let plan = FileChange::prepare(path.clone(), &search, "x").unwrap();
+        std::fs::write(path, "new contents").unwrap();
+        assert!(plan.commit().is_err());
+    }
+    #[test]
+    fn open_file_scope_uses_unsaved_text_and_exclude_patterns() {
+        let scope = Where::parse("<open files>, *.rs, -skip*", Path::new(".")).unwrap();
+        let search = Search::new("changed", crate::text::Options::default()).unwrap();
+        let task = Task::start(Request {
+            search,
+            scope,
+            folders: vec![],
+            open: vec![
+                OpenFile {
+                    path: "unsaved.rs".into(),
+                    text: Text::from("changed in memory"),
+                },
+                OpenFile {
+                    path: "skip.rs".into(),
+                    text: Text::from("changed too"),
+                },
+            ],
+            context: 0,
+        })
+        .unwrap();
+        let mut found = 0;
+        loop {
+            match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Line(line) => {
+                    assert_eq!(line.path, Path::new("unsaved.rs"));
+                    found += 1;
+                }
+                Event::Done { matches, files } => {
+                    assert_eq!((matches, files, found), (1, 1, 1));
+                    break;
+                }
+                Event::Error(e) => panic!("{e}"),
+            }
+        }
+    }
+}

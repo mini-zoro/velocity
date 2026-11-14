@@ -1,3 +1,81 @@
+# Round 5 results: widgets, Goto, palette, find/replace, file search and side bar
+
+Status: implemented and headless-verified; GUI/Metal measurements remain pending. No GUI,
+Metal device creation, display wake or unlock was attempted. Nothing was committed. New work
+is confined to vel-ui, vel-search, velocity, vel-platform, vel-config, vel-commands and Cargo.lock;
+the existing vel-render/vel-fileio seams were also tested. Lane B's files/dependencies were not used.
+
+Users can navigate files/one-based positions with transient previews and a simple split, fuzzy
+word rows, a resource/menu-driven command palette with binding hints/session recency, buffer-backed
+IME/undo inputs, find/replace/incremental find, streaming Find Results with jumps, lazy project
+folders and Open Files, scrolling/reorderable/closable tabs and a full plain-text status bar.
+Replace in Files prepares a read-only plan on a worker, checks it is still current, asks native
+confirmation, rejects stale/dirty targets and retains byte-for-byte backups before atomic saves.
+Symbol navigation remains a provider hook pending the explicitly deferred syntax integration.
+
+Validation: **78 Rust tests pass** across eight crates (commands 5, config 7, fileio 7,
+platform 6, render 7, search 8, UI 3, application 35), including ranking goldens, stale-query
+cancellation, Goto grammar, rope seams/zero-width matches/groups/preserve-case, unsaved open-file
+search, result formatting/backups, exclusions, focus routing, IME display cells, selection-scoped
+shrinking replacements, transient-source/viewport restoration and an automatic CPU panel scenario.
+Targeted cargo fmt, clippy --all-targets with -D warnings and rustdoc with -D warnings pass for
+all touched crates and the render/fileio regression seams. Python telemetry completeness self-tests,
+full-matrix dry-run, shell syntax and git diff whitespace checks also pass. The original 92-line
+IME checklist is preserved verbatim at the beginning of MANUAL_TEST.md.
+
+Release CPU evidence, sequential processes on Darwin 25.1.0 arm64, 2026-11-14 03:16:21 UTC.
+Observed load averages: 6.73 / 8.40 / 7.54; parallel lane may be active. No GUI/GPU in these results.
+Search quantiles use nearest rank; the existing headless app smoke uses its existing interpolation.
+
+| Workload | Samples | p50 | p95 | Max | Budget |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100k prepared paths, synchronous top 100, prefix/reset/backspace | 180 | 2.148 ms | 3.453 ms | 3.687 ms | <=10 ms/key |
+| Same corpus, worker queue + scoring + receipt | 90 | 2.260 ms | 3.638 ms | 3.767 ms | <=10 ms/key |
+| 100,000,000-byte literal highlight, 381,679 matches | 5 | 14.382 ms | 22.501 ms | 22.501 ms | <=200 ms |
+| 60-line viewport, same rope | 100 | 0.0089 ms | 0.0140 ms | 0.0872 ms | <=5 ms |
+| 1k carets, keymap -> buffer -> CPU scene | 50 | 2.306 ms | 4.477 ms | 5.616 ms | CPU smoke; no GUI claim |
+| 1 caret, first CPU smoke process | 50 | 0.3294 ms | 0.6454 ms | 1.041 ms | CPU smoke; no GUI claim |
+| 1 caret, median of five subsequent process quantiles | 5 x 50 | 0.1739 ms | 0.3059 ms | see raw runs | Warm descriptive repeat |
+
+Keymap: 1,000 bindings / 1,000,000 lookups, mean **0.1921 us**, compared with round 4's
+0.1905 us (+0.84%, below the 5% regression limit). The first short 1-caret smoke p50 was 6.5%
+above round 4's single observation, so it was investigated with five additional sequential
+processes; every repeat was faster than that observation. All original/repeated logs are retained,
+not discarded. The 1,000-caret p95 is also below round 4's observation. These short smoke runs
+under concurrent machine load are not a native input-latency benchmark.
+
+P0 PLAN §3.3 recorded naive 100k rescoring at **6–73 ms**. This round's generated corpus differs,
+so this is not a controlled same-corpus speedup claim. All 90 worker observations on the documented
+round-5 corpus are below 10 ms. Background index construction includes path normalization; it is
+outside query scoring. Prefix narrowing retains all matches, top-K sorting touches only retained
+hits, and stale generations cannot publish. Opening an overlay can additionally prepare a source
+snapshot/recency data; per-key updates reuse it. The automatic GUI panel workload includes that
+first-open work and UI polling/scene/GPU submission, which the CPU matcher figures exclude.
+
+Raw JSONL and environment: [summary](output/round5-cpu-20261114T031621.130072Z/summary.jsonl).
+App logs: [1 caret](output/round5-cpu-20261114T031621.130072Z/headless-1.jsonl),
+[1,000 carets](output/round5-cpu-20261114T031621.130072Z/headless-1000.jsonl).
+The same directory retains all five 1-caret repeats and stderr. Search text/index construction
+is outside timing; timed search operates on ChunkCursor, without a full-buffer copy.
+
+GUI review uses automatic `--bench-panels` (exactly 100 scripted actions / 100k candidates,
+default and requested 4K), plus the existing automatic startup/floor/scroll/typing/memory matrix.
+measure.py validates the exact panel sample IDs/count and rejects incomplete or contaminated runs.
+All modes preserve the asleep/locked-display fail-fast path and independent watchdog. The new
+mode has only been compiled and its controller/validator exercised headlessly. No native timing
+or appearance result is inferred from those checks. Exact commands are at the top of RUNBOOK.md;
+the human acceptance checklist is MANUAL_TEST.md.
+
+Documented limits: no live symbols/highlighting until the next lane integration; Rust regex syntax
+excludes lookaround/backreferences/recursion; disk grep is line-oriented; Where's comma separator
+cannot be embedded in a path/glob; disk replacements require saving dirty target tabs and are
+atomic per file; session/workspace persistence and the P3 theme engine remain deferred. Native
+IME geometry, clipping, font quality, split/tab pointer behavior and appearance still need GUI QA.
+
+Historical round-4 and earlier evidence follows.
+
+---
+
 # Round 4 results: settings, commands and real editing
 
 Status: headless checks complete; native GUI/Metal measurements remain pending. No GUI,
@@ -42,7 +120,7 @@ launch. The new Swift floor has the same retry/diagnostic behavior. Hardware mus
 both successful scanout and approximately two-second failure on blocked displays.
 
 Reviewer commands and the 100 MB asynchronous-open measurement are in RUNBOOK.md. Complete
-IME_TEST.md's new editing smoke checklist, including encodings, tabs, dirty close prompts,
+MANUAL_TEST.md's new editing smoke checklist, including encodings, tabs, dirty close prompts,
 multicursor undo and external reload. Record actual native key equivalents, shifted keys,
 keypad/modifier taps, candidate windows and the requested display configurations.
 
@@ -131,7 +209,7 @@ wgpu 30.0.2 的 PipelineCache 当前只实现 Vulkan；Metal adapter 支持位�
 
 ## 原生行为人工验收
 
-IME_TEST.md 完成情况：待填。重点记录 UTF-16 replacementRange、日文再转换、表情选择器、
+MANUAL_TEST.md 完成情况：待填。重点记录 UTF-16 replacementRange、日文再转换、表情选择器、
 长按重音、组合选择区、候选窗在 Retina/多显示器的位置，以及 focus/resize/scroll。
 字体：Menlo、PingFang、Apple Color Emoji；CoreText fallback 次数与颜色/基线观感：待填。
 菜单/剪贴板/撤销、全屏、深浅色切换、idle CPU / 120 Hz：待填。

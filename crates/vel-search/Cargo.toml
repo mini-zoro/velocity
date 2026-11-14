@@ -1,0 +1,29 @@
+[package]
+name = "vel-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vel-text = { path = "../vel-text" }
+vel-buffer = { path = "../vel-buffer" }
+vel-fileio = { path = "../vel-fileio" }
+regex-cursor = { version = "=0.1.5", default-features = false }
+regex = "=1.13.1"
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+notify = "=8.2.0"
+serde_json = "=1.0.154"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+

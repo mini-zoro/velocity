@@ -68,4 +68,4 @@ is used for candidate windows. Offscreen anchors are clamped to the content area
 Kernel process birth, RSS and TASK_VM_INFO REV1 physical footprint need no window
 server. Their ABIs and error/short-reply checks are tested headlessly, along with
 UTF-16 range handling. Native delivery, press-and-hold, reconversion, resize and
-multi-display behavior require the hardware checklist in velocity/IME_TEST.md.
+multi-display behavior require the hardware checklist in velocity/MANUAL_TEST.md.

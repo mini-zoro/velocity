@@ -27,7 +27,7 @@ pub struct MenuItem {
     /// Mnemonic metadata for non-Mac ports.
     pub mnemonic: Option<String>,
 }
-/// Palette command entry; the palette UI is deferred.
+/// Palette command entry, consumed by vel-ui's quick panel.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PaletteItem {
     /// Display caption.
@@ -35,6 +35,37 @@ pub struct PaletteItem {
     /// Command/arguments.
     #[serde(flatten)]
     pub invocation: Invocation,
+}
+/// Adds menu-derived commands, keeping explicit palette captions/arguments first.
+pub fn extend_palette(palette: &mut Vec<PaletteItem>, menu: &[MenuItem]) {
+    fn visit(palette: &mut Vec<PaletteItem>, menu: &[MenuItem], prefix: &str) {
+        for item in menu {
+            if item.caption == "-"
+                || matches!(item.platform.as_deref(), Some("!OSX" | "Windows" | "Linux"))
+            {
+                continue;
+            }
+            let caption = if prefix.is_empty() {
+                item.caption.clone()
+            } else {
+                format!("{prefix}: {}", item.caption)
+            };
+            if let Some(command) = &item.command {
+                let invocation = Invocation {
+                    command: command.clone(),
+                    args: item.args.clone(),
+                };
+                if !palette.iter().any(|p| p.invocation == invocation) {
+                    palette.push(PaletteItem {
+                        caption: caption.clone(),
+                        invocation,
+                    });
+                }
+            }
+            visit(palette, &item.children, &caption);
+        }
+    }
+    visit(palette, menu, "");
 }
 /// Mouse binding; button numbering follows Sublime (1 = primary).
 #[derive(Clone, Debug, Deserialize)]
@@ -93,4 +124,26 @@ pub fn parse_mousemap(source: &str) -> Result<Vec<MouseBinding>, String> {
         }
     }
     Ok(bindings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn palette_menu_deduplication_platform_filter_and_binding_hints() {
+        let mut palette: Vec<PaletteItem> =
+            parse(r#"[{"caption":"Find","command":"show_panel","args":{"panel":"find"}}]"#)
+                .unwrap();
+        let menus: Vec<MenuItem> = parse(r#"[{"caption":"Edit","children":[{"caption":"Find","command":"show_panel","args":{"panel":"find"}},{"caption":"-","command":"noop"},{"caption":"Save","command":"save"},{"caption":"Linux","platform":"Linux","command":"new_window"}]}]"#).unwrap();
+        extend_palette(&mut palette, &menus);
+        assert_eq!(palette.len(), 2);
+        assert_eq!(palette[1].caption, "Edit: Save");
+        let mut keys = crate::keymap::Keymap::default();
+        keys.append(r#"[{"keys":["super+f"],"command":"show_panel","args":{"panel":"find"}}]"#)
+            .unwrap();
+        assert_eq!(keys.hint(&palette[0].invocation).as_deref(), Some("Cmd+F"));
+        keys.append(r#"[{"keys":["super+f"],"command":"save"}]"#)
+            .unwrap();
+        assert!(keys.hint(&palette[0].invocation).is_none());
+    }
 }

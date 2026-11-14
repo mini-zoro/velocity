@@ -11,6 +11,10 @@ impl WindowHandle {
         Vec::new()
     }
     /// No native chooser on this platform.
+    pub fn open_directory(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// No native chooser on this platform.
     pub fn save_file(&self, _suggested: &str) -> Option<std::path::PathBuf> {
         None
     }

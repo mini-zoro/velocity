@@ -13,5 +13,66 @@
   {
     "caption": "Edit: Reverse Lines",
     "command": "reverse_lines"
+  },
+  {
+    "caption": "Goto Anything",
+    "command": "show_overlay",
+    "args": {
+      "overlay": "goto"
+    }
+  },
+  {
+    "caption": "Goto Symbol",
+    "command": "show_overlay",
+    "args": {
+      "overlay": "goto",
+      "text": "@"
+    }
+  },
+  {
+    "caption": "Find: Find",
+    "command": "show_panel",
+    "args": {
+      "panel": "find"
+    }
+  },
+  {
+    "caption": "Find: Replace",
+    "command": "show_panel",
+    "args": {
+      "panel": "replace"
+    }
+  },
+  {
+    "caption": "Find: Find in Files",
+    "command": "show_panel",
+    "args": {
+      "panel": "find_in_files"
+    }
+  },
+  {
+    "caption": "Find: Replace All",
+    "command": "replace_all",
+    "args": {}
+  },
+  {
+    "caption": "Find: Replace in Files\u2026",
+    "command": "replace_in_files",
+    "args": {}
+  },
+  {
+    "caption": "View: Toggle Side Bar",
+    "command": "toggle_side_bar",
+    "args": {}
+  },
+  {
+    "caption": "Project: Add Folder\u2026",
+    "command": "add_folder",
+    "args": {}
+  },
+  {
+    "caption": "View: Close Split",
+    "command": "close_split",
+    "args": {}
   }
 ]

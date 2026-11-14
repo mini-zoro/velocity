@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 pub const SCROLL_FRAMES: usize = 600;
 pub const TYPING_INSERTIONS: usize = 500;
+pub const PANEL_ACTIONS: usize = 100;
 pub const WARMUP_FRAMES: usize = 60;
 #[derive(Debug)]
 pub struct Bench {
@@ -60,6 +61,7 @@ impl Bench {
                 >= match self.mode {
                     Mode::Scroll => SCROLL_FRAMES,
                     Mode::Typing => TYPING_INSERTIONS,
+                    Mode::Panels => PANEL_ACTIONS,
                     Mode::Memory => self.positions.len(),
                     _ => 0,
                 }

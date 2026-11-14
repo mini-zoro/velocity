@@ -19,7 +19,7 @@ use std::{
 };
 use vel_config::{Value, settings::Layer};
 use vel_platform::*;
-use vel_render::scene::{Layer as SceneLayer, SolidRect, TextRun};
+use vel_render::scene::Layer as SceneLayer;
 use vel_render::{FrameTimes, Renderer, font::Fonts};
 
 #[derive(Clone, Debug, Serialize)]
@@ -34,6 +34,12 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    panels: crate::panels::Panels,
+    window_size: Size,
+    content: Rect,
+    secondary: View,
+    last_active: Option<vel_buffer::BufferId>,
+    view_buffer: Option<vel_buffer::BufferId>,
     options: Options,
     clock: Clock,
     reporter: Reporter,
@@ -74,6 +80,24 @@ impl App {
             12.,
         );
         Self {
+            panels: {
+                let mut panels =
+                    crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
+                if !matches!(options.mode, Mode::Interactive | Mode::Panels) {
+                    panels.side_visible = false;
+                }
+                panels
+            },
+            window_size: view.size,
+            content: Rect {
+                x: 0.,
+                y: 0.,
+                width: view.size.width,
+                height: view.size.height,
+            },
+            secondary: View::new(view.size, 8., 12.),
+            last_active: None,
+            view_buffer: None,
             options,
             clock,
             reporter,
@@ -130,6 +154,21 @@ impl App {
             return;
         }
         if !self.command_enabled(name, &args.to_string()) {
+            return;
+        }
+        if self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+            && let Some(input) = self.panels.input_mut()
+        {
+            input.set_clipboard(w.clipboard_text().unwrap_or_default());
+            if let Err(error) = input.run(name, args) {
+                self.show_error(w, &error);
+            }
+            if let Some(input) = self.panels.input() {
+                w.set_clipboard_text(input.clipboard());
+            }
+            let viewport = self.viewport();
+            self.panels.edited(&mut self.workspace, viewport);
+            self.changed(w, Instant::now(), false);
             return;
         }
         self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
@@ -190,16 +229,7 @@ impl App {
             if let Err(error) = result {
                 self.show_error(w, &error);
             }
-            if self.workspace.active != previous
-                || matches!(
-                    name.as_str(),
-                    "open_file" | "prompt_open_file" | "new_file" | "close" | "close_file"
-                )
-            {
-                let scroll = self.workspace.tabs[self.workspace.active].scroll;
-                self.view.scroll_x = scroll.0;
-                self.view.scroll_y = scroll.1;
-            }
+            self.sync_active_view();
         }
         self.workspace.editor_mut().sync();
         let tab = &self.workspace.tabs[self.workspace.active];
@@ -211,6 +241,20 @@ impl App {
         ));
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
+        if matches!(name, "open_dir" | "add_folder") && args["dir"].is_null() {
+            if let Some(path) = w.open_directory() {
+                self.panels.add_folder(&mut self.workspace, path)?;
+            }
+            return Ok(());
+        }
+        let viewport = self.viewport();
+        if self
+            .panels
+            .action(&mut self.workspace, name, args, viewport)?
+        {
+            self.replacement_confirmation(w)?;
+            return Ok(());
+        }
         let active = self.workspace.active;
         match name {
             "new_file" => self.workspace.new_file()?,
@@ -328,27 +372,142 @@ impl App {
         Ok(())
     }
     fn tab_width(&self) -> f64 {
-        (self.view.size.width / self.workspace.tabs.len() as f64).clamp(60., 200.)
+        180.
+    }
+    fn sync_active_view(&mut self) {
+        let current = self.workspace.editor().buffer.id();
+        if self.view_buffer != Some(current) {
+            if let Some(old) = self.view_buffer
+                && let Some(tab) = self
+                    .workspace
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.editor.buffer.id() == old)
+            {
+                tab.scroll = (self.view.scroll_x, self.view.scroll_y);
+            }
+            let scroll = self.workspace.tabs[self.workspace.active].scroll;
+            self.view.scroll_x = scroll.0;
+            self.view.scroll_y = scroll.1;
+            self.view_buffer = Some(current);
+            self.view.reveal(self.workspace.editor());
+        }
+        if let Some(scroll) = self.panels.restore_scroll.take() {
+            self.view.scroll_x = scroll.0;
+            self.view.scroll_y = scroll.1;
+        }
+    }
+    fn viewport(&self) -> std::ops::Range<usize> {
+        let text = &self.workspace.editor().text;
+        let first = (self.view.scroll_y / self.view.line_height).floor().max(0.) as usize;
+        let first = first.min(text.len_lines() - 1);
+        let last = (first + self.view.rows() + 2).min(text.len_lines());
+        text.line_to_byte(first)..if last < text.len_lines() {
+            text.line_to_byte(last)
+        } else {
+            text.len_bytes()
+        }
+    }
+    fn replacement_confirmation(&mut self, w: &WindowHandle) -> Result<(), String> {
+        if let Some(plan) = self.panels.replacement_plan.take() {
+            if self
+                .workspace
+                .tabs
+                .iter()
+                .any(|t| t.dirty() && plan.iter().any(|c| t.path.as_ref() == Some(&c.path)))
+            {
+                return Err("A target has unsaved edits; save it before replacing in files".into());
+            }
+            let count: usize = plan.iter().map(|p| p.count).sum();
+            if count > 0 && w.alert("Replace in Files?", &format!("Replace {count} matches in {} files? Each original is backed up beside the file before atomic saving.", plan.len()), &["Cancel", "Replace"]) == 1 {
+                let mut backups = Vec::new();
+                for change in plan { backups.push(change.commit()?); }
+                self.panels.message = format!("Replaced {count} matches. {} original-file backups retained.", backups.len());
+            }
+        }
+        Ok(())
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
+        self.sync_active_view();
+        let interactive = matches!(self.options.mode, Mode::Interactive | Mode::Panels);
+        let mut content = if interactive {
+            self.panels.layout(self.window_size)
+        } else {
+            Rect {
+                x: 0.,
+                y: 0.,
+                width: self.window_size.width,
+                height: self.window_size.height,
+            }
+        };
+        let mut second_scene = None;
+        if let Some(id) = self.panels.split {
+            if let Some(tab) = self
+                .workspace
+                .tabs
+                .iter()
+                .find(|t| t.editor.buffer.id() == id)
+            {
+                self.secondary.size = Size {
+                    width: content.width / 2.,
+                    height: content.height,
+                };
+                self.secondary.scroll_x = tab.scroll.0;
+                self.secondary.scroll_y = tab.scroll.1;
+                second_scene = Some((self.secondary.scene(&tab.editor), content.x));
+                content.x += content.width / 2.;
+                content.width /= 2.;
+            } else {
+                self.panels.split = None;
+            }
+        }
+        self.content = content;
+        self.view.size = Size {
+            width: content.width,
+            height: content.height,
+        };
         let mut scene = self.view.scene(self.workspace.editor());
+        if interactive {
+            self.paint_matches(&mut scene);
+        }
+        translate_scene(&mut scene, content.x, 0.);
+        if let Some((mut second, x)) = second_scene {
+            translate_scene(&mut second, x, 0.);
+            second.layers.extend(scene.layers);
+            scene = second;
+        }
         let mut tabs = SceneLayer::default();
+        let side = if interactive && self.panels.side_visible {
+            220f64.min(self.window_size.width * 0.3)
+        } else {
+            0.
+        };
         let all = Rect {
-            x: 0.,
+            x: side,
             y: 0.,
-            width: self.view.size.width,
+            width: self.window_size.width - side,
             height: crate::view::TAB_HEIGHT,
         };
-        tabs.rects.push(SolidRect {
-            rect: all,
-            radius: 0.,
-            color: [0.1, 0.11, 0.14, 1.],
-            clip: all,
-        });
+        vel_ui::fill(&mut tabs, all, all, [0.1, 0.11, 0.14, 1.]);
+        let active_id = self.workspace.editor().buffer.id();
+        if self.last_active != Some(active_id) {
+            let left = self.workspace.active as f64 * self.tab_width();
+            if left < self.panels.tab_scroll {
+                self.panels.tab_scroll = left;
+            }
+            if left + self.tab_width() > self.panels.tab_scroll + all.width {
+                self.panels.tab_scroll = left + self.tab_width() - all.width;
+            }
+            self.last_active = Some(active_id);
+        }
+        self.panels.tab_scroll = self.panels.tab_scroll.clamp(
+            0.,
+            (self.workspace.tabs.len() as f64 * self.tab_width() - all.width).max(0.),
+        );
         for (index, tab) in self.workspace.tabs.iter().enumerate() {
-            let x = index as f64 * self.tab_width();
-            if x >= all.width {
-                break;
+            let x = side + index as f64 * self.tab_width() - self.panels.tab_scroll;
+            if x + self.tab_width() < all.x || x > all.x + all.width {
+                continue;
             }
             let rect = Rect {
                 x,
@@ -356,49 +515,120 @@ impl App {
                 width: self.tab_width() - 1.,
                 height: all.height,
             };
-            tabs.rects.push(SolidRect {
+            vel_ui::fill(
+                &mut tabs,
                 rect,
-                radius: 0.,
-                color: if index == self.workspace.active {
+                all,
+                if index == self.workspace.active {
                     [0.2, 0.22, 0.27, 1.]
                 } else {
                     [0.12, 0.13, 0.16, 1.]
                 },
-                clip: all,
-            });
-            let mut label = tab.label();
-            if let Some((read, total)) = tab.progress() {
-                label = format!("Loading {}%", read.saturating_mul(100) / total.max(1));
-            }
-            tabs.text.push(TextRun {
-                text: label,
-                x: (x + 8.) as f32,
-                baseline: 20.,
-                size: 12.,
-                color: [0.85, 0.88, 0.93, 1.],
-                clip: Rect {
-                    width: rect.width - 24.,
+            );
+            let label = if let Some((read, total)) = tab.progress() {
+                format!("Loading {}%", read.saturating_mul(100) / total.max(1))
+            } else {
+                format!("{}{}", if tab.transient { "◦ " } else { "" }, tab.label())
+            };
+            vel_ui::label(
+                &mut tabs,
+                &label,
+                x + 8.,
+                20.,
+                Rect {
+                    width: rect.width - 25.,
                     ..rect
                 },
-            });
-            tabs.text.push(TextRun {
-                text: "×".into(),
-                x: (x + rect.width - 16.) as f32,
-                baseline: 20.,
-                size: 12.,
-                color: [0.7, 0.72, 0.77, 1.],
-                clip: rect,
-            });
+                [0.85, 0.88, 0.93, 1.],
+            );
+            vel_ui::label(
+                &mut tabs,
+                "×",
+                x + self.tab_width() - 20.,
+                20.,
+                all,
+                [0.7, 0.75, 0.8, 1.],
+            );
+            let id = 100 + index as u64;
+            let node = self
+                .panels
+                .tree
+                .nodes
+                .entry(id)
+                .or_insert_with(|| vel_ui::Node::new("tab_control"));
+            node.rect = rect;
+            node.visible = true;
+            self.panels.tree.roots.insert(0, id);
+            node.attributes
+                .retain(|a| matches!(*a, "hover" | "pressed"));
+            if index == self.workspace.active {
+                node.attributes.insert("selected");
+            }
+            if tab.dirty() {
+                node.attributes.insert("dirty");
+            }
+            if tab.transient {
+                node.attributes.insert("transient");
+            }
         }
         scene.layers.push(tabs);
+        if interactive {
+            self.panels.paint(&self.workspace, &mut scene);
+        }
         scene
+    }
+    fn paint_matches(&self, scene: &mut vel_render::scene::Scene) {
+        let editor = self.workspace.editor();
+        let viewport = self.viewport();
+        let first = self
+            .panels
+            .highlights
+            .partition_point(|r| r.end < viewport.start);
+        let Some(layer) = scene.layers.first_mut() else {
+            return;
+        };
+        let clip = Rect {
+            x: self.view.gutter(editor),
+            y: crate::view::TAB_HEIGHT,
+            width: self.view.size.width,
+            height: self.view.size.height - crate::view::TAB_HEIGHT,
+        };
+        for hit in self.panels.highlights[first..]
+            .iter()
+            .take_while(|h| h.start <= viewport.end)
+        {
+            let begin = hit.start.max(viewport.start);
+            let end = hit.end.min(viewport.end);
+            if begin > end {
+                continue;
+            }
+            for row in editor.text.byte_to_line(begin)..=editor.text.byte_to_line(end) {
+                let start = editor.text.line_to_byte(row);
+                let last = start + editor.text.line_len_bytes(row);
+                let a = self.view.rect_at(editor, begin.max(start).min(last));
+                let b = self.view.rect_at(editor, end.min(last).max(start));
+                vel_ui::fill(
+                    layer,
+                    Rect {
+                        x: a.x,
+                        y: a.y,
+                        width: (b.x - a.x).max(2.),
+                        height: self.view.line_height,
+                    },
+                    clip,
+                    [0.45, 0.31, 0.09, 0.75],
+                );
+            }
+        }
     }
     fn log_input(&self, kind: &str, event: impl std::fmt::Debug) {
         if self.options.log_input {
-            let _=self.reporter.emit(json!({"kind":"input","event_kind":kind,"event":format!("{event:?}"),"selected_utf16":[self.workspace.editor().selected_utf16().location,self.workspace.editor().selected_utf16().length],"marked_utf16":self.workspace.editor().marked_utf16().map(|r|[r.location,r.length])}));
+            let state = self.text_input_state();
+            let _ = self.reporter.emit(json!({"kind":"input","event_kind":kind,"event":format!("{event:?}"),"selected_utf16":[state.selected.location,state.selected.length],"marked_utf16":state.marked.map(|r|[r.location,r.length])}));
         }
     }
     fn changed(&mut self, w: &WindowHandle, received: Instant, reveal: bool) {
+        self.sync_active_view();
         self.input_at.get_or_insert(received);
         if reveal {
             self.view.reveal(self.workspace.editor());
@@ -442,6 +672,11 @@ impl App {
                 } else {
                     w.request_frame_at(Instant::now() + Duration::from_millis(16));
                 }
+            }
+            Mode::Panels => {
+                crate::panels::Panels::seed_benchmark(&mut self.workspace);
+                self.bench = Some(Bench::new(Mode::Panels, self.options.seed, vec![]));
+                w.request_frame_at(Instant::now() + Duration::from_millis(16));
             }
             Mode::Interactive => {
                 w.request_frame_at(Instant::now() + Duration::from_millis(200));
@@ -531,6 +766,17 @@ impl App {
                 self.reporter.rss("after_full_sweep",json!({"viewports":self.bench.as_ref().map(|b|b.completed),"atlas":self.renderer.as_ref().map(Renderer::atlas_info),"lines":self.workspace.editor().text.len_lines(),"bytes":self.workspace.editor().text.len_bytes()}))?;
                 self.reporter.emit(json!({"kind":"memory_summary","sweep_complete":true,"visited_viewports":self.bench.as_ref().map(|b|b.completed),"external_input_events":self.external_input}))?;
             }
+            Mode::Panels => {
+                if self.samples.len() != crate::bench::PANEL_ACTIONS {
+                    return Err("incomplete panel benchmark".into());
+                }
+                let cpu: Vec<_> = self.samples.iter().map(|s| s.event_to_submit_ms).collect();
+                for sample in &self.samples {
+                    self.reporter
+                        .emit(json!({"kind":"panel_sample","sample":sample}))?;
+                }
+                self.reporter.emit(json!({"kind":"panel_summary","actions":self.samples.len(),"candidates":100000,"event_to_submit":summarize(&cpu),"boundary":"scripted controller action -> worker polling -> CPU scene -> queue submit; not HID or scanout","external_input_events":self.external_input}))?;
+            }
             _ => {}
         }
         self.reporter
@@ -579,6 +825,9 @@ impl App {
                 let deadline = b.schedule_next(at);
                 w.request_frame_at(deadline);
             }
+            if b.mode == Mode::Panels {
+                w.request_frame_at(Instant::now() + Duration::from_millis(30));
+            }
         } else if let Some(at) = self.input_at.take()
             && self.options.log_input
         {
@@ -597,6 +846,8 @@ impl AppHandler for App {
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
+        self.window_size = w.content_size();
+        self.secondary = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.view.reveal(self.workspace.editor());
         let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("output/pipeline-cache");
         self.renderer = Some(Renderer::new(
@@ -623,6 +874,32 @@ impl AppHandler for App {
         let Some(key) = crate::editor::binding_key(&event) else {
             return false;
         };
+        if self
+            .panels
+            .input()
+            .is_some_and(vel_ui::input::Input::composing)
+        {
+            return false;
+        }
+        let viewport = self.viewport();
+        match self.panels.key(&mut self.workspace, &key, viewport) {
+            Ok((true, invocation)) => {
+                if let Some(invocation) = invocation {
+                    self.run_named(w, &invocation.command, &invocation.args);
+                }
+                self.changed(w, event.received, true);
+                return true;
+            }
+            Ok((false, _)) => {}
+            Err(error) => {
+                self.show_error(w, &error);
+                return true;
+            }
+        }
+        if self.panels.input().is_some() && key.modifiers & 11 == 0 && key.name.chars().count() == 1
+        {
+            return false;
+        }
         match self.workspace.editor_mut().resolve_key(&key) {
             vel_config::keymap::Resolution::Unbound => false,
             vel_config::keymap::Resolution::Pending => true,
@@ -645,6 +922,11 @@ impl AppHandler for App {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
+        if self.panels.input().is_some()
+            && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+        {
+            return true;
+        }
         self.workspace
             .editor()
             .registry
@@ -659,6 +941,15 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        let viewport = self.viewport();
+        if self
+            .panels
+            .text_input(&mut self.workspace, event.clone(), viewport)
+        {
+            self.changed(w, Instant::now(), true);
+            w.request_frame_at(Instant::now() + Duration::from_millis(8));
+            return;
+        }
         if self.workspace.editor().read_only {
             return;
         }
@@ -669,6 +960,27 @@ impl AppHandler for App {
         if self.options.mode.automatic() {
             self.external_input += 1;
             return;
+        }
+        if let Some(input) = self.panels.input_mut() {
+            input.set_clipboard(w.clipboard_text().unwrap_or_default());
+        }
+        let viewport = self.viewport();
+        match self.panels.command(&mut self.workspace, command, viewport) {
+            Ok((true, invocation)) => {
+                if let Some(input) = self.panels.input() {
+                    w.set_clipboard_text(input.clipboard());
+                }
+                if let Some(invocation) = invocation {
+                    self.run_named(w, &invocation.command, &invocation.args);
+                }
+                self.changed(w, Instant::now(), true);
+                return;
+            }
+            Ok((false, _)) => {}
+            Err(error) => {
+                self.show_error(w, &error);
+                return;
+            }
         }
         if command == Command::Cancel && self.workspace.editor().marked.is_some() {
             self.workspace.editor_mut().cancel_composition();
@@ -683,10 +995,46 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        if event.kind == MouseKind::Move {
+            self.panels.tree.pointer(event.position, None);
+            w.request_frame();
+            return;
+        }
+        let viewport = self.viewport();
+        match self.panels.mouse(
+            &mut self.workspace,
+            event.position,
+            event.kind == MouseKind::Down,
+            event.click_count >= 2,
+            event.modifiers.shift(),
+            viewport,
+        ) {
+            Ok(true) => {
+                if let Some(invocation) = self.panels.pending_command.take() {
+                    self.run_named(w, &invocation.command, &invocation.args);
+                }
+                if let Err(error) = self.replacement_confirmation(w) {
+                    self.show_error(w, &error);
+                }
+                self.changed(w, Instant::now(), true);
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.show_error(w, &error);
+                return;
+            }
+        }
+        let side = if self.panels.side_visible {
+            220f64.min(self.window_size.width * 0.3)
+        } else {
+            0.
+        };
         if event.kind == MouseKind::Down && event.position.y < crate::view::TAB_HEIGHT {
-            let index = (event.position.x / self.tab_width()).max(0.) as usize;
+            let local = event.position.x - side + self.panels.tab_scroll;
+            let index = (local / self.tab_width()).max(0.) as usize;
             if index < self.workspace.tabs.len() {
-                if event.position.x % self.tab_width() > self.tab_width() - 20. {
+                if local % self.tab_width() > self.tab_width() - 20. {
                     if self.can_close(w, index) {
                         let _ = self.workspace.close(index);
                     }
@@ -694,13 +1042,32 @@ impl AppHandler for App {
                     self.workspace.tabs[self.workspace.active].scroll =
                         (self.view.scroll_x, self.view.scroll_y);
                     self.workspace.select(index);
+                    self.panels.dragging_tab = Some(index);
+                    if event.click_count >= 2 {
+                        self.workspace.tabs[index].transient = false;
+                    }
                 }
-                let scroll = self.workspace.tabs[self.workspace.active].scroll;
-                self.view.scroll_x = scroll.0;
-                self.view.scroll_y = scroll.1;
                 self.changed(w, Instant::now(), false);
             }
             return;
+        }
+        if event.kind == MouseKind::Drag
+            && let Some(from) = self.panels.dragging_tab
+        {
+            let to = (((event.position.x - side + self.panels.tab_scroll) / self.tab_width())
+                .max(0.) as usize)
+                .min(self.workspace.tabs.len() - 1);
+            if from != to {
+                let tab = self.workspace.tabs.remove(from);
+                self.workspace.tabs.insert(to, tab);
+                self.workspace.active = to;
+                self.panels.dragging_tab = Some(to);
+                self.changed(w, Instant::now(), false);
+            }
+            return;
+        }
+        if event.kind == MouseKind::Up {
+            self.panels.dragging_tab = None;
         }
         let command = self
             .workspace
@@ -749,7 +1116,29 @@ impl AppHandler for App {
         if event.button != 0 {
             return;
         }
-        let at = self.view.hit_test(self.workspace.editor(), event.position);
+        if event.kind == MouseKind::Down
+            && event.position.x < self.content.x
+            && let Some(id) = self.panels.split
+        {
+            if let Some(index) = self
+                .workspace
+                .tabs
+                .iter()
+                .position(|t| t.editor.buffer.id() == id)
+            {
+                self.panels.split = Some(self.workspace.editor().buffer.id());
+                self.workspace.select(index);
+                self.changed(w, Instant::now(), true);
+            }
+            return;
+        }
+        let at = self.view.hit_test(
+            self.workspace.editor(),
+            Point {
+                x: event.position.x - self.content.x,
+                y: event.position.y,
+            },
+        );
         match event.kind {
             MouseKind::Down if event.click_count >= 3 => {
                 self.workspace.editor_mut().select_line(at)
@@ -765,7 +1154,7 @@ impl AppHandler for App {
                 .editor_mut()
                 .set_caret(at, event.modifiers.shift()),
             MouseKind::Drag => self.workspace.editor_mut().set_caret(at, true),
-            MouseKind::Up => {}
+            MouseKind::Up | MouseKind::Move => {}
         }
         self.changed(w, Instant::now(), false);
     }
@@ -779,6 +1168,33 @@ impl AppHandler for App {
         } else {
             self.view.line_height
         };
+        if event.position.y < crate::view::TAB_HEIGHT {
+            self.panels.tab_scroll =
+                (self.panels.tab_scroll - (event.delta_x + event.delta_y) * scale).max(0.);
+            self.changed(w, Instant::now(), false);
+            return;
+        }
+        if self.panels.scroll(event.position, -event.delta_y * scale) {
+            self.changed(w, Instant::now(), false);
+            return;
+        }
+        if event.position.x < self.content.x
+            && let Some(id) = self.panels.split
+            && let Some(index) = self
+                .workspace
+                .tabs
+                .iter()
+                .position(|t| t.editor.buffer.id() == id)
+        {
+            self.secondary.scroll(
+                &self.workspace.tabs[index].editor,
+                -event.delta_x * scale,
+                -event.delta_y * scale,
+            );
+            self.workspace.tabs[index].scroll = (self.secondary.scroll_x, self.secondary.scroll_y);
+            self.changed(w, Instant::now(), false);
+            return;
+        }
         self.view.scroll(
             self.workspace.editor(),
             -event.delta_x * scale,
@@ -787,6 +1203,7 @@ impl AppHandler for App {
         self.changed(w, Instant::now(), false);
     }
     fn on_resize(&mut self, w: &WindowHandle, size: Size, scale: f64) {
+        self.window_size = size;
         self.view.size = size;
         self.view.clamp_scroll(self.workspace.editor());
         if let Some(r) = self.renderer.as_mut() {
@@ -809,7 +1226,15 @@ impl AppHandler for App {
         if self.startup_done && matches!(self.options.mode, Mode::Interactive | Mode::Open) {
             let loading_before = self.workspace.tabs.iter().any(|t| t.loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
-            let changed = self.workspace.poll();
+            let mut changed = self.workspace.poll();
+            let viewport = self.viewport();
+            changed |= self.panels.poll(&mut self.workspace, viewport);
+            if let Err(error) = self.replacement_confirmation(w) {
+                self.show_error(w, &error);
+            }
+            if self.panels.busy() {
+                w.request_frame_at(Instant::now() + Duration::from_millis(8));
+            }
             if active_was_loading && self.workspace.tabs[self.workspace.active].loading.is_none() {
                 self.view.reveal(self.workspace.editor());
             }
@@ -947,6 +1372,22 @@ impl AppHandler for App {
             return Ok(());
         }
         let mut query = None;
+        if self.options.mode == Mode::Panels {
+            if self.bench.as_ref().is_some_and(|b| !b.pending) {
+                let index = self.bench.as_ref().expect("panel bench").completed;
+                self.bench.as_mut().expect("panel bench").pending = true;
+                self.bench_received = Some(Instant::now());
+                let viewport = self.viewport();
+                self.panels
+                    .benchmark_step(&mut self.workspace, index, viewport)?;
+            }
+            let viewport = self.viewport();
+            self.panels.poll(&mut self.workspace, viewport);
+            if self.panels.ranking_pending() {
+                w.request_frame_at(Instant::now() + Duration::from_millis(2));
+                return Ok(());
+            }
+        }
         if let Some(b) = self.bench.as_mut() {
             if b.mode == Mode::Typing {
                 if !b.pending && !b.typing_due(ctx.received) {
@@ -1025,25 +1466,70 @@ impl AppHandler for App {
         true
     }
     fn text_input_state(&self) -> TextInputState {
+        if let Some(input) = self.panels.input() {
+            return input.state();
+        }
+        let mut caret = self
+            .view
+            .rect_at(self.workspace.editor(), self.workspace.editor().caret);
+        caret.x += self.content.x;
         TextInputState {
             text: self.workspace.editor().text.clone(),
             selected: self.workspace.editor().selected_utf16(),
             marked: self.workspace.editor().marked_utf16(),
-            caret: self
-                .view
-                .rect_at(self.workspace.editor(), self.workspace.editor().caret),
+            caret,
         }
     }
     fn text_input_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
-        self.view.range_rect(self.workspace.editor(), range)
+        if let Some(input) = self.panels.input() {
+            return input.range_rect(range);
+        }
+        let (mut rect, range) = self.view.range_rect(self.workspace.editor(), range);
+        rect.x += self.content.x;
+        (rect, range)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
+        if let Some(input) = self.panels.input() {
+            return Some(input.utf16_at_x(point.x));
+        }
         Some(
             self.workspace
                 .editor()
                 .text
-                .byte_to_utf16(self.view.hit_test(self.workspace.editor(), point)),
+                .byte_to_utf16(self.view.hit_test(
+                    self.workspace.editor(),
+                    Point {
+                        x: point.x - self.content.x,
+                        y: point.y,
+                    },
+                )),
         )
+    }
+}
+
+fn translate_scene(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
+    let shift = |rect: &mut Rect| {
+        rect.x += x;
+        rect.y += y;
+    };
+    for layer in &mut scene.layers {
+        for rect in &mut layer.rects {
+            shift(&mut rect.rect);
+            shift(&mut rect.clip);
+        }
+        for shadow in &mut layer.shadows {
+            shift(&mut shadow.rect);
+            shift(&mut shadow.clip);
+        }
+        for underline in &mut layer.underlines {
+            shift(&mut underline.rect);
+            shift(&mut underline.clip);
+        }
+        for text in &mut layer.text {
+            text.x += x as f32;
+            text.baseline += y as f32;
+            shift(&mut text.clip);
+        }
     }
 }
 

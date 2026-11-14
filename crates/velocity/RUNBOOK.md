@@ -1,3 +1,116 @@
+# Round 5: panels, navigation, project tree and search
+
+All commands start in `/Users/zoro/dev/velocity`. Do not commit this lane's work. The new
+`vel-ui` and `vel-search` crates are workspace members through the existing `crates/*` glob.
+No lane-B crate/API is required; the symbol provider is deliberately an integration hook.
+The following checks target all touched crates plus the existing render/file-IO seams, so
+parallel syntax/highlight work is not formatted or edited by these commands.
+
+```sh
+cd /Users/zoro/dev/velocity
+cargo fmt -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio --check
+cargo clippy -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio --all-targets -- -D warnings
+cargo test -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio
+RUSTDOCFLAGS='-D warnings' cargo doc -p vel-ui -p vel-search -p velocity -p vel-platform -p vel-config -p vel-commands -p vel-render -p vel-fileio --no-deps
+python3 crates/velocity/scripts/measure.py --self-test
+sh -n crates/velocity/scripts/bundle.sh
+```
+
+Automatic CPU measurements (no native initialization):
+
+```sh
+cargo run --release -p vel-search --example search_bench
+cargo run --release -p vel-config --example keymap_bench
+cargo run --release -p velocity -- --headless-smoke --carets 1
+cargo run --release -p velocity -- --headless-smoke --carets 1000
+```
+
+The search example prints JSONL and exits. Its generated 100k path set, query sequence,
+match density, sample counts and exact timing boundaries are documented in vel-search/README.md.
+Budgets: fuzzy worker queue+score <=10 ms per query; literal highlights over exactly 100 MB
+<=200 ms; 60-line viewport <=5 ms. Construction/index preparation is outside timing.
+RESULTS.md records the measured quantiles and the earlier P0 6–73 ms comparison. UI polling,
+scene construction, GPU time and actual display presentation are separate boundaries.
+
+On an awake/unlocked logged-in Mac **outside the sandbox**, this new native mode runs a fixed
+100-action sequence over 100k palette candidates: open palette, type three narrowing queries,
+navigate, cancel, open find, type, open replace, hide and toggle the side bar. It repeats ten
+times, emits exactly 100 `panel_sample` records and one `panel_summary`, and exits without any
+human input or file changes. All native automatic modes retain display preflight, watchdog,
+external-input contamination checks and a positive presentedTime startup boundary.
+
+```sh
+cargo build --release -p velocity
+./target/release/velocity --bench-panels
+./target/release/velocity --bench-panels --width 2048 --height 1089
+python3 crates/velocity/scripts/measure.py --validate crates/velocity/output/panels-REPLACE-WITH-RUN.jsonl
+```
+
+The app prints its unique JSONL path; pass that actual path to `--validate`. It never overwrites
+an old result. Panel timings are controller action -> worker polling -> scene -> queue submit /
+present-return. They are neither HID delivery nor per-action scanout. The initial palette-open
+sample includes candidate preparation; later keys reuse it. The 100k path matcher CPU benchmark
+is the direct per-keystroke budget check. Check visual UI behavior with MANUAL_TEST.md separately.
+No GUI mode, display wake/unlock or Metal initialization was attempted in the sandbox.
+
+The existing automatic startup/floor/scroll/typing/memory matrix remains required. It now also
+includes panel runs at default/4K sizes. Build and run it exactly as below; every process exits
+by itself and blocked displays still fail fast with the observed reason.
+
+```sh
+mkdir -p crates/velocity/output
+swiftc -O -module-cache-path /tmp/velocity-swift-module-cache \
+  crates/velocity/scripts/native-floor.swift -o crates/velocity/output/native-floor
+python3 crates/velocity/scripts/measure.py --floor crates/velocity/output/native-floor --runs 10
+```
+
+Human feature review (not a timing mode):
+
+```sh
+./target/release/velocity --log-input --project crates/velocity/fixtures/panels.sublime-project \
+  crates/velocity/fixtures/ime-and-unicode.rs
+```
+
+| Keys | Added action |
+| --- | --- |
+| Cmd+P / Cmd+Shift+P | Goto Anything / command palette |
+| Cmd+R / Ctrl+G | Current-file symbol hook / Goto line |
+| Cmd/Ctrl+Enter in Goto | Pin target in a simple side-by-side split |
+| Cmd+F / Cmd+Alt+F / Cmd+I | Find / Replace / incremental find |
+| Cmd+Shift+F | Find in Files (Tab cycles Find, Replace, Where) |
+| Cmd+G / Cmd+Shift+G | Find next / previous |
+| Alt+Enter | Select all matches |
+| Cmd+E / Cmd+Shift+E | Slurp find / replacement string |
+| Cmd+Alt+G / Cmd+Alt+Shift+G | Find under / previous under |
+| Ctrl+Shift+H / Ctrl+Alt+Enter | Replace next / all |
+| Cmd+K, Cmd+B / Ctrl+0 | Toggle / focus side bar |
+| Cmd+Alt+R / Cmd+Alt+C / Cmd+Alt+W | Toggle regex / case / whole word |
+| Esc / Up/Down / PageUp/PageDown | Restore/cancel overlay or close panel / navigate rows |
+
+The find panel also has clickable regex, case, word, wrap, selection and preserve-case flags,
+plus Find All and Find Next/Replace All buttons. Enter in the Files panel starts streaming
+search; the palette's Find: Replace in Files prepares a replacement plan after that search
+finishes. Return to the Files panel to edit Replace/Where, rerun when query/scope flags change,
+then invoke Replace in Files. Save dirty target documents first. Confirmation lists match/file
+counts; each written original is kept as `NAME.velocity-backup-TIMESTAMP`. A file changed since
+preview is rejected; batch writes are atomic per file, with backups retained on partial failure.
+Where supports comma-separated folders, files, `<project>`, `<open files>`, include globs and
+`-exclude` globs. Unsaved buffers are searched in `<open files>`; regex disk search is line-oriented.
+
+The side bar loads directories only when expanded, with shared ignore/exclusion rules. Single
+click previews; double click/Enter pins. Open Files and folders support keyboard navigation.
+`open_dir` / `add_folder` accept `{"dir":"/path"}` or show a native directory picker through the
+palette. `.sublime-project` paths resolve relative to that project. Added roots are session-only;
+`.sublime-workspace` persistence is deferred. Tabs scroll with a wheel over the tab bar, close
+with their button and reorder by dragging. Status reports position, selections, encoding, EOL,
+indentation and Plain Text. Syntax highlighting and actual @symbol results await the next round.
+
+The original IME checklist was renamed to MANUAL_TEST.md with all IME cases preserved.
+The preceding run commands and new checklist are authoritative for round 5. Earlier round
+notes and the existing hardware methodology follow for reference.
+
+---
+
 # Lane A/P1 reviewer runbook
 
 Run the GUI commands on the logged-in Mac outside the sandbox. The sandbox has no
@@ -138,7 +251,7 @@ The script produces dev.velocity.Velocity with NSHighResolutionCapable and macOS
 minimum, preserving any prior bundle as a timestamped backup. It neither signs nor
 installs the app. Bundled/default source is compiled into the executable; it does not
 rely on the working directory. Check About/Hide/Quit and every Edit action in terminal
-and bundle launches. Follow IME_TEST.md, then test resize, fullscreen, light/dark change,
+and bundle launches. Follow MANUAL_TEST.md, then test resize, fullscreen, light/dark change,
 window movement between Retina/non-Retina displays, occlusion/unocclusion and idle CPU.
 Check Metal validation output and physical candidate-window placement.
 
@@ -264,5 +377,5 @@ Primary shortcuts:
 Arrow/Shift+arrow, Option+arrow/deletion, Cmd+arrows, Home/End and PageUp/PageDown are
 implemented. Minimal bracket/quote pairing and closing-character skip use contextual bindings.
 New/close window commands use a separate process/window; recorded text macros are per view.
-Palette UI, snippet field navigation, syntax highlighting and wrap_lines remain deferred.
-Use IME_TEST.md's editing smoke checklist before accepting native behavior.
+This round-4 section predates the round-5 palette/panels; snippet field navigation, syntax highlighting and wrap_lines remain deferred.
+Use MANUAL_TEST.md's editing smoke checklist before accepting native behavior.

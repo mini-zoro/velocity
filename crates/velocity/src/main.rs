@@ -4,6 +4,7 @@ mod app;
 mod bench;
 mod cli;
 mod editor;
+mod panels;
 mod report;
 mod stats;
 mod view;

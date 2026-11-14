@@ -25,7 +25,7 @@ integration seam; `PlainScope` handles plain-text scope names, comma alternative
 exclusions. Full scope-selector grammar belongs to the syntax lane.
 
 `ui` parses mouse maps, recursive menus and palette descriptions. Menus can extend existing
-submenu IDs. Parsing palette descriptions does not provide a palette interface.
+submenu IDs. Menu-derived palette entries are deduplicated by invocation; binding hints honor unconditional key overrides. The native palette interface lives in velocity/vel-ui.
 
 ```sh
 cargo test -p vel-config

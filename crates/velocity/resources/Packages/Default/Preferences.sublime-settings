@@ -18,5 +18,9 @@
   "caret_style": "solid",
   "highlight_line": true,
   "auto_match_enabled": true,
-  "atomic_save": true
+  "atomic_save": true,
+  "folder_exclude_patterns": [".git", "target"],
+  "file_exclude_patterns": ["*.velocity-backup-*"],
+  "binary_file_patterns": ["*.png", "*.jpg", "*.gif", "*.pdf", "*.zip", "*.exe", "*.dylib"],
+  "show_side_bar": true
 }

@@ -96,7 +96,8 @@ def validate(records, mode=None):
         if key not in memory:
             raise ValueError(f"missing independent memory field {key}")
     expectations = {"scroll": ("scroll_frame", "scroll_summary", "frames", 600),
-                    "typing": ("typing_sample", "typing_summary", "insertions", 500)}
+                    "typing": ("typing_sample", "typing_summary", "insertions", 500),
+                    "panels": ("panel_sample", "panel_summary", "actions", 100)}
     if mode in expectations:
         kind, summary, count_key, expected = expectations[mode]
         samples = [r for r in records if r.get("kind") == kind]
@@ -160,6 +161,23 @@ def self_test():
             raise AssertionError("accepted incomplete telemetry")
     validate([{"schema": 1, "kind": "headless_summary", "mode": "headless"},
               {"schema": 1, "kind": "complete", "complete": True, "mode": "headless"}])
+    panel_records = [
+        {"schema": 1, "kind": "startup", "mode": "panels", "scanout_main_ms": 10,
+         "milestones": [{"phase": phase, "main_ms": i} for i, phase in enumerate([
+             "first_scene_ready", "first_offscreen_submitted", "first_frame_prepared_before_order_front",
+             "ordered_front", "first_submit", "first_present_returned"])]},
+        {"schema": 1, "kind": "memory", "phase": "after_first_frame", "rss_bytes": None, "phys_footprint_bytes": None},
+        *[{"schema": 1, "kind": "panel_sample", "sample": {"index": i}} for i in range(100)],
+        {"schema": 1, "kind": "panel_summary", "actions": 100},
+        {"schema": 1, "kind": "complete", "complete": True},
+    ]
+    validate(panel_records)
+    try:
+        validate(panel_records[:101] + panel_records[102:])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted missing panel sample")
     print("measurement parser/quantiles/completeness self-test passed (no GUI)")
 
 
@@ -194,7 +212,8 @@ def main():
     matrix = [("startup-coldish", "startup", [])]
     matrix += [(f"startup-warm-{i+1:02}", "startup", []) for i in range(args.runs)]
     if not args.only_startup:
-        matrix += [("scroll-default", "scroll", []), ("scroll-4k", "scroll", ["--width", "2048", "--height", "1089"]),
+        matrix += [("panels-default", "panels", []), ("panels-4k", "panels", ["--width", "2048", "--height", "1089"]),
+                   ("scroll-default", "scroll", []), ("scroll-4k", "scroll", ["--width", "2048", "--height", "1089"]),
                    ("typing-default", "typing", []), ("typing-4k", "typing", ["--width", "2048", "--height", "1089"]),
                    ("typing-1000", "typing", ["--carets", "1000"]),
                    ("typing-1000-4k", "typing", ["--carets", "1000", "--width", "2048", "--height", "1089"]),

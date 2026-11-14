@@ -111,6 +111,20 @@ impl WindowHandle {
             .filter_map(|u| u.path().map(|p| std::path::PathBuf::from(p.to_string())))
             .collect()
     }
+    /// Chooses a project folder; cancellation leaves the project untouched.
+    pub fn open_directory(&self) -> Option<std::path::PathBuf> {
+        let panel = NSOpenPanel::openPanel(self.0.mtm);
+        panel.setAllowsMultipleSelection(false);
+        panel.setCanChooseDirectories(true);
+        panel.setCanChooseFiles(false);
+        if panel.runModal() != NSModalResponseOK {
+            return None;
+        }
+        panel
+            .URL()
+            .and_then(|url| url.path())
+            .map(|p| std::path::PathBuf::from(p.to_string()))
+    }
     /// Chooses a destination; cancellation leaves the document untouched.
     pub fn save_file(&self, suggested: &str) -> Option<std::path::PathBuf> {
         let panel = NSSavePanel::savePanel(self.0.mtm);
@@ -548,6 +562,7 @@ define_class!(
         #[unsafe(method(keyUp:))] fn key_up(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::Up))); } }
         #[unsafe(method(flagsChanged:))] fn flags_changed(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::FlagsChanged))); } }
         #[unsafe(method(mouseDown:))] fn mouse_down(&self, e: &NSEvent) { self.mouse(e, MouseKind::Down); }
+        #[unsafe(method(mouseMoved:))] fn mouse_moved(&self, e: &NSEvent) { self.mouse(e, MouseKind::Move); }
         #[unsafe(method(mouseDragged:))] fn mouse_dragged(&self, e: &NSEvent) { self.mouse(e, MouseKind::Drag); }
         #[unsafe(method(mouseUp:))] fn mouse_up(&self, e: &NSEvent) { self.mouse(e, MouseKind::Up); }
         #[unsafe(method(rightMouseDown:))] fn right_down(&self, e: &NSEvent) { self.mouse(e, MouseKind::Down); }
@@ -561,7 +576,8 @@ define_class!(
         }
         #[unsafe(method(scrollWheel:))] fn scroll(&self, e: &NSEvent) {
             if let Some(h) = self.ivars().host.upgrade() {
-                h.dispatch(Event::Scroll(ScrollEvent { delta_x: e.scrollingDeltaX(), delta_y: e.scrollingDeltaY(), precise: e.hasPreciseScrollingDeltas(), phase: e.phase().0 as u64, momentum_phase: e.momentumPhase().0 as u64, modifiers: Modifiers(e.modifierFlags().0 as u64), timestamp: e.timestamp() }));
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                h.dispatch(Event::Scroll(ScrollEvent { position: Point { x: p.x, y: p.y }, delta_x: e.scrollingDeltaX(), delta_y: e.scrollingDeltaY(), precise: e.hasPreciseScrollingDeltas(), phase: e.phase().0 as u64, momentum_phase: e.momentumPhase().0 as u64, modifiers: Modifiers(e.modifierFlags().0 as u64), timestamp: e.timestamp() }));
                 h.handle().invalidate_character_coordinates(); h.flush();
             }
         }
@@ -826,6 +842,7 @@ impl Delegate {
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
         window.setContentView(Some(&view));
+        window.setAcceptsMouseMovedEvents(true);
         window.makeFirstResponder(Some(&view));
         h.window
             .set(window.clone())

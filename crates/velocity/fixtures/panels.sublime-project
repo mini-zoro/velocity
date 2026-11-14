@@ -1,0 +1,5 @@
+// Original reviewer fixture. Project paths are relative to this file.
+{
+  "folders": [{ "path": ".", "name": "Velocity Fixtures", "file_exclude_patterns": ["*.sublime-project"] }],
+  "settings": { "tab_size": 4 }
+}

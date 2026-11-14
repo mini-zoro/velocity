@@ -15,6 +15,8 @@ vel-buffer = { path = "../vel-buffer" }
 vel-config = { path = "../vel-config" }
 vel-commands = { path = "../vel-commands" }
 vel-fileio = { path = "../vel-fileio" }
+vel-ui = { path = "../vel-ui" }
+vel-search = { path = "../vel-search" }
 vel-platform = { path = "../vel-platform" }
 vel-render = { path = "../vel-render" }
 vel-text = { path = "../vel-text", default-features = false }

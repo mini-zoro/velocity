@@ -272,6 +272,36 @@ pub struct Keymap {
     pending: usize,
 }
 impl Keymap {
+    /// Most recent unconditional binding hint for an invocation (including arguments).
+    pub fn hint(&self, invocation: &Invocation) -> Option<String> {
+        self.bindings
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(index, b)| {
+                b.context.is_empty()
+                    && b.invocation == *invocation
+                    && !self.bindings[index + 1..]
+                        .iter()
+                        .any(|later| later.context.is_empty() && later.keys == b.keys)
+            })
+            .map(|(_, b)| {
+                b.keys
+                    .iter()
+                    .map(|key| {
+                        let mut parts = Vec::new();
+                        for (bit, name) in [(1, "Ctrl"), (2, "Alt"), (4, "Shift"), (8, "Cmd")] {
+                            if key.modifiers & bit != 0 {
+                                parts.push(name.to_owned());
+                            }
+                        }
+                        parts.push(key.name.to_uppercase());
+                        parts.join("+")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+    }
     /// Appends one resource; subsequent resources have higher precedence.
     pub fn append(&mut self, source: &str) -> Result<(), String> {
         let doc = Document::parse(source)?;

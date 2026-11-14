@@ -140,6 +140,8 @@ pub struct KeyEvent {
 /// Mouse input kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseKind {
+    /// Pointer movement without a pressed button (widget hover).
+    Move,
     /// Button press.
     Down,
     /// Drag with button pressed.
@@ -166,6 +168,8 @@ pub struct MouseEvent {
 /// Trackpad or wheel scroll with native phase bitmasks.
 #[derive(Clone, Copy, Debug)]
 pub struct ScrollEvent {
+    /// Pointer position in logical view coordinates, for scroll-container routing.
+    pub position: Point,
     /// Horizontal delta (points for precise devices, lines otherwise).
     pub delta_x: f64,
     /// Vertical delta (native sign).

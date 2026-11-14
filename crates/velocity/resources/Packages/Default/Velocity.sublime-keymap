@@ -949,5 +949,27 @@
     "args": {
       "to": "line"
     }
-  }
+  },
+  {"keys": ["super+p"], "command": "show_overlay", "args": {"overlay": "goto"}},
+  {"keys": ["super+shift+p"], "command": "show_overlay", "args": {"overlay": "command_palette"}},
+  {"keys": ["super+r"], "command": "show_overlay", "args": {"overlay": "goto", "text": "@"}},
+  {"keys": ["ctrl+g"], "command": "goto_line", "args": {}},
+  {"keys": ["super+f"], "command": "show_panel", "args": {"panel": "find"}},
+  {"keys": ["super+alt+f"], "command": "show_panel", "args": {"panel": "replace"}},
+  {"keys": ["super+i"], "command": "show_panel", "args": {"panel": "incremental_find"}},
+  {"keys": ["super+shift+f"], "command": "show_panel", "args": {"panel": "find_in_files"}},
+  {"keys": ["super+g"], "command": "find_next", "args": {}},
+  {"keys": ["super+shift+g"], "command": "find_prev", "args": {}},
+  {"keys": ["alt+enter"], "command": "find_all", "args": {}},
+  {"keys": ["super+e"], "command": "slurp_find_string", "args": {}},
+  {"keys": ["super+shift+e"], "command": "slurp_replace_string", "args": {}},
+  {"keys": ["super+k", "super+b"], "command": "toggle_side_bar", "args": {}},
+  {"keys": ["ctrl+0"], "command": "focus_side_bar", "args": {}},
+  {"keys": ["alt+super+r"], "command": "toggle_find_option", "args": {"option": "regex"}},
+  {"keys": ["alt+super+c"], "command": "toggle_find_option", "args": {"option": "case_sensitive"}},
+  {"keys": ["alt+super+w"], "command": "toggle_find_option", "args": {"option": "whole_word"}},
+  {"keys": ["super+alt+g"], "command": "find_under"},
+  {"keys": ["super+alt+shift+g"], "command": "find_under_prev"},
+  {"keys": ["ctrl+shift+h"], "command": "replace_next"},
+  {"keys": ["ctrl+alt+enter"], "command": "replace_all"}
 ]

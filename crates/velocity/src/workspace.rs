@@ -18,6 +18,7 @@ use vel_fileio::{self as fileio, ChangeTracker, Format, LoadTask, Loaded, Watche
 use vel_text::Text;
 #[derive(Debug)]
 pub struct Tab {
+    pub transient: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
     pub format: Format,
@@ -41,6 +42,7 @@ impl Tab {
         editor.keymap.append(keymap)?;
         let format = fileio::default_format(&settings.editor())?;
         Ok(Self {
+            transient: false,
             editor,
             path: None,
             saved_format: format.clone(),
@@ -101,7 +103,7 @@ impl Tab {
             self.goto(&location);
         }
     }
-    fn goto(&mut self, location: &FileLocation) {
+    pub fn goto(&mut self, location: &FileLocation) {
         let text = self.editor.buffer.text();
         let row = location.line.saturating_sub(1).min(text.len_lines() - 1);
         let start = text.line_to_byte(row);
@@ -115,6 +117,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pub folders: Vec<vel_search::project::Folder>,
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub menus: Vec<MenuItem>,
@@ -217,6 +220,7 @@ impl Workspace {
         }
         settings.replace(Layer::User, Value::Object(user))?;
         settings.replace(Layer::Syntax, Value::Object(syntax))?;
+        let mut folder_values = Vec::new();
         if let Some(path) = &project {
             let doc = Document::parse(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
             settings.replace(
@@ -227,6 +231,61 @@ impl Workspace {
                     .unwrap_or(serde_json::json!({})),
             )?;
             config_stamp.push((path.clone(), stamp(path)));
+            folder_values = doc
+                .value
+                .get("folders")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+        }
+        let mut folders = Vec::new();
+        let patterns = |value: Option<&Value>| -> Vec<String> {
+            value
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for folder in folder_values {
+            let path = PathBuf::from(folder["path"].as_str().ok_or("project folder needs path")?);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                project
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .unwrap_or(Path::new("."))
+                    .join(path)
+            };
+            let path = absolute(&path)?;
+            let mut excludes = Vec::new();
+            for key in [
+                "file_exclude_patterns",
+                "folder_exclude_patterns",
+                "binary_file_patterns",
+            ] {
+                let mut list = patterns(settings.get(key));
+                list.extend(patterns(folder.get(key)));
+                excludes.push(list);
+            }
+            folders.push(vel_search::project::Folder {
+                name: folder["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                path,
+                rules: vel_search::project::Rules::new(&excludes[0], &excludes[1], &excludes[2])?,
+                follow_links: folder["follow_symlinks"].as_bool().unwrap_or(false),
+            });
         }
         let mut keys = Vec::new();
         let mut menus = Vec::new();
@@ -253,6 +312,7 @@ impl Workspace {
         for resource in resources.matching(".sublime-commands") {
             palette.extend(ui::parse::<PaletteItem>(resource.text()?)?);
         }
+        ui::extend_palette(&mut palette, &menus);
         // Track resource files and containing directories, including absent User
         // locations, so creating a new override is observable on the next poll.
         for suffix in [".sublime-menu", ".sublime-mousemap", ".sublime-commands"] {
@@ -297,6 +357,7 @@ impl Workspace {
             None
         };
         Ok(Self {
+            folders,
             tabs: vec![tab],
             active: 0,
             menus,
@@ -332,6 +393,18 @@ impl Workspace {
         }
     }
     pub fn open(&mut self, location: FileLocation) -> Result<(), String> {
+        self.open_mode(location, false)
+    }
+    pub fn preview(&mut self, location: FileLocation) -> Result<(), String> {
+        let target = absolute(&location.path)?;
+        if !self.tabs.iter().any(|t| t.path.as_ref() == Some(&target))
+            && let Some(index) = self.tabs.iter().position(|t| t.transient && !t.dirty())
+        {
+            self.close(index)?;
+        }
+        self.open_mode(location, true)
+    }
+    fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
         let path = absolute(&location.path)?;
         if let Some(index) = self
             .tabs
@@ -339,11 +412,15 @@ impl Workspace {
             .position(|t| t.path.as_ref() == Some(&path))
         {
             self.select(index);
+            if !preview {
+                self.tabs[index].transient = false;
+            }
             self.tabs[index].goto(&location);
             return Ok(());
         }
         let started = Instant::now();
         let mut tab = Tab::new(Text::new(), &self.settings, &self.keymap)?;
+        tab.transient = preview;
         tab.path = Some(path.clone());
         tab.location = Some(location);
         let fallback = tab.editor.settings.editor().fallback_encoding;
@@ -362,6 +439,7 @@ impl Workspace {
             w.watch(&path)?;
         }
         if self.tabs.len() == 1
+            && !preview
             && self.tabs[0].path.is_none()
             && !self.tabs[0].editor.buffer.is_dirty()
             && self.tabs[0].editor.text.len_bytes() == 0
@@ -376,6 +454,7 @@ impl Workspace {
     }
     pub fn save(&mut self, index: usize, path: Option<PathBuf>) -> Result<(), String> {
         let tab = &mut self.tabs[index];
+        tab.transient = false;
         if tab.loading.is_some() || tab.editor.read_only {
             return Err("file is loading or its load failed".into());
         }
@@ -420,6 +499,9 @@ impl Workspace {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         for tab in &mut self.tabs {
+            if tab.dirty() {
+                tab.transient = false;
+            }
             let result = tab
                 .loading
                 .as_ref()
@@ -512,6 +594,7 @@ impl Workspace {
                 false,
             ) {
                 Ok(config) => {
+                    self.folders = config.folders;
                     self.settings = config.settings;
                     self.keymap = config.keymap;
                     self.menus = config.menus;
