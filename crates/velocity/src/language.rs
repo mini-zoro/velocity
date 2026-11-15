@@ -217,7 +217,6 @@ impl Assets {
         static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
         ASSETS
             .get_or_init(|| {
-                let phase = std::time::Instant::now();
                 let root = packages_root();
                 let metadata_root = root.clone();
                 let metadata = std::thread::Builder::new()
@@ -230,32 +229,22 @@ impl Assets {
                     })
                     .map_err(|e| e.to_string())?;
                 let cache = std::env::temp_dir().join("velocity-syntax-cache");
-                // The public corpus has no Plain Text YAML. Compose a caller-owned source
-                // tree before load_cached so its lazy index includes our original fallback.
-                std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
-                let stage = tempfile::Builder::new()
-                    .prefix("sources-")
-                    .tempdir_in(&cache)
-                    .map_err(|e| e.to_string())?;
-                stage_syntaxes(
-                    &root.canonicalize().map_err(|e| e.to_string())?,
-                    stage.path(),
-                )?;
-                stage_plain_text(stage.path())?;
-                let stage_ms = phase.elapsed().as_secs_f64() * 1000.;
+                // The public corpus has no Plain Text syntax; ours is an in-memory definition
+                // under a virtual package path, so no staging tree is built or cleaned up.
                 let phase = std::time::Instant::now();
-                let syntaxes =
-                    SyntaxSet::load_cached(stage.path(), &cache).map_err(|e| e.to_string());
+                let syntaxes = SyntaxSet::load_cached_roots(
+                    &[root.as_path()],
+                    &[(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)],
+                    &cache,
+                )
+                .map_err(|e| e.to_string());
                 let load_ms = phase.elapsed().as_secs_f64() * 1000.;
-                let phase = std::time::Instant::now();
-                retire(stage);
-                let cleanup_ms = phase.elapsed().as_secs_f64() * 1000.;
                 let (metadata, metadata_ms) =
                     metadata.join().map_err(|_| "metadata loader panicked")?;
                 Ok(Arc::new(Self {
                     syntaxes: Arc::new(syntaxes?.0),
                     metadata: Arc::new(metadata?),
-                    startup_ms: [stage_ms, load_ms, cleanup_ms, metadata_ms],
+                    startup_ms: [0., load_ms, 0., metadata_ms],
                 }))
             })
             .clone()
@@ -314,44 +303,10 @@ fn packages_root() -> PathBuf {
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/sublime-packages")
 }
-fn stage_syntaxes(source: &Path, target: &Path) -> Result<(), String> {
-    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            if entry.file_name() != ".git" {
-                stage_syntaxes(&path, &target.join(entry.file_name()))?;
-            }
-        } else if path.extension().is_some_and(|e| e == "sublime-syntax") {
-            std::fs::create_dir_all(target).map_err(|e| e.to_string())?;
-            let destination = target.join(entry.file_name());
-            // A file symlink avoids copying the corpus without changing source inode
-            // metadata. Both the cache hasher and YAML loader read through these links.
-            #[cfg(unix)]
-            if std::os::unix::fs::symlink(&path, &destination).is_ok() {
-                continue;
-            }
-            std::fs::copy(&path, destination).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-fn stage_plain_text(stage: &Path) -> Result<(), String> {
-    let default = stage.join("Default");
-    std::fs::create_dir_all(&default).map_err(|e| e.to_string())?;
-    let fallback = default.join("Plain Text.sublime-syntax");
-    // Never write through a public-corpus link if a later corpus adds this file.
-    match std::fs::remove_file(&fallback) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.to_string()),
-    }
-    std::fs::write(
-        fallback,
-        "name: Plain Text\nfile_extensions: [txt]\nscope: text.plain\ncontexts: { main: [] }\n",
-    )
-    .map_err(|e| e.to_string())
-}
+/// Virtual package path of our original Plain Text definition (the public corpus has none).
+const PLAIN_TEXT_PATH: &str = "Packages/Default/Plain Text.sublime-syntax";
+const PLAIN_TEXT_SYNTAX: &str =
+    "name: Plain Text\nfile_extensions: [txt]\nscope: text.plain\ncontexts: { main: [] }\n";
 
 #[derive(Clone, Debug)]
 pub struct Pair {
@@ -1247,45 +1202,44 @@ mod tests {
         assert!(data.join("Packages/User").is_dir());
     }
     #[test]
-    fn staged_corpus_is_read_only_and_cache_observes_source_changes() {
+    fn plain_text_is_virtual_source_is_untouched_and_cache_observes_source_changes() {
+        // No staging tree: the corpus is loaded in place, our Plain Text definition is an
+        // in-memory virtual resource, and the public source files are never written.
         let source = tempfile::tempdir().unwrap();
-        let stage = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let default = source.path().join("Default");
-        std::fs::create_dir_all(&default).unwrap();
-        let fallback = default.join("Plain Text.sublime-syntax");
-        std::fs::write(&fallback, "public source must stay untouched").unwrap();
         let fixture = source.path().join("Fixture.sublime-syntax");
         std::fs::write(
             &fixture,
             "name: Before\nscope: source.fixture\ncontexts: { main: [] }\n",
         )
         .unwrap();
-        stage_syntaxes(source.path(), stage.path()).unwrap();
-        stage_plain_text(stage.path()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&fallback).unwrap(),
-            "public source must stay untouched"
-        );
-        let (loaded, _) = SyntaxSet::load_cached(stage.path(), cache.path()).unwrap();
+        let load = || {
+            SyntaxSet::load_cached_roots(
+                &[source.path()],
+                &[(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)],
+                cache.path(),
+            )
+            .unwrap()
+        };
+        let (loaded, _) = load();
         assert!(loaded.find_syntax_by_name("Before").is_some());
         assert!(loaded.find_syntax_by_name("Plain Text").is_some());
-        #[cfg(unix)]
-        {
-            std::fs::write(
-                &fixture,
-                "name: After\nscope: source.fixture\ncontexts: { main: [] }\n",
-            )
-            .unwrap();
-            let (loaded, status) = SyntaxSet::load_cached(stage.path(), cache.path()).unwrap();
-            assert_eq!(status, vel_syntax::CacheStatus::Yaml);
-            assert!(loaded.find_syntax_by_name("After").is_some());
-        }
-        drop(stage);
-        assert!(fixture.exists());
+        assert!(
+            !source.path().join("Default").exists(),
+            "source tree was written to"
+        );
+        std::fs::write(
+            &fixture,
+            "name: After\nscope: source.fixture\ncontexts: { main: [] }\n",
+        )
+        .unwrap();
+        let (loaded, status) = load();
+        assert_eq!(status, vel_syntax::CacheStatus::Yaml);
+        assert!(loaded.find_syntax_by_name("After").is_some());
         assert_eq!(
-            std::fs::read_to_string(fallback).unwrap(),
-            "public source must stay untouched"
+            std::fs::read_dir(source.path()).unwrap().count(),
+            1,
+            "only the fixture may exist in the source root"
         );
     }
     fn fixture() -> Assets {
