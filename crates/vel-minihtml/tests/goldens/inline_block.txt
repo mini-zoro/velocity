@@ -1,0 +1,7 @@
+size 60.00 30.00; scroll 30.00
+box [0.00,0.00,60.00,30.00] #14232eff border [0.0, 0.0, 0.0, 0.0] radii [0.0, 0.0, 0.0, 0.0]
+box [0.00,0.00,18.00,18.00] #ff0000ff border [1.0, 1.0, 1.0, 1.0] radii [2.0, 2.0, 2.0, 2.0]
+text [3.00,3.00,12.00,12.00] baseline 9.00 "ab" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [18.00,3.00,6.00,12.00] baseline 9.00 " " 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [24.00,3.00,12.00,12.00] baseline 9.00 "cd" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [0.00,18.00,10.00,10.00] baseline 7.50 "ef" 8.333333px 400 italic=false underline=false #e3ebeeff family="system-ui"

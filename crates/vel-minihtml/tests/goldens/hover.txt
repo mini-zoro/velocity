@@ -1,0 +1,17 @@
+size 150.00 52.00; scroll 52.00
+box [0.00,0.00,150.00,52.00] #14232eff border [0.0, 0.0, 0.0, 0.0] radii [0.0, 0.0, 0.0, 0.0]
+box [0.00,0.00,150.00,20.00] #27353fff border [0.0, 0.0, 0.0, 0.0] radii [3.0, 3.0, 3.0, 3.0]
+text [4.00,4.00,12.00,12.00] baseline 9.00 "fn" 10px 700 italic=false underline=false #e3ebeeff family="system-ui"
+text [16.00,4.00,6.00,12.00] baseline 9.00 " " 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [22.00,4.00,24.00,12.00] baseline 9.00 "read" 10px 400 italic=false underline=false #a6ce8dff family="monospace"
+text [46.00,4.00,6.00,12.00] baseline 9.00 "(" 10px 400 italic=false underline=false #a6ce8dff family="monospace"
+text [52.00,4.00,24.00,12.00] baseline 9.00 "path" 10px 400 italic=false underline=false #a6ce8dff family="monospace"
+text [76.00,4.00,6.00,12.00] baseline 9.00 ")" 10px 400 italic=false underline=false #a6ce8dff family="monospace"
+text [0.00,30.00,30.00,12.00] baseline 9.00 "Reads" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [30.00,30.00,6.00,12.00] baseline 9.00 " " 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [36.00,30.00,6.00,12.00] baseline 9.00 "a" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [42.00,30.00,6.00,12.00] baseline 9.00 " " 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [48.00,30.00,24.00,12.00] baseline 9.00 "file" 10px 400 italic=false underline=true #83c5e8ff family="system-ui"
+text [72.00,30.00,6.00,12.00] baseline 9.00 "." 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+link [48.00,30.00,24.00,12.00] Browser("https://example.com")
+tip [48.00,30.00,24.00,12.00] "API"

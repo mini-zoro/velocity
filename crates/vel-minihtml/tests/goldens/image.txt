@@ -1,0 +1,7 @@
+size 100.00 13.00; scroll 13.00
+box [0.00,0.00,100.00,13.00] #14232eff border [0.0, 0.0, 0.0, 0.0] radii [0.0, 0.0, 0.0, 0.0]
+image [0.00,1.50,20.00,10.00] Resource("res://Packages/icon.png")
+text [20.00,1.00,6.00,12.00] baseline 9.00 " " 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [26.00,1.00,24.00,12.00] baseline 9.00 "icon" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+link [0.00,1.50,20.00,10.00] Command { name: "open_file", args: Object {"file": String("a.rs")} }
+tip [0.00,1.50,20.00,10.00] "open"

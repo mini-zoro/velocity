@@ -1,0 +1,17 @@
+<body id="velocity-lsp-hover">
+<style>
+body { font-family: system-ui; color: var(--foreground); }
+.signature { background-color: color(var(--background) blend(var(--foreground) 6%)); border: 1px solid color(var(--foreground) a(0.15)); border-radius: 4px; padding: 0.5rem; }
+.signature code { color: var(--cyanish); }
+p { margin: 0.5rem 0; line-height: 1.3; }
+a { color: var(--accent); } ul { padding-left: 1.5rem; }
+</style>
+<div class="signature"><code><b>pub fn</b> read_to_string(path: impl AsRef&lt;Path&gt;) -&gt; Result&lt;String&gt;</code></div>
+<p>Reads the entire contents of a file into a string. The returned value contains the text decoded as UTF-8. The file handle is closed when this operation finishes.</p>
+<p><b>Parameters</b></p><ul><li><code>path</code>: an absolute path or a path relative to the current working directory.</li><li>The caller must ensure the selected file can be opened for reading.</li></ul>
+<p><b>Errors</b>: returns an error when the file cannot be opened, a read fails, or its contents are not valid UTF-8. Inspect the original error to provide an actionable diagnostic.</p>
+<p><b>Example</b></p><div style="white-space:pre-wrap;padding:0.5rem;background-color:color(var(--background) blend(var(--foreground) 4%))"><code>let contents = read_to_string("notes.txt")?;<br>println!("{}", contents);</code></div>
+<p>This operation is intended for small configuration files and source documents. For large files, prefer a buffered reader and process the input incrementally to keep memory usage bounded.</p>
+<p><a href="https://example.com/api/read_to_string" title="Open API documentation">API documentation</a> · <a href='subl:goto_definition {"symbol":"read_to_string"}'>Go to definition</a></p>
+</body>
+<!-- performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture  performance fixture -->

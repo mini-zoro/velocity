@@ -1,0 +1,18 @@
+[package]
+name = "vel-minihtml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vel-theme = { path = "../vel-theme" }
+vel-color-scheme = { path = "../vel-color-scheme" }
+serde_json = "1"
+unicode-segmentation = "1"
+html-escape = "0.2"
+thiserror = "2"

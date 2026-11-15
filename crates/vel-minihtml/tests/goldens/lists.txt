@@ -1,0 +1,10 @@
+size 100.00 78.00; scroll 78.00
+box [0.00,0.00,100.00,78.00] #14232eff border [0.0, 0.0, 0.0, 0.0] radii [0.0, 0.0, 0.0, 0.0]
+text [9.00,10.00,6.00,12.00] baseline 9.00 "•" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [20.00,10.00,30.00,12.00] baseline 9.00 "alpha" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [9.00,22.00,6.00,12.00] baseline 9.00 "•" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [20.00,22.00,24.00,12.00] baseline 9.00 "beta" 10px 700 italic=false underline=false #e3ebeeff family="system-ui"
+text [3.00,44.00,12.00,12.00] baseline 9.00 "1." 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [20.00,44.00,30.00,12.00] baseline 9.00 "first" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [3.00,56.00,12.00,12.00] baseline 9.00 "2." 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
+text [20.00,56.00,36.00,12.00] baseline 9.00 "second" 10px 400 italic=false underline=false #e3ebeeff family="system-ui"
