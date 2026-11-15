@@ -1,4 +1,4 @@
-// Velocity menus, authored from public command behavior.
+// Velocity resources, authored from public behavior documentation.
 [
   {
     "caption": "File",
@@ -85,6 +85,19 @@
       {
         "caption": "Unindent",
         "command": "unindent"
+      },
+      {
+        "caption": "Text",
+        "children": [
+          {
+            "caption": "Toggle Hunk Diff",
+            "command": "toggle_inline_diff"
+          },
+          {
+            "caption": "Revert Modification",
+            "command": "revert_modification"
+          }
+        ]
       }
     ]
   },
@@ -279,6 +292,17 @@
       {
         "caption": "Toggle Distraction Free",
         "command": "toggle_distraction_free"
+      },
+      {
+        "caption": "Spell Check",
+        "command": "toggle_setting",
+        "args": {
+          "setting": "spell_check"
+        }
+      },
+      {
+        "caption": "Dictionary…",
+        "command": "show_dictionary"
       }
     ]
   },

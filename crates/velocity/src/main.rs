@@ -1,4 +1,6 @@
 //! Native AppKit editor demo with automatic measurements; never launches in tests.
+mod annotation_commands;
+mod annotations;
 #[cfg(target_os = "macos")]
 mod app;
 mod bench;
@@ -10,6 +12,7 @@ mod editor;
 mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
+mod git_ui;
 mod instance;
 mod intelligence;
 mod intelligence_bench;
@@ -18,6 +21,10 @@ mod layout;
 mod panels;
 mod parse_bench;
 mod report;
+mod review_bench;
+#[cfg(test)]
+mod review_tests;
+mod review_ui;
 mod session;
 mod stats;
 mod view;
@@ -127,6 +134,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        if options.mode == Mode::HeadlessReviewHistory {
+            return review_bench::history(&reporter, &options);
+        }
         if options.mode == Mode::HeadlessIntelligence {
             return intelligence_bench::run(&reporter, &options);
         }

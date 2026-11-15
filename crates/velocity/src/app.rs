@@ -1663,6 +1663,31 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        if event.kind == MouseKind::Down
+            && (event.button == 1 || (event.button == 0 && event.modifiers.control()))
+        {
+            let side = self
+                .panels
+                .review_side_path(&self.workspace, event.position);
+            let byte = self.view.hit_test(
+                self.workspace.editor(),
+                Point {
+                    x: event.position.x - self.content.x,
+                    y: event.position.y - self.content.y,
+                },
+            );
+            self.panels
+                .review_context(&mut self.workspace, event.position, byte, side);
+            self.changed(w, Instant::now(), false);
+            return;
+        }
+        if event.kind == MouseKind::Down && !self.panels.review.items.is_empty() {
+            if let Some(Some(invocation)) = self.panels.review_mouse(event.position, true) {
+                self.run_named(w, &invocation.command, &invocation.args);
+            }
+            self.changed(w, Instant::now(), false);
+            return;
+        }
         if event.kind == MouseKind::Down {
             self.dragging_splitter =
                 self.workspace
@@ -1711,6 +1736,7 @@ impl AppHandler for App {
             }
         }
         if event.kind == MouseKind::Move {
+            self.panels.review_hover(&self.workspace, event.position);
             let byte = self.view.hit_test(
                 self.workspace.editor(),
                 Point {
@@ -2066,10 +2092,17 @@ impl AppHandler for App {
             }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
+            if std::mem::take(&mut self.panels.review.reveal) {
+                self.view.reveal(self.workspace.editor());
+            }
+            if let Some(invocation) = self.panels.pending_command.take() {
+                self.run_named(w, &invocation.command, &invocation.args);
+            }
             if let Err(error) = self.replacement_confirmation(w) {
                 self.show_error(w, &error);
             }
             if self.panels.busy()
+                || self.workspace.editor().annotations.borrow().pending > 0
                 || self.workspace.editor().completion.busy()
                 || self.builds.task.is_some()
             {

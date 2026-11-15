@@ -39,6 +39,8 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub annotation_view: ViewId,
+    pub annotations: std::rc::Rc<RefCell<crate::annotations::Annotations>>,
     pub completion: crate::completion::Completion,
     pub fields: Option<vel_snippet::Session>,
     pub fields_version: Option<(vel_buffer::BufferId, vel_buffer::ChangeId)>,
@@ -50,11 +52,9 @@ pub struct Editor {
     pub reindent_job: Option<mpsc::Receiver<ReindentResult>>,
     pub read_only: bool,
     pub buffer: Buffer,
-    pub history: vel_session::History,
     pub shared_shadow: bool,
     pub layout_edits: std::rc::Rc<RefCell<std::collections::VecDeque<SharedLayoutEdit>>>,
     pub layout_version: vel_buffer::ChangeId,
-    history_hint: String,
     pub id: ViewId,
     // O(1) snapshot used by layout and native queries, including preedit preview.
     pub text: Text,
@@ -96,18 +96,19 @@ impl Editor {
             .clone();
         let preferences = settings.editor();
         let settings_revision = settings.revision();
-        let history = vel_session::History::new(&buffer, id);
         Self {
+            annotation_view: id,
+            annotations: std::rc::Rc::new(RefCell::new(crate::annotations::Annotations::new(
+                text.clone(),
+            ))),
             completion: Default::default(),
             fields: None,
             fields_version: None,
             snippets: Default::default(),
             snippet_path: None,
-            history,
             shared_shadow: false,
             layout_edits: std::rc::Rc::new(RefCell::new(std::collections::VecDeque::new())),
             layout_version: vel_buffer::ChangeId(0),
-            history_hint: String::new(),
             language: std::rc::Rc::new(RefCell::new(None)),
             layout: RefCell::new(crate::layout::Layout::default()),
             language_buffer: None,
@@ -145,7 +146,7 @@ impl Editor {
                     word_separators: self.preferences.word_separators.clone(),
                 },
             );
-            self.history.break_group();
+            self.buffer.break_undo_group();
         }
     }
     pub fn sync(&mut self) {
@@ -159,14 +160,20 @@ impl Editor {
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
-            self.buffer.set_settings(
-                self.id,
-                vel_buffer::Settings {
-                    tab_size: self.preferences.tab_size,
-                    translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
-                    word_separators: self.preferences.word_separators.clone(),
-                },
-            );
+            let current = &self.buffer.view(self.id).settings;
+            if current.tab_size != self.preferences.tab_size
+                || current.translate_tabs_to_spaces != self.preferences.translate_tabs_to_spaces
+                || current.word_separators != self.preferences.word_separators
+            {
+                self.buffer.set_settings(
+                    self.id,
+                    vel_buffer::Settings {
+                        tab_size: self.preferences.tab_size,
+                        translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
+                        word_separators: self.preferences.word_separators.clone(),
+                    },
+                );
+            }
         }
         if !self.shared_shadow && self.layout_version != self.buffer.change_id() {
             let edits = self.layout_edits.borrow();
@@ -215,6 +222,11 @@ impl Editor {
             self.language_buffer = Some(self.buffer.id());
             self.layout.borrow_mut().invalidate();
         }
+        if !self.shared_shadow {
+            self.annotations
+                .borrow_mut()
+                .committed(&self.buffer, &self.settings);
+        }
         self.text = self.buffer.text().clone();
         let primary = self
             .buffer
@@ -237,10 +249,6 @@ impl Editor {
             })
         }) {
             self.fields = None;
-        }
-        if !self.shared_shadow {
-            self.history
-                .observe(&self.buffer, self.id, &self.history_hint);
         }
     }
     pub fn attach_language(
@@ -321,7 +329,7 @@ impl Editor {
             self.completion.hide();
         }
         if !self.shared_shadow && self.buffer.view(self.id).sel() != &selection {
-            self.history.break_group();
+            self.buffer.break_undo_group();
         }
         self.buffer.set_selection(self.id, selection);
         self.sync();
@@ -564,52 +572,9 @@ impl Editor {
 }
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
-        self.history.before_command(&self.buffer, self.id);
-        self.history_hint = if name == "insert" {
-            let text = args["characters"].as_str().unwrap_or("");
-            let mut class = None;
-            let mut mixed = false;
-            for c in text.chars() {
-                let next = if c == '\n' {
-                    "newline"
-                } else if c.is_whitespace() {
-                    "space"
-                } else if self.preferences.word_separators.contains(c) {
-                    "punct"
-                } else {
-                    "word"
-                };
-                if class.is_some_and(|old| old != next) {
-                    mixed = true;
-                }
-                class = Some(next);
-            }
-            format!(
-                "typing:{}",
-                if mixed {
-                    "mixed"
-                } else {
-                    class.unwrap_or("mixed")
-                }
-            )
-        } else {
-            if matches!(
-                name,
-                "move"
-                    | "move_to"
-                    | "select_all"
-                    | "single_selection"
-                    | "find_under_expand"
-                    | "find_under_expand_skip"
-                    | "find_all_under"
-                    | "select_lines"
-                    | "expand_selection"
-                    | "split_selection_into_lines"
-            ) {
-                self.history.break_group();
-            }
-            name.to_owned()
-        };
+        if self.annotation_command(name, args)? {
+            return Ok(true);
+        }
         if self.intelligence_command(name, args)? {
             return Ok(true);
         }

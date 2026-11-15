@@ -116,6 +116,9 @@ impl Tab {
                 (p.row, p.column)
             })
             .collect();
+        self.editor.annotations = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::annotations::Annotations::new(loaded.text.clone()),
+        ));
         self.editor.buffer = vel_buffer::Buffer::new(loaded.text.clone());
         self.editor.id = self.editor.buffer.new_view();
         self.editor.read_only = false;
@@ -155,6 +158,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pub git: crate::git_ui::GitUi,
     pub catalog: Arc<crate::completion::Catalog>,
     pub assets: Arc<crate::language::Assets>,
     syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
@@ -649,6 +653,7 @@ impl Workspace {
             None
         };
         let mut workspace = Self {
+            git: Default::default(),
             catalog,
             assets,
             syntax_settings,
@@ -828,6 +833,11 @@ impl Workspace {
         tab.path = Some(target.clone());
         tab.disk_stamp = stamp(&target);
         tab.disk_saved = vel_session::DiskStamp::read(&target);
+        tab.editor.annotations.borrow_mut().reference(
+            tab.editor.buffer.text().clone(),
+            tab.path.clone(),
+            self.data_dir.as_ref().map(|d| d.join("Packages")),
+        );
         if let Some(w) = self.watcher.as_mut() {
             w.watch(&target)?;
         }
@@ -852,12 +862,39 @@ impl Workspace {
     }
     /// Polls jobs/notifications and reports whether scene content changed.
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let enabled = self.settings.bool("show_git_status", true);
+        let mut roots: Vec<_> = self.folders.iter().map(|f| f.path.clone()).collect();
+        for tab in &self.tabs {
+            if let Some(parent) = tab.path.as_deref().and_then(Path::parent)
+                && !roots.iter().any(|root| parent.starts_with(root))
+            {
+                roots.push(parent.to_owned());
+            }
+        }
+        let mut changed = self.git.poll(enabled, roots);
+        if changed {
+            for tab in &mut self.tabs {
+                if !tab.editor.shared_shadow {
+                    tab.editor.annotations.borrow_mut().refresh_reference();
+                }
+            }
+        }
         for tab in &mut self.tabs {
             if tab.lazy.is_some() || tab.editor.shared_shadow {
                 continue;
             }
             changed |= tab.editor.poll_language();
+            changed |= tab.editor.annotations.borrow_mut().poll();
+            if let Some(error) = tab
+                .editor
+                .annotations
+                .borrow_mut()
+                .current
+                .as_mut()
+                .and_then(|p| p.error.take())
+            {
+                self.messages.push(error);
+            }
             changed |= tab.editor.poll_completion();
             if let Some(language) = tab.editor.language.borrow_mut().as_mut() {
                 self.messages.append(&mut language.errors);
@@ -1089,6 +1126,13 @@ impl Workspace {
         explicit: Option<&str>,
         detect: bool,
     ) -> Result<(), String> {
+        if self.tabs[index].lazy.is_none() {
+            let tab = &self.tabs[index];
+            tab.editor.annotations.borrow_mut().set_location(
+                tab.path.clone(),
+                self.data_dir.as_ref().map(|d| d.join("Packages")),
+            );
+        }
         let tab = &mut self.tabs[index];
         tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
         tab.editor.snippet_path = tab.path.clone();

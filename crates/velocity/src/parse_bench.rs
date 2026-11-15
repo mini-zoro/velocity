@@ -26,9 +26,21 @@ pub fn prepare(options: &Options) -> Result<(Fixture, Workspace), String> {
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     for file in 0..10 {
         let source = (0..1000)
-            .map(|row| format!("pub fn render_{file}_{row}() {{ let value = {row}; }} // 你好\n"))
+            .map(|row| {
+                format!(
+                    "pub fn render_{file}_{row}() {{ let value = {row}; }} // 你好{}\n",
+                    if options.review_ui.is_some() {
+                        " mispelled comment"
+                    } else {
+                        ""
+                    }
+                )
+            })
             .collect::<String>();
         std::fs::write(root.join(format!("file{file}.rs")), source).map_err(|e| e.to_string())?;
+    }
+    if options.review_ui.is_some() {
+        crate::review_bench::repository(&root)?;
     }
     let mut workspace = Workspace::new(Text::new(), options.data_dir.clone(), None, false)?;
     for file in 0..10 {

@@ -1,4 +1,4 @@
-// Original Velocity command palette.
+// Velocity resources, authored from public behavior documentation.
 [
   {
     "caption": "File: Save All",
@@ -165,5 +165,59 @@
   {
     "caption": "Clear Snippet Fields",
     "command": "clear_fields"
+  },
+  {
+    "caption": "Next Modification",
+    "command": "next_modification"
+  },
+  {
+    "caption": "Previous Modification",
+    "command": "prev_modification"
+  },
+  {
+    "caption": "Toggle Hunk Diff",
+    "command": "toggle_inline_diff"
+  },
+  {
+    "caption": "Show Only This Hunk Diff",
+    "command": "toggle_inline_diff",
+    "args": {
+      "show_only": true
+    }
+  },
+  {
+    "caption": "Revert Modification",
+    "command": "revert_modification"
+  },
+  {
+    "caption": "Spell Check: Toggle",
+    "command": "toggle_setting",
+    "args": {
+      "setting": "spell_check"
+    }
+  },
+  {
+    "caption": "Next Misspelling",
+    "command": "next_misspelling"
+  },
+  {
+    "caption": "Previous Misspelling",
+    "command": "prev_misspelling"
+  },
+  {
+    "caption": "Dictionary…",
+    "command": "show_dictionary"
+  },
+  {
+    "caption": "Git: Open Repository",
+    "command": "git_open_repository"
+  },
+  {
+    "caption": "Git: File History",
+    "command": "git_file_history"
+  },
+  {
+    "caption": "Git: Blame File",
+    "command": "git_blame_file"
   }
 ]

@@ -2,11 +2,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 pub mod history;
+// Legacy code is only a reader for existing round-seven profiles.
+mod legacy;
 pub mod project;
 pub use history::{History, Position, ViewState};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -171,6 +173,16 @@ impl Session {
         if docs.len() != self.documents.len() {
             return Err("duplicate document identity".into());
         }
+        let history_views: BTreeMap<_, BTreeSet<_>> = self
+            .documents
+            .iter()
+            .filter_map(|d| {
+                d.history
+                    .as_ref()
+                    .map(|h| (d.id, h.view_ids().into_iter().collect()))
+            })
+            .collect();
+        let mut attached = BTreeSet::new();
         let mut all = BTreeSet::new();
         for w in &self.windows {
             let ids = w.sheets.iter().map(|s| s.id).collect();
@@ -183,6 +195,12 @@ impl Session {
                     return Err("invalid sheet identity/document".into());
                 }
                 s.view.validate()?;
+                if let Some(view) = s.view.history_view
+                    && let Some(views) = history_views.get(&s.document)
+                    && (!views.contains(&view) || !attached.insert((s.document, view)))
+                {
+                    return Err("invalid history view ownership".into());
+                }
             }
         }
         Ok(())

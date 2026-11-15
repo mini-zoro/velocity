@@ -117,6 +117,12 @@ impl Editor {
             })
             .collect();
         self.buffer.transact(self.id, kind, &edits, selection);
+        self.annotations.borrow_mut().change(
+            &self.buffer,
+            &self.settings,
+            before_version,
+            &changes,
+        );
         self.fields_version = self
             .fields
             .as_ref()
@@ -290,6 +296,7 @@ impl Editor {
                             } else {
                                 row.saturating_sub(delta)
                             };
+                            let visual = layout.editable_visual(visual, forward);
                             let b = layout.offset_at(&self.text, visual, x);
                             Region {
                                 a: if extend { r.a } else { b },

@@ -1,3 +1,84 @@
+<!-- ROUND9-RESULTS-BEGIN -->
+# Round 9 results: complete history, Git, incremental diff and spelling
+
+Implemented in `velocity`, `vel-session`, `vel-commands`, `vel-config` and root Cargo.lock;
+left uncommitted on `lane-a`. Lane-B crates are consumed read-only. Earlier sections below
+are historical reports; the human has since confirmed Chinese IME and is testing Hot Exit.
+
+Hot Exit now captures `Buffer::export_history` and uses checked `restore_history`, retaining
+text and soft undo/redo, saved identity, grouping/continuation, selections, regions, per-view
+settings and original edit ownership. Every clone is remapped before activation; hidden clean
+files remain lazy. Changed disk files or invalid native imports discard history safely while
+retaining unsaved text. Old profiles upgrade the history they actually stored. Randomized
+tests compare 128 two-view round trips with 200 subsequent actions each; application tests
+cover typing continuation and repeated lazy-clone/owner transfers.
+
+Users can inspect file/folder Git badges and tooltips, dimmed ignored entries, virtual missing
+paths, branch/count status and optional configured merge-tool actions. Status/blob reads use
+read-only gix. Diff markers, wrapped inline original rows with scalar shading, modification
+navigation and undoable per-hunk reverts use saved/index/HEAD references. BOM/legacy encodings
+and CRLF normalize through the editor's text model. Spelling shares exact visible scopes with
+the existing highlighter, has independent clone requests, and offers navigation, suggestions,
+add/ignore persistence and package dictionary choices. Publications are buffer/version/config
+checked; undo snapshot gaps reset consumers instead of inventing intermediate roots.
+
+## Final isolated measurements
+
+One copied release executable, SHA-256 `5b969a8c3359d7ed534f7696e00272c1cb39f040ad84b82600a417b7085b325b`;
+ten alternating process pairs, 500 real keymap edits/CPU scenes and 100 definition jumps per
+process. A prepared popup, sidebar and status bar are present in both modes. Each edit's
+immediate scene suppresses stale annotation ranges; exact worker preparation is outside the
+input timer. Worker jobs flush after scene construction. No other lane-A benchmark or
+compilation ran during the series. All 10,000 typing samples, scheduling outliers, raw runs,
+source hashes and process medians are retained in [timings-round9.json](timings-round9.json).
+
+| Probe | Budget | Final measurement |
+| --- | --- | --- |
+| Typing p50, features off → on | ≤5% increase | 0.563459 → 0.569646 ms, **+1.10%** |
+| Typing p95, off → on | Native absolute target ≤4 ms, pending GUI | 2.399813 → 2.190195 ms CPU |
+| Full-history save: 50 dirty files / 100 views / 100 text steps each | ≤30 ms background | p50 5.402, p95 6.606, **max 9.773 ms** |
+| First-window restore dependencies, 1 loaded / 99 lazy sheets | ≤300 ms CPU proxy; native scanout pending | median **100.580**, max **150.363 ms** |
+
+Typing p50's independent-process bootstrap ratio interval is
+**[0.97294, 1.05895]** (10,000 resamples, seed 9).
+The point estimate meets the gate; its upper bound reaches +5.89%, so this sample does not
+establish strict 5% equivalence. The p95 ratio interval is
+[0.74736, 1.19427]. Do not infer scanout/HID
+latency from these CPU measurements.
+
+Five history processes provide 50 worker saves. Save includes native delta packing, validation,
+JSON, atomic write and file/directory fsync; capture samples are separate. Restore includes
+session read/parse, resources and selected native history import. The existing content-validated
+syntax cache is retained; contexts remain lazy. Resource setup uses file symlinks with a copy
+fallback, concurrent metadata loading and worker cleanup; tests ensure source files are not
+modified. Restored editors share immutable keymap tables with independent pending chords.
+
+Development diagnostics remain in `timings-round9-initial.json`, `-handoff.json`,
+`-badge-diagnostic.json` and `-components.json`. Earlier full-series results are in
+`timings-round9-before-keymap.json`: typing +0.73%, restore max 352.95 ms. Restore/staging/resource
+pilots are in `timings-round9-restore-pilot.json`, `-staging-pilot.json` and
+`-resource-diagnostics.json`. These include failed budget observations. The hard-link experiment
+was reverted; only the final copied binary contributes to the table above.
+
+## Verification and native handoff
+
+All **124 tests** pass (velocity 97, session 13, config 9, commands 5). Scoped fmt, clippy
+all-targets `-D warnings`, release tests, rustdoc `-D warnings`, release build and diff whitespace
+checks passed. Exact commands and frozen-source verification are in timings-round9.json;
+logs are in [the validation directory](output/round9-review-final-verified/validation).
+Both Python entry points and the native runner pass syntax checks. The disposable fixture
+preparation was exercised without opening the app. One earlier unchanged IPC socket test
+returned ENOTCONN; the final complete suite passes.
+
+**No GUI or Metal execution occurred in the sandbox.** On an awake, unlocked, visible display,
+run `zsh crates/velocity/scripts/review-round9-gui.zsh`. It executes five native alternating
+on/off pairs, 4K typing, full-history startup, Metal validation and the interactive fixture.
+The exact expanded commands and timing boundaries are at the top of [RUNBOOK.md](RUNBOOK.md).
+Native typing ≤2/4 ms, ≤5% regression, restore ≤300 ms and Metal/notification behavior remain
+reviewer checks. [MANUAL_TEST.md](MANUAL_TEST.md) records Chinese IME as human-confirmed, puts
+complete Hot Exit history first, and adds pending Git/diff/spelling/encoding/clone checks.
+<!-- ROUND9-RESULTS-END -->
+
 <!-- ROUND8-RESULTS-BEGIN -->
 # Round 8 results: one parse, project navigation, completion and snippets
 

@@ -44,10 +44,8 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
         let history = if i < 5 {
             let mut buffer = Buffer::new(content.as_str());
             let id = buffer.new_view();
-            let mut history = History::new(&buffer, id);
             ops::paste(&mut buffer, id, "unsaved 你好\n");
-            history.observe(&buffer, id, "paste");
-            Some(history)
+            Some(History::capture(&buffer))
         } else {
             None
         };

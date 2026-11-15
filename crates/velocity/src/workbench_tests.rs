@@ -345,3 +345,69 @@ fn query_history_accumulates_bounded_values_and_restores_an_empty_replacement() 
     assert_eq!(panels.query.value(), "query104");
     assert_eq!(panels.replace.value(), "");
 }
+
+#[test]
+fn native_history_continues_typing_group_after_application_restore() {
+    let mut live = Workspace::new(Text::new(), None, None, false).unwrap();
+    for s in ["h", "e"] {
+        live.editor_mut()
+            .run("insert", &json!({"characters":s}))
+            .unwrap();
+    }
+    let (window, documents) = live.snapshot().unwrap();
+    let session = vel_session::Session {
+        windows: vec![window],
+        documents,
+        ..Default::default()
+    };
+    let session: vel_session::Session =
+        serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+    let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+    restored
+        .restore_window(&session.windows[0], &session.documents)
+        .unwrap();
+    for s in ["l", "l", "o"] {
+        restored
+            .editor_mut()
+            .run("insert", &json!({"characters":s}))
+            .unwrap();
+    }
+    restored.editor_mut().run("undo", &json!({})).unwrap();
+    assert_eq!(restored.editor().text, "");
+    assert!(!restored.editor().buffer.is_dirty());
+}
+
+#[test]
+fn lazy_clone_snapshot_uses_the_actual_owner_after_several_activation_transfers() {
+    let mut w = Workspace::new(Text::from("shared"), None, None, false).unwrap();
+    for _ in 0..3 {
+        w.clone_file().unwrap();
+    }
+    let (window, documents) = w.snapshot().unwrap();
+    let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+    restored.restore_window(&window, &documents).unwrap();
+    restored.select(0);
+    restored.select(1);
+    assert!(restored.tabs[2].lazy.is_some());
+    restored
+        .editor_mut()
+        .run("insert", &json!({"characters":"updated"}))
+        .unwrap();
+    let (window, documents) = restored.snapshot().unwrap();
+    let session = vel_session::Session {
+        windows: vec![window],
+        documents,
+        ..Default::default()
+    };
+    session.validate().unwrap();
+    let wire = serde_json::to_vec(&session).unwrap();
+    let session: vel_session::Session = serde_json::from_slice(&wire).unwrap();
+    let mut again = Workspace::new(Text::new(), None, None, false).unwrap();
+    again
+        .restore_window(&session.windows[0], &session.documents)
+        .unwrap();
+    again.select(2);
+    assert_eq!(again.editor().text, "updatedshared");
+    again.editor_mut().run("undo", &json!({})).unwrap();
+    assert_eq!(again.editor().text, "shared");
+}

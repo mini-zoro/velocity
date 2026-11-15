@@ -94,35 +94,59 @@ impl Workspace {
                 .map(|(i, _)| i);
             if let Some(owner) = owner {
                 self.tabs[index].lazy = None;
-                let view = self.tabs[owner].editor.buffer.new_view();
-                state.apply(&mut self.tabs[owner].editor.buffer, view);
+                let existing = self.tabs[index].shared_view;
+                let view = if self.tabs[owner]
+                    .editor
+                    .buffer
+                    .views()
+                    .any(|id| id == existing)
+                {
+                    existing
+                } else {
+                    let view = self.tabs[owner].editor.buffer.new_view();
+                    state.apply(&mut self.tabs[owner].editor.buffer, view);
+                    view
+                };
                 self.tabs[index].document = self.tabs[owner].document;
                 self.tabs[index].shared_view = view;
                 self.tabs[index].editor.shared_shadow = true;
                 self.tabs[index].editor.language = self.tabs[owner].editor.language.clone();
                 self.tabs[index].editor.layout_edits = self.tabs[owner].editor.layout_edits.clone();
+                self.tabs[index].editor.annotations = self.tabs[owner].editor.annotations.clone();
                 self.prepare_sheet(index)?;
                 self.sync_shared();
                 return Ok(());
             }
-            let tab = &mut self.tabs[index];
             let changed = document
                 .path
                 .as_deref()
                 .is_some_and(|p| vel_session::DiskStamp::read(p) != document.disk);
-            if let Some(history) = document.history {
-                let (buffer, id) = history.restore(!changed, document.dirty || changed);
-                tab.editor.buffer = buffer;
-                tab.editor.id = id;
-                tab.editor.history = vel_session::History::new(&tab.editor.buffer, id);
-                // Re-observe future commands against the restored buffer; preserve the journal cursor.
-                tab.editor.history = if changed {
-                    vel_session::History::new(&tab.editor.buffer, id)
-                } else {
-                    history.rebind(&tab.editor.buffer, id)
-                };
+            let mut imported = false;
+            if let Some(history) = &document.history {
+                let dirty = document.dirty || (changed && history.retains_text());
+                let restored = history.restore_views(!changed, dirty);
+                imported = restored.is_ok() && !changed;
+                let (buffer, map) = restored.or_else(|_| history.restore_views(false, dirty))?;
+                let id = state
+                    .history_view
+                    .and_then(|id| map.get(&id).copied())
+                    .or_else(|| map.values().next().copied())
+                    .ok_or("history has no view")?;
+                self.tabs[index].editor.buffer = buffer;
+                self.tabs[index].editor.id = id;
+                // Every clone, including lazy sheets, must keep its original edit ownership.
+                for sibling in &mut self.tabs {
+                    if sibling.restored_document == Some(document.id)
+                        && let Some((_, view)) = &sibling.lazy
+                        && let Some(id) = view.history_view.and_then(|old| map.get(&old))
+                    {
+                        sibling.shared_view = *id;
+                    }
+                }
+                let tab = &mut self.tabs[index];
                 tab.editor.sync();
             } else if let Some(path) = &document.path {
+                let tab = &mut self.tabs[index];
                 let loaded =
                     match vel_fileio::load(path, &tab.editor.preferences.fallback_encoding, |_| {})
                     {
@@ -134,9 +158,12 @@ impl Workspace {
                     };
                 tab.install_restored(loaded);
             }
+            let tab = &mut self.tabs[index];
             tab.lazy = None;
             tab.editor.read_only = false;
-            state.apply(&mut tab.editor.buffer, tab.editor.id);
+            if !imported {
+                state.apply(&mut tab.editor.buffer, tab.editor.id);
+            }
             tab.editor.sync();
             tab.restored_format_dirty = document.dirty && !tab.editor.buffer.is_dirty();
             tab.document = tab.editor.buffer.id();
@@ -171,7 +198,6 @@ impl Workspace {
                 (&mut b[0], &mut a[index])
             };
             std::mem::swap(&mut a.editor.buffer, &mut b.editor.buffer);
-            std::mem::swap(&mut a.editor.history, &mut b.editor.history);
             a.editor.shared_shadow = true;
             b.editor.shared_shadow = false;
             a.editor.buffer = Buffer::new(b.editor.buffer.text().clone());
@@ -265,6 +291,7 @@ impl Workspace {
                 self.tabs[other].editor.shared_shadow = true;
                 self.tabs[other].editor.language = self.tabs[index].editor.language.clone();
                 self.tabs[other].editor.layout_edits = self.tabs[index].editor.layout_edits.clone();
+                self.tabs[other].editor.annotations = self.tabs[index].editor.annotations.clone();
             }
         }
         self.sync_shared();
@@ -299,6 +326,7 @@ impl Workspace {
         clone.editor.shared_shadow = true;
         clone.editor.language = self.tabs[index].editor.language.clone();
         clone.editor.layout_edits = self.tabs[index].editor.layout_edits.clone();
+        clone.editor.annotations = self.tabs[index].editor.annotations.clone();
         clone.editor.layout_version = self.tabs[index].editor.layout_version;
         clone.path = self.tabs[index].path.clone();
         clone.format = self.tabs[index].format.clone();
@@ -459,10 +487,11 @@ impl Workspace {
             let doc = tab.document;
             let identity = tab.session_document;
             if let Some((document, view)) = &tab.lazy {
-                let loaded = self
-                    .tabs
-                    .iter()
-                    .find(|t| t.restored_document == Some(document.id) && t.lazy.is_none());
+                let loaded = self.tabs.iter().find(|t| {
+                    t.restored_document == Some(document.id)
+                        && t.lazy.is_none()
+                        && t.editor.buffer.id() == t.document
+                });
                 let identity = tab.session_document;
                 if loaded.is_none() && seen.insert(identity) {
                     let mut document = document.clone();
@@ -472,7 +501,15 @@ impl Workspace {
                 sheets.push(Sheet {
                     id: tab.sheet,
                     document: identity,
-                    view: view.clone(),
+                    view: loaded
+                        .map(|owner| {
+                            vel_session::ViewState::capture(
+                                &owner.editor.buffer,
+                                tab.shared_view,
+                                tab.scroll,
+                            )
+                        })
+                        .unwrap_or_else(|| view.clone()),
                     syntax: tab
                         .editor
                         .settings
@@ -504,10 +541,6 @@ impl Workspace {
             });
             if seen.insert(identity) {
                 let owner = &mut self.tabs[owner];
-                owner
-                    .editor
-                    .history
-                    .observe(&owner.editor.buffer, owner.editor.id, "");
                 documents.push(Document {
                     id: identity,
                     path: owner.path.clone(),
@@ -516,10 +549,19 @@ impl Workspace {
                     bom: owner.format.bom,
                     line_ending: owner.format.line_ending.name().into(),
                     dirty: owner.dirty(),
-                    history: (owner.dirty()
-                        || owner.path.is_none()
-                        || owner.editor.history.groups() > 0)
-                        .then(|| owner.editor.history.clone()),
+                    history: Some(if !owner.dirty() {
+                        if let Some(path) = &owner.path {
+                            vel_session::History::capture_saved(
+                                &owner.editor.buffer,
+                                path.clone(),
+                                owner.format.encoding.clone(),
+                            )
+                        } else {
+                            vel_session::History::capture(&owner.editor.buffer)
+                        }
+                    } else {
+                        vel_session::History::capture(&owner.editor.buffer)
+                    }),
                 });
             }
         }

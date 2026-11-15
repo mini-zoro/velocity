@@ -16,6 +16,8 @@ use vel_config::json;
 use vel_platform::Size;
 #[derive(Debug)]
 pub struct Prepared {
+    pub full_size: Size,
+    pub review: Option<bool>,
     pub fixture: Fixture,
     pub workspace: Workspace,
     pub panels: Panels,
@@ -24,6 +26,25 @@ pub struct Prepared {
 impl Prepared {
     pub fn new(options: &Options) -> Result<Self, String> {
         let (fixture, mut workspace) = parse_bench::prepare(options)?;
+        if let Some(enabled) = options.review_ui {
+            workspace.settings.set(
+                vel_config::settings::Layer::View,
+                "show_git_status",
+                json!(enabled),
+            );
+            for tab in &mut workspace.tabs {
+                for (key, value) in [
+                    ("mini_diff", json!(enabled)),
+                    ("spell_check", json!(enabled)),
+                    ("show_git_status", json!(enabled)),
+                ] {
+                    tab.editor
+                        .settings
+                        .set(vel_config::settings::Layer::View, key, value);
+                }
+                tab.editor.sync();
+            }
+        }
         parse_bench::wait(&mut workspace)?;
         let mut panels = Panels::new(&workspace, false);
         panels.add_folder(&mut workspace, fixture.0.clone())?;
@@ -90,7 +111,14 @@ impl Prepared {
             12.,
         );
         view.reveal(workspace.editor());
+        // The fixture prefix is preparation; measured keys must undo independently.
+        workspace.editor_mut().buffer.break_undo_group();
         let mut result = Self {
+            full_size: Size {
+                width: options.width as f64,
+                height: options.height as f64,
+            },
+            review: options.review_ui,
             fixture,
             workspace,
             panels,
@@ -106,10 +134,43 @@ impl Prepared {
     pub fn request(&mut self) {
         let _ = self.workspace.editor_mut().run("auto_complete", &json!({}));
     }
+    pub fn scene(&mut self) -> vel_render::scene::Scene {
+        if self.review.is_some() {
+            let content = self.panels.layout(self.full_size);
+            self.view.size = Size {
+                width: content.width,
+                height: content.height,
+            };
+            let mut scene = self.view.scene(self.workspace.editor());
+            crate::app_scene_translate(&mut scene, content.x, content.y);
+            self.panels.paint(&self.workspace, &mut scene);
+            scene
+        } else {
+            self.view.scene(self.workspace.editor())
+        }
+    }
     pub fn poll(&mut self) -> bool {
+        if self.review.is_some() {
+            black_box(self.scene());
+        }
         self.workspace.poll();
         self.panels.poll(&mut self.workspace, 0..1000);
-        self.workspace.editor().completion.visible()
+        let ready = self.review != Some(true) || {
+            let editor = self.workspace.editor();
+            let annotations = editor.annotations.borrow();
+            let git_ready = self.workspace.tabs[self.workspace.active]
+                .path
+                .as_deref()
+                .and_then(|p| self.workspace.git.snapshot(p))
+                .is_some();
+            annotations.pending == 0
+                && annotations.current.as_ref().is_some_and(|p| {
+                    p.identity.1 == editor.buffer.change_id() && !p.spelling.is_empty()
+                })
+                && git_ready
+        };
+        ready
+            && self.workspace.editor().completion.visible()
             && !self.workspace.editor().completion.busy()
             && self
                 .workspace
@@ -123,13 +184,20 @@ impl Prepared {
         let until = Instant::now() + Duration::from_secs(30);
         loop {
             if self.poll() {
-                black_box(self.view.scene(self.workspace.editor()));
+                black_box(self.scene());
                 return Ok(());
             }
             if Instant::now() > until {
                 return Err(format!(
-                    "completion benchmark timed out: {:?}",
-                    self.workspace.messages
+                    "completion benchmark timed out: {:?}; annotations {:?}",
+                    self.workspace.messages,
+                    self.workspace
+                        .editor()
+                        .annotations
+                        .borrow()
+                        .current
+                        .as_ref()
+                        .map(|p| (p.identity, p.spelling.len()))
                 ));
             }
             std::thread::park_timeout(Duration::from_micros(100));
@@ -197,17 +265,20 @@ impl Prepared {
 pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
     let mut prepared = Prepared::new(options)?;
     reporter.rss("ten_file_index_completion",json!({"files":10,"lines_per_file":1000,"synthetic_project_words":options.intel_words,"popup_visible":true,"gui_started":false,"gpu_started":false}))?;
+    if std::env::var_os("VELOCITY_REVIEW_PROFILE").is_some() {
+        return profile(reporter, prepared);
+    }
     let mut samples = Vec::new();
     for _ in 0..500 {
         prepared.wait_popup()?;
         let at = Instant::now();
         crate::type_through_keymap(prepared.workspace.editor_mut(), "0")?;
-        black_box(prepared.view.scene(prepared.workspace.editor()));
+        black_box(prepared.scene());
         samples.push(ms(at.elapsed()));
         prepared.reset()?;
     }
     let definitions = prepared.definitions()?;
-    reporter.emit(json!({"kind":"intelligence_cpu","typing_samples_ms":samples,"typing_ms":summarize(&samples),"typing_budget_ms":[2,4],"definition_samples_ms":definitions,"definition_ms":summarize(&definitions),"definition_budget_ms":20,"files":10,"synthetic_project_words":options.intel_words,"popup_visible_before_every_key":true,"popup_painted_in_timer":true,"gui_started":false,"gpu_started":false,"boundary":"keymap/command/transaction plus CPU scene and popup; background preparation before each key; definition request, worker delivery, open/reveal/CPU scene of already-open file"}))?;
+    reporter.emit(json!({"kind":"intelligence_cpu","review_ui":options.review_ui,"typing_samples_ms":samples,"typing_ms":summarize(&samples),"typing_budget_ms":[2,4],"definition_samples_ms":definitions,"definition_ms":summarize(&definitions),"definition_budget_ms":20,"files":10,"synthetic_project_words":options.intel_words,"popup_visible_before_every_key":true,"popup_painted_in_timer":true,"gui_started":false,"gpu_started":false,"boundary":"keymap/command/transaction plus CPU scene and popup; background preparation before each key; definition request, worker delivery, open/reveal/CPU scene of already-open file"}))?;
     reporter
         .emit(json!({"kind":"complete","complete":true,"gui_started":false,"gpu_started":false}))
 }
@@ -257,6 +328,7 @@ impl Native {
 impl vel_platform::AppHandler for Native {
     fn on_start(&mut self, w: &vel_platform::WindowHandle) -> Result<(), String> {
         let fonts = vel_render::font::Fonts::load_named("Menlo")?;
+        self.prepared.full_size = w.content_size();
         self.prepared.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.prepared.view.reveal(self.prepared.workspace.editor());
         self.fonts = Some(fonts);
@@ -269,6 +341,7 @@ impl vel_platform::AppHandler for Native {
         self.reporter.emit(json!({"kind":"intelligence_gui_environment","logical_size":[w.content_size().width,w.content_size().height],"actual_physical_size":self.renderer.as_ref().unwrap().physical_size(),"scale_factor":w.scale_factor(),"maximum_frames_per_second":w.maximum_frames_per_second(),"synthetic_project_words":self.words,"files":10}))
     }
     fn on_resize(&mut self, _: &vel_platform::WindowHandle, size: Size, scale: f64) {
+        self.prepared.full_size = size;
         self.prepared.view.size = size;
         if let Some(renderer) = &mut self.renderer {
             renderer.resize((size.width * scale) as u32, (size.height * scale) as u32);
@@ -277,7 +350,7 @@ impl vel_platform::AppHandler for Native {
     fn on_frame(&mut self, ctx: &mut vel_platform::FrameContext<'_>) -> Result<(), String> {
         use std::sync::atomic::Ordering;
         if ctx.reason == vel_platform::FrameReason::StartupPrepare {
-            let scene = self.prepared.view.scene(self.prepared.workspace.editor());
+            let scene = self.prepared.scene();
             self.renderer
                 .as_mut()
                 .ok_or("renderer missing")?
@@ -348,7 +421,7 @@ impl vel_platform::AppHandler for Native {
             crate::type_through_keymap(self.prepared.workspace.editor_mut(), "0")?;
         }
         let at = self.injected.unwrap();
-        let scene = self.prepared.view.scene(self.prepared.workspace.editor());
+        let scene = self.prepared.scene();
         let cpu = ms(at.elapsed());
         if let Some(times) = self.renderer.as_mut().ok_or("renderer missing")?.render(
             &scene,
@@ -383,4 +456,33 @@ impl vel_platform::AppHandler for Native {
         }
         true
     }
+}
+
+fn profile(reporter: &Reporter, mut prepared: Prepared) -> Result<(), String> {
+    let mut command = Vec::new();
+    let mut view = Vec::new();
+    let mut chrome = Vec::new();
+    for _ in 0..500 {
+        prepared.wait_popup()?;
+        let at = Instant::now();
+        crate::type_through_keymap(prepared.workspace.editor_mut(), "0")?;
+        command.push(ms(at.elapsed()));
+        let at = Instant::now();
+        let content = prepared.panels.layout(prepared.full_size);
+        prepared.view.size = Size {
+            width: content.width,
+            height: content.height,
+        };
+        let mut scene = prepared.view.scene(prepared.workspace.editor());
+        crate::app_scene_translate(&mut scene, content.x, content.y);
+        view.push(ms(at.elapsed()));
+        let at = Instant::now();
+        prepared.panels.paint(&prepared.workspace, &mut scene);
+        black_box(scene);
+        chrome.push(ms(at.elapsed()));
+        prepared.reset()?;
+    }
+    reporter.emit(json!({"kind":"review_component_profile","review_ui":prepared.review,"command_ms":summarize(&command),"view_ms":summarize(&view),"chrome_ms":summarize(&chrome),"command_samples_ms":command,"view_samples_ms":view,"chrome_samples_ms":chrome,"gui_started":false,"gpu_started":false}))?;
+    reporter
+        .emit(json!({"kind":"complete","complete":true,"gui_started":false,"gpu_started":false}))
 }

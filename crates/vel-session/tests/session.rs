@@ -4,11 +4,8 @@ use vel_session::{Document, History, HotExit, Session, Sheet, ViewState, Window}
 fn sample() -> Session {
     let mut buffer = Buffer::new("α\n");
     let id = buffer.new_view();
-    let mut history = History::new(&buffer, id);
     buffer.set_selection(id, Selection::from_regions([Region::caret(2)]));
-    history.before_command(&buffer, id);
     ops::insert(&mut buffer, id, "你好");
-    history.observe(&buffer, id, "paste");
     buffer.add_regions(id, "velocity.folds", vec![Region::new(0, 2)], true);
     let view = ViewState::capture(&buffer, id, (12., 34.));
     let mut workbench = vel_ui::workbench::Workbench::default();
@@ -22,7 +19,7 @@ fn sample() -> Session {
             bom: false,
             line_ending: "LF".into(),
             dirty: true,
-            history: Some(history),
+            history: Some(History::capture(&buffer)),
         }],
         windows: vec![Window {
             sheets: vec![Sheet {
@@ -50,7 +47,7 @@ fn nonexistent_data_atomic_roundtrip_undo_folds_and_selection() {
     let recovery = vel_session::load(&path);
     assert!(recovery.messages.is_empty());
     let doc = &recovery.session.documents[0];
-    let (mut buffer, id) = doc.history.as_ref().unwrap().restore(true, true);
+    let (mut buffer, id) = doc.history.as_ref().unwrap().restore(true, true).unwrap();
     assert_eq!(buffer.text().to_string(), "α你好\n");
     assert!(buffer.is_dirty());
     assert!(buffer.undo(id));
@@ -132,7 +129,7 @@ fn hot_exit_policies_and_changed_disk_drop_undo_keep_contents() {
     assert!(!HotExit::Disabled.retain(true));
     let original = sample();
     let history = original.documents[0].history.as_ref().unwrap();
-    let (mut buffer, id) = history.restore(false, true);
+    let (mut buffer, id) = history.restore(false, true).unwrap();
     assert_eq!(buffer.text().to_string(), "α你好\n");
     assert!(buffer.is_dirty());
     let before = buffer.text().clone();
@@ -149,19 +146,15 @@ fn hot_exit_policies_and_changed_disk_drop_undo_keep_contents() {
 fn redo_cursor_savepoint_unicode_and_limits_survive_wire_format() {
     let mut buffer = Buffer::new("a");
     let id = buffer.new_view();
-    let mut history = History::new(&buffer, id);
     for text in ["你好", "🦀", "xyz"] {
         ops::paste(&mut buffer, id, text);
-        history.observe(&buffer, id, "paste");
         buffer.break_undo_group();
     }
     buffer.mark_saved();
-    history.observe(&buffer, id, "");
     buffer.undo(id);
-    history.observe(&buffer, id, "undo");
-    let encoded = serde_json::to_vec(&history).unwrap();
+    let encoded = serde_json::to_vec(&History::capture(&buffer)).unwrap();
     let decoded: History = serde_json::from_slice(&encoded).unwrap();
-    let (mut restored, view) = decoded.restore(true, true);
+    let (mut restored, view) = decoded.restore(true, true).unwrap();
     assert_eq!(restored.text(), buffer.text());
     assert!(restored.is_dirty());
     assert!(restored.redo(view));
@@ -171,8 +164,9 @@ fn redo_cursor_savepoint_unicode_and_limits_survive_wire_format() {
         ..Default::default()
     });
     ops::paste(&mut buffer, id, "!");
-    history.observe(&buffer, id, "paste");
-    assert!(history.groups() <= 1);
+    let (mut restored, view) = History::capture(&buffer).restore(true, true).unwrap();
+    assert!(restored.undo(view));
+    assert!(!restored.undo(view));
 }
 #[test]
 fn project_comments_relative_rules_and_fresh_workspace_destination() {

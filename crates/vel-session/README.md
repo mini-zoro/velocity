@@ -44,35 +44,33 @@ Save As preserves unknown keys and the original folder rules, writes atomically,
 missing destination directory. A workspace write never triggers a project-settings reload via
 its containing directory's mtime.
 
-## Public-buffer history adapter and requested API
+## Complete native history
 
-`History::before_command` and `observe` journal the application's primitive commands using
-O(1) rope roots, selection snapshots and public history limits. Encoding runs on the writer
-and stores one base plus UTF-8-safe deltas. Restore replays user-visible groups through public
-`Buffer::transact`, then restores the redo cursor and saved state. Tests cover normal typing,
-selection changes, before/after selections, shared-view undo, save points, redo and bounded
-retention. Changed-disk restoration uses a pruned no-op transaction to preserve dirty state
-without leaving an undo entry.
+`History::capture(&buffer)` owns `Buffer::export_history()` plus the current rope snapshot.
+There is no command observer or second undo journal on the typing path. The session writer
+serializes the backend's opaque versioned payload, including groups/steps, text and soft undo
+cursors, selection events, saved revision identity, limits, typing continuation, named regions,
+per-view settings and original edit ownership. `restore_views(keep_history, dirty)` calls the
+checked `Buffer::restore_history` importer and returns the complete original-to-fresh view map.
+Closed historical owners stay hidden. Sheet `ViewState.history_view` binds each clone to that
+map; the application does not reapply imported selections and create extra soft events.
 
-The public Buffer API does not export its private history. This adapter cannot reproduce
-transaction-level soft undo/selection events, change-map history, or original edit-owner ViewIds
-after a process restart; restored text undo is replayed through the first restored buffer view.
-Generic commands with internal grouping not observable at command boundaries may also differ.
-The live buffer continues to use its native shared history. These are explicit Hot Exit fidelity
-limits, not a claim of lossless serialization of Buffer internals.
+Clean files use `History::capture_saved`: their native payload still includes soft selection
+history, while current contents are supplied lazily from disk on activation. Dirty and untitled
+contents are always retained independently. Disk stamps invalidate history; the backend also
+checks the current text digest, including changes that preserve size/mtime. A failed native
+import can discard history while retaining dirty contents. Missing clean files report a load
+error. No import mutates an existing live buffer, and errors remain recoverable.
 
-Requested vel-buffer API (no vel-buffer sources were modified):
+The previous round-seven wire journal has a reader for existing profiles. It upgrades the text
+undo information those profiles actually retained into a native payload on the next save.
+New profiles preserve full native history. Old profiles cannot recover events they never stored.
+`restore` and `restore_views` return errors for unreadable or malformed data.
 
-```text
-Buffer::export_history() -> owned, versioned HistorySnapshot
-Buffer::restore_history(text, HistorySnapshot, view_id_map) -> Result<Buffer, HistoryError>
-```
-
-The payload should preserve bounded groups/steps, forward/inverse edits, owner view IDs,
-before/after selections, undo/redo cursor, saved-state identity, limits and per-view soft history.
-Import must validate UTF-8 ranges/identities and remap old view IDs to newly allocated views.
-An owned O(1)-snapshot export lets the caller serialize on a worker; a stable public step iterator
-plus checked import is also sufficient. See velocity/RUNBOOK.md for timing and reviewer commands.
+Tests cover 128 randomized two-view histories, each followed by 200 identical future actions,
+selection-only clean-file history, typing continuation, saved points, closed owners, legacy
+profiles, changed disk files and corrupt payloads. Application tests also exercise clone/lazy
+sheet restoration, ownership transfers and continuing a typing group across relaunch.
 
 ```sh
 cargo test -p vel-session

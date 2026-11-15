@@ -192,3 +192,44 @@ fn parses_other_resource_formats_and_merges_submenus() {
         ui::parse(r#"[{"caption":"Save All","command":"save_all"}]"#).unwrap();
     assert_eq!(palette[0].invocation.command, "save_all");
 }
+
+#[test]
+fn cloned_keymaps_keep_chords_and_appended_overrides_independent() {
+    use vel_config::keymap::{Key, Keymap, Resolution, SettingsContext};
+    let settings = vel_config::settings::Settings::default();
+    let context = SettingsContext(&settings);
+    let mut original = Keymap::default();
+    original
+        .append(r#"[{"keys":["ctrl+k","ctrl+x"],"command":"original"}]"#)
+        .unwrap();
+    let mut first = original.clone();
+    let mut second = original.clone();
+    assert_eq!(
+        first.resolve(&Key::parse("ctrl+k").unwrap(), &context),
+        Resolution::Pending
+    );
+    assert_eq!(
+        second.resolve(&Key::parse("ctrl+x").unwrap(), &context),
+        Resolution::Unbound
+    );
+    second
+        .append(r#"[{"keys":["ctrl+k","ctrl+x"],"command":"override"}]"#)
+        .unwrap();
+    let resolve = |map: &mut Keymap| {
+        assert_eq!(
+            map.resolve(&Key::parse("ctrl+k").unwrap(), &context),
+            Resolution::Pending
+        );
+        match map.resolve(&Key::parse("ctrl+x").unwrap(), &context) {
+            Resolution::Command(i) => i.command,
+            other => panic!("{other:?}"),
+        }
+    };
+    match first.resolve(&Key::parse("ctrl+x").unwrap(), &context) {
+        Resolution::Command(i) => assert_eq!(i.command, "original"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(resolve(&mut original), "original");
+    assert_eq!(resolve(&mut first), "original");
+    assert_eq!(resolve(&mut second), "override");
+}

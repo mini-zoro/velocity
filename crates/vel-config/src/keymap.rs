@@ -2,7 +2,7 @@
 use crate::{Value, json::Document, settings::Settings};
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// A normalized chord, including modifier-only taps and named/keypad keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -273,10 +273,12 @@ struct Node {
     candidates: Vec<usize>,
 }
 /// Trie lookup only visits bindings sharing this prefix. Later appended entries win.
+/// Clones share immutable tables and keep independent pending chords. Appending a resource
+/// copies shared tables before mutation, so other views retain their existing bindings.
 #[derive(Clone, Default, Debug)]
 pub struct Keymap {
-    bindings: Vec<Binding>,
-    nodes: Vec<Node>,
+    bindings: Arc<Vec<Binding>>,
+    nodes: Arc<Vec<Node>>,
     pending: usize,
 }
 impl Keymap {
@@ -335,25 +337,27 @@ impl Keymap {
                 })
             })
             .collect::<Result<_, String>>()?;
-        if self.nodes.is_empty() {
-            self.nodes.push(Node::default());
+        let bindings = Arc::make_mut(&mut self.bindings);
+        let nodes = Arc::make_mut(&mut self.nodes);
+        if nodes.is_empty() {
+            nodes.push(Node::default());
         }
         for binding in parsed {
-            let index = self.bindings.len();
+            let index = bindings.len();
             let mut node = 0;
             for key in &binding.keys {
-                let next = if let Some(next) = self.nodes[node].children.get(key) {
+                let next = if let Some(next) = nodes[node].children.get(key) {
                     *next
                 } else {
-                    let next = self.nodes.len();
-                    self.nodes.push(Node::default());
-                    self.nodes[node].children.insert(key.clone(), next);
+                    let next = nodes.len();
+                    nodes.push(Node::default());
+                    nodes[node].children.insert(key.clone(), next);
                     next
                 };
                 node = next;
-                self.nodes[node].candidates.push(index);
+                nodes[node].candidates.push(index);
             }
-            self.bindings.push(binding);
+            bindings.push(binding);
         }
         self.pending = 0;
         Ok(())

@@ -49,3 +49,7 @@ Parsed `Keymap` values are cloneable so fresh session placeholders reuse compile
 tries. Each clone retains its own pending chord state; the application's cached template starts
 at the root. Application-wide Hot Exit/remember/open-window settings bypass project/syntax/view
 layers in the workbench adapter. Malformed optional user resources become startup diagnostics.
+
+Keymap clones share immutable binding and prefix-trie tables; each view keeps its own pending
+chord. Appending an override copies shared tables before changing them. This keeps large Hot
+Exit restores from rebuilding the same tables for every sheet.

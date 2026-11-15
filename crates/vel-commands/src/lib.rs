@@ -58,6 +58,16 @@ pub struct Registry {
     last: Option<(String, Value)>,
 }
 const TEXT: &[&str] = &[
+    "next_modification",
+    "prev_modification",
+    "toggle_inline_diff",
+    "revert_hunk",
+    "revert_modification",
+    "next_misspelling",
+    "prev_misspelling",
+    "add_word",
+    "ignore_word",
+    "replace_misspelling",
     "auto_complete",
     "hide_auto_complete",
     "commit_completion",
@@ -114,6 +124,13 @@ const TEXT: &[&str] = &[
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
+    "show_dictionary",
+    "set_dictionary",
+    "git_open_repository",
+    "git_file_history",
+    "git_folder_history",
+    "git_line_history",
+    "git_blame_file",
     "goto_symbol_in_project",
     "goto_definition",
     "goto_reference",

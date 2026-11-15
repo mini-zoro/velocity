@@ -66,6 +66,10 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    pub review: crate::review_ui::ReviewUi,
+    git_tree_key: Vec<(PathBuf, u64)>,
+    git_tree_dirty: bool,
+    git_virtual: BTreeSet<PathBuf>,
     pub intel: crate::intelligence::Intelligence,
     locations: Vec<vel_index::SymbolLocation>,
     navigation_origin: Option<crate::intelligence::Jump>,
@@ -164,6 +168,10 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            review: Default::default(),
+            git_tree_key: Vec::new(),
+            git_tree_dirty: false,
+            git_virtual: BTreeSet::new(),
             intel: Default::default(),
             locations: Vec::new(),
             navigation_origin: None,
@@ -443,7 +451,10 @@ impl Panels {
         Ok(())
     }
     fn load_directory(&mut self, workspace: &Workspace, path: &Path) {
-        if self.children.contains_key(path) || !self.loading.insert(path.into()) {
+        self.request_directory(workspace, path, false);
+    }
+    fn request_directory(&mut self, workspace: &Workspace, path: &Path, refresh: bool) {
+        if (!refresh && self.children.contains_key(path)) || !self.loading.insert(path.into()) {
             return;
         }
         let Some(folder) = workspace
@@ -457,7 +468,7 @@ impl Panels {
         let path = path.to_owned();
         let tx = self.directory_tx.clone();
         std::thread::spawn(move || {
-            let children = folder.children(&path);
+            let children = sidebar_children(&folder, &path);
             let _ = tx.send((path, children));
         });
     }
@@ -584,7 +595,8 @@ impl Panels {
         self.input_changed(workspace, viewport);
     }
     pub fn busy(&self) -> bool {
-        self.overlay.is_some()
+        self.review_busy()
+            || self.overlay.is_some()
             || self.intel.busy()
             || (!self.hover_term.is_empty() && !self.hover_requested)
             || self.file_task.is_some()
@@ -757,6 +769,9 @@ impl Panels {
         args: &Value,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if self.review_action(workspace, name, args)? {
+            return Ok(true);
+        }
         match name {
             "goto_symbol_in_project" => {
                 self.action(workspace, "show_overlay", &json!({}), viewport)?;
@@ -1590,6 +1605,9 @@ impl Panels {
         key: &Key,
         viewport: Range<usize>,
     ) -> Result<(bool, Option<Invocation>), String> {
+        if let Some(invocation) = self.review_key(key) {
+            return Ok((true, invocation));
+        }
         if !self.captured() {
             return Ok((false, None));
         }
@@ -1900,7 +1918,9 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
-        let intelligence_changed = self.intel.poll(workspace);
+        let intelligence_changed = self.intel.poll(workspace)
+            | self.review_poll(workspace)
+            | self.merge_git_tree(workspace);
         if self.intel.busy()
             && self.locations.is_empty()
             && self.overlay == Some(Overlay::ProjectSymbols)
@@ -2012,6 +2032,9 @@ impl Panels {
             self.loading.remove(&path);
             match children {
                 Ok(children) => {
+                    self.git_tree_dirty = true;
+                    self.git_virtual
+                        .retain(|p| p.parent() != Some(path.as_path()));
                     self.children.insert(path, children);
                 }
                 Err(error) => self.message = error,
@@ -2588,8 +2611,36 @@ impl Panels {
                     18.,
                     y + 18.,
                     clip,
-                    [0.8, 0.83, 0.88, 1.],
+                    [
+                        0.8,
+                        0.83,
+                        0.88,
+                        if tab
+                            .path
+                            .as_deref()
+                            .and_then(|p| workspace.git.badge(p, false))
+                            == Some(vel_git::Badge::Ignored)
+                        {
+                            0.4
+                        } else {
+                            1.
+                        },
+                    ],
                 );
+                if let Some(badge) = tab
+                    .path
+                    .as_deref()
+                    .and_then(|p| workspace.git.badge(p, false))
+                {
+                    label(
+                        &mut layer,
+                        crate::git_ui::badge_text(badge).0,
+                        clip.width - 28.,
+                        y + 18.,
+                        clip,
+                        [0.75, 0.82, 0.6, 1.],
+                    );
+                }
                 y += 24.;
             }
             label(
@@ -2646,8 +2697,29 @@ impl Panels {
                         10. + row.depth as f64 * 14.,
                         y + 18.,
                         clip,
-                        [0.8, 0.83, 0.88, 1.],
+                        [
+                            0.8,
+                            0.83,
+                            0.88,
+                            if workspace.git.badge(&row.path, row.directory)
+                                == Some(vel_git::Badge::Ignored)
+                            {
+                                0.4
+                            } else {
+                                1.
+                            },
+                        ],
                     );
+                    if let Some(badge) = workspace.git.badge(&row.path, row.directory) {
+                        label(
+                            &mut layer,
+                            crate::git_ui::badge_text(badge).0,
+                            clip.width - 28.,
+                            y + 18.,
+                            clip,
+                            [0.75, 0.82, 0.6, 1.],
+                        );
+                    }
                 }
                 y += 24.;
             }
@@ -2893,11 +2965,39 @@ impl Panels {
                 10.,
                 status.y + 17.,
                 Rect {
-                    width: (self.size.width - 180.).max(0.),
+                    width: (self.size.width
+                        - if workspace.tabs[workspace.active]
+                            .path
+                            .as_deref()
+                            .and_then(|p| workspace.git.status(p))
+                            .is_some()
+                            && editor.settings.bool("show_git_status_in_status_bar", true)
+                        {
+                            480.
+                        } else {
+                            180.
+                        })
+                    .max(0.),
                     ..status
                 },
                 [0.77, 0.83, 0.9, 1.],
             );
+            if editor.settings.bool("show_git_status_in_status_bar", true)
+                && let Some(text) = tab.path.as_deref().and_then(|p| workspace.git.status(p))
+            {
+                label(
+                    &mut layer,
+                    text,
+                    (self.size.width - 475.).max(10.),
+                    status.y + 17.,
+                    Rect {
+                        x: (self.size.width - 480.).max(0.),
+                        width: 300.,
+                        ..status
+                    },
+                    [0.75, 0.84, 0.93, 1.],
+                );
+            }
             if let Some(percent) = self.intel.percentage {
                 label(
                     &mut layer,
@@ -3010,6 +3110,7 @@ impl Panels {
             );
             scene.layers.push(overlay);
         }
+        self.review_paint(self.size, scene);
     }
     pub fn mouse(
         &mut self,
@@ -3020,7 +3121,32 @@ impl Panels {
         extend: bool,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if let Some(invocation) = self.review_mouse(point, down) {
+            self.pending_command = invocation;
+            return Ok(true);
+        }
         self.tree.pointer(point, Some(down));
+        if down
+            && self.overlay.is_none()
+            && self.chrome
+            && point.y >= self.size.height - STATUS
+            && point.x >= (self.size.width - 480.).max(0.)
+            && point.x < self.size.width - 180.
+            && workspace
+                .editor()
+                .settings
+                .bool("show_git_status_in_status_bar", true)
+        {
+            if let Some(path) = &workspace.tabs[workspace.active].path {
+                let items = self.git_items(workspace, path, false);
+                if !items.is_empty() {
+                    self.review.items = items;
+                    self.review.point = point;
+                    self.review.selected = 0;
+                }
+            }
+            return Ok(true);
+        }
         if down
             && self.overlay.is_none()
             && self.chrome
@@ -3628,5 +3754,123 @@ mod intelligence_tests {
         assert!(p.intel.projects.is_empty());
         assert!(status.lock().unwrap().indices.is_empty());
         assert!(!status.lock().unwrap().loading);
+    }
+}
+
+impl Panels {
+    pub fn review_side_path(&self, workspace: &Workspace, point: Point) -> Option<(PathBuf, bool)> {
+        if !self.side_visible || !contains(self.side_bounds, point) {
+            return None;
+        }
+        let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / 24.) as usize;
+        if row > 0 && row <= workspace.tabs.len() {
+            return workspace.tabs[row - 1].path.clone().map(|p| (p, false));
+        }
+        row.checked_sub(workspace.tabs.len() + 2)
+            .and_then(|i| self.side_rows.get(i))
+            .map(|r| (r.path.clone(), r.directory))
+    }
+    pub fn review_hover(&mut self, workspace: &Workspace, point: Point) {
+        if !self.review.items.is_empty() && contains(self.review.bounds, point) {
+            self.review.selected = (((point.y - self.review.bounds.y - 4.).max(0.) / 26.) as usize)
+                .min(self.review.items.len() - 1);
+            self.review.tooltip = None;
+            return;
+        }
+        let text = if self.side_visible && point.x >= self.side_bounds.width - 32. {
+            self.review_side_path(workspace, point)
+                .and_then(|(path, folder)| workspace.git.badge(&path, folder))
+                .map(|b| crate::git_ui::badge_text(b).1.to_owned())
+        } else {
+            None
+        };
+        if self.review.tooltip.as_ref().map(|(t, _, _)| t) != text.as_ref() {
+            self.review.tooltip = text.map(|t| (t, point, Instant::now()));
+        }
+    }
+}
+
+fn sidebar_children(folder: &Folder, path: &Path) -> Result<Vec<Entry>, String> {
+    // The sidebar shows ignored entries dimmed; search/index walkers retain ignore filtering.
+    let mut walker = folder.walker(path, Some(1), false);
+    walker
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false);
+    let mut entries = Vec::new();
+    for result in walker.build() {
+        let entry = result.map_err(|e| e.to_string())?;
+        if entry.depth() > 0 {
+            entries.push(Entry {
+                path: entry.path().into(),
+                directory: entry.file_type().is_some_and(|t| t.is_dir()),
+            });
+        }
+    }
+    entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
+    Ok(entries)
+}
+impl Panels {
+    fn merge_git_tree(&mut self, workspace: &Workspace) -> bool {
+        let key: Vec<_> = workspace
+            .git
+            .snapshots
+            .values()
+            .map(|s| (s.root.clone(), s.generation))
+            .collect();
+        if key == self.git_tree_key && !self.git_tree_dirty {
+            return false;
+        }
+        let refresh = key != self.git_tree_key;
+        self.git_tree_key = key;
+        self.git_tree_dirty = false;
+        if refresh {
+            let parents: Vec<_> = self.children.keys().cloned().collect();
+            for parent in parents {
+                self.request_directory(workspace, &parent, true);
+            }
+        }
+        for children in self.children.values_mut() {
+            children.retain(|e| !self.git_virtual.contains(&e.path));
+        }
+        self.git_virtual.clear();
+        for (parent, children) in &mut self.children {
+            let Some(folder) = workspace
+                .folders
+                .iter()
+                .find(|f| parent.starts_with(&f.path))
+            else {
+                continue;
+            };
+            for snapshot in workspace.git.snapshots.values() {
+                for (relative, status) in &snapshot.files {
+                    if !status.statuses.iter().any(|b| {
+                        matches!(b, vel_git::Badge::Missing | vel_git::Badge::StagedDeletion)
+                    }) {
+                        continue;
+                    }
+                    let path = snapshot.root.join(relative);
+                    let Ok(tail) = path.strip_prefix(parent) else {
+                        continue;
+                    };
+                    let mut parts = tail.components();
+                    let Some(first) = parts.next() else {
+                        continue;
+                    };
+                    let path = parent.join(first);
+                    let directory = parts.next().is_some();
+                    if folder.rules.allows(&folder.path, &path, directory, false)
+                        && !children.iter().any(|e| e.path == path)
+                    {
+                        self.git_virtual.insert(path.clone());
+                        children.push(Entry { path, directory });
+                    }
+                }
+            }
+            children.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
+        }
+        self.rebuild_side(workspace);
+        true
     }
 }

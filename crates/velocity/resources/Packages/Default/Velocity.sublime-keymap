@@ -1,4 +1,4 @@
-// Velocity key bindings, authored from scratch.
+// Velocity resources, authored from public behavior documentation.
 [
   {
     "keys": [
@@ -1516,5 +1516,62 @@
         "operand": true
       }
     ]
+  },
+  {
+    "keys": [
+      "ctrl+."
+    ],
+    "command": "next_modification"
+  },
+  {
+    "keys": [
+      "ctrl+,"
+    ],
+    "command": "prev_modification"
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+/"
+    ],
+    "command": "toggle_inline_diff"
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+;"
+    ],
+    "command": "toggle_inline_diff",
+    "args": {
+      "show_only": true
+    }
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+z"
+    ],
+    "command": "revert_hunk"
+  },
+  {
+    "keys": [
+      "f6"
+    ],
+    "command": "toggle_setting",
+    "args": {
+      "setting": "spell_check"
+    }
+  },
+  {
+    "keys": [
+      "ctrl+f6"
+    ],
+    "command": "next_misspelling"
+  },
+  {
+    "keys": [
+      "ctrl+shift+f6"
+    ],
+    "command": "prev_misspelling"
   }
 ]

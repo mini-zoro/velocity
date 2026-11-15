@@ -1,5 +1,9 @@
 # Native AppKit NSTextInputClient manual checklist (P1)
 
+Round-nine tester status: **Chinese IME confirmed working by the human tester**. Hot Exit is
+currently under human test. The individual legacy rows below retain their original evidence
+cells; Japanese/reconversion/display-specific cases are not marked passed by that confirmation.
+
 Adapted from the repository’s MIT OR Apache-2.0 P0 checklist. Hardware results are pending.
 
 Run outside the sandbox:
@@ -173,7 +177,7 @@ actual scale/size/refresh and any failure; these rows have not been executed in 
 | IME in lower/right group, scroll inactive selected sheet, return focus | Candidate anchor, hit testing, selection and view-local scroll use correct offsets | |
 | Cmd+Shift+N; close one window; CLI -n/-a/-w and stdin | One application, independent windows; wait ends when requested sheets close | |
 | Full screen; distraction-free from normal and already-full-screen; customize its settings | Chrome/settings restore correctly and sidebar visibility is remembered per mode | |
-| Quit/relaunch dirty/untitled text, redo, folds, syntax, sidebar and search state | Retained state restored, hidden clean tabs lazy; known private-history limits documented | |
+| Quit/relaunch dirty/untitled text, redo, folds, syntax, sidebar and search state | Retained state restored, hidden clean tabs lazy; round-nine native history removes the former private-history limitation | |
 | Hot Exit always / only_on_quit / disabled; remember_open_files false | Close/quit/crash policies follow RUNBOOK; disabled never silently discards dirty project docs | |
 | Edit a dirty document on disk while quit, then restore | Buffer text retained as dirty, restored undo history dropped | |
 | Open/Save As/Close/Edit/Quick Switch Project; nested fresh destination | Folder rules, inline builds and unknown keys preserved; workspace tied to project | |
@@ -225,3 +229,29 @@ Run the exact commands in RUNBOOK.md. Do not run GUI/Metal in the sandbox.
   separate `--intel-words 0` run for the real ten-file memory target and retain the default
   100k-word stress footprint separately. Compare
   p50/p95 typing to 2/4 ms and definition jumps to 20 ms; retain scanout and submit separately.
+
+
+## Round 9 — full Hot Exit and review UI (human verification pending)
+
+Use the exact disposable-profile commands at the top of RUNBOOK.md. Chinese IME confirmation
+remains accepted; repeat one composition only to check the new Hot Exit boundary. Record native
+results/log references here; headless tests do not check these boxes.
+
+- [ ] **First priority — full history:** type two words, move/select text, soft undo/redo, text undo once, quit and relaunch. Continue Cmd+U/Cmd+Shift+U and Cmd+Z/Cmd+Shift+Z: text, selection direction/primary, groups, redo cursor and saved-state dirty indicator match the uninterrupted session.
+- [ ] Quit halfway through typing a word, relaunch and finish it without moving the caret; one Undo removes the same typing group. Repeat after an actual save: undo/redo must return to the clean saved point.
+- [ ] Clone a file into two groups; alternate text edits and selection-only moves, close one historical editing view, quit/relaunch, then undo/redo from the remaining view. Each edit retains its owner; clones retain independent selections/scroll and share text undo.
+- [ ] Keep one clone hidden, quit/relaunch, activate it, save another session and relaunch again. No extra selection events appear in soft undo; clean hidden documents remain lazy.
+- [ ] Change a dirty file externally while quit. Relaunch retains unsaved contents as dirty and drops text/soft history. For a changed clean file, load current disk contents and drop history. Missing/read-only/corrupt profiles still recover as documented.
+- [ ] Commit one Chinese IME composition, soft-select elsewhere and quit/relaunch. The composition remains a single undoable edit; no transient preedit returns.
+- [ ] In the fixture sidebar, inspect `? M ! A+ M+ D+ U!`; missing and staged-deleted paths are visible. Folder badge priority ends at Unmerged; ignored files/folders are dimmed. Hover badge areas for status tooltips, including the Open Files section.
+- [ ] Check branch name and `? / M / S / !` counts against the fixture. Turn `show_git_status_in_status_bar` off; turn `show_git_status` off/on. Set an invalid `git_binary`: behavior continues through gix.
+- [ ] With `sublime_merge_path` empty, clicking branch status does nothing. Configure a real smerge-compatible executable; branch/context actions open repository, file/folder history, line history and blame for the intended path. Index bytes remain unchanged by Velocity status/diff reads.
+- [ ] Add/modify/delete lines, including a deletion at EOF without a final newline. Inspect color-scheme `line_diff_*` markers; Ctrl+. / Ctrl+, navigate with wrap. Test `mini_diff` true/false/"auto" both inside and outside the repository.
+- [ ] Switch `git_diff_target` between index/head; stage/save/change the file externally. Markers and revert sources update to the selected reference. A non-repository save resets its saved-file reference.
+- [ ] Cmd+K Cmd+/ and right-click Show/Hide Diff Hunk display original lines **beneath** current content, with changed scalar shading. Cmd+K Cmd+; shows only this hunk. Scroll, resize, wrap, move Up/Down across the read-only original rows and click below them; caret and IME candidate geometry stay aligned. An edit hides old expansions.
+- [ ] Cmd+K Cmd+Z, Revert Modification and context Revert Diff Hunk restore exactly one hunk; Undo restores the edit. Repeat after grouped undo/redo; no stale hunk reverts another version.
+- [ ] F6 toggles squiggles; with selector `comment, string`, comments/strings are checked and code identifiers are not. Change `misspelling` in the scheme. Scroll through long documents and two clone viewports: checks follow only visible exact scopes without an idle redraw loop.
+- [ ] Ctrl+F6 / Ctrl+Shift+F6 select/reveal misspellings beyond the viewport and wrap. Move the caret or edit while a navigation request is pending; the old request must not jump later.
+- [ ] Right-click a misspelling; accept a suggestion, Undo, Add to Dictionary and Ignore Word. Suggestions are version checked, Escape dismisses the menu, and words survive relaunch. Existing User preference comments/keys survive.
+- [ ] View → Dictionary lists English and `Packages/User/review.dic`; select the custom dictionary. Test a syntax-specific `spell_check` setting, invalid dictionaries and a package-traversal path; no incorrect underlines or crash.
+- [ ] Run automatic native on/off typing, 4K typing, full-history restore and Metal validation commands. Retain complete JSONL and assess ≤5% typing regression, 2/4 ms absolute typing and ≤300 ms native first-window targets separately from CPU results.

@@ -85,6 +85,7 @@ pub struct Layout {
     heights: Heights,
     folds: Vec<Region>,
     count: usize,
+    inline: Vec<(usize, usize)>,
     pub rewrapped: usize,
     pub page: usize,
 }
@@ -184,6 +185,7 @@ impl Layout {
             return;
         }
         self.identity = Some(identity);
+        self.inline.clear();
         self.folds = self
             .folds
             .iter()
@@ -313,7 +315,67 @@ impl Layout {
             hidden,
         }
     }
+    /// Inserts read-only original lines before physical row boundaries.
+    pub fn set_inline(&mut self, mut blocks: Vec<(usize, usize)>) {
+        blocks.sort_unstable();
+        self.inline = blocks;
+    }
+    fn raw_before(&self, row: usize) -> usize {
+        if self.lines.is_empty() {
+            row.min(self.count)
+        } else {
+            self.heights.before(row.min(self.count))
+        }
+    }
+    pub fn inline_at(&self, visual: usize) -> Option<(usize, usize)> {
+        let mut shift = 0;
+        for &(row, count) in &self.inline {
+            let start = self.raw_before(row) + shift;
+            if visual < start {
+                break;
+            }
+            if visual < start + count {
+                return Some((row, visual - start));
+            }
+            shift += count;
+        }
+        None
+    }
+    /// Skips read-only original rows during vertical caret movement.
+    pub fn editable_visual(&self, visual: usize, forward: bool) -> usize {
+        let mut target = visual.min(self.total().saturating_sub(1));
+        for _ in 0..=self.inline.len() {
+            let mut shift = 0;
+            let mut found = None;
+            for &(row, count) in &self.inline {
+                let start = self.raw_before(row) + shift;
+                if (start..start + count).contains(&target) {
+                    found = Some(start..start + count);
+                    break;
+                }
+                shift += count;
+            }
+            let Some(block) = found else {
+                return target;
+            };
+            target = if forward {
+                if block.end < self.total() {
+                    block.end
+                } else {
+                    block.start.saturating_sub(1)
+                }
+            } else if block.start > 0 {
+                block.start - 1
+            } else {
+                block.end.min(self.total().saturating_sub(1))
+            };
+        }
+        target
+    }
     pub fn total(&self) -> usize {
+        self.raw_total() + self.inline.iter().map(|(_, n)| n).sum::<usize>()
+    }
+    fn raw_total(&self) -> usize {
         if self.lines.is_empty() {
             self.count
         } else {
@@ -322,6 +384,21 @@ impl Layout {
     }
     pub fn locate(&self, visual: usize) -> (usize, usize) {
         let visual = visual.min(self.total().saturating_sub(1));
+        let mut shift = 0;
+        let mut raw = visual;
+        for &(row, count) in &self.inline {
+            let start = self.raw_before(row) + shift;
+            if visual < start {
+                break;
+            }
+            if visual < start + count {
+                raw = self.raw_before(row).saturating_sub(1);
+                break;
+            }
+            shift += count;
+            raw = visual - shift;
+        }
+        let visual = raw.min(self.raw_total().saturating_sub(1));
         if self.lines.is_empty() {
             (visual, 0)
         } else {
@@ -371,7 +448,13 @@ impl Layout {
                 .partition_point(|s| s.bytes.end <= col)
                 .min(self.lines[row].segments.len().saturating_sub(1))
         };
-        (before + segment, self.segment(text, row, segment))
+        let shift: usize = self
+            .inline
+            .iter()
+            .filter(|(boundary, _)| *boundary <= row)
+            .map(|(_, n)| n)
+            .sum();
+        (before + segment + shift, self.segment(text, row, segment))
     }
     pub fn column(&self, text: &Text, byte: usize) -> usize {
         let byte = self

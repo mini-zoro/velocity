@@ -191,6 +191,20 @@ impl View {
             },
             &e.folded(),
         );
+        let annotations = e.annotations.borrow();
+        let blocks = annotations
+            .current
+            .as_ref()
+            .filter(|p| p.identity.1.0 == e.revision)
+            .map(|p| {
+                p.hunks
+                    .iter()
+                    .filter(|h| annotations.inline.contains(&h.new.start))
+                    .map(|h| (h.new.end, h.old.len().max(1)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        e.layout.borrow_mut().set_inline(blocks);
         e.layout.borrow_mut().page = self.rows();
         if wrap && wrap_width <= width {
             self.scroll_x = 0.;
@@ -256,6 +270,12 @@ impl View {
         let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
             .floor()
             .max(0.) as usize;
+        if let Some((boundary, _)) = e.layout.borrow().inline_at(row)
+            && let Some(publication) = e.annotations.borrow().current.as_ref()
+            && let Some(hunk) = publication.hunks.iter().find(|h| h.new.end == boundary)
+        {
+            return crate::annotation_commands::line_byte(&e.text, hunk.new.start);
+        }
         let col = ((p.x - self.gutter(e) - self.margin(e) + self.scroll_x) / self.cell).max(0.);
         e.layout.borrow().offset(&e.text, row, col)
     }
@@ -386,6 +406,10 @@ impl View {
         Ok(false)
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
+        if !e.shared_shadow {
+            e.annotations.borrow_mut().sync(&e.buffer, &e.settings);
+        }
+        e.annotations.borrow_mut().poll();
         self.apply_style(e);
         let first = (self.scroll_y / self.line_height).floor().max(0.) as usize;
         let last = (first + self.rows() + 2).min(e.layout.borrow().total());
@@ -405,7 +429,18 @@ impl View {
             drop(layout);
             if let Some(l) = e.language.borrow_mut().as_mut() {
                 l.poll();
-                l.request_view(e.id, ranges);
+                l.request_view(e.id, ranges.clone());
+                if !ranges.is_empty() {
+                    let visible = ranges.first().unwrap().start..ranges.last().unwrap().end;
+                    let first = e.text.line_to_byte(visible.start);
+                    if let Some(scopes) = l.scope_snapshot_at(first) {
+                        let lines = visible.start.max(scopes.range.start)
+                            ..visible.end.min(scopes.range.end);
+                        e.annotations
+                            .borrow_mut()
+                            .check(e.annotation_view, scopes, lines);
+                    }
+                }
             }
         }
         let language = e.language.borrow();
@@ -484,7 +519,83 @@ impl View {
             .and_then(vel_config::Value::as_array);
         let no_bold = font_options.is_some_and(|a| a.iter().any(|s| s == "no_bold"));
         let no_italic = font_options.is_some_and(|a| a.iter().any(|s| s == "no_italic"));
+        let annotations = e.annotations.borrow();
+        let publication = annotations
+            .current
+            .as_ref()
+            .filter(|p| p.identity.1.0 == e.revision && e.marked.is_none());
         for visual in first..last {
+            if let Some((boundary, offset)) = layout.inline_at(visual) {
+                if let Some(p) = publication
+                    && let Some(hunk) = p.hunks.iter().find(|h| {
+                        h.new.end == boundary && annotations.inline.contains(&h.new.start)
+                    })
+                {
+                    let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
+                    let mut bg = global("line_diff_deleted");
+                    bg[3] = 0.15;
+                    fill(
+                        &mut layer,
+                        Rect {
+                            x: gutter,
+                            y,
+                            width: clip.width,
+                            height: self.line_height,
+                        },
+                        clip,
+                        bg,
+                    );
+                    let original = if hunk.old.is_empty() {
+                        "(added lines)".into()
+                    } else {
+                        p.reference.line(hunk.old.start + offset).to_string()
+                    };
+                    if let Some(changes) = p.inline_spans.get(&hunk.new.start) {
+                        let row = hunk.old.start + offset;
+                        if row < p.reference.len_lines() {
+                            let start = p.reference.line_to_byte(row);
+                            let end = start + original.trim_end_matches('\n').len();
+                            for change in changes
+                                .iter()
+                                .filter(|c| c.old.start < end && c.old.end > start)
+                            {
+                                let a = crate::editor::cells_with_tab(
+                                    &original[..change.old.start.max(start) - start],
+                                    e.preferences.tab_size,
+                                );
+                                let b = crate::editor::cells_with_tab(
+                                    &original[..change.old.end.min(end) - start],
+                                    e.preferences.tab_size,
+                                );
+                                let mut color = global("line_diff_deleted");
+                                color[3] = 0.35;
+                                fill(
+                                    &mut layer,
+                                    Rect {
+                                        x: left + (a + 2) as f64 * self.cell - self.scroll_x,
+                                        y,
+                                        width: b.saturating_sub(a) as f64 * self.cell,
+                                        height: self.line_height,
+                                    },
+                                    clip,
+                                    color,
+                                );
+                            }
+                        }
+                    }
+                    text_run(
+                        &mut layer,
+                        &format!("− {}", original.trim_end_matches('\n')),
+                        left - self.scroll_x,
+                        y + self.ascent + 3.,
+                        e.preferences.font_size,
+                        global("line_diff_deleted"),
+                        FontStyle::default(),
+                        clip,
+                    );
+                }
+                continue;
+            }
             let (row, subrow) = layout.locate(visual);
             let segment = layout.segment(&e.text, row, subrow);
             let line = e.text.line(row).to_string();
@@ -505,6 +616,43 @@ impl View {
                 );
             }
             if subrow == 0 && e.preferences.gutter {
+                if let Some(p) = publication {
+                    let at = p
+                        .hunks
+                        .partition_point(|h| h.new.end.max(h.new.start + 1) <= row);
+                    if let Some(h) = p.hunks.get(at).filter(|h| {
+                        h.new.start.min(e.text.len_lines() - 1) <= row
+                            && row
+                                < h.new
+                                    .end
+                                    .max(h.new.start + 1)
+                                    .max(e.text.len_lines().min(h.new.start + 1))
+                    }) {
+                        let name = match h.kind() {
+                            vel_diff::HunkKind::Added => "line_diff_added",
+                            vel_diff::HunkKind::Modified => "line_diff_modified",
+                            vel_diff::HunkKind::Deleted => "line_diff_deleted",
+                        };
+                        let width = scheme
+                            .globals
+                            .value("line_diff_width")
+                            .and_then(vel_config::Value::as_f64)
+                            .unwrap_or(3.)
+                            .clamp(1., 8.);
+                        let deleted = h.kind() == vel_diff::HunkKind::Deleted;
+                        fill(
+                            &mut layer,
+                            Rect {
+                                x: gutter - width,
+                                y: if deleted { y - 1. } else { y },
+                                width: if deleted { width + 4. } else { width },
+                                height: if deleted { 2. } else { self.line_height },
+                            },
+                            all,
+                            global(name),
+                        );
+                    }
+                }
                 if e.preferences.line_numbers {
                     let number =
                         if e.settings.bool("relative_line_numbers", false) && row != caret_row {
@@ -555,6 +703,75 @@ impl View {
                 }
             }
             let display = self.line_units(&line, layout.hidden(row), e.preferences.tab_size);
+            let column_at = |byte: usize| {
+                segment.indent
+                    + display
+                        .iter()
+                        .filter(|u| {
+                            u.bytes.start >= segment.bytes.start && u.bytes.end <= byte - start
+                        })
+                        .map(|u| u.width)
+                        .sum::<usize>()
+            };
+            if let Some(p) = publication {
+                for (&hunk, changes) in &p.inline_spans {
+                    if !annotations.inline.contains(&hunk) {
+                        continue;
+                    }
+                    let begin = start + segment.bytes.start;
+                    let end = start + segment.bytes.end;
+                    for change in changes
+                        .iter()
+                        .filter(|c| c.new.start < end && c.new.end > begin)
+                    {
+                        let a = column_at(change.new.start.max(begin));
+                        let b = column_at(change.new.end.min(end));
+                        let mut color = global("line_diff_added");
+                        color[3] = 0.25;
+                        fill(
+                            &mut layer,
+                            Rect {
+                                x: left + a as f64 * self.cell - self.scroll_x,
+                                y,
+                                width: b.saturating_sub(a) as f64 * self.cell,
+                                height: self.line_height,
+                            },
+                            clip,
+                            color,
+                        );
+                    }
+                }
+            }
+            if let Some(p) = publication
+                && e.settings.bool("spell_check", false)
+                && p.checked.contains(&row)
+            {
+                let begin = start + segment.bytes.start;
+                let end = start + segment.bytes.end;
+                for error in p
+                    .spelling
+                    .iter()
+                    .filter(|m| m.range.start < end && m.range.end > begin)
+                {
+                    let a = column_at(error.range.start.max(begin));
+                    let b = column_at(error.range.end.min(end));
+                    let x = left + a as f64 * self.cell - self.scroll_x;
+                    let width = b.saturating_sub(a) as f64 * self.cell;
+                    layer.underlines.push(vel_render::scene::Underline {
+                        rect: Rect {
+                            x,
+                            y: y + self.line_height - 3.,
+                            width,
+                            height: 2.,
+                        },
+                        thickness: 1.,
+                        squiggle: true,
+                        stippled: false,
+                        color: global("misspelling"),
+                        clip,
+                    });
+                }
+            }
             let relevant: Vec<_> = display
                 .iter()
                 .filter(|u| {
@@ -829,10 +1046,13 @@ impl View {
         if e.completion.visible() {
             layers.push(popup);
         }
-        Scene {
+        let scene = Scene {
             background: rgba(default.background),
             layers,
-        }
+        };
+        drop(annotations);
+        e.annotations.borrow_mut().flush();
+        scene
     }
     #[allow(clippy::too_many_arguments)]
     fn flush(

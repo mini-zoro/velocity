@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 8. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 9. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -96,8 +96,7 @@ Full screen and distraction-free mode use the View menu; the latter loads its ow
 Sessions save on a debounced worker and flush on quit. Dirty/untitled text, normal command
 undo/redo, folds, selections, syntax overrides and window/project UI return on launch; hidden
 clean tabs load lazily. Missing, read-only and corrupt data directories have regression coverage.
-The undo adapter's exact fidelity limits and requested vel-buffer serialization API are in
-[vel-session](../vel-session/README.md); private soft history/edit-owner IDs are not serialized.
+Round 9 replaces that original adapter with [complete native history](../vel-session/README.md).
 
 Project Open/Save As/Close/Edit/Recent/Quick Switch and `.sublime-workspace` files are wired.
 `velocity -n/-a/-w`, `--project` and stdin use a local socket and a single native application;
@@ -136,3 +135,26 @@ undo history; field/popup sessions are transient and reconstructed by the next u
 cross-file definition jumps. `--bench-intelligence` is the automatic native counterpart with
 actual drawable scanout, submit timing and footprint. No GUI/Metal measurement was run in the
 sandbox. See RUNBOOK.md for reviewer commands and RESULTS.md for measured limits.
+
+
+Round 9 retains complete native text and soft-undo history across Hot Exit, including clone
+ownership, redo branches, saved points and a continued typing group. Existing profiles upgrade
+on save; clean files remain lazy. Git sidebar badges and branch/count status use background gix
+services. Ignored entries are dimmed; missing/staged-deleted paths remain visible. A configured
+`sublime_merge_path` enables repository/history/blame actions.
+
+Ctrl+. / Ctrl+, navigate modifications. Cmd+K Cmd+/ toggles original text beneath a hunk;
+Cmd+K Cmd+; shows only that hunk; Cmd+K Cmd+Z reverts it through normal undo. `mini_diff` accepts
+true/false/"auto", and `git_diff_target` selects index or HEAD. Non-repository files compare to
+the saved file. Diff markers use `line_diff_*`; inline scalar changes receive separate shading.
+
+F6 toggles per-view spelling, Ctrl+F6 / Ctrl+Shift+F6 navigate across the document. Only visible
+exact `spelling_selector` scopes receive `misspelling` squiggles. Right-click offers worker
+suggestions, Add to Dictionary and Ignore Word; additions/ignores persist in User settings.
+View → Dictionary lists the bundled English dictionary and installed Packages/*/*.dic pairs.
+Keep `resources/LICENSES` with application redistribution.
+
+`--headless-review-history` measures 50 dirty files with 100 native steps and two views each.
+`--review-ui on|off` enables the disposable Git/diff/spelling fixture in both automatic
+intelligence modes. See the round-nine RUNBOOK section for exact CPU/native commands and
+MANUAL_TEST for the tester's pending Hot Exit and UI cases.

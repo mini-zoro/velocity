@@ -13,6 +13,7 @@ pub enum Mode {
     Headless,
     HeadlessFeatures,
     HeadlessWorkbench,
+    HeadlessReviewHistory,
     HeadlessParse,
     HeadlessIntelligence,
     Intelligence,
@@ -29,6 +30,7 @@ impl Mode {
             Self::Memory => "memory",
             Self::Headless => "headless",
             Self::HeadlessFeatures => "headless-view-features",
+            Self::HeadlessReviewHistory => "headless-review-history",
             Self::HeadlessWorkbench => "headless-workbench",
             Self::HeadlessParse => "headless-parse-memory",
             Self::HeadlessIntelligence => "headless-intelligence",
@@ -48,6 +50,7 @@ pub struct Options {
     pub add_to_window: bool,
     pub wait: bool,
     pub groups: usize,
+    pub review_ui: Option<bool>,
     pub intel_words: usize,
     pub restore_session: bool,
     pub width: u32,
@@ -71,6 +74,7 @@ impl Default for Options {
             add_to_window: false,
             wait: false,
             groups: 1,
+            review_ui: None,
             intel_words: 100_000,
             restore_session: false,
             width: 1200,
@@ -108,6 +112,7 @@ impl Options {
                 "--bench-memory" => Some(Mode::Memory),
                 "--headless-smoke" => Some(Mode::Headless),
                 "--headless-view-features" => Some(Mode::HeadlessFeatures),
+                "--headless-review-history" => Some(Mode::HeadlessReviewHistory),
                 "--headless-workbench" => Some(Mode::HeadlessWorkbench),
                 "--headless-parse-memory" => Some(Mode::HeadlessParse),
                 "--headless-intelligence" => Some(Mode::HeadlessIntelligence),
@@ -183,6 +188,13 @@ impl Options {
                         .ok_or("--lines needs a value")?
                         .parse()
                         .map_err(|_| "invalid --lines")?
+                }
+                "--review-ui" => {
+                    options.review_ui = Some(match args.next().as_deref() {
+                        Some("on") => true,
+                        Some("off") => false,
+                        _ => return Err("--review-ui needs on or off".into()),
+                    });
                 }
                 "--intel-words" => {
                     options.intel_words = args
@@ -276,7 +288,7 @@ impl FileLocation {
     }
 }
 
-pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
+pub const HELP: &str = "velocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --headless-review-history  50 dirty documents, native full-history save/restore; requires --data-dir\n  --review-ui on|off     Git/diff/spell A/B fixture for intelligence modes\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {

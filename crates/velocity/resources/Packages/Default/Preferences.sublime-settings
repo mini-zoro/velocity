@@ -1,4 +1,4 @@
-// Velocity defaults, authored from public behavior documentation.
+// Velocity resources, authored from public behavior documentation.
 {
   "tab_size": 4,
   "translate_tabs_to_spaces": false,
@@ -95,5 +95,15 @@
   "auto_complete_preserve_order": false,
   "auto_complete_include_snippets": true,
   "auto_complete_include_snippets_when_typing": false,
-  "auto_complete_triggers": []
+  "auto_complete_triggers": [],
+  "show_git_status": true,
+  "show_git_status_in_status_bar": true,
+  "git_diff_target": "index",
+  "mini_diff": true,
+  "spell_check": false,
+  "spelling_selector": "comment, string, text",
+  "dictionary": "Packages/Language - English/en_US.dic",
+  "added_words": [],
+  "ignored_words": [],
+  "sublime_merge_path": ""
 }

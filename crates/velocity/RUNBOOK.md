@@ -1,3 +1,112 @@
+# Round 9: Hot Exit history, Git, diff and spelling
+
+Run in `/Users/zoro/dev/velocity-lane-a`. This round touches only `velocity`, `vel-session`,
+`vel-commands`, `vel-config` and root Cargo.lock. No GUI/Metal is initialized by the CPU checks.
+
+```sh
+cd /Users/zoro/dev/velocity-lane-a
+cargo fmt -p velocity -p vel-session -p vel-commands -p vel-config --check
+cargo clippy -p velocity -p vel-session -p vel-commands -p vel-config --all-targets -- -D warnings
+cargo test -p velocity -p vel-session -p vel-commands -p vel-config --release
+RUSTDOCFLAGS='-D warnings' cargo doc -p velocity -p vel-session -p vel-commands -p vel-config --no-deps
+cargo build --release -p velocity
+VELOCITY_R9_CPU=$(mktemp -d /tmp/velocity-r9-cpu.XXXXXX)
+python3 crates/velocity/scripts/measure-review-ui.py --runs 10 --output-dir "$VELOCITY_R9_CPU/runs"
+```
+
+The runner copies one release executable, hashes the binary and sources, and reverses on/off
+order for ten independent process pairs. Each process measures 500 real keymap edits and CPU
+scenes with a completion popup, sidebar and status bar. Both variants use the same ten-file
+Git fixture and prose comments; only the three review features differ. Exact annotations and
+completion results are prepared before each key. The immediate post-key scene suppresses
+stale decorations until worker results arrive. Timers exclude asynchronous preparation,
+native fonts, uploads, GPU and scanout. The fixture explicitly separates its prepared prefix
+from measured undo groups. No compilation or other lane-A measurement runs during this series.
+All process medians and raw samples are retained, including outliers; bootstrap intervals
+resample processes. The regression gate is ≤5% median typing increase.
+
+Five additional processes each save 50 dirty files, 100 retained text steps and two views per
+file, including redo and soft history. Ten worker saves per process include native delta
+packing, JSON, validation, atomic write, file fsync and directory fsync. Export capture is
+reported separately. Save budget: ≤30 ms. First-window restore budget remains ≤300 ms; the
+CPU probe includes parsing/resources/native history import and leaves 99 sheets lazy. Actual
+first-window scanout remains a separate native check.
+
+Resource setup reads the public syntax corpus through a temporary file-symlink overlay
+(copy fallback), loads metadata concurrently, and retires the overlay on the cleanup worker.
+It never writes through source links. The content-validated syntax cache still detects grammar
+changes and keeps contexts lazy. Restore records expose staging/index/cleanup-dispatch/metadata
+phases; metadata overlaps the other phases, so those values must not be summed.
+
+Reviewer GUI commands — run outside the sandbox on an awake, unlocked, visible display:
+
+The complete matrix below is also runnable with
+`zsh crates/velocity/scripts/review-round9-gui.zsh` from this worktree. It creates a fresh
+temporary output/profile root, runs the automatic modes, then opens the manual fixture.
+
+```sh
+cd /Users/zoro/dev/velocity-lane-a
+cargo build --release -p velocity
+VELOCITY_R9_GUI=$(mktemp -d /tmp/velocity-r9-gui.XXXXXX)
+for run in 1 2 3 4 5; do
+  if [ $((run % 2)) -eq 1 ]; then modes=(off on); else modes=(on off); fi
+  for mode in "${modes[@]}"; do
+    ./target/release/velocity --bench-intelligence --review-ui "$mode" --intel-words 0 --width 1200 --height 800 --data-dir "$VELOCITY_R9_GUI/profile-$mode-$run" --output "$VELOCITY_R9_GUI/typing-$mode-$run.jsonl" --timeout 300
+  done
+done
+./target/release/velocity --bench-intelligence --review-ui on --intel-words 0 --width 2048 --height 1089 --data-dir "$VELOCITY_R9_GUI/4k-profile" --output "$VELOCITY_R9_GUI/typing-4k.jsonl" --timeout 300
+./target/release/velocity --headless-review-history --data-dir "$VELOCITY_R9_GUI/history-profile" --output "$VELOCITY_R9_GUI/history-cpu.jsonl" --timeout 300
+./target/release/velocity --bench-startup --restore-session --data-dir "$VELOCITY_R9_GUI/history-profile" --output "$VELOCITY_R9_GUI/restore.jsonl" --timeout 300
+MTL_DEBUG_LAYER=1 ./target/release/velocity --bench-startup --restore-session --data-dir "$VELOCITY_R9_GUI/history-profile" --output "$VELOCITY_R9_GUI/metal-validation.jsonl" --timeout 300
+python3 crates/velocity/scripts/prepare-review-fixture.py --output-dir "$VELOCITY_R9_GUI/repo" --profile "$VELOCITY_R9_GUI/manual-profile"
+./target/release/velocity -n --project "$VELOCITY_R9_GUI/repo/review.sublime-project" "$VELOCITY_R9_GUI/repo/main.rs:1:1" --data-dir "$VELOCITY_R9_GUI/manual-profile" --log-input
+```
+
+The automatic native mode exits after 500 matched positive presentedTime samples and 100
+definition jumps. Compare process medians on/off; retain injection→submit, injection→scanout
+and CPU command/scene timings separately. Native absolute typing targets remain p50/p95 ≤2/4 ms.
+Keep scanout omissions/failures and Metal validation output. Do not infer GUI latency from CPU
+results. The manual fixture commits/stages only inside its newly created disposable repository.
+It supplies every badge, ignored files, source/prose spelling, a custom dictionary and real
+working/index/HEAD differences. Set `sublime_merge_path` to an installed smerge-compatible
+executable to exercise tool actions; with the default empty string, branch clicks do nothing.
+
+Badge order, low to high: ignored (de-emphasis), untracked `?`, modified `M`, missing `!`, staged
+addition `A+`, staged modification `M+`, staged deletion `D+`, unmerged `U!`. Folders use the
+highest descendant status. Tooltip text names the status. Branch counts are `?` untracked,
+`M` modified/missing, `S` staged and `!` unmerged; staged/working layers can count the same file.
+`show_git_status` gates services/badges; `show_git_status_in_status_bar` gates branch status;
+`git_binary` is ignored. gix status/reference reads never execute Git or write the index.
+Only the fixture generator invokes Git in a temporary repository.
+
+`mini_diff` true/false/"auto" enables all/no/repository-only markers. References are index or
+HEAD via `git_diff_target`; non-repository files use decoded saved disk text. Each observed
+transaction retains its descriptor and matching post-edit snapshot. Direct edits pass that
+descriptor without scanning the retained change log; the worker is woken after CPU scene
+construction. Missing intermediate undo/redo
+roots reset both consumers. Commands never apply stale hunk or spelling ranges. Inline old
+lines take layout space and share caret/hit-testing/scroll coordinates; edits clear old hunk
+expansions. Color scheme `line_diff_width` (1–8), `line_diff_added`, `line_diff_modified`,
+`line_diff_deleted` and `misspelling` control decorations.
+
+F6 toggles `spell_check`; Ctrl+F6 / Ctrl+Shift+F6 select and reveal the next/previous scoped
+misspelling with wrap, including offscreen words. Dictionary parsing, suggestions and checks
+run on the annotation worker, sharing the highlighter's exact scopes. Clone viewports retain
+independent requests. `spelling_selector`, `dictionary`, `added_words` and `ignored_words` are
+settings; add/ignore actions preserve existing User preference comments and keys. Dictionary
+selection lists the bundled English resource and immediate Packages/*/*.dic+.aff pairs.
+Invalid/outside-package resources report errors and produce no incorrect diagnostics.
+Ship the dictionary/license/source notices in `resources/LICENSES` with redistribution.
+
+Hot Exit captures native history without observing every command. Keymaps share immutable binding/trie tables across sheets, while pending chords stay local;
+appending resources copies shared tables before mutation. Restore remaps every attached
+view before activating clones and does not manufacture selection events. Clean current text
+loads lazily from disk; dirty text is retained. Legacy profiles migrate the history they stored.
+Disk changes or checked-import failures discard history; dirty contents survive. Native field
+and completion-popup sessions remain transient as in round eight. See MANUAL_TEST's round-nine
+rows: the human confirmed Chinese IME and is currently testing Hot Exit; other native results
+remain pending. Historical limitations below describe previous rounds, superseded here.
+
 # Round 8: editor intelligence and parser removal
 
 Only `velocity`, `vel-commands`, and root Cargo.lock belong to this lane's change. Run:
