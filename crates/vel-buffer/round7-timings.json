@@ -1,0 +1,82 @@
+[
+  {
+    "run": 1,
+    "case": "one_byte",
+    "export_ns": 409792,
+    "serialize_ns": 5632959,
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  {
+    "run": 1,
+    "case": "100_byte",
+    "export_ns": 492583,
+    "serialize_ns": 6864542,
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  },
+  {
+    "run": 2,
+    "case": "one_byte",
+    "export_ns": 192542,
+    "serialize_ns": 5041583,
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  {
+    "run": 2,
+    "case": "100_byte",
+    "export_ns": 390584,
+    "serialize_ns": 7897750,
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  },
+  {
+    "run": 3,
+    "case": "one_byte",
+    "export_ns": 216250,
+    "serialize_ns": 5056709,
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  {
+    "run": 3,
+    "case": "100_byte",
+    "export_ns": 347625,
+    "serialize_ns": 7519584,
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  },
+  {
+    "run": 4,
+    "case": "one_byte",
+    "export_ns": 176792,
+    "serialize_ns": 4798041,
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  {
+    "run": 4,
+    "case": "100_byte",
+    "export_ns": 565375,
+    "serialize_ns": 7523125,
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  },
+  {
+    "run": 5,
+    "case": "one_byte",
+    "export_ns": 167958,
+    "serialize_ns": 4782125,
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  {
+    "run": 5,
+    "case": "100_byte",
+    "export_ns": 329042,
+    "serialize_ns": 7028625,
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  }
+]

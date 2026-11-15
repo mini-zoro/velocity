@@ -1,0 +1,80 @@
+{
+  "history_one_byte": {
+    "export_ns": {
+      "median": 192542,
+      "p95": 409792,
+      "samples": 5
+    },
+    "serialize_ns": {
+      "median": 5041583,
+      "p95": 5632959,
+      "samples": 5
+    },
+    "serialized_bytes": 5311,
+    "raw_edit_bytes": 10000
+  },
+  "history_100_byte": {
+    "export_ns": {
+      "median": 390584,
+      "p95": 565375,
+      "samples": 5
+    },
+    "serialize_ns": {
+      "median": 7519584,
+      "p95": 7897750,
+      "samples": 5
+    },
+    "serialized_bytes": 18717,
+    "raw_edit_bytes": 1000000
+  },
+  "vel-diff": {
+    "initial_ns": {
+      "median": 19987583,
+      "p95": 20382000,
+      "samples": 5
+    },
+    "edit_ns": {
+      "median": 134000.0,
+      "p95": 146625,
+      "samples": 500
+    }
+  },
+  "vel-spell": {
+    "viewport_ns": {
+      "median": 479458,
+      "p95": 682000,
+      "samples": 5
+    },
+    "edit_ns": {
+      "median": 84229.0,
+      "p95": 97208,
+      "samples": 500
+    }
+  },
+  "git_sublime-packages": {
+    "files": 1751,
+    "cold_ns": {
+      "median": 9187083,
+      "p95": 35768791,
+      "samples": 5
+    },
+    "warm_ns": {
+      "median": 5458542,
+      "p95": 11274458,
+      "samples": 5
+    }
+  },
+  "git_generated-50000": {
+    "files": 50000,
+    "cold_ns": {
+      "median": 70328125,
+      "p95": 194155042,
+      "samples": 5
+    },
+    "warm_ns": {
+      "median": 9723916,
+      "p95": 11003250,
+      "samples": 5
+    }
+  }
+}

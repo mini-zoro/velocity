@@ -61,3 +61,8 @@ python3 crates/vel-buffer/benches/report.py crates/vel-buffer/perf-final.jsonl
 验证：cargo fmt --all；cargo clippy --workspace --all-targets -- -D warnings；
 cargo test --workspace --release；RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps；
 另以 PROPTEST_CASES=1024 验证 buffer 模型，以及 vel-text 的 debug / 无默认 feature 路径。
+
+## Round-seven additive history API
+
+The original report and raw data above remain unchanged. The new 16-observation-per-side
+comparison, all samples and export/size measurements are in [ROUND7.md](ROUND7.md).

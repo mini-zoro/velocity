@@ -1,0 +1,72 @@
+[
+  {
+    "run": 1,
+    "fixture": "sublime-packages",
+    "files": 1751,
+    "cold_ns": 35768791,
+    "warm_ns": 5165000
+  },
+  {
+    "run": 1,
+    "fixture": "generated-50000",
+    "files": 50000,
+    "cold_ns": 194155042,
+    "warm_ns": 11003250
+  },
+  {
+    "run": 2,
+    "fixture": "sublime-packages",
+    "files": 1751,
+    "cold_ns": 9265417,
+    "warm_ns": 5458542
+  },
+  {
+    "run": 2,
+    "fixture": "generated-50000",
+    "files": 50000,
+    "cold_ns": 81390750,
+    "warm_ns": 9057042
+  },
+  {
+    "run": 3,
+    "fixture": "sublime-packages",
+    "files": 1751,
+    "cold_ns": 8820000,
+    "warm_ns": 5233708
+  },
+  {
+    "run": 3,
+    "fixture": "generated-50000",
+    "files": 50000,
+    "cold_ns": 68348292,
+    "warm_ns": 9613542
+  },
+  {
+    "run": 4,
+    "fixture": "sublime-packages",
+    "files": 1751,
+    "cold_ns": 8284916,
+    "warm_ns": 7181583
+  },
+  {
+    "run": 4,
+    "fixture": "generated-50000",
+    "files": 50000,
+    "cold_ns": 65905042,
+    "warm_ns": 9772458
+  },
+  {
+    "run": 5,
+    "fixture": "sublime-packages",
+    "files": 1751,
+    "cold_ns": 9187083,
+    "warm_ns": 11274458
+  },
+  {
+    "run": 5,
+    "fixture": "generated-50000",
+    "files": 50000,
+    "cold_ns": 70328125,
+    "warm_ns": 9723916
+  }
+]

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 21e2223a2e837044ae74a7d7cfb22db0d454cf04d6d04ffce8d9839d05e4bfbe # shrinks to initial = "a🦀aa\na\n\n\rb\n\n中a\r\na中a🦀\r\n\r🦀🦀\r\r", edits = [(7130498264773740033, 7583185600143627893, "\ra\raa世\r\r\r\ra"), (12459960737319242960, 1332424891342175105, "aa\r世aa\n"), (15397745652791502638, 8635654633439787567, "\n世\naa\r世a世\r世aa"), (15894615520742289411, 3231419321605551712, "\n\n\na世\n\n"), (9233689157727939639, 3242045545911886802, ""), (3788865673199166522, 7755117450064381982, "\r\r\r世\r\raa\r\r\na"), (13937378503137721984, 6268921309906823595, "\n\r世\na世\r\n世世\n\n"), (3523022669505503310, 4738277599533596282, "\r"), (5538092692114739584, 4212055219443025704, "\n\r\n世b\r\n\n\rb\n\n"), (4483265614478196468, 7974707145996520274, "\n世\n\ra\r\n\r\r世\r\r\r")]

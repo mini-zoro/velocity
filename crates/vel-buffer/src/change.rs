@@ -10,10 +10,22 @@ pub enum Bias {
     Right,
 }
 /// Monotonic transaction sequence number, local to one buffer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ChangeId(pub u64);
 /// A single replacement in pre-transaction coordinates.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Change {
     /// Replaced range.
     pub old_range: Range<usize>,

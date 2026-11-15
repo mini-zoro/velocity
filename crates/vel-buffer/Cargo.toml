@@ -13,10 +13,17 @@ vel-text = { path = "../vel-text" }
 memchr = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+base64 = "0.22"
+blake3 = "1"
+thiserror = "2"
 
 [dev-dependencies]
 proptest = "1"
 libc = "0.2"
+serde_json = "1"
 
 [[bench]]
 name = "perf"

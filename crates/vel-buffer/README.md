@@ -106,3 +106,52 @@ python3 crates/vel-buffer/benches/report.py crates/vel-buffer/perf-final.jsonl
 选区并集和 named-region 偏置；操作测试覆盖多 caret、CJK、ZWJ emoji、组合音标、CR、
 空缓冲区和缺少尾 LF。库用 `#![forbid(unsafe_code)]`；只有基准的 OS 记账 FFI 使用有 SAFETY 注释的 unsafe。
 中间测量置于 `.perf-local/`，不随 crate 交付。最终结果与局限见 [PERF.md](PERF.md)。
+
+## Round seven: native Hot Exit history
+
+`Buffer::export_history() -> HistorySnapshot` captures owned groups, shared steps, both undo
+cursors, saved-state identity, per-view soft selection/edit events, limits, owner IDs, typing
+continuation, named regions, settings and retained ChangeSets. Capture clones references and
+bounded metadata; it does not copy document text or extract edit strings. Serialize with serde
+on the existing session writer. The v1 payload stores forward/inverse UTF-8 edit deltas relative
+to the separately supplied current text, delta-coded coordinates/IDs, varints, zlib and base64.
+It stores no full historical document copies. BLAKE3 plus current byte length bind it to text.
+Serde formats can persist the opaque payload; do not inspect its private packed representation.
+
+```rust
+use std::collections::BTreeMap;
+use vel_buffer::{Buffer, HistorySnapshot, ViewId, ops};
+let mut buffer = Buffer::new("hello");
+let old_view = buffer.new_view();
+ops::insert(&mut buffer, old_view, "!");
+let current_text = buffer.text().clone();
+let owned = buffer.export_history(); // application capture; writer may serialize later
+let json = serde_json::to_vec(&owned)?;
+let decoded: HistorySnapshot = serde_json::from_slice(&json)?;
+let remap: BTreeMap<_, _> = decoded.view_ids().into_iter()
+    .map(|old| (old, ViewId::fresh())).collect();
+let mut restored = Buffer::restore_history(current_text, decoded, &remap)?;
+assert!(restored.undo(remap[&old_view]));
+assert_eq!(restored.text().to_string(), "hello");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The import map must cover exactly the attached old views with unique nonzero fresh IDs. Import
+attaches those IDs; it does not require placeholder Buffer views. Closed historical owners get
+fresh hidden IDs, so their text steps remain undoable without reviving closed sheets. Import
+checks format/version, text digest/length, edit ordering/content/scalar boundaries, selection
+shapes/primary/goals, revision chains, cursor, references, view ownership and log geometry.
+Malformed imports return `HistoryError` without touching an existing live buffer. Decoding is
+bounded to 512 MiB; restore/serialization are background operations. Small histories have fixed
+metadata overhead: the 2× edit-byte size target is measured on the specified 10,000-step fixture,
+not a promise for an empty history or arbitrary incompressible selection/annotation metadata.
+
+`ChangeId`s are rebased while preserving stored relative ages. Old asynchronous results must
+be discarded across a restart. `changes_since(from)` returns retained `(ChangeId, ChangeSet)`
+pairs, including each step of a grouped undo/redo. `None` means the mapping window expired.
+This is a descriptor API, not a stream of intermediate text roots: if an incremental consumer
+missed multiple steps and lacks the matching intermediate snapshots, reset it from current
+text. The session crate can replace its command-replay adapter with this native payload next
+round; no session/application sources were changed in this lane.
+
+Round-seven budget, validation and raw timing evidence: [engine report](../vel-git/ROUND7.md).

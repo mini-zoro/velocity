@@ -2,7 +2,7 @@ use std::{ops::Range, sync::Arc};
 use vel_text::Text;
 
 /// A byte region with an anchor (`a`), caret (`b`) and optional vertical goal.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Region {
     /// Anchor, in UTF-8 bytes.
     pub a: usize,
@@ -93,7 +93,7 @@ impl From<Range<usize>> for Region {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Regions {
     // Goals are a separate allocation, absent on the typing path: 16 bytes/caret.
     points: Vec<usize>,
@@ -102,7 +102,7 @@ struct Regions {
 }
 /// Sorted, normalized regions with an independently tracked primary region.
 /// `clear()` permits a temporary empty set; `normalize()` restores a caret at zero.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Selection {
     data: Arc<Regions>,
     primary: usize,
@@ -118,6 +118,39 @@ impl From<Region> for Selection {
     }
 }
 impl Selection {
+    pub(crate) fn snapshot_relative(&mut self, base: usize, decode: bool) {
+        let data = Arc::make_mut(&mut self.data);
+        for p in data.points.iter_mut().chain(&mut data.anchors) {
+            *p = if decode {
+                base.wrapping_add((*p >> 1) ^ 0usize.wrapping_sub(*p & 1))
+            } else {
+                let delta = p.wrapping_sub(base);
+                (delta << 1) ^ ((delta as isize >> (usize::BITS - 1)) as usize)
+            };
+        }
+    }
+    pub(crate) fn snapshot_valid(&self, text: Option<&Text>) -> bool {
+        let n = self.data.points.len();
+        if n == 0
+            || self.primary >= n
+            || (!self.data.anchors.is_empty() && self.data.anchors.len() != n)
+            || (!self.data.goals.is_empty() && self.data.goals.len() != n)
+        {
+            return false;
+        }
+        let mut last = None;
+        for r in self.iter() {
+            if r.xpos.is_some_and(|x| !x.is_finite())
+                || text.is_some_and(|t| !t.is_char_boundary(r.a) || !t.is_char_boundary(r.b))
+                || last.is_some_and(|p| p >= r.begin())
+            {
+                return false;
+            }
+            last = Some(r.end());
+        }
+        true
+    }
+
     /// A temporary empty selection, for building a replacement.
     pub fn new() -> Self {
         Self {

@@ -8,13 +8,19 @@ use std::{
 };
 use vel_text::{Edit, Text};
 
+#[path = "history.rs"]
+mod history;
+pub use history::{HistoryError, HistorySnapshot};
+
 static NEXT_BUFFER: AtomicU64 = AtomicU64::new(1);
 static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 /// Process-unique document identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(pub u64);
 /// Process-unique view identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ViewId(pub u64);
 /// Intent used to control undo grouping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +35,7 @@ pub enum EditKind {
     Other,
 }
 /// Configurable bounds; bytes include metadata and retained rope allocations.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct HistoryLimits {
     /// Maximum retained committed transactions, including redo.
     pub entries: usize,
@@ -51,7 +57,7 @@ impl Default for HistoryLimits {
     }
 }
 /// Text semantics passed explicitly to operations; no global configuration dependency.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     /// Characters classified as punctuation.
     pub word_separators: String,
@@ -70,7 +76,7 @@ impl Default for Settings {
     }
 }
 /// One named annotation set. Overlapping regions are allowed.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RegionSet {
     /// Regions in ascending begin order.
     pub regions: Vec<Region>,
@@ -88,7 +94,7 @@ enum SoftEvent {
     Edit(Arc<Step>),
 }
 /// Per-view state. Change selections through `Buffer::set_selection` to record soft undo.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ViewState {
     id: ViewId,
     selection: Selection,
@@ -135,20 +141,20 @@ struct Step {
     after_state: u64,
     bytes: usize,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Group {
     steps: Vec<Arc<Step>>,
     run: Option<Run>,
     has_word: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Run {
     Word,
     Whitespace,
     Punctuation,
     Newline,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct LoggedChange {
     id: ChangeId,
     map: Arc<ChangeSet>,

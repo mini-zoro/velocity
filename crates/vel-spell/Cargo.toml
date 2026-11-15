@@ -1,0 +1,27 @@
+[package]
+name = "vel-spell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+spellbook = "0.4.2"
+vel-buffer = { path = "../vel-buffer" }
+vel-text = { path = "../vel-text" }
+vel-highlight = { path = "../vel-highlight" }
+vel-scope = { path = "../vel-scope" }
+thiserror = "2"
+unicode-segmentation = "1"
+vel-diff = { path = "../vel-diff" }
+
+[dev-dependencies]
+serde_json = "1"
+vel-syntax = { path = "../vel-syntax" }
+vel-color-scheme = { path = "../vel-color-scheme" }
+tempfile = "3"
+proptest = "1"

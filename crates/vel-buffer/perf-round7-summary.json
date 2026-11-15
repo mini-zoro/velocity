@@ -1,0 +1,127 @@
+{
+  "method": "All 7 sequential observations plus all 9 alternating paired observations per side, pooled without exclusions; nearest-rank p95.",
+  "sources": {
+    "before": [
+      "perf-round7-before.jsonl",
+      "perf-round7-paired-before.jsonl"
+    ],
+    "after": [
+      "perf-round7.jsonl",
+      "perf-round7-paired-after.jsonl"
+    ]
+  },
+  "scenarios": {
+    "type_10000": {
+      "before": {
+        "runs": 16,
+        "median": 908542.0,
+        "p95": 1052334.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 893479.0,
+        "p95": 978375.0
+      },
+      "regression_percent": -1.6579310587732876,
+      "unit": "ns"
+    },
+    "type_100000": {
+      "before": {
+        "runs": 16,
+        "median": 9750938.0,
+        "p95": 10535334.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 9840916.5,
+        "p95": 15019166.0
+      },
+      "regression_percent": 0.9227676352777658,
+      "unit": "ns"
+    },
+    "find_10000": {
+      "before": {
+        "runs": 16,
+        "median": 36395.5,
+        "p95": 81667.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 30354.0,
+        "p95": 63959.0
+      },
+      "regression_percent": -16.599579618359417,
+      "unit": "ns"
+    },
+    "undo_10000": {
+      "before": {
+        "runs": 16,
+        "median": 1132666.5,
+        "p95": 1273708.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 1108979.5,
+        "p95": 1362875.0
+      },
+      "regression_percent": -2.0912598721689046,
+      "unit": "ns"
+    },
+    "delete_50mb": {
+      "before": {
+        "runs": 16,
+        "median": 730896.0,
+        "p95": 818625.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 707312.5,
+        "p95": 922125.0
+      },
+      "regression_percent": -3.226656049561083,
+      "unit": "ns"
+    },
+    "undo_50mb": {
+      "before": {
+        "runs": 16,
+        "median": 1645.5,
+        "p95": 3291.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 1708.0,
+        "p95": 7000.0
+      },
+      "regression_percent": 3.798237617745359,
+      "unit": "ns"
+    },
+    "map_100000": {
+      "before": {
+        "runs": 16,
+        "median": 3961541.5,
+        "p95": 4985000.0
+      },
+      "after": {
+        "runs": 16,
+        "median": 4153687.5,
+        "p95": 4904875.0
+      },
+      "regression_percent": 4.8502836585202935,
+      "unit": "ns"
+    },
+    "undo_metadata": {
+      "before": {
+        "runs": 16,
+        "median": 48.0489,
+        "p95": 48.0489
+      },
+      "after": {
+        "runs": 16,
+        "median": 48.0489,
+        "p95": 48.0489
+      },
+      "regression_percent": 0.0,
+      "unit": "B/caret"
+    }
+  }
+}
