@@ -1,3 +1,91 @@
+<!-- ROUND10-RESULTS-BEGIN -->
+# Round 10 results: themed widgets and minihtml
+
+Implemented without a commit in `velocity`, `vel-ui`, `vel-render`, `vel-platform`, `vel-config`
+and `vel-session`, plus root Cargo.lock. The theme/minihtml engines, original bundled theme art,
+lane-B crates and syntax staging implementation remain unchanged.
+
+Tabs, sidebar/Goto rows, quick panels, search controls, menus, tooltips, status controls, fold
+icons, minimaps and scrollbars now use the original dark/light themes. User fragments, file
+icons, UI scaling, density variants, nine-slice layers, fonts and finite transitions reach the
+scene painter. The output panel follows live window theme/settings/scheme changes. Native
+text uses the existing font stack with matching metrics; native appearance/title-bar behavior
+is implemented but awaits the human check below.
+
+Definition hover and completion/quick-panel details render minihtml. The review demo exercises
+popup flags, viewport clipping/scrolling, command/browser links and titles; inline/below/block
+phantoms; right-aligned annotations; build errors escaped into HTML annotations; and ordinary
+read-only HTML sheet tabs that retain their content through Hot Exit. Images decode on bounded
+workers and share the atlas. See [ROUND10.md](ROUND10.md) for behavior and practical limits.
+
+## Isolated CPU evidence
+
+Ten alternating process pairs per workload, with both release binaries copied and hashed.
+Typing uses the same round-nine ten-file Git/prose/completion fixture with review UI enabled
+and 500 real keymap edits/scenes per process. Scrolling measures 300 four-view Rust scenes per
+process. No compilation, tests or other lane-A benchmark ran alongside these processes.
+Five further current-binary processes measure 100 popup opens, 100 annotation frames and
+50 theme switches each. All 10,000 typing samples, 6,000 scrolling samples, budget samples,
+process results, environment/source hashes and confidence intervals are retained in
+[timings-round10.json](timings-round10.json). Raw evidence: `/tmp/velocity-r10-final-20261115T121806Z`.
+
+| Probe | Budget | Measured p50 / p95 |
+| --- | --- | --- |
+| Typing delta versus round 9 | ≤ +5% | +4.89% / +3.65% |
+| Four-view scrolling delta versus round 9 | ≤ +5% | +3.22% / +1.14% |
+| 2,048-byte popup to first CPU scene | ≤ 2 ms | 0.173 / 0.214 ms |
+| 200 visible annotations, CPU frame | ≤ 2 ms | 0.720 / 0.739 ms |
+| Dark/light switch to next CPU scene | ≤ 50 ms | 0.811 / 0.957 ms |
+
+These are medians of per-process quantiles. Typing changed from 0.492 / 0.573
+to 0.516 / 0.594 ms; scrolling changed from 0.667 / 0.803 to
+0.689 / 0.812 ms. Paired bootstrap 95% intervals for typing are
++1.84% to +6.44% at p50 and -4.03% to +7.06% at p95; scrolling intervals are
+-0.80% to +6.79% and -1.41% to +37.81%. The point estimates meet the 5% gate;
+the intervals cross it, so the results do not establish a 5% upper confidence bound.
+Individual maxima were 0.403 ms for popups,
+1.502 ms for annotations and
+6.627 ms for switching. Native shaping, uploads,
+GPU execution and scanout are excluded from all these CPU measurements.
+
+The runner initially stopped after the first successful theme metrics record because that mode
+has no separate completion-marker record. Its success check now requires the final sample counts
+and a successful process exit. Resume verified the same frozen binary/source hashes, retained
+all completed A/B samples and ran the five budget processes; the original theme attempt remains
+in the raw directory. No timing failure or outlier was discarded.
+
+## Verification and reviewer handoff
+
+- [x] `cargo fmt --all --check`.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`.
+- [x] `cargo test --workspace`: 395 tests passed.
+- [x] Final rerun of all six touched crates: 158 tests passed, including 108 Velocity tests.
+- [x] `RUSTDOCFLAGS='-D warnings' cargo doc` for all six touched crates, with `--no-deps`.
+- [x] Dark/light structural goldens; lifecycle/link/scroll/clip, multiline baseline, phantom tracking,
+  annotation row invariance, image/density/scale, deep ancestry, resolver equivalence, output-panel
+  updates and HTML-sheet restore coverage. Existing fresh/read-only/corrupt-profile coverage passes.
+- [x] Reviewer script syntax checks; frozen-binary CPU A/B and all three feature budgets.
+- [x] Lane-A-only file scope; no GUI/Metal execution; no commit.
+- [ ] Human native fonts/Retina/OS appearance/title bar/hover/press/fade/IME/link checks,
+  Metal validation and native CPU/GPU/scanout measurements from [MANUAL_TEST.md](MANUAL_TEST.md#round-10-theme-and-minihtml-acceptance).
+
+The initial parallel workspace run hit the existing socket test's deadline; both its sequential
+rerun and the subsequent full default workspace rerun passed. Detailed gate logs accompany
+the raw measurements. The final touched-crate rerun includes the additional output-panel test.
+
+Run on an awake, unlocked display outside the sandbox:
+
+```sh
+zsh crates/velocity/scripts/review-round10-gui.zsh /tmp/velocity-round10-baseline/velocity
+```
+
+The script freezes both executables, records hashes, runs automatic theme review at ordinary/4K
+sizes, uses Metal validation, performs native typing/scrolling A/B, then opens a disposable
+manual profile. Supply another saved round-nine binary if that temporary baseline is unavailable.
+
+Earlier sections below are historical evidence.
+<!-- ROUND10-RESULTS-END -->
+
 <!-- ROUND9-RESULTS-BEGIN -->
 # Round 9 results: complete history, Git, incremental diff and spelling
 

@@ -38,6 +38,11 @@ struct Composition {
 /// A widget input. Committed edits use the same registry and buffer transactions as document edits.
 #[derive(Debug)]
 pub struct Input {
+    /// UI scale shared by painting, hit testing, selection and native IME geometry.
+    pub scale: f64,
+    font: Option<vel_minihtml::TextStyle>,
+    metrics: Option<std::rc::Rc<crate::minihtml::Metrics>>,
+    margin: f64,
     /// Editable shared document.
     pub buffer: Buffer,
     /// Single input view.
@@ -65,6 +70,10 @@ impl Input {
             Selection::from_regions([Region::caret(buffer.text().len_bytes())]),
         );
         Self {
+            scale: 1.,
+            font: None,
+            metrics: None,
+            margin: 8.,
             buffer,
             view,
             bounds: Rect::default(),
@@ -73,6 +82,59 @@ impl Input {
             clipboard: String::new(),
             composition: None,
         }
+    }
+    /// Shares the theme's actual metrics with painting, hit testing and native IME geometry.
+    pub fn configure_theme(
+        &mut self,
+        style: &crate::theme::Style,
+        metrics: std::rc::Rc<crate::minihtml::Metrics>,
+    ) {
+        self.font = style.family.as_ref().map(|family| vel_minihtml::TextStyle {
+            font_family: family.clone(),
+            font_size: style.size,
+            font_weight: if style.font.bold { 700 } else { 400 },
+            italic: style.font.italic,
+            underline: false,
+            color: vel_theme::Color::rgb(0, 0, 0),
+        });
+        self.metrics = Some(metrics);
+        self.margin = f64::from(style.margin.left).max(4. * self.scale);
+        self.reveal();
+    }
+    /// Horizontal position for a byte boundary in the displayed text, including scrolling.
+    pub fn x_for_byte(&self, text: &str, byte: usize) -> f64 {
+        let start = byte_at_column(text, self.scroll);
+        let byte = byte.max(start).min(text.len());
+        self.bounds.x + self.margin() + self.advance(&text[start..byte])
+    }
+    fn margin(&self) -> f64 {
+        if self.font.is_some() {
+            self.margin
+        } else {
+            8. * self.scale
+        }
+    }
+    fn advance(&self, text: &str) -> f64 {
+        if let (Some(font), Some(metrics)) = (&self.font, &self.metrics) {
+            use vel_minihtml::FontMetrics;
+            f64::from(metrics.measure(text, font).advance)
+        } else {
+            cells(text) as f64 * 7.2 * self.scale
+        }
+    }
+    fn byte_at_x(&self, text: &str, x: f64) -> usize {
+        let start = byte_at_column(text, self.scroll);
+        let x = (x - self.bounds.x - self.margin()).max(0.);
+        let mut previous = 0.;
+        for (offset, g) in text[start..].grapheme_indices(true) {
+            let end = start + offset + g.len();
+            let advance = self.advance(&text[start..end]);
+            if x <= (previous + advance) * 0.5 {
+                return start + offset;
+            }
+            previous = advance;
+        }
+        text.len()
     }
     /// Replaces the value as one undoable operation and selects it for immediate typing.
     pub fn set(&mut self, value: &str) {
@@ -263,13 +325,10 @@ impl Input {
         };
         let caret_byte = selected.bytes(&text).end;
         let caret = Rect {
-            x: self.bounds.x
-                + 8.
-                + cells(&text.slice(0..caret_byte).to_string()).saturating_sub(self.scroll) as f64
-                    * 7.2,
-            y: self.bounds.y + 6.,
+            x: self.x_for_byte(&text.to_string(), caret_byte),
+            y: self.bounds.y + (6. * self.scale),
             width: 1.,
-            height: 18.,
+            height: (18. * self.scale),
         };
         TextInputState {
             text,
@@ -295,21 +354,22 @@ impl Input {
                 .slice(0..state.selected.bytes(&state.text).end)
                 .to_string(),
         );
-        let cells = ((self.bounds.width - 20.) / 7.2).max(1.) as usize;
         if col < self.scroll {
             self.scroll = col;
         }
-        if col > self.scroll + cells {
-            self.scroll = col - cells;
-        }
         let value = state.text.to_string();
+        let byte = state.selected.bytes(&state.text).end;
+        while self.x_for_byte(&value, byte) > self.bounds.x + self.bounds.width - self.margin()
+            && self.scroll < col
+        {
+            self.scroll += 1;
+        }
         self.scroll = self::cells(&value[..byte_at_column(&value, self.scroll)]);
     }
     /// Places a caret from an input-local pointer column.
     pub fn click(&mut self, x: f64, extend: bool) {
         self.commit_composition();
-        let col = ((x - self.bounds.x - 8.) / 7.2).round().max(0.) as usize + self.scroll;
-        let byte = byte_at_column(&self.value(), col);
+        let byte = self.byte_at_x(&self.value(), x);
         let old = self
             .buffer
             .view(self.view)
@@ -329,23 +389,23 @@ impl Input {
     /// Native point-to-UTF-16 lookup, including preedit and wide graphemes.
     pub fn utf16_at_x(&self, x: f64) -> usize {
         let state = self.state();
-        let column = ((x - self.bounds.x - 8.) / 7.2).round().max(0.) as usize + self.scroll;
         state
             .text
-            .byte_to_utf16(byte_at_column(&state.text.to_string(), column))
+            .byte_to_utf16(self.byte_at_x(&state.text.to_string(), x))
     }
     /// Native range geometry in logical widget coordinates.
     pub fn range_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
         let state = self.state();
         let bytes = range.bytes(&state.text);
-        let start = cells(&state.text.slice(0..bytes.start).to_string());
-        let length = cells(&state.text.slice(bytes.clone()).to_string());
+        let text = state.text.to_string();
+        let start = self.x_for_byte(&text, bytes.start);
+        let width = self.x_for_byte(&text, bytes.end) - start;
         (
             Rect {
-                x: self.bounds.x + 8. + start.saturating_sub(self.scroll) as f64 * 7.2,
-                y: self.bounds.y + 6.,
-                width: (length as f64 * 7.2).max(1.),
-                height: 18.,
+                x: start,
+                y: self.bounds.y + (6. * self.scale),
+                width: width.max(1.),
+                height: (18. * self.scale),
             },
             Utf16Range::from_bytes(&state.text, bytes),
         )

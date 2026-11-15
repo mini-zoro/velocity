@@ -67,6 +67,13 @@ impl WindowHandle {
     /// Enables continuous display-linked animation.
     pub fn set_animating(&self, _active: bool) {}
     /// Changes the native window title.
+    /// Portable no-op counterpart of native title-bar theming.
+    pub fn set_title_bar_theme(
+        &self,
+        _appearance: Option<crate::Appearance>,
+        _background: Option<[f32; 4]>,
+    ) {
+    }
     pub fn set_title(&self, _title: &str) {}
     /// Logical-to-physical pixel scale.
     pub fn scale_factor(&self) -> f64 {

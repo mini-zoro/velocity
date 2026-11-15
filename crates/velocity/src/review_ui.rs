@@ -3,7 +3,7 @@ use crate::{panels::Panels, workspace::Workspace};
 use std::path::PathBuf;
 use vel_config::{Value, json, keymap::Invocation, settings::Layer, ui::PaletteItem};
 use vel_platform::{Point, Rect};
-use vel_ui::{contains, fill, label};
+use vel_ui::contains;
 #[derive(Debug, Default)]
 pub struct ReviewUi {
     pub reveal: bool,
@@ -383,8 +383,15 @@ impl Panels {
         }
         changed
     }
-    pub fn review_paint(&mut self, size: vel_platform::Size, scene: &mut vel_render::scene::Scene) {
+    pub fn review_paint(
+        &mut self,
+        workspace: &Workspace,
+        size: vel_platform::Size,
+        scene: &mut vel_render::scene::Scene,
+    ) {
         let mut layer = vel_render::scene::Layer::default();
+        let mut theme = workspace.themes.ui.borrow_mut();
+        let settings = &workspace.editor().settings;
         if !self.review.items.is_empty() {
             let height = self.review.items.len() as f64 * 26. + 8.;
             let rect = Rect {
@@ -394,7 +401,15 @@ impl Panels {
                 height,
             };
             self.review.bounds = rect;
-            fill(&mut layer, rect, rect, [0.10, 0.13, 0.18, 1.]);
+            let popup = theme.style(
+                0xF000,
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("popup_control", &[]),
+                ]),
+                settings,
+            );
+            theme.surface(&mut layer, &popup, rect, rect);
             for (i, item) in self.review.items.iter().enumerate() {
                 let row = Rect {
                     x: rect.x + 4.,
@@ -402,16 +417,28 @@ impl Panels {
                     width: rect.width - 8.,
                     height: 26.,
                 };
-                if i == self.review.selected {
-                    fill(&mut layer, row, rect, [0.22, 0.32, 0.45, 1.]);
-                }
-                label(
+                let path = [
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("popup_control", &[]),
+                    vel_theme::Element::new(
+                        "quick_panel_row",
+                        if i == self.review.selected {
+                            &["selected"]
+                        } else {
+                            &[]
+                        },
+                    ),
+                ];
+                let style =
+                    theme.style(0xF100 + i as u64, &vel_theme::ElementPath(&path), settings);
+                theme.surface(&mut layer, &style, row, rect);
+                theme.text(
                     &mut layer,
+                    &style,
                     &item.caption,
                     row.x + 6.,
                     row.y + 18.,
                     rect,
-                    [0.9, 0.93, 0.97, 1.],
                 );
             }
         } else if let Some((text, point, since)) = &self.review.tooltip
@@ -423,17 +450,18 @@ impl Panels {
                 width: 260.,
                 height: 26.,
             };
-            fill(&mut layer, rect, rect, [0.10, 0.13, 0.18, 1.]);
-            label(
-                &mut layer,
-                text,
-                rect.x + 8.,
-                rect.y + 18.,
-                rect,
-                [0.9, 0.93, 0.97, 1.],
+            let style = theme.style(
+                0xF200,
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("tool_tip_control", &[]),
+                ]),
+                settings,
             );
+            theme.surface(&mut layer, &style, rect, rect);
+            theme.text(&mut layer, &style, text, rect.x + 8., rect.y + 18., rect);
         }
-        if !layer.rects.is_empty() {
+        if !layer.surfaces.is_empty() || !layer.text.is_empty() {
             scene.layers.push(layer);
         }
     }

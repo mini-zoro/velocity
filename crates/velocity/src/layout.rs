@@ -86,6 +86,7 @@ pub struct Layout {
     folds: Vec<Region>,
     count: usize,
     inline: Vec<(usize, usize)>,
+    phantom_inline: Vec<(usize, usize)>,
     pub rewrapped: usize,
     pub page: usize,
 }
@@ -287,12 +288,13 @@ impl Layout {
             let mut word = None;
             while end < units.len() {
                 if self.options.width > 0
-                    && col + units[end].width > self.options.width
+                    && col + units[end].width + self.phantom_gap(start + units[end].bytes.start)
+                        > self.options.width
                     && end > from
                 {
                     break;
                 }
-                col += units[end].width;
+                col += units[end].width + self.phantom_gap(start + units[end].bytes.start);
                 end += 1;
                 if units[end - 1].text.chars().all(char::is_whitespace) {
                     word = Some(end);
@@ -314,6 +316,30 @@ impl Layout {
             segments: segments.into(),
             hidden,
         }
+    }
+    pub fn set_phantom_inline(&mut self, text: &Text, inline: Vec<(usize, usize)>) {
+        if self.phantom_inline == inline {
+            return;
+        }
+        self.phantom_inline = inline;
+        if !self.lines.is_empty() {
+            self.lines = (0..text.len_lines())
+                .map(|row| self.make_line(text, row))
+                .collect();
+            self.heights = Heights::build(&self.lines);
+        }
+    }
+    #[inline]
+    pub fn has_phantom_inline(&self) -> bool {
+        !self.phantom_inline.is_empty()
+    }
+    #[inline]
+    pub fn phantom_gap(&self, at: usize) -> usize {
+        self.phantom_inline
+            .iter()
+            .filter(|(p, _)| *p == at)
+            .map(|(_, n)| n)
+            .sum()
     }
     /// Inserts read-only original lines before physical row boundaries.
     pub fn set_inline(&mut self, mut blocks: Vec<(usize, usize)>) {
@@ -466,7 +492,14 @@ impl Layout {
         let line = text.line(row).to_string();
         let col = byte - text.line_to_byte(row);
         let (_, segment) = self.visual_at(text, byte);
-        segment.indent
+        let start = text.line_to_byte(row);
+        let gaps: usize = self
+            .phantom_inline
+            .iter()
+            .filter(|(at, _)| *at >= start + segment.bytes.start && *at < byte)
+            .map(|(_, n)| n)
+            .sum();
+        gaps + segment.indent
             + units(&line, self.hidden(row), self.options.tab)
                 .iter()
                 .filter(|u| {
@@ -486,6 +519,11 @@ impl Layout {
             .iter()
             .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end)
         {
+            let gap = self.phantom_gap(text.line_to_byte(row) + unit.bytes.start) as f64;
+            if x <= col + gap {
+                return text.line_to_byte(row) + unit.bytes.start;
+            }
+            col += gap;
             if x <= col + unit.width as f64 / 2. {
                 return text.line_to_byte(row) + unit.bytes.start;
             }

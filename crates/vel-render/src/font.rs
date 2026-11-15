@@ -20,8 +20,22 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug)]
+enum FontBytes {
+    System(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+impl std::ops::Deref for FontBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::System(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+#[derive(Debug)]
 struct Face {
-    bytes: memmap2::Mmap,
+    bytes: FontBytes,
     offset: u32,
     key: CacheKey,
     path: PathBuf,
@@ -30,10 +44,16 @@ struct Face {
 }
 impl Face {
     fn load(path: &Path, name: &str, native: Option<native::NativeFont>) -> Result<Self, String> {
-        let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // SAFETY: only macOS system font files on the sealed/read-only system volume are
-        // mapped; their bytes cannot be truncated or changed during this Font lifetime.
-        let bytes = unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| e.to_string())?;
+        let bytes = if path.starts_with("/System/Library/Fonts") {
+            let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            // SAFETY: only fonts on macOS's sealed system volume use a file mapping. Other
+            // CoreText-resolved fonts are copied, so later user font edits cannot invalidate data.
+            FontBytes::System(
+                unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| e.to_string())?,
+            )
+        } else {
+            FontBytes::Owned(std::fs::read(path).map_err(|e| e.to_string())?)
+        };
         let collection = FontDataRef::new(&bytes)
             .ok_or_else(|| format!("{} is not a supported font", path.display()))?;
         let font = collection
@@ -80,8 +100,21 @@ pub struct ShapedGlyph {
     pub y: f32,
 }
 
+/// Proportional glyph positions and their measured baseline extents.
+#[derive(Debug)]
+pub struct UiRun {
+    /// Positioned glyphs, with face identities valid for the owning Fonts.
+    pub glyphs: Vec<ShapedGlyph>,
+    /// Horizontal advance in pixels.
+    pub advance: f32,
+    /// Maximum ascent of the resolved faces.
+    pub ascent: f32,
+    /// Maximum descent of the resolved faces.
+    pub descent: f32,
+}
 /// Lazy system fonts and reusable swash shaping/raster contexts.
 pub struct Fonts {
+    families: HashMap<String, u16>,
     variants: HashMap<(u16, crate::scene::FontStyle), u16>,
     faces: Vec<Face>,
     fallbacks_loaded: bool,
@@ -120,6 +153,7 @@ impl Fonts {
             .scale(13.)
             .advance_width(ascii[b'M' as usize]);
         Ok(Self {
+            families: HashMap::new(),
             variants: HashMap::new(),
             faces: vec![face],
             fallbacks_loaded: false,
@@ -289,6 +323,102 @@ impl Fonts {
         }
         self.shaped.insert(key, glyphs.clone());
         glyphs
+    }
+    /// Shapes a proportional UI run using the same face/fallback/raster stack as painting.
+    /// Family lists are tried in order; generic CSS families map to native system faces.
+    pub fn shape_ui(
+        &mut self,
+        text: &str,
+        families: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+    ) -> UiRun {
+        let base = if let Some(index) = self.families.get(families) {
+            *index
+        } else if self.families.len() >= 256 || self.faces.len() >= 512 {
+            0
+        } else {
+            let mut index = 0;
+            for requested in families
+                .split(',')
+                .map(|s| s.trim().trim_matches(['\"', '\'']))
+            {
+                let name = match requested {
+                    "system" | "system-ui" | "sans-serif" => ".AppleSystemUIFont",
+                    "monospace" => "Menlo",
+                    "serif" => "Times",
+                    s => s,
+                };
+                if let Ok((path, name, native)) = native::font_location(name)
+                    && let Ok(face) = Face::load(&path, &name, Some(native))
+                {
+                    index = self.faces.len() as u16;
+                    self.faces.push(face);
+                    break;
+                }
+            }
+            if self.families.len() < 256 {
+                self.families.insert(families.into(), index);
+            }
+            index
+        };
+        self.load_fallbacks();
+        let mut runs: Vec<(usize, usize, u16)> = Vec::new();
+        for (start, cluster) in text.grapheme_indices(true) {
+            let covers = |f: &Face| {
+                cluster
+                    .chars()
+                    .filter(|c| !matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}'))
+                    .all(|c| f.reference().charmap().map(c) != 0)
+            };
+            let base = if covers(&self.faces[base as usize]) {
+                base
+            } else {
+                self.faces.iter().position(covers).unwrap_or(base as usize) as u16
+            };
+            let face = self.variant(base, style);
+            if let Some(last) = runs.last_mut()
+                && last.2 == face
+            {
+                last.1 = start + cluster.len();
+            } else {
+                runs.push((start, start + cluster.len(), face));
+            }
+        }
+        let mut out = UiRun {
+            glyphs: Vec::new(),
+            advance: 0.,
+            ascent: 0.,
+            descent: 0.,
+        };
+        for (start, end, face) in runs {
+            let reference = self.faces[face as usize].reference();
+            let metrics = reference.metrics(&[]).scale(px);
+            out.ascent = out.ascent.max(metrics.ascent);
+            out.descent = out.descent.max(metrics.descent.abs());
+            let run = &text[start..end];
+            let mut builder = self.shaper.builder(reference).size(px);
+            if let Some(c) = run
+                .chars()
+                .find(|c| !c.is_ascii_punctuation() && !c.is_whitespace())
+            {
+                builder = builder.script(c.script());
+            }
+            let mut shaper = builder.build();
+            shaper.add_str(run);
+            shaper.shape_with(|cluster| {
+                for g in cluster.glyphs {
+                    out.glyphs.push(ShapedGlyph {
+                        face,
+                        id: g.id,
+                        x: out.advance + g.x,
+                        y: g.y,
+                    });
+                    out.advance += g.advance;
+                }
+            });
+        }
+        out
     }
     /// Rasterizes one glyph at a quarter-pixel physical phase.
     pub fn rasterize(&mut self, face: u16, id: u16, px: f32, bucket: u8) -> Option<Image> {

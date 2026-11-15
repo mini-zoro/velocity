@@ -1,7 +1,8 @@
 # vel-ui
 
-Original retained widgets painted with `vel-render::scene` primitives. No window, font or GPU
-is initialized by this crate. Layout supports rows, columns and stacks, fixed/flexible extents,
+Original retained widgets painted with `vel-render::scene` primitives. Headless layout and tests
+initialize no window, native font or GPU. Native font loading is explicitly requested by the host.
+Layout supports rows, columns and stacks, fixed/flexible extents,
 ancestor-clipped hit testing, hover/press attributes, retained focus and finite animations.
 `Scroll` bounds offsets and virtualizes rows; `QuickPanel` paints only visible rows, with kind
 badges, annotations, details and matched-character coloring. Navigation returns a payload for
@@ -10,8 +11,8 @@ the application's transient-sheet preview callback. No Sublime application resou
 `input::Input` uses vel-buffer and vel-commands for committed edits, clipboard, selection and
 undo. Native IME previews stay outside buffer history; UTF-16 ranges include the preview.
 Candidate geometry, scrolling and hit testing count grapheme display cells, including CJK,
-combining sequences and emoji. The widget grid uses 12pt UI text (7.2pt cells); paragraph bidi
-and the future `.sublime-theme` engine are outside this round.
+combining sequences and emoji. Inputs share themed font metrics with painting, pointer/selection geometry and native IME anchors.
+Headless metrics remain deterministic; paragraph bidi remains outside this implementation.
 
 Keyboard capture is overlay → focused bottom panel → view. A panel can stay visible while the
 document has focus. Closing an overlay restores the lower surface's focus. Velocity retains
@@ -40,7 +41,9 @@ The theme seam is `Node::class` + `Node::attributes`:
 | `text_area` | Main editor viewport | hover, pressed |
 
 Caption/badge/detail nodes are noninteractive children; theme lookup may inspect their parent
-row's state. Colors are original hardcoded scene colors until the P3 theme engine arrives.
+row's state. The theme painter resolves stack-backed ancestor/state paths every frame and caches their typed
+paint representation. Layer fills/textures, colors, fonts, shadows and finite transitions come
+from vel-theme. Child label rules inspect actual row ancestry.
 Output and Find Results use the same bounded scroll state, with append-only result rows.
 
 ```sh
@@ -63,3 +66,17 @@ segments respect spanning cells. Stable sheet IDs separate tab order, selected s
 keyboard focus and shift anchor. Primary-click toggles, shift ranges and selected-sheet movement
 retain display order. The theme seam includes `tab_connector` with `selected` and `tab_control`
 with `focused`, `selected`, `transient` and `dirty`. Rendering/native interaction is in velocity.
+
+
+`theme::ThemeUi` owns the UI-thread resolver, immutable settings projections, bounded paint-state
+caches and decoded 1x/2x/3x resources. `begin_frame` and `animating` let the host stop requesting
+redraws at transition endpoints. Engine cache hits and paint-style hits allocate nothing; scene
+construction still owns its glyph strings and primitive vectors.
+
+`minihtml::{Metrics, Html, Popup, Phantom, Annotation}` retain parsed documents and invalidate
+layouts on width/font/palette/CSS/image changes. The native metrics adapter uses vel-render's
+proportional UI shaping and font fallback. CSS boxes preserve four radii and border colors,
+text baselines are relative to each run rectangle, and painting/hit testing share independent
+origin/clip/scroll transforms. Navigation returns command/browser/callback data to the host.
+PNG/JPEG/GIF data/local/package images decode on bounded workers through the MIT/Apache image
+crate, with intrinsic dimensions retained when a large bitmap is downsampled for atlas upload.

@@ -77,3 +77,8 @@ cargo test -p vel-session
 cargo clippy -p vel-session --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc -p vel-session --no-deps
 ```
+
+
+Round 10 adds optional `Sheet::html` metadata containing a read-only HTML sheet's name and
+minihtml source. Older sessions omit it. Validation bounds source to 4 MiB and titles to 4096
+bytes; the host reconstructs the parsed document after restore. Popup/phantom content is transient.

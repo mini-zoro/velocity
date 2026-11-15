@@ -1,7 +1,15 @@
 //! Observable settings, in increasing precedence order.
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+static VALUE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Setting source, from lowest to highest priority.
 #[derive(Clone, Copy, Debug)]
@@ -27,6 +35,8 @@ type Observer = Arc<dyn Fn(&str, Option<&Value>) + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct Settings {
     revision: u64,
+    cache_identity: u64,
+    single_layer: Option<usize>,
     layers: [Map<String, Value>; 7],
     observers: BTreeMap<String, Observer>,
 }
@@ -40,15 +50,41 @@ impl fmt::Debug for Settings {
 }
 impl Settings {
     /// Monotonic configuration revision, for cached typed accessors.
+    #[inline]
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Opaque process-local identity of these values. Clones share it until either mutates.
+    /// Unlike the local revision counter, independent changed settings never share an identity.
+    #[inline]
+    pub fn cache_identity(&self) -> u64 {
+        self.cache_identity
+    }
+    /// Copies selected effective keys into one lookup layer with a distinct value identity.
+    /// The local revision is retained. Observers are not copied.
+    pub fn project<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut projected = Self {
+            revision: self.revision,
+            cache_identity: VALUE_ID.fetch_add(1, Ordering::Relaxed),
+            single_layer: Some(Layer::View as usize),
+            ..Default::default()
+        };
+        projected.layers[Layer::View as usize] = keys
+            .into_iter()
+            .filter_map(|key| self.get(key).map(|value| (key.into(), value.clone())))
+            .collect();
+        projected
     }
     /// Returns one unmerged source layer.
     pub fn layer(&self, layer: Layer) -> &Map<String, Value> {
         &self.layers[layer as usize]
     }
     /// Looks up a value, resolving per-view through default values.
+    #[inline]
     pub fn get(&self, key: &str) -> Option<&Value> {
+        if let Some(layer) = self.single_layer {
+            return self.layers[layer].get(key);
+        }
         self.layers.iter().rev().find_map(|m| m.get(key))
     }
     /// Replaces a whole source, notifying only on effective value changes.
@@ -58,8 +94,15 @@ impl Settings {
             .ok_or("settings must be an object")?
             .clone();
         self.revision += 1;
+        self.cache_identity = VALUE_ID.fetch_add(1, Ordering::Relaxed);
         let before = self.effective();
         self.layers[layer as usize] = values;
+        let mut nonempty = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| (!m.is_empty()).then_some(i));
+        self.single_layer = nonempty.next().filter(|_| nonempty.next().is_none());
         let after = self.effective();
         let mut keys: Vec<_> = before.keys().chain(after.keys()).collect();
         keys.sort();

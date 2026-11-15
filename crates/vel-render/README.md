@@ -66,3 +66,12 @@ FrameTimes now includes the acquired drawable sequence so the editor can correla
 exact highlighted scene with positive native scanout. These paths compile and their CPU
 packing, shader and font logic run headlessly; Metal validation and GPU budgets require
 reviewer hardware runs.
+
+
+Round 10 adds ordered theme surfaces, immutable RGBA images, density-correct nine-slice/tiled
+patches and CSS boxes with independently rounded corners and colored border edges. Image tiles
+use the same page pinning, eviction generations, transparent upload borders and texture array as
+glyphs, with a distinct key namespace. CPU geometry and shader validation run without Metal.
+TextRun's optional family selects proportional UI shaping; absent families retain the editor
+monospace grid. Native measurements and painting use the same size/family/weight/slant/fallback
+path. Mutable user font files are copied; only sealed system font files are memory mapped.

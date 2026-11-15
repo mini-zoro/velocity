@@ -35,6 +35,7 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    title_theme: Option<(u64, u64)>,
     exact_scene: bool,
     exact_drawables: std::collections::BTreeSet<u64>,
     content_scanout: Option<Instant>,
@@ -49,6 +50,7 @@ pub struct App {
     group_bounds: Vec<Rect>,
     workbench_bounds: Rect,
     tab_hits: Vec<(u64, Rect)>,
+    tab_close_hits: Vec<(u64, Rect)>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
     builds: crate::build::Builds,
     normal_sidebar: bool,
@@ -89,6 +91,11 @@ impl App {
         done: Arc<AtomicBool>,
         sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     ) -> Self {
+        if options.mode == Mode::ThemeUi
+            && let Err(e) = crate::theme_bench::demo(&mut workspace)
+        {
+            workspace.messages.push(e);
+        }
         if options.mode == Mode::Typing {
             crate::install_carets(workspace.editor_mut(), options.carets);
         }
@@ -102,6 +109,7 @@ impl App {
         );
         let session_id = sessions.borrow_mut().register();
         Self {
+            title_theme: None,
             sessions,
             session_id,
             session_due: Some(Instant::now()),
@@ -116,7 +124,10 @@ impl App {
             panels: {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
-                if !matches!(options.mode, Mode::Interactive | Mode::Panels) {
+                if !matches!(
+                    options.mode,
+                    Mode::Interactive | Mode::Panels | Mode::ThemeUi
+                ) {
                     panels.side_visible = false;
                 }
                 panels
@@ -133,6 +144,7 @@ impl App {
             group_bounds: Vec::new(),
             workbench_bounds: Rect::default(),
             tab_hits: Vec::new(),
+            tab_close_hits: Vec::new(),
             dragging_splitter: None,
             builds: crate::build::Builds::default(),
             normal_sidebar: true,
@@ -435,6 +447,7 @@ impl App {
                     | "unfold_all"
                     | "fold_tag_attributes"
             )
+            && !crate::html_ui::COMMANDS.contains(&name)
             && let Some(input) = self.panels.input_mut()
         {
             input.set_clipboard(w.clipboard_text().unwrap_or_default());
@@ -580,6 +593,21 @@ impl App {
             return Ok(());
         }
         match name {
+            "open_url" => {
+                let url = args["url"].as_str().ok_or("missing URL")?;
+                if matches!(
+                    vel_minihtml::LinkTarget::parse(url),
+                    Ok(vel_minihtml::LinkTarget::Browser(_))
+                ) {
+                    std::process::Command::new("/usr/bin/open")
+                        .arg(url)
+                        .spawn()
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            "minihtml_navigate" => {
+                self.panels.message = args["href"].as_str().unwrap_or("").into();
+            }
             "show_indexing_status" => {
                 let source = self.panels.intel.status_source.clone();
                 w.new_window(
@@ -917,8 +945,27 @@ impl App {
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
         self.sync_active_view();
-        let interactive = matches!(self.options.mode, Mode::Interactive | Mode::Panels)
-            || self.options.groups > 1;
+        if !self.workspace.themes.ui.borrow().metrics.native_enabled() {
+            let result = self
+                .workspace
+                .themes
+                .ui
+                .borrow_mut()
+                .metrics
+                .enable_native();
+            if let Err(e) = result {
+                self.workspace.messages.push(e);
+            }
+        }
+        let settings = &self.workspace.tabs[self.workspace.active].editor.settings;
+        if let Err(e) = self.workspace.themes.select(settings, self.workspace.dark) {
+            self.workspace.messages.push(e);
+        }
+        self.panels.ui_scale = vel_ui::theme::ui_scale(settings);
+        let interactive = matches!(
+            self.options.mode,
+            Mode::Interactive | Mode::Panels | Mode::ThemeUi
+        ) || self.options.groups > 1;
         if !interactive {
             self.content = Rect {
                 x: 0.,
@@ -964,11 +1011,28 @@ impl App {
         self.sheet_bounds.clear();
         self.group_bounds.clear();
         self.tab_hits.clear();
+        self.tab_close_hits.clear();
+        self.workspace
+            .themes
+            .ui
+            .borrow_mut()
+            .begin_frame(Instant::now());
+        let mut theme_animating = false;
         let active = self.workspace.active;
         let focused = self.workspace.tabs[active].sheet;
         let mut scene = vel_render::scene::Scene::default();
         let mut chrome = SceneLayer::default();
         let mut exact = true;
+        let tabset_style = self.workspace.themes.ui.borrow_mut().style(
+            0xDFFF,
+            &vel_theme::ElementPath(&[
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("tabset_control", &[]),
+            ]),
+            &self.workspace.editor().settings,
+        );
+        let tab_height = f64::from(tabset_style.tab_height).max(16.);
+        let tab_width = f64::from(tabset_style.tab_width).max(72.);
         let groups = self.workspace.workbench.groups.clone();
         for (group_index, group) in groups.iter().enumerate() {
             let Some(group_bounds) = self.workspace.workbench.layout.rect(group_index, bounds)
@@ -1024,7 +1088,7 @@ impl App {
                 view.tab_height = if self.workspace.distraction_free {
                     0.
                 } else {
-                    crate::view::TAB_HEIGHT
+                    tab_height
                 };
                 view.focused = *sheet == focused
                     && self.window_focused
@@ -1045,52 +1109,20 @@ impl App {
                             .cloned(),
                     );
                 }
+                theme_animating |= self.workspace.themes.ui.borrow().animating();
                 let mut part = view.scene(&self.workspace.tabs[index].editor);
+                theme_animating |= self.workspace.themes.ui.borrow().animating();
                 exact &= view.exact(&self.workspace.tabs[index].editor)
                     && self.workspace.tabs[index].loading.is_none();
-                if self.workspace.tabs[index]
-                    .editor
-                    .settings
-                    .bool("show_errors_inline", true)
-                {
-                    let editor = &self.workspace.tabs[index].editor;
-                    let path = &self.workspace.tabs[index].path;
-                    let mut badges = SceneLayer::default();
-                    let clip = Rect {
-                        x: 0.,
-                        y: view.tab_height,
-                        width: rect.width,
-                        height: (rect.height - view.tab_height).max(0.),
-                    };
-                    for d in self
-                        .builds
+                crate::html_ui::paint_build_errors(
+                    &self.workspace.tabs[index].editor,
+                    view,
+                    self.builds
                         .diagnostics
                         .iter()
-                        .filter(|d| path.as_ref() == Some(&d.path))
-                    {
-                        let row = d.line.saturating_sub(1).min(editor.text.len_lines() - 1);
-                        let at = editor.text.line_to_byte(row);
-                        let position = view.rect_at(editor, at);
-                        if position.y >= view.tab_height && position.y < rect.height {
-                            let badge = Rect {
-                                x: (rect.width * 0.45).max(30.),
-                                y: position.y,
-                                width: rect.width * 0.55,
-                                height: view.line_height,
-                            };
-                            vel_ui::fill(&mut badges, badge, clip, [0.35, 0.12, 0.12, 0.92]);
-                            vel_ui::label(
-                                &mut badges,
-                                &d.message,
-                                badge.x + 4.,
-                                badge.y + view.ascent,
-                                clip,
-                                [1., 0.77, 0.73, 1.],
-                            );
-                        }
-                    }
-                    part.layers.push(badges);
-                }
+                        .filter(|d| self.workspace.tabs[index].path.as_ref() == Some(&d.path)),
+                    &mut part,
+                );
                 if *sheet != focused {
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     let view = std::mem::replace(view, View::new(Size::default(), 8., 12.));
@@ -1101,22 +1133,34 @@ impl App {
             }
             if !self.workspace.distraction_free {
                 let bar = Rect {
-                    height: crate::view::TAB_HEIGHT,
+                    height: tab_height,
                     ..group_bounds
                 };
-                vel_ui::fill(&mut chrome, bar, bar, [0.1, 0.11, 0.14, 1.]);
-                let scroll = group
-                    .tab_scroll
-                    .clamp(0., (group.sheets.len() as f64 * 180. - bar.width).max(0.));
+                let mut theme = self.workspace.themes.ui.borrow_mut();
+                let bar_path = [
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("tabset_control", &[]),
+                ];
+                let bar_style = theme.style(
+                    0xD000 + group_index as u64,
+                    &vel_theme::ElementPath(&bar_path),
+                    &self.workspace.editor().settings,
+                );
+                theme.surface(&mut chrome, &bar_style, bar, bar);
+                drop(theme);
+                let scroll = group.tab_scroll.clamp(
+                    0.,
+                    (group.sheets.len() as f64 * tab_width - bar.width).max(0.),
+                );
                 for (position, sheet) in group.sheets.iter().enumerate() {
                     let Some(index) = self.workspace.sheet_index(*sheet) else {
                         continue;
                     };
                     let tab = &self.workspace.tabs[index];
                     let rect = Rect {
-                        x: bar.x + position as f64 * 180. - scroll,
+                        x: bar.x + position as f64 * tab_width - scroll,
                         y: bar.y,
-                        width: 179.,
+                        width: tab_width - 1.,
                         height: bar.height,
                     };
                     if rect.x + rect.width <= bar.x || rect.x >= bar.x + bar.width {
@@ -1129,40 +1173,112 @@ impl App {
                     };
                     self.tab_hits.push((*sheet, hit));
                     let selected = group.selected.contains(sheet);
-                    vel_ui::fill(
-                        &mut chrome,
-                        rect,
-                        bar,
-                        if selected {
-                            [0.2, 0.22, 0.27, 1.]
-                        } else {
-                            [0.12, 0.13, 0.16, 1.]
-                        },
+                    let mut attrs = [""; 8];
+                    let mut n = 0;
+                    for (enabled, attr) in [
+                        (selected, "selected"),
+                        (*sheet == focused, "focused"),
+                        (tab.dirty(), "dirty"),
+                        (tab.transient, "transient"),
+                    ] {
+                        if enabled {
+                            attrs[n] = attr;
+                            n += 1;
+                        }
+                    }
+                    if let Some(node) = self.panels.tree.nodes.get(&(100 + *sheet)) {
+                        for attr in ["hover", "pressed"] {
+                            if node.attributes.contains(attr) {
+                                attrs[n] = attr;
+                                n += 1;
+                            }
+                        }
+                    }
+                    attrs[n] = if self.workspace.dark {
+                        "file_dark"
+                    } else {
+                        "file_light"
+                    };
+                    n += 1;
+                    let path = [
+                        bar_path[0],
+                        bar_path[1],
+                        vel_theme::Element::new("tab_control", &attrs[..n]),
+                    ];
+                    let mut theme = self.workspace.themes.ui.borrow_mut();
+                    let settings = &self.workspace.editor().settings;
+                    let tab_style =
+                        theme.style(100 + *sheet, &vel_theme::ElementPath(&path), settings);
+                    theme.surface(&mut chrome, &tab_style, rect, bar);
+                    let label_path = [
+                        path[0],
+                        path[1],
+                        path[2],
+                        vel_theme::Element::new("tab_label", &[]),
+                    ];
+                    let label = theme.style(
+                        0xD100 + *sheet,
+                        &vel_theme::ElementPath(&label_path),
+                        settings,
                     );
+                    if let Some(icon) = tab
+                        .path
+                        .as_deref()
+                        .and_then(|p| self.workspace.themes.file_icon(p))
+                    {
+                        theme.icon(
+                            &mut chrome,
+                            icon,
+                            Rect {
+                                x: rect.x + if tab_style.close_left { 26. } else { 8. },
+                                y: rect.y + 8.,
+                                width: 14.,
+                                height: 14.,
+                            },
+                            bar,
+                            label.foreground,
+                        );
+                    }
                     let caption = if let Some((read, total)) = tab.progress() {
                         format!("Loading {}%", read.saturating_mul(100) / total.max(1))
                     } else {
-                        format!("{}{}", if tab.transient { "◦ " } else { "" }, tab.label())
+                        tab.label()
                     };
-                    vel_ui::label(
+                    theme.text(
                         &mut chrome,
+                        &label,
                         &caption,
-                        rect.x + 8.,
-                        rect.y + 20.,
+                        rect.x + if tab_style.close_left { 46. } else { 28. },
+                        rect.y + f64::from(label.size) + 8. * self.panels.ui_scale,
                         Rect {
-                            width: (rect.width - 25.).min(bar.x + bar.width - rect.x),
+                            width: (rect.width - 30.).min(bar.x + bar.width - rect.x),
                             ..rect
                         },
-                        [0.85, 0.88, 0.93, 1.],
                     );
-                    vel_ui::label(
-                        &mut chrome,
-                        "×",
-                        rect.x + 160.,
-                        rect.y + 20.,
-                        bar,
-                        [0.7, 0.75, 0.8, 1.],
+                    let close_path = [
+                        path[0],
+                        path[1],
+                        path[2],
+                        vel_theme::Element::new("tab_close_button", &[]),
+                    ];
+                    let close = theme.style(
+                        0xD200 + *sheet,
+                        &vel_theme::ElementPath(&close_path),
+                        settings,
                     );
+                    let close_rect = Rect {
+                        x: if tab_style.close_left {
+                            rect.x + 6.
+                        } else {
+                            rect.x + rect.width - 20.
+                        },
+                        y: rect.y + (rect.height - 12.) / 2.,
+                        width: 12.,
+                        height: 12.,
+                    };
+                    self.tab_close_hits.push((*sheet, close_rect));
+                    theme.surface(&mut chrome, &close, close_rect, bar);
+                    drop(theme);
                     let id = 100 + *sheet;
                     let node = self
                         .panels
@@ -1193,7 +1309,18 @@ impl App {
                             height: 2.,
                             ..rect
                         };
-                        vel_ui::fill(&mut chrome, connector, bar, [0.4, 0.7, 0.95, 1.]);
+                        let mut theme = self.workspace.themes.ui.borrow_mut();
+                        let path = [
+                            path[0],
+                            path[1],
+                            vel_theme::Element::new("tab_connector", &["selected"]),
+                        ];
+                        let style = theme.style(
+                            0xD300 + *sheet,
+                            &vel_theme::ElementPath(&path),
+                            &self.workspace.editor().settings,
+                        );
+                        theme.surface(&mut chrome, &style, connector, bar);
                         let id = (5 << 40) + *sheet;
                         let node = self
                             .panels
@@ -1217,7 +1344,39 @@ impl App {
         self.exact_scene = exact;
         scene.layers.push(chrome);
         self.panels.paint(&self.workspace, &mut scene);
+        if theme_animating {
+            self.workspace.themes.ui.borrow_mut().request_animation();
+        }
         scene
+    }
+    fn apply_title_theme(&mut self, w: &WindowHandle) {
+        let key = (
+            self.workspace.themes.ui.borrow().revision,
+            self.workspace.editor().settings.cache_identity(),
+        );
+        if self.title_theme == Some(key) {
+            return;
+        }
+        self.title_theme = Some(key);
+        let settings = &self.workspace.editor().settings;
+        if !settings.bool("themed_title_bar", true) {
+            w.set_title_bar_theme(None, None);
+            return;
+        }
+        let style = self.workspace.themes.ui.borrow_mut().style(
+            0xDFFE,
+            &vel_theme::ElementPath(&[
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("title_bar", &[]),
+            ]),
+            settings,
+        );
+        let appearance = match style.title_style {
+            Some(vel_theme::Keyword::Dark) => Some(Appearance::Dark),
+            Some(vel_theme::Keyword::Light) => Some(Appearance::Light),
+            _ => None,
+        };
+        w.set_title_bar_theme(appearance, style.background);
     }
     fn log_input(&self, kind: &str, event: impl std::fmt::Debug) {
         if self.options.log_input {
@@ -1272,6 +1431,10 @@ impl App {
         renderer.persist_pipeline_cache()?;
         self.startup_done = true;
         match self.options.mode {
+            Mode::ThemeUi => {
+                self.bench = Some(Bench::new(Mode::ThemeUi, self.options.seed, vec![]));
+                w.set_animating(true);
+            }
             Mode::Startup => self.finish(w)?,
             Mode::Open => {
                 if self.workspace.tabs.iter().all(|t| t.loading.is_none())
@@ -1386,6 +1549,10 @@ impl App {
                 self.reporter.rss("after_full_sweep",json!({"viewports":self.bench.as_ref().map(|b|b.completed),"atlas":self.renderer.as_ref().map(Renderer::atlas_info),"lines":self.workspace.editor().text.len_lines(),"bytes":self.workspace.editor().text.len_bytes()}))?;
                 self.reporter.emit(json!({"kind":"memory_summary","sweep_complete":true,"visited_viewports":self.bench.as_ref().map(|b|b.completed),"external_input_events":self.external_input}))?;
             }
+            Mode::ThemeUi => {
+                let cpu: Vec<_> = self.samples.iter().map(|s| s.event_to_submit_ms).collect();
+                self.reporter.emit(json!({"kind":"theme_ui_native","actions":self.samples.len(),"action_to_submit_ms":summarize(&cpu),"boundary":"theme/minihtml action -> CPU scene -> atlas upload -> GPU submit; scanout reported separately","gui_started":true,"gpu_started":true}))?;
+            }
             Mode::Panels => {
                 if self.samples.len() != crate::bench::PANEL_ACTIONS {
                     return Err("incomplete panel benchmark".into());
@@ -1451,7 +1618,7 @@ impl App {
                 let deadline = b.schedule_next(at);
                 w.request_frame_at(deadline);
             }
-            if b.mode == Mode::Panels {
+            if matches!(b.mode, Mode::Panels | Mode::ThemeUi) {
                 w.request_frame_at(Instant::now() + Duration::from_millis(30));
             }
         } else if let Some(at) = self.input_at.take()
@@ -1486,9 +1653,16 @@ impl AppHandler for App {
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
         self.window_size = w.content_size();
+        self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
         self.view.appearance = w.appearance();
         self.workspace
             .set_appearance(w.appearance() == Appearance::Dark)?;
+        self.workspace
+            .themes
+            .ui
+            .borrow_mut()
+            .metrics
+            .enable_native()?;
         self.view.reveal(self.workspace.editor());
         let cache_dir = self
             .workspace
@@ -1663,6 +1837,26 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        let local = Point {
+            x: event.position.x - self.content.x,
+            y: event.position.y - self.content.y,
+        };
+        if event.kind == MouseKind::Move {
+            self.workspace.editor().html.borrow_mut().mouse_move(local);
+        }
+        if event.kind == MouseKind::Down {
+            let target = self.workspace.editor().html.borrow().navigate(local);
+            if let Some(popup) = &mut self.workspace.editor().html.borrow_mut().popup {
+                popup.mouse_action();
+            }
+            if let Some(target) = target {
+                let action = crate::html_ui::invocation(target);
+                self.run_named(w, &action.command, &action.args);
+                self.changed(w, Instant::now(), false);
+                return;
+            }
+        }
+
         if event.kind == MouseKind::Down
             && (event.button == 1 || (event.button == 0 && event.modifiers.control()))
         {
@@ -1786,14 +1980,18 @@ impl AppHandler for App {
             }
         }
         if event.kind == MouseKind::Down
-            && let Some((sheet, rect)) = self
+            && let Some((sheet, _)) = self
                 .tab_hits
                 .iter()
                 .find(|(_, rect)| vel_ui::contains(*rect, event.position))
                 .copied()
         {
             if let Some(index) = self.workspace.sheet_index(sheet) {
-                if event.position.x >= rect.x + rect.width - 20. {
+                if self
+                    .tab_close_hits
+                    .iter()
+                    .any(|(id, rect)| *id == sheet && vel_ui::contains(*rect, event.position))
+                {
                     let mut indices = if self.workspace.workbench.group_of(sheet).is_some_and(|g| {
                         self.workspace.workbench.groups[g].selected.contains(&sheet)
                     }) {
@@ -1998,6 +2196,18 @@ impl AppHandler for App {
             self.changed(w, Instant::now(), false);
             return;
         }
+        let local = Point {
+            x: event.position.x - self.content.x,
+            y: event.position.y - self.content.y,
+        };
+        if self.workspace.editor().html.borrow_mut().scroll(
+            local,
+            -event.delta_x * scale,
+            -event.delta_y * scale,
+        ) {
+            self.changed(w, Instant::now(), false);
+            return;
+        }
         if self.panels.scroll(event.position, -event.delta_y * scale) {
             self.changed(w, Instant::now(), false);
             return;
@@ -2035,6 +2245,7 @@ impl AppHandler for App {
         if self.options.mode == Mode::Interactive {
             self.workspace.fullscreen = w.is_full_screen();
         }
+        self.workspace.themes.ui.borrow_mut().density = scale as f32;
         self.window_size = size;
         self.view.size = size;
         self.view.clamp_scroll(self.workspace.editor());
@@ -2060,6 +2271,7 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
+        self.workspace.themes.ui.borrow_mut().density = ctx.window.scale_factor() as f32;
         if self.done.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2080,6 +2292,8 @@ impl AppHandler for App {
             let loading_before = self.workspace.tabs.iter().any(|t| t.loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
             let mut changed = self.workspace.poll() || focus_changed;
+            self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
+            changed |= self.workspace.themes.ui.borrow().metrics.poll_images();
             changed |= self.builds.poll(&mut self.panels);
             if changed && self.options.mode == Mode::Interactive && self.session_due.is_none() {
                 self.session_due = Some(Instant::now() + Duration::from_millis(300));
@@ -2105,6 +2319,7 @@ impl AppHandler for App {
                 || self.workspace.editor().annotations.borrow().pending > 0
                 || self.workspace.editor().completion.busy()
                 || self.builds.task.is_some()
+                || self.workspace.themes.ui.borrow().metrics.images_pending()
             {
                 w.request_frame_at(Instant::now() + Duration::from_millis(8));
             }
@@ -2156,18 +2371,25 @@ impl AppHandler for App {
                 != "solid";
             w.request_frame_at(
                 Instant::now()
-                    + Duration::from_millis(if caret_animation {
-                        16
-                    } else if self.workspace.language_busy()
-                        || self.panels.busy()
-                        || self.builds.task.is_some()
-                    {
-                        8
-                    } else {
-                        200
-                    }),
+                    + Duration::from_millis(
+                        if caret_animation || self.workspace.themes.ui.borrow().animating() {
+                            16
+                        } else if self.workspace.language_busy()
+                            || self.panels.busy()
+                            || self.builds.task.is_some()
+                        {
+                            8
+                        } else {
+                            200
+                        },
+                    ),
             );
-            if ctx.reason == FrameReason::Timer && !changed && !loading_before && !caret_animation {
+            if ctx.reason == FrameReason::Timer
+                && !changed
+                && !loading_before
+                && !caret_animation
+                && !self.workspace.themes.ui.borrow().animating()
+            {
                 return Ok(());
             }
         }
@@ -2287,6 +2509,48 @@ impl AppHandler for App {
             return Ok(());
         }
         let mut query = None;
+        if self.options.mode == Mode::ThemeUi {
+            self.workspace.poll();
+        }
+        if self.options.mode == Mode::ThemeUi && self.bench.as_ref().is_some_and(|b| !b.pending) {
+            let step = self.bench.as_ref().unwrap().completed;
+            self.bench.as_mut().unwrap().pending = true;
+            self.bench_received = Some(Instant::now());
+            crate::theme_bench::native_step(&mut self.workspace, step)?;
+            let viewport = self.viewport();
+            match step % 10 {
+                0 => {
+                    self.panels
+                        .action(&mut self.workspace, "hide_panel", &json!({}), viewport)?;
+                }
+                6 => {
+                    self.panels.action(
+                        &mut self.workspace,
+                        "show_panel",
+                        &json!({"panel":"find"}),
+                        viewport,
+                    )?;
+                }
+                7..=9 => {
+                    if let Some(node) = self.panels.tree.nodes.get(&50) {
+                        let point = Point {
+                            x: node.rect.x + node.rect.width / 2.,
+                            y: node.rect.y + node.rect.height / 2.,
+                        };
+                        self.panels.tree.pointer(
+                            point,
+                            match step % 10 {
+                                8 => Some(true),
+                                9 => Some(false),
+                                _ => None,
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if self.options.mode == Mode::Panels {
             if self.bench.as_ref().is_some_and(|b| !b.pending) {
                 let index = self.bench.as_ref().expect("panel bench").completed;
@@ -2349,6 +2613,7 @@ impl AppHandler for App {
             }
         }
         let scene = self.scene();
+        self.apply_title_theme(w);
         let result = self.renderer.as_mut().ok_or("renderer missing")?.render(
             &scene,
             self.fonts.as_mut().ok_or("fonts missing")?,

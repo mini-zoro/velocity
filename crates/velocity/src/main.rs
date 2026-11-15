@@ -13,6 +13,7 @@ mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
 mod git_ui;
+mod html_ui;
 mod instance;
 mod intelligence;
 mod intelligence_bench;
@@ -27,6 +28,10 @@ mod review_tests;
 mod review_ui;
 mod session;
 mod stats;
+mod theme_bench;
+#[cfg(test)]
+mod theme_tests;
+mod theme_ui;
 mod view;
 mod workbench;
 mod workbench_bench;
@@ -134,6 +139,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        if options.mode == Mode::HeadlessTheme {
+            return theme_bench::run(&reporter, &options);
+        }
         if options.mode == Mode::HeadlessReviewHistory {
             return review_bench::history(&reporter, &options);
         }
@@ -461,6 +469,11 @@ fn app_scene_translate(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
         r.y += y;
     };
     for layer in &mut scene.layers {
+        for surface in &mut layer.surfaces {
+            let (rect, clip) = surface.bounds_mut();
+            shift(rect);
+            shift(clip);
+        }
         for rect in &mut layer.rects {
             shift(&mut rect.rect);
             shift(&mut rect.clip);

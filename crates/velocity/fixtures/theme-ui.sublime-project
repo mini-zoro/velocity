@@ -1,0 +1,11 @@
+// Original theme/minihtml fixture: diagnostics print to stdout and never change files.
+{
+  "folders": [{"path": ".", "name": "Theme review", "file_exclude_patterns": ["*.sublime-workspace"]}],
+  "settings": {"theme": "auto", "show_errors_inline": true, "word_wrap": false},
+  "build_systems": [{
+    "name": "Theme annotations",
+    "cmd": ["python3", "-c", "print('workbench-error.txt:2:1: Build annotation: <markup> & Unicode 世界'); raise SystemExit(1)"],
+    "working_dir": "$project_path",
+    "file_regex": "^([^:]+):([0-9]+):([0-9]+): (.*)$"
+  }]
+}

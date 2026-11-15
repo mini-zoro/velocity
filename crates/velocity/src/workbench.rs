@@ -359,6 +359,29 @@ impl Workspace {
     }
     pub fn workbench_action(&mut self, name: &str, args: &Value) -> Result<bool, String> {
         match name {
+            "new_html_sheet" => {
+                let content = args["content"].as_str().unwrap_or("");
+                vel_ui::minihtml::Html::new(content, false).map_err(|e| e.to_string())?;
+                self.new_file()?;
+                let editor = self.editor_mut();
+                editor.settings.set(
+                    vel_config::settings::Layer::View,
+                    "velocity_html_sheet",
+                    json!(content),
+                );
+                editor.settings.set(
+                    vel_config::settings::Layer::View,
+                    "velocity_html_sheet_title",
+                    json!(args["name"].as_str().unwrap_or("HTML")),
+                );
+                editor.read_only = true;
+            }
+            "set_theme_appearance" => {
+                self.set_appearance(args["dark"].as_bool().unwrap_or(!self.dark))?;
+            }
+            "theme_demo" => {
+                crate::theme_bench::demo(self)?;
+            }
             "set_layout" => {
                 let layout = if let Some(preset) = args["preset"].as_str() {
                     match preset {
@@ -499,6 +522,19 @@ impl Workspace {
                     documents.push(document);
                 }
                 sheets.push(Sheet {
+                    html: tab
+                        .editor
+                        .settings
+                        .get("velocity_html_sheet")
+                        .and_then(Value::as_str)
+                        .map(|contents| vel_session::HtmlSheet {
+                            name: tab
+                                .editor
+                                .settings
+                                .string("velocity_html_sheet_title", "HTML")
+                                .into(),
+                            contents: contents.into(),
+                        }),
                     id: tab.sheet,
                     document: identity,
                     view: loaded
@@ -528,6 +564,19 @@ impl Workspace {
             let buffer = &self.tabs[owner].editor.buffer;
             let view = vel_session::ViewState::capture(buffer, tab.shared_view, tab.scroll);
             sheets.push(Sheet {
+                html: tab
+                    .editor
+                    .settings
+                    .get("velocity_html_sheet")
+                    .and_then(Value::as_str)
+                    .map(|contents| vel_session::HtmlSheet {
+                        name: tab
+                            .editor
+                            .settings
+                            .string("velocity_html_sheet_title", "HTML")
+                            .into(),
+                        contents: contents.into(),
+                    }),
                 id: tab.sheet,
                 document: identity,
                 view,
@@ -640,6 +689,15 @@ impl Workspace {
             tab.scroll = sheet.view.scroll;
             tab.transient = sheet.transient;
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
+            if let Some(html) = &sheet.html {
+                tab.editor
+                    .settings
+                    .set(Layer::View, "velocity_html_sheet", json!(html.contents));
+                tab.editor
+                    .settings
+                    .set(Layer::View, "velocity_html_sheet_title", json!(html.name));
+                tab.editor.read_only = true;
+            }
             if let Some(syntax) = &sheet.syntax {
                 tab.editor
                     .settings

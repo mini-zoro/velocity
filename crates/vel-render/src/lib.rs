@@ -9,6 +9,7 @@ pub mod font;
 mod gpu;
 #[cfg(target_os = "macos")]
 mod native;
+pub mod nine_slice;
 pub mod scene;
 #[cfg(target_os = "macos")]
 mod timing;

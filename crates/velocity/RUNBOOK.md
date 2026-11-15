@@ -829,3 +829,41 @@ implemented. Minimal bracket/quote pairing and closing-character skip use contex
 New/close window commands use a separate process/window; recorded text macros are per view.
 This round-4 section predates the round-5 palette/panels; snippet field navigation, syntax highlighting and wrap_lines remain deferred.
 Use MANUAL_TEST.md's editing smoke checklist before accepting native behavior.
+
+## Round ten: theme and minihtml
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS='-D warnings' cargo doc -p velocity -p vel-ui -p vel-render -p vel-platform -p vel-config -p vel-session --no-deps
+cargo build --release -p velocity
+./target/release/velocity --headless-theme-ui --data-dir /tmp/velocity-theme-profile --output /tmp/velocity-theme.jsonl --timeout 300
+python3 crates/velocity/scripts/measure-theme-ui.py --before /absolute/path/to/round9/velocity --runs 10 --output-dir /tmp/velocity-theme-ab
+```
+
+Keep the round-nine binary before rebuilding. The A/B script copies both binaries, records hashes
+and runs one process at a time in alternating order, with 500 typing and 300 four-view scrolling
+samples per process. It runs five additional current-binary popup/annotation/theme-switch
+processes. Do not compile, test or run another benchmark during that series. Raw samples,
+profiles, environment/source hashes and paired bootstrap intervals remain in the output folder.
+The style-cache projection uses process-unique settings value identities; views cannot reuse a cached
+projection belonging to different effective values.
+
+`VEL_UPDATE_GOLDENS=1 cargo test -p velocity theme_tests::key_screens_match_structural_goldens`
+regenerates the original CPU scene fixture for review. Normal tests compare ordered layers,
+CSS boxes/borders/radii, nine-slice image patches, rectangles, glyph runs and clips. They do not
+initialize a native window or GPU. The HTML metrics provider switches to the actual native
+font stack only in a window's startup callback.
+
+Outside the sandbox, on a visible display:
+
+```sh
+zsh crates/velocity/scripts/review-round10-gui.zsh /absolute/path/to/round9/velocity
+```
+
+The automatic `--bench-theme-ui` mode makes 100 bounded UI actions over dark/light themes,
+popups, phantom/annotation content, an HTML sheet and find-button hover/press/release states,
+reports actual submit/presentation data
+and exits. The existing watchdog and display preflight remain active. Use MANUAL_TEST.md to
+record visual, native shaping, density, title-bar, IME, link and Metal acceptance.

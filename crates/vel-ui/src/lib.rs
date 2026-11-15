@@ -2,7 +2,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod images;
 pub mod input;
+pub mod minihtml;
+pub mod theme;
 pub mod workbench;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -61,7 +64,7 @@ pub enum Layout {
     #[default]
     Stack,
 }
-/// Retained widget state. Classes/attributes are the future .sublime-theme selector seam.
+/// Retained widget state. Classes and attributes supply the live .sublime-theme selector path.
 #[derive(Clone, Debug)]
 pub struct Node {
     /// Theme class, documented in the crate README.
@@ -82,6 +85,7 @@ pub struct Node {
     pub interactive: bool,
     /// Whether the node participates in painting/layout/hit testing.
     pub visible: bool,
+    style_attributes: Vec<&'static str>,
 }
 impl Node {
     /// Creates an empty visible widget with no children.
@@ -96,6 +100,7 @@ impl Node {
             label: String::new(),
             interactive: true,
             visible: true,
+            style_attributes: Vec::new(),
         }
     }
 }
@@ -110,6 +115,7 @@ pub struct Tree {
     pub focus: Focus,
     hovered: Option<Id>,
     pressed: Option<Id>,
+    parents: BTreeMap<Id, Option<Id>>,
 }
 /// Inclusive logical point hit test.
 pub fn contains(rect: Rect, point: Point) -> bool {
@@ -119,6 +125,38 @@ pub fn contains(rect: Rect, point: Point) -> bool {
         && point.y < rect.y + rect.height
 }
 impl Tree {
+    /// Refreshes retained ancestry after changing roots or child lists. Stable links reuse storage.
+    pub fn index_ancestry(&mut self) {
+        for node in self.nodes.values_mut() {
+            if !node.style_attributes.iter().eq(node.attributes.iter()) {
+                node.style_attributes.clear();
+                node.style_attributes
+                    .extend(node.attributes.iter().copied());
+            }
+        }
+        fn index(
+            nodes: &BTreeMap<Id, Node>,
+            parents: &mut BTreeMap<Id, Option<Id>>,
+            id: Id,
+            parent: Option<Id>,
+            depth: usize,
+        ) {
+            if depth >= 256 {
+                return;
+            }
+            parents.insert(id, parent);
+            if let Some(node) = nodes.get(&id) {
+                for child in &node.children {
+                    index(nodes, parents, *child, Some(id), depth + 1);
+                }
+            }
+        }
+        self.parents.retain(|id, _| self.nodes.contains_key(id));
+        for root in &self.roots {
+            index(&self.nodes, &mut self.parents, *root, None, 0);
+        }
+    }
+
     /// Lays out one retained subtree inside a logical rectangle.
     pub fn layout(&mut self, id: Id, bounds: Rect) {
         let Some(node) = self.nodes.get_mut(&id) else {
@@ -294,56 +332,107 @@ impl QuickPanel {
         self.scroll.reveal(self.selected);
         self.current()
     }
-    /// Paints visible rows only, including matched-character highlights and metadata.
+    /// Paints visible rows with the original default theme, retaining a thread-local resolver.
     pub fn paint(&self, layer: &mut Layer, bounds: Rect) {
+        thread_local! {static THEME: std::cell::RefCell<theme::ThemeUi>=std::cell::RefCell::new(theme::ThemeUi::default());}
+        THEME.with(|theme| {
+            self.paint_with_theme(
+                layer,
+                bounds,
+                &mut theme.borrow_mut(),
+                &vel_config::settings::Settings::default(),
+            )
+        });
+    }
+    /// Paints through the caller's shared resolver, applying actual selected-row ancestor state.
+    pub fn paint_with_theme(
+        &self,
+        layer: &mut Layer,
+        bounds: Rect,
+        theme: &mut theme::ThemeUi,
+        settings: &vel_config::settings::Settings,
+    ) {
+        use vel_theme::{Element, ElementPath};
         for row in self.scroll.visible() {
             let item = &self.items[row];
-            let y = bounds.y + row as f64 * self.scroll.row_height - self.scroll.offset;
             let rect = Rect {
-                y,
+                y: bounds.y + row as f64 * self.scroll.row_height - self.scroll.offset,
                 height: self.scroll.row_height,
                 ..bounds
             };
-            if row == self.selected {
-                fill(layer, rect, bounds, [0.19, 0.27, 0.37, 1.]);
-            }
-            label(
+            let attrs = if row == self.selected {
+                &["selected"][..]
+            } else {
+                &[]
+            };
+            let path = [
+                Element::new("window", &[]),
+                Element::new("quick_panel", &[]),
+                Element::new("quick_panel_row", attrs),
+            ];
+            let style = theme.style(row as u64, &ElementPath(&path), settings);
+            theme.surface(layer, &style, rect, bounds);
+            let label_path = [
+                path[0],
+                path[1],
+                path[2],
+                Element::new("quick_panel_label", &[]),
+            ];
+            let caption = theme.style(0x1000 + row as u64, &ElementPath(&label_path), settings);
+            theme.text(
                 layer,
+                &caption,
                 &item.caption,
                 rect.x + 12.,
-                y + 18.,
+                rect.y + 18.,
                 bounds,
-                [0.87, 0.89, 0.94, 1.],
             );
-            for (i, c) in item.caption.char_indices() {
-                if item.highlights.contains(&i) {
-                    label(
-                        layer,
-                        &c.to_string(),
-                        rect.x + 12. + input::cells(&item.caption[..i]) as f64 * 7.2,
-                        y + 18.,
-                        bounds,
-                        [0.45, 0.8, 1., 1.],
-                    );
-                }
+            for (byte, c) in item
+                .caption
+                .char_indices()
+                .filter(|(i, _)| item.highlights.contains(i))
+            {
+                let mut matched = caption.clone();
+                matched.foreground = matched.matched;
+                theme.text(
+                    layer,
+                    &matched,
+                    &c.to_string(),
+                    rect.x + 12. + theme.advance(&caption, &item.caption[..byte]),
+                    rect.y + 18.,
+                    bounds,
+                );
             }
-            label(
+            let detail_path = [
+                path[0],
+                path[1],
+                path[2],
+                Element::new("quick_panel_detail_label", &[]),
+            ];
+            let detail = theme.style(0x2000 + row as u64, &ElementPath(&detail_path), settings);
+            theme.text(
                 layer,
+                &detail,
                 &item.details,
                 rect.x + 12.,
-                y + 35.,
+                rect.y + 35.,
                 bounds,
-                [0.5, 0.57, 0.65, 1.],
             );
-            let hint = format!("{}  {}", item.kind, item.annotation);
-            label(
+            let hint_path = [
+                path[0],
+                path[1],
+                path[2],
+                Element::new("quick_panel_label hint", &[]),
+            ];
+            let hint = theme.style(0x3000 + row as u64, &ElementPath(&hint_path), settings);
+            let text = format!("{}  {}", item.kind, item.annotation);
+            theme.text(
                 layer,
                 &hint,
-                (bounds.x + bounds.width - input::cells(&hint) as f64 * 7.2 - 12.)
-                    .max(bounds.x + 12.),
-                y + 35.,
+                &text,
+                (rect.x + rect.width - theme.advance(&hint, &text) - 12.).max(rect.x + 12.),
+                rect.y + 35.,
                 bounds,
-                [0.67, 0.7, 0.77, 1.],
             );
         }
     }
@@ -360,6 +449,7 @@ pub fn fill(layer: &mut Layer, rect: Rect, clip: Rect, color: [f32; 4]) {
 /// Adds one clipped UI text run (12pt grid).
 pub fn label(layer: &mut Layer, text: &str, x: f64, baseline: f64, clip: Rect, color: [f32; 4]) {
     layer.text.push(TextRun {
+        family: None,
         style: Default::default(),
         text: text.replace(['\n', '\r', '\t'], " "),
         x: x as f32,
@@ -392,9 +482,161 @@ impl Animation {
     }
 }
 
+impl Tree {
+    /// Resolves a retained widget and optional semantic child against its actual ancestor states.
+    /// Ancestor/attribute scratch storage is stack-backed; cache hits allocate nothing.
+    pub fn style(
+        &self,
+        id: Id,
+        child: Option<&str>,
+        theme: &mut theme::ThemeUi,
+        settings: &vel_config::settings::Settings,
+    ) -> theme::Style {
+        let paint_id = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            child.hash(&mut h);
+            id.wrapping_mul(0x9e3779b97f4a7c15) ^ h.finish()
+        };
+        fn find(
+            tree: &Tree,
+            root: Id,
+            target: Id,
+            ids: &mut [Id; 8],
+            depth: usize,
+        ) -> Option<usize> {
+            if depth >= ids.len() {
+                return None;
+            }
+            let node = tree.nodes.get(&root)?;
+            ids[depth] = root;
+            if root == target {
+                return Some(depth + 1);
+            }
+            node.children
+                .iter()
+                .find_map(|id| find(tree, *id, target, ids, depth + 1))
+        }
+        let mut ids = [0; 8];
+        let indexed = self.parents.get(&id).and_then(|_| {
+            let mut current = Some(id);
+            let mut count = 0;
+            while let Some(id) = current {
+                if count == ids.len() {
+                    return None;
+                }
+                ids[count] = id;
+                count += 1;
+                current = *self.parents.get(&id)?;
+            }
+            ids[..count].reverse();
+            Some(count)
+        });
+        // Normal chrome fits the stack buffer. Preserve complete ancestry for deeper
+        // retained extension trees instead of silently styling only the leaf.
+        if indexed.is_none() && self.parents.contains_key(&id) {
+            let mut chain = Vec::new();
+            let mut current = Some(id);
+            while let Some(id) = current {
+                if chain.len() >= 256 || chain.contains(&id) {
+                    break;
+                }
+                chain.push(id);
+                current = self.parents.get(&id).copied().flatten();
+            }
+            let mut path = vec![vel_theme::Element::new("window", &[])];
+            for id in chain.iter().rev() {
+                let node = &self.nodes[id];
+                path.push(vel_theme::Element::new(node.class, &node.style_attributes));
+            }
+            if let Some(child) = child {
+                path.push(vel_theme::Element::new(child, &[]));
+            }
+            return theme.style(paint_id, &vel_theme::ElementPath(&path), settings);
+        }
+        let n = indexed
+            .or_else(|| {
+                self.roots
+                    .iter()
+                    .find_map(|root| find(self, *root, id, &mut ids, 0))
+            })
+            .unwrap_or_else(|| {
+                ids[0] = id;
+                1
+            });
+        if indexed.is_some() {
+            let mut path = [vel_theme::Element::new("window", &[]); 10];
+            for i in 0..n {
+                let node = &self.nodes[&ids[i]];
+                path[i + 1] = vel_theme::Element::new(node.class, &node.style_attributes);
+            }
+            let count = if let Some(child) = child {
+                path[n + 1] = vel_theme::Element::new(child, &[]);
+                n + 2
+            } else {
+                n + 1
+            };
+            return theme.style(paint_id, &vel_theme::ElementPath(&path[..count]), settings);
+        }
+        let mut attrs = [[""; 12]; 8];
+        let mut lengths = [0; 8];
+        for i in 0..n {
+            if let Some(node) = self.nodes.get(&ids[i]) {
+                for (j, attr) in node.attributes.iter().take(12).enumerate() {
+                    attrs[i][j] = attr;
+                    lengths[i] += 1;
+                }
+            }
+        }
+        let mut path = [vel_theme::Element::new("window", &[]); 10];
+        for i in 0..n {
+            path[i + 1] = vel_theme::Element::new(
+                self.nodes.get(&ids[i]).map_or("label_control", |n| n.class),
+                &attrs[i][..lengths[i]],
+            );
+        }
+        let count = if let Some(child) = child {
+            path[n + 1] = vel_theme::Element::new(child, &[]);
+            n + 2
+        } else {
+            n + 1
+        };
+        theme.style(paint_id, &vel_theme::ElementPath(&path[..count]), settings)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn theme_paths_preserve_deep_retained_ancestors() {
+        let mut tree = Tree::default();
+        for id in 1..=12 {
+            let mut node = Node::new(if id == 1 {
+                "panel_control"
+            } else if id == 12 {
+                "button_control"
+            } else {
+                "container"
+            });
+            if id < 12 {
+                node.children.push(id + 1);
+            }
+            if id == 1 {
+                node.attributes.insert("hover");
+            }
+            tree.nodes.insert(id, node);
+        }
+        tree.roots.push(1);
+        tree.index_ancestry();
+        let palette = vel_theme::Palette::default();
+        let mut painter = theme::ThemeUi::new(std::sync::Arc::new(vel_theme::Theme::parse(r##"{"rules":[{"class":"button_control","parents":[{"class":"panel_control","attributes":["hover"]}],"fg":"#123456"}]}"##, &palette).unwrap()), palette);
+        assert_eq!(
+            tree.style(12, None, &mut painter, &Default::default())
+                .foreground,
+            [18. / 255., 52. / 255., 86. / 255., 1.]
+        );
+    }
     #[test]
     fn focus_routing_layout_hit_order_and_virtualization() {
         let mut focus = Focus::default();

@@ -83,3 +83,9 @@ independent hosts/layers/renderers. Application quit validates every live window
 the loop; a window close releases its editor/worker state while siblings remain alive. Native
 window tabs remain disabled. Unit tests still construct no AppKit or Metal objects; the
 multi-window/full-screen bridge is compiled here and requires the velocity human checklist.
+
+
+Round 10 adds `WindowHandle::set_title_bar_theme`: appearance is applied to the native title-bar
+view, preserving OS appearance notifications for the document. None restores system appearance;
+a supplied background uses straight-alpha sRGB. This compiles headlessly; visual title-bar and
+multi-display behavior require the native reviewer checklist.

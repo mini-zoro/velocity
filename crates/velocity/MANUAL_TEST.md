@@ -255,3 +255,49 @@ results/log references here; headless tests do not check these boxes.
 - [ ] Right-click a misspelling; accept a suggestion, Undo, Add to Dictionary and Ignore Word. Suggestions are version checked, Escape dismisses the menu, and words survive relaunch. Existing User preference comments/keys survive.
 - [ ] View → Dictionary lists English and `Packages/User/review.dic`; select the custom dictionary. Test a syntax-specific `spell_check` setting, invalid dictionaries and a package-traversal path; no incorrect underlines or crash.
 - [ ] Run automatic native on/off typing, 4K typing, full-history restore and Metal validation commands. Retain complete JSONL and assess ≤5% typing regression, 2/4 ms absolute typing and ≤300 ms native first-window targets separately from CPU results.
+
+## Round 10: theme and minihtml acceptance
+
+No GUI or Metal execution was performed in the sandbox. Leave these boxes unchecked until a
+human runs them. Preserve the round-nine IME confirmation above; repeat the panel-input cases
+because the UI now shares proportional font metrics with hit testing and candidate geometry.
+
+Run `zsh crates/velocity/scripts/review-round10-gui.zsh /absolute/path/to/round9/velocity` on an
+awake, unlocked display. It builds once, runs the new automatic native demo with Metal validation
+at ordinary/4K logical sizes, then alternates round-nine/current four-group typing and scrolling.
+It finally opens a disposable manual profile. Record its printed evidence directory, machine,
+OS, scale/refresh, all completion/error records and any Metal diagnostics.
+
+- [ ] Open the command palette and run **Theme & minihtml: Review Demo**. Inspect all three
+  phantom placements, the right-hand annotation, the scrollable hover and the HTML sheet tab.
+  Wrapped paragraphs, list markers and links must keep distinct baselines; emoji/CJK and
+  bold/italic/code faces must align with their measured boxes.
+- [ ] In the HTML sheet click Light/Dark, then switch OS appearance with `theme: "auto"`.
+  Explicit `theme` stays selected; `dark_theme`/`light_theme` choose the auto pair. Check native
+  title-bar appearance, then set `themed_title_bar: false` and verify system appearance returns.
+- [ ] Visit Goto, palette, sidebar expanded/selected rows, transient/dirty tabs, find/replace
+  buttons, context menu and status bar in both appearances. Hover/pressed/selected states,
+  match colors, kind badges, file icons, close/fold glyphs and minimap tint must be legible.
+  Drag a scroll puck and switch `overlay_scroll_bars` between enabled/disabled/system.
+- [ ] Add a User theme fragment that changes a status/sidebar color, font size and content margin;
+  verify live reload. Try `ui_scale` 0.75, 1, 1.5 and 2; in a search field click CJK/emoji text,
+  extend selection and compose Pinyin. Caret, selection, hit testing and IME anchor must agree.
+  Move between displays to check @2x/@3x resource selection and glyph/texture sharpness.
+- [ ] Use the palette's **Theme & minihtml: Popup flags …** entries. Default popups close on
+  selection changes; flag 16 keeps them; 4 closes on movement/click/scroll; 8 permits movement
+  toward/inside the popup and closes on movement away; 32 closes on character input; 48 keeps
+  selections while closing on typing. Escape closes the popup. Completion cooperation is
+  exercised by the automatic demo's flag-18 popup beside the completion menu.
+- [ ] Scroll a popup larger than its maximum height. Click `subl:` actions and the public HTTPS
+  link, and hover titles. Link/tooltip hit regions must follow scroll/resize and stay clipped.
+- [ ] Edit and undo text before an inline/below/block phantom. Text, carets, hit testing and
+  phantom links must retain the same tracked anchor and reserved space. Annotations must not
+  add editable rows or change vertical navigation.
+- [ ] Open `fixtures/theme-ui.sublime-project` and `workbench-error.txt`, select **Theme annotations**
+  in Build With and build. The error appears as a right-aligned HTML annotation with a colored
+  left border; literal `<markup> &` is displayed as text. Toggle `show_errors_inline` off/on.
+- [ ] In the HTML sheet click commands/browser links, scroll, resize, close/reopen the app and
+  confirm its name/content return read-only. Text commands must not change its buffer.
+- [ ] Repeat with fresh, unwritable and corrupt profiles, then a malformed/missing User theme
+  and missing image. Confirm fallback/diagnostics and continued editing. Record actual native
+  timings against the round-ten budgets; CPU structural goldens are not a pixel-quality result.

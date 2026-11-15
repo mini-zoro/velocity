@@ -219,5 +219,14 @@
   {
     "caption": "Git: Blame File",
     "command": "git_blame_file"
-  }
+  },
+  {"caption":"Theme & minihtml: Review Demo","command":"theme_demo"},
+  {"caption":"Theme: Light","command":"set_theme_appearance","args":{"dark":false}},
+  {"caption":"Theme: Dark","command":"set_theme_appearance","args":{"dark":true}},
+  {"caption": "Theme & minihtml: Popup flags 0", "command": "show_popup", "args": {"content": "<p title=\"Flags 0\"><b>Popup flags 0</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 0, "max_width": 320, "max_height": 100}},
+  {"caption": "Theme & minihtml: Popup flags 4", "command": "show_popup", "args": {"content": "<p title=\"Flags 4\"><b>Popup flags 4</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 4, "max_width": 320, "max_height": 100}},
+  {"caption": "Theme & minihtml: Popup flags 8", "command": "show_popup", "args": {"content": "<p title=\"Flags 8\"><b>Popup flags 8</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 8, "max_width": 320, "max_height": 100}},
+  {"caption": "Theme & minihtml: Popup flags 16", "command": "show_popup", "args": {"content": "<p title=\"Flags 16\"><b>Popup flags 16</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 16, "max_width": 320, "max_height": 100}},
+  {"caption": "Theme & minihtml: Popup flags 32", "command": "show_popup", "args": {"content": "<p title=\"Flags 32\"><b>Popup flags 32</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 32, "max_width": 320, "max_height": 100}},
+  {"caption": "Theme & minihtml: Popup flags 48", "command": "show_popup", "args": {"content": "<p title=\"Flags 48\"><b>Popup flags 48</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 48, "max_width": 320, "max_height": 100}}
 ]

@@ -1,4 +1,5 @@
 //! Scene primitives in logical points, grouped by kind within explicit layers.
+use std::sync::Arc;
 use vel_platform::Rect;
 
 /// Straight-alpha linear RGBA.
@@ -26,6 +27,8 @@ pub struct SolidRect {
 /// A single-baseline text run; tab expansion belongs to the UI layout.
 #[derive(Clone, Debug)]
 pub struct TextRun {
+    /// CSS/theme family list. None retains the editor monospace grid.
+    pub family: Option<Arc<str>>,
     /// Requested weight and slant.
     pub style: FontStyle,
     /// Text to shape, with no tabs or newlines.
@@ -75,6 +78,8 @@ pub struct Shadow {
 /// Use separate layers when a later solid must cover earlier glyphs.
 #[derive(Clone, Debug, Default)]
 pub struct Layer {
+    /// Ordered theme fills/textures, behind selections and text.
+    pub surfaces: Vec<Surface>,
     /// Marks the overview layer for isolated GPU timestamp measurements.
     pub minimap: bool,
     /// Shadows behind other primitives.
@@ -105,6 +110,8 @@ impl Default for Scene {
 /// Primitive kinds in draw order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveKind {
+    /// Ordered fills and theme image patches.
+    Surface,
     /// Soft shadow.
     Shadow,
     /// Solid/rounded rectangle.
@@ -208,4 +215,76 @@ mod tests {
         plan.clear();
         assert!(plan.is_empty());
     }
+}
+
+/// Immutable straight-alpha image shared by CPU scenes and the GPU atlas.
+#[derive(Clone, Debug)]
+pub struct Image {
+    /// Intrinsic logical dimensions; a decoded HTML image may use a downsampled bitmap.
+    pub logical_size: [f32; 2],
+    /// Content identity; hosts must change this when pixels change.
+    pub id: u64,
+    /// Physical pixel width.
+    pub width: u32,
+    /// Physical pixel height.
+    pub height: u32,
+    /// Tightly packed RGBA8, top row first.
+    pub rgba: Arc<[u8]>,
+}
+/// One clipped image patch with independently tinted pixels.
+#[derive(Clone, Debug)]
+pub struct ImageQuad {
+    /// Shared atlas resource.
+    pub image: Arc<Image>,
+    /// Source pixels (left, top, width, height).
+    pub source: [f32; 4],
+    /// Logical destination.
+    pub rect: Rect,
+    /// Logical clip.
+    pub clip: Rect,
+    /// Multiplicative RGBA tint.
+    pub color: Color,
+}
+/// Ordered surface primitive. Separate layers preserve overlap with text.
+#[derive(Clone, Debug)]
+pub enum Surface {
+    /// CSS box, including corner-specific radii and border edges.
+    CssBox(CssBox),
+    /// Solid or rounded fill.
+    Fill(SolidRect),
+    /// Atlas image patch.
+    Image(ImageQuad),
+}
+impl Surface {
+    /// Mutable destination and clipping bounds for coordinate transforms.
+    pub fn bounds_mut(&mut self) -> (&mut Rect, &mut Rect) {
+        match self {
+            Self::CssBox(r) => (&mut r.rect, &mut r.clip),
+            Self::Fill(r) => (&mut r.rect, &mut r.clip),
+            Self::Image(r) => (&mut r.rect, &mut r.clip),
+        }
+    }
+}
+
+/// One CSS border edge, ordered top/right/bottom/left.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BorderEdge {
+    /// Width in logical points.
+    pub width: f32,
+    /// Straight-alpha edge color.
+    pub color: Color,
+}
+/// A minihtml box with independently rounded corners and colored border edges.
+#[derive(Clone, Debug)]
+pub struct CssBox {
+    /// Logical outer border box.
+    pub rect: Rect,
+    /// Ancestor clipping rectangle.
+    pub clip: Rect,
+    /// Background behind the content and border.
+    pub background: Color,
+    /// Top-left, top-right, bottom-right, bottom-left radii.
+    pub radii: [f32; 4],
+    /// Top, right, bottom, left border edges.
+    pub borders: [BorderEdge; 4],
 }

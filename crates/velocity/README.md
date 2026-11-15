@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 9. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 10. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -158,3 +158,14 @@ Keep `resources/LICENSES` with application redistribution.
 `--review-ui on|off` enables the disposable Git/diff/spelling fixture in both automatic
 intelligence modes. See the round-nine RUNBOOK section for exact CPU/native commands and
 MANUAL_TEST for the tester's pending Hot Exit and UI cases.
+
+
+Round 10 replaces hardcoded widget chrome with the original Velocity theme engine, live dark/light
+selection, User fragments, UI scaling, theme fonts, finite transitions, density-selected file/control
+icons and nine-slice atlas surfaces. Definition hover and completion/quick-panel details now use
+minihtml. Named phantom sets reserve text space, annotations align at region ends, and build
+errors use annotations. Read-only HTML sheets retain their name/content through Hot Exit.
+
+`--headless-theme-ui` measures a 2 KiB popup, 200 visible annotations and dark/light switching;
+`--bench-theme-ui` is the bounded automatic native counterpart. See [ROUND10.md](ROUND10.md),
+RUNBOOK.md and MANUAL_TEST.md for evidence boundaries, exact commands and pending native checks.

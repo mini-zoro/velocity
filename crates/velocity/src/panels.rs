@@ -66,6 +66,7 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    pub ui_scale: f64,
     pub review: crate::review_ui::ReviewUi,
     git_tree_key: Vec<(PathBuf, u64)>,
     git_tree_dirty: bool,
@@ -79,6 +80,7 @@ pub struct Panels {
     hover_since: Instant,
     hover_requested: bool,
     hover_bounds: Rect,
+    hover_html: Option<vel_ui::minihtml::Popup>,
     pub restore_scroll: Option<(f64, f64)>,
     pub pending_command: Option<Invocation>,
     pub overlay: Option<Overlay>,
@@ -168,6 +170,7 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            ui_scale: 1.,
             review: Default::default(),
             git_tree_key: Vec::new(),
             git_tree_dirty: false,
@@ -181,6 +184,7 @@ impl Default for Panels {
             hover_since: Instant::now(),
             hover_requested: false,
             hover_bounds: Rect::default(),
+            hover_html: None,
             restore_scroll: None,
             pending_command: None,
             overlay: None,
@@ -271,6 +275,7 @@ impl Default for Panels {
 impl Panels {
     pub fn new(workspace: &Workspace, workers: bool) -> Self {
         let mut ui = Self {
+            ui_scale: vel_ui::theme::ui_scale(&workspace.editor().settings),
             side_visible: workspace.editor().settings.bool("show_side_bar", true),
             ..Self::default()
         };
@@ -293,6 +298,7 @@ impl Panels {
         word_wrap: bool,
     ) {
         let mut editor = crate::editor::Editor::new(vel_text::Text::new());
+        editor.theme = workspace.themes.ui.clone();
         editor.settings = workspace.editor().settings.clone();
         for (key, value) in [
             ("word_wrap", json!(word_wrap)),
@@ -727,6 +733,20 @@ impl Panels {
         );
     }
     pub fn hover_at(&mut self, workspace: &Workspace, point: Point, byte: usize) {
+        if !workspace.editor().settings.bool("show_definitions", true) {
+            self.hover.clear();
+            self.hover_html = None;
+            self.hover_term.clear();
+            return;
+        }
+        if let Some(popup) = &mut self.hover_html {
+            popup.mouse_move(point);
+            if popup.visible {
+                return;
+            }
+            self.hover.clear();
+            self.hover_html = None;
+        }
         if contains(self.hover_bounds, point) && !self.hover.is_empty() {
             return;
         }
@@ -740,6 +760,7 @@ impl Panels {
         };
         if term != self.hover_term {
             self.hover.clear();
+            self.hover_html = None;
             self.hover_term = term;
             self.hover_since = Instant::now();
             self.hover_requested = false;
@@ -752,12 +773,21 @@ impl Panels {
         point: Point,
     ) -> Result<bool, String> {
         if !self.hover.is_empty() && contains(self.hover_bounds, point) {
-            let i = ((point.y - self.hover_bounds.y) / 24.) as usize;
+            let target = self.hover_html.as_ref().and_then(|p| p.html.link_at(point));
+            let i = target
+                .and_then(|target| match target {
+                    vel_minihtml::LinkTarget::Callback(url) => {
+                        url.strip_prefix("definition:")?.parse().ok()
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
             if let Some(location) = self.hover.get(i).cloned() {
                 self.intel.remember(crate::intelligence::capture(workspace));
                 crate::intelligence::jump(workspace, &location, false)?;
             }
             self.hover.clear();
+            self.hover_html = None;
             return Ok(true);
         }
         Ok(false)
@@ -2165,6 +2195,11 @@ impl Panels {
     }
     pub fn layout(&mut self, size: Size) -> Rect {
         self.size = size;
+        self.side_scroll.row_height = 24. * self.ui_scale;
+        self.quick_input.scale = self.ui_scale;
+        self.query.scale = self.ui_scale;
+        self.replace.scale = self.ui_scale;
+        self.where_input.scale = self.ui_scale;
         let side = if self.side_visible {
             220f64.min(size.width * 0.3)
         } else {
@@ -2172,42 +2207,50 @@ impl Panels {
         };
         let bottom = match self.panel {
             None => 0.,
-            Some(Panel::Find | Panel::Incremental) => 96.,
-            Some(Panel::Replace) => 130.,
-            Some(Panel::Files) => 164.,
-            Some(Panel::Input) => 68.,
-            _ => (size.height * 0.38).clamp(60., 320.),
+            Some(Panel::Find | Panel::Incremental) => 96. * self.ui_scale,
+            Some(Panel::Replace) => 130. * self.ui_scale,
+            Some(Panel::Files) => 164. * self.ui_scale,
+            Some(Panel::Input) => 68. * self.ui_scale,
+            _ => (size.height * 0.38).clamp(60. * self.ui_scale, 320. * self.ui_scale),
         }
-        .min((size.height - 80.).max(0.));
+        .min((size.height - (80. * self.ui_scale)).max(0.));
         self.panel_bounds = Rect {
             x: side,
-            y: size.height - if self.chrome { STATUS } else { 0. } - bottom,
+            y: size.height
+                - if self.chrome {
+                    STATUS * self.ui_scale
+                } else {
+                    0.
+                }
+                - bottom,
             width: (size.width - side).max(1.),
             height: bottom,
         };
         self.side_bounds = Rect {
             x: 0.,
-            y: 30.,
+            y: (30. * self.ui_scale),
             width: side,
-            height: (size.height - 30. - STATUS).max(1.),
+            height: (size.height - (30. * self.ui_scale) - (STATUS * self.ui_scale)).max(1.),
         };
         self.side_scroll.viewport = self.side_bounds.height;
         self.side_scroll.scroll(0.);
-        let width = (size.width * 0.7).clamp(240., 820.).min(size.width);
+        let width = (size.width * 0.7)
+            .clamp(240. * self.ui_scale, 820. * self.ui_scale)
+            .min(size.width);
         self.quick_bounds = Rect {
-            x: (size.width - width) / 2.,
-            y: 54.,
+            x: (size.width - width) / (2. * self.ui_scale),
+            y: (54. * self.ui_scale),
             width,
-            height: (size.height * 0.65).min(520.),
+            height: (size.height * 0.65).min(520. * self.ui_scale),
         };
         self.quick_input.bounds = Rect {
-            x: self.quick_bounds.x + 8.,
-            y: self.quick_bounds.y + 8.,
-            width: width - 16.,
-            height: 32.,
+            x: self.quick_bounds.x + (8. * self.ui_scale),
+            y: self.quick_bounds.y + (8. * self.ui_scale),
+            width: width - (16. * self.ui_scale),
+            height: (32. * self.ui_scale),
         };
-        self.quick.scroll.row_height = 44.;
-        self.quick.scroll.viewport = (self.quick_bounds.height - 72.).max(1.);
+        self.quick.scroll.row_height = 44. * self.ui_scale;
+        self.quick.scroll.viewport = (self.quick_bounds.height - (72. * self.ui_scale)).max(1.);
         self.quick.scroll.rows = self.quick.items.len();
         self.quick.scroll.scroll(0.);
         for (i, input) in [&mut self.query, &mut self.replace, &mut self.where_input]
@@ -2215,10 +2258,12 @@ impl Panels {
             .enumerate()
         {
             input.bounds = Rect {
-                x: side + 80.,
-                y: self.panel_bounds.y + 8. + i as f64 * PANEL_ROW,
-                width: (self.panel_bounds.width - 92.).max(1.),
-                height: 28.,
+                x: side + (80. * self.ui_scale),
+                y: self.panel_bounds.y
+                    + (8. * self.ui_scale)
+                    + i as f64 * PANEL_ROW * self.ui_scale,
+                width: (self.panel_bounds.width - (92. * self.ui_scale)).max(1.),
+                height: (28. * self.ui_scale),
             };
             input.reveal();
         }
@@ -2227,9 +2272,9 @@ impl Panels {
             if self.panel == Some(Panel::Output) && self.output_editor.is_some() {
                 self.output_view.line_height
             } else {
-                24.
+                24. * self.ui_scale
             };
-        self.result_scroll.viewport = (bottom - 34.).max(1.);
+        self.result_scroll.viewport = (bottom - (34. * self.ui_scale)).max(1.);
         self.result_scroll.scroll(0.);
         // Retained controls expose live theme attributes and shared hit testing.
         self.tree.roots.clear();
@@ -2238,7 +2283,18 @@ impl Panels {
         }
         for (id, class, rect, visible) in [
             (1, "quick_panel", self.quick_bounds, self.overlay.is_some()),
-            (2, "panel", self.panel_bounds, self.panel.is_some()),
+            (
+                2,
+                match self.panel {
+                    Some(Panel::Find | Panel::Incremental) => "panel_control find_panel",
+                    Some(Panel::Replace) => "panel_control replace_panel",
+                    Some(Panel::Files) => "panel_control find_in_files_panel",
+                    Some(Panel::Input) => "panel_control input_panel",
+                    _ => "panel_control output_panel",
+                },
+                self.panel_bounds,
+                self.panel.is_some(),
+            ),
             (3, "sidebar_container", self.side_bounds, self.side_visible),
         ] {
             let node = self
@@ -2246,6 +2302,7 @@ impl Panels {
                 .nodes
                 .entry(id)
                 .or_insert_with(|| Node::new(class));
+            node.class = class;
             node.rect = rect;
             node.visible = visible;
             node.children.clear();
@@ -2256,7 +2313,7 @@ impl Panels {
             x: side,
             y: 0.,
             width: (size.width - side).max(1.),
-            height: (size.height - STATUS - bottom).max(32.),
+            height: (size.height - (STATUS * self.ui_scale) - bottom).max(32. * self.ui_scale),
         }
     }
     fn paint_input(layer: &mut Layer, input: &Input, focused: bool) {
@@ -2274,18 +2331,17 @@ impl Panels {
         let state = input.state();
         let shown = input.visible_text();
         let selected = state.selected.bytes(&state.text);
-        let a = vel_ui::input::cells(&state.text.slice(0..selected.start).to_string())
-            .saturating_sub(input.scroll);
-        let b = vel_ui::input::cells(&state.text.slice(0..selected.end).to_string())
-            .saturating_sub(input.scroll);
+        let value = state.text.to_string();
+        let a = input.x_for_byte(&value, selected.start);
+        let b = input.x_for_byte(&value, selected.end);
         if a < b {
             fill(
                 layer,
                 Rect {
-                    x: rect.x + 8. + a as f64 * 7.2,
-                    y: rect.y + 5.,
-                    width: (b - a) as f64 * 7.2,
-                    height: 19.,
+                    x: a,
+                    y: rect.y + (5. * input.scale),
+                    width: b - a,
+                    height: (19. * input.scale),
                 },
                 rect,
                 [0.23, 0.35, 0.5, 1.],
@@ -2294,8 +2350,8 @@ impl Panels {
         label(
             layer,
             &shown,
-            rect.x + 8.,
-            rect.y + 20.,
+            input.x_for_byte(&value, 0),
+            rect.y + (20. * input.scale),
             rect,
             [0.9, 0.92, 0.95, 1.],
         );
@@ -2304,16 +2360,14 @@ impl Panels {
         }
         if let Some(marked) = state.marked {
             let range = marked.bytes(&state.text);
-            let a = vel_ui::input::cells(&state.text.slice(0..range.start).to_string())
-                .saturating_sub(input.scroll);
-            let b = vel_ui::input::cells(&state.text.slice(0..range.end).to_string())
-                .saturating_sub(input.scroll);
+            let a = input.x_for_byte(&value, range.start);
+            let b = input.x_for_byte(&value, range.end);
             fill(
                 layer,
                 Rect {
-                    x: rect.x + 8. + a as f64 * 7.2,
-                    y: rect.y + 24.,
-                    width: (b - a) as f64 * 7.2,
+                    x: a,
+                    y: rect.y + (24. * input.scale),
+                    width: b - a,
                     height: 1.,
                 },
                 rect,
@@ -2340,7 +2394,7 @@ impl Panels {
             self.widget(10, "text_input", self.quick_input.bounds, &["focused"]);
             let list = Rect {
                 x: self.quick_bounds.x,
-                y: self.quick_bounds.y + 46.,
+                y: self.quick_bounds.y + (46. * self.ui_scale),
                 width: self.quick_bounds.width,
                 height: self.quick.scroll.viewport,
             };
@@ -2350,8 +2404,8 @@ impl Panels {
                 let item = &self.quick.items[row];
                 let id = (1 << 40) + item.value as u64 * 5;
                 let rect = Rect {
-                    y: list.y + row as f64 * 44. - self.quick.scroll.offset,
-                    height: 44.,
+                    y: list.y + row as f64 * (44. * self.ui_scale) - self.quick.scroll.offset,
+                    height: (44. * self.ui_scale),
                     ..list
                 };
                 let selected = row == self.quick.selected;
@@ -2427,13 +2481,13 @@ impl Panels {
                     self.in_selection,
                     self.options.preserve_case,
                 ];
-                let width = self.panel_bounds.width / 6.;
+                let width = self.panel_bounds.width / (6. * self.ui_scale);
                 for (i, flag) in flags.into_iter().enumerate() {
                     let rect = Rect {
                         x: self.panel_bounds.x + i as f64 * width,
-                        y: self.panel_bounds.y + self.panel_bounds.height - 44.,
-                        width: width - 2.,
-                        height: 20.,
+                        y: self.panel_bounds.y + self.panel_bounds.height - (44. * self.ui_scale),
+                        width: width - (2. * self.ui_scale),
+                        height: (20. * self.ui_scale),
                     };
                     self.widget(
                         30 + i as u64,
@@ -2462,10 +2516,11 @@ impl Panels {
                 .enumerate()
                 {
                     let rect = Rect {
-                        x: self.panel_bounds.x + self.panel_bounds.width - (2 - i) as f64 * 104.,
-                        y: self.panel_bounds.y + self.panel_bounds.height - 23.,
-                        width: 100.,
-                        height: 22.,
+                        x: self.panel_bounds.x + self.panel_bounds.width
+                            - (2 - i) as f64 * (104. * self.ui_scale),
+                        y: self.panel_bounds.y + self.panel_bounds.height - (23. * self.ui_scale),
+                        width: (100. * self.ui_scale),
+                        height: (22. * self.ui_scale),
                     };
                     self.widget(50 + i as u64, "button", rect, &[]);
                     self.tree
@@ -2506,8 +2561,9 @@ impl Panels {
                     id,
                     "open_file",
                     Rect {
-                        y: self.side_bounds.y + (i + 1) as f64 * 24. - self.side_scroll.offset,
-                        height: 24.,
+                        y: self.side_bounds.y + (i + 1) as f64 * (24. * self.ui_scale)
+                            - self.side_scroll.offset,
+                        height: (24. * self.ui_scale),
                         ..self.side_bounds
                     },
                     &attrs,
@@ -2520,18 +2576,21 @@ impl Panels {
                 let row = &self.side_rows[i];
                 let expanded = self.expanded.contains(&row.path);
                 let rect = Rect {
-                    y: self.side_bounds.y + (base + i) as f64 * 24. - self.side_scroll.offset,
-                    height: 24.,
+                    y: self.side_bounds.y + (base + i) as f64 * (24. * self.ui_scale)
+                        - self.side_scroll.offset,
+                    height: (24. * self.ui_scale),
                     ..self.side_bounds
                 };
-                let attrs =
-                    if self.side_focused && self.side_open.is_none() && self.side_selected == i {
-                        vec!["selected"]
-                    } else if expanded {
-                        vec!["expanded"]
-                    } else {
-                        vec![]
-                    };
+                let mut attrs = Vec::new();
+                if self.side_focused && self.side_open.is_none() && self.side_selected == i {
+                    attrs.push("selected");
+                }
+                if expanded {
+                    attrs.push("expanded");
+                }
+                if row.directory {
+                    attrs.push("expandable");
+                }
                 self.widget((3 << 40) + i as u64, "tree_row", rect, &attrs);
                 self.tree
                     .nodes
@@ -2546,9 +2605,9 @@ impl Panels {
             "status_bar",
             Rect {
                 x: 0.,
-                y: self.size.height - STATUS,
+                y: self.size.height - (STATUS * self.ui_scale),
                 width: self.size.width,
-                height: STATUS,
+                height: (STATUS * self.ui_scale),
             },
             &[],
         );
@@ -2557,279 +2616,265 @@ impl Panels {
             "text_area",
             Rect {
                 x: self.side_bounds.width,
-                y: 30.,
+                y: (30. * self.ui_scale),
                 width: self.size.width - self.side_bounds.width,
-                height: (self.panel_bounds.y - 30.).max(1.),
+                height: (self.panel_bounds.y - (30. * self.ui_scale)).max(1.),
             },
             &[],
         );
         self.tree.roots.insert(0, 5);
         self.tree.roots.insert(0, 4);
         self.tree.nodes.retain(|_, node| node.visible);
+        self.tree.index_ancestry();
     }
     pub fn paint(&mut self, workspace: &Workspace, scene: &mut Scene) {
         self.side_scroll.rows = workspace.tabs.len() + self.side_rows.len() + 2;
         self.sync_widgets(workspace);
+        let mut theme = workspace.themes.ui.borrow_mut();
+
+        let settings = &workspace.editor().settings;
+        let style = |id, child, theme: &mut vel_ui::theme::ThemeUi| {
+            self.tree.style(id, child, theme, settings)
+        };
         let mut layer = Layer::default();
         if self.side_visible {
-            fill(
-                &mut layer,
-                self.side_bounds,
-                self.side_bounds,
-                [0.085, 0.1, 0.13, 1.],
-            );
             let clip = self.side_bounds;
-            let mut y = clip.y - self.side_scroll.offset;
-            label(
-                &mut layer,
-                "OPEN FILES",
-                10.,
-                y + 18.,
-                clip,
-                [0.5, 0.6, 0.7, 1.],
-            );
-            y += 24.;
-            for (i, tab) in workspace.tabs.iter().enumerate() {
-                if (self.side_focused && self.side_open == Some(i))
-                    || (!self.side_focused && i == workspace.active)
+            let sidebar = style(3, None, &mut theme);
+            theme.surface(&mut layer, &sidebar, clip, clip);
+            let heading = style(3, Some("sidebar_heading"), &mut theme);
+            for (caption, row) in [("Open Files", 0), ("Folders", workspace.tabs.len() + 1)] {
+                theme.text(
+                    &mut layer,
+                    &heading,
+                    caption,
+                    10. * self.ui_scale,
+                    clip.y + row as f64 * (24. * self.ui_scale) - self.side_scroll.offset
+                        + (18. * self.ui_scale),
+                    clip,
+                );
+            }
+            let visible = self.side_scroll.visible();
+            for i in visible.start.saturating_sub(1)
+                ..visible.end.saturating_sub(1).min(workspace.tabs.len())
+            {
+                let tab = &workspace.tabs[i];
+                let id = (2 << 40) + i as u64;
+                let Some(node) = self.tree.nodes.get(&id) else {
+                    continue;
+                };
+                let row = style(id, None, &mut theme);
+                theme.surface(&mut layer, &row, node.rect, clip);
+                let mut label_style = style(id, Some("sidebar_label"), &mut theme);
+                if tab.transient {
+                    label_style.font.italic = true;
+                }
+                if tab
+                    .path
+                    .as_deref()
+                    .and_then(|p| workspace.git.badge(p, false))
+                    == Some(vel_git::Badge::Ignored)
                 {
-                    fill(
+                    label_style.foreground[3] *= 0.4;
+                }
+                if let Some(icon) = tab
+                    .path
+                    .as_deref()
+                    .and_then(|p| workspace.themes.file_icon(p))
+                {
+                    theme.icon(
                         &mut layer,
+                        icon,
                         Rect {
-                            x: 0.,
-                            y,
-                            height: 24.,
-                            ..clip
+                            x: (10. * self.ui_scale),
+                            y: node.rect.y + (5. * self.ui_scale),
+                            width: (14. * self.ui_scale),
+                            height: (14. * self.ui_scale),
                         },
                         clip,
-                        [0.16, 0.22, 0.3, 1.],
+                        label_style.foreground,
                     );
                 }
-                label(
+                theme.text(
                     &mut layer,
+                    &label_style,
                     &tab.label(),
-                    18.,
-                    y + 18.,
-                    clip,
-                    [
-                        0.8,
-                        0.83,
-                        0.88,
-                        if tab
-                            .path
-                            .as_deref()
-                            .and_then(|p| workspace.git.badge(p, false))
-                            == Some(vel_git::Badge::Ignored)
-                        {
-                            0.4
-                        } else {
-                            1.
-                        },
-                    ],
+                    (30. * self.ui_scale) + f64::from(label_style.margin.left),
+                    node.rect.y + (18. * self.ui_scale),
+                    Rect {
+                        width: (clip.width - (30. * self.ui_scale)).max(0.),
+                        ..clip
+                    },
                 );
                 if let Some(badge) = tab
                     .path
                     .as_deref()
                     .and_then(|p| workspace.git.badge(p, false))
                 {
-                    label(
+                    let badge_style = style(id, Some("vcs_status_badge"), &mut theme);
+                    theme.text(
                         &mut layer,
+                        &badge_style,
                         crate::git_ui::badge_text(badge).0,
-                        clip.width - 28.,
-                        y + 18.,
+                        clip.width - (24. * self.ui_scale),
+                        node.rect.y + (18. * self.ui_scale),
                         clip,
-                        [0.75, 0.82, 0.6, 1.],
                     );
                 }
-                y += 24.;
             }
-            label(
-                &mut layer,
-                "FOLDERS",
-                10.,
-                y + 18.,
-                clip,
-                [0.5, 0.6, 0.7, 1.],
-            );
-            y += 24.;
-            // Rows are retained; only intersecting rows produce draw primitives.
             let base = workspace.tabs.len() + 2;
-            let visible = self.side_scroll.visible();
-            let start = visible.start.saturating_sub(base).min(self.side_rows.len());
-            let end = visible.end.saturating_sub(base).min(self.side_rows.len());
-            y += start as f64 * 24.;
-            for (i, row) in self.side_rows.iter().enumerate().take(end).skip(start) {
-                if y + 24. >= clip.y && y < clip.y + clip.height {
-                    if self.side_focused && self.side_open.is_none() && i == self.side_selected {
-                        fill(
-                            &mut layer,
-                            Rect {
-                                x: 0.,
-                                y,
-                                height: 24.,
-                                ..clip
-                            },
-                            clip,
-                            [0.18, 0.25, 0.32, 1.],
-                        );
-                    }
-                    let name = if row.depth == 0 {
-                        workspace.folders[row.folder].name.clone()
-                    } else {
-                        row.path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                    let icon = if row.directory {
-                        if self.expanded.contains(&row.path) {
-                            "▾"
-                        } else {
-                            "▸"
-                        }
-                    } else {
-                        "·"
-                    };
-                    label(
-                        &mut layer,
-                        &format!("{icon} {name}"),
-                        10. + row.depth as f64 * 14.,
-                        y + 18.,
-                        clip,
-                        [
-                            0.8,
-                            0.83,
-                            0.88,
-                            if workspace.git.badge(&row.path, row.directory)
-                                == Some(vel_git::Badge::Ignored)
-                            {
-                                0.4
-                            } else {
-                                1.
-                            },
-                        ],
-                    );
-                    if let Some(badge) = workspace.git.badge(&row.path, row.directory) {
-                        label(
-                            &mut layer,
-                            crate::git_ui::badge_text(badge).0,
-                            clip.width - 28.,
-                            y + 18.,
-                            clip,
-                            [0.75, 0.82, 0.6, 1.],
-                        );
-                    }
+            for i in visible.start.saturating_sub(base)
+                ..visible.end.saturating_sub(base).min(self.side_rows.len())
+            {
+                let row = &self.side_rows[i];
+                let id = (3 << 40) + i as u64;
+                let Some(node) = self.tree.nodes.get(&id) else {
+                    continue;
+                };
+                let row_style = style(id, None, &mut theme);
+                theme.surface(&mut layer, &row_style, node.rect, clip);
+                let mut text = style(id, Some("sidebar_label"), &mut theme);
+                if workspace.git.badge(&row.path, row.directory) == Some(vel_git::Badge::Ignored) {
+                    text.foreground[3] *= 0.4;
                 }
-                y += 24.;
+                let name = if row.depth == 0 {
+                    workspace.folders[row.folder].name.clone()
+                } else {
+                    row.path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let x = (10. * self.ui_scale) + row.depth as f64 * (16. * self.ui_scale);
+                if row.directory {
+                    let disclosure = style(id, Some("disclosure_button_control"), &mut theme);
+                    theme.surface(
+                        &mut layer,
+                        &disclosure,
+                        Rect {
+                            x,
+                            y: node.rect.y + (6. * self.ui_scale),
+                            width: (12. * self.ui_scale),
+                            height: (12. * self.ui_scale),
+                        },
+                        clip,
+                    );
+                    let folder = style(id, Some("icon_folder"), &mut theme);
+                    theme.surface(
+                        &mut layer,
+                        &folder,
+                        Rect {
+                            x: x + (14. * self.ui_scale),
+                            y: node.rect.y + (5. * self.ui_scale),
+                            width: (14. * self.ui_scale),
+                            height: (14. * self.ui_scale),
+                        },
+                        clip,
+                    );
+                } else if let Some(icon) = workspace.themes.file_icon(&row.path) {
+                    theme.icon(
+                        &mut layer,
+                        icon,
+                        Rect {
+                            x: x + (14. * self.ui_scale),
+                            y: node.rect.y + (5. * self.ui_scale),
+                            width: (14. * self.ui_scale),
+                            height: (14. * self.ui_scale),
+                        },
+                        clip,
+                        text.foreground,
+                    );
+                }
+                theme.text(
+                    &mut layer,
+                    &text,
+                    &name,
+                    x + (32. * self.ui_scale),
+                    node.rect.y + (18. * self.ui_scale),
+                    clip,
+                );
+                if let Some(badge) = workspace.git.badge(&row.path, row.directory) {
+                    let badge_style = style(id, Some("vcs_status_badge"), &mut theme);
+                    theme.text(
+                        &mut layer,
+                        &badge_style,
+                        crate::git_ui::badge_text(badge).0,
+                        clip.width - (24. * self.ui_scale),
+                        node.rect.y + (18. * self.ui_scale),
+                        clip,
+                    );
+                }
             }
         }
         if let Some(panel) = self.panel {
             let clip = self.panel_bounds;
-            fill(&mut layer, clip, clip, [0.105, 0.125, 0.16, 1.]);
+            let panel_style = style(2, None, &mut theme);
+            theme.surface(&mut layer, &panel_style, clip, clip);
+            let text_style = style(2, Some("label_control"), &mut theme);
             if matches!(panel, Panel::Results | Panel::Output) {
-                label(
+                theme.text(
                     &mut layer,
+                    &text_style,
                     if panel == Panel::Results {
                         "Find Results"
                     } else {
                         "Output"
                     },
-                    clip.x + 10.,
-                    clip.y + 20.,
+                    clip.x + (10. * self.ui_scale),
+                    clip.y + (20. * self.ui_scale),
                     clip,
-                    [0.7, 0.8, 0.9, 1.],
                 );
-                let body = Rect {
-                    y: clip.y + 30.,
-                    height: (clip.height - 30.).max(1.),
-                    ..clip
-                };
                 if panel == Panel::Results {
+                    let body = Rect {
+                        y: clip.y + (30. * self.ui_scale),
+                        height: (clip.height - (30. * self.ui_scale)).max(1.),
+                        ..clip
+                    };
                     for row in self.result_scroll.visible() {
-                        let y = body.y + row as f64 * 24. - self.result_scroll.offset;
-                        if row == self.result_selected {
-                            fill(
-                                &mut layer,
-                                Rect {
-                                    y,
-                                    height: 24.,
-                                    ..body
-                                },
-                                body,
-                                [0.18, 0.25, 0.33, 1.],
-                            );
-                        }
-                        let line = match &self.result_view.rows[row] {
-                            files::Row::Header(path) => {
-                                label(
-                                    &mut layer,
-                                    &format!("{}:", path.display()),
-                                    body.x + 8.,
-                                    y + 18.,
-                                    body,
-                                    [0.55, 0.76, 0.98, 1.],
-                                );
-                                continue;
-                            }
-                            files::Row::Gap => {
-                                label(
-                                    &mut layer,
-                                    "        …",
-                                    body.x + 8.,
-                                    y + 18.,
-                                    body,
-                                    [0.5, 0.6, 0.7, 1.],
-                                );
-                                continue;
-                            }
-                            files::Row::Line(line) => line,
+                        let y =
+                            body.y + row as f64 * (24. * self.ui_scale) - self.result_scroll.offset;
+                        let attrs = if row == self.result_selected {
+                            &["selected"][..]
+                        } else {
+                            &[]
                         };
-                        let prefix = format!(
-                            "  {:>5}{} ",
-                            line.number,
-                            if line.highlights.is_empty() { ' ' } else { ':' }
+                        let path = [
+                            vel_theme::Element::new("window", &[]),
+                            vel_theme::Element::new("panel_control output_panel", &[]),
+                            vel_theme::Element::new("quick_panel_row", attrs),
+                        ];
+                        let row_style = theme.style(
+                            0xB000 + row as u64,
+                            &vel_theme::ElementPath(&path),
+                            settings,
                         );
-                        label(
+                        theme.surface(
                             &mut layer,
-                            &(prefix.clone() + &line.text),
-                            body.x + 8.,
-                            y + 18.,
+                            &row_style,
+                            Rect {
+                                y,
+                                height: (24. * self.ui_scale),
+                                ..body
+                            },
                             body,
-                            [0.75, 0.8, 0.87, 1.],
                         );
-                        for hit in &line.highlights {
-                            label(
-                                &mut layer,
-                                &line.text[hit.clone()],
-                                body.x
-                                    + 8.
-                                    + (prefix.chars().count()
-                                        + line.text[..hit.start].chars().count())
-                                        as f64
-                                        * 7.2,
-                                y + 18.,
-                                body,
-                                [1., 0.77, 0.38, 1.],
-                            );
-                        }
-                    }
-                } else if self.output_editor.is_none() {
-                    for (i, line) in self
-                        .output
-                        .lines()
-                        .skip(self.result_scroll.visible().start)
-                        .take(self.result_scroll.visible().len())
-                        .enumerate()
-                    {
-                        label(
+                        let line = match &self.result_view.rows[row] {
+                            files::Row::Header(path) => format!("{}:", path.display()),
+                            files::Row::Gap => "        …".into(),
+                            files::Row::Line(line) => format!(
+                                "  {:>5}{} {}",
+                                line.number,
+                                if line.highlights.is_empty() { ' ' } else { ':' },
+                                line.text
+                            ),
+                        };
+                        theme.text(
                             &mut layer,
-                            line,
-                            body.x + 8.,
-                            body.y + 18. + (i + self.result_scroll.visible().start) as f64 * 24.
-                                - self.result_scroll.offset,
+                            &row_style,
+                            &line,
+                            body.x + (8. * self.ui_scale),
+                            y + (18. * self.ui_scale),
                             body,
-                            [0.8, 0.84, 0.9, 1.],
                         );
                     }
                 }
@@ -2843,23 +2888,26 @@ impl Panels {
                 };
                 for i in 0..fields {
                     let input = match i {
-                        1 => &self.replace,
-                        2 => &self.where_input,
-                        _ => &self.query,
+                        1 => &mut self.replace,
+                        2 => &mut self.where_input,
+                        _ => &mut self.query,
                     };
-                    label(
+                    theme.text(
                         &mut layer,
+                        &text_style,
                         if panel == Panel::Input {
                             &self.input_caption
                         } else {
                             ["Find", "Replace", "Where"][i]
                         },
-                        clip.x + 8.,
-                        input.bounds.y + 20.,
+                        clip.x + (8. * self.ui_scale),
+                        input.bounds.y + (20. * self.ui_scale),
                         clip,
-                        [0.65, 0.72, 0.8, 1.],
                     );
-                    Self::paint_input(
+                    let input_style = style(20 + i as u64, None, &mut theme);
+                    paint_themed_input(
+                        &theme,
+                        &input_style,
                         &mut layer,
                         input,
                         self.overlay.is_none() && self.focus_input == i,
@@ -2870,87 +2918,93 @@ impl Panels {
                         .into_iter()
                         .enumerate()
                     {
-                        let node = &self.tree.nodes[&(30 + i as u64)];
-                        fill(
-                            &mut layer,
-                            node.rect,
-                            clip,
-                            if node.attributes.contains("selected") {
-                                [0.2, 0.32, 0.45, 1.]
-                            } else if node.attributes.contains("hover") {
-                                [0.19, 0.23, 0.3, 1.]
-                            } else {
-                                [0.13, 0.16, 0.21, 1.]
-                            },
+                        let id = 30 + i as u64;
+                        let node = &self.tree.nodes[&id];
+                        let button = style(id, None, &mut theme);
+                        theme.surface(&mut layer, &button, node.rect, clip);
+                        let icon = style(
+                            id,
+                            Some(
+                                [
+                                    "icon_regex",
+                                    "icon_case",
+                                    "icon_whole_word",
+                                    "icon_wrap",
+                                    "icon_in_selection",
+                                    "icon_preserve_case",
+                                ][i],
+                            ),
+                            &mut theme,
                         );
-                        label(
+                        theme.surface(
                             &mut layer,
-                            caption,
-                            node.rect.x + 6.,
-                            node.rect.y + 15.,
+                            &icon,
+                            Rect {
+                                x: node.rect.x + (4. * self.ui_scale),
+                                y: node.rect.y + (3. * self.ui_scale),
+                                width: (14. * self.ui_scale),
+                                height: (14. * self.ui_scale),
+                            },
                             node.rect,
-                            [0.75, 0.84, 0.95, 1.],
+                        );
+                        theme.text(
+                            &mut layer,
+                            &button,
+                            caption,
+                            node.rect.x + (22. * self.ui_scale),
+                            node.rect.y + (15. * self.ui_scale),
+                            node.rect,
                         );
                     }
                     for id in 50..=51 {
                         let node = &self.tree.nodes[&id];
-                        fill(
+                        let button = style(id, None, &mut theme);
+                        theme.surface(&mut layer, &button, node.rect, clip);
+                        theme.text(
                             &mut layer,
-                            node.rect,
-                            clip,
-                            if node.attributes.contains("hover") {
-                                [0.24, 0.33, 0.43, 1.]
-                            } else {
-                                [0.17, 0.24, 0.32, 1.]
-                            },
-                        );
-                        label(
-                            &mut layer,
+                            &button,
                             &node.label,
-                            node.rect.x + 7.,
-                            node.rect.y + 16.,
+                            node.rect.x + (7. * self.ui_scale),
+                            node.rect.y + (16. * self.ui_scale),
                             node.rect,
-                            [0.8, 0.88, 0.98, 1.],
                         );
                     }
-                    label(
+                    theme.text(
                         &mut layer,
+                        &text_style,
                         &self.message,
-                        clip.x + 8.,
-                        clip.y + clip.height - 8.,
+                        clip.x + (8. * self.ui_scale),
+                        clip.y + clip.height - (8. * self.ui_scale),
                         Rect {
-                            width: (clip.width - 216.).max(0.),
+                            width: (clip.width - (216. * self.ui_scale)).max(0.),
                             ..clip
                         },
-                        [0.65, 0.74, 0.84, 1.],
                     );
                 }
             }
         }
         if self.chrome {
-            let status = Rect {
-                x: 0.,
-                y: self.size.height - STATUS,
-                width: self.size.width,
-                height: STATUS,
-            };
-            fill(&mut layer, status, status, [0.12, 0.16, 0.21, 1.]);
+            let status = self.tree.nodes[&4].rect;
+            let status_style = style(4, None, &mut theme);
+            theme.surface(&mut layer, &status_style, status, status);
+            let text = style(4, Some("status_container"), &mut theme);
             let editor = workspace.editor();
             let row = editor.text.byte_to_line(editor.caret);
             let start = editor.text.line_to_byte(row);
-            let column = editor.text.slice(start..editor.caret).len_chars() + 1;
+            let col = editor.text.slice(start..editor.caret).len_chars() + 1;
             let tab = &workspace.tabs[workspace.active];
             let selected: usize = editor
                 .regions()
                 .iter()
                 .map(|r| editor.text.slice(r.to_range()).len_chars())
                 .sum();
-            label(
+            theme.text(
                 &mut layer,
+                &text,
                 &format!(
-                    "Ln {}, Col {}  ·  {} selections / {} chars  ·  {}  ·  {}  ·  {}: {}",
+                    "Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
                     row + 1,
-                    column,
+                    col,
                     editor.regions().len(),
                     selected,
                     tab.format.encoding,
@@ -2962,11 +3016,11 @@ impl Panels {
                     },
                     editor.preferences.tab_size
                 ),
-                10.,
-                status.y + 17.,
+                10. * self.ui_scale,
+                status.y + (17. * self.ui_scale),
                 Rect {
-                    width: (self.size.width
-                        - if workspace.tabs[workspace.active]
+                    width: (status.width
+                        - (if tab
                             .path
                             .as_deref()
                             .and_then(|p| workspace.git.status(p))
@@ -2976,36 +3030,36 @@ impl Panels {
                             480.
                         } else {
                             180.
-                        })
-                    .max(0.),
+                        }) * self.ui_scale)
+                        .max(0.),
                     ..status
                 },
-                [0.77, 0.83, 0.9, 1.],
             );
             if editor.settings.bool("show_git_status_in_status_bar", true)
-                && let Some(text) = tab.path.as_deref().and_then(|p| workspace.git.status(p))
+                && let Some(git) = tab.path.as_deref().and_then(|p| workspace.git.status(p))
             {
-                label(
+                let git_style = style(4, Some("vcs_status"), &mut theme);
+                theme.text(
                     &mut layer,
-                    text,
-                    (self.size.width - 475.).max(10.),
-                    status.y + 17.,
+                    &git_style,
+                    git,
+                    (status.width - (475. * self.ui_scale)).max(10. * self.ui_scale),
+                    status.y + (17. * self.ui_scale),
                     Rect {
-                        x: (self.size.width - 480.).max(0.),
-                        width: 300.,
+                        x: (status.width - (480. * self.ui_scale)).max(0.),
+                        width: (300. * self.ui_scale),
                         ..status
                     },
-                    [0.75, 0.84, 0.93, 1.],
                 );
             }
             if let Some(percent) = self.intel.percentage {
-                label(
+                theme.text(
                     &mut layer,
+                    &text,
                     &format!("Indexing {percent}%"),
-                    (self.size.width - 310.).max(10.),
-                    status.y + 17.,
+                    (status.width - (310. * self.ui_scale)).max(10. * self.ui_scale),
+                    status.y + (17. * self.ui_scale),
                     status,
-                    [0.65, 0.8, 0.95, 1.],
                 );
             }
             let name = editor
@@ -3014,60 +3068,53 @@ impl Panels {
                 .as_ref()
                 .map(|l| l.name.clone())
                 .unwrap_or_else(|| "Plain Text".into());
-            label(
+            theme.text(
                 &mut layer,
+                &text,
                 &name,
-                (self.size.width - 170.).max(10.),
-                status.y + 17.,
+                (status.width - (170. * self.ui_scale)).max(10. * self.ui_scale),
+                status.y + (17. * self.ui_scale),
                 status,
-                [0.77, 0.83, 0.9, 1.],
             );
-        }
-        if !self.hover.is_empty() && self.overlay.is_none() {
-            let height = self.hover.len().min(8) as f64 * 24. + 8.;
-            let rect = crate::completion::popup_bounds(
-                Rect {
-                    x: self.hover_point.x,
-                    y: self.hover_point.y,
-                    width: 1.,
-                    height: 16.,
-                },
-                self.size,
-                height,
-            );
-            self.hover_bounds = rect;
-            self.widget(9001, "definitions_popup", rect, &[]);
-            fill(&mut layer, rect, rect, [0.11, 0.15, 0.2, 1.]);
-            for (i, location) in self.hover.iter().take(8).enumerate() {
-                label(
-                    &mut layer,
-                    &format!(
-                        "{:?}  {}  {}:{}",
-                        location.kind,
-                        location.name,
-                        location
-                            .file
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy(),
-                        location.row + 1
-                    ),
-                    rect.x + 8.,
-                    rect.y + 20. + i as f64 * 24.,
-                    rect,
-                    [0.84, 0.9, 0.96, 1.],
-                );
-            }
         }
         scene.layers.push(layer);
+        let theme_animating = theme.animating();
+        drop(theme);
         if self.panel == Some(Panel::Output)
-            && let Some(editor) = &self.output_editor
+            && let Some(editor) = &mut self.output_editor
         {
+            editor.theme = workspace.themes.ui.clone();
+            for source in [
+                vel_config::settings::Layer::Default,
+                vel_config::settings::Layer::Platform,
+                vel_config::settings::Layer::User,
+                vel_config::settings::Layer::Project,
+                vel_config::settings::Layer::DistractionFree,
+            ] {
+                if editor.settings.layer(source) != settings.layer(source) {
+                    editor
+                        .settings
+                        .replace(source, Value::Object(settings.layer(source).clone()))
+                        .expect("settings object");
+                }
+            }
+            editor.sync();
+            editor.read_only = true;
+            if let Some(current) = workspace.editor().language.borrow().as_ref()
+                && let Some(output) = editor.language.borrow_mut().as_mut()
+                && !Arc::ptr_eq(&current.scheme, &output.scheme)
+            {
+                output.recolor(
+                    current.scheme.clone(),
+                    editor.text.clone(),
+                    editor.preferences.tab_size,
+                );
+            }
             let body = Rect {
                 x: self.panel_bounds.x,
-                y: self.panel_bounds.y + 30.,
+                y: self.panel_bounds.y + (30. * self.ui_scale),
                 width: self.panel_bounds.width,
-                height: (self.panel_bounds.height - 30.).max(1.),
+                height: (self.panel_bounds.height - (30. * self.ui_scale)).max(1.),
             };
             self.output_view.size = Size {
                 width: body.width,
@@ -3082,35 +3129,162 @@ impl Panels {
             scene.layers.extend(output.layers);
         }
         if self.overlay.is_some() {
+            let mut theme = workspace.themes.ui.borrow_mut();
             let mut overlay = Layer::default();
-            fill(
+            let panel = self.tree.style(1, None, &mut theme, settings);
+            theme.surface(&mut overlay, &panel, self.quick_bounds, self.quick_bounds);
+            let input_style = self.tree.style(10, None, &mut theme, settings);
+            paint_themed_input(
+                &theme,
+                &input_style,
                 &mut overlay,
-                self.quick_bounds,
-                self.quick_bounds,
-                [0.09, 0.115, 0.155, 1.],
+                &mut self.quick_input,
+                true,
             );
-            Self::paint_input(&mut overlay, &self.quick_input, true);
             let rows = Rect {
                 x: self.quick_bounds.x,
-                y: self.quick_bounds.y + 46.,
+                y: self.quick_bounds.y + (46. * self.ui_scale),
                 width: self.quick_bounds.width,
                 height: self.quick.scroll.viewport,
             };
-            self.quick.paint(&mut overlay, rows);
-            label(
+            for row in self.quick.scroll.visible() {
+                let item = &self.quick.items[row];
+                let id = (1 << 40) + item.value as u64 * 5;
+                let rect = self.tree.nodes[&id].rect;
+                let row_style = self.tree.style(id, None, &mut theme, settings);
+                theme.surface(&mut overlay, &row_style, rect, rows);
+                let caption = self
+                    .tree
+                    .style(id, Some("quick_panel_label"), &mut theme, settings);
+                theme.text(
+                    &mut overlay,
+                    &caption,
+                    &item.caption,
+                    rect.x + (30. * self.ui_scale),
+                    rect.y + (18. * self.ui_scale),
+                    rows,
+                );
+                for (byte, c) in item
+                    .caption
+                    .char_indices()
+                    .filter(|(i, _)| item.highlights.contains(i))
+                {
+                    let mut matched = caption.clone();
+                    matched.foreground = matched.matched;
+                    theme.text(
+                        &mut overlay,
+                        &matched,
+                        &c.to_string(),
+                        rect.x
+                            + (30. * self.ui_scale)
+                            + theme.advance(&caption, &item.caption[..byte]),
+                        rect.y + (18. * self.ui_scale),
+                        rows,
+                    );
+                }
+                let kind = self.tree.style(
+                    id,
+                    Some(match item.kind.as_str() {
+                        "function" | "symbol" => "kind_container kind_function",
+                        "command" => "kind_container kind_keyword",
+                        _ => "kind_container kind_navigation",
+                    }),
+                    &mut theme,
+                    settings,
+                );
+                let badge = Rect {
+                    x: rect.x + (7. * self.ui_scale),
+                    y: rect.y + (6. * self.ui_scale),
+                    width: (16. * self.ui_scale),
+                    height: (16. * self.ui_scale),
+                };
+                theme.surface(&mut overlay, &kind, badge, rows);
+                theme.text(
+                    &mut overlay,
+                    &kind,
+                    &item.kind.chars().next().unwrap_or('·').to_string(),
+                    badge.x + (3. * self.ui_scale),
+                    badge.y + (12. * self.ui_scale),
+                    rows,
+                );
+                if self.overlay == Some(Overlay::Goto)
+                    && let Some(icon) = workspace.themes.file_icon(Path::new(&item.details))
+                {
+                    theme.icon(&mut overlay, icon, badge, rows, caption.foreground);
+                }
+                let hint =
+                    self.tree
+                        .style(id, Some("quick_panel_label hint"), &mut theme, settings);
+                theme.text(
+                    &mut overlay,
+                    &hint,
+                    &item.annotation,
+                    (rect.x + rect.width
+                        - theme.advance(&hint, &item.annotation)
+                        - (12. * self.ui_scale))
+                        .max(rect.x + (30. * self.ui_scale)),
+                    rect.y + (18. * self.ui_scale),
+                    rows,
+                );
+                let detail =
+                    self.tree
+                        .style(id, Some("quick_panel_detail_label"), &mut theme, settings);
+                // Inline minihtml follows the engine's restricted details mode.
+                let options = vel_minihtml::LayoutOptions {
+                    max_width: (rect.width - (42. * self.ui_scale)).max(1.) as f32,
+                    root_font_size: detail.size,
+                    palette: {
+                        let mut palette = theme.palette.clone();
+                        palette.set(
+                            "--foreground",
+                            vel_theme::Color {
+                                r: (detail.foreground[0] * 255.) as u8,
+                                g: (detail.foreground[1] * 255.) as u8,
+                                b: (detail.foreground[2] * 255.) as u8,
+                                a: 255,
+                            },
+                        );
+                        palette
+                    },
+                    extra_css: String::new(),
+                };
+                scene.layers.push(std::mem::take(&mut overlay));
+                if let Ok(html) = workspace
+                    .editor()
+                    .html
+                    .borrow_mut()
+                    .cached(&item.details, true)
+                {
+                    html.layout(&options, theme.revision, &theme.metrics);
+                    html.paint(
+                        scene,
+                        vel_ui::minihtml::intersection(
+                            Rect {
+                                x: rect.x + (30. * self.ui_scale),
+                                y: rect.y + (23. * self.ui_scale),
+                                width: rect.width - (42. * self.ui_scale),
+                                height: (20. * self.ui_scale),
+                            },
+                            rows,
+                        ),
+                    );
+                }
+            }
+            theme.text(
                 &mut overlay,
-                &format!(
-                    "{} · {:.3} ms · Enter open · Cmd/Ctrl+Enter split",
-                    self.message, self.quick_elapsed_ms
-                ),
-                rows.x + 8.,
-                self.quick_bounds.y + self.quick_bounds.height - 8.,
+                &panel,
+                &format!("{} · Enter open · Cmd/Ctrl+Enter split", self.message),
+                rows.x + (8. * self.ui_scale),
+                self.quick_bounds.y + self.quick_bounds.height - (8. * self.ui_scale),
                 self.quick_bounds,
-                [0.55, 0.65, 0.76, 1.],
             );
             scene.layers.push(overlay);
         }
-        self.review_paint(self.size, scene);
+        self.paint_hover(workspace, scene);
+        self.review_paint(workspace, self.size, scene);
+        if theme_animating {
+            workspace.themes.ui.borrow_mut().request_animation();
+        }
     }
     pub fn mouse(
         &mut self,
@@ -3129,9 +3303,9 @@ impl Panels {
         if down
             && self.overlay.is_none()
             && self.chrome
-            && point.y >= self.size.height - STATUS
-            && point.x >= (self.size.width - 480.).max(0.)
-            && point.x < self.size.width - 180.
+            && point.y >= self.size.height - (STATUS * self.ui_scale)
+            && point.x >= (self.size.width - (480. * self.ui_scale)).max(0.)
+            && point.x < self.size.width - (180. * self.ui_scale)
             && workspace
                 .editor()
                 .settings
@@ -3150,8 +3324,8 @@ impl Panels {
         if down
             && self.overlay.is_none()
             && self.chrome
-            && point.y >= self.size.height - STATUS
-            && point.x >= self.size.width - 180.
+            && point.y >= self.size.height - (STATUS * self.ui_scale)
+            && point.x >= self.size.width - (180. * self.ui_scale)
         {
             self.action(
                 workspace,
@@ -3166,10 +3340,11 @@ impl Panels {
                 self.quick_input.click(point.x, extend);
             } else if down
                 && contains(self.quick_bounds, point)
-                && point.y >= self.quick_bounds.y + 46.
+                && point.y >= self.quick_bounds.y + (46. * self.ui_scale)
             {
-                let row = ((point.y - self.quick_bounds.y - 46. + self.quick.scroll.offset) / 44.)
-                    as usize;
+                let row = ((point.y - self.quick_bounds.y - (46. * self.ui_scale)
+                    + self.quick.scroll.offset)
+                    / (44. * self.ui_scale)) as usize;
                 if row < self.quick.items.len() {
                     self.quick.selected = row;
                     self.preview_current(workspace)?;
@@ -3186,20 +3361,21 @@ impl Panels {
             if down {
                 if self.panel == Some(Panel::Output)
                     && double
-                    && point.y >= self.panel_bounds.y + 30.
+                    && point.y >= self.panel_bounds.y + (30. * self.ui_scale)
                 {
-                    let row = ((point.y - self.panel_bounds.y - 30. + self.result_scroll.offset)
-                        / 24.) as usize;
+                    let row = ((point.y - self.panel_bounds.y - (30. * self.ui_scale)
+                        + self.result_scroll.offset)
+                        / (24. * self.ui_scale)) as usize;
                     if let Some((_, location)) =
                         self.build_results.iter().find(|(line, _)| *line == row)
                     {
                         workspace.open(location.clone())?;
                     }
                 } else if self.panel == Some(Panel::Results) {
-                    if point.y >= self.panel_bounds.y + 30. {
-                        let row = ((point.y - self.panel_bounds.y - 30.
+                    if point.y >= self.panel_bounds.y + (30. * self.ui_scale) {
+                        let row = ((point.y - self.panel_bounds.y - (30. * self.ui_scale)
                             + self.result_scroll.offset)
-                            / 24.) as usize;
+                            / (24. * self.ui_scale)) as usize;
                         if row < self.result_view.rows.len() {
                             self.result_selected = row;
                             if double {
@@ -3253,7 +3429,8 @@ impl Panels {
         }
         if self.side_visible && contains(self.side_bounds, point) {
             if down {
-                let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / 24.) as usize;
+                let row = ((point.y - self.side_bounds.y + self.side_scroll.offset)
+                    / (24. * self.ui_scale)) as usize;
                 if (1..=workspace.tabs.len()).contains(&row) {
                     workspace.click_sheet(row - 1, self.primary_click, extend);
                     self.side_open = Some(row - 1);
@@ -3312,7 +3489,7 @@ impl Panels {
             self.panel_focused = false;
             self.focus.show(Surface::Panel, false);
         }
-        Ok(self.chrome && point.y >= self.size.height - STATUS)
+        Ok(self.chrome && point.y >= self.size.height - (STATUS * self.ui_scale))
     }
     pub fn scroll(&mut self, point: Point, delta: f64) -> bool {
         if self.overlay.is_some() {
@@ -3706,7 +3883,7 @@ mod intelligence_tests {
             p.tree
                 .nodes
                 .values()
-                .any(|n| n.class == "definitions_popup")
+                .any(|n| n.class == "popup_control html_popup")
         );
         let point = Point {
             x: p.hover_bounds.x + 10.,
@@ -3873,4 +4050,107 @@ impl Panels {
         self.rebuild_side(workspace);
         true
     }
+}
+
+fn paint_themed_input(
+    theme: &vel_ui::theme::ThemeUi,
+    style: &vel_ui::theme::Style,
+    layer: &mut Layer,
+    input: &mut Input,
+    focused: bool,
+) {
+    input.configure_theme(style, theme.metrics.clone());
+    let first = layer.rects.len();
+    let text = layer.text.len();
+    Panels::paint_input(layer, input, focused);
+    layer.rects.remove(first);
+    theme.surface(layer, style, input.bounds, input.bounds);
+    for run in &mut layer.text[text..] {
+        run.color = style.foreground;
+        run.size = style.size;
+        run.style = style.font;
+        run.family = style.family.clone();
+    }
+    for rect in &mut layer.rects[first..] {
+        rect.color = style.matched;
+        rect.color[3] = if rect.rect.width <= 1. { 1. } else { 0.3 };
+    }
+}
+
+impl Panels {
+    fn paint_hover(&mut self, workspace: &Workspace, scene: &mut Scene) {
+        if self.hover.is_empty() || self.overlay.is_some() {
+            self.hover_html = None;
+            self.hover_bounds = Rect::default();
+            return;
+        }
+        let source=self.hover.iter().take(8).enumerate().map(|(i,location)|format!("<div><a href='definition:{i}' title='Open definition'><b>{}</b></a> <code>{}:{}</code></div>",escape_html(&location.name),escape_html(&location.file.file_name().unwrap_or_default().to_string_lossy()),location.row+1)).collect::<String>();
+        if self
+            .hover_html
+            .as_ref()
+            .is_none_or(|p| p.html.source != source)
+        {
+            self.hover_html = vel_ui::minihtml::Popup::new(
+                &source,
+                vel_ui::minihtml::PopupFlags::HIDE_ON_MOUSE_MOVE_AWAY,
+                None,
+                Size {
+                    width: 460.,
+                    height: 240.,
+                },
+            )
+            .ok();
+        }
+        let options =
+            crate::html_ui::options(workspace.editor(), 460f64.min(self.size.width), true);
+        let Some(popup) = &mut self.hover_html else {
+            return;
+        };
+        let mut theme = workspace.themes.ui.borrow_mut();
+        popup.html.layout(&options, theme.revision, &theme.metrics);
+        let viewport = Rect {
+            x: 0.,
+            y: 0.,
+            width: self.size.width,
+            height: self.size.height,
+        };
+        if let Some(rect) = popup.place(
+            Rect {
+                x: self.hover_point.x,
+                y: self.hover_point.y,
+                width: 1.,
+                height: 16.,
+            },
+            viewport,
+            workspace.editor().completion.popup_rect(),
+        ) {
+            self.hover_bounds = rect;
+            let node = self
+                .tree
+                .nodes
+                .entry(9001)
+                .or_insert_with(|| Node::new("popup_control html_popup"));
+            node.rect = rect;
+            node.visible = true;
+            let style = theme.style(
+                9001,
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("popup_control html_popup", &[]),
+                ]),
+                &workspace.editor().settings,
+            );
+            let mut layer = Layer::default();
+            theme.surface(&mut layer, &style, rect, viewport);
+            scene.layers.push(layer);
+            popup.html.paint(scene, rect);
+        }
+    }
+}
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+        .replace('\'', "&#39;")
 }

@@ -309,58 +309,152 @@ impl Completion {
             };
         }
     }
-    pub fn paint(&self, editor: &Editor, view: &crate::view::View, layer: &mut Layer) {
+    pub fn popup_rect(&self) -> Option<Rect> {
+        self.visible().then(|| self.bounds.get())
+    }
+    pub fn paint(
+        &self,
+        editor: &Editor,
+        view: &crate::view::View,
+        scene: &mut vel_render::scene::Scene,
+    ) {
         let Some(list) = self.list.as_ref().filter(|_| self.visible()) else {
             self.bounds.set(Rect::default());
             return;
         };
-        let caret = view.rect_at(editor, editor.caret);
+        use vel_theme::{Element, ElementPath};
+        let mut theme = editor.theme.borrow_mut();
         let n = popup_rows(list.items.len(), view.size.height);
-        let height = n as f64 * 24. + 30.;
-        let rect = popup_bounds(caret, view.size, height);
+        let height = n as f64 * 24. + 50.;
+        let rect = popup_bounds(view.rect_at(editor, editor.caret), view.size, height);
         self.bounds.set(rect);
-        vel_ui::fill(layer, rect, rect, [0.11, 0.14, 0.19, 1.]);
+        let popup_path = [
+            Element::new("window", &[]),
+            Element::new("popup_control auto_complete_popup", &[]),
+        ];
+        let popup = theme.style(
+            editor.ui_id(0xC000),
+            &ElementPath(&popup_path),
+            &editor.settings,
+        );
+        let mut layer = Layer::default();
+        theme.surface(&mut layer, &popup, rect, rect);
         let first = self.selected.saturating_sub(n.saturating_sub(1));
         for (row, item) in list.items.iter().skip(first).take(n).enumerate() {
+            let attrs = if first + row == self.selected {
+                &["selected"][..]
+            } else {
+                &[]
+            };
+            let path = [
+                popup_path[0],
+                popup_path[1],
+                Element::new("auto_complete", &[]),
+                Element::new("table_row", attrs),
+            ];
+            let row_style = theme.style(
+                editor.ui_id(0xC100_0000 + row as u32),
+                &ElementPath(&path),
+                &editor.settings,
+            );
             let r = Rect {
                 y: rect.y + row as f64 * 24.,
                 height: 24.,
                 ..rect
             };
-            if first + row == self.selected {
-                vel_ui::fill(layer, r, rect, [0.22, 0.32, 0.45, 1.]);
-            }
+            theme.surface(&mut layer, &row_style, r, rect);
+            let label_path = [
+                path[0],
+                path[1],
+                path[2],
+                path[3],
+                Element::new("auto_complete_label", &[]),
+            ];
+            let text = theme.style(
+                editor.ui_id(0xC200_0000 + row as u32),
+                &ElementPath(&label_path),
+                &editor.settings,
+            );
             let badge = if item.kind.letter.is_empty() {
                 item.kind.name.chars().next().unwrap_or('·').to_string()
             } else {
                 item.kind.letter.clone()
             };
-            vel_ui::label(
-                layer,
+            theme.text(
+                &mut layer,
+                &text,
                 &format!("{badge}  {}", item.trigger),
                 r.x + 8.,
                 r.y + 17.,
                 r,
-                [0.87, 0.91, 0.96, 1.],
             );
-            vel_ui::label(
-                layer,
-                &item.annotation,
-                r.x + r.width * 0.6,
-                r.y + 17.,
-                r,
-                [0.62, 0.73, 0.84, 1.],
-            );
+            if !item.annotation.is_empty() {
+                let hint_path = [
+                    path[0],
+                    path[1],
+                    path[2],
+                    path[3],
+                    Element::new("auto_complete_label auto_complete_hint", &[]),
+                ];
+                let hint = theme.style(
+                    editor.ui_id(0xC300_0000 + row as u32),
+                    &ElementPath(&hint_path),
+                    &editor.settings,
+                );
+                theme.text(
+                    &mut layer,
+                    &hint,
+                    &item.annotation,
+                    r.x + r.width * 0.6,
+                    r.y + 17.,
+                    r,
+                );
+            }
         }
-        if let Some(item) = list.items.get(self.selected) {
-            vel_ui::label(
-                layer,
-                &plain_details(&item.details),
-                rect.x + 8.,
-                rect.y + height - 10.,
-                rect,
-                [0.65, 0.74, 0.84, 1.],
+        scene.layers.push(layer);
+        if let Some(item) = list
+            .items
+            .get(self.selected)
+            .filter(|item| !item.details.is_empty())
+        {
+            let path = [
+                popup_path[0],
+                popup_path[1],
+                Element::new("auto_complete_detail_pane", &[]),
+                Element::new("auto_complete_details", &[]),
+            ];
+            let detail = theme.style(editor.ui_id(0xC400), &ElementPath(&path), &editor.settings);
+            let mut palette = theme.palette.clone();
+            palette.set(
+                "--foreground",
+                vel_theme::Color {
+                    r: (detail.foreground[0] * 255.) as u8,
+                    g: (detail.foreground[1] * 255.) as u8,
+                    b: (detail.foreground[2] * 255.) as u8,
+                    a: 255,
+                },
             );
+            let options = vel_minihtml::LayoutOptions {
+                max_width: (rect.width - 16.).max(1.) as f32,
+                root_font_size: detail.size,
+                palette,
+                extra_css: format!(
+                    "html {{ font-family: {}; }}",
+                    detail.family.as_deref().unwrap_or("system-ui")
+                ),
+            };
+            if let Ok(html) = editor.html.borrow_mut().cached(&item.details, true) {
+                html.layout(&options, theme.revision, &theme.metrics);
+                html.paint(
+                    scene,
+                    Rect {
+                        x: rect.x + 8.,
+                        y: rect.y + n as f64 * 24. + 4.,
+                        width: rect.width - 16.,
+                        height: 42.,
+                    },
+                );
+            }
         }
     }
     pub fn hit(&mut self, point: Point) -> bool {
@@ -399,24 +493,7 @@ pub fn popup_bounds(caret: Rect, size: vel_platform::Size, height: f64) -> Rect 
         height,
     }
 }
-fn plain_details(source: &str) -> String {
-    let mut tag = false;
-    source
-        .chars()
-        .filter(|c| {
-            if *c == '<' {
-                tag = true;
-                false
-            } else if *c == '>' {
-                tag = false;
-                false
-            } else {
-                !tag
-            }
-        })
-        .take(160)
-        .collect()
-}
+
 fn settings(editor: &Editor) -> CompletionSettings {
     let s = &editor.settings;
     let d = CompletionSettings::default();
@@ -1103,10 +1180,14 @@ mod tests {
         let popup = scene.layers.last().unwrap();
         assert!(popup.text.iter().any(|run| run.text.contains(&chosen)));
         let selected = popup
-            .rects
+            .surfaces
             .iter()
-            .find(|r| r.color == [0.22, 0.32, 0.45, 1.])
-            .unwrap();
+            .filter_map(|s| match s {
+                vel_render::scene::Surface::Fill(r) if r.rect.height == 24. => Some(r),
+                _ => None,
+            })
+            .next_back()
+            .expect("selected themed row");
         assert!(
             selected.rect.y >= bounds.y
                 && selected.rect.y + selected.rect.height <= bounds.y + bounds.height
@@ -1142,7 +1223,7 @@ mod tests {
         assert!(workspace.editor().fields.is_none());
     }
     #[test]
-    fn popup_flips_and_clamps_and_details_are_plain_text() {
+    fn popup_flips_and_clamps() {
         let rect = popup_bounds(
             Rect {
                 x: 390.,
@@ -1158,10 +1239,6 @@ mod tests {
         );
         assert!(rect.y < 150.);
         assert!(rect.x >= 0. && rect.x + rect.width <= 400.);
-        assert_eq!(
-            plain_details("<b>plain</b> &amp; details"),
-            "plain &amp; details"
-        );
     }
     #[test]
     fn creating_a_user_snippet_preserves_runtime_folders_and_unsaved_text() {

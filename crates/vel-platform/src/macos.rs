@@ -171,6 +171,49 @@ impl WindowHandle {
         self.0.animating.set(active);
         self.0.pace();
     }
+    /// Applies a theme appearance to the title-bar view while the document still observes OS changes.
+    /// None restores the system title bar. Background colors use straight-alpha sRGB channels.
+    pub fn set_title_bar_theme(
+        &self,
+        appearance: Option<Appearance>,
+        background: Option<[f32; 4]>,
+    ) {
+        let Some(window) = self.0.window.get() else {
+            return;
+        };
+        if let Some(view) = window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .and_then(|button| {
+                // SAFETY: this retained standard AppKit button is alive and accessed on the main thread.
+                unsafe { button.superview() }
+            })
+        {
+            let native = appearance.and_then(|appearance| {
+                // SAFETY: AppKit's immutable appearance constants are read on the main thread.
+                let name = unsafe {
+                    if appearance == Appearance::Dark {
+                        NSAppearanceNameDarkAqua
+                    } else {
+                        NSAppearanceNameAqua
+                    }
+                };
+                NSAppearance::appearanceNamed(name)
+            });
+            view.setAppearance(native.as_deref());
+        }
+        window.setTitlebarAppearsTransparent(background.is_some());
+        let color = background
+            .map(|c| {
+                NSColor::colorWithSRGBRed_green_blue_alpha(
+                    c[0] as f64,
+                    c[1] as f64,
+                    c[2] as f64,
+                    c[3] as f64,
+                )
+            })
+            .unwrap_or_else(NSColor::windowBackgroundColor);
+        window.setBackgroundColor(Some(&color));
+    }
     /// Changes the native title.
     pub fn set_title(&self, title: &str) {
         if let Some(w) = self.0.window.get() {

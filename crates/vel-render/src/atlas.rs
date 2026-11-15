@@ -101,6 +101,11 @@ struct Page {
     used: u64,
     pinned: bool,
 }
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum AssetKey {
+    Glyph(GlyphKey),
+    Image(u64, u32, u32),
+}
 /// A bounded, growing atlas. Eviction is page-granular LRU; pages referenced by
 /// the current frame cannot be evicted, so no built scene can contain stale UVs.
 #[derive(Debug)]
@@ -109,7 +114,7 @@ pub struct PagedAtlas {
     maximum: usize,
     frame: u64,
     pages: Vec<Page>,
-    entries: HashMap<GlyphKey, AtlasEntry>,
+    entries: HashMap<AssetKey, AtlasEntry>,
     evictions: u64,
 }
 impl PagedAtlas {
@@ -133,6 +138,9 @@ impl PagedAtlas {
     }
     /// Looks up and pins a cached bitmap.
     pub fn get(&mut self, key: GlyphKey) -> Option<AtlasEntry> {
+        self.get_asset(AssetKey::Glyph(key))
+    }
+    fn get_asset(&mut self, key: AssetKey) -> Option<AtlasEntry> {
         let entry = *self.entries.get(&key)?;
         let page = &mut self.pages[entry.page as usize];
         page.pinned = true;
@@ -148,12 +156,49 @@ impl PagedAtlas {
         height: u32,
         kind: PageKind,
     ) -> Result<AtlasEntry, String> {
+        self.allocate_asset(AssetKey::Glyph(key), width, height, kind)
+    }
+    /// Pins an uploaded theme image, sharing the normal generation/eviction rules.
+    pub fn get_image(&mut self, id: u64) -> Option<AtlasEntry> {
+        self.get_asset(AssetKey::Image(id, 0, 0))
+    }
+    /// Allocates a color image without sharing the font glyph namespace.
+    pub fn allocate_image(
+        &mut self,
+        id: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<AtlasEntry, String> {
+        self.allocate_asset(AssetKey::Image(id, 0, 0), width, height, PageKind::Color)
+    }
+    /// Pins one physical tile of a larger image, with generation-safe cache identity.
+    pub fn get_image_tile(&mut self, id: u64, x: u32, y: u32) -> Option<AtlasEntry> {
+        self.get_asset(AssetKey::Image(id, x, y))
+    }
+    /// Allocates one color tile independently from glyphs and other tiles of the same image.
+    pub fn allocate_image_tile(
+        &mut self,
+        id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<AtlasEntry, String> {
+        self.allocate_asset(AssetKey::Image(id, x, y), width, height, PageKind::Color)
+    }
+    fn allocate_asset(
+        &mut self,
+        key: AssetKey,
+        width: u32,
+        height: u32,
+        kind: PageKind,
+    ) -> Result<AtlasEntry, String> {
         if width.checked_add(2).is_none_or(|w| w > self.side)
             || height.checked_add(2).is_none_or(|h| h > self.side)
         {
             return Err("glyph exceeds atlas page size".into());
         }
-        if let Some(entry) = self.get(key) {
+        if let Some(entry) = self.get_asset(key) {
             return Ok(entry);
         }
         let mut allocated = None;

@@ -451,6 +451,58 @@ impl Renderer {
         self.rasters.insert(key, raster);
         Ok(Some((entry, raster)))
     }
+    fn image_tile(
+        &mut self,
+        image: &Image,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Result<AtlasEntry, String> {
+        if let Some(entry) = self.atlas.get_image_tile(image.id, tile_x, tile_y) {
+            return Ok(entry);
+        }
+        if image.rgba.len() != image.width as usize * image.height as usize * 4 {
+            return Err("invalid image buffer".into());
+        }
+        let tile_width = (image.width - tile_x).min(ATLAS_SIDE - 2);
+        let tile_height = (image.height - tile_y).min(ATLAS_SIDE - 2);
+        let entry =
+            self.atlas
+                .allocate_image_tile(image.id, tile_x, tile_y, tile_width, tile_height)?;
+        self.grow_texture(self.atlas.pages().max(1) as u32);
+        let width = tile_width + 2;
+        let height = tile_height + 2;
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        for y in 0..tile_height as usize {
+            let src = ((y + tile_y as usize) * image.width as usize + tile_x as usize) * 4;
+            let dst = ((y + 1) * width as usize + 1) * 4;
+            pixels[dst..dst + tile_width as usize * 4]
+                .copy_from_slice(&image.rgba[src..src + tile_width as usize * 4]);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: entry.slot.x - 1,
+                    y: entry.slot.y - 1,
+                    z: entry.page,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(entry)
+    }
     fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
         self.atlas.begin_frame();
         self.data.clear();
@@ -471,6 +523,113 @@ impl Renderer {
             }
             self.batch(layer_index, PrimitiveKind::Shadow, first);
             let first = self.data.len() as u32;
+            for surface in &layer.surfaces {
+                match surface {
+                    Surface::CssBox(r) => {
+                        let widths = r.borders.map(|b| b.width * scale);
+                        if r.background[3] > 0. {
+                            let mut q = quad(
+                                r.rect,
+                                r.clip,
+                                r.background,
+                                scale,
+                                r.radii.map(|n| n * scale),
+                                PrimitiveKind::Rect,
+                            );
+                            q.meta[0] = 4.;
+                            q.uv = widths;
+                            self.data.push(q);
+                        }
+                        for (i, border) in r.borders.iter().enumerate() {
+                            if border.width <= 0. || border.color[3] <= 0. {
+                                continue;
+                            }
+                            let mut q = quad(
+                                r.rect,
+                                r.clip,
+                                border.color,
+                                scale,
+                                r.radii.map(|n| n * scale),
+                                PrimitiveKind::Rect,
+                            );
+                            q.meta[0] = 4.;
+                            q.meta[1] = (i + 1) as f32;
+                            q.uv = widths;
+                            self.data.push(q);
+                        }
+                    }
+                    Surface::Fill(r) => self.data.push(quad(
+                        r.rect,
+                        r.clip,
+                        r.color,
+                        scale,
+                        [r.radius * scale, 0., 0., 0.],
+                        PrimitiveKind::Rect,
+                    )),
+                    Surface::Image(r) => {
+                        let tile = (ATLAS_SIDE - 2) as f32;
+                        if r.source[2] <= 0. || r.source[3] <= 0. {
+                            continue;
+                        }
+                        let end_x = (r.source[0] + r.source[2]).min(r.image.width as f32);
+                        let end_y = (r.source[1] + r.source[3]).min(r.image.height as f32);
+                        for ty in (r.source[1] / tile).floor().max(0.) as u32
+                            ..(end_y / tile).ceil() as u32
+                        {
+                            for tx in (r.source[0] / tile).floor().max(0.) as u32
+                                ..(end_x / tile).ceil() as u32
+                            {
+                                let left = r.source[0].max(tx as f32 * tile);
+                                let top = r.source[1].max(ty as f32 * tile);
+                                let width = end_x.min((tx + 1) as f32 * tile) - left;
+                                let height = end_y.min((ty + 1) as f32 * tile) - top;
+                                let rect = Rect {
+                                    x: r.rect.x
+                                        + f64::from((left - r.source[0]) / r.source[2])
+                                            * r.rect.width,
+                                    y: r.rect.y
+                                        + f64::from((top - r.source[1]) / r.source[3])
+                                            * r.rect.height,
+                                    width: f64::from(width / r.source[2]) * r.rect.width,
+                                    height: f64::from(height / r.source[3]) * r.rect.height,
+                                };
+                                if rect.x + rect.width <= r.clip.x
+                                    || rect.x >= r.clip.x + r.clip.width
+                                    || rect.y + rect.height <= r.clip.y
+                                    || rect.y >= r.clip.y + r.clip.height
+                                {
+                                    continue;
+                                }
+                                let entry = self.image_tile(
+                                    &r.image,
+                                    tx * (ATLAS_SIDE - 2),
+                                    ty * (ATLAS_SIDE - 2),
+                                )?;
+                                let mut q = quad(
+                                    rect,
+                                    r.clip,
+                                    r.color,
+                                    scale,
+                                    [0.; 4],
+                                    PrimitiveKind::Glyph,
+                                );
+                                let side = ATLAS_SIDE as f32;
+                                q.uv = [
+                                    (entry.slot.x as f32 + left - tx as f32 * tile) / side,
+                                    (entry.slot.y as f32 + top - ty as f32 * tile) / side,
+                                    width / side,
+                                    height / side,
+                                ];
+                                q.meta[1] = entry.page as f32;
+                                self.data.push(q);
+                            }
+                        }
+                    }
+                }
+            }
+            self.batch(layer_index, PrimitiveKind::Surface, first);
+
+            let first = self.data.len() as u32;
             for r in &layer.rects {
                 self.data.push(quad(
                     r.rect,
@@ -488,14 +647,26 @@ impl Renderer {
                 let style = LayoutStyle {
                     font_style: run.style,
                     px64,
-                    font_epoch: 0,
+                    font_epoch: run.family.as_ref().map_or(0, |family| {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        family.hash(&mut h);
+                        h.finish()
+                    }),
                 };
                 let glyphs = if let Some(g) = self.layouts.get(&run.text, style) {
                     g
                 } else {
-                    let g: Arc<[_]> = fonts
-                        .shape_styled(&run.text, px64 as f32 / 64., run.style)
-                        .into();
+                    let g: Arc<[_]> = if let Some(family) = &run.family {
+                        fonts
+                            .shape_ui(&run.text, family, px64 as f32 / 64., run.style)
+                            .glyphs
+                            .into()
+                    } else {
+                        fonts
+                            .shape_styled(&run.text, px64 as f32 / 64., run.style)
+                            .into()
+                    };
                     self.layouts.insert(&run.text, style, Arc::clone(&g));
                     g
                 };
@@ -934,6 +1105,7 @@ fn quad(r: Rect, c: Rect, color: Color, s: f32, params: [f32; 4], kind: Primitiv
         params,
         meta: [
             match kind {
+                PrimitiveKind::Surface => 1.,
                 PrimitiveKind::Shadow => 0.,
                 PrimitiveKind::Rect => 1.,
                 PrimitiveKind::Glyph => 2.,

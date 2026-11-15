@@ -53,3 +53,10 @@ layers in the workbench adapter. Malformed optional user resources become startu
 Keymap clones share immutable binding and prefix-trie tables; each view keeps its own pending
 chord. Appending an override copies shared tables before changing them. This keeps large Hot
 Exit restores from rebuilding the same tables for every sheet.
+
+
+Round 10 adds process-unique settings value identities alongside the local revision counter.
+Clones share a value identity until one changes. `Settings::project` copies selected effective
+keys into one lookup layer with its own immutable value identity, allowing theme callers to cache compact snapshots without repeatedly
+traversing all application setting layers. Observer behavior and precedence remain shared with
+the ordinary settings API.

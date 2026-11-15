@@ -93,6 +93,14 @@ impl Tab {
             || self.format != self.saved_format
     }
     pub fn label(&self) -> String {
+        if let Some(title) = self
+            .editor
+            .settings
+            .get("velocity_html_sheet_title")
+            .and_then(Value::as_str)
+        {
+            return title.into();
+        }
         let name = self
             .path
             .as_ref()
@@ -108,6 +116,7 @@ impl Tab {
     }
     fn install(&mut self, loaded: Loaded) {
         self.editor.cancel_composition();
+        *self.editor.html.borrow_mut() = Default::default();
         let old = self.editor.buffer.view(self.editor.id).sel().clone();
         let positions: Vec<_> = old
             .iter()
@@ -158,6 +167,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pub themes: crate::theme_ui::Themes,
     pub git: crate::git_ui::GitUi,
     pub catalog: Arc<crate::completion::Catalog>,
     pub assets: Arc<crate::language::Assets>,
@@ -212,6 +222,7 @@ impl Workspace {
         watch: bool,
     ) -> Result<Self, String> {
         let mut resources = Resources::default();
+        crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
             (
                 "Rust Function.sublime-snippet",
@@ -601,7 +612,14 @@ impl Workspace {
         }
         // Track resource files and containing directories, including absent User
         // locations, so creating a new override is observable on the next poll.
-        for suffix in [".sublime-menu", ".sublime-mousemap", ".sublime-commands"] {
+        for suffix in [
+            ".sublime-menu",
+            ".sublime-mousemap",
+            ".sublime-commands",
+            ".sublime-theme",
+            ".sublime-file-icons",
+            ".png",
+        ] {
             for resource in resources.matching(suffix) {
                 if resource.origin.exists() {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
@@ -652,7 +670,12 @@ impl Workspace {
         } else {
             None
         };
+        let mut themes = crate::theme_ui::Themes::load(&resources, &schemes, &mut messages);
+        if let Err(e) = themes.select(&settings, true) {
+            messages.push(e);
+        }
         let mut workspace = Self {
+            themes,
             git: Default::default(),
             catalog,
             assets,
@@ -1007,6 +1030,10 @@ impl Workspace {
                 false,
             ) {
                 Ok(config) => {
+                    self.themes = config.themes;
+                    if let Err(e) = self.themes.select(&config.settings, self.dark) {
+                        self.messages.push(e);
+                    }
                     self.assets = config.assets;
                     self.catalog = config.catalog;
                     self.syntax_settings = config.syntax_settings;
@@ -1115,6 +1142,9 @@ impl Workspace {
     }
     pub fn set_appearance(&mut self, dark: bool) -> Result<(), String> {
         self.dark = dark;
+        if let Err(e) = self.themes.select(&self.settings, dark) {
+            self.messages.push(e);
+        }
         for index in 0..self.tabs.len() {
             self.configure_language(index, None, false)?;
         }
@@ -1134,6 +1164,7 @@ impl Workspace {
             );
         }
         let tab = &mut self.tabs[index];
+        tab.editor.theme = self.themes.ui.clone();
         tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
         tab.editor.snippet_path = tab.path.clone();
         let previous = tab

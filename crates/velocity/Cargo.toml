@@ -40,4 +40,7 @@ unicode-width = "=0.2.3"
 tempfile = "=3.27.0"
 
 
+vel-theme = { path = "../vel-theme" }
+vel-minihtml = { path = "../vel-minihtml" }
+
 [dev-dependencies]

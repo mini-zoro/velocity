@@ -105,5 +105,16 @@
   "dictionary": "Packages/Language - English/en_US.dic",
   "added_words": [],
   "ignored_words": [],
-  "sublime_merge_path": ""
+  "sublime_merge_path": "",
+  "theme": "auto",
+  "dark_theme": "Velocity.sublime-theme",
+  "light_theme": "Velocity Light.sublime-theme",
+  "ui_scale": 1.0,
+  "ui_font_size": 12,
+  "animation_enabled": true,
+  "overlay_scroll_bars": "system",
+  "themed_title_bar": true,
+  "file_tab_style": "angled",
+  "show_tab_close_buttons": true,
+  "show_tab_close_buttons_on_left": false
 }

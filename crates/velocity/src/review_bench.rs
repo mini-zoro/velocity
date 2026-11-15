@@ -79,6 +79,7 @@ pub fn history(reporter: &Reporter, options: &Options) -> Result<(), String> {
         for (i, view) in views.into_iter().enumerate() {
             let id = n * 2 + i as u64;
             sheets.push(Sheet {
+                html: None,
                 id,
                 document: n,
                 view: ViewState::capture(&buffer, view, (0., 0.)),

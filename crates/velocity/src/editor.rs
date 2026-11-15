@@ -39,6 +39,8 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub theme: std::rc::Rc<RefCell<vel_ui::theme::ThemeUi>>,
+    pub html: RefCell<crate::html_ui::ViewHtml>,
     pub annotation_view: ViewId,
     pub annotations: std::rc::Rc<RefCell<crate::annotations::Annotations>>,
     pub completion: crate::completion::Completion,
@@ -72,6 +74,11 @@ pub struct Editor {
     pub revision: u64,
 }
 impl Editor {
+    /// Namespaces paint state by view, including cloned views of a shared buffer.
+    pub fn ui_id(&self, local: u32) -> u64 {
+        (self.annotation_view.0 << 32) | u64::from(local)
+    }
+
     pub fn new(text: Text) -> Self {
         let mut buffer = Buffer::new(text.clone());
         let id = buffer.new_view();
@@ -96,7 +103,22 @@ impl Editor {
             .clone();
         let preferences = settings.editor();
         let settings_revision = settings.revision();
+        let mut registry = Registry::standard();
+        for name in crate::html_ui::COMMANDS {
+            registry.register(name, vel_commands::Kind::TextCommand, None);
+        }
+        for name in [
+            "new_html_sheet",
+            "open_url",
+            "minihtml_navigate",
+            "theme_demo",
+            "set_theme_appearance",
+        ] {
+            registry.register(name, vel_commands::Kind::WindowCommand, None);
+        }
         Self {
+            theme: crate::theme_ui::default_ui(),
+            html: Default::default(),
             annotation_view: id,
             annotations: std::rc::Rc::new(RefCell::new(crate::annotations::Annotations::new(
                 text.clone(),
@@ -124,7 +146,7 @@ impl Editor {
             marked: None,
             composition: None,
             settings,
-            registry: Registry::standard(),
+            registry,
             keymap,
             clipboard: String::new(),
             actions: Vec::new(),
@@ -156,6 +178,9 @@ impl Editor {
         {
             self.fields = None;
             self.fields_version = None;
+        }
+        if self.settings.get("velocity_html_sheet").is_some() {
+            self.read_only = true;
         }
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
@@ -327,6 +352,7 @@ impl Editor {
         self.unmark();
         if self.buffer.view(self.id).sel() != &selection {
             self.completion.hide();
+            self.html.borrow_mut().selection_modified();
         }
         if !self.shared_shadow && self.buffer.view(self.id).sel() != &selection {
             self.buffer.break_undo_group();
@@ -346,7 +372,10 @@ impl Editor {
             .map(|r| Utf16Range::from_bytes(&self.text, r))
     }
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
-        if self.read_only && self.registry.kind(name) == Some(vel_commands::Kind::TextCommand) {
+        if self.read_only
+            && self.registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+            && !crate::html_ui::COMMANDS.contains(&name)
+        {
             return Ok(());
         }
         self.unmark();
@@ -377,6 +406,16 @@ impl Editor {
                 )
         {
             self.completion.hide();
+            self.html.borrow_mut().selection_modified();
+        }
+        if before_selection
+            != (
+                self.anchor,
+                self.caret,
+                self.buffer.view(self.id).sel().len(),
+            )
+        {
+            self.html.borrow_mut().selection_modified();
         }
         if self.buffer.change_id() != before_version
             && !matches!(
@@ -392,6 +431,7 @@ impl Editor {
             } else {
                 None
             };
+            self.html.borrow_mut().character_event();
             self.completion.edited(character);
         }
         result
@@ -557,6 +597,10 @@ impl Editor {
     }
     pub fn command(&mut self, command: Command) {
         if command == Command::Cancel {
+            if self.html.borrow().popup.as_ref().is_some_and(|p| p.visible) {
+                self.html.borrow_mut().popup = None;
+                return;
+            }
             if self.completion.visible() {
                 self.completion.hide();
                 return;
@@ -572,6 +616,9 @@ impl Editor {
 }
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        if self.html_command(name, args)? {
+            return Ok(true);
+        }
         if self.annotation_command(name, args)? {
             return Ok(true);
         }

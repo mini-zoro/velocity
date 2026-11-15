@@ -54,6 +54,13 @@ pub struct View {
     pub minimap_drag: bool,
     pub gutter_hover: bool,
     pub tab_height: f64,
+    scroll_bar: Rect,
+    scroll_puck: Rect,
+    scroll_bar_drag: bool,
+    scroll_bar_hover: bool,
+    scroll_drag_offset: f64,
+    bar_overlay: bool,
+    scrolled: Option<Instant>,
     base_cell: f64,
     base_ascent: f64,
     started: Instant,
@@ -78,6 +85,13 @@ impl View {
             minimap_drag: false,
             gutter_hover: false,
             tab_height: TAB_HEIGHT,
+            scroll_bar: Rect::default(),
+            scroll_puck: Rect::default(),
+            scroll_bar_drag: false,
+            scroll_bar_hover: false,
+            scroll_drag_offset: 0.,
+            bar_overlay: true,
+            scrolled: None,
             base_cell: cell,
             base_ascent: ascent,
             started: Instant::now(),
@@ -128,7 +142,13 @@ impl View {
         }
     }
     pub fn right(&self, e: &Editor) -> f64 {
-        self.size.width - self.minimap_width(e)
+        self.size.width
+            - self.minimap_width(e)
+            - if self.bar_overlay {
+                0.
+            } else {
+                8. * vel_ui::theme::ui_scale(&e.settings)
+            }
     }
     fn margin(&self, e: &Editor) -> f64 {
         let margin = e.settings.number("margin", 8.).max(0.);
@@ -154,6 +174,18 @@ impl View {
             .max(1.) as usize
     }
     pub fn apply_style(&mut self, e: &Editor) {
+        self.bar_overlay = e
+            .theme
+            .borrow_mut()
+            .style(
+                e.ui_id(0xE300),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("scroll_area_control", &[]),
+                ]),
+                &e.settings,
+            )
+            .overlay;
         let scale = e.preferences.font_size / 13.;
         self.cell = self.base_cell * scale;
         self.ascent = self.base_ascent * scale;
@@ -192,7 +224,7 @@ impl View {
             &e.folded(),
         );
         let annotations = e.annotations.borrow();
-        let blocks = annotations
+        let mut blocks: Vec<(usize, usize)> = annotations
             .current
             .as_ref()
             .filter(|p| p.identity.1.0 == e.revision)
@@ -204,6 +236,14 @@ impl View {
                     .collect()
             })
             .unwrap_or_default();
+        let (phantoms, inline) = crate::html_ui::prepare(
+            e,
+            self.right(e) - self.gutter(e),
+            self.cell,
+            self.line_height,
+        );
+        blocks.extend(phantoms);
+        e.layout.borrow_mut().set_phantom_inline(&e.text, inline);
         e.layout.borrow_mut().set_inline(blocks);
         e.layout.borrow_mut().page = self.rows();
         if wrap && wrap_width <= width {
@@ -228,6 +268,7 @@ impl View {
         self.scroll_x = self.scroll_x.max(0.);
     }
     pub fn scroll(&mut self, e: &Editor, x: f64, y: f64) {
+        self.scrolled = Some(Instant::now());
         self.scroll_x += x;
         self.scroll_y += y;
         self.clamp_scroll(e);
@@ -333,6 +374,32 @@ impl View {
         dragging: bool,
         up: bool,
     ) -> Result<bool, String> {
+        if up && self.scroll_bar_drag {
+            self.scroll_bar_drag = false;
+            return Ok(true);
+        }
+        if (down && vel_ui::contains(self.scroll_bar, point)) || (dragging && self.scroll_bar_drag)
+        {
+            if down {
+                self.scroll_bar_drag = true;
+                self.scroll_drag_offset = if vel_ui::contains(self.scroll_puck, point) {
+                    point.y - self.scroll_puck.y
+                } else {
+                    self.scroll_puck.height / 2.
+                };
+            }
+            let track = (self.scroll_bar.height - self.scroll_puck.height).max(1.);
+            let fraction =
+                ((point.y - self.scroll_bar.y - self.scroll_drag_offset) / track).clamp(0., 1.);
+            let height = e.layout.borrow().total() as f64 * self.line_height;
+            self.scroll_y = fraction * (height - self.scroll_bar.height).max(0.);
+            self.scrolled = Some(Instant::now());
+            self.clamp_scroll(e);
+            return Ok(true);
+        }
+        self.scroll_bar_hover = point.x >= self.right(e) - 8.
+            && point.x < self.right(e) + if self.bar_overlay { 0. } else { 8. }
+            && point.y >= self.tab_height;
         self.minimap_hover = point.x >= self.right(e) && point.y >= self.tab_height;
         self.gutter_hover = point.x >= 0. && point.x < self.gutter(e);
         if up {
@@ -406,6 +473,12 @@ impl View {
         Ok(false)
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
+        e.theme.borrow().metrics.poll_images();
+        e.theme.borrow_mut().begin_frame(Instant::now());
+        e.html.borrow_mut().begin_frame();
+        if let Some(scene) = crate::html_ui::sheet(e, self) {
+            return scene;
+        }
         if !e.shared_shadow {
             e.annotations.borrow_mut().sync(&e.buffer, &e.settings);
         }
@@ -464,6 +537,19 @@ impl View {
             height: (self.size.height - self.tab_height).max(0.),
         };
         let mut layer = Layer::default();
+        {
+            let mut theme = e.theme.borrow_mut();
+            let path = [
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("sheet_contents", &[]),
+                vel_theme::Element::new(
+                    "text_area_control",
+                    if self.focused { &["focused"] } else { &[] },
+                ),
+            ];
+            let style = theme.style(e.ui_id(0xE000), &vel_theme::ElementPath(&path), &e.settings);
+            theme.surface(&mut layer, &style, clip, all);
+        }
         let mut carets = Layer::default();
         // Each split paints its own scheme background before the shared scene is merged.
         fill(
@@ -689,21 +775,42 @@ impl View {
                             .any(|f| !f.attributes)
                     });
                     if is_folded || candidate {
-                        text_run(
+                        let mut theme = e.theme.borrow_mut();
+                        let attrs = if is_folded {
+                            &["expandable"][..]
+                        } else {
+                            &["expandable", "expanded"][..]
+                        };
+                        let path = [
+                            vel_theme::Element::new("window", &[]),
+                            vel_theme::Element::new("text_area_control", &[]),
+                            vel_theme::Element::new("fold_button_control", attrs),
+                        ];
+                        let style = theme.style(
+                            e.ui_id(0xE100_0000 + row as u32),
+                            &vel_theme::ElementPath(&path),
+                            &e.settings,
+                        );
+                        theme.surface(
                             &mut layer,
-                            if is_folded { "▸" } else { "▾" },
-                            gutter - 10.,
-                            baseline,
-                            e.preferences.font_size,
-                            global("fold_marker"),
-                            FontStyle::default(),
+                            &style,
+                            Rect {
+                                x: gutter - 12.,
+                                y: baseline - 10.,
+                                width: 10.,
+                                height: 10.,
+                            },
                             all,
                         );
                     }
                 }
             }
             let display = self.line_units(&line, layout.hidden(row), e.preferences.tab_size);
+            let inline_phantoms = layout.has_phantom_inline();
             let column_at = |byte: usize| {
+                if inline_phantoms {
+                    return layout.column(&e.text, byte);
+                }
                 segment.indent
                     + display
                         .iter()
@@ -888,7 +995,36 @@ impl View {
             let mut run = String::new();
             let mut run_x = 0.;
             let mut run_style: Option<(Color, FontStyle, Decoration)> = None;
+            // Styled spans and display units are ordered. Walk them together instead of
+            // restarting the span search for every grapheme while painting themed scenes.
+            let spans = if e.marked.is_none() {
+                language
+                    .and_then(|l| l.styled.get(&row))
+                    .map(|line| line.spans.as_ref())
+                    .unwrap_or(&[])
+            } else {
+                &[]
+            };
+            debug_assert!(
+                spans
+                    .windows(2)
+                    .all(|pair| pair[0].range.end <= pair[1].range.start)
+            );
+            let mut span = spans.partition_point(|s| s.range.end <= segment.bytes.start);
             for unit in relevant {
+                let gap = if inline_phantoms {
+                    layout.phantom_gap(start + unit.bytes.start)
+                } else {
+                    0
+                };
+                if gap > 0 {
+                    if let Some((fg, font, decoration)) = run_style.take() {
+                        self.flush(
+                            &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                        );
+                    }
+                    column += gap;
+                }
                 let text = unit.text(&line);
                 let x = left + column as f64 * self.cell - self.scroll_x;
                 let at = start + unit.bytes.start;
@@ -899,19 +1035,16 @@ impl View {
                     .find_matches
                     .get(self.find_matches.partition_point(|r| r.end <= at))
                     .is_some_and(|r| r.contains(&at));
-                let style = if e.marked.is_none() {
-                    language
-                        .and_then(|l| l.styled.get(&row))
-                        .and_then(|line| {
-                            line.spans
-                                .iter()
-                                .find(|s| s.range.contains(&unit.bytes.start))
-                        })
-                        .map(|s| s.style)
-                        .unwrap_or(default)
-                } else {
-                    default
-                };
+                while spans
+                    .get(span)
+                    .is_some_and(|s| s.range.end <= unit.bytes.start)
+                {
+                    span += 1;
+                }
+                let style = spans
+                    .get(span)
+                    .filter(|s| s.range.contains(&unit.bytes.start))
+                    .map_or(default, |s| s.style);
                 let fg = if selected {
                     style.selection_foreground.map(rgba).unwrap_or_else(|| {
                         global(if self.focused {
@@ -1040,19 +1173,96 @@ impl View {
             ..Layer::default()
         };
         self.paint_minimap(e, language, scheme, &mut minimap);
-        let mut popup = Layer::default();
-        e.completion.paint(e, self, &mut popup);
-        let mut layers = vec![layer, carets, minimap];
-        if e.completion.visible() {
-            layers.push(popup);
-        }
-        let scene = Scene {
+        let layers = vec![layer, carets, minimap];
+        let mut scene = Scene {
             background: rgba(default.background),
             layers,
         };
         drop(annotations);
+        self.paint_scrollbar(e, &mut scene);
+        e.completion.paint(e, self, &mut scene);
+        crate::html_ui::paint(e, self, &mut scene);
         e.annotations.borrow_mut().flush();
         scene
+    }
+    fn paint_scrollbar(&mut self, e: &Editor, scene: &mut Scene) {
+        let ui_scale = vel_ui::theme::ui_scale(&e.settings);
+        let height = (self.size.height - self.tab_height).max(1.);
+        let content = e.layout.borrow().total() as f64 * self.line_height;
+        if content <= height {
+            self.scroll_bar = Rect::default();
+            return;
+        }
+        let elapsed = self
+            .scrolled
+            .map_or(f32::INFINITY, |at| at.elapsed().as_secs_f32());
+        let hovered = self.scroll_bar_hover || self.scroll_bar_drag;
+        if self.bar_overlay && !hovered && elapsed >= 0.8 {
+            self.scroll_bar = Rect::default();
+            return;
+        }
+        let bounds = Rect {
+            x: if self.bar_overlay {
+                self.right(e) - 8. * ui_scale
+            } else {
+                self.right(e)
+            },
+            y: self.tab_height,
+            width: 8. * ui_scale,
+            height,
+        };
+        self.scroll_bar = bounds;
+        let mut theme = e.theme.borrow_mut();
+        let path = [
+            vel_theme::Element::new("window", &[]),
+            vel_theme::Element::new("scroll_area_control", &[]),
+            vel_theme::Element::new("scroll_bar_control", &["vertical"]),
+        ];
+        let style = theme.style(e.ui_id(0xE301), &vel_theme::ElementPath(&path), &e.settings);
+        let mut layer = Layer::default();
+        theme.surface(&mut layer, &style, bounds, bounds);
+        let track_path = [
+            path[0],
+            path[1],
+            path[2],
+            vel_theme::Element::new("scroll_track_control", &[]),
+        ];
+        let track = theme.style(
+            e.ui_id(0xE302),
+            &vel_theme::ElementPath(&track_path),
+            &e.settings,
+        );
+        theme.surface(&mut layer, &track, bounds, bounds);
+        let puck_path = [
+            path[0],
+            path[1],
+            path[2],
+            vel_theme::Element::new("puck_control", if hovered { &["hover"] } else { &[] }),
+        ];
+        let mut puck = theme.style(
+            e.ui_id(0xE303),
+            &vel_theme::ElementPath(&puck_path),
+            &e.settings,
+        );
+        let puck_height = (height * height / content)
+            .max(f64::from(puck.min_size[1]).max(24. * ui_scale))
+            .min(height);
+        let rect = Rect {
+            x: bounds.x + ui_scale,
+            y: bounds.y
+                + (self.scroll_y / (content - height)).clamp(0., 1.) * (height - puck_height),
+            width: (bounds.width - 2. * ui_scale).max(1.),
+            height: puck_height,
+        };
+        self.scroll_puck = rect;
+        if self.bar_overlay && !hovered {
+            puck.multiply_opacity(((0.8 - elapsed) / 0.2).clamp(0., 1.));
+            if e.settings.bool("animation_enabled", true) {
+                theme.request_animation();
+            }
+        }
+        theme.surface(&mut layer, &puck, rect, bounds);
+        scene.layers.push(layer);
     }
     #[allow(clippy::too_many_arguments)]
     fn flush(
@@ -1096,6 +1306,7 @@ impl View {
             );
         }
         layer.text.push(TextRun {
+            family: None,
             text: std::mem::take(run),
             x: x as f32,
             baseline: baseline as f32,
@@ -1187,6 +1398,18 @@ impl View {
             bounds,
             rgba(scheme.default_style().background),
         );
+        {
+            let mut theme = e.theme.borrow_mut();
+            let path = [
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new(
+                    "minimap_control",
+                    if self.minimap_hover { &["hover"] } else { &[] },
+                ),
+            ];
+            let style = theme.style(e.ui_id(0xE200), &vel_theme::ElementPath(&path), &e.settings);
+            theme.surface(layer, &style, bounds, bounds);
+        }
         if let Some(language) = language {
             for line in language.minimap.iter() {
                 let y =
@@ -1225,8 +1448,19 @@ impl View {
                     * bounds.height)
                     .max(3.),
             };
-            let mut shade = color(scheme, "minimap_border");
-            shade[3] *= 0.15;
+            let mut theme = e.theme.borrow_mut();
+            let path = [
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new(
+                    "minimap_control",
+                    if self.minimap_hover { &["hover"] } else { &[] },
+                ),
+            ];
+            let style = theme.style(e.ui_id(0xE200), &vel_theme::ElementPath(&path), &e.settings);
+            let mut shade = style
+                .viewport_color
+                .unwrap_or_else(|| color(scheme, "minimap_border"));
+            shade[3] *= style.viewport_opacity;
             fill(layer, rect, bounds, shade);
             border(layer, rect, bounds, color(scheme, "minimap_border"));
         }
@@ -1298,6 +1532,7 @@ fn text_run(
     clip: Rect,
 ) {
     layer.text.push(TextRun {
+        family: None,
         text: text.to_owned(),
         x: x as f32,
         baseline: baseline as f32,

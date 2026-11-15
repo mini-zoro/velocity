@@ -233,3 +233,39 @@ fn cloned_keymaps_keep_chords_and_appended_overrides_independent() {
     assert_eq!(resolve(&mut first), "original");
     assert_eq!(resolve(&mut second), "override");
 }
+
+#[test]
+fn projected_settings_keep_values_and_revisions_distinguish_independent_configs() {
+    use vel_config::settings::{Layer, Settings};
+    let mut first = Settings::default();
+    let mut second = Settings::default();
+    first.set(
+        Layer::User,
+        "overlay_scroll_bars",
+        serde_json::json!("enabled"),
+    );
+    second.set(
+        Layer::User,
+        "overlay_scroll_bars",
+        serde_json::json!("disabled"),
+    );
+    assert_eq!(first.revision(), second.revision());
+    assert_ne!(first.cache_identity(), second.cache_identity());
+    let snapshot = first.project(["overlay_scroll_bars", "absent"]);
+    assert_eq!(snapshot.revision(), first.revision());
+    assert_ne!(snapshot.cache_identity(), first.cache_identity());
+    assert_eq!(
+        snapshot.get("overlay_scroll_bars"),
+        first.get("overlay_scroll_bars")
+    );
+    assert_eq!(snapshot.get("absent"), None);
+    let copy = first.clone();
+    assert_eq!(copy.revision(), first.revision());
+    first.set(
+        Layer::View,
+        "overlay_scroll_bars",
+        serde_json::json!("disabled"),
+    );
+    assert_ne!(copy.revision(), first.revision());
+    assert_eq!(copy.string("overlay_scroll_bars", ""), "enabled");
+}

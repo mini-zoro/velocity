@@ -482,7 +482,7 @@ fn profile(reporter: &Reporter, mut prepared: Prepared) -> Result<(), String> {
         chrome.push(ms(at.elapsed()));
         prepared.reset()?;
     }
-    reporter.emit(json!({"kind":"review_component_profile","review_ui":prepared.review,"command_ms":summarize(&command),"view_ms":summarize(&view),"chrome_ms":summarize(&chrome),"command_samples_ms":command,"view_samples_ms":view,"chrome_samples_ms":chrome,"gui_started":false,"gpu_started":false}))?;
+    reporter.emit(json!({"theme_cache_calls_misses":prepared.workspace.themes.ui.borrow().cache_stats(),"kind":"review_component_profile","review_ui":prepared.review,"command_ms":summarize(&command),"view_ms":summarize(&view),"chrome_ms":summarize(&chrome),"command_samples_ms":command,"view_samples_ms":view,"chrome_samples_ms":chrome,"gui_started":false,"gpu_started":false}))?;
     reporter
         .emit(json!({"kind":"complete","complete":true,"gui_started":false,"gpu_started":false}))
 }

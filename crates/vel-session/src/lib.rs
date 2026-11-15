@@ -86,9 +86,20 @@ pub struct Document {
     /// Dirty/untitled contents and undo. Clean, hidden files may load lazily from disk.
     pub history: Option<History>,
 }
+/// Retained HTML sheet content and tab name. Transient popups/phantoms are not serialized.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HtmlSheet {
+    /// User-visible tab name.
+    pub name: String,
+    /// Minihtml document source, bounded to the parser's 4 MiB input limit.
+    pub contents: String,
+}
 /// One sheet's view-local state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sheet {
+    /// Optional retained minihtml sheet; missing in older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<HtmlSheet>,
     /// Stable ID used in the workbench.
     pub id: u64,
     /// Shared document ID.
@@ -191,6 +202,12 @@ impl Session {
                 return Err("invalid sidebar scroll".into());
             }
             for s in &w.sheets {
+                if s.html
+                    .as_ref()
+                    .is_some_and(|h| h.contents.len() > 4 * 1024 * 1024 || h.name.len() > 4096)
+                {
+                    return Err("invalid HTML sheet content".into());
+                }
                 if !all.insert(s.id) || !docs.contains(&s.document) {
                     return Err("invalid sheet identity/document".into());
                 }
