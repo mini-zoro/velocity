@@ -105,6 +105,10 @@ const ZERO_WIDTH_ESCAPE_FIRE_LIMIT: u32 = 100;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct InterpreterState {
     stack: SharedStack,
+    // Immutable document-relative base; resolving by name per token is expensive.
+    base_context: ContextId,
+    // Sticky optimization flag, excluded from stable semantic equality/fingerprints.
+    has_while: bool,
     first_line: bool,
     // See issue #101. Contains indices of frames pushed by `with_prototype`s.
     // Doesn't look at `with_prototype`s below top of stack.
@@ -704,6 +708,8 @@ impl InterpreterState {
         };
         InterpreterState {
             stack: SharedStack(Arc::new(vec![start_state])),
+            base_context: syntax.context_ids()["main"],
+            has_while: false,
             first_line: true,
             proto_starts: Vec::new(),
             branch_points: Vec::new(),
@@ -872,6 +878,10 @@ impl InterpreterState {
                 res.push((0, ScopeStackOp::Push(context.meta_content_scope[0])));
             }
             self.first_line = false;
+        }
+
+        if start_at == 0 && self.has_while {
+            self.check_while_patterns(line, syntax_set, &mut match_start, &mut res)?;
         }
 
         let (mut search_cache, mut regions) = SEARCH_WORKSPACES
@@ -1294,7 +1304,7 @@ impl InterpreterState {
         // interpreter only arbitrates prototype priority, escapes and invalid branches.
         let haystack = &line[..search_end];
         for (from_with_proto, ctx, captures) in context_chain {
-            let patterns = syntax_set.context_patterns(*ctx, captures)?;
+            let patterns = syntax_set.context_patterns(*ctx, captures, self.base_context)?;
             let mut excluded = Vec::new();
             if self.skipped_branches.iter().any(|(at, _)| *at == start) {
                 for (index, (context_id, rule)) in patterns.rules.iter().enumerate() {
@@ -1806,6 +1816,7 @@ impl InterpreterState {
                 .any(|id| syntax_set.get_context(id).is_ok_and(|c| c.uses_backrefs));
         let captures =
             needs_captures.then(|| self.branch_points[bp_index].trigger_captures.clone());
+        self.has_while |= context.while_pattern.is_some();
         self.stack.push(StateLevel {
             context: context_id,
             prototypes: proto_ids,
@@ -3058,6 +3069,7 @@ impl InterpreterState {
                 syntax_set,
             );
             prev_embed_scope_replaces = context.embed_scope_replaces;
+            self.has_while |= context.while_pattern.is_some();
             self.stack.push(StateLevel {
                 context: context_id,
                 prototypes: proto_ids,
@@ -3299,22 +3311,44 @@ impl DerefMut for SharedStack {
         Arc::make_mut(&mut self.0)
     }
 }
-type StackPool = HashMap<u64, Vec<Weak<Vec<StateLevel>>>>;
-static STACK_POOL: LazyLock<Mutex<StackPool>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const STACK_SWEEP_INTERVAL: usize = 8_192;
+struct StackPool {
+    buckets: HashMap<u64, Vec<Weak<Vec<StateLevel>>>>,
+    collect_after: usize,
+}
+impl Default for StackPool {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            collect_after: STACK_SWEEP_INTERVAL,
+        }
+    }
+}
+impl StackPool {
+    fn sweep_if_needed(&mut self) -> bool {
+        if self.buckets.len() <= self.collect_after {
+            return false;
+        }
+        self.buckets.retain(|_, entries| {
+            entries.retain(|entry| entry.strong_count() > 0);
+            !entries.is_empty()
+        });
+        // Live checkpoints may exceed the initial threshold. Leave room for
+        // another interval of new buckets instead of rescanning all live stacks
+        // on every subsequent line. Weak entries never keep a stack alive.
+        self.collect_after = self.buckets.len().saturating_add(STACK_SWEEP_INTERVAL);
+        true
+    }
+}
+static STACK_POOL: LazyLock<Mutex<StackPool>> = LazyLock::new(|| Mutex::new(StackPool::default()));
 impl SharedStack {
     fn intern(&mut self) {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut h);
         let key = h.finish();
         let mut pool = STACK_POOL.lock().unwrap_or_else(|e| e.into_inner());
-        // Weak entries do not keep states alive. Bound dead bucket metadata as well.
-        if pool.len() > 8192 {
-            pool.retain(|_, v| {
-                v.retain(|x| x.strong_count() > 0);
-                !v.is_empty()
-            });
-        }
-        let bucket = pool.entry(key).or_default();
+        pool.sweep_if_needed();
+        let bucket = pool.buckets.entry(key).or_default();
         bucket.retain(|p| p.strong_count() > 0);
         for weak in bucket.iter() {
             if let Some(shared) = weak.upgrade()
@@ -3328,9 +3362,65 @@ impl SharedStack {
     }
 }
 impl InterpreterState {
+    #[cold]
+    #[inline(never)]
+    fn check_while_patterns(
+        &mut self,
+        line: &str,
+        syntax_set: &SyntaxSet,
+        match_start: &mut usize,
+        res: &mut ScopeOperations,
+    ) -> Result<(), ParsingError> {
+        // TextMate while rules are tested outermost first, even when an inner
+        // begin/end rule is still open. Failure unwinds that entire region.
+        let mut depth = 0;
+        while depth < self.stack.len() {
+            let level = &self.stack[depth];
+            let context = syntax_set.get_context(&level.context)?;
+            if let Some(pattern) = &context.while_pattern {
+                let regex = match &level.captures {
+                    Some((captures, text)) if pattern.has_captures => {
+                        pattern.regex_with_refs(captures, text)
+                    }
+                    _ => pattern.regex.clone(),
+                };
+                let mut captures = Region::new();
+                if !regex.search(line, *match_start, line.len(), Some(&mut captures), true)
+                    || captures.pos(0).is_none_or(|span| span.0 != *match_start)
+                {
+                    while self.stack.len() > depth {
+                        let level = self.stack.pop().expect("while frame");
+                        let context = syntax_set.get_context(&level.context)?;
+                        let count = context
+                            .meta_content_scope
+                            .len()
+                            .saturating_sub(level.mcs_skipped)
+                            + context.meta_scope.len();
+                        if count > 0 {
+                            res.push((*match_start, ScopeStackOp::Pop(count)));
+                        }
+                        if context.clear_scopes.is_some() {
+                            res.push((*match_start, ScopeStackOp::Restore));
+                        }
+                    }
+                    self.escape_stack.retain(|e| e.stack_depth < depth);
+                    self.branch_points
+                        .retain(|bp| branch_point_is_live(bp, depth));
+                    break;
+                }
+                if let Some(map) = &pattern.captures {
+                    res.extend(build_capture_ops(map, &captures, 2));
+                }
+                *match_start = captures.pos(0).expect("matched while").1;
+            }
+            depth += 1;
+        }
+        Ok(())
+    }
     pub(crate) fn semantic_eq(&self, other: &Self) -> bool {
         if self.branch_points.is_empty() && other.branch_points.is_empty() {
-            self.first_line == other.first_line
+            self.base_context == other.base_context
+                && self.first_line == other.first_line
                 && self.stack == other.stack
                 && self.proto_starts == other.proto_starts
                 && self.escape_stack == other.escape_stack
@@ -3340,6 +3430,7 @@ impl InterpreterState {
     }
     pub(crate) fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.base_context.hash(&mut h);
         self.first_line.hash(&mut h);
         self.stack.hash(&mut h);
         self.proto_starts.hash(&mut h);
@@ -3350,5 +3441,38 @@ impl InterpreterState {
             self.pending_lines.hash(&mut h);
         }
         h.finish()
+    }
+}
+
+#[cfg(test)]
+mod stack_pool_tests {
+    use super::*;
+
+    #[test]
+    fn live_checkpoints_do_not_trigger_a_full_sweep_on_every_line() {
+        let live = Arc::new(Vec::<StateLevel>::new());
+        let mut pool = StackPool::default();
+        for key in 0..=STACK_SWEEP_INTERVAL as u64 {
+            pool.buckets.insert(key, vec![Arc::downgrade(&live)]);
+        }
+        assert!(pool.sweep_if_needed());
+        for key in STACK_SWEEP_INTERVAL as u64 + 1..STACK_SWEEP_INTERVAL as u64 + 1_001 {
+            pool.buckets.insert(key, vec![Weak::new()]);
+            assert!(
+                !pool.sweep_if_needed(),
+                "live stacks must not force repeated full sweeps"
+            );
+        }
+        drop(live);
+        let mut key = STACK_SWEEP_INTERVAL as u64 + 1_001;
+        while !pool.sweep_if_needed() {
+            pool.buckets.insert(key, vec![Weak::new()]);
+            key += 1;
+            assert!(key <= 2 * STACK_SWEEP_INTERVAL as u64 + 2);
+        }
+        assert!(
+            pool.buckets.is_empty(),
+            "dead metadata must eventually be reclaimed"
+        );
     }
 }

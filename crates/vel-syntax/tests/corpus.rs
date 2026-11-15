@@ -12,7 +12,11 @@ fn official_assertions_never_regress() {
         "initialize the pinned sublime-packages submodule before testing"
     );
     let set = SyntaxSet::load_directories(&[&root]).unwrap();
-    assert_eq!(set.syntaxes().len(), 202);
+    assert_eq!(
+        set.syntaxes().len(),
+        203,
+        "includes the public Plain Text.tmLanguage"
+    );
     assert!(set.warnings().is_empty(), "{:?}", set.warnings());
     let actual = syntest::run(&set, &root, None);
     let baseline: SuiteResult = serde_json::from_str(include_str!("baseline.json")).unwrap();

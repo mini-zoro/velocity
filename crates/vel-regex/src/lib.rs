@@ -445,6 +445,7 @@ pub struct SearchCache {
     backend_state: Option<Box<dyn std::any::Any + Send>>,
     entries: NextMatches,
     haystack: Option<(usize, usize)>,
+    ascii: bool,
     generation: u64,
 }
 impl fmt::Debug for SearchCache {
@@ -482,6 +483,7 @@ impl SearchCache {
         if self.haystack != Some(key) {
             self.entries.clear();
             self.haystack = Some(key);
+            self.ascii = line.is_ascii();
             self.generation = self.generation.wrapping_add(1);
         }
     }

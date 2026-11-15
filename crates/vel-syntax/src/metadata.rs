@@ -554,7 +554,7 @@ impl MetadataSet {
 
 // plist's XML reader currently ignores CDATA events. Public preferences use them for
 // regexes and selectors. Escape their contents as equivalent XML character data first.
-fn preserve_cdata(bytes: &[u8]) -> Result<Vec<u8>, MetadataError> {
+pub(crate) fn preserve_cdata(bytes: &[u8]) -> Result<Vec<u8>, MetadataError> {
     if bytes.starts_with(b"bplist") {
         return Ok(bytes.to_vec());
     }

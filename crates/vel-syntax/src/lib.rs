@@ -8,6 +8,7 @@ mod state;
 pub mod syntax_definition;
 mod syntax_set;
 pub mod syntest;
+mod tm_language;
 mod yaml_load;
 pub use cache::CacheStatus;
 pub use metadata::{
@@ -17,6 +18,7 @@ pub use parser::{ParsingError, ScopeOperations};
 pub use state::{LineOps, ParseState, Rewind};
 pub use syntax_definition::SyntaxDefinition;
 pub use syntax_set::{SyntaxReference, SyntaxSet, SyntaxSetBuilder};
+pub use tm_language::TmLanguageError;
 pub use vel_scope::{Scope, ScopeOp, ScopeStack, ScopeStackOp};
 pub use yaml_load::ParseSyntaxError;
 
@@ -32,9 +34,9 @@ pub enum LoadingError {
     /// Package directory traversal failed.
     #[error("{0}")]
     WalkDir(Box<walkdir::Error>),
-    /// Legacy plist syntax conversion is not implemented yet.
-    #[error(".tmLanguage conversion is unimplemented; use .sublime-syntax")]
-    UnimplementedTmLanguage,
+    /// Invalid or unsupported TextMate grammar structure.
+    #[error(transparent)]
+    TmLanguage(#[from] TmLanguageError),
 }
 
 mod dumps {
@@ -55,12 +57,5 @@ mod dumps {
             .read_to_end(&mut bytes)
             .map_err(|e| Box::new(bincode::ErrorKind::Io(e)))?;
         bincode::deserialize(&bytes)
-    }
-}
-
-impl SyntaxDefinition {
-    /// Legacy plist begin/end/while conversion is reserved for a later round.
-    pub fn load_tm_language(_xml: &str) -> Result<Self, LoadingError> {
-        Err(LoadingError::UnimplementedTmLanguage)
     }
 }

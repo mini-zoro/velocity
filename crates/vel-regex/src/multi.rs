@@ -422,7 +422,6 @@ impl MultiSet {
                             .and_then(Option::as_ref)
                             .expect("compiled candidate");
                         if machine.exact[local]
-                            && candidate.captures.is_some()
                             && (self.patterns.0[index].allow_empty
                                 || (!candidate.zero_width && at != end))
                             && !(at == line.len() && line.ends_with('\n'))
@@ -438,7 +437,7 @@ impl MultiSet {
                                 at,
                                 if candidate.zero_width { at } else { end },
                                 at,
-                                Some(candidate),
+                                candidate.captures.as_ref().map(|_| candidate),
                             ))
                         } else {
                             self.patterns
@@ -585,10 +584,10 @@ impl PatternMatcher for MultiSet {
         if start > line.len() || !line.is_char_boundary(start) {
             return None;
         }
-        if self.disabled.load(Ordering::Relaxed) || !line.is_ascii() || !excluded.is_empty() {
+        cache.bind(line);
+        if self.disabled.load(Ordering::Relaxed) || !cache.ascii || !excluded.is_empty() {
             return self.patterns.find_earliest(line, start, cache, excluded);
         }
-        cache.bind(line);
         let result = self.query(line, start, cache);
         if self.shared.config.verify_matches {
             let expected =

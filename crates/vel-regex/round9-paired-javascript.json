@@ -1,0 +1,28 @@
+{
+  "case": "interleaved_original_current_uncached_parser",
+  "chunk_lines": 1024,
+  "runs": 5,
+  "timings": [
+    {
+      "after_seconds": [
+        10.938619330999996,
+        6.818058954000005,
+        12.137888044999992,
+        16.893109873,
+        10.085573703999998
+      ],
+      "before_seconds": [
+        10.749527800999989,
+        6.898864543000004,
+        16.74559234099999,
+        18.786934462,
+        10.179638707999992
+      ],
+      "bytes": 10000000,
+      "file": "spikes/data/javascript-10mb.js",
+      "language": "javascript"
+    }
+  ],
+  "before_source_sha256": "b3f955ce9f6670bdaf9e10acbb758bb1336eb7a4804ccb2adaa817d6fac9fe05",
+  "after_source_sha256": "65d27b3d31e9fb5fea350b9da7451d35cb2af9970bc3cb6465e7ccd8c42969af"
+}

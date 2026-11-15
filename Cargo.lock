@@ -3172,8 +3172,12 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror",
+ "vel-buffer",
+ "vel-color-scheme",
+ "vel-highlight",
  "vel-regex",
  "vel-scope",
+ "vel-text",
  "walkdir",
  "yaml-rust2",
 ]
@@ -3218,6 +3222,17 @@ dependencies = [
  "vel-config",
  "vel-platform",
  "vel-render",
+ "vel-text",
+]
+
+[[package]]
+name = "vel-vintage"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "regex",
+ "unicode-segmentation",
+ "vel-buffer",
  "vel-text",
 ]
 

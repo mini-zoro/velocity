@@ -1,0 +1,47 @@
+{
+  "case": "interleaved_original_current_uncached_parser",
+  "chunk_lines": 1024,
+  "runs": 5,
+  "timings": [
+    {
+      "after_seconds": [
+        3.1158728300000007,
+        2.5962130500000002,
+        2.490441587999999,
+        2.445127165,
+        2.4175592480000008
+      ],
+      "before_seconds": [
+        3.011275290999999,
+        2.5422654210000006,
+        2.537162208,
+        2.4125778270000007,
+        2.434202915000002
+      ],
+      "bytes": 5117175,
+      "file": "prototypes/sregex/data/cpp-5mb.cpp",
+      "language": "cpp"
+    },
+    {
+      "after_seconds": [
+        0.60506662,
+        0.5908635060000003,
+        0.5695372099999999,
+        0.5638409989999998,
+        0.563883452
+      ],
+      "before_seconds": [
+        0.5919474619999996,
+        0.5737631669999997,
+        0.5728367089999994,
+        0.552164129,
+        0.5511414929999997
+      ],
+      "bytes": 5001969,
+      "file": "prototypes/sregex/data/html-5mb.html",
+      "language": "html"
+    }
+  ],
+  "before_source_sha256": "b3f955ce9f6670bdaf9e10acbb758bb1336eb7a4804ccb2adaa817d6fac9fe05",
+  "after_source_sha256": "d46c0fa838082bcf48e6fb8045ce940c2b1277f73d364e47b3e23f8a68e7088c"
+}

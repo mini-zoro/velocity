@@ -1,0 +1,142 @@
+{
+  "case": "production_background_parse_style_checkpoints",
+  "runs": 5,
+  "timings": [
+    {
+      "blake3": "7ae3c962d3ac7726c5420fd7e33c824b030c605f80bdf5797b1c5c65a76bec79",
+      "bytes": 10000000,
+      "file": "spikes/data/rust-10mb.rs",
+      "language": "rust",
+      "mb_per_second": 2.1566845331805107,
+      "median_seconds": 4.63674675,
+      "p95_seconds": 4.9375395829999995,
+      "seconds": [
+        4.9375395829999995,
+        4.632844792,
+        4.673850625,
+        4.63674675,
+        4.516828833
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "050b5ebc0a76c8228b3acce5fddd21c5f56a3aa727e5b5a2310d869e078a9096",
+      "bytes": 10000000,
+      "file": "spikes/data/javascript-10mb.js",
+      "language": "javascript",
+      "mb_per_second": 2.7609689100886046,
+      "median_seconds": 3.621916916,
+      "p95_seconds": 4.466739958,
+      "seconds": [
+        4.466739958,
+        3.621916916,
+        3.503036958,
+        3.428634041,
+        3.9169558330000003
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "9380b89f7462b948816a6dbab10da43b165b0c6fc2866f9ffaa0052a102984bb",
+      "bytes": 5036973,
+      "file": "prototypes/sregex/data/python-5mb.py",
+      "language": "python",
+      "mb_per_second": 5.976101693934926,
+      "median_seconds": 0.842852625,
+      "p95_seconds": 0.870366083,
+      "seconds": [
+        0.787104958,
+        0.842852625,
+        0.870366083,
+        0.849018458,
+        0.772005125
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "942c417b8c22ee761bd460a1a4e9a1fd21cbb81e843a22a422ba4d7ef355cece",
+      "bytes": 5117175,
+      "file": "prototypes/sregex/data/cpp-5mb.cpp",
+      "language": "cpp",
+      "mb_per_second": 1.7681013568246051,
+      "median_seconds": 2.894163833,
+      "p95_seconds": 3.525053791,
+      "seconds": [
+        2.749041459,
+        2.972602458,
+        3.525053791,
+        2.7452025,
+        2.894163833
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "42fe47db6eba15d890510d84665c1384f21591bca825774ec8369795b472a497",
+      "bytes": 20117640,
+      "file": "spikes/data/json-20mb.json",
+      "language": "json",
+      "mb_per_second": 11.718375910071764,
+      "median_seconds": 1.716760083,
+      "p95_seconds": 1.794407417,
+      "seconds": [
+        1.639324959,
+        1.716760083,
+        1.534679125,
+        1.794407417,
+        1.734717459
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "9b05e4af8254630a798f3b45a992656f3537af7f478f0d5bebd681f66f493b49",
+      "bytes": 5000000,
+      "file": "spikes/data/markdown-5mb.md",
+      "language": "markdown",
+      "mb_per_second": 4.087582728678816,
+      "median_seconds": 1.223216833,
+      "p95_seconds": 1.441022333,
+      "seconds": [
+        1.223216833,
+        1.1090665,
+        1.441022333,
+        1.127847875,
+        1.276585042
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "22a32626e6a33f8628398c4dddde7feca883ba141e4c9d1c0b2134c4e82f94c4",
+      "bytes": 5005611,
+      "file": "prototypes/sregex/data/yaml-5mb.yaml",
+      "language": "yaml",
+      "mb_per_second": 12.253460241197583,
+      "median_seconds": 0.408505916,
+      "p95_seconds": 0.531926333,
+      "seconds": [
+        0.453732584,
+        0.531926333,
+        0.408505916,
+        0.387085375,
+        0.38996575
+      ],
+      "target_mb_per_second": 2.5
+    },
+    {
+      "blake3": "de7335003250cde2e3b0152e5ea631106afbd3825887b24a014b273265e0cc74",
+      "bytes": 5001969,
+      "file": "prototypes/sregex/data/html-5mb.html",
+      "language": "html",
+      "mb_per_second": 20.866298057875834,
+      "median_seconds": 0.239715209,
+      "p95_seconds": 0.242628833,
+      "seconds": [
+        0.234888083,
+        0.240321583,
+        0.23888425,
+        0.239715209,
+        0.242628833
+      ],
+      "target_mb_per_second": 2.5
+    }
+  ]
+}

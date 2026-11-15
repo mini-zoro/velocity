@@ -1,142 +1,125 @@
-# Lane B，第五轮：生产多模式匹配与 parser 热路径
+# Lane B, round 9: Vintage, TextMate and highlighting throughput
 
-本报告由 scripts/report.py 从原始 JSON 生成。未提交 git commit；未调用 sysctl。
+Measured November 15, 2026; Darwin 25.1.0 arm64, rustc 1.99.1 (58cf8f9c3).
+Release builds, one timed task at a time. Other activity on the shared machine was not controlled.
+All reported medians use five samples; P95 is nearest rank (the maximum of five).
+No sample was removed. MB/s uses decimal megabytes. These measurements supersede the round 5 timing table; historical raw files remain available.
 
-## 预算结果
+The 2.5 MB/s background target remains open for **rust, javascript, cpp**.
+Correctness checks pass; performance closure is separate. The vi and TextMate compatibility limits are in their crate documentation.
 
-| 指标 | 本轮实测 | 目标 |
-| --- | ---: | --- |
-| Rust 10 MB，实际后台 parse+style | 2.124 MB/s；中位 4.708506 s / P95 4.790598 s | ≥2.5 MB/s |
-| 八语言独立 backend 加速 | 最低 1.044×；1/8 达到 2× | 每种 ≥2× |
-| 最差已测 context | Markdown::__main：0.324× | ≥1× |
-| 冷进程首次 context 编译 | pooled P50 0.0412 ms / P95 0.5887 ms | P95 ≤2 ms |
-| 八语料完成后的 DFA/NFA/cache 实际驻留 | 16.954 MiB；峰值 16.954 MiB | ≤32 MiB |
-| edit → exact visible batch | 500 samples P95 0.11500 ms | ≤0.2 ms |
+## Production background parse + style + checkpoints
 
-预算按实测逐项判断；表中未达标项仍是未完成的性能目标，不能用总体平均值替代。
+The example invokes the existing vel-highlight DocumentHighlighter and HighlightService. Each language receives one full-file warmup, then five fresh workers.
+The timer includes worker creation, parsing, styling, checkpoints and completion polling (1 ms). It excludes fixture I/O, syntax loading, warmup, Text construction and worker teardown.
+Stable transition memoization is enabled: 16,384 entries, 4 MiB source-text cap and clock replacement. Snapshot and operation metadata are bounded by entry count; the source-text cap is not a total-memory cap.
 
-## 八语言吞吐：同一 parser，关闭双方的稳定行 memoization
+| Language | MB | Worker MB/s | Target ≥2.5 | Median / P95 seconds | Uncached parser MB/s |
+| --- | ---: | ---: | --- | ---: | ---: |
+| rust | 10.000 | 1.531 | open | 6.530920 / 6.823963 | 1.704 |
+| javascript | 10.000 | 1.932 | open | 5.176507 / 6.302747 | 1.524 |
+| python | 5.037 | 3.681 | pass | 1.368200 / 1.529441 | 1.923 |
+| cpp | 5.117 | 1.736 | open | 2.946852 / 3.323644 | 2.027 |
+| json | 20.118 | 11.507 | pass | 1.748281 / 2.144763 | 5.283 |
+| markdown | 5.000 | 3.952 | pass | 1.265165 / 1.743844 | 3.310 |
+| yaml | 5.006 | 11.160 | pass | 0.448535 / 0.516853 | 4.919 |
+| html | 5.002 | 17.688 | pass | 0.282789 / 0.314053 | 8.238 |
 
-release，Darwin arm64 / macOS 26.1，rustc 1.99.1；单线程；每引擎先完整预热一次，随后交替先后顺序执行五次。
-计时包含真实 context 切换、prototype/embed、branch replay、regex 搜索、赢家 captures 和 LineOps；排除文件 I/O、YAML 加载和预热编译。
-双方都使用 parse_line_into 重用输出；双方都关闭稳定行 memoization，以隔离 matcher 差异。后台服务则开启默认 memoization，不能混称同一指标。
-P95 为 nearest rank；五次样本的 P95 等于其中最大值。其他 lane 可能活动，未删除噪声或异常值。
+## Ordered matcher, identical uncached parser
 
-| 语言 | MB | 新 backend MB/s | Onig MB/s | 加速 | 新 median / P95 s | Onig median / P95 s |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| rust | 10.000 | 2.032 | 1.511 | 1.345× | 4.920104 / 5.006419 | 6.616142 / 6.811257 |
-| javascript | 10.000 | 1.875 | 1.765 | 1.062× | 5.334672 / 5.386525 | 5.666322 / 5.764382 |
-| python | 5.037 | 2.514 | 1.150 | 2.186× | 2.003740 / 2.044511 | 4.379700 / 4.583226 |
-| cpp | 5.117 | 2.225 | 2.131 | 1.044× | 2.300248 / 2.328324 | 2.401217 / 2.434357 |
-| json | 20.118 | 6.746 | 3.482 | 1.937× | 2.982263 / 2.999355 | 5.777686 / 5.875841 |
-| markdown | 5.000 | 4.271 | 2.251 | 1.897× | 1.170707 / 1.196737 | 2.221069 / 2.252363 |
-| yaml | 5.006 | 5.361 | 3.345 | 1.603× | 0.933689 / 0.942740 | 1.496392 / 1.520651 |
-| html | 5.002 | 9.438 | 5.775 | 1.634× | 0.529974 / 0.540209 | 0.866085 / 0.894228 |
+Both backends disable stable-line memoization and reuse LineOps storage. A complete warmup precedes five alternating Oniguruma/candidate runs.
+This measures real context transitions, regex searches, captures, branch corrections and scope operations. It is distinct from the background worker above.
+The before executable was built from the original round 9 checkout (cfd76b3, before these edits) in an isolated /tmp workspace. Both versions read the same fixtures and pinned package corpus.
 
-## Context 剖析与原型慢路径
+| Language | Before MB/s | Final MB/s | Oniguruma MB/s | Final speedup | Final median / P95 seconds | Before→final median time | Oniguruma median time change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rust | 1.750 | 1.704 | 1.289 | 1.322× | 5.868801 / 6.221913 | +2.7% | -13.4% |
+| javascript | 1.639 | 1.524 | 1.254 | 1.215× | 6.560773 / 7.819945 | +7.5% | +18.2% |
+| python | 1.758 | 1.923 | 0.954 | 2.016× | 2.619175 / 2.701506 | -8.6% | -12.8% |
+| cpp | 1.821 | 2.027 | 1.942 | 1.044× | 2.525008 / 3.021103 | -10.2% | -12.2% |
+| json | 5.358 | 5.283 | 2.824 | 1.870× | 3.808177 / 3.890217 | +1.4% | +3.4% |
+| markdown | 3.082 | 3.310 | 1.878 | 1.763× | 1.510424 / 1.523670 | -6.9% | -9.0% |
+| yaml | 3.424 | 4.919 | 2.894 | 1.700× | 1.017569 / 1.158175 | -30.4% | -38.3% |
+| html | 7.008 | 8.238 | 4.936 | 1.669× | 0.607212 / 0.776976 | -14.9% | -19.0% |
 
-独立的 instrumented run 使用每语言最前约 200 KB，五次完整 parser 流程，检查 890 个具有五次相同 query 数的 context。
-每次 context 调用用 Instant 单独累计；不把这组带计时开销的数据当成完整文件吞吐。低频 context 的固定计时/锁开销占比可能很高，仍保留其最差值。
-每次至少 100 queries 的 388 个 context 中，最差为 Rust::type-path，0.394×。
+The initial full run showed >5% wall-time regressions for C++ and HTML during large timing swings. That run is retained in round9-throughput-first.json.
+The initial sequential rechecks below preceded the final hot-path cleanup. They retain five samples per executable and supplement the final tables and interleaved diagnostic below.
 
-| context | 每次 queries | 新 median ms | Onig median ms | 加速 |
+| Recheck | Before MB/s | After MB/s | Median time change | Oniguruma median time change |
 | --- | ---: | ---: | ---: | ---: |
-| Markdown::__main | 1 | 0.002958 | 0.000958 | 0.324× |
-| Rust::impl-trait-types | 60 | 0.148209 | 0.054378 | 0.367× |
-| Rust::type-path | 186 | 0.237707 | 0.093551 | 0.394× |
-| JavaScript::__main | 1 | 0.000208 | 0.000083 | 0.399× |
-| JSON::__main | 1 | 0.001417 | 0.000625 | 0.441× |
-| C++::#anon_data-structures-struct-definition_0 | 5 | 0.005624 | 0.002500 | 0.445× |
-| Rust::declaration-identifier | 1820 | 8.686217 | 3.931953 | 0.453× |
-| Rust::union-identifier | 3 | 0.003625 | 0.001709 | 0.471× |
-| Python::type-parameter-bound-continue | 10 | 0.007292 | 0.003583 | 0.491× |
-| Python::function-return-type | 75 | 0.061920 | 0.033878 | 0.547× |
-| Rust::statements | 3740 | 5.303418 | 12.150266 | 2.291× |
+| cpp | 1.543 | 1.106 | +39.6% | +11.4% |
+| html | 6.735 | 4.458 | +51.1% | +11.6% |
 
-另对原型点名的两个 context 做独立固定扫描：每种前 200 KB、完整 C/C++ includes、五次、先逐 query 核对 captures；不执行 parser context 切换或自动 prototype 注入。这组数据不冒充整文件 parser 吞吐。
+The final regression diagnostic links the original and current parsers into one process, warming each over a complete file and alternating 1,024-line chunks in both orders. Each state persists across chunks, with memoization disabled. Timers sum active chunks only; the five per-pass pairs are retained in round9-paired.json. This diagnostic does not replace contiguous wall throughput above.
 
-| 固定 context | 每次 queries | 新 median / P95 ms | Onig median / P95 ms | 加速 |
+| Interleaved final comparison | Before median s | After median s | Median paired time change |
+| --- | ---: | ---: | ---: |
+| cpp | 2.994522 | 3.016792 | +0.1% |
+| html | 0.717897 | 0.739733 | +4.4% |
+| python | 2.889895 | 2.792718 | -0.6% |
+| javascript | 10.749528 | 10.938619 | -1.2% |
+
+The diagnostic copies the original crates to /tmp and changes only package names to allow both versions to link. Source digests are recorded in its JSON. Run scripts/paired-round9.py --before /path/to/original/checkout to reproduce it. round9-paired-cpp-html.json retains the earlier two-language comparison. The final diagnostic also includes Python: its preliminary wall-time median was 6.5% slower, and the paired check confirmed the routing regression described below. round9-paired-javascript.json adds five JavaScript pairs after its final contiguous wall-time samples also moved more than 5%.
+
+## Context profiles and general changes
+
+Context profiling is a separate instrumented run over the first approximately 200 KB per language, five complete parser passes. Per-query Instant overhead is included here, not in the full-file tables.
+
+| Context | Queries per pass | Candidate median / P95 ms | Oniguruma median ms | Speedup |
 | --- | ---: | ---: | ---: | ---: |
-| rust::statements | 54848 | 128.6694 / 135.9089 | 139.8766 / 156.4977 | 1.087× |
-| cpp::global | 54750 | 143.9691 / 147.1993 | 145.1753 / 160.0258 | 1.008× |
+| Markdown::__main | 1 | 0.003125 / 0.018792 | 0.001084 | 0.347× |
+| Rust::type-path | 186 | 0.269041 / 0.303672 | 0.097501 | 0.362× |
+| Rust::declaration-identifier | 1820 | 9.656003 / 9.947065 | 4.151561 | 0.430× |
+| Rust::statements | 3740 | 6.060679 / 7.829619 | 13.021388 | 2.149× |
+| Rust::impl-trait-types | 60 | 0.181413 / 0.215421 | 0.057207 | 0.315× |
+| Rust::union-identifier | 3 | 0.004584 / 0.007583 | 0.001542 | 0.336× |
+| C++::#anon_data-structures-struct-definition_0 | 5 | 0.007042 / 0.009791 | 0.002626 | 0.373× |
 
-原型在 Rust statements 的主要问题是 Unicode 边界/PikeVM、重复 guard matcher 和失败后的逐规则 anchored 修复。
-本轮使用 ASCII hybrid DFA 和 exact Onig Unicode fallback；边界小谓词直接判断，独立 lookahead 绝不顺序消费；纯正向、无 captures 的 lookahead 在自动机定位后直接还原零宽 span；没有有效定位式的 epsilon 候选留给 Onig。拒绝候选后仅按原始顺序修复该 query。
-C++ 的全局候选包含不规则 lookaround 时，先生成保守候选，再用原式核实；固定捕获布局可直接生成 inline spans。
-DFA 与 fallback 先比较 span/priority，再为最终赢家物化 captures；query 起点的赢家不再搜索不可能抢先的低优先级 fallback。
-少于四条规则的上下文直接建立原 Onig matcher，避免 DFA 与额外 dispatch 开销。其他 context 仍可能不及 Onig；上表完整披露。可选 adaptive 会比较 64 个 warm queries，但短前缀会误判后续流量，默认关闭；未将其不同工作量混入主表。
-共享机器争用时注册/搜索使用 try_lock 并退回 Onig，避免一个后台文档阻塞另一个文档的前台高亮；有专门的并发回归测试。
+General rules: classify ASCII once per input line, avoid a duplicate native span search before extracting captures for exact candidates, and retain direct Oniguruma for sets below the existing four-pattern threshold. No syntax names enter these choices.
+Native source compilation, assertion guards, empty-match policy and LF edge cases still gate the exact path. Captures are materialized only for the final winner.
+A proposed direct-native route for early empty exits and bounded exact sets caused a 10.6% paired Python regression. Restoring the old capture path did not fix it; removing those routing heuristics did. The failed all-language run is retained as round9-before-routing-*, with the two five-pair isolation runs in round9-python-capture-path-experiment.json and round9-python-dfa-routing.json. The final tables use the corrected general routing.
+The TextMate while continuation handler is outlined as cold code; ordinary YAML lines never scan the stack for it. Cache-disabled parsing avoids unused line hashing and locking. Production caching uses clock replacement and a larger bounded window. A two-hit admission experiment was removed after five Rust samples regressed; the raw experiment remains in round9-worker-admission-rust.json.
+round9-worker-before-clock.json, round9-worker-clock-only.json and round9-worker-window-{rust,js}.json preserve the cache experiments. Shared-machine variation prevents treating these sequential observations as a precise isolated speedup estimate.
+round9-pre-cold-* retains the discarded revision that published every exact DFA span to the native cache. Those extra writes were removed. Low-frequency context measurements (sometimes one query per pass) are especially sensitive to timer overhead. Rust helper-context ratios can remain below 1 even when the whole parser is faster: all-native parent contexts prepopulate more native search results. The profile reports that cost instead of hiding it behind whole-language averages.
 
-## Lazy 编译与内存
+The larger checkpoint window exposed a general weak-stack interner bug: once more than 8,192 stack buckets stayed live, every subsequent intern scanned the entire pool. Cleanup now waits for another 8,192 buckets after each sweep. Weak references still do not retain stack data, and a regression test checks both live-stack scan frequency and eventual dead-metadata cleanup.
+The retained before-sweep full worker run measured Markdown at 0.558 MB/s; the isolated five-sample check after the fix measured 5.384 MB/s. These sequential observations are diagnostic evidence; the fresh all-language table above is the final result. All round9-before-sweep-* inputs and round9-worker-sweep-markdown.json remain available.
 
-五次独立进程各从新 SyntaxSet 开始，依次进入八语言的前 64 KiB 完整行。计时覆盖前端、NFA、forward/reverse DFA 与 literal set；只编译实际进入的 context。
-Onig 赢家/不支持规则的单模式编译仍按需发生，其成本不冒充 DFA 编译。编译数组含未能建立 DFA 而选择 fallback 的尝试。
+## Correctness and compatibility evidence
 
-| 独立进程 | contexts 尝试 | compile P50 / P95 ms | 首次编译合计 ms | peak RSS MiB |
-| --- | ---: | ---: | ---: | ---: |
-| 1 | 422 | 0.0415 / 0.5500 | 74.461 | 112.938 |
-| 2 | 422 | 0.0383 / 0.4935 | 71.934 | 104.141 |
-| 3 | 422 | 0.0409 / 0.4476 | 71.828 | 107.953 |
-| 4 | 422 | 0.0464 / 0.7738 | 87.749 | 90.391 |
-| 5 | 422 | 0.0439 / 0.5201 | 73.700 | 95.297 |
+- Official corpus: 242 files, 193,704 lines, 8,831,216 bytes, 486 rewinds; zero divergences.
+- Eight complete large fixtures: 8 files, 1,704,072 lines, 65,279,368 bytes, 7,624 rewinds; zero divergences.
+- The diagnostic run compares every candidate query's pattern index, span and capture slots, then every LineOps/correction/rewind/warning against Oniguruma. No file sampling or skipped official inputs.
+- The release differential separately checks memoized transitions against uncached Oniguruma. The steady-state allocation fixture remains at zero Rust allocations with and without memoization; it does not measure C allocations or whole-worker allocations.
+- Monotonic locked baseline: scopes 125,877/0, symbols 688/0, reindent 30/5, zero skips. The five existing reindent failures remain open. The baseline file was not lowered or rewritten.
+- 203 loaded syntaxes (the existing public Plain Text.tmLanguage now loads), 242 official test files. Eleven TextMate tests include XML/JSON semantics, repositories, dynamic end/while captures, include linking, scope expectations and cache invalidation. JSON, Diff and Log grammars are fetched from MIT-licensed VS Code 1.105.0 with its license at test time; the final local run fetched all three. Offline transport failures print a skip.
+- Injections, capture retokenization and interpolated scope names return explicit diagnostics. The public CSS grammar's retokenized captures are not supported. Zip packages remain open.
+- Vintage covers the requested command surface; its compatibility matrix and host integration contract are in ../vel-vintage/COVERAGE.md. Tests include 4,096 random command sequences, multiple cursors and Unicode graphemes.
+- fmt, clippy --all-targets -D warnings, release tests and rustdoc -D warnings pass for vel-vintage, vel-syntax and vel-regex. There are no vel-scope source changes.
+- 58 touched-crate release tests/doctests and 11 downstream vel-highlight tests/doctests pass. round9-checks.json records the checked source hashes, raw evidence hashes and verified public grammar paths.
 
-主吞吐进程：507 个 ordered lists，507 次 lazy 尝试，0 次 LRU 驱逐。
-32 MiB 限额覆盖整个 backend 的所有语言，包含 forward/reverse NFA、DFA transition caches 和 literal automata；共享列表不重复持有机器。
-SearchCache/checkpoint 不持有编译机器，因而不会阻止驱逐。小内存配置、LRU 重编译、共享与并发均有测试。
-API memory 不包含源模式/HIR、Onig、allocator、语法索引、parser/checkpoints 或短暂编译工作区。RSS 由 wait4/rusage 单独读取每个子进程，包含进程与冷前缀解析，不能和纯 DFA 预算混为一谈；没有调用被 sandbox 禁止的 sysctl。
-未增加磁盘 DFA cache；编译延迟和内存证据保留在 compile.json / throughput.json。
-
-## Parser 热路径与服务
-
-parse_line_into 复用 operations/corrections；Region 与常见 capture ops 使用 inline storage；删除了每 token 未使用的 MatchOperation clone。
-稳定、非 speculative 的 (完整输入行，语义起始状态) → (结束状态，interned operations) 按文档缓存，最多 4096 条及 4 MiB 源文本；hash 命中仍核对完整文本与状态。
-cache 不参与 checkpoint 的语义相等性；命中不会丢失绝对行计数，下一次真实解释前恢复行号；rewind/corrections/warnings 不缓存。
-分支 replay、动态捕获、Unicode/换行编辑、缓存 suffix 收敛、scheme 切换及跨行修正均保留测试。
-一个含捕获的稳定流式 fixture，在关闭 memoization 和启用 memoization 两种模式下，各 10,000 行均为 0 次 Rust allocation；这不测 Onig 的 C allocator，也不声称冷 miss、分支快照、styled spans 和返回 batch 永不分配。
-
-Rust 10 MB core parse+style/checkpoints：中位 4.681539 s / P95 5.148992 s。
-实际 worker：中位 4.708506 s / P95 4.790598 s；对比上轮 7.444 s 的中位数为 1.581×。
-稳定编辑服务 500 samples P95 0.11500 ms，最坏 2.13958 ms。计时包括 ChangeSet 提交与获得 exact 100-line viewport；文本替换在计时外。
-该编辑场景是稳定 token 编辑，不代表任意多行 delimiter 修改；单个病态 Onig 调用仍不可抢占，UI 请求沿用非阻塞降级协议。
-
-## 差分与单调 baseline
-
-官方：242 文件、202 语法，193,704 行 / 8,831,216 bytes，486 次 rewind。
-大文件：1,704,072 行 / 65,279,368 bytes，7,624 次 rewind。均为 0 divergences，无抽样、无文件跳过。
-诊断模式逐 query 核对 pattern index、span、所有 capture slots；逐行核对完整 LineOps、corrections、rewind 和 warnings。
-额外 raw-Onig 探针修复了原前缀过滤器的 x-mode class 空白差异和 Rust-only class 操作符差异；精确 DFA 赢家先验证原 Onig 源确实可编译。终端换行后的 ^（包括内部 ^）保留 Onig 语义。HIR 可消去 {0} 分支，输出仍按 Native 元数据保留全部未参与 capture slots。
-官方文本使用与 assertion harness 相同的 CR 归一化；大文件原样解析。单元测试另覆盖 CRLF、空串、终端换行、exclusions、nonempty、独立 lookahead、短串穷举、²³¹¼½¾ 与 join controls、full folding、search-start 和自定义 regex 限制。
-整个官方 release differential 还把启用行 memoization 的结果与 uncached Onig 比较，避免缓存掩盖底层差异。
-
-基线：scopes **125,877/0**，symbols **688/0**，reindent **30/5**，零 skips。
-partial-symbols 文件照常评估 scopes；selector 仍使用最长可解析前缀通则，没有特定 suffix 或文件名例外。
-本轮修复两种 PHP 变体、Bash case 与 Bash heredoc。一般规则：完整同一行 body 不再延续缩进；preserveIndent 选取前导实际代码而非后方 heredoc；metadata increase 不再错误套用外层括号的基准；clause terminator 使用退出前的作用域，case 结束恢复对应层级。
-
-| 剩余文件 | variant | 首处不同的行 |
-| --- | --- | ---: |
-| C++/tests/syntax_test_indent_common.c++ | reindent-unchanged | 770 |
-| CSS/tests/syntax_test_indentation.css | reindent-unchanged | 77 |
-| JavaScript/tests/syntax_test_js_indent_common.js | reindent-unchanged | 682 |
-| JavaScript/tests/syntax_test_jsx_indent.jsx | reindent-unchanged | 34 |
-| ShellScript/Zsh/tests/syntax_test_reindent_case.zsh | reindent-unchanged | 107 |
-
-详细差异保留在 vel-syntax/tests/baseline.json 和 RESULTS.md；所有已通过文件均维持单调。
-
-## 复跑与来源
+## Reproduction and raw inputs
 
 ```sh
-cargo fmt -p vel-regex -p vel-syntax -p vel-highlight --check
-cargo clippy -p vel-regex -p vel-syntax -p vel-highlight --all-targets -- -D warnings
-cargo test --release -p vel-regex -p vel-syntax -p vel-highlight
-RUSTDOCFLAGS='-D warnings' cargo doc -p vel-regex -p vel-syntax -p vel-highlight --no-deps
-python3 crates/vel-regex/scripts/measure.py
-python3 crates/vel-regex/scripts/report.py
+cargo fmt -p vel-vintage -p vel-syntax -p vel-regex --check
+cargo clippy -p vel-vintage -p vel-syntax -p vel-regex --all-targets -- -D warnings
+PROPTEST_CASES=4096 cargo test --release -p vel-vintage -p vel-syntax -p vel-regex
+cargo test --release -p vel-highlight
+cargo test --release -p vel-syntax --test tm_language public_mit -- --nocapture
+RUSTDOCFLAGS='-D warnings' cargo doc -p vel-vintage -p vel-syntax -p vel-regex --no-deps
+cargo build --release -p vel-syntax --bin regex-bench --example highlight_throughput
+# Set VEL_REGEX_FIXTURE_ROOT to a checkout containing all eight fixtures if needed.
+target/release/regex-bench --diff-only --verify-matches --output crates/vel-regex/round9-differential.json
+target/release/regex-bench --bench-only --output crates/vel-regex/round9-throughput.json
+target/release/regex-bench --bench-only --quick --profile --output crates/vel-regex/round9-contexts-final.json
+target/release/examples/highlight_throughput crates/vel-regex/round9-highlight.json
+python3 crates/vel-regex/scripts/report-round9.py
 ```
 
-官方 Packages commit：3f8b2c544e8f74a76e7212da449dcfe3f01b2245。仅使用公开 permissive 语法与本仓库原型；未读取应用私有实现。
-原始 evidence：differential.json、large-differential.json、throughput.json、contexts.json、focused-contexts.json、compile.json，及 vel-highlight/timings.json。
+The initial before rechecks use the original executable with --bench-only --language cpp/html. The initial after rechecks use the discarded span-publication executable with the same arguments. The source directories and fixture override are independent.
+All raw samples live beside this report. The previous round's compile-latency, resident-memory and edit-latency measurements and older budget table remain in [PERF-round5.md](PERF-round5.md). Those measurements were not retaken and are not claimed as new results.
 
-| 输入 | bytes | SHA-256 |
+| Fixture | Bytes | SHA-256 |
 | --- | ---: | --- |
 | spikes/data/rust-10mb.rs | 10000000 | d5f3d0c59a12ba34446e540cfd7b5e1a3eab6c03176f3aff048281f12e031380 |
 | spikes/data/javascript-10mb.js | 10000000 | 400c06f10bba70bb06b45041cf059fdf14c12b85c65f1471f4d7e46acbf8a79a |

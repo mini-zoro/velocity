@@ -25,3 +25,10 @@ serde_bytes = "0.11"
 flate2 = "1.1"
 plist = "1"
 smallvec = "1"
+
+# Exercise the existing editor worker from an example; production dependencies stay acyclic.
+[dev-dependencies]
+vel-buffer = { path = "../vel-buffer" }
+vel-text = { path = "../vel-text" }
+vel-color-scheme = { path = "../vel-color-scheme" }
+vel-highlight = { path = "../vel-highlight" }

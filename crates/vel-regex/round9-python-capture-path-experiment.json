@@ -1,0 +1,28 @@
+{
+  "case": "interleaved_original_current_uncached_parser",
+  "chunk_lines": 1024,
+  "runs": 5,
+  "timings": [
+    {
+      "after_seconds": [
+        2.609776488000001,
+        2.3788315449999997,
+        2.6355763740000024,
+        2.6664039640000006,
+        2.485700917000002
+      ],
+      "before_seconds": [
+        2.4027020060000024,
+        2.1322153219999995,
+        2.3839554240000003,
+        2.3984273300000005,
+        2.249078496
+      ],
+      "bytes": 5036973,
+      "file": "prototypes/sregex/data/python-5mb.py",
+      "language": "python"
+    }
+  ],
+  "before_source_sha256": "b3f955ce9f6670bdaf9e10acbb758bb1336eb7a4804ccb2adaa817d6fac9fe05",
+  "after_source_sha256": "f687e14bbd71dc4cde2f6db4182e3bcc37b0c1aa5787e51bb9fc4bfa559e2862"
+}

@@ -130,6 +130,12 @@ pub struct Context {
     pub prototype: Option<ContextId>,
     /// Whether this context or an included context requires entering-match captures.
     pub uses_backrefs: bool,
+    /// Whether this context includes the outer TextMate grammar.
+    #[serde(default)]
+    pub(crate) uses_base: bool,
+    /// TextMate continuation tested at the start of each subsequent line.
+    #[serde(default)]
+    pub(crate) while_pattern: Option<MatchPattern>,
 
     /// Rules in source-priority order.
     pub patterns: Vec<Pattern>,
@@ -158,6 +164,8 @@ impl Context {
             meta_include_prototype,
             clear_scopes: None,
             uses_backrefs: false,
+            uses_base: false,
+            while_pattern: None,
             patterns: Vec::new(),
             prototype: None,
             merge_mode: ContextMergeMode::default(),
@@ -184,6 +192,7 @@ pub enum Pattern {
 #[derive(Debug)]
 pub struct MatchIter<'a> {
     syntax_set: &'a SyntaxSet,
+    base: ContextId,
     ctx_stack: Vec<&'a Context>,
     index_stack: Vec<usize>,
 }
@@ -213,6 +222,8 @@ pub struct MatchPattern {
 #[non_exhaustive]
 /// A local, package-file, scope-based or already linked context reference.
 pub enum ContextReference {
+    /// The main context of the outermost TextMate grammar (`$base`).
+    Base,
     #[non_exhaustive]
     /// A context in the current syntax.
     Named(String),
@@ -339,6 +350,9 @@ impl<'a> Iterator for MatchIter<'a> {
                             ContextReference::Direct(ref context_id) => {
                                 self.syntax_set.get_context(context_id).unwrap()
                             }
+                            ContextReference::Base => {
+                                self.syntax_set.get_context(&self.base).unwrap()
+                            }
                             _ => return self.next(), // skip this and move onto the next one
                         };
                         if self.ctx_stack.iter().any(|ctx| std::ptr::eq(*ctx, ctx_ptr)) {
@@ -397,8 +411,17 @@ impl<'a> Iterator for MatchIter<'a> {
 /// It recursively follows include directives. Can only be run on contexts that have already been
 /// linked up.
 pub fn context_iter<'a>(syntax_set: &'a SyntaxSet, context: &'a Context) -> MatchIter<'a> {
+    context_iter_with_base(syntax_set, context, context.id)
+}
+
+pub(crate) fn context_iter_with_base<'a>(
+    syntax_set: &'a SyntaxSet,
+    context: &'a Context,
+    base: ContextId,
+) -> MatchIter<'a> {
     MatchIter {
         syntax_set,
+        base,
         ctx_stack: vec![context],
         index_stack: vec![0],
     }

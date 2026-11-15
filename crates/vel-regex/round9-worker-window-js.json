@@ -1,0 +1,23 @@
+{
+  "case": "production_background_parse_style_checkpoints",
+  "runs": 5,
+  "timings": [
+    {
+      "blake3": "050b5ebc0a76c8228b3acce5fddd21c5f56a3aa727e5b5a2310d869e078a9096",
+      "bytes": 10000000,
+      "file": "spikes/data/javascript-10mb.js",
+      "language": "javascript",
+      "mb_per_second": 1.5313636385475697,
+      "median_seconds": 6.530127625,
+      "p95_seconds": 11.202447292,
+      "seconds": [
+        4.653089125,
+        10.012456834,
+        11.202447292,
+        6.530127625,
+        5.782447542
+      ],
+      "target_mb_per_second": 2.5
+    }
+  ]
+}

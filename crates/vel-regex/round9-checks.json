@@ -1,0 +1,79 @@
+{
+  "date": "2026-11-15",
+  "crates": [
+    "vel-vintage",
+    "vel-syntax",
+    "vel-regex"
+  ],
+  "fmt_check": true,
+  "clippy_all_targets_warnings_denied": true,
+  "rustdoc_warnings_denied": true,
+  "release_tests_and_doctests_passed": 58,
+  "release_result_groups": [
+    4,
+    7,
+    2,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    8,
+    11,
+    11,
+    0,
+    9,
+    0,
+    2,
+    1
+  ],
+  "proptest_cases": 4096,
+  "baseline_unchanged": true,
+  "source_files": {
+    "crates/vel-vintage/src/lib.rs": "e01e35d0f443c7f82e5ff6498a8a092e0af81eaad4c69d0a441c57d2fac2d3ec",
+    "crates/vel-vintage/src/motion.rs": "bfd52b70655f39b6605bb3e533d9ae3555af3790e0b776b83caa7d968ce0fd1c",
+    "crates/vel-syntax/src/bin/regex-bench/profile.rs": "cc5d542e7add283d2b5aaf8de2cac3dbcf9dd9aee0328bce98980351188cce97",
+    "crates/vel-syntax/src/bin/regex-bench.rs": "98eca2a2a6e1370e6ee9300efb7244176279260b8df2cb77584bf69b87e37b84",
+    "crates/vel-syntax/src/bin/syntax-bench.rs": "ffd1dfee291bdcff66ffdc7bfdb055377ea56655057d97a522bffd378d9d532d",
+    "crates/vel-syntax/src/bin/syntax-tests.rs": "316e415640b67bb94aebd006802303a4e7190fe4d2dfb07a4aac31e765afccca",
+    "crates/vel-syntax/src/cache.rs": "d23d2a2decb186c1113a88399b99a9d945d7e5cd7cf14d6429b7a75e0cb7e48c",
+    "crates/vel-syntax/src/indent.rs": "b445280c429ea4148e7e022ef5e8e22a199642077a9c4a7befc7eb16b48a113a",
+    "crates/vel-syntax/src/lib.rs": "4158f18f960b872fa2ef6346fdd114067b5aecc60c2d3603402ad2df2cf8ad29",
+    "crates/vel-syntax/src/metadata.rs": "88a290474b1b5f6645f16f733f92cf63b27891e75a44aa72d35d765ff183d0af",
+    "crates/vel-syntax/src/parser.rs": "fe1ca1b8698638a5ec8431d5d30ea7b03b73843367a8b53f370bd82658f19293",
+    "crates/vel-syntax/src/state.rs": "3ca45c3b1e9b66f13b1cf13f1a1bd244cbe2e9b5522c4b6ee208e1b3b59f0901",
+    "crates/vel-syntax/src/syntax_definition.rs": "f0260fb3a074505eca5b204221c9efa218eac363b1ad20caf4d4db8d27b2509a",
+    "crates/vel-syntax/src/syntax_set.rs": "6982c157514a8e2d7a7c1f10d7d249110b98c65e7c18d8d39787ca2a1fc0c12c",
+    "crates/vel-syntax/src/syntest.rs": "b12fce367ba2991dae778b14710793decd44de92780ebdd381848eb6efda2057",
+    "crates/vel-syntax/src/tm_language.rs": "c501f36b0c75e02588f68d790fd951eb96c31f1a9433e01e0f70b0cccd9e2646",
+    "crates/vel-syntax/src/yaml_load.rs": "748f9c3dad6a3fc27c384d1bb736d3b7cb187f95fa87be771b36ba9a661e2196",
+    "crates/vel-regex/src/frontend.rs": "3ee324b8422ea6b1bcb90e15eb8253deefa798eae24f0703b62ed0a817e479e2",
+    "crates/vel-regex/src/lib.rs": "01643d0619fe74df7001d4d9647aa93ce98b239285f701728c6b1094cb5b6de4",
+    "crates/vel-regex/src/multi.rs": "0d13ea08e0f3cb23ed324998b679fb7b164e82782f79fd91b148a11f2fb44b00"
+  },
+  "paired_regression_limit_pct": 5,
+  "paired_median_time_change_pct": {
+    "cpp": 0.072803757084694,
+    "html": 4.4252594927361555,
+    "python": -0.566724125206941,
+    "javascript": -1.171288238757917
+  },
+  "paired_after_source_sha256": "65d27b3d31e9fb5fea350b9da7451d35cb2af9970bc3cb6465e7ccd8c42969af",
+  "differential_lines": 1897776,
+  "differential_divergences": 0,
+  "public_grammars_verified": [
+    "extensions/json/syntaxes/JSON.tmLanguage.json",
+    "extensions/diff/syntaxes/diff.tmLanguage.json",
+    "extensions/log/syntaxes/log.tmLanguage.json"
+  ],
+  "downstream_vel_highlight_tests_and_doctests_passed": 11,
+  "raw_evidence_sha256": {
+    "round9-throughput.json": "171646ed46be6341a73cab25de21a16d24e67939e8ee910396ec44ba76e80749",
+    "round9-contexts-final.json": "626caae0b606bfd543c08c36889ae1d05a19e69c4ddfe398278985821ed7a501",
+    "round9-highlight.json": "0dce83d95816aa6a14a08af704756b222b514ef66ed994f60d7eea466b32013a",
+    "round9-differential.json": "d1746da318bc38ac4f695e114b9aac4ea059a729ea4a1213c4071ee99e42675c",
+    "round9-paired.json": "a56d5fab9fd9fe18a49dea73da3e5a12d0b50d4e6eb6cd110a1ae5762202d466",
+    "round9-paired-javascript.json": "0da5c6dc8d19d3406d54e02584e25037cdef943c725d4595757ae23bcea6a8de"
+  }
+}

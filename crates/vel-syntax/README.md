@@ -1,7 +1,8 @@
 # vel-syntax
 
 Sublime YAML syntax loading and line interpretation, with official corpus tests.
-The current measurements and all 202 per-syntax results are in [RESULTS.md](RESULTS.md).
+The locked assertion results for the original 202 syntaxes are in [RESULTS.md](RESULTS.md).
+TextMate loading adds the existing Plain Text definition to the index (203 syntaxes).
 
 ```rust
 use std::sync::Arc;
@@ -46,7 +47,8 @@ references and inheritance can resolve by filename even when display names diffe
 content hashes and a schema version. Cache files include a payload checksum and
 are atomically replaced. Context bodies are compressed independently and decoded
 only when entered; index metadata remains directly available. No compiled regex is serialized; corruption rebuilds
-from YAML. Scope names, rather than process-local IDs, are serialized.
+from source definitions (YAML, XML or JSON). Scope names, rather than process-local IDs,
+are serialized.
 
 ```sh
 cargo run --release -p vel-syntax --bin syntax-tests
@@ -65,8 +67,28 @@ current corpus has no skips. The regression test checks the full pinned corpus, 
 counts, the denominator and the skip count. Baseline updates require improvement
 without per-syntax regressions. `tests/last-run.json` preserves evidence.
 
-Limitations: `.tmLanguage` begin/end/while conversion explicitly returns
-`LoadingError::UnimplementedTmLanguage`; zip packages are a later extension.
+TextMate `.tmLanguage` XML plists and `.tmLanguage.json` are loaded by directory
+and cached loaders. `SyntaxDefinition::load_tm_language(source)` accepts either
+text form for in-memory grammars. Patterns/repositories (including local overrides),
+`#name`, `$self`, document-relative `$base`, `source.x` and `source.x#name` includes,
+match/name/captures, begin/end and their captures/contentName, numeric begin-to-end
+backreferences, and applyEndPatternLast use the existing linked interpreter.
+Begin/while rules check outer-to-inner on each subsequent line, apply whileCaptures,
+and unwind nested contexts when continuation fails. Supply lines including LF.
+
+Injections/injectionSelector, capture retokenization, and interpolated scope names
+return `LoadingError::TmLanguage` diagnostics rather than being silently dropped.
+Directory loading records these as warnings, consistently with malformed YAML.
+Zip packages remain a later extension. The cache schema/content digest includes
+both TextMate forms. The public fetch-at-test-time check loads the MIT-licensed
+VS Code 1.105.0 JSON, Diff and Log grammars and verifies emitted scopes; transport
+failures print an explicit offline skip. CSS in that version requires capture
+retokenization and is currently rejected with the documented diagnostic.
+The official corpus now includes the existing public Plain
+Text.tmLanguage, bringing the loaded index to 203 syntaxes; assertion counts are
+unchanged. `tests/tm_language.rs` has local semantic/cache fixtures and downloads
+three MIT VS Code grammars plus their license at test time, explicitly skipping
+when curl/network is unavailable.
 All 688 symbol assertions pass. Unparseable annotation tails use the general longest
 parseable selector prefix; `() {}` has no special handling and negative selectors remain strict.
 Reindentation remains partially compatible; the exact failing variants and first mismatches
@@ -123,8 +145,13 @@ in Oniguruma so its word boundaries (including ²³¹¼½¾) are reproduced exac
 
 `ParseState::parse_line_into(line, &mut LineOps)` retains output capacity. Small captures and
 capture operations use inline storage. Stable, non-speculative transitions are memoized per
-document (4096 entries, at most 4 MiB of source text), with shared operation arrays. Checkpoints
-share this cache but semantic equality ignores it. Absolute replay counters are restored before
+document (16,384 entries, at most 4 MiB of source text), with shared operation arrays.
+A clock replacement policy gives recently reused transitions a second pass before
+eviction; first-use admissions stay cold. The entry cap bounds snapshot/operation
+metadata separately from the source-text byte cap. The weak stack interner
+spaces full cleanup passes by another 8,192 buckets after each sweep, even when
+more than 8,192 checkpoint stacks remain live. Checkpoints share this cache but
+semantic equality ignores it. Absolute replay counters are restored before
 interpreting a cache miss. `with_line_cache_capacity(0)` disables this optimization for backend
 comparisons; branch corrections and warnings are never memoized.
 

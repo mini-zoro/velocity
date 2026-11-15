@@ -1,0 +1,66 @@
+{
+  "case": "interleaved_original_current_uncached_parser",
+  "chunk_lines": 1024,
+  "runs": 5,
+  "timings": [
+    {
+      "after_seconds": [
+        3.174685376,
+        2.4432345060000005,
+        2.544160286,
+        2.394730955999999,
+        2.4443596219999986
+      ],
+      "before_seconds": [
+        3.1471559160000004,
+        2.4534481370000005,
+        2.477629626000001,
+        2.369950082,
+        2.404395745000001
+      ],
+      "bytes": 5117175,
+      "file": "prototypes/sregex/data/cpp-5mb.cpp",
+      "language": "cpp"
+    },
+    {
+      "after_seconds": [
+        0.6294265479999996,
+        0.6285666230000001,
+        0.55878075,
+        0.5580724579999998,
+        0.5624434140000002
+      ],
+      "before_seconds": [
+        0.6306670869999996,
+        0.587470039,
+        0.5507524630000002,
+        0.5498145480000001,
+        0.5733466719999997
+      ],
+      "bytes": 5001969,
+      "file": "prototypes/sregex/data/html-5mb.html",
+      "language": "html"
+    },
+    {
+      "after_seconds": [
+        2.4598137379999994,
+        2.324551296000001,
+        2.3695818300000018,
+        2.3459583699999977,
+        2.4091423349999976
+      ],
+      "before_seconds": [
+        2.191769373999999,
+        2.1118762980000003,
+        2.135882211999999,
+        2.166548295000001,
+        2.1778191999999996
+      ],
+      "bytes": 5036973,
+      "file": "prototypes/sregex/data/python-5mb.py",
+      "language": "python"
+    }
+  ],
+  "before_source_sha256": "b3f955ce9f6670bdaf9e10acbb758bb1336eb7a4804ccb2adaa817d6fac9fe05",
+  "after_source_sha256": "d46c0fa838082bcf48e6fb8045ce940c2b1277f73d364e47b3e23f8a68e7088c"
+}

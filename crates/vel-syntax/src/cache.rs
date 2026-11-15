@@ -22,13 +22,16 @@ impl SyntaxSet {
         let mut paths = Vec::new();
         for e in walkdir::WalkDir::new(root) {
             let e = e.map_err(|e| LoadingError::WalkDir(Box::new(e)))?;
-            if e.path().extension().is_some_and(|x| x == "sublime-syntax") {
+            if e.file_type().is_file()
+                && (e.path().extension().is_some_and(|x| x == "sublime-syntax")
+                    || crate::tm_language::is_tm_language(e.path()))
+            {
                 paths.push(e.into_path());
             }
         }
         paths.sort();
         let mut hash = blake3::Hasher::new();
-        hash.update(b"velocity-syntax-v1-7");
+        hash.update(b"velocity-syntax-v1-9");
         for path in &paths {
             hash.update(
                 path.strip_prefix(root)

@@ -27,7 +27,7 @@ pub(crate) struct ContextPatterns {
     pub matcher: PatternSet,
 }
 type ContextMatcherCache =
-    Mutex<HashMap<(ContextId, Option<(Region, String)>), Arc<ContextPatterns>>>;
+    Mutex<HashMap<(ContextId, Option<(Region, String)>, Option<ContextId>), Arc<ContextPatterns>>>;
 
 /// A syntax set holds multiple syntaxes that have been linked together.
 ///
@@ -121,6 +121,9 @@ fn load_syntax_file(
     lines_include_newline: bool,
 ) -> Result<SyntaxDefinition, LoadingError> {
     let s = std::fs::read_to_string(p)?;
+    if crate::tm_language::is_tm_language(p) {
+        return SyntaxDefinition::load_tm_language(&s);
+    }
 
     SyntaxDefinition::load_from_str(
         &s,
@@ -571,10 +574,12 @@ impl SyntaxSetBuilder {
         for entry in walkdir::WalkDir::new(folder).sort_by(|a, b| a.file_name().cmp(b.file_name()))
         {
             let entry = entry.map_err(|e| LoadingError::WalkDir(Box::new(e)))?;
-            if entry
-                .path()
-                .extension()
-                .is_some_and(|e| e == "sublime-syntax")
+            if entry.file_type().is_file()
+                && (entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e == "sublime-syntax")
+                    || crate::tm_language::is_tm_language(entry.path()))
             {
                 match load_syntax_file(entry.path(), lines_include_newline) {
                     Ok(syntax) => {
@@ -754,6 +759,29 @@ impl SyntaxSetBuilder {
                         context.uses_backrefs = true;
                         // look for contexts including this context
                         found_more_backref_includes = true;
+                    }
+                }
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for si in 0..all_contexts.len() {
+                for ci in 0..all_contexts[si].len() {
+                    let context = &all_contexts[si][ci];
+                    if !context.uses_base
+                        && context.patterns.iter().any(|p| match p {
+                            Pattern::Include(ContextReference::Base) => true,
+                            Pattern::Include(ContextReference::Direct(id))
+                            | Pattern::IncludeWithPrototype(ContextReference::Direct(id)) => {
+                                all_contexts[id.syntax_index][id.context_index].uses_base
+                            }
+                            _ => false,
+                        })
+                    {
+                        all_contexts[si][ci].uses_base = true;
+                        changed = true;
                     }
                 }
             }
@@ -1433,7 +1461,7 @@ impl SyntaxSetBuilder {
                     file_reference_matches(name, index_and_syntax.1)
                 }),
             ),
-            Direct(_) => None,
+            Direct(_) | Base => None,
         };
         if let Some(context_id) = linked_context_id {
             let mut new_ref = Direct(*context_id);
@@ -1553,8 +1581,12 @@ impl SyntaxSet {
         let Some(id) = syntax.context_ids().get(name) else {
             return Ok(None);
         };
-        self.context_patterns(*id, None)
-            .map(|context| Some(context.matcher.clone()))
+        self.context_patterns(
+            *id,
+            None,
+            *syntax.context_ids().get("main").expect("main context"),
+        )
+        .map(|context| Some(context.matcher.clone()))
     }
     /// Chooses the ordered-context matching backend. Configure before creating parser states.
     pub fn with_matcher_backend(mut self, backend: Arc<dyn MatcherBackend>) -> Self {
@@ -1573,9 +1605,10 @@ impl SyntaxSet {
         &self,
         id: ContextId,
         captures: Option<&(Region, String)>,
+        base: ContextId,
     ) -> Result<Arc<ContextPatterns>, ParsingError> {
         let context = self.get_context(&id)?;
-        let is_static = !context.uses_backrefs || captures.is_none();
+        let is_static = (!context.uses_backrefs || captures.is_none()) && !context.uses_base;
         if is_static && let Some(compiled) = context.compiled.0.get() {
             return Ok(compiled.clone());
         }
@@ -1587,6 +1620,7 @@ impl SyntaxSet {
             } else {
                 None
             },
+            context.uses_base.then_some(base),
         );
         if !is_static
             && let Some(cached) = self
@@ -1599,7 +1633,7 @@ impl SyntaxSet {
         }
         let mut rules = Vec::new();
         let mut patterns = Vec::new();
-        for (ctx, index) in context_iter(self, context) {
+        for (ctx, index) in context_iter_with_base(self, context, base) {
             let pattern = ctx.match_at(index)?;
             let regex = match (pattern.has_captures, captures) {
                 (true, Some((r, line))) => pattern.regex_with_refs(r, line),

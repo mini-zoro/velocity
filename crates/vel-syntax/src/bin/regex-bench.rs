@@ -136,6 +136,8 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1));
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let packages = root.join("third_party/sublime-packages");
+    let fixture_root =
+        std::env::var_os("VEL_REGEX_FIXTURE_ROOT").map_or_else(|| root.clone(), PathBuf::from);
     let onig_profile = Arc::new(profile::Backend::new(Arc::new(OnigBackend::default())));
     let profile = args.iter().any(|a| a == "--profile");
     let onig = Arc::new(
@@ -205,12 +207,12 @@ fn main() -> Result<()> {
         }
         let mut text = if cold {
             let mut bytes = Vec::new();
-            std::fs::File::open(root.join(path))?
+            std::fs::File::open(fixture_root.join(path))?
                 .take(66_048)
                 .read_to_end(&mut bytes)?;
             String::from_utf8_lossy(&bytes).into_owned()
         } else {
-            std::fs::read_to_string(root.join(path))?
+            std::fs::read_to_string(fixture_root.join(path))?
         };
         let limit = if cold { 65_536 } else { 200_000 };
         if (quick || cold || micro) && text.len() > limit {

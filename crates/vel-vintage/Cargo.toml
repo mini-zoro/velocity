@@ -1,0 +1,20 @@
+[package]
+name = "vel-vintage"
+description = "Headless vi command state machine over shared Velocity buffers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vel-buffer = { path = "../vel-buffer" }
+vel-text = { path = "../vel-text" }
+unicode-segmentation = "1"
+regex = "1"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true
