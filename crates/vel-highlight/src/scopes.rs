@@ -1,7 +1,12 @@
 //! Compact scope runs and immutable editor query snapshots.
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 use vel_buffer::ChangeId;
-use vel_scope::{MatchScore, Scope, ScopeStack, Selector};
+use vel_scope::{MatchScore, Scope, ScopeStack, ScopeStackOp, Selector};
 use vel_syntax::{Metadata, MetadataSet, Symbol};
 use vel_text::Text;
 
@@ -150,6 +155,13 @@ pub(crate) struct ScopeInterner {
     pub(crate) metadata: Arc<MetadataSet>,
     selected: Vec<Option<Arc<Metadata>>>,
     styles: Vec<Option<vel_color_scheme::Style>>,
+    transitions: HashMap<u64, ScopeTransition, fnv::FnvBuildHasher>,
+}
+#[derive(Debug)]
+struct ScopeTransition {
+    before: ScopeStackId,
+    ops: Box<[ScopeStackOp]>,
+    after: ScopeStackId,
 }
 impl ScopeInterner {
     pub(crate) fn new(metadata: Arc<MetadataSet>) -> Self {
@@ -159,6 +171,7 @@ impl ScopeInterner {
             metadata,
             selected: Vec::new(),
             styles: Vec::new(),
+            transitions: HashMap::default(),
         };
         value.intern(&ScopeStack::new());
         value
@@ -188,6 +201,47 @@ impl ScopeInterner {
         Arc::make_mut(&mut self.stacks.0).push(Arc::from(stack.as_slice()));
         self.ids.insert(stack.as_slice().to_vec(), id);
         id
+    }
+    pub(crate) fn apply_group(
+        &mut self,
+        id: ScopeStackId,
+        stack: &mut ScopeStack,
+        ops: &[(usize, ScopeStackOp)],
+    ) -> Result<ScopeStackId, vel_scope::ScopeError> {
+        let mut hash = fnv::FnvHasher::default();
+        id.hash(&mut hash);
+        let mut restore = false;
+        for (_, op) in ops {
+            stack.apply(op)?;
+            op.hash(&mut hash);
+            restore |= *op == ScopeStackOp::Restore;
+        }
+        // Saved clear stacks are intentionally not encoded by ScopeStackId.
+        // Restore depends on that hidden history; every other operation's
+        // resulting active scopes depend only on (active ID, operation).
+        if restore {
+            return Ok(self.intern(stack));
+        }
+        let key = hash.finish();
+        if let Some(next) = self.transitions.get(&key)
+            && next.before == id
+            && next.ops.len() == ops.len()
+            && next.ops.iter().zip(ops).all(|(a, (_, b))| a == b)
+        {
+            return Ok(next.after);
+        }
+        let next = self.intern(stack);
+        if self.transitions.len() < 65_536 {
+            self.transitions.insert(
+                key,
+                ScopeTransition {
+                    before: id,
+                    ops: ops.iter().map(|(_, op)| *op).collect(),
+                    after: next,
+                },
+            );
+        }
+        Ok(next)
     }
     pub(crate) fn invalidate_styles(&mut self) {
         self.styles.fill(None);

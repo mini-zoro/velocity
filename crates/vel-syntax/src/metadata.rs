@@ -132,24 +132,24 @@ impl MetadataSet {
     }
     /// Loads public preferences in deterministic resource order; pass User directories last.
     pub fn load_directories<P: AsRef<Path>>(roots: &[P]) -> Result<Self, MetadataError> {
+        Self::load_roots(&roots.iter().map(AsRef::as_ref).collect::<Vec<_>>(), &[])
+    }
+    /// Loads package preferences with path overrides, then virtual XML preferences.
+    /// Later roots replace an earlier file completely at the same relative path;
+    /// distinct resources still merge each setting by specificity and resource order.
+    /// Symlinks and optional-root handling match [`crate::SyntaxSet::load_roots`].
+    pub fn load_roots(roots: &[&Path], extra: &[(&str, &str)]) -> Result<Self, MetadataError> {
+        let sources = crate::resources::Resources::collect(
+            roots,
+            extra,
+            b"",
+            crate::resources::is_preferences,
+        )
+        .map_err(|e| MetadataError(e.to_string()))?;
         let mut set = Self::new();
-        for root in roots {
-            let mut paths = Vec::new();
-            for entry in walkdir::WalkDir::new(root) {
-                let e = entry.map_err(|e| MetadataError(e.to_string()))?;
-                if e.file_type().is_file()
-                    && e.path().extension().is_some_and(|s| s == "tmPreferences")
-                {
-                    paths.push(e.into_path());
-                }
-            }
-            paths.sort();
-            for path in paths {
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| MetadataError(format!("{}: {e}", path.display())))?;
-                set.add_plist(&bytes)
-                    .map_err(|e| MetadataError(format!("{}: {e}", path.display())))?;
-            }
+        for source in sources.files {
+            set.add_plist(&source.bytes)
+                .map_err(|e| MetadataError(format!("{}: {e}", source.path)))?;
         }
         Ok(set)
     }

@@ -204,6 +204,100 @@ fn literal_prefilters_and_invalid_sources_agree_with_raw_onig() {
 }
 
 #[test]
+fn necessary_literals_in_forward_assertions_and_concats_preserve_native_searches() {
+    let patterns = [
+        r"(?=\s*(?:::|!?[a-z]+|\$|<)+(<.*?>)?\s+for\s+)",
+        r"(?=\w+\s*=>)",
+        r"(?:[a-z]+)(?=\s*\()",
+        r"(?=(?:[a-z]+|[0-9]+)\s*=>)",
+        r"(?=a)b|c",
+        r"a|b(?=c)",
+        r"(?=ab)?c",
+        r"(?=a)*b",
+        r"(?!for)\w+",
+        r"(?<=for )word",
+        r"(?<=x)abc",
+        r"a(?=b)c",
+        r"(?=ab)(?=a)b",
+        r"(?x:(?= \s* for [ ] ))",
+        r"(?i)(?=for)",
+        r"(?i:ß)",
+        r"(?:a+)?for",
+        r"[a-z]+for",
+        r"(?=(?:[a-z]+)?for)",
+        r"(?=\p{L}+for)",
+        r"(?=a(?=b))",
+        r"(?=a(?!b))",
+        r"(?=(?:x|y))z",
+        r"(?=x)|y",
+        r"(a)\1",
+    ];
+    let lines = [
+        "",
+        "a",
+        "ab",
+        "abc",
+        "ac",
+        "b",
+        "c",
+        "x",
+        "y",
+        "z",
+        "xaaabc",
+        "identifier",
+        "for",
+        " for ",
+        "abcd for ",
+        "for word",
+        "abc =>",
+        "123 =>",
+        "abc (",
+        "abcfor",
+        "FOR",
+        "ss",
+        "éfor",
+        "你好for",
+        "a\nb",
+        "abc\n",
+    ];
+    for source in patterns {
+        let regex = Regex::new(source.into());
+        let Ok(raw) = onig::Regex::new(source) else {
+            assert!(regex.compile_error().is_some(), "{source}");
+            continue;
+        };
+        for line in lines {
+            for start in (0..=line.len()).filter(|&at| line.is_char_boundary(at)) {
+                let mut actual = vel_regex::Region::new();
+                let mut expected = onig::Region::new();
+                let found = raw.search_with_options(
+                    line,
+                    start,
+                    line.len(),
+                    onig::SearchOptions::SEARCH_OPTION_NONE,
+                    Some(&mut expected),
+                );
+                assert_eq!(
+                    regex.search(line, start, line.len(), Some(&mut actual), true),
+                    found.is_some(),
+                    "{source} at {start} on {line:?}"
+                );
+                if found.is_some() {
+                    assert_eq!(actual.len(), expected.len(), "{source}");
+                    for group in 0..actual.len() {
+                        assert_eq!(
+                            actual.pos(group),
+                            expected.pos(group),
+                            "{source} group {group}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn consuming_guard_locator_does_not_override_nonempty_policy() {
     let patterns = [r"(?=a)", r"a", r"b", r"c"]
         .into_iter()

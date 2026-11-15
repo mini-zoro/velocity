@@ -918,3 +918,33 @@ fn relax(source: &str) -> Option<String> {
     }
     Some(out)
 }
+
+/// Regular supersets whose literals must occur at or after a native match's start.
+/// Lookbehind is deliberately excluded: its literals may precede the search tail.
+pub(crate) fn prefilter_hirs(source: &str) -> Vec<Hir> {
+    let Ok(normalized) = normalize(source) else {
+        return Vec::new();
+    };
+    let parse = |s: &str| relax(s).and_then(|s| regex_syntax::Parser::new().parse(&s).ok());
+    let mut hirs: Vec<_> = parse(&normalized).into_iter().collect();
+    let mut inner = normalized.as_str();
+    let mut wrappers = Vec::new();
+    while let Some((text, flags)) = outer(inner) {
+        wrappers.push(flags.to_owned());
+        inner = text;
+    }
+    if let Some(parts) = atoms(inner)
+        // A guard inside one alternative is not necessary for the other alternatives.
+        && !parts.iter().any(|&(start, end)| &inner[start..end] == "|")
+    {
+        for (start, end) in parts {
+            if let Some(guard) = guard(&inner[start..end], true)
+                && guard.positive
+                && let Some(hir) = parse(&wrap(&guard.expr, &wrappers))
+            {
+                hirs.push(hir);
+            }
+        }
+    }
+    hirs
+}

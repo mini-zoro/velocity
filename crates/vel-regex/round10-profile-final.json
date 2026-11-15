@@ -1,0 +1,6903 @@
+[
+  {
+    "language": "rust",
+    "blake3": "7ae3c962d3ac7726c5420fd7e33c824b030c605f80bdf5797b1c5c65a76bec79",
+    "bytes": 10000000,
+    "lines": 297030,
+    "ready": true,
+    "mb_per_second": 3.1284213853388643,
+    "profile": {
+      "checkpoint_seconds": 0.101472912,
+      "input_seconds": 0.184672216,
+      "parse_seconds": 2.470922026,
+      "regex_contexts": {
+        "Rust::#anon_attribute-call_0": {
+          "nanos": [
+            1262997,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5070,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_block-comments_0": {
+          "nanos": [
+            392546,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1943,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_block-comments_1": {
+          "nanos": [
+            228840,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            636,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_byte-string_0": {
+          "nanos": [
+            66006,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            216,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_bytes_0": {
+          "nanos": [
+            119962,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            476,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_chars_0": {
+          "nanos": [
+            164260,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            704,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_constant-integer-expression_0": {
+          "nanos": [
+            10460,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            20,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_declarations_0": {
+          "nanos": [
+            75456,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            210,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_enum-identifier_0": {
+          "nanos": [
+            12294,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            30,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_fn-parameters_0": {
+          "nanos": [
+            14767766,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            53401,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_format-raw-string_0": {
+          "nanos": [
+            12330,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_format-string_0": {
+          "nanos": [
+            993239,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1509,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_hrtb_0": {
+          "nanos": [
+            9708,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_impl-for_0": {
+          "nanos": [
+            12518019,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3727,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_inside-attribute_0": {
+          "nanos": [
+            2093299,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6698,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_line-comments_0": {
+          "nanos": [
+            19371755,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            20771,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_line-comments_1": {
+          "nanos": [
+            7037080,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8834,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-block-contents_0": {
+          "nanos": [
+            1959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-block-contents_1": {
+          "nanos": [
+            797510,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1636,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-block_0": {
+          "nanos": [
+            131917,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            597,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-identifiers_0": {
+          "nanos": [
+            195643,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            861,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-identifiers_1": {
+          "nanos": [
+            6025548,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3335,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-identifiers_2": {
+          "nanos": [
+            382348,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            627,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-matchers_0": {
+          "nanos": [
+            104967,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            294,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-matchers_1": {
+          "nanos": [
+            74286,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            159,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-matchers_2": {
+          "nanos": [
+            109878,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            305,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-matchers_3": {
+          "nanos": [
+            339295,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            615,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-transcriber-block_0": {
+          "nanos": [
+            3517266,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2280,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_macro-transcriber-block_1": {
+          "nanos": [
+            103757,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            114,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_module-block_0": {
+          "nanos": [
+            15337765,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4224,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_modules_0": {
+          "nanos": [
+            215174,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            653,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_pattern-param_1": {
+          "nanos": [
+            197912,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            413,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_pattern-param_3": {
+          "nanos": [
+            34580137,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            35217,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_raw-byte-string_0": {
+          "nanos": [
+            2959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            44,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_raw-string_0": {
+          "nanos": [
+            219232,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            643,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_return-type_0": {
+          "nanos": [
+            17515681,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18594,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_statements_0": {
+          "nanos": [
+            16790948,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            19977,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_string_0": {
+          "nanos": [
+            2836266,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            9467,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_struct-classic-body_0": {
+          "nanos": [
+            25816655,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            29819,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_struct-identifier_0": {
+          "nanos": [
+            215972,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            602,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_trait-block_0": {
+          "nanos": [
+            7643174,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4870,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_type-slice-or-array_0": {
+          "nanos": [
+            5067134,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4024,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_type-slice-or-array_1": {
+          "nanos": [
+            1068691,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3091,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_types-relaxed_0": {
+          "nanos": [
+            117623,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            147,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_types_0": {
+          "nanos": [
+            2039490,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            829,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_types_1": {
+          "nanos": [
+            87217,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            213,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_types_2": {
+          "nanos": [
+            2127709,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2725,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_types_3": {
+          "nanos": [
+            70298,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            252,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_union-identifier_0": {
+          "nanos": [
+            1083,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::#anon_visibility_0": {
+          "nanos": [
+            481270,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1977,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::__main": {
+          "nanos": [
+            125,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::__start": {
+          "nanos": [
+            7958,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::after-operator": {
+          "nanos": [
+            19683417,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            59284,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::attribute-call": {
+          "nanos": [
+            21502,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            39,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::attribute-contents": {
+          "nanos": [
+            157753,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            726,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::block-body": {
+          "nanos": [
+            323191748,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            107514,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::byte-tail": {
+          "nanos": [
+            125131,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            396,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::char-tail": {
+          "nanos": [
+            200381,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            704,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure": {
+          "nanos": [
+            345023,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1012,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure-body": {
+          "nanos": [
+            337708,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1012,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure-explicit-body": {
+          "nanos": [
+            8959782,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3105,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure-implicit-body": {
+          "nanos": [
+            3538089,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2723,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure-parameters": {
+          "nanos": [
+            849840,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2239,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::closure-return": {
+          "nanos": [
+            348010,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1018,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::declaration-after-identifier": {
+          "nanos": [
+            7847885,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            27667,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::declaration-identifier": {
+          "nanos": [
+            70079651,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10322,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::declaration-type": {
+          "nanos": [
+            85613719,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            57127,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::enum-body": {
+          "nanos": [
+            754888,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4487,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::enum-discriminant": {
+          "nanos": [
+            531287,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1377,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::enum-identifier": {
+          "nanos": [
+            337937,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            252,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::enum-maybe-where": {
+          "nanos": [
+            85715,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            242,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::enum-variant-type": {
+          "nanos": [
+            296154,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1725,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-after-parameters": {
+          "nanos": [
+            3172692,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16589,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-body": {
+          "nanos": [
+            140414566,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            71900,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-definition": {
+          "nanos": [
+            3224071,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10362,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-generic": {
+          "nanos": [
+            2116297,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11124,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-parameters": {
+          "nanos": [
+            8246604,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            19698,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::fn-where": {
+          "nanos": [
+            4081522,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1945,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::frontmatter": {
+          "nanos": [
+            458,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::generic-angles": {
+          "nanos": [
+            6529707,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18714,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::generic-angles-body": {
+          "nanos": [
+            49544176,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            34830,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::group": {
+          "nanos": [
+            25962960,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            65659,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::group-body": {
+          "nanos": [
+            125630523,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            102958,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::group-tail": {
+          "nanos": [
+            2108630,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2039,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::identifier-path": {
+          "nanos": [
+            43979712,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            39036,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::identifier-path-second": {
+          "nanos": [
+            63413824,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            46313,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-body": {
+          "nanos": [
+            53678018,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            26097,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-definition": {
+          "nanos": [
+            485700,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2126,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-for": {
+          "nanos": [
+            71006859,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2072,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-generic": {
+          "nanos": [
+            830240,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2392,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-identifier": {
+          "nanos": [
+            2166857,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3948,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-trait-types": {
+          "nanos": [
+            1148545,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            607,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::impl-where": {
+          "nanos": [
+            4637290,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2262,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::inside-attribute": {
+          "nanos": [
+            1373873,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6618,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::inside-struct-tuple": {
+          "nanos": [
+            843369,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            741,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::macro-block": {
+          "nanos": [
+            49830,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            138,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::macro-rule-sep": {
+          "nanos": [
+            82370,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            282,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::macro-semi-sep": {
+          "nanos": [
+            24039,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            55,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::macro-transcriber-block": {
+          "nanos": [
+            74210,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            281,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::path-after-accessor": {
+          "nanos": [
+            6709782,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            41115,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::prototype": {
+          "nanos": [
+            48684555,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1383203,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::shebang": {
+          "nanos": [
+            1666,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::statements": {
+          "nanos": [
+            422881536,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            173334,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::static-identifier-path": {
+          "nanos": [
+            27957986,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18430,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::static-identifier-path-second": {
+          "nanos": [
+            40808197,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            27990,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::struct-body": {
+          "nanos": [
+            464602,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1908,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::struct-classic": {
+          "nanos": [
+            1362138,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3116,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::struct-classic-body": {
+          "nanos": [
+            8274235,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            28551,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::struct-identifier": {
+          "nanos": [
+            2359046,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1831,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::struct-tuple": {
+          "nanos": [
+            230045,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            517,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::try-closure": {
+          "nanos": [
+            17342524,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            47438,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::type-declaration-body": {
+          "nanos": [
+            4529787,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3394,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::type-declaration-identifier": {
+          "nanos": [
+            832213,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3140,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::type-mark": {
+          "nanos": [
+            25623,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            58,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::type-path": {
+          "nanos": [
+            11879193,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            13128,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::type-path-second": {
+          "nanos": [
+            5872863,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8487,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::union-body": {
+          "nanos": [
+            232501,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            832,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::union-extra": {
+          "nanos": [
+            34957,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            72,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Rust::union-identifier": {
+          "nanos": [
+            95874,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            75,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "render_entries": 3794,
+      "render_hits": 100216,
+      "render_queries": 297030,
+      "render_seconds": 0.395805792,
+      "rust_allocated_bytes": 998638954,
+      "rust_allocations": 2979833
+    },
+    "seconds": 3.196500333,
+    "teardown_wait_ms": 200
+  },
+  {
+    "language": "javascript",
+    "blake3": "050b5ebc0a76c8228b3acce5fddd21c5f56a3aa727e5b5a2310d869e078a9096",
+    "bytes": 10000000,
+    "lines": 281484,
+    "ready": true,
+    "mb_per_second": 3.0551293502447376,
+    "profile": {
+      "checkpoint_seconds": 0.098963542,
+      "input_seconds": 0.167096057,
+      "parse_seconds": 2.73955084,
+      "regex_contexts": {
+        "JavaScript::#anon_array-literal_0": {
+          "nanos": [
+            1323773,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8297,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_block_0": {
+          "nanos": [
+            5302349,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            9341,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_expect-label_0": {
+          "nanos": [
+            206537,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            83,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_function-block_0": {
+          "nanos": [
+            31808752,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            52289,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_function-call-arguments_0": {
+          "nanos": [
+            16905827,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            110758,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_function-declaration-parameters_0": {
+          "nanos": [
+            13024571,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            42848,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_property-access_0": {
+          "nanos": [
+            6854754,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17146,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_regexp_0": {
+          "nanos": [
+            796580,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1211,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_regexp_1": {
+          "nanos": [
+            1184298,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3213,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_0": {
+          "nanos": [
+            95462,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            134,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_1": {
+          "nanos": [
+            25793,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_12": {
+          "nanos": [
+            33546,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            103,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_13": {
+          "nanos": [
+            63292,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            85,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_16": {
+          "nanos": [
+            103250,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            251,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_17": {
+          "nanos": [
+            67126,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            85,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_18": {
+          "nanos": [
+            15377,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            36,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_19": {
+          "nanos": [
+            1042,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_2": {
+          "nanos": [
+            10545,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_24": {
+          "nanos": [
+            10917,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_26": {
+          "nanos": [
+            76039,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            153,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_27": {
+          "nanos": [
+            73918,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            68,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_28": {
+          "nanos": [
+            12666,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            21,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_8": {
+          "nanos": [
+            36711,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            85,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-ecma_9": {
+          "nanos": [
+            29624,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            51,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-node_2": {
+          "nanos": [
+            29420,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            68,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_support-variable-node_3": {
+          "nanos": [
+            41877,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::#anon_variable-binding-name_0": {
+          "nanos": [
+            5912912,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            22997,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::__main": {
+          "nanos": [
+            84,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::__start": {
+          "nanos": [
+            9792,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::block-comment-body": {
+          "nanos": [
+            38960,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            55,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::block-scope": {
+          "nanos": [
+            939769,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2120,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::branch-possible-arrow-function": {
+          "nanos": [
+            62587499,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            165909,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::call-method-name": {
+          "nanos": [
+            2846670,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6066,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::catch-binding": {
+          "nanos": [
+            56126,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            133,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::catch-binding-end": {
+          "nanos": [
+            35882,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            133,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::catch-meta": {
+          "nanos": [
+            35166,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            133,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::conditional-meta": {
+          "nanos": [
+            989001,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::detect-arrow": {
+          "nanos": [
+            46632820,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            167455,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::do-while-condition": {
+          "nanos": [
+            11664,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::do-while-meta": {
+          "nanos": [
+            4668,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expect-case-colon": {
+          "nanos": [
+            250300,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            925,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expect-label": {
+          "nanos": [
+            184119,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            252,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expect-parenthesized-expression": {
+          "nanos": [
+            1418346,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4204,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expect-semicolon": {
+          "nanos": [
+            9454838,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            26861,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression": {
+          "nanos": [
+            1309373,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11194,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-begin": {
+          "nanos": [
+            455066657,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            221852,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-end": {
+          "nanos": [
+            19104319,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            51578,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-end-no-comma": {
+          "nanos": [
+            34078138,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            144077,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-no-comma": {
+          "nanos": [
+            12172915,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            46347,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-statement": {
+          "nanos": [
+            3981159,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            14498,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-statement-continuation": {
+          "nanos": [
+            483617,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            584,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-statement-end": {
+          "nanos": [
+            51408920,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            79237,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::expression-statement-pop": {
+          "nanos": [
+            23208,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            34,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-await": {
+          "nanos": [
+            1124809,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-condition": {
+          "nanos": [
+            494886,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-condition-end": {
+          "nanos": [
+            654706,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1962,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-in-of": {
+          "nanos": [
+            509813,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-in-of-binding": {
+          "nanos": [
+            2767349,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1269,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-in-of-declaration": {
+          "nanos": [
+            4666067,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-in-of-word": {
+          "nanos": [
+            1421016,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-meta": {
+          "nanos": [
+            490625,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1795,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-oldstyle": {
+          "nanos": [
+            473970,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1696,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-oldstyle-declaration": {
+          "nanos": [
+            733450,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1696,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::for-oldstyle-separator": {
+          "nanos": [
+            1027397,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3392,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-call-arguments": {
+          "nanos": [
+            9720550,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            31829,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration": {
+          "nanos": [
+            3112019,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-async": {
+          "nanos": [
+            4715916,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-body": {
+          "nanos": [
+            3450093,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-function-keyword": {
+          "nanos": [
+            3703208,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-generator-star": {
+          "nanos": [
+            3610330,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-name": {
+          "nanos": [
+            8960332,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-declaration-expect-parameters": {
+          "nanos": [
+            3120700,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11816,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-meta": {
+          "nanos": [
+            2796185,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11147,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-name-meta": {
+          "nanos": [
+            84537,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            318,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-parameter": {
+          "nanos": [
+            5183800,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            20862,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::function-parameter-binding-pattern": {
+          "nanos": [
+            49254221,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            41724,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::initializer": {
+          "nanos": [
+            12183593,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            42457,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-body": {
+          "nanos": [
+            772739,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1428,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-class-name": {
+          "nanos": [
+            753681,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            889,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-expect-arguments": {
+          "nanos": [
+            500500,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1428,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-expect-class-end": {
+          "nanos": [
+            1140369,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1530,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-expect-class-name": {
+          "nanos": [
+            6603844,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1428,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::instantiation-meta": {
+          "nanos": [
+            362017,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1428,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::jsdoc-block-tag": {
+          "nanos": [
+            1824346,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4304,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::jsdoc-comment-body": {
+          "nanos": [
+            2629870,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            7954,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::left-expression-end": {
+          "nanos": [
+            229046,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            720,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::line-comment-double-slash-body": {
+          "nanos": [
+            311530,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            225,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::literal-double-quoted-string-content": {
+          "nanos": [
+            3105144,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18797,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::literal-single-quoted-string-content": {
+          "nanos": [
+            684177,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3302,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::literal-variable": {
+          "nanos": [
+            490698620,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            182362,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::literal-variable-base": {
+          "nanos": [
+            95748,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            165,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-literal-contents": {
+          "nanos": [
+            23988698,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            13956,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-literal-element": {
+          "nanos": [
+            4835590,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4395,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-literal-meta-key": {
+          "nanos": [
+            1179233,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4395,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-literal-property": {
+          "nanos": [
+            1237697,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4395,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-literal-property-check": {
+          "nanos": [
+            482089,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4395,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-property": {
+          "nanos": [
+            177999402,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            23511,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-property-base": {
+          "nanos": [
+            64541,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            119,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::object-property-name": {
+          "nanos": [
+            1714877,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4395,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::parenthesized-expression": {
+          "nanos": [
+            1886037,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6595,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::parenthesized-expression-body": {
+          "nanos": [
+            8921946,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            22110,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::prototype": {
+          "nanos": [
+            167863222,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1605121,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::regexp": {
+          "nanos": [
+            639771,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1520,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::restricted-production": {
+          "nanos": [
+            26251561,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            14498,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::script": {
+          "nanos": [
+            51912,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            54,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::shebang": {
+          "nanos": [
+            1667,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::statement": {
+          "nanos": [
+            166189628,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            44367,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::switch-block": {
+          "nanos": [
+            38875,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            117,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::switch-block-contents": {
+          "nanos": [
+            1380339,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2077,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::switch-meta": {
+          "nanos": [
+            38044,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            117,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::ternary-operator-expect-colon": {
+          "nanos": [
+            3064641,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            9895,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::try-meta": {
+          "nanos": [
+            39673,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            133,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::variable-binding-list-top": {
+          "nanos": [
+            7604259,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            21406,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::variable-binding-pattern": {
+          "nanos": [
+            13322088,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            21728,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::variable-binding-top": {
+          "nanos": [
+            15711799,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            23669,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "JavaScript::while-meta": {
+          "nanos": [
+            5459,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Regular Expressions (JavaScript)::#anon_character-class-definition_0": {
+          "nanos": [
+            510185,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1459,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Regular Expressions (JavaScript)::#anon_group-assertion_0": {
+          "nanos": [
+            75966,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            317,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "Regular Expressions (JavaScript)::#anon_group-definition_0": {
+          "nanos": [
+            635260,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2289,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "render_entries": 3965,
+      "render_hits": 275440,
+      "render_queries": 281501,
+      "render_seconds": 0.22416801,
+      "rust_allocated_bytes": 4584115932,
+      "rust_allocations": 2908986
+    },
+    "seconds": 3.273183834,
+    "teardown_wait_ms": 200
+  },
+  {
+    "language": "cpp",
+    "blake3": "942c417b8c22ee761bd460a1a4e9a1fd21cbb81e843a22a422ba4d7ef355cece",
+    "bytes": 5117175,
+    "lines": 156176,
+    "ready": true,
+    "mb_per_second": 2.4508189166546024,
+    "profile": {
+      "checkpoint_seconds": 0.060717092,
+      "input_seconds": 0.091057404,
+      "parse_seconds": 1.548152991,
+      "regex_contexts": {
+        "C++::#anon_angle-brackets_0": {
+          "nanos": [
+            1649961,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1297,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_attributes_0": {
+          "nanos": [
+            31710,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            50,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_attributes_1": {
+          "nanos": [
+            11334,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_attributes_2": {
+          "nanos": [
+            7959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_block_0": {
+          "nanos": [
+            780506471,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            219607,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_brackets_0": {
+          "nanos": [
+            430131,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            995,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_case-default_0": {
+          "nanos": [
+            7998653,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3565,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_constraint-requires_0": {
+          "nanos": [
+            58000,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            24,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-body_0": {
+          "nanos": [
+            4166,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-class-definition-after-identifier_0": {
+          "nanos": [
+            1720993,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            533,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-class-definition_0": {
+          "nanos": [
+            23125,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            36,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-concept-definition_0": {
+          "nanos": [
+            34000,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-definition-common-end_0": {
+          "nanos": [
+            32924,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            100,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-definition-common-end_1": {
+          "nanos": [
+            21044,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            38,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-enum-definition-after-identifier_0": {
+          "nanos": [
+            127877,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            465,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-enum-definition_0": {
+          "nanos": [
+            45541,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            58,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-function-identifier-generic_0": {
+          "nanos": [
+            1125,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-maybe-method_0": {
+          "nanos": [
+            1542,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-modifier_0": {
+          "nanos": [
+            5625,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-modifier_1": {
+          "nanos": [
+            541,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-modifier_2": {
+          "nanos": [
+            26751,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-modifier_3": {
+          "nanos": [
+            33875,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            9,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-struct-definition-after-identifier_0": {
+          "nanos": [
+            3395507,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1261,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-struct-definition_0": {
+          "nanos": [
+            135044,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            161,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-union-definition-after-identifier_0": {
+          "nanos": [
+            141835,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            35,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_data-structures-union-definition_0": {
+          "nanos": [
+            5416,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-call_0": {
+          "nanos": [
+            7973887,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            17966,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-call_1": {
+          "nanos": [
+            20509177,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16665,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-call_2": {
+          "nanos": [
+            90814902,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            23738,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-definition-body_0": {
+          "nanos": [
+            18711855,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3825,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-definition-params_0": {
+          "nanos": [
+            114959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            345,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-definition-params_1": {
+          "nanos": [
+            6819467,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1841,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_function-definition-params_2": {
+          "nanos": [
+            32333,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_0": {
+          "nanos": [
+            527283,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            989,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_1": {
+          "nanos": [
+            867678,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            938,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_4": {
+          "nanos": [
+            181083,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            348,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_5": {
+          "nanos": [
+            289083,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            197,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_6": {
+          "nanos": [
+            1404794,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2365,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_generic-type_7": {
+          "nanos": [
+            4739651,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2777,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-maybe-function_0": {
+          "nanos": [
+            22667,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            24,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-maybe-function_1": {
+          "nanos": [
+            20334,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            34,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-modifier_0": {
+          "nanos": [
+            6876,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-modifier_1": {
+          "nanos": [
+            6415,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            12,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-modifier_2": {
+          "nanos": [
+            11584,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-type_0": {
+          "nanos": [
+            9458,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-type_1": {
+          "nanos": [
+            15332,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            11,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global-type_2": {
+          "nanos": [
+            4499,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global_0": {
+          "nanos": [
+            19668,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            67,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global_1": {
+          "nanos": [
+            3542,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            7,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global_2": {
+          "nanos": [
+            68000,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            20,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_global_3": {
+          "nanos": [
+            4041,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_keywords-angle-brackets_0": {
+          "nanos": [
+            104341,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            250,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_keywords-angle-brackets_1": {
+          "nanos": [
+            769121,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            325,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_keywords-parens_0": {
+          "nanos": [
+            2131239,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1516,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_members-after-accessor-junction_0": {
+          "nanos": [
+            46164,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            75,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_members-after-accessor-junction_1": {
+          "nanos": [
+            39498,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            100,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_members-after-accessor-junction_2": {
+          "nanos": [
+            33005,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            99,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_members-after-accessor-junction_3": {
+          "nanos": [
+            187075,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            198,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_members-after-accessor-junction_4": {
+          "nanos": [
+            56504,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            149,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-body_0": {
+          "nanos": [
+            582625,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            178,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-continue_0": {
+          "nanos": [
+            1458,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-continue_1": {
+          "nanos": [
+            405211,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            76,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-continue_2": {
+          "nanos": [
+            4501,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-continue_3": {
+          "nanos": [
+            27668,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            29,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-continue_4": {
+          "nanos": [
+            2917,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-params_0": {
+          "nanos": [
+            21831,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            81,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-params_1": {
+          "nanos": [
+            236002,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            139,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_method-definition-params_2": {
+          "nanos": [
+            7667,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_modifiers-parens_0": {
+          "nanos": [
+            89466,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            100,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_modifiers-parens_1": {
+          "nanos": [
+            71538,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            148,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_modifiers-parens_2": {
+          "nanos": [
+            265393,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            344,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_modifiers-parens_3": {
+          "nanos": [
+            117870,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            223,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_0": {
+          "nanos": [
+            8583,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            12,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_1": {
+          "nanos": [
+            46914,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            18,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_2": {
+          "nanos": [
+            12713,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            21,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_3": {
+          "nanos": [
+            1001,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_4": {
+          "nanos": [
+            292,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_module_5": {
+          "nanos": [
+            19294,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            33,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_namespace_0": {
+          "nanos": [
+            8832,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_namespace_1": {
+          "nanos": [
+            91208,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            31,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_namespace_2": {
+          "nanos": [
+            152922,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            38,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_negated-block_0": {
+          "nanos": [
+            555546,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            244,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_parens_0": {
+          "nanos": [
+            49497691,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            32427,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-convention-ignore-uppercase-ident-lines_0": {
+          "nanos": [
+            564682,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1039,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-macro-define_0": {
+          "nanos": [
+            782914,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            571,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-macro-define_1": {
+          "nanos": [
+            54249,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            174,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-macro-definition_0": {
+          "nanos": [
+            32414,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            50,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-macro-params_0": {
+          "nanos": [
+            279422,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1593,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_0": {
+          "nanos": [
+            80250,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            323,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_1": {
+          "nanos": [
+            60254,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            200,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_2": {
+          "nanos": [
+            179028,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            864,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_3": {
+          "nanos": [
+            100279,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            350,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_4": {
+          "nanos": [
+            14751,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-other_5": {
+          "nanos": [
+            57874,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            150,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-data-structures_0": {
+          "nanos": [
+            1041,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-data-structures_2": {
+          "nanos": [
+            1417,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-global_0": {
+          "nanos": [
+            3624,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            9,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-global_1": {
+          "nanos": [
+            71958,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            22,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-global_2": {
+          "nanos": [
+            5624,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-statements_0": {
+          "nanos": [
+            115499,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            296,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-statements_1": {
+          "nanos": [
+            892167,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            384,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-disabled-statements_2": {
+          "nanos": [
+            199783,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            821,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-data-structures_0": {
+          "nanos": [
+            1209,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-data-structures_1": {
+          "nanos": [
+            959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-data-structures_2": {
+          "nanos": [
+            39918,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-global_0": {
+          "nanos": [
+            1626,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-global_1": {
+          "nanos": [
+            1165,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-global_2": {
+          "nanos": [
+            53419,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            21,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-statements_0": {
+          "nanos": [
+            93420,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            240,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-statements_1": {
+          "nanos": [
+            57458,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            288,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-enabled-statements_2": {
+          "nanos": [
+            2807533,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1056,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-other-global_0": {
+          "nanos": [
+            4084,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-rule-other-statements_0": {
+          "nanos": [
+            217711,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            688,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_preprocessor-workaround-eat-macro-before-identifier_0": {
+          "nanos": [
+            19166,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            12,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_template_0": {
+          "nanos": [
+            8544,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            39,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_template_1": {
+          "nanos": [
+            729414,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            162,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_template_2": {
+          "nanos": [
+            21499,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            58,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_template_3": {
+          "nanos": [
+            36875,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_typedef_0": {
+          "nanos": [
+            5548552,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            838,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_types-parens_0": {
+          "nanos": [
+            79415,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            53,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_unique-strings_0": {
+          "nanos": [
+            41453,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            75,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::#anon_using-namespace_0": {
+          "nanos": [
+            70698,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            100,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::__main": {
+          "nanos": [
+            9039781,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3294,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::__start": {
+          "nanos": [
+            10125,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::annotation-body": {
+          "nanos": [
+            763579,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            375,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::attribute_list": {
+          "nanos": [
+            297996,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            675,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::constant-value": {
+          "nanos": [
+            1156623,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            512,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::contract-condition": {
+          "nanos": [
+            1041,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::contract-result-name": {
+          "nanos": [
+            2917,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures": {
+          "nanos": [
+            339829,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            345,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-class-definition": {
+          "nanos": [
+            25373,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            42,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-class-definition-after-identifier": {
+          "nanos": [
+            24745,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            74,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-concept-definition": {
+          "nanos": [
+            4042,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-enum-definition": {
+          "nanos": [
+            96588,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            162,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-enum-definition-after-identifier": {
+          "nanos": [
+            79669,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            219,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-function-identifier": {
+          "nanos": [
+            38791,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            64,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-function-identifier-generic": {
+          "nanos": [
+            6959,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-maybe-method": {
+          "nanos": [
+            639172,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            185,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-modifier": {
+          "nanos": [
+            765989,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            272,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-modifier-friend": {
+          "nanos": [
+            24000,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-struct-definition": {
+          "nanos": [
+            97086,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            164,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-struct-definition-after-identifier": {
+          "nanos": [
+            62288,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            210,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-type": {
+          "nanos": [
+            519464,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            372,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-union-definition": {
+          "nanos": [
+            8917,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            6,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::data-structures-union-definition-after-identifier": {
+          "nanos": [
+            3663,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::function-definition-body": {
+          "nanos": [
+            55205,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            183,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::function-definition-continue": {
+          "nanos": [
+            153039,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            667,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::function-definition-params": {
+          "nanos": [
+            99824,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            363,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::function-definition-trailing-return": {
+          "nanos": [
+            18126,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            15,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-block-comment-after": {
+          "nanos": [
+            508730,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            977,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-function-identifier": {
+          "nanos": [
+            425007,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            682,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-function-identifier-generic": {
+          "nanos": [
+            11002,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            19,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-maybe-function": {
+          "nanos": [
+            1725216,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            275,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-modifier": {
+          "nanos": [
+            149708,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            403,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::global-type": {
+          "nanos": [
+            1053707,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            573,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::inside-contract-condition": {
+          "nanos": [
+            26668,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::members-after-accessor-junction": {
+          "nanos": [
+            3225555,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8688,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::members-inside-function-call": {
+          "nanos": [
+            4211731,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            4297,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::method-definition-body": {
+          "nanos": [
+            9123,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            33,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::method-definition-continue": {
+          "nanos": [
+            50835,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            157,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::method-definition-params": {
+          "nanos": [
+            17001,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            89,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::method-definition-trailing-return": {
+          "nanos": [
+            17833,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            12,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::module-identifier": {
+          "nanos": [
+            5869,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            27,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-block-finish-global": {
+          "nanos": [
+            19501,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            8,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-block-finish-if-branch-statements": {
+          "nanos": [
+            2795929,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            939,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-block-finish-statements": {
+          "nanos": [
+            3988300,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1139,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-block-if-branch-global": {
+          "nanos": [
+            2166,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            3,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-block-if-branch-statements": {
+          "nanos": [
+            977407,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            567,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-elif-else-branch-global": {
+          "nanos": [
+            45709,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            16,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-elif-else-branch-statements": {
+          "nanos": [
+            3678597,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1004,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-if-branch-function-call": {
+          "nanos": [
+            136337,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            248,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-if-branch-function-call-arguments": {
+          "nanos": [
+            464304,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            328,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-if-branch-function-call-arguments-finish": {
+          "nanos": [
+            1493948,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            441,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-if-branch-global": {
+          "nanos": [
+            259295,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            62,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-if-branch-statements": {
+          "nanos": [
+            20161538,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5133,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-macro-definition": {
+          "nanos": [
+            5198281,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1128,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C++::preprocessor-macro-params": {
+          "nanos": [
+            140787,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            541,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_parens_0": {
+          "nanos": [
+            24338,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_preprocessor-comments_0": {
+          "nanos": [
+            356613,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            562,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_preprocessor-comments_1": {
+          "nanos": [
+            84580,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            145,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_preprocessor-convention-ignore-uppercase-calls-without-semicolon_0": {
+          "nanos": [
+            729371,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            326,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_preprocessor-disabled_0": {
+          "nanos": [
+            89366,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            195,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_strings_0": {
+          "nanos": [
+            1475786,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            5341,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_strings_1": {
+          "nanos": [
+            583733,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            2600,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::#anon_types-parens_0": {
+          "nanos": [
+            1022615,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            550,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::block-comment-body": {
+          "nanos": [
+            17310098,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            57921,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::block-comment-documentation-body": {
+          "nanos": [
+            813363,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            1849,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::line-comment-body": {
+          "nanos": [
+            5105567,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            7570,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "C::line-comment-documentation-body": {
+          "nanos": [
+            64122,
+            0,
+            0,
+            0,
+            0
+          ],
+          "queries": [
+            100,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "render_entries": 7030,
+      "render_hits": 39066,
+      "render_queries": 156176,
+      "render_seconds": 0.366105758,
+      "rust_allocated_bytes": 1992642725,
+      "rust_allocations": 1597926
+    },
+    "seconds": 2.087944958,
+    "teardown_wait_ms": 200
+  }
+]

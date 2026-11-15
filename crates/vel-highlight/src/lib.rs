@@ -1,7 +1,8 @@
 //! Versioned incremental highlighting. The UI uses nonblocking requests and discards stale batches.
 #![forbid(unsafe_code)]
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     ops::Range,
     sync::{
         Arc, Mutex,
@@ -105,6 +106,26 @@ struct LineRecord {
     end_stack: ScopeStackId,
     has_symbols: bool,
 }
+/// Instrumented component wall times; available only with the `profile` feature.
+/// Regex time is part of `parse`; use an instrumented matcher backend to split it.
+#[cfg(feature = "profile")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HighlightProfile {
+    /// Rope lookup and copying into the reusable line buffer.
+    pub input: Duration,
+    /// Parser, including regex searches, context transitions and transition memoization.
+    pub parse: Duration,
+    /// Scope operations, selectors, styling, scope runs and branch correction rendering.
+    pub render: Duration,
+    /// Operation/stack sharing, dense checkpoints, convergence and record publication.
+    pub checkpoint: Duration,
+    /// Complete rendered-line reuse hits, excluding uncached shapes and token hashes.
+    pub render_hits: u64,
+    /// Renderer calls including branch corrections and palette restyling.
+    pub render_queries: u64,
+    /// Number of retained render shapes (bounded independently of source text).
+    pub render_entries: usize,
+}
 /// Stateful engine, also usable without threads in tests or editor-owned scheduling.
 /// Dense checkpoints (N=1) include every visible line and permit single-line convergence.
 #[derive(Debug)]
@@ -128,6 +149,9 @@ pub struct DocumentHighlighter {
     operation_cache: HashSet<Arc<[(usize, ScopeStackOp)]>>,
     scope_cache: HashSet<Arc<ScopeStack>>,
     scope_interner: ScopeInterner,
+    render_cache: RenderCache,
+    #[cfg(feature = "profile")]
+    profile: HighlightProfile,
 }
 /// Detects syntax by explicit name/path/scope/token, then whole filename, compound extension,
 /// then first-line expression. Hidden extensions participate; no filesystem reads are needed.
@@ -195,11 +219,15 @@ impl DocumentHighlighter {
             operation_cache: HashSet::new(),
             scope_cache: HashSet::new(),
             scope_interner: ScopeInterner::new(Arc::new(MetadataSet::new())),
+            render_cache: RenderCache::default(),
+            #[cfg(feature = "profile")]
+            profile: HighlightProfile::default(),
         }
     }
     /// Selects package/User preferences before parsing. Existing checkpoints are invalidated.
     pub fn with_metadata(mut self, metadata: Arc<MetadataSet>) -> Self {
         self.scope_interner = ScopeInterner::new(metadata);
+        self.render_cache = RenderCache::default();
         self.records.fill(None);
         self.frontier = 0;
         self.reusable_to = 0;
@@ -291,11 +319,23 @@ impl DocumentHighlighter {
     pub fn stats(&self) -> HighlightStats {
         self.stats
     }
+    /// Component timings since construction. Timer overhead is included; do not
+    /// enable this feature when measuring production throughput.
+    #[cfg(feature = "profile")]
+    pub fn profile(&self) -> HighlightProfile {
+        HighlightProfile {
+            render_hits: self.render_cache.hits,
+            render_queries: self.render_cache.queries,
+            render_entries: self.render_cache.entries.len(),
+            ..self.profile
+        }
+    }
     /// Swaps the color scheme and recolors parsed operations without running regexes again.
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) -> Result<(), Error> {
         self.scheme_revision += 1;
         self.resolver = Highlighter::new(scheme);
         self.scope_interner.invalidate_styles();
+        self.render_cache = RenderCache::default();
         // Unvalidated suffix spans still use the previous palette. They must be reparsed
         // or recolored before reuse, even if their parsing checkpoints converge.
         self.reusable_to = self.frontier;
@@ -309,7 +349,7 @@ impl DocumentHighlighter {
                 .text
                 .slice(complete_line_range(&self.text, row))
                 .to_string();
-            let rendered = style_line(
+            let rendered = self.render_cache.render(
                 &line,
                 &ops,
                 &mut scopes,
@@ -462,6 +502,8 @@ impl DocumentHighlighter {
         Ok(())
     }
     fn parse_next(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "profile")]
+        let phase = Instant::now();
         let row = self.frontier;
         self.line_scratch.clear();
         for chunk in self
@@ -471,9 +513,21 @@ impl DocumentHighlighter {
         {
             self.line_scratch.push_str(chunk);
         }
+        #[cfg(feature = "profile")]
+        {
+            self.profile.input += phase.elapsed();
+        }
+        #[cfg(feature = "profile")]
+        let phase = Instant::now();
         self.state
             .parse_line_into(&self.line_scratch, &mut self.parse_scratch)
             .map_err(|e| Error::Parse(e.to_string()))?;
+        #[cfg(feature = "profile")]
+        {
+            self.profile.parse += phase.elapsed();
+        }
+        #[cfg(feature = "profile")]
+        let phase = Instant::now();
         let output = &mut self.parse_scratch;
         self.stats.parsed_lines += 1;
         let mut rewind = output.rewind.map(|r| r.from_line);
@@ -509,7 +563,7 @@ impl DocumentHighlighter {
                     .text
                     .slice(complete_line_range(&self.text, n))
                     .to_string();
-                let rendered = style_line(
+                let rendered = self.render_cache.render(
                     &line,
                     &ops,
                     &mut scopes,
@@ -526,13 +580,19 @@ impl DocumentHighlighter {
             }
             self.scopes = scopes;
         }
-        let rendered = style_line(
+        let rendered = self.render_cache.render(
             &self.line_scratch,
             &output.ops,
             &mut self.scopes,
             &mut self.resolver,
             &mut self.scope_interner,
         )?;
+        #[cfg(feature = "profile")]
+        {
+            self.profile.render += phase.elapsed();
+        }
+        #[cfg(feature = "profile")]
+        let phase = Instant::now();
         let converged = row + 1 >= self.must_parse_to
             && !self.state.is_speculative()
             && self.records[row].as_ref().is_some_and(|old| {
@@ -589,6 +649,10 @@ impl DocumentHighlighter {
                 to -= 1;
             }
         }
+        #[cfg(feature = "profile")]
+        {
+            self.profile.checkpoint += phase.elapsed();
+        }
         Ok(())
     }
     fn batch(&self, lines: Range<usize>) -> HighlightBatch {
@@ -640,11 +704,90 @@ fn default_spans(len: usize, style: Style) -> Arc<[StyleSpan]> {
         }])
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RenderedLine {
     spans: Arc<[StyleSpan]>,
     runs: Arc<[ScopeRun]>,
     end_stack: ScopeStackId,
+    text_dependent: bool,
+}
+
+#[derive(Debug)]
+struct CachedRender {
+    before: ScopeStack,
+    after: ScopeStack,
+    ops: Box<[(usize, ScopeStackOp)]>,
+    len: usize,
+    output: RenderedLine,
+}
+#[derive(Debug, Default)]
+struct RenderCache {
+    entries: HashMap<u64, CachedRender>,
+    bytes: usize,
+    #[cfg(feature = "profile")]
+    hits: u64,
+    #[cfg(feature = "profile")]
+    queries: u64,
+}
+impl RenderCache {
+    fn render(
+        &mut self,
+        line: &str,
+        ops: &[(usize, ScopeStackOp)],
+        stack: &mut ScopeStack,
+        resolver: &mut Highlighter,
+        interner: &mut ScopeInterner,
+    ) -> Result<RenderedLine, Error> {
+        #[cfg(feature = "profile")]
+        {
+            self.queries += 1;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        stack.hash(&mut hash);
+        ops.hash(&mut hash);
+        line.len().hash(&mut hash);
+        let key = hash.finish();
+        if let Some(cached) = self.entries.get(&key)
+            && cached.len == line.len()
+            && cached.before == *stack
+            && cached.ops.as_ref() == ops
+            && (line.is_ascii() || ops.iter().all(|(at, _)| line.is_char_boundary(*at)))
+        {
+            #[cfg(feature = "profile")]
+            {
+                self.hits += 1;
+            }
+            if *stack != cached.after {
+                stack.clone_from(&cached.after);
+            }
+            return Ok(cached.output.clone());
+        }
+        // Bound both the number of keys and retained arrays. Uncached shapes
+        // continue through the ordinary renderer; hashed colors depend on text.
+        let admit = self.entries.len() < 8192 && self.bytes < 4 * 1024 * 1024;
+        let before = admit.then(|| stack.clone());
+        let output = style_line(line, ops, stack, resolver, interner)?;
+        let bytes = std::mem::size_of_val(ops)
+            + std::mem::size_of_val(output.spans.as_ref())
+            + std::mem::size_of_val(output.runs.as_ref());
+        if !output.text_dependent
+            && let Some(before) = before
+            && self.bytes.saturating_add(bytes) <= 4 * 1024 * 1024
+        {
+            self.bytes += bytes;
+            self.entries.insert(
+                key,
+                CachedRender {
+                    before,
+                    after: stack.clone(),
+                    ops: ops.into(),
+                    len: line.len(),
+                    output: output.clone(),
+                },
+            );
+        }
+        Ok(output)
+    }
 }
 fn style_line(
     line: &str,
@@ -661,14 +804,17 @@ fn style_line(
     let mut runs: Vec<ScopeRun> = Vec::with_capacity(ops.len() / 2 + 1);
     let mut spans: Vec<StyleSpan> = Vec::with_capacity(ops.len() / 2 + 1);
     let mut at = 0;
+    let mut active = interner.intern(stack);
+    let mut text_dependent = false;
     let mut emit = |range: Range<usize>,
+                    id: ScopeStackId,
                     stack: &ScopeStack,
                     resolver: &mut Highlighter,
+                    interner: &mut ScopeInterner,
                     spans: &mut Vec<StyleSpan>| {
         if range.is_empty() {
             return;
         }
-        let id = interner.intern(stack);
         if let Some(last) = runs.last_mut()
             && last.stack == id
             && last.end as usize == range.start
@@ -693,6 +839,7 @@ fn style_line(
             }
         };
         if style.hashed_foreground.is_some() {
+            text_dependent = true;
             let text = &line[range.clone()];
             let mut start = range.start;
             let mut word = None;
@@ -718,19 +865,30 @@ fn style_line(
             append(range, style);
         }
     };
-    for &(byte, op) in ops {
+    for group in ops.chunk_by(|a, b| a.0 == b.0) {
+        let byte = group[0].0;
         if byte < at || byte > line.len() || !line.is_char_boundary(byte) {
             return Err(Error::Parse("invalid UTF-8 scope operation".into()));
         }
-        emit(at..byte, stack, resolver, &mut spans);
-        stack.apply(&op).map_err(|e| Error::Parse(e.to_string()))?;
+        emit(at..byte, active, stack, resolver, interner, &mut spans);
+        active = interner
+            .apply_group(active, stack, group)
+            .map_err(|e| Error::Parse(e.to_string()))?;
         at = byte;
     }
-    emit(at..line.len(), stack, resolver, &mut spans);
+    emit(
+        at..line.len(),
+        active,
+        stack,
+        resolver,
+        interner,
+        &mut spans,
+    );
     Ok(RenderedLine {
         spans: spans.into(),
         runs: runs.into(),
-        end_stack: interner.intern(stack),
+        end_stack: active,
+        text_dependent,
     })
 }
 #[derive(Debug)]
@@ -923,6 +1081,11 @@ impl HighlightService {
             },
         )
     }
+    /// Returns component timers when the worker is idle enough to acquire its lock.
+    #[cfg(feature = "profile")]
+    pub fn profile(&self) -> Option<HighlightProfile> {
+        Some(self.shared.try_lock().ok()?.profile())
+    }
     /// Changes scheme on the worker, keeping parsing checkpoints.
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) -> Result<(), Error> {
         self.default_style = scheme.default_style();
@@ -1039,5 +1202,93 @@ fn worker(
         }
         drop(state);
         thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use vel_scope::{ClearAmount, Scope};
+
+    #[test]
+    fn shared_rendering_preserves_saved_scopes_and_utf8_validation() {
+        let mut cache = RenderCache::default();
+        let mut resolver = Highlighter::new(Arc::new(ColorScheme::velocity_dark()));
+        let mut interner = ScopeInterner::new(Arc::new(MetadataSet::new()));
+        let visible = Scope::new("source.visible").unwrap();
+        for saved in ["source.first", "source.second", "source.first"] {
+            let mut stack = ScopeStack::from_vec(vec![Scope::new(saved).unwrap()]);
+            stack.apply(&ScopeStackOp::Clear(ClearAmount::All)).unwrap();
+            stack.push(visible);
+            let mut expected_stack = stack.clone();
+            let ops = [(1, ScopeStackOp::Restore)];
+            let expected = style_line(
+                "ab",
+                &ops,
+                &mut expected_stack,
+                &mut resolver,
+                &mut interner,
+            )
+            .unwrap();
+            let actual = cache
+                .render("ab", &ops, &mut stack, &mut resolver, &mut interner)
+                .unwrap();
+            assert_eq!(stack, expected_stack);
+            assert_eq!(actual.spans, expected.spans);
+            assert_eq!(actual.runs, expected.runs);
+            assert_eq!(actual.end_stack, expected.end_stack);
+        }
+        let ops = [(1, ScopeStackOp::Noop)];
+        cache
+            .render(
+                "ab",
+                &ops,
+                &mut ScopeStack::new(),
+                &mut resolver,
+                &mut interner,
+            )
+            .unwrap();
+        assert!(
+            cache
+                .render(
+                    "é",
+                    &ops,
+                    &mut ScopeStack::new(),
+                    &mut resolver,
+                    &mut interner
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hashed_colors_are_text_dependent_and_never_shared_by_shape() {
+        let scheme = Arc::new(
+            ColorScheme::parse(
+                r##"{"rules":[{"scope":"source.fixture","foreground":["#f00","#00f"]}]}"##,
+            )
+            .unwrap(),
+        );
+        let mut resolver = Highlighter::new(scheme);
+        let mut interner = ScopeInterner::new(Arc::new(MetadataSet::new()));
+        let mut cache = RenderCache::default();
+        let initial = ScopeStack::from_vec(vec![Scope::new("source.fixture").unwrap()]);
+        for line in ["foo", "bar", "éx", "foo"] {
+            let mut stack = initial.clone();
+            let actual = cache
+                .render(line, &[], &mut stack, &mut resolver, &mut interner)
+                .unwrap();
+            let expected = style_line(
+                line,
+                &[],
+                &mut initial.clone(),
+                &mut resolver,
+                &mut interner,
+            )
+            .unwrap();
+            assert_eq!(actual.spans, expected.spans);
+            assert!(actual.text_dependent);
+        }
+        assert!(cache.entries.is_empty());
     }
 }

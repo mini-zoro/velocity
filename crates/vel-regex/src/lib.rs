@@ -361,12 +361,10 @@ impl Regex {
             // engine applies its own search-range semantics afterwards.
             .is_some_and(|p| !p.maybe(&line.as_bytes()[start..]))
         {
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "verify-prefilters"))]
             if let Ok(compiled) = self.compiled(allow_empty) {
-                debug_assert!(
-                    compiled
-                        .search(line, start, end, None)
-                        .is_ok_and(|m| m.is_none()),
+                assert!(
+                    !matches!(compiled.search(line, start, end, None), Ok(Some(_))),
                     "literal prefilter disagreement: {}",
                     self.regex_str()
                 );
@@ -734,8 +732,8 @@ impl MatcherBackend for OnigBackend {
     }
 }
 
-// Prefix extraction follows syntect PR #705 (MIT). Unlike that implementation,
-// full case folding and patterns needing Onig dialect translation stay unfiltered.
+// Literal extraction follows syntect PR #705 (MIT). Unlike that implementation,
+// full case folding and unsupported dialect constructs stay unfiltered.
 #[derive(Debug)]
 enum Prefilter {
     One(memchr::memmem::Finder<'static>),
@@ -758,23 +756,56 @@ impl Prefilter {
         {
             return None;
         }
-        // Onig x-mode retains spaces inside classes; Rust x-mode does not. Use
-        // the conservative dialect front end before deriving a rejecting filter.
-        let normalized = frontend::normalize(source).ok()?;
-        let hir = regex_syntax::Parser::new().parse(&normalized).ok()?;
-        let seq = regex_syntax::hir::literal::Extractor::new().extract(&hir);
-        let literals = seq.literals()?;
-        if literals.is_empty() || literals.len() > 64 || seq.min_literal_len()? == 0 {
-            return None;
+        // Onig x-mode retains spaces inside classes. Derive only necessary
+        // literals from conservative dialect supersets, including positive
+        // lookaheads. A required concat member need not be a match prefix: a
+        // suffix such as `for` can reject an otherwise expensive identifier scan.
+        let mut best = None;
+        for hir in frontend::prefilter_hirs(source) {
+            Self::required_literals(&hir, &mut best);
         }
-        if let [literal] = literals {
-            return Some(Self::One(
-                memchr::memmem::Finder::new(literal.as_bytes()).into_owned(),
-            ));
+        let (_, literals) = best?;
+        if let [literal] = literals.as_slice() {
+            return Some(Self::One(memchr::memmem::Finder::new(literal).into_owned()));
         }
         Some(Self::Any(Box::new(
-            aho_corasick::AhoCorasick::new(literals.iter().map(|l| l.as_bytes())).ok()?,
+            aho_corasick::AhoCorasick::new(&literals).ok()?,
         )))
+    }
+
+    fn required_literals(hir: &regex_syntax::hir::Hir, best: &mut Option<(usize, Vec<Vec<u8>>)>) {
+        use regex_syntax::hir::{
+            HirKind,
+            literal::{ExtractKind, Extractor},
+        };
+        for kind in [ExtractKind::Prefix, ExtractKind::Suffix] {
+            let seq = Extractor::new().kind(kind).limit_total(64).extract(hir);
+            if let Some(literals) = seq.literals()
+                && !literals.is_empty()
+                && let Some(min) = seq.min_literal_len()
+                && min > 0
+                && best.as_ref().is_none_or(|(old, needles)| {
+                    min > *old || (min == *old && literals.len() < needles.len())
+                })
+            {
+                *best = Some((
+                    min,
+                    literals.iter().map(|l| l.as_bytes().to_vec()).collect(),
+                ));
+            }
+        }
+        match hir.kind() {
+            HirKind::Concat(parts) => {
+                for part in parts {
+                    Self::required_literals(part, best);
+                }
+            }
+            HirKind::Capture(capture) => Self::required_literals(&capture.sub, best),
+            HirKind::Repetition(repetition) if repetition.min > 0 => {
+                Self::required_literals(&repetition.sub, best)
+            }
+            _ => {}
+        }
     }
 }
 

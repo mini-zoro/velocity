@@ -9,6 +9,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+profile = ["vel-highlight/profile"]
+
 [dependencies]
 vel-scope = { path = "../vel-scope" }
 vel-regex = { path = "../vel-regex" }

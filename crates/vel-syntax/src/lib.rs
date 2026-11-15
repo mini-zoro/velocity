@@ -4,6 +4,7 @@ mod cache;
 pub mod indent;
 pub mod metadata;
 mod parser;
+mod resources;
 mod state;
 pub mod syntax_definition;
 mod syntax_set;
@@ -37,6 +38,9 @@ pub enum LoadingError {
     /// Invalid or unsupported TextMate grammar structure.
     #[error(transparent)]
     TmLanguage(#[from] TmLanguageError),
+    /// Virtual resource paths must be package-relative and have a supported extension.
+    #[error("invalid package resource path: {0}")]
+    InvalidPath(String),
 }
 
 mod dumps {

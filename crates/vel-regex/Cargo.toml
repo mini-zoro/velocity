@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Diagnostic oracle check for every literal-filter rejection, including release builds.
+verify-prefilters = []
+
 [dependencies]
 onig = { version = "6.5.3", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }

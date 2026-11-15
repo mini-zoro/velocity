@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Component timers are compiled out of production and throughput builds.
+profile = []
+
 [dependencies]
 vel-color-scheme = { path = "../vel-color-scheme" }
 vel-syntax = { path = "../vel-syntax" }

@@ -1,0 +1,83 @@
+{
+  "baseline_commit": "fcab5c3a372ef63c67866d61cc11ffd080ca0b0c",
+  "committed": false,
+  "workspace_tests": {
+    "groups": 88,
+    "passed": 408,
+    "failed": 0,
+    "ignored": 0,
+    "velocity_passed": 97
+  },
+  "checks": [
+    {
+      "name": "fmt",
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --offline --workspace --all-targets -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "6da5b2e8a216060bfa9a25b3bdae5cf0a33af6eb4835955d697b963b0e117567"
+    },
+    {
+      "name": "clippy_features",
+      "command": "cargo clippy --offline -p vel-syntax -p vel-regex -p vel-highlight --all-targets --all-features -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "312daffe94d3dff38df4640f757987a4bd87586d88a1eb08ce2811a299350e5a"
+    },
+    {
+      "name": "workspace_release",
+      "command": "cargo test --offline --workspace --release",
+      "exit_code": 0,
+      "log_sha256": "b2108906770ec0b44a03dd12ee91eb13de78ffb328469ff0e8265bf240e21e7f"
+    },
+    {
+      "name": "rustdoc",
+      "command": "RUSTDOCFLAGS=-D warnings cargo doc --offline --workspace --no-deps",
+      "exit_code": 0,
+      "log_sha256": "e65ec20b0fe4f5f1f4c5440ca87b14322e950a36529a74781ef3ec9148965078"
+    },
+    {
+      "name": "rustdoc_features",
+      "command": "RUSTDOCFLAGS=-D warnings cargo doc --offline -p vel-syntax -p vel-regex -p vel-highlight --all-features --no-deps",
+      "exit_code": 0,
+      "log_sha256": "51005d8b839ef75faf4350b6aeebab4fee41b94ebc0479c55ffcdcbbab95a847"
+    },
+    {
+      "name": "differential",
+      "command": "VEL_REGEX_FIXTURE_ROOT=/Users/zoro/dev/velocity /tmp/velocity-round10-oracle-target/release/regex-bench --diff-only --verify-matches --output crates/vel-regex/round10-differential.json",
+      "exit_code": 0,
+      "log_sha256": "3895f306e757e5fa8b41c29de7133e8ccea4017862055141f9d0877653255954"
+    }
+  ],
+  "baseline_assertions": {
+    "scope_pass": 125877,
+    "scope_fail": 0,
+    "symbols_pass": 688,
+    "symbols_fail": 0,
+    "reindent_pass": 30,
+    "reindent_fail": 5,
+    "skipped": 0,
+    "baseline_file_changed": false
+  },
+  "production_source_sha256": "c6b4aea764c42b036183f180d0850c4cf07ad5d9bfcb554edb210cc9ad791034",
+  "evidence_sha256": {
+    "round10-anchored-paired.json": "b219c6b5e2dab7d49a040d096f76c7bba10b6c76f3bab6a806628f15bf4f5602",
+    "round10-before-anchored-paired.json": "6f2028927453518829071d0df16339a93664a04461784c2b8e42dea2af10fd25",
+    "round10-differential.json": "537222926e664e835d571a624aee5b1341b02252bcf19d5b75d08cfd82b9b00a",
+    "round10-groups-paired-cpp.json": "64c77dd88addada5acca0eaa7a7c0e1ca6dc126088d4dccbe1360c31668236d5",
+    "round10-loading-paired.json": "d8f01e0de34d0d9bc24322444c09b17f74f385e9e59c963faf06e16ac27d8986",
+    "round10-paired.json": "0bb66ac312cffeb10cab590c2559e27ddc0a55f6f8197725ce619d82289a4cb1",
+    "round10-prefilter-paired.json": "e91e55bd0baabb6930294f55aa042278e7344d5ebe1efb79ad9488096c1a543c",
+    "round10-profile-before.json": "83303c62bbd5cd00f3d50069a1936efa39757275ad00c65d11a576d1b2a2b7b2",
+    "round10-profile-cpp-render.json": "aaac371b313a2caa0cc10aeb329d8bcdc1d43f71cf67c8f4b4c020d9db83ba71",
+    "round10-profile-cpp-transitions.json": "f59265809e19e9e86606aaf2be89c9c62a816416b36e84b1782815d4a87c84e3",
+    "round10-profile-final.json": "289c76c22bd916aca4adc21ea440628b140ea054f6829ed9ec50d64b3cf96acb",
+    "round10-render-paired-cpp.json": "bf5fd29202bf8dfe3ab6e97f6ca0e1a57471b33d31bdd7cea56cde5c02f4efda",
+    "round10-transitions-paired-cpp.json": "b79df7ddeba299e996c8915ffacf14ce9e713e9f4aaa1d49fe78bc1eeb4fc539"
+  },
+  "authorized_paths_only": true,
+  "no_tracked_baseline_change": true
+}

@@ -47,6 +47,8 @@ pub struct SyntaxSet {
     syntaxes: Vec<SyntaxReference>,
     /// Stores the syntax index for every path that was loaded
     path_syntaxes: Vec<(String, usize)>,
+    #[serde(skip)]
+    physical_paths: HashMap<String, usize>,
 
     /// Warnings collected during syntax loading and linking.
     warnings: Vec<String>,
@@ -140,6 +142,7 @@ impl Clone for SyntaxSet {
             pattern_contexts: Mutex::new(HashMap::new()),
             syntaxes: self.syntaxes.clone(),
             path_syntaxes: self.path_syntaxes.clone(),
+            physical_paths: self.physical_paths.clone(),
             warnings: self.warnings.clone(),
             // Will need to be re-initialized
             first_line_cache: OnceLock::new(),
@@ -154,6 +157,7 @@ impl Default for SyntaxSet {
             pattern_contexts: Mutex::new(HashMap::new()),
             syntaxes: Vec::new(),
             path_syntaxes: Vec::new(),
+            physical_paths: HashMap::new(),
             warnings: Vec::new(),
             first_line_cache: OnceLock::new(),
         }
@@ -161,6 +165,21 @@ impl Default for SyntaxSet {
 }
 
 impl SyntaxSet {
+    pub(crate) fn bind_resource_paths<'a>(
+        &mut self,
+        resources: impl Iterator<Item = (&'a str, &'a str)>,
+    ) {
+        self.physical_paths.clear();
+        for (virtual_path, physical) in resources {
+            if let Some((_, index)) = self
+                .path_syntaxes
+                .iter()
+                .find(|(path, _)| path == virtual_path)
+            {
+                self.physical_paths.insert(physical.into(), *index);
+            }
+        }
+    }
     /// Creates an empty syntax collection.
     pub fn new() -> SyntaxSet {
         SyntaxSet::default()
@@ -257,6 +276,9 @@ impl SyntaxSet {
     /// loaded syntax definition files
     // however, if a syntax name is provided without a folder, make sure we don't accidentally match the end of a different syntax definition's name - by checking a / comes before it or it is the full path
     pub fn find_syntax_by_path<'a>(&'a self, path: &str) -> Option<&'a SyntaxReference> {
+        if let Some(&index) = self.physical_paths.get(path) {
+            return self.syntaxes.get(index);
+        }
         let path = path.strip_prefix("Packages/").unwrap_or(path);
         let mut slash_path = "/".to_string();
         slash_path.push_str(path);
@@ -521,6 +543,26 @@ impl SyntaxSetBuilder {
         self.path_syntaxes.push((path.into(), self.syntaxes.len()));
         self.syntaxes.push(syntax);
         self.lines_include_newline = true;
+    }
+
+    pub(crate) fn add_resource(&mut self, path: &str, bytes: &[u8]) {
+        let source = std::str::from_utf8(bytes).map_err(std::io::Error::other);
+        let syntax = source.map_err(LoadingError::from).and_then(|source| {
+            if crate::tm_language::is_tm_language(Path::new(path)) {
+                SyntaxDefinition::load_tm_language(source)
+            } else {
+                SyntaxDefinition::load_from_str(
+                    source,
+                    true,
+                    Path::new(path).file_stem().and_then(|s| s.to_str()),
+                )
+                .map_err(|e| LoadingError::ParseSyntax(e, path.into()))
+            }
+        });
+        match syntax {
+            Ok(syntax) => self.add_with_path(syntax, path),
+            Err(e) => self.warnings.push(format!("skipping {path:?}: {e}")),
+        }
     }
 
     /// Adds an in-memory definition; use add_with_path when package references are needed.
@@ -805,6 +847,7 @@ impl SyntaxSetBuilder {
             pattern_contexts: Mutex::new(HashMap::new()),
             syntaxes,
             path_syntaxes,
+            physical_paths: HashMap::new(),
             warnings,
             first_line_cache: OnceLock::new(),
         }

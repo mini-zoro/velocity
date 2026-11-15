@@ -50,6 +50,89 @@ only when entered; index metadata remains directly available. No compiled regex 
 from source definitions (YAML, XML or JSON). Scope names, rather than process-local IDs,
 are serialized.
 
+## Multiple roots and editor migration (round 10)
+
+`SyntaxSet::load_cached_roots(roots: &[&Path], extra: &[(&str, &str)], cache_dir)`
+loads ordered package trees and virtual definitions into one lazy binary index.
+Each root contains package directories, e.g. `Rust/Rust.sublime-syntax`. Later
+roots replace earlier definitions **by the entire package-relative path**, before
+inheritance and includes link. The last extra at a path wins over every root.
+Virtual paths may start with `Packages/`; `/` and `\\` are normalized. Distinct
+paths remain distinct even when their display names or scopes match; later
+resources win lookup ties, with `User/` resources last within each root. YAML,
+XML tmLanguage and JSON tmLanguage all participate.
+
+The digest frames root boundaries, resource paths, every source's contents
+(including shadowed inputs), extra order and a schema version. Edits, additions,
+removals and root/extra reordering invalidate it. Root locations are omitted:
+moving identical trees reuses the cache, whose paths remain `Packages/...`.
+`find_syntax_by_path` also accepts the winning sources' current physical paths;
+these lookup aliases are rebuilt per load and never serialized.
+Corrupt cache entries rebuild atomically from the already-read source bytes.
+File and directory symlinks are followed; dangling links and grammar-named
+directories are skipped, while loops and other traversal failures are errors.
+Omit optional missing roots; an explicitly supplied missing root is an error.
+`load_cached` is a one-root wrapper; `load_roots` and `load_directories` use the
+same override selection without persistent caching. The lower-level builder
+continues to support explicit physical paths.
+
+Lane A: replace the **whole** `Assets::bundled` method in
+`crates/velocity/src/language.rs` with the following. The original fallback text
+is supplied in memory; the public corpus stays in place. The four telemetry slots
+stay compatible, with staging/cleanup now zero. Keep `packages_root` and
+`with_user_metadata`; remove `stage_syntaxes` and `stage_plain_text`, and replace
+the staging-specific test with a direct-roots test. Keep `retire` for its other
+analysis-service callers. No change in `crates/velocity` is included in this lane.
+
+```rust,ignore
+pub fn bundled() -> Result<Arc<Self>, String> {
+    static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
+    ASSETS
+        .get_or_init(|| {
+            let root = packages_root();
+            let metadata_root = root.clone();
+            let metadata = std::thread::Builder::new()
+                .name("velocity-metadata".into())
+                .spawn(move || {
+                    let phase = std::time::Instant::now();
+                    let result = MetadataSet::load_directories(&[metadata_root])
+                        .map_err(|e| e.to_string());
+                    (result, phase.elapsed().as_secs_f64() * 1000.)
+                })
+                .map_err(|e| e.to_string())?;
+            let cache = std::env::temp_dir().join("velocity-syntax-cache");
+            let extra = [(
+                "Packages/Default/Plain Text.sublime-syntax",
+                "name: Plain Text\nfile_extensions: [txt]\nscope: text.plain\ncontexts: { main: [] }\n",
+            )];
+            let phase = std::time::Instant::now();
+            let syntaxes = SyntaxSet::load_cached_roots(&[root.as_path()], &extra, &cache)
+                .map_err(|e| e.to_string());
+            let load_ms = phase.elapsed().as_secs_f64() * 1000.;
+            let (metadata, metadata_ms) =
+                metadata.join().map_err(|_| "metadata loader panicked")?;
+            Ok(Arc::new(Self {
+                syntaxes: Arc::new(syntaxes?.0),
+                metadata: Arc::new(metadata?),
+                startup_ms: [0., load_ms, 0., metadata_ms],
+            }))
+        })
+        .clone()
+}
+```
+
+For user syntax overrides, pass the existing `data.join("Packages")` directory
+after the shipped root, filtering absent optional directories first. Definitions
+inside `User/` remain addressable as `Packages/User/...`.
+`MetadataSet::load_roots(roots, extra)` and the existing `load_directories` now
+select preferences by the same full resource path, including linked files and
+directories. Replacing a tmPreferences file removes keys from the shadowed file;
+distinct files still merge settings by selector specificity, then resource order.
+Metadata remains parsed directly; the persistent binary cache is for syntaxes.
+
+Run `cargo run --release -p vel-syntax --example roots_probe` to measure content
+hashing plus lazy index loading for the 203 corpus syntaxes and one virtual extra.
+
 ```sh
 cargo run --release -p vel-syntax --bin syntax-tests
 cargo run --release -p vel-syntax --bin syntax-tests -- Python

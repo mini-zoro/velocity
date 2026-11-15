@@ -99,6 +99,24 @@ Use `finish` only in background jobs; it deliberately has no foreground deadline
 
 ## Validation and performance
 
+Round 10 shares rendered line shapes by the full starting scope stack (including
+saved clears), exact operation list and byte length. The cache retains at most
+8,192 shapes and 4 MiB of operation/span/run arrays; entry/stack metadata is
+separately bounded by the entry count. Hash collisions are checked against the
+complete key. UTF-8 operation boundaries remain validated on reuse. Hashed token
+colors bypass shape sharing, and palette/metadata changes discard its entries.
+Push/pop/clear sequences at one byte also reuse document-local IDs, up to
+65,536 transitions, without interning invisible intermediate stacks. Groups
+containing Restore always consult their actual saved scope history.
+
+The optional `profile` feature adds component timers for rope input, parser,
+rendering (including corrected lines) and checkpoints, plus render reuse counts.
+It is compiled out of production and throughput builds. The vel-syntax
+`worker_probe` example forwards this feature and adds per-context regex timers
+and Rust allocation counts. Those diagnostic times include timer/atomic overhead;
+allocation totals omit C allocations. Paired production results and reproduction
+commands are in [../vel-regex/PERF.md](../vel-regex/PERF.md).
+
 Tests compare incremental output with a fresh parse over 100 deterministic Unicode/newline/
 comment edits, multiple queued edits, multi-range edits, branch rewinds after line insertion,
 scheme changes during pending edits, stale results, zero-budget fallback, and syntax detection.

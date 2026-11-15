@@ -1,0 +1,3044 @@
+{
+  "language": "cpp",
+  "blake3": "942c417b8c22ee761bd460a1a4e9a1fd21cbb81e843a22a422ba4d7ef355cece",
+  "bytes": 5117175,
+  "lines": 156176,
+  "ready": true,
+  "mb_per_second": 2.2024411161931763,
+  "profile": {
+    "checkpoint_seconds": 0.06835189,
+    "input_seconds": 0.090962251,
+    "parse_seconds": 1.603882354,
+    "regex_contexts": {
+      "C++::#anon_angle-brackets_0": {
+        "nanos": [
+          1627418,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1297,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_attributes_0": {
+        "nanos": [
+          34834,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          50,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_attributes_1": {
+        "nanos": [
+          12874,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          25,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_attributes_2": {
+        "nanos": [
+          8081,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          25,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_block_0": {
+        "nanos": [
+          775700587,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          219607,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_brackets_0": {
+        "nanos": [
+          455455,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          995,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_case-default_0": {
+        "nanos": [
+          8051060,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3565,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_constraint-requires_0": {
+        "nanos": [
+          55708,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          24,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-body_0": {
+        "nanos": [
+          4208,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          11,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-class-definition-after-identifier_0": {
+        "nanos": [
+          1684533,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          533,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-class-definition_0": {
+        "nanos": [
+          26499,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          36,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-concept-definition_0": {
+        "nanos": [
+          35250,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-definition-common-end_0": {
+        "nanos": [
+          37542,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          100,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-definition-common-end_1": {
+        "nanos": [
+          21002,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          38,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-enum-definition-after-identifier_0": {
+        "nanos": [
+          149365,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          465,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-enum-definition_0": {
+        "nanos": [
+          57373,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          58,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-function-identifier-generic_0": {
+        "nanos": [
+          2917,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-maybe-method_0": {
+        "nanos": [
+          1500,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-modifier_0": {
+        "nanos": [
+          6750,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-modifier_1": {
+        "nanos": [
+          584,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-modifier_2": {
+        "nanos": [
+          26749,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          10,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-modifier_3": {
+        "nanos": [
+          33292,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          9,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-struct-definition-after-identifier_0": {
+        "nanos": [
+          3345844,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1261,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-struct-definition_0": {
+        "nanos": [
+          144201,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          161,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-union-definition-after-identifier_0": {
+        "nanos": [
+          137747,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          35,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_data-structures-union-definition_0": {
+        "nanos": [
+          5294,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-call_0": {
+        "nanos": [
+          9299069,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          17966,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-call_1": {
+        "nanos": [
+          20536767,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          16665,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-call_2": {
+        "nanos": [
+          89539012,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          23738,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-definition-body_0": {
+        "nanos": [
+          18391380,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3825,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-definition-params_0": {
+        "nanos": [
+          100086,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          345,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-definition-params_1": {
+        "nanos": [
+          6691754,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1841,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_function-definition-params_2": {
+        "nanos": [
+          32291,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          10,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_0": {
+        "nanos": [
+          566011,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          989,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_1": {
+        "nanos": [
+          885260,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          938,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_4": {
+        "nanos": [
+          187296,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          348,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_5": {
+        "nanos": [
+          282919,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          197,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_6": {
+        "nanos": [
+          1437545,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2365,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_generic-type_7": {
+        "nanos": [
+          4800160,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2777,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-maybe-function_0": {
+        "nanos": [
+          28748,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          24,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-maybe-function_1": {
+        "nanos": [
+          19834,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          34,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-modifier_0": {
+        "nanos": [
+          6998,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          10,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-modifier_1": {
+        "nanos": [
+          7749,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          12,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-modifier_2": {
+        "nanos": [
+          14750,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          10,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-type_0": {
+        "nanos": [
+          9126,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          16,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-type_1": {
+        "nanos": [
+          15169,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          11,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global-type_2": {
+        "nanos": [
+          4458,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global_0": {
+        "nanos": [
+          20302,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          67,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global_1": {
+        "nanos": [
+          4500,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          7,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global_2": {
+        "nanos": [
+          68752,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          20,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_global_3": {
+        "nanos": [
+          3917,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_keywords-angle-brackets_0": {
+        "nanos": [
+          104292,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          250,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_keywords-angle-brackets_1": {
+        "nanos": [
+          767788,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          325,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_keywords-parens_0": {
+        "nanos": [
+          2138664,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1516,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_members-after-accessor-junction_0": {
+        "nanos": [
+          64536,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          75,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_members-after-accessor-junction_1": {
+        "nanos": [
+          40879,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          100,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_members-after-accessor-junction_2": {
+        "nanos": [
+          33833,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          99,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_members-after-accessor-junction_3": {
+        "nanos": [
+          188412,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          198,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_members-after-accessor-junction_4": {
+        "nanos": [
+          72757,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          149,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-body_0": {
+        "nanos": [
+          599791,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          178,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-continue_0": {
+        "nanos": [
+          1624,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-continue_1": {
+        "nanos": [
+          398123,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          76,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-continue_2": {
+        "nanos": [
+          5084,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-continue_3": {
+        "nanos": [
+          27454,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          29,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-continue_4": {
+        "nanos": [
+          3291,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-params_0": {
+        "nanos": [
+          22795,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          81,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-params_1": {
+        "nanos": [
+          245552,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          139,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_method-definition-params_2": {
+        "nanos": [
+          8207,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_modifiers-parens_0": {
+        "nanos": [
+          90255,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          100,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_modifiers-parens_1": {
+        "nanos": [
+          90078,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          148,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_modifiers-parens_2": {
+        "nanos": [
+          342833,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          344,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_modifiers-parens_3": {
+        "nanos": [
+          158830,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          223,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_0": {
+        "nanos": [
+          8497,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          12,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_1": {
+        "nanos": [
+          46832,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          18,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_2": {
+        "nanos": [
+          7044,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          21,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_3": {
+        "nanos": [
+          625,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_4": {
+        "nanos": [
+          250,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_module_5": {
+        "nanos": [
+          16793,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          33,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_namespace_0": {
+        "nanos": [
+          8836,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          16,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_namespace_1": {
+        "nanos": [
+          91543,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          31,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_namespace_2": {
+        "nanos": [
+          142250,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          38,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_negated-block_0": {
+        "nanos": [
+          588579,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          244,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_parens_0": {
+        "nanos": [
+          49049305,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          32427,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-convention-ignore-uppercase-ident-lines_0": {
+        "nanos": [
+          590636,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1039,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-macro-define_0": {
+        "nanos": [
+          840750,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          571,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-macro-define_1": {
+        "nanos": [
+          56579,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          174,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-macro-definition_0": {
+        "nanos": [
+          35749,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          50,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-macro-params_0": {
+        "nanos": [
+          277421,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1593,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_0": {
+        "nanos": [
+          128954,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          323,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_1": {
+        "nanos": [
+          78632,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          200,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_2": {
+        "nanos": [
+          187224,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          864,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_3": {
+        "nanos": [
+          132878,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          350,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_4": {
+        "nanos": [
+          10833,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          25,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-other_5": {
+        "nanos": [
+          52327,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          150,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-data-structures_0": {
+        "nanos": [
+          958,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-data-structures_2": {
+        "nanos": [
+          2001,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-global_0": {
+        "nanos": [
+          3085,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          9,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-global_1": {
+        "nanos": [
+          64876,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          22,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-global_2": {
+        "nanos": [
+          5957,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          25,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-statements_0": {
+        "nanos": [
+          123794,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          296,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-statements_1": {
+        "nanos": [
+          876381,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          384,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-disabled-statements_2": {
+        "nanos": [
+          229125,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          821,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-data-structures_0": {
+        "nanos": [
+          1959,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-data-structures_1": {
+        "nanos": [
+          1209,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          5,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-data-structures_2": {
+        "nanos": [
+          35084,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-global_0": {
+        "nanos": [
+          1666,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          5,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-global_1": {
+        "nanos": [
+          999,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-global_2": {
+        "nanos": [
+          52916,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          21,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-statements_0": {
+        "nanos": [
+          101928,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          240,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-statements_1": {
+        "nanos": [
+          57549,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          288,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-enabled-statements_2": {
+        "nanos": [
+          2811662,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1056,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-other-global_0": {
+        "nanos": [
+          2499,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-rule-other-statements_0": {
+        "nanos": [
+          316130,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          688,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_preprocessor-workaround-eat-macro-before-identifier_0": {
+        "nanos": [
+          19209,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          12,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_template_0": {
+        "nanos": [
+          9042,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          39,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_template_1": {
+        "nanos": [
+          706666,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          162,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_template_2": {
+        "nanos": [
+          25082,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          58,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_template_3": {
+        "nanos": [
+          27001,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          5,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_typedef_0": {
+        "nanos": [
+          5575920,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          838,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_types-parens_0": {
+        "nanos": [
+          82917,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          53,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_unique-strings_0": {
+        "nanos": [
+          40034,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          75,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::#anon_using-namespace_0": {
+        "nanos": [
+          72828,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          100,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::__main": {
+        "nanos": [
+          8778857,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3294,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::__start": {
+        "nanos": [
+          6291,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::annotation-body": {
+        "nanos": [
+          754297,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          375,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::attribute_list": {
+        "nanos": [
+          466499,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          675,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::constant-value": {
+        "nanos": [
+          1187079,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          512,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::contract-condition": {
+        "nanos": [
+          1123,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::contract-result-name": {
+        "nanos": [
+          2834,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures": {
+        "nanos": [
+          480920,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          345,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-class-definition": {
+        "nanos": [
+          36084,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          42,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-class-definition-after-identifier": {
+        "nanos": [
+          20919,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          74,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-concept-definition": {
+        "nanos": [
+          3625,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-enum-definition": {
+        "nanos": [
+          117425,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          162,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-enum-definition-after-identifier": {
+        "nanos": [
+          109078,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          219,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-function-identifier": {
+        "nanos": [
+          41957,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          64,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-function-identifier-generic": {
+        "nanos": [
+          1875,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-maybe-method": {
+        "nanos": [
+          656922,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          185,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-modifier": {
+        "nanos": [
+          810444,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          272,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-modifier-friend": {
+        "nanos": [
+          22917,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-struct-definition": {
+        "nanos": [
+          148503,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          164,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-struct-definition-after-identifier": {
+        "nanos": [
+          101124,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          210,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-type": {
+        "nanos": [
+          574831,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          372,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-union-definition": {
+        "nanos": [
+          8208,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          6,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::data-structures-union-definition-after-identifier": {
+        "nanos": [
+          3877,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          14,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::function-definition-body": {
+        "nanos": [
+          58792,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          183,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::function-definition-continue": {
+        "nanos": [
+          207473,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          667,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::function-definition-params": {
+        "nanos": [
+          138801,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          363,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::function-definition-trailing-return": {
+        "nanos": [
+          18582,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          15,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-block-comment-after": {
+        "nanos": [
+          483925,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          977,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-function-identifier": {
+        "nanos": [
+          484915,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          682,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-function-identifier-generic": {
+        "nanos": [
+          11457,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          19,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-maybe-function": {
+        "nanos": [
+          1717746,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          275,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-modifier": {
+        "nanos": [
+          161379,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          403,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::global-type": {
+        "nanos": [
+          1071331,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          573,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::inside-contract-condition": {
+        "nanos": [
+          26251,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          16,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::members-after-accessor-junction": {
+        "nanos": [
+          3660120,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8688,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::members-inside-function-call": {
+        "nanos": [
+          4292019,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          4297,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::method-definition-body": {
+        "nanos": [
+          9083,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          33,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::method-definition-continue": {
+        "nanos": [
+          75456,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          157,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::method-definition-params": {
+        "nanos": [
+          17704,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          89,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::method-definition-trailing-return": {
+        "nanos": [
+          17959,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          12,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::module-identifier": {
+        "nanos": [
+          5457,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          27,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-block-finish-global": {
+        "nanos": [
+          18541,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          8,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-block-finish-if-branch-statements": {
+        "nanos": [
+          2791200,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          939,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-block-finish-statements": {
+        "nanos": [
+          3940501,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1139,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-block-if-branch-global": {
+        "nanos": [
+          2374,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          3,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-block-if-branch-statements": {
+        "nanos": [
+          990949,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          567,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-elif-else-branch-global": {
+        "nanos": [
+          42084,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          16,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-elif-else-branch-statements": {
+        "nanos": [
+          3592323,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1004,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-if-branch-function-call": {
+        "nanos": [
+          169830,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          248,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-if-branch-function-call-arguments": {
+        "nanos": [
+          517530,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          328,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-if-branch-function-call-arguments-finish": {
+        "nanos": [
+          1455467,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          441,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-if-branch-global": {
+        "nanos": [
+          255161,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          62,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-if-branch-statements": {
+        "nanos": [
+          20134657,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          5133,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-macro-definition": {
+        "nanos": [
+          5293802,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1128,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C++::preprocessor-macro-params": {
+        "nanos": [
+          174487,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          541,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_parens_0": {
+        "nanos": [
+          24626,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          25,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_preprocessor-comments_0": {
+        "nanos": [
+          362252,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          562,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_preprocessor-comments_1": {
+        "nanos": [
+          94828,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          145,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_preprocessor-convention-ignore-uppercase-calls-without-semicolon_0": {
+        "nanos": [
+          788407,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          326,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_preprocessor-disabled_0": {
+        "nanos": [
+          116429,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          195,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_strings_0": {
+        "nanos": [
+          1807111,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          5341,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_strings_1": {
+        "nanos": [
+          690260,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          2600,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::#anon_types-parens_0": {
+        "nanos": [
+          1023036,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          550,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::block-comment-body": {
+        "nanos": [
+          17192207,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          57921,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::block-comment-documentation-body": {
+        "nanos": [
+          942044,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          1849,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::line-comment-body": {
+        "nanos": [
+          5105952,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          7570,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "C::line-comment-documentation-body": {
+        "nanos": [
+          60581,
+          0,
+          0,
+          0,
+          0
+        ],
+        "queries": [
+          100,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "render_seconds": 0.53910703,
+    "rust_allocated_bytes": 1973722693,
+    "rust_allocations": 1534190
+  },
+  "seconds": 2.323410584,
+  "teardown_wait_ms": 200
+}
