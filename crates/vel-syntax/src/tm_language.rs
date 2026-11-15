@@ -299,3 +299,13 @@ fn backrefs(regex: &str) -> bool {
     }
     false
 }
+
+/// Whether a directory-walk entry is a regular file or a symlink that resolves to one.
+/// Users link packages into `Packages/`, and the editor may stage definitions as file
+/// symlinks, so symlinked definitions must load like regular files; directories (even
+/// ones named like `*.tmLanguage`) and dangling links are skipped.
+pub(crate) fn is_file_entry(entry: &walkdir::DirEntry) -> bool {
+    let kind = entry.file_type();
+    kind.is_file()
+        || (kind.is_symlink() && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()))
+}

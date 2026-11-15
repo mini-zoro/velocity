@@ -574,7 +574,7 @@ impl SyntaxSetBuilder {
         for entry in walkdir::WalkDir::new(folder).sort_by(|a, b| a.file_name().cmp(b.file_name()))
         {
             let entry = entry.map_err(|e| LoadingError::WalkDir(Box::new(e)))?;
-            if entry.file_type().is_file()
+            if crate::tm_language::is_file_entry(&entry)
                 && (entry
                     .path()
                     .extension()

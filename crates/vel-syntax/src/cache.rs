@@ -22,7 +22,7 @@ impl SyntaxSet {
         let mut paths = Vec::new();
         for e in walkdir::WalkDir::new(root) {
             let e = e.map_err(|e| LoadingError::WalkDir(Box::new(e)))?;
-            if e.file_type().is_file()
+            if crate::tm_language::is_file_entry(&e)
                 && (e.path().extension().is_some_and(|x| x == "sublime-syntax")
                     || crate::tm_language::is_tm_language(e.path()))
             {
