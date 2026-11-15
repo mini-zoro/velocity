@@ -1,0 +1,10 @@
+{
+  "name": "Velocity Notes",
+  "scopeName": "source.velocity-notes",
+  "fileTypes": ["vnote"],
+  "patterns": [
+    {"match": "\\bTODO\\b", "name": "keyword.other.todo.velocity-notes"},
+    {"begin": "\"", "end": "\"", "name": "string.quoted.double.velocity-notes"},
+    {"match": "#.*$", "name": "comment.line.number-sign.velocity-notes"}
+  ]
+}

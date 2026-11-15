@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 10. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 11. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -169,3 +169,17 @@ errors use annotations. Read-only HTML sheets retain their name/content through 
 `--headless-theme-ui` measures a 2 KiB popup, 200 visible annotations and dark/light switching;
 `--bench-theme-ui` is the bounded automatic native counterpart. See [ROUND10.md](ROUND10.md),
 RUNBOOK.md and MANUAL_TEST.md for evidence boundaries, exact commands and pending native checks.
+
+
+Vintage is off by default. Enable `vintage_enabled` in User preferences (or Ctrl+Alt+V in a view);
+`vintage_start_in_command_mode`, `vintage_ctrl_keys`, and `vintage_use_clipboard` default to false.
+Vi modes, counts, operators, multiple carets, registers/macros/dot and engine undo now reach the
+editor. The status bar and block caret show mode/prefixes; Ex and search use the input panel.
+Insert-mode IME retains native preedit and commits once through the engine. See [ROUND11.md](ROUND11.md)
+for host completions, file behavior and engine compatibility limits.
+
+User YAML/XML/JSON TextMate grammars load in place from `<data>/Packages/**` after the bundled
+root using `load_cached_roots`, with existing Installed Packages archive support. Editing, adding
+or deleting definitions reloads open views, detection, the syntax picker and palette without
+replacing unsaved text. Plain Text remains virtual; corrupt/unwritable caches rebuild or use
+uncached loading. Original sample grammars are in `fixtures/user-grammars`.

@@ -3330,6 +3330,8 @@ dependencies = [
  "vel-text",
  "vel-theme",
  "vel-ui",
+ "vel-vintage",
+ "zip",
 ]
 
 [[package]]

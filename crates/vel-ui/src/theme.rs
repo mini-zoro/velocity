@@ -108,6 +108,7 @@ struct State {
     alphas: [Option<Alpha>; 5],
     key: Option<PaintKey>,
     active: bool,
+    settled: Option<Style>,
 }
 type PaintKey = (usize, u64, u32, u32, bool);
 #[derive(Debug)]
@@ -115,6 +116,13 @@ struct ThemeSettings {
     values: Settings,
     scale: f32,
     root: f32,
+    animations: bool,
+}
+#[derive(Debug)]
+struct WidgetStyle {
+    input: Prepared,
+    settings: u64,
+    key: PaintKey,
     animations: bool,
 }
 #[derive(Debug)]
@@ -279,6 +287,7 @@ pub struct ThemeUi {
     misses: usize,
     unconditional_calls: usize,
     prepared: fnv::FnvHashMap<PaintKey, Prepared>,
+    widgets: fnv::FnvHashMap<u64, WidgetStyle>,
     now: Instant,
     origin: Instant,
     active: bool,
@@ -320,6 +329,7 @@ impl ThemeUi {
             misses: 0,
             unconditional_calls: 0,
             prepared: Default::default(),
+            widgets: Default::default(),
             now,
             origin: now,
             active: false,
@@ -339,6 +349,7 @@ impl ThemeUi {
         self.revision += 1;
         self.states.clear();
         self.prepared.clear();
+        self.widgets.clear();
         self.active = false;
     }
     /// Installs the same resource graph with settings-dependent rules removed. Guards must cover
@@ -355,10 +366,11 @@ impl ThemeUi {
             guards: by_class,
         });
         self.prepared.clear();
+        self.widgets.clear();
         self.states.clear();
     }
     /// Supplies selector setting names collected from all loaded theme fragments. Projection is
-    /// cached per immutable settings value identity; every widget still calls the engine resolver.
+    /// cached per immutable settings value identity; unchanged widget inputs reuse their paint style.
     pub fn set_setting_keys(&mut self, mut keys: Vec<String>) {
         keys.extend(["ui_scale", "ui_font_size", "animation_enabled"].map(str::to_owned));
         keys.sort();
@@ -366,6 +378,7 @@ impl ThemeUi {
         self.setting_keys = Some(keys);
         self.settings.clear();
         self.prepared.clear();
+        self.widgets.clear();
         self.resolver.clear();
     }
     /// Sets the monotonic frame clock. Reading a cached style never restarts a transition.
@@ -405,8 +418,18 @@ impl ThemeUi {
             .entry(name.trim_start_matches("Packages/").into())
             .or_default()[image.scale.saturating_sub(1).min(2) as usize] = Some(texture);
     }
-    /// Resolves a stack-backed ancestor path each frame, using the engine's allocation-free cache.
+    /// Resolves changed widget inputs; unchanged paths/settings reuse paint data while
+    /// transitions and texture sequences continue sampling the current frame clock.
     pub fn style(&mut self, id: u64, path: &ElementPath<'_>, settings: &Settings) -> Style {
+        if let Some(cached) = self.widgets.get(&id)
+            && cached.settings == settings.cache_identity()
+            && cached.input.matches(path)
+        {
+            let (style, key, enabled) = (cached.input.style.clone(), cached.key, cached.animations);
+            return self.animate(id, style, key, enabled);
+        }
+        let input_path = *path;
+        let input_settings = settings.cache_identity();
         let platform = if cfg!(target_os = "macos") {
             Platform::Mac
         } else if cfg!(target_os = "windows") {
@@ -475,8 +498,19 @@ impl ThemeUi {
             root.to_bits(),
             selected,
         );
+        // A resolver eviction may recycle an address held by an older widget input.
+        // Preserve its transition history, but sample the new style even if PaintKey collides.
+        if self
+            .widgets
+            .get(&id)
+            .is_some_and(|cached| cached.key == key)
+            && let Some(state) = self.states.get_mut(&id)
+        {
+            state.key = None;
+        }
         if self.prepared.len() > 4096 {
             self.prepared.clear();
+            self.widgets.clear();
             self.states.clear();
         }
         let cached = self.prepared.entry(key).or_insert_with(|| {
@@ -510,14 +544,30 @@ impl ThemeUi {
                 ),
             );
         }
-        let mut style = cached.style.clone();
+        let style = cached.style.clone();
         let enabled = snapshot.animations;
+        if self.widgets.len() >= 4096 {
+            self.widgets.clear();
+            self.states.clear();
+        }
+        self.widgets.insert(
+            id,
+            WidgetStyle {
+                input: Prepared::new(&input_path, style.clone()),
+                settings: input_settings,
+                key,
+                animations: enabled,
+            },
+        );
+        self.animate(id, style, key, enabled)
+    }
+    fn animate(&mut self, id: u64, mut style: Style, key: PaintKey, enabled: bool) -> Style {
         if self.states.len() > 4096 {
             self.states.clear();
         }
         let state = self.states.entry(id).or_default();
         if state.key == Some(key) && !state.active {
-            return style;
+            return state.settled.as_ref().unwrap_or(&style).clone();
         }
         let mut active = false;
         let count = style.layer_count;
@@ -573,6 +623,7 @@ impl ThemeUi {
         }
         state.key = Some(key);
         state.active = active;
+        state.settled = (!active).then(|| style.clone());
         self.active |= active;
         style
     }
@@ -1053,6 +1104,88 @@ mod tests {
         assert!(fast.cache_stats()[2] > 0 && fast.cache_stats()[2] < fast.cache_stats()[0]);
     }
     #[test]
+    fn recycled_resolver_address_cannot_reuse_a_settled_widget_style() {
+        let palette = Palette::default();
+        let source =
+            r##"{"rules":[{"class":"button","fg":"#ff0000"},{"class":"label","fg":"#00ff00"}]}"##;
+        let mut theme = ThemeUi::new(Arc::new(Theme::parse(source, &palette).unwrap()), palette);
+        let settings = Settings::default();
+        let button = ElementPath(&[Element::new("button", &[])]);
+        let label = ElementPath(&[Element::new("label", &[])]);
+        theme.style(1, &button, &settings);
+        theme.style(2, &label, &settings);
+        // Model the address of button's evicted engine style being reused by label's style.
+        let recycled = theme.widgets[&2].key;
+        theme.widgets.get_mut(&1).unwrap().key = recycled;
+        theme.states.get_mut(&1).unwrap().key = Some(recycled);
+        assert_eq!(
+            theme.style(1, &label, &settings).foreground,
+            rgba(Color::rgb(0, 255, 0))
+        );
+        for id in 3..=4096 {
+            theme.style(id, &button, &settings);
+        }
+        theme.style(1, &button, &settings);
+        assert!(
+            theme.states.keys().all(|id| theme.widgets.contains_key(id)),
+            "capacity eviction must discard states whose input paths are no longer retained"
+        );
+    }
+    #[test]
+    fn retained_widgets_invalidate_on_ancestor_settings_and_theme_changes() {
+        let source = r##"{"rules":[
+            {"class":"label","fg":"#112233"},
+            {"class":"label","parents":[{"class":"row","attributes":["selected"]}],"fg":"#ff0000"},
+            {"class":"label","settings":["bright"],"fg":"#ffffff"}
+        ]}"##;
+        let palette = Palette::default();
+        let compiled = Arc::new(Theme::parse(source, &palette).unwrap());
+        let mut retained = ThemeUi::new(compiled.clone(), palette.clone());
+        let mut reference = ThemeUi::new(compiled, palette.clone());
+        let mut settings = Settings::default();
+        for selected in [false, true, false] {
+            for bright in [false, true, false] {
+                settings.set(
+                    vel_config::settings::Layer::User,
+                    "bright",
+                    serde_json::json!(bright),
+                );
+                let path = ElementPath(&[
+                    Element::new("window", &[]),
+                    Element::new("row", if selected { &["selected"] } else { &[] }),
+                    Element::new("label", &[]),
+                ]);
+                for _ in 0..3 {
+                    reference.widgets.clear();
+                    assert_eq!(
+                        format!("{:?}", retained.style(7, &path, &settings)),
+                        format!("{:?}", reference.style(7, &path, &settings))
+                    );
+                }
+            }
+        }
+        // Replacing resources must invalidate even when settings and widget identity are retained.
+        let replacement = Arc::new(
+            Theme::parse(
+                r##"{"rules":[{"class":"label","fg":"#00ff00"}]}"##,
+                &palette,
+            )
+            .unwrap(),
+        );
+        retained.replace(replacement, palette);
+        let path = ElementPath(&[Element::new("label", &[])]);
+        assert_eq!(
+            retained.style(7, &path, &settings).foreground,
+            rgba(Color::rgb(0, 255, 0))
+        );
+        let calls = retained.cache_stats()[0];
+        retained.style(7, &path, &settings);
+        assert_eq!(retained.cache_stats()[0], calls);
+        retained.set_setting_keys(vec!["bright".into()]);
+        retained.style(7, &path, &settings);
+        assert_eq!(retained.cache_stats()[0], calls + 1);
+    }
+    #[test]
     fn cached_styles_keep_continuous_transitions_and_stop_at_the_endpoint() {
         let source = r##"{"rules":[{"class":"button","layer0.tint":"#000000","layer0.opacity":1},{"class":"button","attributes":["hover"],"layer0.tint":{"target":"#ffffff","speed":5,"interpolation":"smoothstep"}}]}"##;
         let palette = Palette::default();
@@ -1071,6 +1204,12 @@ mod tests {
         theme.begin_frame(now + std::time::Duration::from_millis(200));
         let end = theme.style(1, &ElementPath(&hover), &settings);
         assert_eq!(end.layers[0].color, [1.; 4]);
+        assert!(!theme.animating());
+        theme.begin_frame(now + std::time::Duration::from_millis(300));
+        assert_eq!(
+            theme.style(1, &ElementPath(&hover), &settings).layers[0].color,
+            [1.; 4]
+        );
         assert!(!theme.animating());
         let mut disabled = settings.clone();
         disabled.set(

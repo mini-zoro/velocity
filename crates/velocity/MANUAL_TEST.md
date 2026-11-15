@@ -1,3 +1,41 @@
+# Round 11: Vintage and user grammar review
+
+Run outside the sandbox on an awake, unlocked display:
+
+```sh
+cd /Users/zoro/dev/velocity-lane-a
+cargo build --release -p velocity
+zsh crates/velocity/scripts/review-round11-gui.zsh
+```
+
+The script freezes the binary, records its hash, creates an isolated profile with both original
+TextMate fixtures and enables Vintage in command mode. It prints the profile/grammar/log paths.
+`--prepare-only` creates those fixtures without starting a native application.
+
+- [ ] See COMMAND in the status bar and a readable block caret. Try `2d3w`, `u`, `gg`, `G`,
+  `f`/`;`, `ciw`, `v`, `V`, Ctrl+V, `>`, registers, `q`/`@` and `.`. Pending prefixes/counts
+  and visual line/block selections should update on screen. Confirm multiple carets still work.
+- [ ] Press `i`, activate Pinyin/Japanese, compose and choose candidates. Preedit and candidate
+  geometry should match normal editing; Escape after committing returns to command mode.
+  In command mode, `h/j/k/l` should act immediately with the input method still selected.
+- [ ] Use `/one`, `?one`, `n` and `N`; Escape cancels a prompt without editing. Try `d/three`.
+  Use the input panel's arrows, clipboard and IME. Open Find or another tab during a prompt.
+- [ ] In `editor.rs`, reindent the second line with `==`; `u` restores indentation in one step.
+  Verify clipboard `yw`/`p` using another application. Check `:w`, `:wq`, `:q`, `:q!`,
+  `:e`, `:e!` and `:w <temporary path>` with dirty/save-cancel/failure paths.
+- [ ] Ctrl+Alt+V disables/re-enables Vintage for the active view. Edit User preferences while
+  open to test all four settings. Turning it off closes a vi prompt and restores normal typing.
+  Reopen using a fresh profile to confirm Vintage is off by default.
+- [ ] `notes.vnote` detects Velocity Notes; `xml-notes.vxnote` detects Velocity XML Notes.
+  Check TODO/string/comment colors, syntax picker and palette entries. Edit the printed JSON
+  grammar's name/rules, add another nested grammar, then remove it: open views and choices
+  should reload while retaining unsaved edits. Try a malformed definition and read-only cache.
+- [ ] Test split/clone views, Retina scaling, status clipping and Metal validation. Record the
+  display, input source and input JSONL path with observed results. Native rows remain unverified
+  until a human runs them; the headless tests initialize no window server or GPU.
+
+Earlier checklists follow.
+
 # Native AppKit NSTextInputClient manual checklist (P1)
 
 Round-nine tester status: **Chinese IME confirmed working by the human tester**. Hot Exit is

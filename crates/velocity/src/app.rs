@@ -752,9 +752,23 @@ impl App {
         let active = self.workspace.active;
         match name {
             "new_file" => self.workspace.new_file()?,
-            "open_file" => self.workspace.open(crate::cli::FileLocation::parse(
-                args["file"].as_str().ok_or("open_file needs file")?,
-            ))?,
+            "open_file" => {
+                if let Some(file) = args["file"].as_str() {
+                    self.workspace.open(crate::cli::FileLocation::parse(file))?;
+                } else if (args["force"].as_bool().unwrap_or(false) || self.can_close(w, active))
+                    && let Some(path) = self.workspace.tabs[active].path.clone()
+                {
+                    let fallback = self
+                        .workspace
+                        .editor()
+                        .preferences
+                        .fallback_encoding
+                        .clone();
+                    self.workspace.tabs[active].loading =
+                        Some(vel_fileio::load_background(path, fallback)?);
+                    self.workspace.tabs[active].editor.read_only = true;
+                }
+            }
             "prompt_open_file" => {
                 for path in w.open_files() {
                     self.workspace.open(crate::cli::FileLocation {
@@ -764,8 +778,24 @@ impl App {
                     })?;
                 }
             }
-            "save" => {
-                self.save_tab(w, active, false);
+            "save" | "save_and_close" => {
+                let saved = if let Some(file) = args["file"].as_str() {
+                    match self
+                        .workspace
+                        .save(active, Some(std::path::PathBuf::from(file)))
+                    {
+                        Ok(()) => true,
+                        Err(error) => {
+                            self.show_error(w, &error);
+                            false
+                        }
+                    }
+                } else {
+                    self.save_tab(w, active, false)
+                };
+                if saved && name == "save_and_close" {
+                    self.workspace.close(active)?;
+                }
             }
             "prompt_save_as" => {
                 self.save_tab(w, active, true);
@@ -778,7 +808,7 @@ impl App {
                 }
             }
             "close" | "close_file" => {
-                if self.can_close(w, active) {
+                if args["force"].as_bool().unwrap_or(false) || self.can_close(w, active) {
                     let last = self.workspace.tabs.len() == 1;
                     self.workspace.close(active)?;
                     if last
@@ -1706,27 +1736,36 @@ impl AppHandler for App {
             return false;
         }
         let viewport = self.viewport();
-        match self.panels.key(&mut self.workspace, &key, viewport) {
-            Ok((true, invocation)) => {
-                if let Some(invocation) = invocation {
-                    self.run_named(w, &invocation.command, &invocation.args);
-                }
-                self.changed(w, event.received, true);
-                return true;
-            }
-            Ok((false, _)) => {}
+        if self.workspace.editor().vintage.is_some() {
+            let first = (self.view.scroll_y / self.view.line_height).max(0.) as usize;
+            let (top, rows) = {
+                let layout = self.workspace.editor().layout.borrow();
+                let top = layout.locate(first).0;
+                let last = layout.locate(first + self.view.rows().saturating_sub(1)).0;
+                (top, last.saturating_sub(top) + 1)
+            };
+            self.workspace
+                .editor_mut()
+                .vintage
+                .as_mut()
+                .expect("enabled")
+                .engine
+                .set_viewport(top, rows);
+            self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
+        }
+        let resolution = match self.panels.resolve_key(&mut self.workspace, &key, viewport) {
+            Ok(resolution) => resolution,
             Err(error) => {
                 self.show_error(w, &error);
                 return true;
             }
-        }
-        if self.panels.input().is_some() && key.modifiers & 11 == 0 && key.name.chars().count() == 1
-        {
-            return false;
-        }
-        match self.workspace.editor_mut().resolve_key(&key) {
+        };
+        match resolution {
             vel_config::keymap::Resolution::Unbound => false,
-            vel_config::keymap::Resolution::Pending => true,
+            vel_config::keymap::Resolution::Pending => {
+                self.changed(w, event.received, true);
+                true
+            }
             vel_config::keymap::Resolution::Command(invocation) => {
                 self.run_named(w, &invocation.command, &invocation.args);
                 self.input_at = Some(event.received);

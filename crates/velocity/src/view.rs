@@ -38,8 +38,15 @@ struct CachedLine {
     units: Arc<[CachedUnit]>,
 }
 
+/// Optional aggregate CPU phases for the headless review profiler.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct SceneProfile {
+    frames: usize,
+    total_ms: [f64; 9],
+}
 #[derive(Debug)]
 pub struct View {
+    pub profile: Option<SceneProfile>,
     units: HashMap<u64, CachedLine>,
     pub find_matches: Vec<Range<usize>>,
     pub size: Size,
@@ -71,6 +78,7 @@ impl View {
     }
     pub fn new(size: Size, cell: f64, ascent: f64) -> Self {
         Self {
+            profile: std::env::var_os("VELOCITY_REVIEW_PROFILE").map(|_| SceneProfile::default()),
             units: HashMap::new(),
             find_matches: Vec::new(),
             size,
@@ -473,6 +481,7 @@ impl View {
         Ok(false)
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
+        let mut phase = self.profile.as_ref().map(|_| Instant::now());
         e.theme.borrow().metrics.poll_images();
         e.theme.borrow_mut().begin_frame(Instant::now());
         e.html.borrow_mut().begin_frame();
@@ -484,6 +493,7 @@ impl View {
         }
         e.annotations.borrow_mut().poll();
         self.apply_style(e);
+        self.profile_step(&mut phase, 0);
         let first = (self.scroll_y / self.line_height).floor().max(0.) as usize;
         let last = (first + self.rows() + 2).min(e.layout.borrow().total());
         if e.marked.is_none() {
@@ -516,6 +526,7 @@ impl View {
                 }
             }
         }
+        self.profile_step(&mut phase, 1);
         let language = e.language.borrow();
         let language = language.as_ref();
         let scheme = language.map_or_else(|| fallback_scheme(self.appearance), |l| &*l.scheme);
@@ -605,11 +616,26 @@ impl View {
             .and_then(vel_config::Value::as_array);
         let no_bold = font_options.is_some_and(|a| a.iter().any(|s| s == "no_bold"));
         let no_italic = font_options.is_some_and(|a| a.iter().any(|s| s == "no_italic"));
+        let line_padding_top = e.settings.number("line_padding_top", 0.).max(0.);
+        let indent_guides = e.settings.bool("draw_indent_guides", true);
+        let guide_options = e
+            .settings
+            .get("indent_guide_options")
+            .and_then(vel_config::Value::as_array);
+        let caret_indent = if indent_guides {
+            vel_syntax::indent::indentation(
+                &e.text.line(caret_row).to_string(),
+                e.preferences.tab_size,
+            )
+        } else {
+            0
+        };
         let annotations = e.annotations.borrow();
         let publication = annotations
             .current
             .as_ref()
             .filter(|p| p.identity.1.0 == e.revision && e.marked.is_none());
+        self.profile_step(&mut phase, 2);
         for visual in first..last {
             if let Some((boundary, offset)) = layout.inline_at(visual) {
                 if let Some(p) = publication
@@ -687,8 +713,9 @@ impl View {
             let line = e.text.line(row).to_string();
             let start = e.text.line_to_byte(row);
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
-            let baseline = y + self.ascent + 3. + e.settings.number("line_padding_top", 0.).max(0.);
-            if e.preferences.highlight_line && caret_visuals.contains(&visual) {
+            let baseline = y + self.ascent + 3. + line_padding_top;
+            if (e.preferences.highlight_line || e.command_mode()) && caret_visuals.contains(&visual)
+            {
                 fill(
                     &mut layer,
                     Rect {
@@ -953,17 +980,10 @@ impl View {
                     );
                 }
             }
-            if e.settings.bool("draw_indent_guides", true) {
+            if indent_guides {
                 let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
                 let columns =
                     crate::editor::cells_with_tab(&line[..leading], e.preferences.tab_size);
-                let caret_line = e.text.line(caret_row).to_string();
-                let caret_indent =
-                    vel_syntax::indent::indentation(&caret_line, e.preferences.tab_size);
-                let guide_options = e
-                    .settings
-                    .get("indent_guide_options")
-                    .and_then(vel_config::Value::as_array);
                 for col in (e.preferences.tab_size..=columns).step_by(e.preferences.tab_size) {
                     let active = col == caret_indent;
                     let enabled = guide_options.is_none_or(|o| {
@@ -1143,6 +1163,7 @@ impl View {
             }
         }
         drop(layout);
+        self.profile_step(&mut phase, 3);
         self.paint_brackets(e, language, scheme, clip, &mut layer);
         let alpha = caret_alpha(
             e.settings.string("caret_style", "solid"),
@@ -1155,7 +1176,7 @@ impl View {
             }
             let mut caret = self.rect_at(e, r.b);
             caret.width += e.settings.number("caret_extra_width", 0.).max(0.);
-            if e.preferences.caret_style == "block" {
+            if e.command_mode() || e.preferences.caret_style == "block" {
                 caret.width = self.cell;
             } else if e.preferences.caret_style == "underline" {
                 caret.y += caret.height - 2.;
@@ -1163,7 +1184,7 @@ impl View {
                 caret.width = self.cell;
             }
             let mut color = global("caret");
-            color[3] *= alpha;
+            color[3] *= alpha * if e.command_mode() { 0.45 } else { 1. };
             if self.focused {
                 fill(&mut carets, caret, clip, color);
             }
@@ -1172,7 +1193,9 @@ impl View {
             minimap: true,
             ..Layer::default()
         };
+        self.profile_step(&mut phase, 4);
         self.paint_minimap(e, language, scheme, &mut minimap);
+        self.profile_step(&mut phase, 5);
         let layers = vec![layer, carets, minimap];
         let mut scene = Scene {
             background: rgba(default.background),
@@ -1180,10 +1203,24 @@ impl View {
         };
         drop(annotations);
         self.paint_scrollbar(e, &mut scene);
+        self.profile_step(&mut phase, 6);
         e.completion.paint(e, self, &mut scene);
+        self.profile_step(&mut phase, 7);
         crate::html_ui::paint(e, self, &mut scene);
         e.annotations.borrow_mut().flush();
+        self.profile_step(&mut phase, 8);
+        if let Some(profile) = &mut self.profile {
+            profile.frames += 1;
+        }
         scene
+    }
+    fn profile_step(&mut self, phase: &mut Option<Instant>, index: usize) {
+        if let Some(at) = phase {
+            let now = Instant::now();
+            self.profile.as_mut().expect("profiling enabled").total_ms[index] +=
+                now.duration_since(*at).as_secs_f64() * 1000.;
+            *at = now;
+        }
     }
     fn paint_scrollbar(&mut self, e: &Editor, scene: &mut Scene) {
         let ui_scale = vel_ui::theme::ui_scale(&e.settings);

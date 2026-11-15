@@ -1,3 +1,61 @@
+<!-- ROUND11-RESULTS-BEGIN -->
+# Round 11: typing gate, Vintage and user TextMate grammars
+
+The final binary meets the spec's upper-confidence-bound gate. Each comparison uses the same
+round-nine `/tmp/velocity-round10-baseline/velocity`, ten alternating AB/BA process pairs and
+500 timed keymap/transaction/CPU scenes per process, with review UI enabled and zero synthetic
+index words. The mandatory gate passed before Vintage/grammar feature work began.
+
+| State vs round 9 | Median process p50 | Median paired p50 change | Paired 95% CI | Ratio of medians / paired 95% CI |
+| --- | --- | --- | --- | --- |
+| Merge state before fix | 0.528583 → 0.548781 ms | +6.89% | +3.90%…+9.32% | +3.82% / +1.18%…+9.23% |
+| Mandatory gate before feature work | 0.473251 → 0.410500 ms | -13.11% | -14.10%…-12.06% | -13.26% / -13.83%…-12.06% |
+| Finished round-11 binary | 0.474135 → 0.405979 ms | -13.83% | -15.28%…-13.26% | -14.37% / -15.37%…-13.21% |
+
+The bootstrap resamples process pairs 20,000 times; individual key samples are not treated as
+independent processes. The runner gates both p50 upper bounds at +5%. No lane-A compilation,
+tests or other benchmark ran during a series. All 40,000 typing samples (including the retained pre-capacity-guard validation series), definition samples,
+process quantiles, binary/source hashes and diagnostic phases are in
+[timings-round11.json](timings-round11.json). Raw files and frozen executables:
+`/tmp/velocity-round11/{before,gate,final,final-capacity}`. The finished binary is `final-capacity`;
+the earlier `final` series is retained as additional evidence. The regression reproduction used the clean merge
+state (`3f4f4cb`, application code `7c84f61`). No samples or timing outliers were dropped.
+
+The optimization retains widget styles for unchanged full paths/settings while continuing
+animation sampling and theme invalidation; it also hoists scene-invariant line settings.
+Existing scene goldens pass unchanged. A deterministic test covers recycled resolver-address
+collisions. Separate component diagnostics and the exact reproduction commands are in
+[ROUND11.md](ROUND11.md) and [RUNBOOK.md](RUNBOOK.md).
+
+Vintage is off by default and enabled with `vintage_enabled`; the three public Vintage options
+are supported. The shared native/headless route handles vi edits, pass-through keys and registry
+requests, multiple carets, grouped vi undo/dot/macros, block/visual carets, mode/prefix status,
+input-panel Ex/search and asynchronous reindent completion. Insert-mode IME preedit stays
+transient; command mode bypasses document IME input. New input supersedes unfinished reindent.
+User XML/JSON TextMate and YAML grammars load from ordered roots, plus existing archive resources,
+and reload detection, syntax picker/palette and open views without replacing unsaved text.
+
+Final CPU theme p95 budgets: popup 0.208 ms / ≤2 ms,
+200 annotations 0.774 ms / ≤2 ms,
+theme switch 0.997 ms / ≤50 ms.
+
+Verification: workspace fmt, strict all-targets clippy, `cargo test --workspace --release`
+(**442 passed, zero failed/ignored**), strict workspace rustdoc, release build, shell/Python
+syntax checks and the GUI script's preparation-only path all pass. Fresh/read-only/corrupt
+profiles, corrupted/unavailable grammar caches, live settings/grammar changes and IME are
+covered headlessly. All changes stay in lane-A crates plus Cargo.lock; no commit was made.
+
+Native visual/IME/clipboard/dialog/Metal behavior remains for human review. No native result is
+inferred from CPU evidence. Outside the sandbox, run:
+
+```sh
+zsh crates/velocity/scripts/review-round11-gui.zsh
+```
+
+Follow [MANUAL_TEST.md](MANUAL_TEST.md)'s Round 11 checklist; engine compatibility limits are in
+ROUND11.md and vel-vintage/COVERAGE.md. Earlier reports follow.
+<!-- ROUND11-RESULTS-END -->
+
 <!-- ROUND10-RESULTS-BEGIN -->
 # Round 10 results: themed widgets and minihtml
 

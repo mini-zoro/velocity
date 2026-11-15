@@ -66,6 +66,7 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    vintage_prompt: Option<u64>,
     pub ui_scale: f64,
     pub review: crate::review_ui::ReviewUi,
     git_tree_key: Vec<(PathBuf, u64)>,
@@ -170,6 +171,7 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            vintage_prompt: None,
             ui_scale: 1.,
             review: Default::default(),
             git_tree_key: Vec::new(),
@@ -527,6 +529,89 @@ impl Panels {
         self.side_selected = self
             .side_selected
             .min(self.side_rows.len().saturating_sub(1));
+    }
+    /// Shared native/headless keyboard route: focused widgets, Vintage, then the keymap.
+    pub fn resolve_key(
+        &mut self,
+        workspace: &mut Workspace,
+        key: &Key,
+        viewport: Range<usize>,
+    ) -> Result<vel_config::keymap::Resolution, String> {
+        use vel_config::keymap::Resolution;
+        if self.input().is_some_and(Input::composing) {
+            return Ok(Resolution::Unbound);
+        }
+        let (handled, invocation) = self.key(workspace, key, viewport.clone())?;
+        if handled {
+            return Ok(invocation.map_or(Resolution::Pending, Resolution::Command));
+        }
+        if self.input().is_some()
+            && key.modifiers & 11 == 0
+            && (key.name.chars().count() == 1 || key.name == "space")
+        {
+            return Ok(Resolution::Unbound);
+        }
+        let result = workspace.editor_mut().resolve_key(key);
+        self.sync_vintage_prompt(workspace, viewport)?;
+        Ok(result)
+    }
+    /// Opens the ordinary buffer-backed input panel for the engine's Ex/search prompt.
+    pub fn sync_vintage_prompt(
+        &mut self,
+        workspace: &mut Workspace,
+        viewport: Range<usize>,
+    ) -> Result<(), String> {
+        let sheet = workspace.tabs[workspace.active].sheet;
+        if let Some(owner) = self.vintage_prompt
+            && (owner != sheet
+                || self.panel != Some(Panel::Input)
+                || self.overlay.is_some()
+                || workspace
+                    .editor()
+                    .vintage
+                    .as_ref()
+                    .and_then(|v| v.engine.command_line())
+                    .is_none())
+        {
+            self.vintage_prompt = None;
+            if let Some(tab) = workspace.tabs.iter_mut().find(|t| t.sheet == owner)
+                && tab
+                    .editor
+                    .vintage
+                    .as_ref()
+                    .and_then(|v| v.engine.command_line())
+                    .is_some()
+            {
+                tab.editor.key(&Key::parse("escape")?)?;
+            }
+            if self.panel == Some(Panel::Input) && self.overlay.is_none() {
+                self.close_panel();
+            }
+        }
+        if self.vintage_prompt.is_none()
+            && let Some(prompt) = workspace
+                .editor()
+                .vintage
+                .as_ref()
+                .and_then(|v| v.engine.command_line())
+        {
+            let caption = match prompt.chars().next() {
+                Some('/') => "Search forward /",
+                Some('?') => "Search backward ?",
+                _ => ":",
+            };
+            self.action(
+                workspace,
+                "show_input_panel",
+                &json!({
+                    "caption": caption, "initial_text": &prompt[1..],
+                    "on_done": {"command":"vintage_submit_prompt", "args":{}}
+                }),
+                viewport,
+            )?;
+            self.vintage_prompt = Some(sheet);
+        }
+        Ok(())
     }
     pub fn input(&self) -> Option<&Input> {
         if self.overlay.is_some() {
@@ -1612,6 +1697,7 @@ impl Panels {
             Some(Panel::Files) => self.start_files(workspace)?,
             Some(Panel::Results) => self.jump_result(workspace)?,
             Some(Panel::Input) => {
+                self.vintage_prompt = None;
                 let mut invocation = self.input_done.take();
                 if let Some(i) = &mut invocation {
                     if !i.args.is_object() {
@@ -1645,6 +1731,9 @@ impl Panels {
             return Ok((false, None));
         }
         if key.name == "escape" {
+            if self.vintage_prompt.take().is_some() {
+                workspace.editor_mut().key(&Key::parse("escape")?)?;
+            }
             if self.overlay.is_some() {
                 self.cancel_overlay(workspace);
             } else {
@@ -1948,6 +2037,11 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
+        if self.vintage_prompt.is_some()
+            && let Err(error) = self.sync_vintage_prompt(workspace, viewport.clone())
+        {
+            self.message = error;
+        }
         let intelligence_changed = self.intel.poll(workspace)
             | self.review_poll(workspace)
             | self.merge_git_tree(workspace);
@@ -3002,7 +3096,12 @@ impl Panels {
                 &mut layer,
                 &text,
                 &format!(
-                    "Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
+                    "{}Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
+                    if editor.vintage.is_some() {
+                        format!("{} · ", editor.vintage_status())
+                    } else {
+                        String::new()
+                    },
                     row + 1,
                     col,
                     editor.regions().len(),

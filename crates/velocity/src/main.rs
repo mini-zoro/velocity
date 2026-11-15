@@ -32,7 +32,12 @@ mod theme_bench;
 #[cfg(test)]
 mod theme_tests;
 mod theme_ui;
+#[cfg(test)]
+mod user_grammar_tests;
 mod view;
+mod vintage;
+#[cfg(test)]
+mod vintage_tests;
 mod workbench;
 mod workbench_bench;
 #[cfg(test)]

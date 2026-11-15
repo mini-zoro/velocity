@@ -1,0 +1,10 @@
+// Original host bindings. Motions and operators are decoded by vel-vintage.
+[
+  { "keys": ["escape"], "command": "exit_insert_mode", "context": [
+    { "key": "setting.vintage_enabled" }, { "key": "vi_mode_insert" }
+  ] },
+  { "keys": ["ctrl+["], "command": "exit_insert_mode", "context": [
+    { "key": "setting.vintage_enabled" }, { "key": "setting.command_mode", "operand": false }
+  ] },
+  { "keys": ["ctrl+alt+v"], "command": "toggle_setting", "args": { "setting": "vintage_enabled" } }
+]

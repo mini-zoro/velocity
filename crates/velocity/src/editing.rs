@@ -117,6 +117,15 @@ impl Editor {
             })
             .collect();
         self.buffer.transact(self.id, kind, &edits, selection);
+        self.publish_direct_change(old, before_version, changes);
+    }
+    /// Publishes one completed transaction made by the host or the vi engine.
+    pub fn publish_direct_change(
+        &mut self,
+        old: vel_text::Text,
+        before_version: vel_buffer::ChangeId,
+        changes: ChangeSet,
+    ) {
         self.annotations.borrow_mut().change(
             &self.buffer,
             &self.settings,

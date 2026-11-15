@@ -203,6 +203,41 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.len(), m.modified().ok()?))
 }
+fn package_stamps(
+    dir: &Path,
+    out: &mut Vec<(PathBuf, Option<(u64, SystemTime)>)>,
+    seen: &mut std::collections::BTreeSet<PathBuf>,
+) {
+    let mut pending = vec![dir.to_owned()];
+    while let Some(dir) = pending.pop() {
+        let Ok(canonical) = std::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !seen.insert(canonical) {
+            continue;
+        }
+        out.push((dir.clone(), stamp(&dir)));
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.to_str().is_some_and(|p| {
+                    [
+                        ".sublime-syntax",
+                        ".tmLanguage",
+                        ".tmLanguage.json",
+                        ".tmPreferences",
+                    ]
+                    .iter()
+                    .any(|s| p.ends_with(s))
+                }) {
+                    out.push((path.clone(), stamp(&path)));
+                }
+            }
+        }
+    }
+}
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     if path.exists() {
         std::fs::canonicalize(path).map_err(|e| e.to_string())
@@ -239,6 +274,10 @@ impl Workspace {
             (
                 "Velocity.sublime-keymap",
                 include_str!("../resources/Packages/Default/Velocity.sublime-keymap"),
+            ),
+            (
+                "Velocity Vintage.sublime-keymap",
+                include_str!("../resources/Packages/Default/Velocity Vintage.sublime-keymap"),
             ),
             (
                 "Main.sublime-menu",
@@ -518,14 +557,18 @@ impl Workspace {
         }
         ui::extend_palette(&mut palette, &menus);
         let bundled = crate::language::Assets::bundled()?;
-        let assets =
-            match crate::language::Assets::with_user_metadata(&bundled, data_dir.as_deref()) {
-                Ok(assets) => assets,
-                Err(e) => {
-                    resource_messages.push(format!("user metadata: {e}"));
-                    bundled
-                }
-            };
+        let assets = match crate::language::Assets::with_user_packages(
+            &bundled,
+            data_dir.as_deref(),
+            &resources,
+        ) {
+            Ok(assets) => assets,
+            Err(e) => {
+                resource_messages.push(format!("user grammars/metadata: {e}"));
+                bundled
+            }
+        };
+        resource_messages.extend(assets.syntaxes.warnings().iter().cloned());
         for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
             palette.push(PaletteItem {
                 caption: format!("Set Syntax: {}", syntax.name),
@@ -613,6 +656,10 @@ impl Workspace {
         // Track resource files and containing directories, including absent User
         // locations, so creating a new override is observable on the next poll.
         for suffix in [
+            ".sublime-syntax",
+            ".tmLanguage",
+            ".tmLanguage.json",
+            ".tmPreferences",
             ".sublime-menu",
             ".sublime-mousemap",
             ".sublime-commands",
@@ -651,6 +698,13 @@ impl Workspace {
                 let current = stamp(&path);
                 config_stamp.push((path, current));
             }
+        }
+        if let Some(data) = &data_dir {
+            package_stamps(
+                &data.join("Packages"),
+                &mut config_stamp,
+                &mut std::collections::BTreeSet::new(),
+            );
         }
         config_stamp.sort_by(|a, b| a.0.cmp(&b.0));
         config_stamp.dedup_by(|a, b| a.0 == b.0);
@@ -1082,6 +1136,7 @@ impl Workspace {
                         }
                         tab.editor.sync();
                         tab.language_settings_revision = u64::MAX;
+                        tab.needs_detection = true;
                         tab.editor.keymap = self.keymap.clone();
                     }
                     changed = true;
@@ -1185,11 +1240,9 @@ impl Workspace {
             chosen,
         )
         .or_else(|| {
-            if chosen.is_none() {
-                Some(self.assets.syntaxes.find_syntax_plain_text())
-            } else {
-                None
-            }
+            explicit
+                .is_none()
+                .then(|| self.assets.syntaxes.find_syntax_plain_text())
         })
         .ok_or("Unknown syntax")?;
         let syntax = reference.path.clone();

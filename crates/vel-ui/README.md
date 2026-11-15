@@ -41,8 +41,10 @@ The theme seam is `Node::class` + `Node::attributes`:
 | `text_area` | Main editor viewport | hover, pressed |
 
 Caption/badge/detail nodes are noninteractive children; theme lookup may inspect their parent
-row's state. The theme painter resolves stack-backed ancestor/state paths every frame and caches their typed
-paint representation. Layer fills/textures, colors, fonts, shadows and finite transitions come
+row's state. Each frame supplies the complete ancestor/state path. Unchanged widget paths and immutable
+settings identities reuse their typed paint representation; changed inputs go through the theme resolver.
+Theme/palette replacement invalidates the bounded widget cache. Animated colors, opacity and texture
+sequences keep sampling the frame clock, and settled endpoints remain stable. Layer fills/textures, colors, fonts, shadows and finite transitions come
 from vel-theme. Child label rules inspect actual row ancestry.
 Output and Find Results use the same bounded scroll state, with append-only result rows.
 

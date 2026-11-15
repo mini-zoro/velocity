@@ -249,45 +249,64 @@ impl Assets {
             })
             .clone()
     }
-    pub fn with_user_metadata(base: &Arc<Self>, data: Option<&Path>) -> Result<Arc<Self>, String> {
+    /// Loads user YAML/TextMate definitions after the shipped root. Effective archive/loose
+    /// resources are virtual extras, retaining resource precedence without extracting archives.
+    pub fn with_user_packages(
+        base: &Arc<Self>,
+        data: Option<&Path>,
+        resources: &vel_config::resources::Resources,
+    ) -> Result<Arc<Self>, String> {
         let Some(data) = data else {
             return Ok(base.clone());
         };
-        let root = packages_root();
-        let user_packages = data.join("Packages");
-        // First launch: create the user package tree (as Sublime Text does). Failing to create
-        // it must never prevent startup, and missing directories are simply not scanned.
-        let _ = std::fs::create_dir_all(user_packages.join("User"));
-        fn has_metadata(dir: &Path) -> bool {
-            std::fs::read_dir(dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .any(|entry| {
-                    entry.file_type().is_ok_and(|ty| {
-                        if ty.is_dir() {
-                            has_metadata(&entry.path())
-                        } else {
-                            ty.is_file()
-                                && entry
-                                    .path()
-                                    .extension()
-                                    .is_some_and(|e| e == "tmPreferences")
-                        }
-                    })
-                })
+        let bundled = packages_root();
+        let packages = data.join("Packages");
+        let _ = std::fs::create_dir_all(packages.join("User"));
+        let mut roots = vec![bundled.as_path()];
+        if packages.is_dir() {
+            roots.push(&packages);
         }
-        if !has_metadata(&user_packages) {
-            return Ok(base.clone());
-        }
-        let roots: Vec<PathBuf> = [root, user_packages]
+        let mut grammar = vec![(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)];
+        let effective = [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
             .into_iter()
-            .filter(|p| p.is_dir())
-            .collect();
+            .flat_map(|suffix| resources.matching(suffix))
+            .collect::<Vec<_>>();
+        if effective.iter().any(|r| {
+            r.origin
+                .extension()
+                .is_some_and(|ext| ext == "sublime-package")
+        }) {
+            // An archive has no physical root. Its effective overlay includes loose winners,
+            // preserving loose-over-archive and User-last lookup ties without extraction.
+            for resource in effective {
+                if let Ok(text) = resource.text() {
+                    grammar.push((resource.path.as_str(), text));
+                }
+            }
+            grammar[1..].sort_by_key(|(path, _)| (path.starts_with("Packages/User/"), *path));
+        }
+        let cache = data.join("Cache/Syntaxes");
+        let syntaxes = SyntaxSet::load_cached_roots(&roots, &grammar, &cache)
+            .map(|(set, _)| set)
+            .or_else(|_| SyntaxSet::load_roots(&roots, &grammar))
+            .map_err(|e| e.to_string())?;
+        let resources = resources.matching(".tmPreferences");
+        let preferences = if resources.iter().any(|r| {
+            r.origin
+                .extension()
+                .is_some_and(|ext| ext == "sublime-package")
+        }) {
+            resources
+                .iter()
+                .map(|r| Ok((r.path.as_str(), r.text()?)))
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            Vec::new()
+        };
+        let metadata = MetadataSet::load_roots(&roots, &preferences).map_err(|e| e.to_string())?;
         Ok(Arc::new(Self {
-            syntaxes: base.syntaxes.clone(),
-            metadata: Arc::new(MetadataSet::load_directories(&roots).map_err(|e| e.to_string())?),
+            syntaxes: Arc::new(syntaxes),
+            metadata: Arc::new(metadata),
             startup_ms: base.startup_ms,
         }))
     }
@@ -1198,7 +1217,12 @@ mod tests {
         let data = dir.path().join("Velocity");
         assert!(!data.exists());
         let base = Arc::new(fixture());
-        Assets::with_user_metadata(&base, Some(&data)).expect("first launch must succeed");
+        Assets::with_user_packages(
+            &base,
+            Some(&data),
+            &vel_config::resources::Resources::default(),
+        )
+        .expect("first launch must succeed");
         assert!(data.join("Packages/User").is_dir());
     }
     #[test]

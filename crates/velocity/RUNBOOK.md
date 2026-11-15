@@ -1,3 +1,35 @@
+# Round 11: exact checks and review
+
+```sh
+cd /Users/zoro/dev/velocity-lane-a
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --release
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+cargo build --release -p velocity
+python3 crates/velocity/scripts/measure-typing.py --before /tmp/velocity-round10-baseline/velocity --after target/release/velocity --runs 10 --output-dir /tmp/velocity-round11-review-ab
+VELOCITY_REVIEW_PROFILE=1 target/release/velocity --headless-intelligence --review-ui on --intel-words 0 --data-dir /tmp/velocity-round11-review-profile --output /tmp/velocity-round11-review-profile.jsonl --timeout 300
+```
+
+Use a new output directory for each comparison. The runner freezes/hashes binaries, runs ten
+alternating AB/BA process pairs with 500 typing samples each and bootstraps paired 95% intervals.
+It requires the p50 CI upper bound ≤ +5%, for both paired medians and ratios of process medians.
+Do not compile, test or run another benchmark during the series. `timings-round11.json` records
+before/gate/final evidence; raw files remain under `/tmp/velocity-round11`.
+
+Outside the sandbox, on a visible display:
+
+```sh
+zsh crates/velocity/scripts/review-round11-gui.zsh
+```
+
+The GUI script accepts an optional release binary and `--prepare-only` (first argument) for
+fixture setup without GUI. It uses a disposable profile and enables the four Vintage preferences,
+installs original JSON/XML grammars and opens three fixtures with Metal validation/input logging.
+Follow MANUAL_TEST.md's Round 11 checklist. No GUI/Metal result is inferred from CPU tests.
+
+Earlier runbooks follow.
+
 # Round 9: Hot Exit history, Git, diff and spelling
 
 Run in `/Users/zoro/dev/velocity-lane-a`. This round touches only `velocity`, `vel-session`,

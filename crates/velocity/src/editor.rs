@@ -39,6 +39,8 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub vintage: Option<crate::vintage::State>,
+    pub vintage_requests: Vec<vel_config::keymap::Invocation>,
     pub theme: std::rc::Rc<RefCell<vel_ui::theme::ThemeUi>>,
     pub html: RefCell<crate::html_ui::ViewHtml>,
     pub annotation_view: ViewId,
@@ -99,6 +101,11 @@ impl Editor {
                     ))
                     .expect("our keymap");
                 keymap
+                    .append(include_str!(
+                        "../resources/Packages/Default/Velocity Vintage.sublime-keymap"
+                    ))
+                    .expect("our Vintage keymap");
+                keymap
             })
             .clone();
         let preferences = settings.editor();
@@ -108,6 +115,8 @@ impl Editor {
             registry.register(name, vel_commands::Kind::TextCommand, None);
         }
         for name in [
+            "set_clipboard",
+            "save_and_close",
             "new_html_sheet",
             "open_url",
             "minihtml_navigate",
@@ -116,7 +125,12 @@ impl Editor {
         ] {
             registry.register(name, vel_commands::Kind::WindowCommand, None);
         }
+        for name in ["set_clipboard", "exit_insert_mode", "vintage_submit_prompt"] {
+            registry.register(name, vel_commands::Kind::TextCommand, None);
+        }
         Self {
+            vintage: None,
+            vintage_requests: Vec::new(),
             theme: crate::theme_ui::default_ui(),
             html: Default::default(),
             annotation_view: id,
@@ -185,6 +199,7 @@ impl Editor {
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
+            self.configure_vintage();
             let current = &self.buffer.view(self.id).settings;
             if current.tab_size != self.preferences.tab_size
                 || current.translate_tabs_to_spaces != self.preferences.translate_tabs_to_spaces
@@ -322,6 +337,9 @@ impl Editor {
                         }
                     }
                 }
+                self.complete_vintage_host();
+            } else if let Some(vi) = &mut self.vintage {
+                vi.cancel_host();
             }
         }
         changed
@@ -394,8 +412,16 @@ impl Editor {
             self.completion.hide();
         }
         let mut registry = std::mem::take(&mut self.registry);
-        let result = registry.run(name, args, self);
+        let mut result = registry.run(name, args, self);
         self.registry = registry;
+        for command in std::mem::take(&mut self.vintage_requests) {
+            if let Err(error) = self.run(&command.command, &command.args) {
+                result = Err(error);
+            }
+        }
+        if name == "reindent" && self.reindent_job.is_none() {
+            self.complete_vintage_host();
+        }
         self.sync();
         if self.buffer.change_id() == before_version
             && before_selection
@@ -440,6 +466,11 @@ impl Editor {
         context.iter().all(|c| c.matches(&EditorContext(self)))
     }
     pub fn resolve_key(&mut self, key: &Key) -> Resolution {
+        if let Some(resolution) = self.vintage_key(key)
+            && !matches!(resolution, Resolution::Unbound)
+        {
+            return resolution;
+        }
         if self.marked.is_some() {
             return Resolution::Unbound;
         }
@@ -459,6 +490,9 @@ impl Editor {
         }
     }
     pub fn text_input(&mut self, input: TextInput) {
+        if self.read_only || self.command_mode() {
+            return;
+        }
         match input {
             TextInput::Insert { text, replacement } => {
                 if let Some(composition) = self.composition.take() {
@@ -482,7 +516,13 @@ impl Editor {
                     self.buffer
                         .set_selection(self.id, Selection::from_regions([Region::from(range)]));
                 }
-                let _ = self.run("insert", &json!({"characters":text}));
+                if self.vintage.is_some() {
+                    if let Some(command) = self.vintage_text(&text) {
+                        let _ = self.run(&command.command, &command.args);
+                    }
+                } else {
+                    let _ = self.run("insert", &json!({"characters":text}));
+                }
             }
             TextInput::Marked {
                 text,
@@ -596,6 +636,21 @@ impl Editor {
         self.sync();
     }
     pub fn command(&mut self, command: Command) {
+        let vi_key = match command {
+            Command::Cancel => Some("escape"),
+            Command::Newline => Some("enter"),
+            Command::DeleteBackward => Some("backspace"),
+            _ => None,
+        };
+        if let Some(key) = vi_key
+            && self.marked.is_none()
+            && self.vintage.is_some()
+            && self
+                .key(&Key::parse(key).expect("named key"))
+                .unwrap_or(false)
+        {
+            return;
+        }
         if command == Command::Cancel {
             if self.html.borrow().popup.as_ref().is_some_and(|p| p.visible) {
                 self.html.borrow_mut().popup = None;
@@ -616,6 +671,9 @@ impl Editor {
 }
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        if self.vintage_command(name, args)? {
+            return Ok(true);
+        }
         if self.html_command(name, args)? {
             return Ok(true);
         }
@@ -665,6 +723,11 @@ impl ContextProvider for EditorContext<'_> {
     fn values(&self, key: &str) -> Vec<Value> {
         let e = self.0;
         let selections = e.buffer.view(e.id).sel();
+        if key == "setting.command_mode" || key.starts_with("vi_") {
+            return vec![json!(
+                e.vintage.as_ref().is_some_and(|vi| vi.engine.context(key))
+            )];
+        }
         if let Some(key) = key.strip_prefix("setting.") {
             return vec![e.settings.get(key).cloned().unwrap_or(Value::Null)];
         }
