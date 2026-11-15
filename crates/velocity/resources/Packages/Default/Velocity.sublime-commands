@@ -57,7 +57,7 @@
     "args": {}
   },
   {
-    "caption": "Find: Replace in Files\u2026",
+    "caption": "Find: Replace in Files…",
     "command": "replace_in_files",
     "args": {}
   },
@@ -67,7 +67,7 @@
     "args": {}
   },
   {
-    "caption": "Project: Add Folder\u2026",
+    "caption": "Project: Add Folder…",
     "command": "add_folder",
     "args": {}
   },
@@ -133,5 +133,37 @@
     "args": {
       "setting": "word_wrap"
     }
+  },
+  {
+    "caption": "Goto Symbol in Project",
+    "command": "goto_symbol_in_project"
+  },
+  {
+    "caption": "Goto Definition",
+    "command": "goto_definition"
+  },
+  {
+    "caption": "Goto Reference",
+    "command": "goto_reference"
+  },
+  {
+    "caption": "Jump Back",
+    "command": "jump_back"
+  },
+  {
+    "caption": "Jump Forward",
+    "command": "jump_forward"
+  },
+  {
+    "caption": "Indexing Status",
+    "command": "show_indexing_status"
+  },
+  {
+    "caption": "Auto Complete",
+    "command": "auto_complete"
+  },
+  {
+    "caption": "Clear Snippet Fields",
+    "command": "clear_fields"
   }
 ]

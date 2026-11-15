@@ -1,0 +1,4 @@
+{
+  "folders": [{ "path": "intel-project" }],
+  "settings": { "index_files": true, "index_workers": 2 }
+}

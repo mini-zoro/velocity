@@ -12,15 +12,18 @@ use std::{
 };
 use vel_buffer::{ChangeId, ChangeSet};
 use vel_color_scheme::{ColorScheme, Highlighter};
-use vel_highlight::{DocumentHighlighter, HighlightBatch, HighlightService, StyledLine};
-use vel_scope::{Scope, ScopeStack, ScopeStackOp, Selector};
-use vel_syntax::{MetadataSet, ParseState, ScopedSpan, SyntaxSet};
+use vel_highlight::{
+    DocumentHighlighter, HighlightBatch, HighlightService, ScopeProvider, ScopeSnapshot,
+    StyledLine, SymbolList,
+};
+use vel_scope::{Scope, ScopeStack, Selector};
+use vel_syntax::{MetadataSet, SyntaxSet};
 use vel_text::Text;
 
 #[derive(Debug)]
 enum HighlightCommand {
-    Edit(Text, ChangeId, ChangeSet),
-    Scheme(Arc<ColorScheme>),
+    Edit(Text, ChangeId, ChangeSet, usize),
+    Scheme(Arc<ColorScheme>, usize),
     Request(ChangeId, Vec<Range<usize>>),
     Stop,
 }
@@ -30,15 +33,23 @@ enum HighlightCommand {
 struct HighlightFrontend {
     tx: mpsc::Sender<HighlightCommand>,
     rx: mpsc::Receiver<Result<HighlightBatch, String>>,
+    scopes: mpsc::Receiver<Arc<ScopeSnapshot>>,
     complete: Arc<std::sync::atomic::AtomicBool>,
     latest: Arc<AtomicU64>,
 }
 impl HighlightFrontend {
-    fn new(engine: DocumentHighlighter) -> Result<Self, String> {
+    fn new(
+        engine: DocumentHighlighter,
+        mut text: Text,
+        mut scheme: Arc<ColorScheme>,
+        mut tab: usize,
+        analysis: mpsc::Sender<Job>,
+    ) -> Result<Self, String> {
         let version = engine.version().0;
         let mut service = HighlightService::new(engine).map_err(|e| e.to_string())?;
         let (tx, commands) = mpsc::channel();
         let (results, rx) = mpsc::channel();
+        let (scope_tx, scopes) = mpsc::channel();
         let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ready = complete.clone();
         let latest = Arc::new(AtomicU64::new(version));
@@ -49,6 +60,7 @@ impl HighlightFrontend {
                 let mut viewport: Option<(ChangeId, Vec<Range<usize>>)> = None;
                 let mut pending = std::collections::VecDeque::new();
                 let mut validated = false;
+                let mut published = false;
                 let mut refresh = std::time::Instant::now();
                 loop {
                     let idle = validated && pending.is_empty();
@@ -57,19 +69,25 @@ impl HighlightFrontend {
                     } else {
                         1
                     })) {
-                        Ok(HighlightCommand::Edit(text, version, changes)) => {
+                        Ok(HighlightCommand::Edit(after, version, changes, size)) => {
+                            text = after;
+                            tab = size;
+                            published = false;
                             viewport = None;
                             pending.clear();
                             validated = false;
-                            if let Err(e) = service.apply_change(text, version, changes) {
+                            if let Err(e) = service.apply_change(text.clone(), version, changes) {
                                 let _ = results.send(Err(e.to_string()));
                             }
                         }
-                        Ok(HighlightCommand::Scheme(scheme)) => {
+                        Ok(HighlightCommand::Scheme(palette, size)) => {
+                            scheme = palette;
+                            tab = size;
+                            published = false;
                             viewport = None;
                             pending.clear();
                             validated = false;
-                            if let Err(e) = service.set_color_scheme(scheme) {
+                            if let Err(e) = service.set_color_scheme(scheme.clone()) {
                                 let _ = results.send(Err(e.to_string()));
                             }
                         }
@@ -97,6 +115,33 @@ impl HighlightFrontend {
                         let full = p.version.0 == current.load(Ordering::Acquire)
                             && p.parsed_lines == p.total_lines;
                         ready.store(full, Ordering::Release);
+                        if full
+                            && !published
+                            && let Some(scopes) =
+                                service.scope_snapshot(p.version, 0..text.len_lines())
+                            && scopes.complete()
+                            && let Some(symbols) = service.symbols(p.version)
+                        {
+                            match symbols {
+                                Ok(symbols) if symbols.complete => {
+                                    let scopes = Arc::new(scopes);
+                                    let _ = scope_tx.send(scopes.clone());
+                                    let _ = analysis.send(Job {
+                                        scopes,
+                                        symbols: Arc::new(symbols),
+                                        scheme: scheme.clone(),
+                                        tab,
+                                    });
+                                    published = true;
+                                }
+                                Err(e) => {
+                                    let _ = results.send(Err(e.to_string()));
+                                    published = true;
+                                }
+                                _ => {}
+                            }
+                        }
+
                         // A service watches one interval. Refresh every visible folded interval
                         // after convergence, and during parsing to pick up branch corrections.
                         if let Some((_, ranges)) = &viewport
@@ -136,16 +181,17 @@ impl HighlightFrontend {
             tx,
             rx,
             complete,
+            scopes,
             latest,
         })
     }
     fn send(&self, command: HighlightCommand) {
         match &command {
-            HighlightCommand::Edit(_, version, _) => {
+            HighlightCommand::Edit(_, version, _, _) => {
                 self.latest.store(version.0, Ordering::Release);
                 self.complete.store(false, Ordering::Release);
             }
-            HighlightCommand::Scheme(_) => {
+            HighlightCommand::Scheme(_, _) => {
                 self.complete.store(false, Ordering::Release);
             }
             _ => {}
@@ -283,6 +329,8 @@ pub struct Analysis {
     pair_tree: Vec<usize>,
     pub folds: Vec<Fold>,
     pub minimap: Arc<[MiniLine]>,
+    pub index_symbols: Arc<SymbolList>,
+    pub words: Arc<vel_complete::BufferWords>,
 }
 impl Analysis {
     /// Finds the innermost enabled pair in logarithmic time plus active nesting depth.
@@ -351,28 +399,16 @@ impl Analysis {
         )
     }
 }
-#[derive(Clone, Debug)]
-pub struct LocalScope {
-    pub range: Range<usize>,
-    pub scopes: Arc<[Scope]>,
-}
 #[derive(Debug)]
 struct AnalysisTask {
     tx: mpsc::Sender<Job>,
     rx: mpsc::Receiver<Result<Arc<Analysis>, String>>,
     latest: Arc<AtomicU64>,
-    scopes: mpsc::Receiver<Arc<ScopeSnapshot>>,
-}
-#[derive(Debug)]
-struct ScopeSnapshot {
-    version: ChangeId,
-    lines: Vec<Arc<[LocalScope]>>,
 }
 #[derive(Debug)]
 struct Job {
-    text: Text,
-    version: ChangeId,
-    changes: Option<ChangeSet>,
+    scopes: Arc<ScopeSnapshot>,
+    symbols: Arc<SymbolList>,
     scheme: Arc<ColorScheme>,
     tab: usize,
 }
@@ -382,299 +418,39 @@ impl Drop for AnalysisTask {
         while let Ok(Ok(old)) = self.rx.try_recv() {
             retire(old);
         }
-        while let Ok(old) = self.scopes.try_recv() {
-            retire(old);
-        }
-    }
-}
-#[derive(Clone, Debug)]
-struct Record {
-    checkpoint: Option<ParseState>,
-    end: ScopeStack,
-    ops: Arc<[(usize, ScopeStackOp)]>,
-    spans: Arc<[LocalScope]>,
-}
-#[derive(Debug)]
-struct ScopeCache {
-    corrected_from: Option<usize>,
-    text: Text,
-    records: Vec<Option<Record>>,
-    frontier: usize,
-    must_parse: usize,
-    reusable: usize,
-    initial: ParseState,
-    parser: ParseState,
-    stack: ScopeStack,
-}
-impl ScopeCache {
-    fn new(text: Text, assets: &Assets, syntax: &str) -> Self {
-        let reference = assets
-            .syntaxes
-            .find_syntax_by_path(syntax)
-            .unwrap_or_else(|| assets.syntaxes.find_syntax_plain_text());
-        let initial = ParseState::new(assets.syntaxes.clone(), reference);
-        Self {
-            corrected_from: None,
-            records: vec![None; text.len_lines()],
-            text,
-            frontier: 0,
-            must_parse: 0,
-            reusable: 0,
-            parser: initial.clone(),
-            initial,
-            stack: ScopeStack::new(),
-        }
-    }
-    fn update(&mut self, after: Text, changes: &ChangeSet) {
-        let Some(first) = changes.changes().first() else {
-            self.text = after;
-            return;
-        };
-        let last = changes.changes().last().expect("first change");
-        let start = self.text.byte_to_line(first.old_range.start);
-        let end = self.text.byte_to_line(last.old_range.end) + 1;
-        let new_end = after.len_lines() - (self.records.len() - end);
-        let compare = self.records[end - 1].clone();
-        let need = self.must_parse;
-        let reusable = self.frontier.max(self.reusable);
-        self.records
-            .splice(start..end, std::iter::repeat_n(None, new_end - start));
-        if new_end > start {
-            self.records[new_end - 1] = compare;
-        }
-        self.reusable = if reusable >= end {
-            reusable - end + new_end
-        } else {
-            reusable.min(start)
-        };
-        let mapped_need = if need >= end {
-            need - end + new_end
-        } else if need > start {
-            new_end
-        } else {
-            need
-        };
-        self.must_parse = new_end.max(mapped_need);
-        let mut resume = self.frontier.min(start);
-        while resume > 0
-            && self.records[resume - 1]
-                .as_ref()
-                .and_then(|r| r.checkpoint.as_ref())
-                .is_none()
-        {
-            resume -= 1;
-        }
-        while resume > 0 {
-            let record = self.records[resume - 1].as_ref().expect("checkpoint");
-            let mut parser = record.checkpoint.clone().expect("checkpoint");
-            if parser.resume_at(resume) {
-                self.parser = parser;
-                self.stack = record.end.clone();
-                break;
-            }
-            resume -= 1;
-        }
-        if resume == 0 {
-            self.parser = self.initial.clone();
-            self.stack = ScopeStack::new();
-        }
-        self.frontier = resume;
-        self.text = after;
-    }
-    fn line_scopes(
-        line: &str,
-        ops: &[(usize, ScopeStackOp)],
-        stack: &mut ScopeStack,
-    ) -> Result<Arc<[LocalScope]>, String> {
-        let mut spans = Vec::new();
-        let mut at = 0;
-        for (byte, op) in ops {
-            if *byte > at {
-                spans.push(LocalScope {
-                    range: at..*byte,
-                    scopes: stack.as_slice().into(),
-                });
-            }
-            stack.apply(op).map_err(|e| e.to_string())?;
-            at = *byte;
-        }
-        if at < line.len() {
-            spans.push(LocalScope {
-                range: at..line.len(),
-                scopes: stack.as_slice().into(),
-            });
-        }
-        if spans.is_empty() {
-            spans.push(LocalScope {
-                range: 0..line.len(),
-                scopes: stack.as_slice().into(),
-            });
-        }
-        Ok(spans.into())
-    }
-    fn next(&mut self) -> Result<(), String> {
-        self.corrected_from = None;
-        let row = self.frontier;
-        let line = self.text.line(row).to_string();
-        let output = self.parser.parse_line(&line).map_err(|e| e.to_string())?;
-        let mut rewind = output.rewind.map(|r| r.from_line);
-        for (n, ops) in output.corrections {
-            if n < row
-                && let Some(record) = self.records[n].as_mut()
-            {
-                record.ops = ops.into();
-                record.checkpoint = None;
-                rewind = Some(rewind.map_or(n, |old| old.min(n)));
-            }
-        }
-        if let Some(from) = rewind {
-            self.corrected_from = Some(from);
-            let mut stack = if from == 0 {
-                ScopeStack::new()
-            } else {
-                self.records[from - 1]
-                    .as_ref()
-                    .ok_or("missing rewind anchor")?
-                    .end
-                    .clone()
-            };
-            for n in from..row {
-                let record = self.records[n].as_mut().ok_or("missing rewind line")?;
-                record.spans =
-                    Self::line_scopes(&self.text.line(n).to_string(), &record.ops, &mut stack)?;
-                record.end = stack.clone();
-                record.checkpoint = None;
-            }
-            self.stack = stack;
-        }
-        let spans = Self::line_scopes(&line, &output.ops, &mut self.stack)?;
-        let converged = row + 1 >= self.must_parse
-            && !self.parser.is_speculative()
-            && self.records[row].as_ref().is_some_and(|r| {
-                r.end == self.stack
-                    && r.checkpoint
-                        .as_ref()
-                        .is_some_and(|p| !p.is_speculative() && *p == self.parser)
-            });
-        self.records[row] = Some(Record {
-            checkpoint: Some(self.parser.clone()),
-            end: self.stack.clone(),
-            ops: output.ops.into(),
-            spans,
-        });
-        self.frontier += 1;
-        if converged && self.reusable > self.frontier {
-            let end = self.reusable.min(self.records.len());
-            if let Some(record) = &self.records[end - 1]
-                && let Some(mut parser) = record.checkpoint.clone()
-                && !parser.is_speculative()
-                && parser.resume_at(end)
-            {
-                self.parser = parser;
-                self.stack = record.end.clone();
-                self.frontier = end;
-            }
-        }
-        Ok(())
     }
 }
 impl AnalysisTask {
-    fn new(assets: Arc<Assets>, syntax: String) -> Result<Self, String> {
+    fn new(version: ChangeId) -> Result<Self, String> {
         let (tx, jobs) = mpsc::channel::<Job>();
         let (results, rx) = mpsc::channel();
-        let (scope_results, scopes) = mpsc::channel();
-        let latest = Arc::new(AtomicU64::new(0));
+        let latest = Arc::new(AtomicU64::new(version.0));
         let current = latest.clone();
         std::thread::Builder::new()
             .name("velocity-language".into())
             .spawn(move || {
-                let mut cache: Option<ScopeCache> = None;
                 while let Ok(mut job) = jobs.recv() {
-                    loop {
-                        if let Some(old) = &mut cache {
-                            if let Some(changes) = &job.changes {
-                                old.update(job.text.clone(), changes);
-                            } else {
-                                cache = None;
+                    while let Ok(next) = jobs.try_recv() {
+                        job = next;
+                    }
+                    if current.load(Ordering::Acquire) != job.scopes.version.0 {
+                        continue;
+                    }
+                    match analyze(&job, &current) {
+                        Ok(Some(value)) => {
+                            if results.send(Ok(Arc::new(value))).is_err() {
+                                break;
                             }
                         }
-                        let state = cache.get_or_insert_with(|| {
-                            ScopeCache::new(job.text.clone(), &assets, &syntax)
-                        });
-                        let result = (|| {
-                            let mut published = 0;
-                            let mut next_publish = 64;
-                            while state.frontier < state.text.len_lines() {
-                                if current.load(Ordering::Acquire) != job.version.0 {
-                                    return Ok(None);
-                                }
-                                state.next()?;
-                                let advance = state.frontier >= next_publish;
-                                let correction =
-                                    state.corrected_from.is_some_and(|from| from < published);
-                                if advance || correction {
-                                    let count = if advance { state.frontier } else { published };
-                                    let lines = state.records[..count]
-                                        .iter()
-                                        .map(|r| {
-                                            r.as_ref().expect("parsed scope line").spans.clone()
-                                        })
-                                        .collect();
-                                    let _ = scope_results.send(Arc::new(ScopeSnapshot {
-                                        version: job.version,
-                                        lines,
-                                    }));
-                                    if advance {
-                                        published = count;
-                                        next_publish = count.saturating_mul(2);
-                                    }
-                                }
-                            }
-                            if current.load(Ordering::Acquire) != job.version.0 {
-                                return Ok(None);
-                            }
-                            if published != state.frontier {
-                                let lines = state
-                                    .records
-                                    .iter()
-                                    .map(|r| r.as_ref().expect("parsed scope line").spans.clone())
-                                    .collect();
-                                let _ = scope_results.send(Arc::new(ScopeSnapshot {
-                                    version: job.version,
-                                    lines,
-                                }));
-                            }
-                            analyze(state, &assets.metadata, &job, &current)
-                                .map(|a| a.map(Arc::new))
-                        })();
-                        match result {
-                            Ok(Some(a)) => {
-                                let _ = results.send(Ok(a));
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                let _ = results.send(Err(e));
-                                cache = None;
-                            }
-                        }
-                        match jobs.try_recv() {
-                            Ok(next) => job = next,
-                            Err(_) => break,
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = results.send(Err(error));
                         }
                     }
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self {
-            tx,
-            rx,
-            latest,
-            scopes,
-        })
-    }
-    fn submit(&self, job: Job) {
-        self.latest.store(job.version.0, Ordering::Release);
-        let _ = self.tx.send(job);
+        Ok(Self { tx, rx, latest })
     }
 }
 
@@ -693,7 +469,8 @@ pub struct Language {
     pub styled: BTreeMap<usize, StyledLine>,
     pub errors: Vec<String>,
     pub minimap: Arc<[MiniLine]>,
-    scopes: Option<Arc<ScopeSnapshot>>,
+    pub scopes: Option<Arc<ScopeSnapshot>>,
+    viewport_scopes: BTreeMap<usize, Arc<ScopeSnapshot>>,
     text: Text,
     scheme_revision: u64,
     requested: Option<(ChangeId, u64, Vec<Range<usize>>)>,
@@ -714,21 +491,21 @@ impl Language {
         let path = reference.path.clone();
         let name = reference.name.clone();
         let root = reference.scope;
-        let service = HighlightFrontend::new(DocumentHighlighter::new(
+        let task = AnalysisTask::new(version)?;
+        let service = HighlightFrontend::new(
+            DocumentHighlighter::new(
+                text.clone(),
+                version,
+                assets.syntaxes.clone(),
+                reference,
+                scheme.clone(),
+            )
+            .with_metadata(assets.metadata.clone()),
             text.clone(),
-            version,
-            assets.syntaxes.clone(),
-            reference,
             scheme.clone(),
-        ))?;
-        let task = AnalysisTask::new(assets.clone(), path.clone())?;
-        task.submit(Job {
-            text: text.clone(),
-            version,
-            changes: None,
-            scheme: scheme.clone(),
             tab,
-        });
+            task.tx.clone(),
+        )?;
         Ok(Self {
             assets,
             syntax: path,
@@ -743,6 +520,7 @@ impl Language {
             errors: Vec::new(),
             minimap: Arc::from([]),
             scopes: None,
+            viewport_scopes: BTreeMap::new(),
             text,
             scheme_revision: 0,
             requested: None,
@@ -794,6 +572,7 @@ impl Language {
             text.clone(),
             version,
             changes.clone(),
+            tab,
         ));
         self.version = version;
         self.text = text.clone();
@@ -802,23 +581,19 @@ impl Language {
         }
         self.styled.clear();
         self.requested = None;
-        self.task.submit(Job {
-            text,
-            version,
-            changes: Some(changes),
-            scheme: self.scheme.clone(),
-            tab,
-        });
+        self.task.latest.store(version.0, Ordering::Release);
+        self.viewport_scopes.clear();
         if let Some(viewport) = viewport {
             self.request_visible(viewport);
         }
     }
-    pub fn recolor(&mut self, scheme: Arc<ColorScheme>, text: Text, tab: usize) {
+    pub fn recolor(&mut self, scheme: Arc<ColorScheme>, _text: Text, tab: usize) {
         if Arc::ptr_eq(&scheme, &self.scheme) {
             return;
         }
         let viewport = self.requested.as_ref().map(|(_, _, r)| r.clone());
-        self.service.send(HighlightCommand::Scheme(scheme.clone()));
+        self.service
+            .send(HighlightCommand::Scheme(scheme.clone(), tab));
         self.scheme = scheme.clone();
         self.scheme_revision += 1;
         self.styled.clear();
@@ -827,13 +602,7 @@ impl Language {
         if let Some(analysis) = self.analysis.take() {
             retire(analysis);
         }
-        self.task.submit(Job {
-            text,
-            version: self.version,
-            changes: Some(ChangeSet::new(vec![])),
-            scheme,
-            tab,
-        });
+        self.viewport_scopes.clear();
         if let Some(viewport) = viewport {
             self.request_visible(viewport);
         }
@@ -848,7 +617,28 @@ impl Language {
                 .get(&line.line)
                 .is_some_and(|old| old.spans == line.spans && old.exact == line.exact)
         });
-        for line in batch.highlighted {
+        if batch.scopes.lines.iter().any(|line| line.exact) {
+            self.viewport_scopes
+                .insert(batch.lines.start, Arc::new(batch.scopes));
+            if self.viewport_scopes.len() > 32 {
+                self.viewport_scopes.retain(|_, s| {
+                    s.range.start < batch.lines.end && s.range.end > batch.lines.start
+                });
+            }
+        }
+        for mut line in batch.highlighted {
+            let body = self.text.line(line.line).len_bytes();
+            if line.spans.iter().any(|s| s.range.end > body) {
+                line.spans = line
+                    .spans
+                    .iter()
+                    .filter_map(|s| {
+                        let mut s = s.clone();
+                        s.range.end = s.range.end.min(body);
+                        (s.range.start < s.range.end).then_some(s)
+                    })
+                    .collect();
+            }
             if !line.exact && self.styled.get(&line.line).is_some_and(|l| l.exact) {
                 continue;
             }
@@ -901,7 +691,7 @@ impl Language {
     }
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(scopes) = self.task.scopes.try_recv() {
+        while let Ok(scopes) = self.service.scopes.try_recv() {
             if scopes.version == self.version {
                 if let Some(old) = self.scopes.replace(scopes) {
                     retire(old);
@@ -940,14 +730,24 @@ impl Language {
                 .is_some_and(|a| a.version == self.version)
     }
     pub fn scopes_ready(&self) -> bool {
-        self.scopes
-            .as_ref()
-            .is_some_and(|s| s.version == self.version && s.lines.len() == self.text.len_lines())
+        self.scopes.as_ref().is_some_and(|s| {
+            s.version == self.version && s.range == (0..self.text.len_lines()) && s.complete()
+        })
     }
-    pub fn scopes_ready_at(&self, text: &Text, byte: usize) -> bool {
+    pub fn scopes_ready_at(&self, _text: &Text, byte: usize) -> bool {
+        self.scope_snapshot_at(byte).is_some()
+    }
+    pub fn scope_snapshot_at(&self, byte: usize) -> Option<Arc<ScopeSnapshot>> {
         self.scopes
             .as_ref()
-            .is_some_and(|s| s.version == self.version && text.byte_to_line(byte) < s.lines.len())
+            .filter(|s| s.version == self.version && s.scopes_at(byte).is_some())
+            .or_else(|| {
+                self.viewport_scopes
+                    .values()
+                    .rev()
+                    .find(|s| s.version == self.version && s.scopes_at(byte).is_some())
+            })
+            .cloned()
     }
     pub fn busy(&self) -> bool {
         !self.ready()
@@ -962,22 +762,10 @@ impl Language {
     pub fn highlight_complete(&self) -> bool {
         self.service.complete.load(Ordering::Acquire)
     }
-    pub fn scopes(&self, text: &Text, byte: usize) -> ScopeStack {
-        let row = text.byte_to_line(byte);
-        let col = byte - text.line_to_byte(row);
+    pub fn scopes(&self, _text: &Text, byte: usize) -> ScopeStack {
         let mut stack = ScopeStack::new();
-        let scopes = self
-            .scopes
-            .as_ref()
-            .filter(|a| a.version == self.version)
-            .and_then(|a| a.lines.get(row))
-            .and_then(|line| {
-                line.iter()
-                    .find(|s| s.range.contains(&col))
-                    .or_else(|| line.last())
-            });
-        if let Some(span) = scopes {
-            for scope in span.scopes.iter() {
+        if let Some(snapshot) = self.scope_snapshot_at(byte) {
+            for scope in snapshot.scopes_at(byte).unwrap_or(&[]) {
                 stack.push(*scope);
             }
         } else {
@@ -1023,48 +811,80 @@ fn retire<T: Send + 'static>(value: T) {
 pub fn rgba(color: vel_color_scheme::Color) -> vel_render::scene::Color {
     color.rgba8().map(|c| f32::from(c) / 255.)
 }
-fn excluded(scopes: &[Scope]) -> bool {
-    scopes.iter().any(|s| {
-        let n = s.build_string();
-        n.starts_with("string") || n.starts_with("comment")
-    })
+#[derive(Debug)]
+struct ScopeFacts {
+    excluded: bool,
+    comment: bool,
+    tag: bool,
+    blocks: BTreeSet<Scope>,
+    style: vel_color_scheme::Style,
+}
+impl ScopeFacts {
+    fn new(scopes: &[Scope], resolver: &mut Highlighter) -> Self {
+        let mut stack = ScopeStack::new();
+        let mut excluded = false;
+        let mut comment = false;
+        let mut tag = false;
+        let mut blocks = BTreeSet::new();
+        for scope in scopes {
+            stack.push(*scope);
+            let name = scope.build_string();
+            comment |= name.starts_with("comment");
+            excluded |= name.starts_with("comment") || name.starts_with("string");
+            tag |= name.starts_with("meta.tag") || name.starts_with("punctuation.definition.tag");
+            if name.starts_with("meta.block") || name.starts_with("meta.function.body") {
+                blocks.insert(*scope);
+            }
+        }
+        Self {
+            excluded,
+            comment,
+            tag,
+            blocks,
+            style: resolver.style_for(&stack),
+        }
+    }
 }
 
-fn analyze(
-    cache: &ScopeCache,
-    metadata: &MetadataSet,
-    job: &Job,
-    latest: &AtomicU64,
-) -> Result<Option<Analysis>, String> {
-    let text = &cache.text;
-    let lines: Vec<_> = cache
-        .records
-        .iter()
-        .map(|r| r.as_ref().expect("parsed line").spans.clone())
-        .collect();
+fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
+    let text = &job.scopes.text;
     let mut spans = Vec::new();
     let mut stack: Vec<(char, usize)> = Vec::new();
     let mut pairs = Vec::new();
     let mut angles = Vec::new();
     let mut minimap = Vec::new();
     let mut resolver = Highlighter::new(job.scheme.clone());
+    // Interned IDs replace per-token scope-name conversion, selector resolution and
+    // temporary ScopeStacks. Facts are local to this immutable snapshot and palette.
+    let mut facts: Vec<Option<ScopeFacts>> = Vec::new();
     let step = text.len_lines().div_ceil(1024).max(1);
-    for (row, line_spans) in lines.iter().enumerate() {
-        if row % 32 == 0 && latest.load(Ordering::Acquire) != job.version.0 {
+    for record in &job.scopes.lines {
+        let row = record.line;
+        if row % 32 == 0 && latest.load(Ordering::Acquire) != job.scopes.version.0 {
             return Ok(None);
         }
         let start = text.line_to_byte(row);
         let line = text.line(row).to_string();
         let mut tokens = Vec::new();
         let mut col = 0;
-        for span in line_spans.iter() {
-            let part = &line[span.range.clone()];
-            let mut scopes = ScopeStack::new();
-            for scope in span.scopes.iter() {
-                scopes.push(*scope);
+        for run in record.runs.iter() {
+            let range = run.start as usize..(run.end as usize).min(line.len());
+            if range.is_empty() {
+                continue;
             }
+            let part = &line[range.clone()];
+            let id = run.stack.0 as usize;
+            if facts.len() <= id {
+                facts.resize_with(id + 1, || None);
+            }
+            let fact = facts[id].get_or_insert_with(|| {
+                ScopeFacts::new(
+                    job.scopes.stacks.get(run.stack).unwrap_or(&[]),
+                    &mut resolver,
+                )
+            });
             if row % step == 0 {
-                let style = resolver.style_for(&scopes);
+                let style = fact.style;
                 let width =
                     crate::editor::cells_with_tab_at(part.trim_end_matches('\n'), job.tab, col);
                 if !part.trim().is_empty() {
@@ -1076,9 +896,9 @@ fn analyze(
                 }
                 col += width;
             }
-            if !excluded(&span.scopes) {
+            if !fact.excluded {
                 for (at, c) in part.char_indices() {
-                    let byte = start + span.range.start + at;
+                    let byte = start + range.start + at;
                     match c {
                         '<' => angles.push(byte),
                         '>' => {
@@ -1109,22 +929,19 @@ fn analyze(
                     }
                 }
             }
-            spans.push(ScopedSpan {
-                range: start + span.range.start..start + span.range.end,
-                scopes: span.scopes.to_vec(),
-            });
+            spans.push((start + range.start..start + range.end, run.stack));
         }
         if row % step == 0 {
             minimap.push(MiniLine { row, tokens });
         }
     }
     let source = text.to_string();
-    let symbols = metadata
-        .symbols(&source, &spans)
-        .map_err(|e| e.to_string())?
-        .into_iter()
+    let symbols = job
+        .symbols
+        .symbols
+        .iter()
         .filter(|s| s.local && !s.name.trim().is_empty())
-        .map(|s| (s.name, s.range.start))
+        .map(|s| (s.name.clone(), s.range.start))
         .collect();
     let mut folds = Vec::new();
     // Tags use scope-selected markup, with quote-aware scanning of attributes.
@@ -1133,16 +950,13 @@ fn analyze(
     while let Some(relative) = source[at..].find('<') {
         let begin = at + relative;
         at = begin + 1;
-        let selected = spans.get(spans.partition_point(|s| s.range.end <= begin));
-        if !selected.is_some_and(|s| {
-            !s.scopes
-                .iter()
-                .any(|s| s.build_string().starts_with("comment"))
-                && s.scopes.iter().any(|s| {
-                    let n = s.build_string();
-                    n.starts_with("meta.tag") || n.starts_with("punctuation.definition.tag")
-                })
-        }) {
+        let row = text.byte_to_line(begin);
+        let fact = job
+            .scopes
+            .scope_at(row, begin - text.line_to_byte(row))
+            .and_then(|id| facts.get(id.0 as usize))
+            .and_then(Option::as_ref);
+        if !fact.is_some_and(|fact| !fact.comment && fact.tag) {
             continue;
         }
         let closing = source.as_bytes().get(at) == Some(&b'/');
@@ -1257,15 +1071,10 @@ fn analyze(
     // Contiguous block meta scopes contribute regions even without literal braces.
     let mut blocks: BTreeMap<Scope, Range<usize>> = BTreeMap::new();
     for span in &spans {
-        let active: BTreeSet<_> = span
-            .scopes
-            .iter()
-            .copied()
-            .filter(|s| {
-                let n = s.build_string();
-                n.starts_with("meta.block") || n.starts_with("meta.function.body")
-            })
-            .collect();
+        let active = &facts[span.1.0 as usize]
+            .as_ref()
+            .expect("visited scope stack")
+            .blocks;
         let ended: Vec<_> = blocks
             .keys()
             .filter(|s| !active.contains(s))
@@ -1275,11 +1084,11 @@ fn analyze(
             let range = blocks.remove(&scope).expect("block");
             add_block_fold(text, range, &mut folds);
         }
-        for scope in active {
+        for &scope in active {
             blocks
                 .entry(scope)
-                .and_modify(|r| r.end = span.range.end)
-                .or_insert(span.range.clone());
+                .and_modify(|r| r.end = span.0.end)
+                .or_insert(span.0.clone());
         }
     }
     for (_, range) in blocks {
@@ -1304,17 +1113,19 @@ fn analyze(
     for i in (1..base).rev() {
         pair_tree[i] = pair_tree[i * 2].max(pair_tree[i * 2 + 1]);
     }
-    if latest.load(Ordering::Acquire) != job.version.0 {
+    if latest.load(Ordering::Acquire) != job.scopes.version.0 {
         return Ok(None);
     }
     Ok(Some(Analysis {
         scheme: job.scheme.clone(),
-        version: job.version,
+        version: job.scopes.version,
         symbols,
         pairs,
         pair_tree,
         folds,
         minimap: minimap.into(),
+        index_symbols: job.symbols.clone(),
+        words: Arc::new(vel_complete::BufferWords::new(text)),
     }))
 }
 fn add_block_fold(text: &Text, range: Range<usize>, folds: &mut Vec<Fold>) {
@@ -1367,7 +1178,6 @@ pub fn syntax_path(path: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vel_buffer::Change;
     use vel_syntax::{SyntaxDefinition, SyntaxSetBuilder};
     #[test]
     fn first_launch_without_user_packages_dir_succeeds_and_creates_it() {
@@ -1387,56 +1197,6 @@ mod tests {
             metadata: Arc::new(MetadataSet::new()),
         }
     }
-    fn finish(cache: &mut ScopeCache) {
-        while cache.frontier < cache.text.len_lines() {
-            cache.next().unwrap();
-        }
-    }
-    fn stacks(cache: &ScopeCache) -> Vec<(Range<usize>, Vec<Scope>)> {
-        cache
-            .records
-            .iter()
-            .enumerate()
-            .flat_map(|(row, r)| {
-                let start = cache.text.line_to_byte(row);
-                r.as_ref().unwrap().spans.iter().map(move |s| {
-                    (
-                        start + s.range.start..start + s.range.end,
-                        s.scopes.to_vec(),
-                    )
-                })
-            })
-            .collect()
-    }
-    #[test]
-    fn scope_cache_pending_changes_and_branch_rewinds_match_fresh_parses() {
-        let assets = fixture();
-        let mut text = Text::from("a\nline\nz\na\nline\nz\n");
-        let mut cache = ScopeCache::new(text.clone(), &assets, "Fixture.sublime-syntax");
-        finish(&mut cache);
-        for i in 0..40 {
-            let byte = if i % 2 == 0 { 0 } else { text.line_to_byte(2) };
-            let replacement = if i % 3 == 0 { "你\n" } else { "x" };
-            text.replace(byte..byte, replacement);
-            cache.update(
-                text.clone(),
-                &ChangeSet::new(vec![Change {
-                    old_range: byte..byte,
-                    new_len: replacement.len(),
-                }]),
-            );
-            if i % 4 == 0 {
-                cache.next().unwrap();
-            }
-            if i % 2 == 0 {
-                continue;
-            }
-            finish(&mut cache);
-            let mut fresh = ScopeCache::new(text.clone(), &assets, "Fixture.sublime-syntax");
-            finish(&mut fresh);
-            assert_eq!(stacks(&cache), stacks(&fresh));
-        }
-    }
     #[test]
     fn indentation_detection_ignores_blank_lines_and_observes_tab_stops() {
         assert_eq!(
@@ -1450,28 +1210,50 @@ mod tests {
         assert_eq!(detect_indentation(&Text::new()), None);
     }
     #[test]
-    fn language_workers_publish_valid_prefix_scopes_before_the_full_document() {
-        let assets = Assets::bundled().unwrap();
-        let task = AnalysisTask::new(assets, "Rust.sublime-syntax".into()).unwrap();
-        let text = Text::from("// comment\n".repeat(10_000).as_str());
-        let count = text.len_lines();
-        task.submit(Job {
-            text,
-            version: ChangeId(0),
-            changes: None,
-            scheme: Arc::new(ColorScheme::velocity_dark()),
-            tab: 4,
-        });
-        let prefix = task
-            .scopes
-            .recv_timeout(std::time::Duration::from_secs(10))
+    fn shared_scopes_include_lf_without_slicing_past_body_and_drop_stale_versions() {
+        let mut editor = crate::editor::Editor::new(Text::from("// 你好\nfn f() {}\n"));
+        editor
+            .attach_language(
+                Assets::bundled().unwrap(),
+                "Rust",
+                Arc::new(ColorScheme::velocity_dark()),
+            )
             .unwrap();
-        assert!(!prefix.lines.is_empty() && prefix.lines.len() < count);
-        assert!(prefix.lines[0].iter().any(|span| {
-            span.scopes
-                .iter()
-                .any(|s| s.build_string().starts_with("comment"))
-        }));
+        editor
+            .language
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .request_visible(std::iter::once(0..3).collect());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !editor.language.borrow().as_ref().unwrap().ready() {
+            editor.poll_language();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        {
+            let language = editor.language.borrow();
+            let language = language.as_ref().unwrap();
+            assert!(language.selector(&editor.text, "comment", 3));
+            for line in language.styled.values() {
+                assert!(
+                    line.spans
+                        .iter()
+                        .all(|s| s.range.end <= editor.text.line(line.line).len_bytes())
+                );
+            }
+        }
+        editor
+            .run("insert", &vel_config::json!({"characters":"x"}))
+            .unwrap();
+        assert!(
+            !editor
+                .language
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .scopes_ready_at(&editor.text, 0)
+        );
     }
 
     #[test]

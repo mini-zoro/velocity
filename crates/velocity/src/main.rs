@@ -4,15 +4,19 @@ mod app;
 mod bench;
 mod build;
 mod cli;
+mod completion;
 mod editing;
 mod editor;
 mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
 mod instance;
+mod intelligence;
+mod intelligence_bench;
 mod language;
 mod layout;
 mod panels;
+mod parse_bench;
 mod report;
 mod session;
 mod stats;
@@ -123,6 +127,32 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        if options.mode == Mode::HeadlessIntelligence {
+            return intelligence_bench::run(&reporter, &options);
+        }
+        #[cfg(target_os = "macos")]
+        if options.mode == Mode::Intelligence {
+            vel_platform::display_status().check()?;
+            let done = Arc::new(AtomicBool::new(false));
+            let native = intelligence_bench::Native::new(&options, reporter.clone(), done.clone())?;
+            Platform::run_with_options(
+                WindowOptions {
+                    title: "Velocity Intelligence Measurement".into(),
+                    size: Size {
+                        width: options.width as f64,
+                        height: options.height as f64,
+                    },
+                },
+                native,
+            )?;
+            if !done.load(Ordering::Acquire) {
+                return Err("intelligence benchmark ended early".into());
+            }
+            return Ok(());
+        }
+        if options.mode == Mode::HeadlessParse {
+            return parse_bench::run(&reporter, &options);
+        }
         if options.mode == Mode::HeadlessFeatures {
             return feature_bench::run(&reporter, &options);
         }

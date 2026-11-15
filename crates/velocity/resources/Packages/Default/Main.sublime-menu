@@ -348,5 +348,14 @@
         "command": "prev_result"
       }
     ]
+  },
+  {
+    "caption": "Help",
+    "children": [
+      {
+        "caption": "Indexing Status",
+        "command": "show_indexing_status"
+      }
+    ]
   }
 ]

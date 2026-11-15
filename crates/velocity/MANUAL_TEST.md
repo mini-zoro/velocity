@@ -181,3 +181,47 @@ actual scale/size/refresh and any failure; these rows have not been executed in 
 | Cmd+B with Workbench Example; F4/Shift+F4; output double-click | Both streams appear, exit/time shown, correct diagnostic location and inline badge | |
 | Build With variants, Cancel Process Tree, quiet, syntax and wrapping | Variant overrides apply, tree terminates, UI stays responsive, output follows settings | |
 | Native automatic startup/typing/scroll with four groups | Positive scanout/complete JSONL; budgets from RESULTS/RUNBOOK assessed with no missing timestamps | |
+
+
+## Round 8 — intelligence and Hot Exit acceptance (native review pending)
+
+Run the exact commands in RUNBOOK.md. Do not run GUI/Metal in the sandbox.
+
+- [ ] Cmd+Shift+R: type `render`, inspect kind badges and file:line, arrow through previews,
+  Esc restores original selection/scroll and Enter pins the target. Repeat with unsaved names.
+- [ ] F12/Cmd+Alt+Down on `unique_target` jumps to another already-open file. `shared_name`
+  opens multiple definition rows. Shift+F12 lists references when syntax metadata publishes
+  indexed references. Missing metadata yields no reference locations. Ctrl+- and Ctrl+Shift+-
+  traverse cross-file jumps and remain bounded after 130 jumps.
+- [ ] Hover over a symbol, click a location, then disable `show_definitions` and confirm it
+  stays hidden. Open Help → Indexing Status, watch percentage/logs, close only that window,
+  and verify editor focus, folders and session state are intact.
+- [ ] Ctrl+Space/Auto Complete: arrows, cycling, Enter and mouse commit. At the bottom of a
+  view the popup flips upward. Check annotations/kinds/details and a second window/group.
+  Type rapidly, switch tabs and move the caret while queries are pending; stale results never
+  replace text. Set `auto_complete_commit_on_tab`, `auto_complete_cycle`, delay, selector,
+  triggers, `auto_complete_with_fields` and size limits and verify each behavior.
+- [ ] Type `fn`, Tab, rename the first field, Tab to args, Shift+Tab back, then Tab to `$0`.
+  Expand `${1:name} = $1; ${2:value} $0` from an inline/User snippet: field outlines and mirrors
+  update live with Chinese/emoji and multiple carets. Esc or moving outside the field exits.
+  Verify undo/redo treats a primary edit and all its mirrors as one transaction. Clone the file
+  into another group: passive painting must preserve fields; editing the other clone must
+  cancel stale fields in the source view.
+- [ ] Add/change `.sublime-snippet` and `.sublime-completions` resources in Packages/User;
+  snippet names appear as `Snippet: …` and tab triggers/resource suggestions update. Runtime
+  folders and unsaved text must remain in the window.
+- [ ] Hot Exit: edit unsaved named and untitled files with expanded/mirrored snippets, retain
+  an undo/redo branch, create multiple windows/groups and open the index status window. Quit
+  and relaunch the same profile. Text, selections, folders, layouts and normal undo/redo return;
+  popup/field sessions and the separate status window are transient. Repeat with `hot_exit`
+  always/only_on_quit/disabled, Cmd+W and a forced process exit after autosave. Keep the existing
+  read-only-session failure guard: quit must not silently discard dirty text when saving fails.
+- [ ] Start with fresh, read-only and corrupt profiles. Cache creation/fallback and subsequent
+  session writes must not reload settings or drop folders added through Open Folder. Verify
+  indexing exclusions, disabling/re-enabling indexing and closing an unsaved indexed buffer.
+- [ ] Retest Chinese IME commits/candidate placement with a popup and inside a snippet field.
+  IME preedit must suppress completion and never publish preview text to the index/session.
+- [ ] Record five native intelligence runs, physical size/scale/refresh and memory. Use the
+  separate `--intel-words 0` run for the real ten-file memory target and retain the default
+  100k-word stress footprint separately. Compare
+  p50/p95 typing to 2/4 ms and definition jumps to 20 ms; retain scanout and submit separately.

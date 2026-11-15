@@ -596,6 +596,39 @@ impl View {
                 );
                 border(&mut layer, rect, clip, global("selection_border"));
             }
+            if let Some(fields) = &e.fields {
+                for field in fields
+                    .fields()
+                    .iter()
+                    .filter(|f| f.range.start <= range_end && f.range.end > range_start)
+                {
+                    let a = relevant
+                        .iter()
+                        .take_while(|u| start + u.bytes.end <= field.range.start)
+                        .map(|u| u.width)
+                        .sum::<usize>();
+                    let b = relevant
+                        .iter()
+                        .take_while(|u| start + u.bytes.start < field.range.end)
+                        .map(|u| u.width)
+                        .sum::<usize>();
+                    border(
+                        &mut layer,
+                        Rect {
+                            x: left + (segment.indent + a) as f64 * self.cell - self.scroll_x,
+                            y,
+                            width: ((b - a) as f64 * self.cell).max(2.),
+                            height: self.line_height,
+                        },
+                        clip,
+                        if field.mirror {
+                            [0.45, 0.56, 0.65, 0.8]
+                        } else {
+                            [0.55, 0.75, 0.95, 1.]
+                        },
+                    );
+                }
+            }
             if e.settings.bool("draw_indent_guides", true) {
                 let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
                 let columns =
@@ -790,9 +823,15 @@ impl View {
             ..Layer::default()
         };
         self.paint_minimap(e, language, scheme, &mut minimap);
+        let mut popup = Layer::default();
+        e.completion.paint(e, self, &mut popup);
+        let mut layers = vec![layer, carets, minimap];
+        if e.completion.visible() {
+            layers.push(popup);
+        }
         Scene {
             background: rgba(default.background),
-            layers: vec![layer, carets, minimap],
+            layers,
         }
     }
     #[allow(clippy::too_many_arguments)]

@@ -580,6 +580,20 @@ impl App {
             return Ok(());
         }
         match name {
+            "show_indexing_status" => {
+                let source = self.panels.intel.status_source.clone();
+                w.new_window(
+                    WindowOptions {
+                        title: "Indexing Status — Velocity".into(),
+                        size: Size {
+                            width: 720.,
+                            height: 480.,
+                        },
+                    },
+                    crate::intelligence::StatusWindow::new(source),
+                )?;
+                return Ok(());
+            }
             "toggle_full_screen" => {
                 self.workspace.fullscreen = !self.workspace.fullscreen;
                 w.toggle_full_screen();
@@ -1676,7 +1690,35 @@ impl AppHandler for App {
                 return;
             }
         }
+        if event.kind == MouseKind::Down {
+            let point = Point {
+                x: event.position.x - self.content.x,
+                y: event.position.y - self.content.y,
+            };
+            if self.workspace.editor_mut().completion.hit(point) {
+                let _ = self.workspace.editor_mut().commit_completion();
+                self.changed(w, Instant::now(), true);
+                return;
+            }
+            if self
+                .panels
+                .click_definition(&mut self.workspace, event.position)
+                .unwrap_or(false)
+            {
+                self.sync_active_view();
+                self.changed(w, Instant::now(), true);
+                return;
+            }
+        }
         if event.kind == MouseKind::Move {
+            let byte = self.view.hit_test(
+                self.workspace.editor(),
+                Point {
+                    x: event.position.x - self.content.x,
+                    y: event.position.y - self.content.y,
+                },
+            );
+            self.panels.hover_at(&self.workspace, event.position, byte);
             let _ = self.view.pointer(
                 self.workspace.editor_mut(),
                 Point {
@@ -2027,7 +2069,10 @@ impl AppHandler for App {
             if let Err(error) = self.replacement_confirmation(w) {
                 self.show_error(w, &error);
             }
-            if self.panels.busy() || self.builds.task.is_some() {
+            if self.panels.busy()
+                || self.workspace.editor().completion.busy()
+                || self.builds.task.is_some()
+            {
                 w.request_frame_at(Instant::now() + Duration::from_millis(8));
             }
             if active_was_loading && self.workspace.tabs[self.workspace.active].loading.is_none() {

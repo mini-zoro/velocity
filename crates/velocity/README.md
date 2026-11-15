@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 7. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 8. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -24,8 +24,8 @@ and viewport. Native Open/Save dialogs and Save/Cancel/Discard alerts complete f
 
 Settings and keymaps use comments/trailing-comma JSON, loose/zip resources and User overrides.
 Our resources/Packages/Default files are original. See the runbook for precedence, data paths
-and shortcuts. Highlighting uses versioned workers over the shared buffer. Snippet field navigation and
-wrap_lines remain deferred. Wrapping, folds and native IME geometry share a grapheme-based
+and shortcuts. Highlighting uses versioned workers over the shared buffer. Snippet fields and mirrors use vel-snippet;
+wrap_lines remains deferred. Wrapping, folds and native IME geometry share a grapheme-based
 monospace layout; complex scripts and keyboard layouts still need human visual QA.
 
 `--bench-panels`, `--bench-startup`, `--bench-scroll`, `--bench-typing --carets 1|1000`, `--bench-memory` and
@@ -112,3 +112,27 @@ native fonts, window or GPU. `scripts/measure-workbench.py --runs 5` retains one
 fingerprints, raw JSONL, individual runs and pooled quantiles. `--groups 4` also applies to native
 typing/scroll modes; `--bench-startup --restore-session --data-dir PATH` measures actual session
 startup scanout outside the sandbox. Exact commands and pending native checks are in RUNBOOK.md.
+
+
+Round 8 shares the highlighter's versioned scopes and symbol list with editing, folds, brackets,
+minimap, completions and unsaved indexing. The lane-A parser/checkpoints have been removed.
+Cmd+Shift+R opens project symbols; F12/Cmd+Alt+Down and Shift+F12 open definitions/references.
+One result jumps, multiple results preview in the quick panel. Ctrl+- / Ctrl+Shift+- traverse
+128 saved jumps across files. Hover definitions link to locations; Help → Indexing Status opens
+an independent progress/log window. Each folder has a background index; missing or unwritable
+profile caches fall back to temporary storage. Cache/session writes do not reload settings.
+
+Completion results arrive asynchronously, with view/version/caret checks at acceptance and
+commit. The caret popup flips above the bottom edge, shows kinds/annotations/plain details,
+and supports arrows, Enter/Tab policies, cycling and mouse selection. Ctrl+Space or Auto Complete
+in the palette requests it explicitly. User package `.sublime-completions` and `.sublime-snippet`
+resources reload with settings. Snippet palette entries and tab triggers expand numeric fields,
+live mirrors and transformations. Tab/Shift+Tab navigate; Esc or leaving the fields exits.
+The original Rust `fn` snippet is included. Undo and Hot Exit preserve expanded text and normal
+undo history; field/popup sessions are transient and reconstructed by the next user action.
+
+`--headless-parse-memory` measures ten 1,000-line Rust files; `--headless-intelligence` measures
+500 real typing commands with a visible popup and a 100k-word project vocabulary plus 100
+cross-file definition jumps. `--bench-intelligence` is the automatic native counterpart with
+actual drawable scanout, submit timing and footprint. No GUI/Metal measurement was run in the
+sandbox. See RUNBOOK.md for reviewer commands and RESULTS.md for measured limits.

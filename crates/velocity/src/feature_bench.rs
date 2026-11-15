@@ -90,7 +90,13 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
         let at = Instant::now();
         let scene = v.scene(editor);
         scenes.push(ms(at.elapsed()));
-        minimap_rects = minimap_rects.max(scene.layers.last().map_or(0, |l| l.rects.len()));
+        minimap_rects = minimap_rects.max(
+            scene
+                .layers
+                .iter()
+                .find(|l| l.minimap)
+                .map_or(0, |l| l.rects.len()),
+        );
         black_box(scene);
     }
     reporter.emit(json!({"kind":"highlight_minimap_scroll_cpu","samples_ms":scenes,"stats_ms":summarize(&scenes),"p95_budget_ms":2,"exact_viewports":true,"boundary":"CPU scene with exact viewport styles; asynchronous delivery happens before the timer","minimap_rects_max":minimap_rects,"gpu_budget_ms":1,"gpu_pending":true}))?;

@@ -70,5 +70,30 @@
   "remember_open_files": true,
   "close_windows_when_empty": false,
   "open_files_in_new_window": false,
-  "show_errors_inline": true
+  "show_errors_inline": true,
+  "index_files": true,
+  "index_workers": 0,
+  "index_exclude_patterns": [
+    "*.log",
+    "target",
+    "node_modules",
+    ".git"
+  ],
+  "index_exclude_gitignore": true,
+  "index_skip_unknown_extensions": true,
+  "show_definitions": true,
+  "auto_complete": true,
+  "auto_complete_selector": "source - comment - string, meta.tag",
+  "auto_complete_delay": 50,
+  "auto_complete_size_limit": 4194304,
+  "auto_complete_commit_on_tab": false,
+  "auto_complete_with_fields": false,
+  "auto_complete_cycle": false,
+  "auto_complete_when_likely": true,
+  "auto_complete_use_index": true,
+  "auto_complete_use_history": true,
+  "auto_complete_preserve_order": false,
+  "auto_complete_include_snippets": true,
+  "auto_complete_include_snippets_when_typing": false,
+  "auto_complete_triggers": []
 }

@@ -1199,7 +1199,6 @@
       "level": 1
     }
   },
-
   {
     "keys": [
       "super+b"
@@ -1357,6 +1356,165 @@
     "args": {
       "group": 3
     }
+  },
+  {
+    "keys": [
+      "super+shift+r"
+    ],
+    "command": "goto_symbol_in_project"
+  },
+  {
+    "keys": [
+      "f12"
+    ],
+    "command": "goto_definition"
+  },
+  {
+    "keys": [
+      "super+alt+down"
+    ],
+    "command": "goto_definition"
+  },
+  {
+    "keys": [
+      "shift+f12"
+    ],
+    "command": "goto_reference"
+  },
+  {
+    "keys": [
+      "ctrl+-"
+    ],
+    "command": "jump_back"
+  },
+  {
+    "keys": [
+      "ctrl+shift+-"
+    ],
+    "command": "jump_forward"
+  },
+  {
+    "keys": [
+      "ctrl+space"
+    ],
+    "command": "auto_complete"
+  },
+  {
+    "keys": [
+      "tab"
+    ],
+    "command": "insert_best_completion"
+  },
+  {
+    "keys": [
+      "tab"
+    ],
+    "command": "next_field",
+    "context": [
+      {
+        "key": "has_next_field",
+        "operand": true
+      },
+      {
+        "key": "auto_complete_visible",
+        "operand": false
+      }
+    ]
+  },
+  {
+    "keys": [
+      "shift+tab"
+    ],
+    "command": "prev_field",
+    "context": [
+      {
+        "key": "has_prev_field",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "escape"
+    ],
+    "command": "clear_fields",
+    "context": [
+      {
+        "key": "has_next_field",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "escape"
+    ],
+    "command": "hide_auto_complete",
+    "context": [
+      {
+        "key": "auto_complete_visible",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "enter"
+    ],
+    "command": "commit_completion",
+    "context": [
+      {
+        "key": "auto_complete_visible",
+        "operand": true
+      },
+      {
+        "key": "setting.auto_complete_commit_on_tab",
+        "operand": false
+      }
+    ]
+  },
+  {
+    "keys": [
+      "up"
+    ],
+    "command": "move",
+    "args": {
+      "by": "lines",
+      "forward": false
+    },
+    "context": [
+      {
+        "key": "auto_complete_visible",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "down"
+    ],
+    "command": "move",
+    "args": {
+      "by": "lines",
+      "forward": true
+    },
+    "context": [
+      {
+        "key": "auto_complete_visible",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "ctrl+space"
+    ],
+    "command": "replace_completion_with_next_completion",
+    "context": [
+      {
+        "key": "auto_complete_visible",
+        "operand": true
+      }
+    ]
   }
-
 ]

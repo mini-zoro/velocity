@@ -39,6 +39,11 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub completion: crate::completion::Completion,
+    pub fields: Option<vel_snippet::Session>,
+    pub fields_version: Option<(vel_buffer::BufferId, vel_buffer::ChangeId)>,
+    pub snippets: Arc<std::collections::BTreeMap<String, vel_snippet::SnippetFile>>,
+    pub snippet_path: Option<std::path::PathBuf>,
     pub language: crate::language::LanguageCell,
     pub layout: RefCell<crate::layout::Layout>,
     language_buffer: Option<vel_buffer::BufferId>,
@@ -93,6 +98,11 @@ impl Editor {
         let settings_revision = settings.revision();
         let history = vel_session::History::new(&buffer, id);
         Self {
+            completion: Default::default(),
+            fields: None,
+            fields_version: None,
+            snippets: Default::default(),
+            snippet_path: None,
             history,
             shared_shadow: false,
             layout_edits: std::rc::Rc::new(RefCell::new(std::collections::VecDeque::new())),
@@ -139,6 +149,13 @@ impl Editor {
         }
     }
     pub fn sync(&mut self) {
+        if self.fields.is_some()
+            && !self.shared_shadow
+            && self.fields_version != Some((self.buffer.id(), self.buffer.change_id()))
+        {
+            self.fields = None;
+            self.fields_version = None;
+        }
         if self.settings_revision != self.settings.revision() {
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
@@ -178,6 +195,8 @@ impl Editor {
                     || self.language_buffer != Some(self.buffer.id())
             });
         if reset {
+            self.fields = None;
+            self.completion.hide();
             let previous = self.language.borrow_mut().take().expect("language");
             let result = crate::language::Language::new(
                 previous.assets.clone(),
@@ -206,6 +225,19 @@ impl Editor {
         self.anchor = primary.a;
         self.caret = primary.b;
         self.revision = self.buffer.change_id().0;
+        if self.fields.as_ref().is_some_and(|s| {
+            if self.shared_shadow {
+                return false;
+            }
+            let fields = s.selections();
+            self.buffer.view(self.id).sel().iter().any(|r| {
+                !fields
+                    .iter()
+                    .any(|f| f.start <= r.begin() && r.end() <= f.end)
+            })
+        }) {
+            self.fields = None;
+        }
         if !self.shared_shadow {
             self.history
                 .observe(&self.buffer, self.id, &self.history_hint);
@@ -217,6 +249,7 @@ impl Editor {
         syntax: &str,
         scheme: Arc<vel_color_scheme::ColorScheme>,
     ) -> Result<(), String> {
+        self.completion.hide();
         let language = crate::language::Language::new(
             assets,
             syntax,
@@ -284,6 +317,9 @@ impl Editor {
     }
     pub fn set_selection(&mut self, selection: Selection) {
         self.unmark();
+        if self.buffer.view(self.id).sel() != &selection {
+            self.completion.hide();
+        }
         if !self.shared_shadow && self.buffer.view(self.id).sel() != &selection {
             self.history.break_group();
         }
@@ -307,10 +343,49 @@ impl Editor {
         }
         self.unmark();
         self.sync();
+        let before_version = self.buffer.change_id();
+        let before_selection = (
+            self.anchor,
+            self.caret,
+            self.buffer.view(self.id).sel().len(),
+        );
+        if matches!(
+            name,
+            "undo" | "redo" | "redo_or_repeat" | "soft_undo" | "soft_redo"
+        ) {
+            self.fields = None;
+            self.completion.hide();
+        }
         let mut registry = std::mem::take(&mut self.registry);
         let result = registry.run(name, args, self);
         self.registry = registry;
         self.sync();
+        if self.buffer.change_id() == before_version
+            && before_selection
+                != (
+                    self.anchor,
+                    self.caret,
+                    self.buffer.view(self.id).sel().len(),
+                )
+        {
+            self.completion.hide();
+        }
+        if self.buffer.change_id() != before_version
+            && !matches!(
+                name,
+                "commit_completion"
+                    | "replace_completion_with_next_completion"
+                    | "insert_best_completion"
+                    | "insert_snippet"
+            )
+        {
+            let character = if name == "insert" {
+                args["characters"].as_str().and_then(|s| s.chars().last())
+            } else {
+                None
+            };
+            self.completion.edited(character);
+        }
         result
     }
     pub fn context_matches(&self, context: &[vel_config::keymap::Context]) -> bool {
@@ -366,6 +441,7 @@ impl Editor {
                 selected,
                 replacement,
             } => {
+                self.completion.hide();
                 if text.is_empty() {
                     if self.composition.is_some() {
                         self.cancel_composition();
@@ -473,6 +549,11 @@ impl Editor {
     }
     pub fn command(&mut self, command: Command) {
         if command == Command::Cancel {
+            if self.completion.visible() {
+                self.completion.hide();
+                return;
+            }
+            self.fields = None;
             self.cancel_composition();
             self.keymap.cancel();
             return;
@@ -529,6 +610,9 @@ impl Host for Editor {
             }
             name.to_owned()
         };
+        if self.intelligence_command(name, args)? {
+            return Ok(true);
+        }
         self.language_command(name, args)
     }
     fn command_finished(&mut self) {
@@ -593,11 +677,10 @@ impl ContextProvider for EditorContext<'_> {
                     )
                 })
                 .collect(),
-            "has_prev_field"
-            | "has_next_field"
-            | "overlay_visible"
-            | "panel_visible"
-            | "auto_complete_visible" => vec![json!(false)],
+            "has_prev_field" => vec![json!(e.field_previous())],
+            "has_next_field" => vec![json!(e.fields.as_ref().is_some_and(|s| s.has_next_field()))],
+            "auto_complete_visible" => vec![json!(e.completion.visible())],
+            "overlay_visible" | "panel_visible" => vec![json!(false)],
             "is_recording_macro" => vec![json!(e.registry.is_recording())],
             _ => vec![],
         }

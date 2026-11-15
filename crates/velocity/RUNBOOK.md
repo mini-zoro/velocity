@@ -1,4 +1,95 @@
-# Round 7: workbench, sessions, projects and builds
+# Round 8: editor intelligence and parser removal
+
+Only `velocity`, `vel-commands`, and root Cargo.lock belong to this lane's change. Run:
+
+```sh
+cargo fmt -p velocity -p vel-commands --check
+cargo clippy -p velocity -p vel-commands --all-targets -- -D warnings
+cargo test --release -p velocity -p vel-commands
+RUSTDOCFLAGS='-D warnings' cargo doc -p velocity -p vel-commands --no-deps
+cargo build --release -p velocity
+```
+
+CPU probes (no AppKit, CoreText or Metal initialization):
+
+```sh
+VELOCITY_R8_CPU=$(mktemp -d /tmp/velocity-r8-cpu.XXXXXX)
+./target/release/velocity --headless-parse-memory --output "$VELOCITY_R8_CPU/parse.jsonl" --timeout 300
+./target/release/velocity --headless-intelligence --output "$VELOCITY_R8_CPU/intelligence.jsonl" --timeout 300
+./target/release/velocity --headless-intelligence --intel-words 0 --output "$VELOCITY_R8_CPU/ten-file-memory.jsonl" --timeout 300
+```
+
+The shared parser probe opens ten real Rust files, 1,000 lines each, with warmed assets and
+waits for complete highlighter/editor analysis. It reports process user+system CPU and kernel
+TASK_VM_INFO phys_footprint; no index or completion query is included. For the comparison,
+`parse_bench.rs` is also compiled unchanged into a temporary archive of accepted commit
+5b128ba, with only its CLI/main measurement hook added. The archive needs the existing public
+`third_party/sublime-packages` tree. To build and measure the reference automatically:
+
+```sh
+VELOCITY_R8_REF=$(mktemp -d /tmp/velocity-r8-reference-parent.XXXXXX)
+python3 crates/velocity/scripts/build-parser-reference.py --output-dir "$VELOCITY_R8_REF/reference"
+python3 crates/velocity/scripts/measure-intelligence.py --old "$VELOCITY_R8_REF/reference/target/release/velocity" --output-dir "$VELOCITY_R8_REF/measurements"
+```
+
+This runs five sequential processes per workload. Source trees, binaries, hashes and raw runs are retained;
+repository history is never changed. The intelligence probe adds real project services and a
+prepared synthetic 100,000-word source, including word sequences, then times each keymap command
+and CPU scene with its popup. Worker preparation occurs before each key. Definition time includes
+a navigation request, worker delivery, opening an already-open target, reveal and CPU scene.
+It uses an actual Rust definition in file0 and a reference in file9. This is a CPU workload;
+it does not establish a physical display or HID latency budget.
+
+Isolated scroll comparison (one child process at a time, alternating order, ten runs each):
+
+```sh
+python3 crates/velocity/scripts/compare-scroll.py --old crates/velocity/output/round6-cpu-20261114T052128.851998Z/velocity --new crates/velocity/output/round7-cpu-20261114T073311.813812Z/velocity --output-dir "$VELOCITY_R8_CPU/scroll-r7"
+```
+
+Keep the archived binary hashes in timings-round8.json; confidence intervals bootstrap the
+independent process medians rather than treating 6,000 frames as independent processes.
+Run no other lane-A benchmark during any timing series.
+
+Reviewer GUI commands, outside the sandbox with a visible, unlocked display:
+
+```sh
+cargo build --release -p velocity
+VELOCITY_R8_GUI=$(mktemp -d /tmp/velocity-r8-gui.XXXXXX)
+for run in 1 2 3 4 5; do
+  ./target/release/velocity --bench-intelligence --width 1200 --height 800 --data-dir "$VELOCITY_R8_GUI/profile-$run" --output "$VELOCITY_R8_GUI/intelligence-$run.jsonl" --timeout 300
+done
+./target/release/velocity --bench-intelligence --intel-words 0 --width 1200 --height 800 --data-dir "$VELOCITY_R8_GUI/memory-profile" --output "$VELOCITY_R8_GUI/ten-file-memory.jsonl" --timeout 300
+./target/release/velocity --bench-intelligence --width 2048 --height 1089 --data-dir "$VELOCITY_R8_GUI/4k-profile" --output "$VELOCITY_R8_GUI/intelligence-4k.jsonl" --timeout 300
+./target/release/velocity --bench-scroll --lines 0 --width 2048 --height 1089 spikes/data/rust-10mb.rs --data-dir "$VELOCITY_R8_GUI/scroll-profile" --output "$VELOCITY_R8_GUI/scroll-4k.jsonl" --timeout 300
+./target/release/velocity -n --project crates/velocity/fixtures/intelligence.sublime-project crates/velocity/fixtures/intel-project/main.rs:4:12 --data-dir "$VELOCITY_R8_GUI/manual-profile" --log-input
+```
+
+The native intelligence mode exits after 500 successfully presented typing samples and 100
+already-open definition jumps. It records actual physical size/scale/refresh, CPU command+scene,
+injection→submit, injection→positive presentedTime and phys_footprint with index+completions.
+Typing targets are p50/p95 ≤2/4 ms; already-open definition jumps ≤20 ms. Scanout is reported
+separately. Startup, glyph uploads and worker preparation are outside typing samples. Close or
+watchdog failures write incomplete/error records. `--intel-words 0` uses the real ten-file
+vocabulary for the memory budget; the default
+100k-word synthetic stress workload reports its larger footprint separately.
+The 10-file memory target is ≤+20 MB versus
+the accepted round-7 fixture; CPU phys_footprint is available in the headless comparison, while
+native font/GPU footprint must be evaluated from these reviewer runs. Do not substitute RSS.
+
+Use Cmd+Shift+R, F12/Cmd+Alt+Down, Shift+F12, Ctrl+- / Ctrl+Shift+-, hover and Help → Indexing
+Status. `index_files`, `index_workers`, `index_exclude_patterns`, `index_exclude_gitignore`,
+`index_skip_unknown_extensions` and `show_definitions` are settings. Completion settings follow
+vel-complete's README, with delay in milliseconds and size limit in bytes. A dedicated
+navigation worker remains independent of project word-statistic publication.
+The publisher calls `analyze_scopes` on complete matching snapshots; benchmark setup waits
+for a publication barrier before measuring footprint or definition jumps. Resource/package
+reload replaces the prepared engines; queued results from the previous engine cannot commit.
+The palette exposes `Snippet: Rust function`; typing `fn` then Tab expands it. Fields use
+Tab/Shift+Tab, Esc and `clear_fields`; popup visibility and field contexts are available to User
+keymaps. Details are rendered as plain text; minihtml remains deferred.
+
+
+## Round 7 archive: layouts, sessions, projects and builds
 
 Run from `/Users/zoro/dev/velocity`. Do not commit. This round changes velocity, vel-ui,
 vel-config, vel-commands, vel-platform and the new vel-build/vel-session, plus Cargo.lock.

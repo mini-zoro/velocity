@@ -58,6 +58,13 @@ pub struct Registry {
     last: Option<(String, Value)>,
 }
 const TEXT: &[&str] = &[
+    "auto_complete",
+    "hide_auto_complete",
+    "commit_completion",
+    "replace_completion_with_next_completion",
+    "next_field",
+    "prev_field",
+    "clear_fields",
     "toggle_comment",
     "reindent",
     "fold",
@@ -107,6 +114,12 @@ const TEXT: &[&str] = &[
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
+    "goto_symbol_in_project",
+    "goto_definition",
+    "goto_reference",
+    "jump_back",
+    "jump_forward",
+    "show_indexing_status",
     "set_layout",
     "focus_group",
     "move_to_group",

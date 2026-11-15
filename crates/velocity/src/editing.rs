@@ -15,7 +15,7 @@ impl Editor {
     pub fn apply_edits(
         &mut self,
         mut owned: Vec<(Range<usize>, String)>,
-        after: Option<Selection>,
+        mut after: Option<Selection>,
         kind: EditKind,
     ) {
         if owned.is_empty() {
@@ -23,6 +23,64 @@ impl Editor {
         }
         owned.sort_by_key(|(r, _)| (r.start, r.end));
         owned.dedup_by(|a, b| a.0 == b.0);
+        if let Some(mut fields) = self.fields.take() {
+            let input: Vec<_> = owned
+                .iter()
+                .map(|(range, text)| vel_snippet::SnippetEdit {
+                    range: range.clone(),
+                    text: text.clone(),
+                })
+                .collect();
+            let old_fields = fields.selections();
+            let input_changes = ChangeSet::new(
+                input
+                    .iter()
+                    .map(|e| Change {
+                        old_range: e.range.clone(),
+                        new_len: e.text.len(),
+                    })
+                    .collect(),
+            );
+            match fields.edit_fields(self.buffer.text(), &input) {
+                Ok(edits) => {
+                    let new_fields = fields.selections();
+                    let requested = after.as_ref();
+                    after = Some(Selection::from_regions(
+                        self.buffer
+                            .view(self.id)
+                            .sel()
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(selection_index, r)| {
+                                let i = old_fields
+                                    .iter()
+                                    .position(|f| f.start <= r.begin() && r.end() <= f.end)?;
+                                let start =
+                                    input_changes.transform_point(old_fields[i].start, Bias::Left);
+                                let desired = requested
+                                    .and_then(|selection| selection.iter().nth(selection_index))
+                                    .unwrap_or_else(|| {
+                                        Region::caret(
+                                            input_changes.transform_point(r.end(), Bias::Right),
+                                        )
+                                    });
+                                let map = |point: usize| {
+                                    (new_fields[i].start + point.saturating_sub(start))
+                                        .min(new_fields[i].end)
+                                };
+                                Some(Region::new(map(desired.a), map(desired.b)))
+                            }),
+                    ));
+                    owned = edits.into_iter().map(|e| (e.range, e.text)).collect();
+                    self.fields = Some(fields);
+                }
+                Err(_) => {
+                    if fields.rebase(&input_changes) {
+                        self.fields = Some(fields);
+                    }
+                }
+            }
+        }
         let changes = ChangeSet::new(
             owned
                 .iter()
@@ -59,6 +117,10 @@ impl Editor {
             })
             .collect();
         self.buffer.transact(self.id, kind, &edits, selection);
+        self.fields_version = self
+            .fields
+            .as_ref()
+            .map(|_| (self.buffer.id(), self.buffer.change_id()));
         if let Some(language) = self.language.borrow_mut().as_mut() {
             language.change(
                 self.buffer.text().clone(),
@@ -124,15 +186,6 @@ impl Editor {
                     })
                     .collect();
                 self.replace_selections(values, EditKind::InsertChars);
-            }
-            "insert_snippet" => {
-                let snippet = vel_commands::Snippet::parse(
-                    args["contents"].as_str().ok_or("snippet needs contents")?,
-                )?;
-                self.replace_selections(
-                    vec![(snippet.text, snippet.selection); self.buffer.view(self.id).sel().len()],
-                    EditKind::Other,
-                );
             }
             "paste" => {
                 let count = self.buffer.view(self.id).sel().len();

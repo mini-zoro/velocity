@@ -42,6 +42,8 @@ pub enum Overlay {
     Palette,
     Syntax,
     Choices,
+    ProjectSymbols,
+    Locations,
 }
 #[derive(Debug)]
 struct Preview {
@@ -64,6 +66,15 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    pub intel: crate::intelligence::Intelligence,
+    locations: Vec<vel_index::SymbolLocation>,
+    navigation_origin: Option<crate::intelligence::Jump>,
+    hover: Vec<vel_index::SymbolLocation>,
+    hover_point: Point,
+    hover_term: String,
+    hover_since: Instant,
+    hover_requested: bool,
+    hover_bounds: Rect,
     pub restore_scroll: Option<(f64, f64)>,
     pub pending_command: Option<Invocation>,
     pub overlay: Option<Overlay>,
@@ -153,6 +164,15 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            intel: Default::default(),
+            locations: Vec::new(),
+            navigation_origin: None,
+            hover: Vec::new(),
+            hover_point: Point::default(),
+            hover_term: String::new(),
+            hover_since: Instant::now(),
+            hover_requested: false,
+            hover_bounds: Rect::default(),
             restore_scroll: None,
             pending_command: None,
             overlay: None,
@@ -565,6 +585,8 @@ impl Panels {
     }
     pub fn busy(&self) -> bool {
         self.overlay.is_some()
+            || self.intel.busy()
+            || (!self.hover_term.is_empty() && !self.hover_requested)
             || self.file_task.is_some()
             || self.replace_rx.is_some()
             || self
@@ -655,6 +677,79 @@ impl Panels {
         }
         Ok(())
     }
+    fn decorate_locations(&mut self) {
+        for item in &mut self.quick.items {
+            if let Some(location) = self.locations.get(item.value) {
+                item.kind = format!("{:?}", location.kind);
+                item.annotation = format!(
+                    "{}:{}",
+                    location
+                        .file
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    location.row + 1
+                );
+                item.details = location.file.display().to_string();
+            }
+        }
+    }
+    fn location_items(&mut self) {
+        self.quick.set_items(
+            self.locations
+                .iter()
+                .enumerate()
+                .map(|(i, l)| Item {
+                    caption: l.name.clone(),
+                    value: i,
+                    kind: format!("{:?}", l.kind),
+                    annotation: format!(
+                        "{}:{}",
+                        l.file.file_name().unwrap_or_default().to_string_lossy(),
+                        l.row + 1
+                    ),
+                    details: l.file.display().to_string(),
+                    highlights: Vec::new(),
+                })
+                .collect(),
+        );
+    }
+    pub fn hover_at(&mut self, workspace: &Workspace, point: Point, byte: usize) {
+        if contains(self.hover_bounds, point) && !self.hover.is_empty() {
+            return;
+        }
+        let term = if workspace.editor().settings.bool("show_definitions", true)
+            && self.overlay.is_none()
+            && workspace.editor().marked.is_none()
+        {
+            crate::intelligence::word(workspace.editor(), byte)
+        } else {
+            String::new()
+        };
+        if term != self.hover_term {
+            self.hover.clear();
+            self.hover_term = term;
+            self.hover_since = Instant::now();
+            self.hover_requested = false;
+        }
+        self.hover_point = point;
+    }
+    pub fn click_definition(
+        &mut self,
+        workspace: &mut Workspace,
+        point: Point,
+    ) -> Result<bool, String> {
+        if !self.hover.is_empty() && contains(self.hover_bounds, point) {
+            let i = ((point.y - self.hover_bounds.y) / 24.) as usize;
+            if let Some(location) = self.hover.get(i).cloned() {
+                self.intel.remember(crate::intelligence::capture(workspace));
+                crate::intelligence::jump(workspace, &location, false)?;
+            }
+            self.hover.clear();
+            return Ok(true);
+        }
+        Ok(false)
+    }
     pub fn action(
         &mut self,
         workspace: &mut Workspace,
@@ -663,6 +758,45 @@ impl Panels {
         viewport: Range<usize>,
     ) -> Result<bool, String> {
         match name {
+            "goto_symbol_in_project" => {
+                self.action(workspace, "show_overlay", &json!({}), viewport)?;
+                self.overlay = Some(Overlay::ProjectSymbols);
+                self.prepared.clear();
+                self.locations.clear();
+                self.query_quick(workspace);
+            }
+            "goto_definition" | "goto_reference" => {
+                self.hover.clear();
+                let term = crate::intelligence::word(workspace.editor(), workspace.editor().caret);
+                if !term.is_empty() {
+                    self.navigation_origin = Some(crate::intelligence::capture(workspace));
+                    self.intel.query(
+                        if name == "goto_definition" {
+                            crate::intelligence::Query::Definition(term)
+                        } else {
+                            crate::intelligence::Query::Reference(term)
+                        },
+                        workspace,
+                    );
+                }
+            }
+            "jump_back" | "jump_forward" => {
+                self.cancel_overlay(workspace);
+                self.intel.history(workspace, name == "jump_forward")?;
+                self.restore_scroll = Some(workspace.tabs[workspace.active].scroll);
+            }
+            "show_indexing_status" => {
+                self.output = crate::intelligence::status_text(
+                    &self
+                        .intel
+                        .projects
+                        .iter()
+                        .map(|p| p.index.clone())
+                        .collect::<Vec<_>>(),
+                );
+                self.panel = Some(Panel::Output);
+                self.panel_focused = true;
+            }
             "set_file_type" => {
                 workspace.set_file_type(
                     args["syntax"]
@@ -1034,6 +1168,26 @@ impl Panels {
     }
     fn query_quick(&mut self, workspace: &mut Workspace) {
         self.fuzzy_worker.cancel();
+        if self.overlay == Some(Overlay::ProjectSymbols) {
+            self.quick_pending = true;
+            self.intel.query(
+                crate::intelligence::Query::Symbols(self.quick_input.value()),
+                workspace,
+            );
+            return;
+        }
+        if self.overlay == Some(Overlay::Locations) {
+            self.quick_pending = true;
+            self.candidates = Arc::new(
+                self.locations
+                    .iter()
+                    .map(|l| fuzzy::Candidate::new(&l.name))
+                    .collect(),
+            );
+            self.fuzzy_worker.set_items(self.candidates.clone());
+            self.fuzzy_worker.query(self.quick_input.value(), 100);
+            return;
+        }
         self.quick_pending = true;
         self.quick_revision = self.quick_input.buffer.change_id().0;
         self.quick.items.clear();
@@ -1230,6 +1384,20 @@ impl Panels {
         self.fuzzy_worker.query(term, 100);
     }
     fn preview_current(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        if matches!(
+            self.overlay,
+            Some(Overlay::ProjectSymbols | Overlay::Locations)
+        ) {
+            if let Some(location) = self
+                .quick
+                .current()
+                .and_then(|i| self.locations.get(i))
+                .cloned()
+            {
+                crate::intelligence::jump(workspace, &location, true)?;
+            }
+            return Ok(());
+        }
         if self.overlay != Some(Overlay::Goto) {
             return Ok(());
         }
@@ -1303,6 +1471,7 @@ impl Panels {
         self.local_generation += 1;
         self.local = None;
         self.prepared.clear();
+        self.navigation_origin = None;
     }
     fn accept(
         &mut self,
@@ -1342,6 +1511,25 @@ impl Panels {
             return Ok(invocation);
         }
         if self.overlay.is_some() {
+            if matches!(
+                self.overlay,
+                Some(Overlay::ProjectSymbols | Overlay::Locations)
+            ) {
+                if let Some(origin) = self.navigation_origin.take() {
+                    self.intel.remember(origin);
+                } else if let Some(source) = &self.preview {
+                    self.intel.remember(crate::intelligence::Jump {
+                        sheet: source.sheet,
+                        path: workspace
+                            .tabs
+                            .iter()
+                            .find(|t| t.sheet == source.sheet)
+                            .and_then(|t| t.path.clone()),
+                        selection: source.selection.clone(),
+                        scroll: source.scroll,
+                    });
+                }
+            }
             self.preview_current(workspace)?;
             if let Some(source) = &self.preview
                 && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == source.sheet)
@@ -1712,6 +1900,71 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
+        let intelligence_changed = self.intel.poll(workspace);
+        if self.intel.busy()
+            && self.locations.is_empty()
+            && self.overlay == Some(Overlay::ProjectSymbols)
+            && !self.intel.pending
+        {
+            self.query_quick(workspace);
+        }
+        if !self.hover_requested
+            && !self.hover_term.is_empty()
+            && self.hover_since.elapsed() >= std::time::Duration::from_millis(250)
+            && self.overlay.is_none()
+            && !self.intel.pending
+        {
+            self.intel.query(
+                crate::intelligence::Query::Hover(self.hover_term.clone()),
+                workspace,
+            );
+            self.hover_requested = true;
+        }
+        let mut query_changed = false;
+        if let Some(result) = self.intel.result() {
+            query_changed = true;
+            use crate::intelligence::Query;
+            let editor = workspace.editor();
+            let current =
+                result.source == (editor.buffer.id(), editor.buffer.change_id(), editor.caret);
+            match result.query {
+                Query::Hover(term) if current && term == self.hover_term => {
+                    self.hover = result.locations
+                }
+                Query::Symbols(term)
+                    if self.overlay == Some(Overlay::ProjectSymbols)
+                        && term == self.quick_input.value() =>
+                {
+                    self.locations = result.locations;
+                    self.quick_pending = false;
+                    self.location_items();
+                    let _ = self.preview_current(workspace);
+                }
+                Query::Definition(_) | Query::Reference(_) if current => {
+                    if result.locations.len() == 1 {
+                        if let Some(origin) = self.navigation_origin.take() {
+                            self.intel.remember(origin);
+                        }
+                        let _ = crate::intelligence::jump(workspace, &result.locations[0], false);
+                    } else if result.locations.is_empty() {
+                        self.message = "No indexed locations".into();
+                        self.navigation_origin = None;
+                    } else {
+                        let origin = self.navigation_origin.take();
+                        let _ =
+                            self.action(workspace, "show_overlay", &json!({}), viewport.clone());
+                        self.navigation_origin = origin;
+                        self.overlay = Some(Overlay::Locations);
+                        self.fuzzy_worker.cancel();
+                        self.locations = result.locations;
+                        self.quick_pending = false;
+                        self.location_items();
+                        let _ = self.preview_current(workspace);
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.overlay == Some(Overlay::Goto)
             && matches!(
                 Query::parse(&self.quick_input.value()).target,
@@ -1720,7 +1973,7 @@ impl Panels {
         {
             self.query_quick(workspace);
         }
-        let mut changed = false;
+        let mut changed = intelligence_changed || query_changed;
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
             if self.replace_signature.as_ref()
@@ -1832,6 +2085,9 @@ impl Panels {
                 })
                 .collect();
             self.quick.set_items(items);
+            if self.overlay == Some(Overlay::Locations) {
+                self.decorate_locations();
+            }
             if let Err(error) = self.preview_current(workspace) {
                 self.message = error;
             }
@@ -2642,6 +2898,16 @@ impl Panels {
                 },
                 [0.77, 0.83, 0.9, 1.],
             );
+            if let Some(percent) = self.intel.percentage {
+                label(
+                    &mut layer,
+                    &format!("Indexing {percent}%"),
+                    (self.size.width - 310.).max(10.),
+                    status.y + 17.,
+                    status,
+                    [0.65, 0.8, 0.95, 1.],
+                );
+            }
             let name = editor
                 .language
                 .borrow()
@@ -2656,6 +2922,42 @@ impl Panels {
                 status,
                 [0.77, 0.83, 0.9, 1.],
             );
+        }
+        if !self.hover.is_empty() && self.overlay.is_none() {
+            let height = self.hover.len().min(8) as f64 * 24. + 8.;
+            let rect = crate::completion::popup_bounds(
+                Rect {
+                    x: self.hover_point.x,
+                    y: self.hover_point.y,
+                    width: 1.,
+                    height: 16.,
+                },
+                self.size,
+                height,
+            );
+            self.hover_bounds = rect;
+            self.widget(9001, "definitions_popup", rect, &[]);
+            fill(&mut layer, rect, rect, [0.11, 0.15, 0.2, 1.]);
+            for (i, location) in self.hover.iter().take(8).enumerate() {
+                label(
+                    &mut layer,
+                    &format!(
+                        "{:?}  {}  {}:{}",
+                        location.kind,
+                        location.name,
+                        location
+                            .file
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        location.row + 1
+                    ),
+                    rect.x + 8.,
+                    rect.y + 20. + i as f64 * 24.,
+                    rect,
+                    [0.84, 0.9, 0.96, 1.],
+                );
+            }
         }
         scene.layers.push(layer);
         if self.panel == Some(Panel::Output)
@@ -3073,5 +3375,258 @@ mod tests {
         assert_eq!(workspace.editor().buffer.id(), source);
         assert!(workspace.tabs[workspace.active].transient);
         assert_eq!(panels.restore_scroll, Some((12., 80.)));
+    }
+}
+
+#[cfg(test)]
+mod intelligence_tests {
+    use super::*;
+    use std::time::Duration;
+    #[track_caller]
+    fn wait(
+        workspace: &mut Workspace,
+        panels: &mut Panels,
+        condition: impl Fn(&Workspace, &Panels) -> bool,
+    ) {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            workspace.poll();
+            panels.poll(workspace, 0..100);
+            if condition(workspace, panels) {
+                return;
+            }
+            assert!(
+                Instant::now() < until,
+                "index navigation timed out: {} / {:?}; active {:?}; overlay {:?}; pending {}; unique {:?}; shared {:?}",
+                panels.message,
+                workspace.messages,
+                workspace.tabs[workspace.active].path,
+                panels.overlay,
+                panels.intel.pending,
+                panels
+                    .intel
+                    .projects
+                    .first()
+                    .map(|p| p.index.lookup_definition("unique")),
+                panels
+                    .intel
+                    .projects
+                    .first()
+                    .map(|p| p.index.lookup_definition("shared"))
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+    fn setup() -> (tempfile::TempDir, tempfile::TempDir, Workspace, Panels) {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().canonicalize().unwrap().join("a.rs"),
+            "fn shared() {}\n// unique\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().canonicalize().unwrap().join("b.rs"),
+            "fn shared() {}\nfn unique() {}\n",
+        )
+        .unwrap();
+        let mut workspace =
+            Workspace::new(vel_text::Text::new(), Some(data.path().into()), None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels
+            .add_folder(&mut workspace, root.path().into())
+            .unwrap();
+        for file in ["b.rs", "a.rs"] {
+            workspace
+                .open(FileLocation {
+                    path: root.path().canonicalize().unwrap().join(file),
+                    line: 1,
+                    column: 1,
+                })
+                .unwrap();
+        }
+        wait(&mut workspace, &mut panels, |_, p| {
+            !p.intel.projects.is_empty() && !p.intel.projects[0].index.status().active
+        });
+        (root, data, workspace, panels)
+    }
+    #[test]
+    fn project_symbols_definition_previews_unicode_locations_and_bounded_history() {
+        let (root, _data, mut w, mut p) = setup();
+        let a = w.active;
+        let source = w.editor().text.to_string();
+        w.editor_mut()
+            .set_caret(source.find("unique").unwrap(), false);
+        let start = w.editor().caret;
+        p.action(&mut w, "goto_definition", &json!({}), 0..100)
+            .unwrap();
+        wait(&mut w, &mut p, |w, p| {
+            !p.intel.pending
+                && w.tabs[w.active].path.as_ref()
+                    == Some(&root.path().canonicalize().unwrap().join("b.rs"))
+        });
+        assert_eq!(w.editor().caret, "fn shared() {}\nfn ".len());
+        p.action(&mut w, "jump_back", &json!({}), 0..100).unwrap();
+        assert_eq!(w.active, a);
+        assert_eq!(w.editor().caret, start);
+        p.action(&mut w, "jump_forward", &json!({}), 0..100)
+            .unwrap();
+        assert_eq!(
+            w.tabs[w.active].path.as_ref(),
+            Some(&root.path().canonicalize().unwrap().join("b.rs"))
+        );
+        w.select(a);
+        w.editor_mut().set_caret(4, false);
+        p.action(&mut w, "goto_definition", &json!({}), 0..100)
+            .unwrap();
+        wait(&mut w, &mut p, |_, p| {
+            p.overlay == Some(Overlay::Locations) && p.quick.items.len() == 2
+        });
+        assert!(p.quick.items.iter().all(|r| r.annotation.contains(".rs:")));
+        p.key(&mut w, &Key::parse("escape").unwrap(), 0..100)
+            .unwrap();
+        assert_eq!(w.active, a);
+        assert_eq!(w.editor().caret, 4);
+        p.action(&mut w, "goto_symbol_in_project", &json!({}), 0..100)
+            .unwrap();
+        p.quick_input.set("uniq");
+        p.query_quick(&mut w);
+        wait(&mut w, &mut p, |_, p| {
+            !p.quick_pending && !p.quick.items.is_empty()
+        });
+        assert_eq!(p.quick.items[0].caption, "unique");
+        p.key(&mut w, &Key::parse("enter").unwrap(), 0..100)
+            .unwrap();
+        assert!(p.overlay.is_none());
+        for _ in 0..140 {
+            let mut jump = crate::intelligence::capture(&w);
+            jump.sheet += p.intel.back.len() as u64 + 1;
+            p.intel.remember(jump);
+        }
+        assert!(p.intel.back.len() <= 128);
+    }
+    #[test]
+    fn unsaved_analysis_replaces_disk_and_close_restores_it() {
+        let (_root, _data, mut w, mut p) = setup();
+        w.editor_mut()
+            .set_selection(Selection::from_regions([Region::from(3..9)]));
+        w.editor_mut()
+            .run("insert", &json!({"characters":"renamed"}))
+            .unwrap();
+        wait(&mut w, &mut p, |_, p| {
+            p.intel.projects[0].index.lookup_definition("renamed").len() == 1
+        });
+        assert_eq!(
+            p.intel.projects[0].index.lookup_definition("shared").len(),
+            1
+        );
+        let old = w.active;
+        w.editor_mut().run("undo", &json!({})).unwrap();
+        wait(&mut w, &mut p, |_, p| {
+            p.intel.projects[0]
+                .index
+                .lookup_definition("renamed")
+                .is_empty()
+                && p.intel.projects[0].index.lookup_definition("shared").len() == 2
+        });
+        w.close(old).unwrap();
+        wait(&mut w, &mut p, |_, p| {
+            p.intel.projects[0].index.lookup_definition("shared").len() == 2
+        });
+        assert!(
+            crate::intelligence::status_text(&[p.intel.projects[0].index.clone()])
+                .contains("files")
+        );
+    }
+    #[test]
+    fn references_hover_click_and_disabled_hover_use_the_project_service() {
+        let (_root, data, mut w, mut p) = setup();
+        let refs = data.path().canonicalize().unwrap().join("refs.rs");
+        std::fs::write(&refs, "// shared\n").unwrap();
+        let index = p.intel.projects[0].index.shared_index();
+        index.write().unwrap().replace_file(
+            refs.clone(),
+            vel_index::FileAnalysis {
+                symbols: vec![vel_index::IndexedSymbol {
+                    name: "shared".into(),
+                    row: 0,
+                    column: 3,
+                    range: 3..9,
+                    kind: vel_index::SymbolKind::Function,
+                    definition: false,
+                    reference: true,
+                }],
+                ..Default::default()
+            },
+        );
+        w.editor_mut().set_caret(4, false);
+        p.action(&mut w, "goto_reference", &json!({}), 0..100)
+            .unwrap();
+        wait(&mut w, &mut p, |w, p| {
+            !p.intel.pending && w.tabs[w.active].path.as_ref() == Some(&refs)
+        });
+        assert_eq!(w.editor().caret, 3);
+        p.action(&mut w, "jump_back", &json!({}), 0..100).unwrap();
+        p.hover_at(&w, Point { x: 100., y: 100. }, 4);
+        p.hover_since = Instant::now() - Duration::from_secs(1);
+        wait(&mut w, &mut p, |_, p| !p.hover.is_empty());
+        p.layout(Size {
+            width: 800.,
+            height: 600.,
+        });
+        let mut scene = Scene::default();
+        p.paint(&w, &mut scene);
+        assert!(
+            p.tree
+                .nodes
+                .values()
+                .any(|n| n.class == "definitions_popup")
+        );
+        let point = Point {
+            x: p.hover_bounds.x + 10.,
+            y: p.hover_bounds.y + 10.,
+        };
+        assert!(p.click_definition(&mut w, point).unwrap());
+        assert!(p.hover.is_empty());
+        w.editor_mut().settings.set(
+            vel_config::settings::Layer::View,
+            "show_definitions",
+            json!(false),
+        );
+        p.hover_at(&w, Point { x: 200., y: 200. }, 4);
+        assert!(p.hover_term.is_empty());
+    }
+    #[test]
+    fn unavailable_profile_cache_falls_back_and_index_settings_disable_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().canonicalize().unwrap().join("a.rs"),
+            "fn available() {}\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("profile");
+        std::fs::write(&bad, "not a directory").unwrap();
+        let mut w = Workspace::new(vel_text::Text::new(), Some(bad), None, false).unwrap();
+        let mut p = Panels::new(&w, false);
+        p.add_folder(&mut w, root.path().into()).unwrap();
+        wait(&mut w, &mut p, |_, p| {
+            p.intel
+                .projects
+                .first()
+                .is_some_and(|p| !p.index.lookup_definition("available").is_empty())
+        });
+        assert!(w.messages.iter().any(|m| m.contains("temporary cache")));
+        let status = p.intel.status_source.clone();
+        assert_eq!(status.lock().unwrap().indices.len(), 1);
+        w.settings.set(
+            vel_config::settings::Layer::Project,
+            "index_files",
+            json!(false),
+        );
+        p.poll(&mut w, 0..100);
+        assert!(p.intel.projects.is_empty());
+        assert!(status.lock().unwrap().indices.is_empty());
+        assert!(!status.lock().unwrap().loading);
     }
 }

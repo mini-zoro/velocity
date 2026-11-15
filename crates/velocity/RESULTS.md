@@ -1,3 +1,100 @@
+<!-- ROUND8-RESULTS-BEGIN -->
+# Round 8 results: one parse, project navigation, completion and snippets
+
+Implemented and package-verified; **uncommitted**. Changes are restricted to `velocity`,
+`vel-commands` and shared root Cargo.lock. Concurrent lane-B work was left untouched.
+The previous round-7 section below is an archive; its scroll exception was accepted in 5b128ba.
+This round closes that exception with an isolated comparison.
+
+The editor now consumes `ScopeSnapshot` and `HighlightService::symbols`; the lane-A ScopeCache,
+its parser, operation arrays and checkpoints are gone. Scope-derived style/comment/tag/fold
+facts are cached by the interned stack ID instead of rebuilding strings/stacks for each token.
+Styles/scopes are clipped to line bodies
+before rendering/analysis. A dedicated publisher builds unsaved index analysis from the complete
+matching scopes and symbols, with no syntax parse. Navigation runs on a separate worker. IME
+preview text and clone placeholders never enter published analysis. Cache/session creation does
+not reload resources; actual resource reloads preserve folders added at runtime and unsaved text.
+
+Users can search project symbols (Cmd+Shift+R), jump to definitions (F12/Cmd+Alt+Down) and
+references (Shift+F12), preview multiple locations, navigate 128 saved jumps, click hover
+locations and inspect live indexing progress/logs in Help → Indexing Status. Completion is
+asynchronous, shows kinds/annotations/plain details, flips above the caret and adapts to short
+splits. Arrows, Enter/Tab policies, cycling, mouse commit, delay/selectors/triggers and field
+contexts are wired. Stale commits query the new prefix; moving the caret/tab or composing cancels
+pending results. Package and inline snippets support Tab/Shift+Tab, live mirrors, field outlines,
+Unicode/multiple carets, completion/pairs inside fields, Escape and ordinary undo/Hot Exit text.
+
+## Scroll exception and final regression check
+
+One child process at a time, the same actual 10 MB Rust fixture and 3840×2160 logical CPU view;
+ten independent processes per binary, 600 measured scenes each. Order is counterbalanced A/B,
+then B/A. No other benchmark ran in lane A. Process medians avoid treating correlated frames as
+independent runs; intervals bootstrap those medians (10,000 resamples, fixed seed 8). All raw
+samples and scheduling outliers remain in the run directories.
+
+| Comparison | old / new process p50 (ms) | change | old / new 95% CI (ms) |
+| --- | --- | --- | --- |
+| Archived round 6 → accepted round 7 | 0.435 / 0.440 | +1.21% | [0.42775, 0.4441355] / [0.431521, 0.44490625] |
+| Archived round 6 → final round 8 | 0.445 / 0.428 | -3.85% | [0.43063525, 0.4798125] / [0.4256355, 0.45561474999999996] |
+
+Verdict: the round-7 +8.2% regression did not reproduce in the isolated session. Final round-8
+scroll also has no >5% p50 regression with non-overlapping confidence. Binary and fixture hashes
+are in [timings-round8.json](timings-round8.json); the original round-6/7 records are unchanged.
+
+## Parser CPU and memory
+
+Five alternating process pairs use the identical `parse_bench.rs` in accepted 5b128ba and the
+final editor. Only CLI/main measurement hooks are added to the isolated reference archive.
+Each opens ten real Rust files, 1,000 lines each, **527,800 UTF-8 bytes total**, with warmed
+syntax assets. The timer waits for complete highlighter and editor analysis. CPU is total
+process user+system time over all threads; footprint is kernel TASK_VM_INFO phys_footprint.
+Figures below are medians of five processes. RSS is retained separately in JSON.
+
+| Probe | round 7 | one parser | change |
+| --- | ---: | ---: | ---: |
+| Process CPU (ms) | 2685.410 | 809.664 | -69.85% |
+| Wall time (ms) | 416.087 | 153.530 | -63.10% |
+| phys_footprint (MB) | 102.926 | 56.903 | -46.023 MB / -44.71% |
+
+The ten-file project with live index/completion popup uses **81.463 MB**,
+-21.463 MB versus round 7 and
+24.560 MB above the one-parser probe.
+Adding the synthetic 100k-word vocabulary uses **96.520 MB**,
+-6.406 MB versus round 7.
+The real-project memory target is no more than +20 MB over round 7; these headless kernel
+footprints meet it. Native fonts/Metal footprint remains a reviewer measurement.
+
+## Budgets and verification
+
+| Workload | Budget | measured CPU | samples |
+| --- | --- | --- | ---: |
+| Typing with popup + 100k extra project words, p50 / p95 | ≤2 / 4 ms | 0.441 / 0.498 ms | 2500 |
+| Already-open cross-file definition, p50 / p95 / max | ≤20 ms | 0.437 / 0.522 / 1.470 ms | 500 |
+| Ten-file index + popup phys_footprint delta vs round 7 | target ≤+20 MB | -21.463 MB | 5 processes |
+
+Typing starts with a current popup before each real keymap/command transaction and paints the
+popup in the timed scene. Worker preparation is outside the timer. Definition time includes a
+navigation request, worker delivery, opening an already-open target, reveal and CPU scene. Index
+publication is drained before footprint and jump measurements. Synthetic vocabulary preparation
+is outside query/typing timing. These are CPU proxies; no AppKit, native font or Metal subsystem
+was initialized for measurements. The automatic GUI mode records actual positive drawable
+scanout separately from submit and CPU scene time.
+
+Strict fmt, clippy all-targets with -D warnings, release tests (92 passing across the two
+packages), rustdoc with -D warnings and release build passed. Logs are retained under
+[output/round8-release-intelligence/validation](output/round8-release-intelligence/validation), with commands and source hashes in JSON.
+Coverage includes stale completion commits/caret changes, delay/trigger/Tab policies, short
+popup layouts, field/mirror/IME/undo behavior, clone cancellation, package reloads, live status,
+unsaved indexing, navigation previews/history and fresh/read-only/corrupt profiles. Existing
+Hot Exit and Chinese IME regressions still pass. Native behavior/IME geometry/Hot Exit acceptance
+remain in [MANUAL_TEST.md](MANUAL_TEST.md); exact automatic and interactive commands are at the
+top of [RUNBOOK.md](RUNBOOK.md). No GUI/Metal run is claimed from this sandbox.
+
+Reproduction helpers: `scripts/build-parser-reference.py`, `scripts/measure-intelligence.py`
+and `scripts/compare-scroll.py`. Earlier complete experimental series remain under output;
+only the final copied binary contributes the round-8 table above.
+<!-- ROUND8-RESULTS-END -->
+
 # Round 7 results: workbench, sessions, projects and builds
 
 Implemented and headless-verified; **uncommitted**. Users can arrange draggable pane grids,

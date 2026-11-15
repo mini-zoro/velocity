@@ -155,6 +155,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pub catalog: Arc<crate::completion::Catalog>,
     pub assets: Arc<crate::language::Assets>,
     syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
     schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
@@ -208,6 +209,10 @@ impl Workspace {
     ) -> Result<Self, String> {
         let mut resources = Resources::default();
         for (name, source) in [
+            (
+                "Rust Function.sublime-snippet",
+                include_str!("../resources/Packages/Default/Rust Function.sublime-snippet"),
+            ),
             (
                 "Preferences.sublime-settings",
                 include_str!("../resources/Packages/Default/Preferences.sublime-settings"),
@@ -515,6 +520,30 @@ impl Workspace {
                 },
             });
         }
+        for suffix in [".sublime-snippet", ".sublime-completions"] {
+            for resource in resources.matching(suffix) {
+                if resource.origin != Path::new("<embedded>") {
+                    config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
+                }
+            }
+        }
+        let catalog = crate::completion::Catalog::load(&resources, &mut resource_messages);
+        for (name, snippet) in &catalog.snippets {
+            palette.push(PaletteItem {
+                caption: format!(
+                    "Snippet: {}",
+                    if snippet.description.is_empty() {
+                        name.as_str()
+                    } else {
+                        &snippet.description
+                    }
+                ),
+                invocation: vel_config::keymap::Invocation {
+                    command: "insert_snippet".into(),
+                    args: serde_json::json!({"name":name}),
+                },
+            });
+        }
         let mut scheme_resources = Vec::new();
         for suffix in [".sublime-color-scheme", ".hidden-color-scheme", ".tmTheme"] {
             for resource in resources.matching(suffix) {
@@ -589,8 +618,10 @@ impl Workspace {
             config_stamp.push((parent.clone(), stamp(&parent)));
         }
         if let Some(data) = &data_dir {
+            // Observe resource locations directly. Cache/Sessions children must not reload
+            // project settings or discard dynamically added folders. Missing paths are
+            // tracked as None, so their first creation is still detected.
             for path in [
-                data.clone(),
                 data.join("Packages"),
                 data.join("Packages/User"),
                 data.join("Installed Packages"),
@@ -618,6 +649,7 @@ impl Workspace {
             None
         };
         let mut workspace = Self {
+            catalog,
             assets,
             syntax_settings,
             schemes,
@@ -683,6 +715,9 @@ impl Workspace {
     }
     pub fn select(&mut self, index: usize) {
         if index < self.tabs.len() {
+            if index != self.active {
+                self.editor_mut().completion.hide();
+            }
             self.editor_mut().unmark();
             self.editor_mut().keymap.cancel();
             self.activate_sheet(index);
@@ -823,6 +858,7 @@ impl Workspace {
                 continue;
             }
             changed |= tab.editor.poll_language();
+            changed |= tab.editor.poll_completion();
             if let Some(language) = tab.editor.language.borrow_mut().as_mut() {
                 self.messages.append(&mut language.errors);
             }
@@ -917,6 +953,16 @@ impl Workspace {
         }
         self.reconcile_installs();
         if self.config_stamp.iter().any(|(p, s)| stamp(p) != *s) {
+            let project_changed = self.project.as_ref().is_some_and(|project| {
+                self.config_stamp
+                    .iter()
+                    .any(|(path, saved)| path == project && stamp(path) != *saved)
+            });
+            let folders = if project_changed {
+                Vec::new()
+            } else {
+                self.folders.clone()
+            };
             match Self::new(
                 Text::new(),
                 self.data_dir.clone(),
@@ -925,6 +971,7 @@ impl Workspace {
             ) {
                 Ok(config) => {
                     self.assets = config.assets;
+                    self.catalog = config.catalog;
                     self.syntax_settings = config.syntax_settings;
                     self.schemes = config.schemes;
                     self.folders = config.folders;
@@ -932,6 +979,32 @@ impl Workspace {
                     self.build_systems = config.build_systems;
                     self.project_model = config.project_model;
                     self.settings = config.settings;
+                    // User resource changes must preserve folders added at runtime. An
+                    // actual project-file edit still replaces its configured folder list.
+                    for mut folder in folders {
+                        if self.folders.iter().any(|f| f.path == folder.path) {
+                            continue;
+                        }
+                        let patterns = |key| {
+                            self.settings
+                                .get(key)
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        };
+                        match vel_search::project::Rules::new(
+                            &patterns("file_exclude_patterns"),
+                            &patterns("folder_exclude_patterns"),
+                            &patterns("binary_file_patterns"),
+                        ) {
+                            Ok(rules) => folder.rules = rules,
+                            Err(error) => self.messages.push(error),
+                        }
+                        self.folders.push(folder);
+                    }
                     self.keymap = config.keymap;
                     self.menus = config.menus;
                     self.mousemap = config.mousemap;
@@ -1017,6 +1090,8 @@ impl Workspace {
         detect: bool,
     ) -> Result<(), String> {
         let tab = &mut self.tabs[index];
+        tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
+        tab.editor.snippet_path = tab.path.clone();
         let previous = tab
             .editor
             .language
