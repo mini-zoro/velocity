@@ -17,11 +17,13 @@ use vel_color_scheme::{ColorScheme, Highlighter, Style};
 use vel_scope::{ScopeStack, ScopeStackOp};
 use vel_syntax::{MetadataSet, ParseState, SyntaxReference, SyntaxSet};
 mod scopes;
+mod viewport;
 use scopes::ScopeInterner;
 pub use scopes::{
     ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine, SymbolList,
 };
 use vel_text::Text;
+pub use viewport::{ViewportHighlighter, ViewportOptions, ViewportProgress};
 
 /// Maximum synchronous catch-up time; a single regex search is cooperative, not preemptible.
 pub const VISIBLE_BUDGET: Duration = Duration::from_millis(2);

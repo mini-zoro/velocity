@@ -546,3 +546,35 @@ fn regex_crosses_chunk_edge_and_slice_cursor_backtracks() {
     assert_eq!(found.range(), 1..10);
     tree::assert_invariants(&patched.root);
 }
+
+#[test]
+fn progressive_roots_share_valid_trees_and_stop_on_callback_errors() {
+    let source = "abc中😀\n".repeat(600_000);
+    let mut saved = Vec::new();
+    let text = Text::from_reader_snapshots(
+        source.as_bytes(),
+        2 * 1024 * 1024,
+        std::time::Duration::from_secs(10),
+        |snapshot| {
+            tree::assert_invariants(&snapshot.root);
+            assert_eq!(snapshot.to_string(), &source[..snapshot.len_bytes()]);
+            saved.push(snapshot);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(text.to_string(), source);
+    assert!(saved.len() >= 3);
+    for snapshot in saved {
+        tree::assert_invariants(&snapshot.root);
+    }
+    let mut count = 0;
+    let error =
+        Text::from_reader_snapshots(source.as_bytes(), 1, std::time::Duration::ZERO, |_| {
+            count += 1;
+            Err(io::Error::other("stop publication"))
+        })
+        .unwrap_err();
+    assert_eq!(count, 1);
+    assert_eq!(error.to_string(), "stop publication");
+}

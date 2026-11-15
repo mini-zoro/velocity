@@ -149,3 +149,18 @@ python3 crates/vel-text/benches/report.py crates/vel-text/perf-final.jsonl
 最终原始记录：[perf-final.jsonl](perf-final.jsonl)；完整统计：[perf-summary.json](perf-summary.json)。探索阶段记录在 gitignored 的 .perf-local/perf-data/，本报告只用最终 pass 做预算验收。
 
 验证：cargo fmt --all；cargo clippy -p vel-text --all-targets -- -D warnings；cargo test -p vel-text（debug 与 release）；--no-default-features；RUSTDOCFLAGS=-D warnings cargo doc -p vel-text --no-deps。本轮增加了非 Send reader、多个在途块后的 I/O/UTF-8 错误、2 MiB Unicode 分界与串行路径一致性测试。另以 PROPTEST_CASES=1024运行 release 模型测试，包含生产叶大小集成测试。
+
+## Round 11: additive progressive loader
+
+The original results above remain intact. The new `Text::from_reader_snapshots` is isolated in
+`src/tree/progressive.rs`; existing loader/edit/query implementations and Node layout stay the
+same. Prefixes share complete subtrees, with at most 8 MiB of source input in flight.
+
+All existing text benchmarks and all eight buffer scenarios were rerun with alternating,
+process-isolated A/B pairs against clean HEAD 760baf9: 25 pairs per metric, and 101 for the tiny
+50 MB undo case. Both paired and marginal median regressions stay within 5%; the largest paired
+increase is undo at +4.59%, CI [1.000, 1.09486]. This is a point-estimate gate, not a claim that
+all confidence intervals exclude 5%. Initial estimates, an A/A control, and all old/new samples
+are preserved. New feature budgets, tails, memory accounting, full CIs and reproduction are in
+[../vel-largefile/PERF.md](../vel-largefile/PERF.md). Workspace fmt, clippy -D warnings, release
+tests (421 passed) and rustdoc -D warnings passed. No commit was made.

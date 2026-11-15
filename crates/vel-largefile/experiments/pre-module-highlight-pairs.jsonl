@@ -1,0 +1,20 @@
+{"exact": false, "init_ns": 256722166, "ns": [2024333], "operation": "deep-viewport", "parsed_lines": 1557, "side": "A", "case": "deep-viewport", "pair": 0, "order": "AB"}
+{"exact": false, "init_ns": 51958, "ns": [101542], "operation": "deep-viewport", "parsed_lines": 10, "retained_lines": 20, "side": "B", "case": "deep-viewport", "pair": 0, "order": "AB"}
+{"exact": false, "init_ns": 70625, "ns": [120250], "operation": "deep-viewport", "parsed_lines": 10, "retained_lines": 20, "side": "B", "case": "deep-viewport", "pair": 1, "order": "BA"}
+{"exact": false, "init_ns": 355577458, "ns": [2915875], "operation": "deep-viewport", "parsed_lines": 293, "side": "A", "case": "deep-viewport", "pair": 1, "order": "BA"}
+{"exact": false, "init_ns": 289529459, "ns": [2033417], "operation": "deep-viewport", "parsed_lines": 1376, "side": "A", "case": "deep-viewport", "pair": 2, "order": "AB"}
+{"exact": false, "init_ns": 57000, "ns": [110667], "operation": "deep-viewport", "parsed_lines": 10, "retained_lines": 20, "side": "B", "case": "deep-viewport", "pair": 2, "order": "AB"}
+{"exact": false, "init_ns": 60666, "ns": [101292], "operation": "deep-viewport", "parsed_lines": 10, "retained_lines": 20, "side": "B", "case": "deep-viewport", "pair": 3, "order": "BA"}
+{"exact": false, "init_ns": 237160041, "ns": [2217667], "operation": "deep-viewport", "parsed_lines": 878, "side": "A", "case": "deep-viewport", "pair": 3, "order": "BA"}
+{"exact": false, "init_ns": 114769500, "ns": [2009167], "operation": "deep-viewport", "parsed_lines": 2623, "side": "A", "case": "deep-viewport", "pair": 4, "order": "AB"}
+{"exact": false, "init_ns": 50583, "ns": [104667], "operation": "deep-viewport", "parsed_lines": 10, "retained_lines": 20, "side": "B", "case": "deep-viewport", "pair": 4, "order": "AB"}
+{"exact": true, "init_ns": 52250, "ns": [24229917], "operation": "long-viewport", "parsed_lines": 1, "side": "A", "case": "long-viewport", "pair": 0, "order": "AB"}
+{"exact": false, "init_ns": 54083, "ns": [3833], "operation": "long-viewport", "parsed_lines": 0, "retained_lines": 2, "side": "B", "case": "long-viewport", "pair": 0, "order": "AB"}
+{"exact": false, "init_ns": 54458, "ns": [4125], "operation": "long-viewport", "parsed_lines": 0, "retained_lines": 2, "side": "B", "case": "long-viewport", "pair": 1, "order": "BA"}
+{"exact": true, "init_ns": 52542, "ns": [25223708], "operation": "long-viewport", "parsed_lines": 1, "side": "A", "case": "long-viewport", "pair": 1, "order": "BA"}
+{"exact": true, "init_ns": 63125, "ns": [24753083], "operation": "long-viewport", "parsed_lines": 1, "side": "A", "case": "long-viewport", "pair": 2, "order": "AB"}
+{"exact": false, "init_ns": 63584, "ns": [3917], "operation": "long-viewport", "parsed_lines": 0, "retained_lines": 2, "side": "B", "case": "long-viewport", "pair": 2, "order": "AB"}
+{"exact": false, "init_ns": 58750, "ns": [4084], "operation": "long-viewport", "parsed_lines": 0, "retained_lines": 2, "side": "B", "case": "long-viewport", "pair": 3, "order": "BA"}
+{"exact": true, "init_ns": 55750, "ns": [26901584], "operation": "long-viewport", "parsed_lines": 1, "side": "A", "case": "long-viewport", "pair": 3, "order": "BA"}
+{"exact": true, "init_ns": 53083, "ns": [25125208], "operation": "long-viewport", "parsed_lines": 1, "side": "A", "case": "long-viewport", "pair": 4, "order": "AB"}
+{"exact": false, "init_ns": 63208, "ns": [4583], "operation": "long-viewport", "parsed_lines": 0, "retained_lines": 2, "side": "B", "case": "long-viewport", "pair": 4, "order": "AB"}

@@ -1,5 +1,7 @@
 //! Original implementation of a copy-on-write B-tree; no third-party rope code is copied.
 use std::{io, sync::Arc};
+mod progressive;
+pub(crate) use progressive::from_reader_snapshots;
 
 #[cfg(not(test))]
 pub(crate) const CHUNK: usize = 6144;

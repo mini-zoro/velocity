@@ -220,3 +220,47 @@ scope/symbol regions. A line above 4 GiB is rejected explicitly instead of trunc
 
 New regression/performance evidence is in [../vel-index/ROUND6.md](../vel-index/ROUND6.md), with
 raw five-run measurements in `round6-timings.json`. Previous round evidence remains intact.
+
+## Round 11: sparse huge-document integration
+
+When `vel_largefile::LargeDocumentPolicy` selects viewport highlighting, construct a
+`ViewportHighlighter` instead of the ordinary dense DocumentHighlighter/HighlightService.
+Construction does not allocate a record per document line. This is an editor-owned scheduling
+core; keep it on the existing analysis dispatcher. The current HighlightService continues to
+wrap the dense engine for normal documents.
+
+`request_lines(version, a..b, budget)` starts from a nearby exact stable checkpoint, or directly
+at a with a best-effort initial state. It never parses a distant prefix on that request. It clips
+requests to max_viewport_lines (default 512), checks the cooperative deadline between lines, and
+returns version/scheme tags, colors and ScopeSnapshot just like the dense engine. Approximate
+styles have `StyledLine::exact=false`; their scope queries return None. Deadline exhaustion uses
+plain spans. Lines over max_line_bytes (default 16 KiB, including LF) are not copied or parsed
+in this path. Skipping keeps the incoming state and marks dependent results approximate.
+
+On a worker, call `advance(budget)` for exact background slices. Its progress reports the exact
+prefix and `long_line` when it stops before an oversized line. Schedule `repair_long_line()` on
+that worker, then continue advancing. This explicit repair is uncapped and may block in a regex;
+never perform it while holding a UI/render lock. A general grammar cannot derive the state after
+arbitrary skipped text without inspecting it. The repair uses real complete-line parsing, including
+branch corrections, and bypasses transition memoization for oversized lines so stable multi-MB
+strings do not remain cached. Speculative parser history can still retain text required for replay.
+A line over the compact scope-run limit (4 GiB) still returns an explicit error during exact repair;
+viewport fallback for it remains available.
+
+Call request_lines again after background progress/rewinds to redraw the watched viewport from
+corrected records. If its exact checkpoint was evicted or is outside the foreground lookback,
+`repair_lines(version, range)` is the worker-only eventual-correction path. It parses from the
+nearest retained exact checkpoint without a deadline and reads ahead through the 128-line rewind
+horizon. Publish its returned batch only for the matching buffer version/palette. Even very old
+viewports can therefore recover exact scopes; the UI never treats a skipped prefix as validated.
+Worker repair and ordinary requests must remain serialized on this engine's owner. Off-thread
+repair should publish batches to UI through its existing channel; do not move this core behind a
+mutex that the UI waits on.
+
+The engine retains bounded viewport/replay history, at most max_checkpoints stable states (128
+by default) and 1024 memoized transitions. `apply_change(after, new_version, changes)` validates
+lengths/boundaries, drops checkpoints after the first changed line, and restarts exact work from
+a retained stable state, without a document-tail scan. A palette swap increments scheme_revision,
+discards styled records and reparses. All old-coordinate/undo/redo integration rules above still
+apply. New tests and paired construction/viewport measurements are linked from
+[vel-largefile/PERF.md](../vel-largefile/PERF.md).

@@ -127,6 +127,17 @@ impl ParseState {
         self.parse_line_into(line, &mut output)?;
         Ok(output)
     }
+    /// Parses without retaining this line in the shared transition cache. Useful
+    /// for explicit background repair of oversized lines: the exact interpreter
+    /// state is preserved, but a multi-MB string is not cached after a stable parse.
+    /// Speculative branch replay may still retain its required source history.
+    pub fn parse_line_uncached(&mut self, line: &str) -> Result<LineOps, ParsingError> {
+        let enabled = self.cache_enabled;
+        self.cache_enabled = false;
+        let result = self.parse_line(line);
+        self.cache_enabled = enabled;
+        result
+    }
     /// Parses a line while retaining the operation and correction vector capacities.
     /// Use this for streaming parsing; ordinary, non-speculative lines reuse storage.
     pub fn parse_line_into(&mut self, line: &str, out: &mut LineOps) -> Result<(), ParsingError> {

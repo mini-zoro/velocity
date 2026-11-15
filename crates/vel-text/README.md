@@ -128,3 +128,19 @@ libc 仅作测试/性能对照。库内不使用 unsafe；基准中的 getrusage
 
 探索阶段数据已移至 gitignored 的 `.perf-local/perf-data/`；发布结果只保留 `perf-final.jsonl` 与 `perf-summary.json`。
 本轮新增并行/串行、非 Send reader、2 MiB 分界及多个在途任务后的错误传播测试。
+
+## Round 11: progressive engine integration
+
+`Text::from_reader_snapshots(reader, publish_bytes, interval, callback)` publishes the first
+completed 2 MiB and subsequent persistent prefixes while one bounded worker pipeline continues.
+It preserves the original loader's UTF-8 seams, short-read/error handling and at most 8 MiB of
+in-flight input. Callback errors stop the pipeline and join its workers. Every prefix is provisional
+until the terminal Result succeeds. The existing from_reader/from_reader_serial paths are unchanged.
+Prefix assembly shares complete subtrees and repairs the joining boundary without flattening.
+Tree invariants and preserved prefix snapshots are tested throughout construction. The progressive
+pipeline is isolated in its own module; the ordinary rope API and node layout are unchanged.
+
+Lane A should normally use [vel-largefile](../vel-largefile/README.md), which adds cancellation,
+a coalescing worker mailbox, strict BOM/binary/fallback routing, progress and prefix measurements.
+Its LongLineIndex supplies optional grapheme/cell/word metrics without enlarging every rope node.
+The paired text/buffer regression gate is recorded in [../vel-largefile/PERF.md](../vel-largefile/PERF.md).

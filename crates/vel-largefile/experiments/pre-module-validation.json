@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "command": "cargo fmt --all --check",
+      "exit_status": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit_status": 0
+    },
+    {
+      "command": "cargo test --workspace --release",
+      "exit_status": 0,
+      "passed": 421,
+      "failed": 0,
+      "ignored": 0,
+      "result_groups": 92
+    },
+    {
+      "command": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps",
+      "exit_status": 0
+    }
+  ],
+  "scope": "No Rust logic changed after these checks; benchmark scripts/docs/evidence updated afterward."
+}

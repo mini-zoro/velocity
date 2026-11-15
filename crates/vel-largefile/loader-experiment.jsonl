@@ -1,0 +1,10 @@
+{"extra": {"bytes": 1000000000, "first_ns": 1548250, "snapshots": 61}, "ns": [2176781541], "operation": "load", "peak_rss_bytes": 174047232, "side": "A", "pair": 0, "case": "loader-experiment", "order": "AB"}
+{"extra": {"bytes": 1000000000, "first_ns": 429417, "snapshots": 61}, "ns": [921535542], "operation": "load", "peak_rss_bytes": 844431360, "side": "B", "pair": 0, "case": "loader-experiment", "order": "AB"}
+{"extra": {"bytes": 1000000000, "first_ns": 101292, "snapshots": 61}, "ns": [884005959], "operation": "load", "peak_rss_bytes": 1127923712, "side": "B", "pair": 1, "case": "loader-experiment", "order": "BA"}
+{"extra": {"bytes": 1000000000, "first_ns": 2539167, "snapshots": 61}, "ns": [1285580208], "operation": "load", "peak_rss_bytes": 1087094784, "side": "A", "pair": 1, "case": "loader-experiment", "order": "BA"}
+{"extra": {"bytes": 1000000000, "first_ns": 81500, "snapshots": 61}, "ns": [1259050750], "operation": "load", "peak_rss_bytes": 1087029248, "side": "A", "pair": 2, "case": "loader-experiment", "order": "AB"}
+{"extra": {"bytes": 1000000000, "first_ns": 88375, "snapshots": 61}, "ns": [880167833], "operation": "load", "peak_rss_bytes": 1128038400, "side": "B", "pair": 2, "case": "loader-experiment", "order": "AB"}
+{"extra": {"bytes": 1000000000, "first_ns": 112292, "snapshots": 61}, "ns": [1565593542], "operation": "load", "peak_rss_bytes": 295518208, "side": "B", "pair": 3, "case": "loader-experiment", "order": "BA"}
+{"extra": {"bytes": 1000000000, "first_ns": 248416, "snapshots": 61}, "ns": [1324697250], "operation": "load", "peak_rss_bytes": 1087012864, "side": "A", "pair": 3, "case": "loader-experiment", "order": "BA"}
+{"extra": {"bytes": 1000000000, "first_ns": 94708, "snapshots": 61}, "ns": [1257644583], "operation": "load", "peak_rss_bytes": 1086980096, "side": "A", "pair": 4, "case": "loader-experiment", "order": "AB"}
+{"extra": {"bytes": 1000000000, "first_ns": 79875, "snapshots": 61}, "ns": [881744792], "operation": "load", "peak_rss_bytes": 1126072320, "side": "B", "pair": 4, "case": "loader-experiment", "order": "AB"}

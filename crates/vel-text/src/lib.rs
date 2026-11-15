@@ -93,6 +93,23 @@ impl Text {
             root: tree::from_reader_parallel(r)?,
         })
     }
+    /// Loads through a single bounded worker pipeline, publishing immutable prefixes.
+    /// The first completed 2 MiB block is published immediately; later publications
+    /// follow the byte/time cadence (checked between completed blocks), plus EOF.
+    /// Callback errors stop loading and join the bounded workers. Invalid/truncated
+    /// UTF-8 is InvalidData, including errors after already published prefixes.
+    /// Readers need not be Send; callback snapshots share their complete subtrees.
+    pub fn from_reader_snapshots(
+        reader: impl io::Read,
+        publish_bytes: usize,
+        interval: std::time::Duration,
+        mut publish: impl FnMut(Self) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let root = tree::from_reader_snapshots(reader, publish_bytes, interval, |root| {
+            publish(Self { root })
+        })?;
+        Ok(Self { root })
+    }
     /// Loads on the calling thread, with a 1 MiB staging buffer.
     /// Suitable for small streams or callers already managing a thread pool.
     /// Invalid or truncated UTF-8 returns [`io::ErrorKind::InvalidData`].

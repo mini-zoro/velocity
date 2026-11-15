@@ -1,0 +1,24 @@
+[package]
+name = "vel-largefile"
+description = "Progressive text loading, huge-document policy, long-line navigation and mapped hex views"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vel-text = { path = "../vel-text", default-features = false }
+memmap2 = "0.9"
+memchr = "2"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+libc = "0.2"
+

@@ -3077,6 +3077,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-largefile"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "memchr",
+ "memmap2",
+ "serde_json",
+ "thiserror",
+ "unicode-segmentation",
+ "unicode-width",
+ "vel-text",
+]
+
+[[package]]
 name = "vel-minihtml"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,10 @@
+{"extra": {"bytes": 4000000000, "estimated_storage_bytes": 4184979880, "load_peak_rss_bytes": 1142849536, "snapshots": 0}, "ns": [1490312084], "operation": "first", "peak_rss_bytes": 1145978880, "side": "A", "case": "first", "pair": 0, "order": "AB"}
+{"extra": {"prefix_bytes": 2097152, "total": 4000000000}, "ns": [1392666], "operation": "first", "peak_rss_bytes": 6275072, "side": "B", "case": "first", "pair": 0, "order": "AB"}
+{"extra": {"prefix_bytes": 2097152, "total": 4000000000}, "ns": [726708], "operation": "first", "peak_rss_bytes": 6275072, "side": "B", "case": "first", "pair": 1, "order": "BA"}
+{"extra": {"bytes": 4000000000, "estimated_storage_bytes": 4184979880, "load_peak_rss_bytes": 2880389120, "snapshots": 0}, "ns": [1161206375], "operation": "first", "peak_rss_bytes": 2880389120, "side": "A", "case": "first", "pair": 1, "order": "BA"}
+{"extra": {"bytes": 4000000000, "estimated_storage_bytes": 4184979880, "load_peak_rss_bytes": 2840936448, "snapshots": 0}, "ns": [1122301458], "operation": "first", "peak_rss_bytes": 2850242560, "side": "A", "case": "first", "pair": 2, "order": "AB"}
+{"extra": {"prefix_bytes": 2097152, "total": 4000000000}, "ns": [1426667], "operation": "first", "peak_rss_bytes": 6275072, "side": "B", "case": "first", "pair": 2, "order": "AB"}
+{"extra": {"prefix_bytes": 2097152, "total": 4000000000}, "ns": [795209], "operation": "first", "peak_rss_bytes": 6275072, "side": "B", "case": "first", "pair": 3, "order": "BA"}
+{"extra": {"bytes": 4000000000, "estimated_storage_bytes": 4184979880, "load_peak_rss_bytes": 2881011712, "snapshots": 0}, "ns": [1136083875], "operation": "first", "peak_rss_bytes": 2886877184, "side": "A", "case": "first", "pair": 3, "order": "BA"}
+{"extra": {"bytes": 4000000000, "estimated_storage_bytes": 4184979880, "load_peak_rss_bytes": 2714025984, "snapshots": 0}, "ns": [1133175791], "operation": "first", "peak_rss_bytes": 2724184064, "side": "A", "case": "first", "pair": 4, "order": "AB"}
+{"extra": {"prefix_bytes": 2097152, "total": 4000000000}, "ns": [2432666], "operation": "first", "peak_rss_bytes": 6275072, "side": "B", "case": "first", "pair": 4, "order": "AB"}

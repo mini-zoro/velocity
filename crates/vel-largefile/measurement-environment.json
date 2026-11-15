@@ -1,0 +1,26 @@
+{
+  "baseline_commit": "760baf9c1285f61935362df514fadbbb6671c662",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "executables": {
+    "text-before": "284ed12924cfde9373bf7dc3bc536dd70bbc7cb87f303505e09a1afc5817493f",
+    "buffer-before": "e988698fd05c0f876c0c5bb507d1e658a8d5e6e54f81439bd3626ec11b840cdd"
+  },
+  "arch": "arm64",
+  "macos": "26.1",
+  "baseline_scope": "HEAD before any round-11 edits",
+  "benchmark_policy": "serial independent processes; alternating AB/BA; final legacy 25 pairs (undo_50mb 101); feature probes 5 pairs; earlier variants retained in experiments",
+  "candidate_executables": {
+    "text-after": "dd240a8e37eddd6e6b560cf296bbf26a5dd71333aae31451584999a5f6353996",
+    "buffer-after": "b624c69f95b67c1f644f6830f332fe8d66436172758ad049889760491d2b94f5",
+    "budgets": "fe0ec95e429ab63abfa29abcc239484ac277f5f96643f0622da2b8dad64ce698",
+    "huge_bench": "d43d0e6a765b668ac720ce1f7afb775ca643c604a3563704ba1a5788d8933673"
+  },
+  "source_sha256": {
+    "crates/vel-text/src/lib.rs": "8e8722002b8353e7b5cb4bedd4d416cc5db2ecfc905bae2d07dd96882930d648",
+    "crates/vel-text/src/tree.rs": "2c51cbd20f38877eef23b3571c9fec9fdf42fab0d1700f5b70c9769f53392f40",
+    "crates/vel-text/src/tree/progressive.rs": "13630876abd04ba0f2464f1c45e606219189d2a2b5bf33fe4681248af2acbbaa",
+    "crates/vel-largefile/src/load.rs": "b18a1ec4e6a66d0c246a0ce99099a7b19264b7ec250c123d7545247cd8f7f9d7",
+    "crates/vel-largefile/src/line.rs": "ae8ef9e5a48fdaf227366375068f7e3cbc8f2bd56744cd58b1da61961920dca7",
+    "crates/vel-highlight/src/viewport.rs": "e0e99873b2cbf763e540cec91dc4ff8ca9f21010043a9f704208f790d369ca04"
+  }
+}

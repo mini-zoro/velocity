@@ -1,0 +1,32 @@
+{
+  "tracked_metrics": 32,
+  "all_paired_median_changes_within_5_percent": true,
+  "all_marginal_median_changes_within_5_percent": true,
+  "worst_paired": {
+    "metric": "undo_50mb/undo_50mb",
+    "pairs": 101,
+    "unit": "ns",
+    "paired_change_percent": 4.585152838427953,
+    "paired_ratio_ci95": [
+      1.0,
+      1.0948571428571428
+    ],
+    "A": {
+      "median": 875.0,
+      "p95": 1709.0,
+      "max": 5042.0,
+      "samples": 101
+    },
+    "B": {
+      "median": 917.0,
+      "p95": 2041.0,
+      "max": 4541.0,
+      "samples": 101
+    }
+  },
+  "worst_marginal": {
+    "metric": "undo_50mb/undo_50mb",
+    "percent": 4.800000000000004
+  },
+  "interpretation": "Point-estimate gate passes; CIs are reported and several do not exclude a 5% regression. No universal latency or noise guarantee."
+}
