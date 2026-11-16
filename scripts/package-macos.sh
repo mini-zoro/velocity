@@ -105,9 +105,19 @@ VELOCITY_BASENAME=Velocity-$VELOCITY_VERSION-$VELOCITY_ARCHIVE_ARCH
 mkdir -p "$VELOCITY_STAGE/dmg-root"
 ditto "$VELOCITY_APP" "$VELOCITY_STAGE/dmg-root/Velocity.app"
 ln -s /Applications "$VELOCITY_STAGE/dmg-root/Applications"
-# DiscRecording creates a read-only HFS+ filesystem without attaching a disk device.
-hdiutil makehybrid -quiet -hfs -hfs-volume-name Velocity -o "$VELOCITY_STAGE/payload.dmg" "$VELOCITY_STAGE/dmg-root"
-hdiutil convert -quiet "$VELOCITY_STAGE/payload.dmg" -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
+# Prefer `hdiutil create`: it copies files without adding attributes, so the app inside the image
+# still passes `codesign --verify --deep --strict` (required for notarization). It needs to attach
+# a disk device, which restricted sandboxes forbid; there we fall back to DiscRecording
+# (`makehybrid`), which works without a device but stamps com.apple.FinderInfo on every file.
+VELOCITY_DMG_METHOD=create
+if ! hdiutil create -quiet -volname Velocity -srcfolder "$VELOCITY_STAGE/dmg-root" -fs HFS+ -layout SPUD \
+        -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" 2>/dev/null; then
+    VELOCITY_DMG_METHOD=makehybrid
+    printf '%s\n' 'warning: hdiutil create unavailable; using makehybrid (app inside the DMG will fail strict codesign verification)' >&2
+    rm -f "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
+    hdiutil makehybrid -quiet -hfs -hfs-volume-name Velocity -o "$VELOCITY_STAGE/payload.dmg" "$VELOCITY_STAGE/dmg-root"
+    hdiutil convert -quiet "$VELOCITY_STAGE/payload.dmg" -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
+fi
 if [ "$VELOCITY_IDENTITY" = - ]; then
     codesign --force --sign - --timestamp=none "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
 else
@@ -119,6 +129,21 @@ if [ "$VELOCITY_NOTARIZE" = 1 ]; then
 fi
 codesign --verify --strict "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
 hdiutil verify -quiet "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
+# Acceptance check on the shipped bytes: the app inside the mounted image must pass strict, deep
+# signature verification. Skipped (with a warning) only where attaching images is impossible.
+VELOCITY_MOUNT=$(mktemp -d "$VELOCITY_STAGE/mount.XXXXXX")
+if hdiutil attach -quiet -nobrowse -readonly -mountpoint "$VELOCITY_MOUNT" "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" 2>/dev/null; then
+    VELOCITY_DMG_APP_STRICT=passed
+    codesign --verify --deep --strict "$VELOCITY_MOUNT/Velocity.app" || VELOCITY_DMG_APP_STRICT=failed
+    hdiutil detach -quiet "$VELOCITY_MOUNT" || hdiutil detach -quiet -force "$VELOCITY_MOUNT"
+    if [ "$VELOCITY_DMG_APP_STRICT" != passed ]; then
+        printf '%s\n' 'error: Velocity.app inside the DMG fails strict codesign verification' >&2
+        exit 1
+    fi
+else
+    VELOCITY_DMG_APP_STRICT=skipped
+    printf '%s\n' 'warning: cannot attach the DMG here; strict in-image codesign check skipped' >&2
+fi
 hdiutil convert -quiet "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" -format UDTO -o "$VELOCITY_STAGE/read-back.cdr"
 "$VELOCITY_PYTHON" "$VELOCITY_PACKAGING/check-hfs.py" "$VELOCITY_STAGE/read-back.cdr" "$VELOCITY_APP"
 ditto -c -k --keepParent "$VELOCITY_APP" "$VELOCITY_STAGE/$VELOCITY_BASENAME.app.zip"
@@ -127,8 +152,10 @@ ditto -c -k --keepParent "$VELOCITY_APP" "$VELOCITY_STAGE/$VELOCITY_BASENAME.app
     shasum -a 256 "$VELOCITY_BASENAME.app.zip" "$VELOCITY_BASENAME.dmg" > SHA256SUMS
 )
 "$VELOCITY_PYTHON" "$VELOCITY_PACKAGING/bundle.py" validate --app "$VELOCITY_APP" > "$VELOCITY_STAGE/packaging-report.json"
-"$VELOCITY_PYTHON" - "$VELOCITY_STAGE/packaging-report.json" "$VELOCITY_OUTPUT" "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" "$VELOCITY_STAGE/$VELOCITY_BASENAME.app.zip" <<'PY'
+VELOCITY_DMG_METHOD=$VELOCITY_DMG_METHOD VELOCITY_DMG_APP_STRICT=$VELOCITY_DMG_APP_STRICT \
+    "$VELOCITY_PYTHON" - "$VELOCITY_STAGE/packaging-report.json" "$VELOCITY_OUTPUT" "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" "$VELOCITY_STAGE/$VELOCITY_BASENAME.app.zip" <<'PY'
 import json
+import os
 from pathlib import Path
 import sys
 report_path, output, dmg, archive = map(Path, sys.argv[1:])
@@ -136,7 +163,9 @@ report = json.loads(report_path.read_text())
 report.update(app=str(output / 'Velocity.app'), dmg=str(output / dmg.name), dmg_bytes=dmg.stat().st_size,
               app_zip=str(output / archive.name), app_zip_bytes=archive.stat().st_size,
               codesign='verified', cli_forwarding='passed (headless running IPC fixture)',
-              dmg_layout='passed (HFS+ read-back: all app bytes, modes, Applications symlink)')
+              dmg_layout='passed (HFS+ read-back: all app bytes, modes, Applications symlink)',
+              dmg_method=os.environ.get('VELOCITY_DMG_METHOD', ''),
+              dmg_app_strict_codesign=os.environ.get('VELOCITY_DMG_APP_STRICT', ''))
 report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 PY
 for VELOCITY_ARTIFACT in Velocity.app "$VELOCITY_BASENAME.dmg" "$VELOCITY_BASENAME.app.zip" SHA256SUMS packaging-report.json; do

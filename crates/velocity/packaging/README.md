@@ -159,3 +159,13 @@ app's dependencies before wiring these APIs:
 See the new crates' READMEs/rustdoc for exact API contracts and index schema. CLI forwarding
 is already wired in the existing executable; the new menu/install, crash and package UI
 entry points remain intentionally in Lane A's scope.
+
+## DMG creation (reviewer fix, round 12)
+
+`hdiutil makehybrid -hfs` (used when disk devices cannot be attached, e.g. inside a sandbox) stamps
+`com.apple.FinderInfo` on every file, so the app inside the image fails `codesign --verify --deep --strict`
+— notarization would reject it. The script now uses `hdiutil create -srcfolder … -fs HFS+ -layout SPUD`
+whenever possible (locally outside a sandbox and on GitHub Actions), falls back to `makehybrid` with a
+warning, and — when the image can be attached — mounts it and requires strict deep signature
+verification of the shipped app. `packaging-report.json` records `dmg_method` and
+`dmg_app_strict_codesign`.
