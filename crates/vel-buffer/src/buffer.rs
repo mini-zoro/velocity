@@ -421,6 +421,27 @@ impl Buffer {
     pub fn is_dirty(&self) -> bool {
         self.state != self.saved
     }
+    /// Marks restored or externally changed contents unsaved without manufacturing an edit.
+    pub fn mark_unsaved(&mut self) {
+        if !self.is_dirty() {
+            self.saved = self.next_state;
+            self.next_state = self.next_state.checked_add(1).expect("revision overflow");
+        }
+    }
+    /// Whether a replacement leaves its old bytes intact. Insertions/deletions with different
+    /// lengths take constant time; equal-length replacements compare only the affected slice.
+    pub fn edit_is_noop(&self, edit: &Edit<'_>) -> bool {
+        edit.range.len() == edit.text.len()
+            && (if edit.range.is_empty() {
+                assert!(
+                    self.text.is_char_boundary(edit.range.start),
+                    "edit must be on a scalar boundary"
+                );
+                true
+            } else {
+                self.text.slice(edit.range.clone()) == edit.text
+            })
+    }
     /// Applies validated edits once in pre-transaction coordinates and records undo.
     /// Invalid edits or selections panic without changing the buffer or its history.
     pub fn transact(
@@ -430,6 +451,39 @@ impl Buffer {
         edits: &[Edit<'_>],
         mut new_selection: Selection,
     ) -> ChangeId {
+        // Validate even an all-no-op request, before changing selections or history.
+        let mut previous_end = 0;
+        for edit in edits {
+            assert!(
+                edit.range.start >= previous_end
+                    && edit.range.start <= edit.range.end
+                    && edit.range.end <= self.text.len_bytes(),
+                "invalid edit range/order"
+            );
+            previous_end = edit.range.end;
+        }
+        let filtered;
+        let edits = if edits.iter().any(|e| self.edit_is_noop(e)) {
+            filtered = edits
+                .iter()
+                .filter(|e| !self.edit_is_noop(e))
+                .map(|e| Edit {
+                    range: e.range.clone(),
+                    text: e.text,
+                })
+                .collect::<Vec<_>>();
+            filtered.as_slice()
+        } else {
+            edits
+        };
+        if edits.is_empty() {
+            new_selection.normalize();
+            validate_selection(&self.text, &new_selection);
+            if self.view(id).sel() != &new_selection {
+                self.set_selection(id, new_selection);
+            }
+            return self.change;
+        }
         let before_selection = self.view(id).selection.clone();
         let changes = Arc::new(ChangeSet::new(
             edits
@@ -446,7 +500,6 @@ impl Buffer {
         new_selection.normalize();
         new_selection.reset_xpos();
         validate_selection(&after, &new_selection);
-        // ST-BEHAVIOR: unverified [H1]: even empty/no-op transactions receive a revision and undo step.
         let run = typing_run(kind, edits, &self.view(id).settings, &before_selection);
         let merge = self.group_open
             && self
@@ -548,6 +601,9 @@ impl Buffer {
                 if set.drop_empty {
                     set.regions.retain(|r| !r.empty());
                 }
+                // Replacement starts map Right to the new end, while interior points map
+                // to its start. Restore stable order for navigation and mark index pairing.
+                // This is linear on the already-sorted insertion/deletion path.
                 set.regions.sort_by_key(|r| r.begin());
             }
         }

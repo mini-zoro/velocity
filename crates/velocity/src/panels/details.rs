@@ -30,7 +30,7 @@ impl Panels {
             ..self.panel_bounds
         }
     }
-    pub(super) fn set_message(&mut self, message: String) {
+    pub(crate) fn set_message(&mut self, message: String) {
         self.message = message;
         self.message_seen.clone_from(&self.message);
         self.message_until = Some(Instant::now() + Duration::from_secs(5));
@@ -461,7 +461,7 @@ mod tests {
             if !early {
                 wait(&mut p, &mut w, |p| !p.quick_pending);
             }
-            let invocation = p.accept(&mut w, false).unwrap().unwrap();
+            let invocation = p.accept(&mut w, false, 0..1).unwrap().unwrap();
             assert_eq!(invocation.args["item"], "file");
             p.finish_palette_accept(&mut w, &invocation.command, &invocation.args, true);
             assert!(p.overlay.is_none());

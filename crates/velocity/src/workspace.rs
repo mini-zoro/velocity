@@ -283,6 +283,8 @@ pub struct Workspace {
     pub context_menus: BTreeMap<String, Vec<MenuItem>>,
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
+    /// Macro filenames from the background resource overlay; contents are loaded on demand.
+    pub(crate) macro_paths: std::collections::BTreeSet<String>,
     pub messages: Vec<String>,
     pub telemetry: Vec<Value>,
     pub(crate) settings: Settings,
@@ -362,6 +364,7 @@ struct Configuration {
     context_menus: BTreeMap<String, Vec<MenuItem>>,
     mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
+    macro_paths: std::collections::BTreeSet<String>,
     folders: Vec<vel_search::project::Folder>,
     distraction_settings: serde_json::Map<String, Value>,
     build_systems: Vec<vel_build::BuildSystem>,
@@ -447,15 +450,11 @@ impl Configuration {
         }
         let mut resource_messages = Vec::new();
         resources.load_syntaxes(&crate::language::packages_root())?;
-        if let Some(bundle) = crate::release::bundle_resources()
-            && let Err(error) = resources.load(&bundle)
-        {
-            resource_messages.push(error);
+        if let Some(bundle) = crate::release::bundle_resources() {
+            resource_messages.extend(resources.load_with_warnings(&bundle));
         }
-        if let Some(data) = &data_dir
-            && let Err(e) = resources.load(data)
-        {
-            resource_messages.push(format!("user resources: {e}"));
+        if let Some(data) = &data_dir {
+            resource_messages.extend(resources.load_with_warnings(data));
         }
         // Resolve ignored_packages before loading any resource category. Reading
         // the preferences first is necessary to allow re-enabling a package.
@@ -897,8 +896,14 @@ impl Configuration {
             &settings,
             &mut resource_messages,
         );
+        let macro_paths = resources
+            .matching(".sublime-macro")
+            .into_iter()
+            .map(|r| r.path.clone())
+            .collect();
         Ok(Self {
             themes,
+            macro_paths,
             #[cfg(test)]
             resources,
             settings,
@@ -941,6 +946,7 @@ impl Workspace {
             context_menus,
             mousemap,
             palette,
+            macro_paths,
             folders,
             distraction_settings,
             build_systems,
@@ -995,6 +1001,7 @@ impl Workspace {
             context_menus,
             mousemap,
             palette,
+            macro_paths,
             messages,
             telemetry: Vec::new(),
             settings,
@@ -1822,6 +1829,7 @@ impl Workspace {
                     self.context_menus = config.context_menus;
                     self.mousemap = config.mousemap;
                     self.palette = config.palette;
+                    self.macro_paths = config.macro_paths;
                     self.config_stamp = config.config_stamp;
                     for tab in &mut self.tabs {
                         for layer in [Layer::Default, Layer::Platform, Layer::User, Layer::Project]

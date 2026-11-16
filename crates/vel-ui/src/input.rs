@@ -157,7 +157,7 @@ impl Input {
     /// Executes editing/history/clipboard commands through vel-commands.
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
         self.commit_composition();
-        let mut registry = std::mem::take(&mut self.registry);
+        let mut registry = self.registry.take_for_dispatch();
         let result = registry.run(name, args, self);
         self.registry = registry;
         result

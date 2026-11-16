@@ -525,30 +525,42 @@ pub fn split_selection_into_lines(buffer: &mut Buffer, id: ViewId) {
     }
     buffer.set_selection(id, Selection::from_regions(regions));
 }
-/// Adds a caret on the neighboring LF line for each selected caret, at its goal column.
+/// Adds a neighboring column region, mapping both ends at their visual goal columns.
 pub fn select_lines(buffer: &mut Buffer, id: ViewId, forward: bool, layout: &dyn VerticalLayout) {
     let text = buffer.text();
     let mut selection = buffer.view(id).sel().clone();
+    let mut primary = selection.primary().unwrap_or_default();
     let source: Vec<_> = selection.iter().collect();
     for r in source {
-        let row = text.byte_to_line(r.b);
-        let next = if forward {
-            (row + 1).min(text.len_lines() - 1)
-        } else {
-            row.saturating_sub(1)
+        let adjacent = |at, x| {
+            let row = text.byte_to_line(at);
+            let next = if forward {
+                (row + 1).min(text.len_lines() - 1)
+            } else {
+                row.saturating_sub(1)
+            };
+            if next == row {
+                at
+            } else {
+                layout.offset_at(text, next, x)
+            }
         };
-        if next == row {
-            continue;
-        }
         let x = r.xpos.unwrap_or_else(|| layout.x_of(text, r.b));
-        let p = layout.offset_at(text, next, x);
-        selection.add(Region {
-            a: p,
-            b: p,
-            xpos: Some(x),
-        });
+        let a = adjacent(r.a, if r.empty() { x } else { layout.x_of(text, r.a) });
+        let b = adjacent(r.b, x);
+        if a != r.a || b != r.b {
+            let next = Region {
+                a,
+                b,
+                xpos: Some(x),
+            };
+            if Some(r) == buffer.view(id).sel().primary() {
+                primary = next;
+            }
+            selection.add(next);
+        }
     }
-    buffer.set_selection(id, selection);
+    buffer.set_selection(id, selection.with_primary_region(primary));
 }
 fn match_at(text: &Text, range: Range<usize>, whole: bool, s: &Settings) -> bool {
     !whole
@@ -810,6 +822,8 @@ fn line_edits(
 }
 /// Indents every touched line once, using a tab or `tab_size` spaces.
 pub fn indent(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    // Verification: https://www.sublimetext.com/download, build 4166 mentions an
+    // improvement on empty lines without specifying the rule. Retain today's behavior.
     line_edits(buffer, id, |t, l, s| {
         let prefix = if s.translate_tabs_to_spaces {
             " ".repeat(s.tab_size)
@@ -944,31 +958,26 @@ pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
             joins.extend(a..b);
         }
     }
-    let mut edits = Vec::new();
-    for group in blocks(joins) {
-        let mut value = String::new();
-        for line in group.start..=group.end {
-            let part = text.line(line).to_string();
-            let part = if line > group.start {
-                part.trim_start_matches([' ', '\t'])
+    // https://www.sublimetext.com/download, build 4213: joining maintains the
+    // selection. Replace only each seam so endpoints inside the text remain attached.
+    // Build 4166 says "Improved Join Lines behavior" without a precise spacing rule;
+    // retain the existing single-space rule until it can be confirmed publicly.
+    let edits = joins
+        .iter()
+        .copied()
+        .map(|row| {
+            let left = text.line(row).to_string();
+            let right = text.line(row + 1).to_string();
+            let a = if row > 0 && joins.contains(&(row - 1)) && left.trim().is_empty() {
+                line_end(text, row)
             } else {
-                part.as_str()
+                text.line_to_byte(row) + left.trim_end_matches([' ', '\t']).len()
             };
-            let part = if line < group.end {
-                part.trim_end_matches([' ', '\t'])
-            } else {
-                part
-            };
-            if line > group.start {
-                value.push(' ');
-            }
-            value.push_str(part);
-        }
-        edits.push((
-            text.line_to_byte(group.start)..line_end(text, group.end),
-            value,
-        ));
-    }
+            let b = text.line_to_byte(row + 1) + right.len()
+                - right.trim_start_matches([' ', '\t']).len();
+            (a..b, " ".into())
+        })
+        .collect();
     commit_owned(buffer, id, edits)
 }
 /// Opens an empty line above each caret's line, indented like that line, and moves the carets
@@ -1185,18 +1194,33 @@ pub fn title_case(buffer: &mut Buffer, id: ViewId) -> ChangeId {
 pub fn swap_case(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     case(buffer, id, 3)
 }
-/// Swaps adjacent graphemes at carets; non-empty regions reverse their graphemes.
+/// Circulates selected strings, or swaps adjacent graphemes and advances each caret.
 pub fn transpose(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     use unicode_segmentation::UnicodeSegmentation;
-    // ST-BEHAVIOR: unverified [C2]: at BOL/EOF transpose the first/last pair; overlapping requests merge before reversal, preserving grapheme internals.
     let text = buffer.text();
-    let v = buffer.view(id);
-    let mut regions = Vec::new();
-    for r in v.sel().iter() {
-        if !r.empty() {
-            regions.push(r);
-            continue;
-        }
+    let old = buffer.view(id).sel().clone();
+    // https://docs.sublimetext.io/reference/commands.html#transpose: selections
+    // circulate; without selections swap adjacent characters and advance one character.
+    if old.iter().any(|r| !r.empty()) {
+        let values: Vec<_> = old
+            .iter()
+            .map(|r| text.slice(r.to_range()).to_string())
+            .collect();
+        let rotated: Vec<_> = (0..values.len())
+            .map(|i| values[(i + values.len() - 1) % values.len()].clone())
+            .collect();
+        return commit_owned(
+            buffer,
+            id,
+            old.iter()
+                .zip(rotated)
+                .map(|(r, s)| (r.to_range(), s))
+                .collect(),
+        );
+    }
+    let mut ranges = Vec::new();
+    let mut targets = Vec::new();
+    for r in old.iter() {
         let row = text.byte_to_line(r.b);
         let start = text.line_to_byte(row);
         let end = line_end(text, row);
@@ -1209,18 +1233,32 @@ pub fn transpose(buffer: &mut Buffer, id: ViewId) -> ChangeId {
         };
         let a = text.prev_grapheme_boundary(middle).max(start);
         let b = text.next_grapheme_boundary(middle).min(end);
-        regions.push(Region::new(a, b));
+        ranges.push(Region::new(a, b));
+        // At BOL the first pair is swapped, then the caret advances over the new first
+        // grapheme. Elsewhere the end of the swapped pair is one grapheme ahead.
+        targets.push(if r.b == start { a + b - middle } else { b });
     }
-    let selection = Selection::from_regions(regions);
-    let edits = selection
+    let selection = Selection::from_regions(ranges);
+    let owned: Vec<_> = selection
         .iter()
         .map(|r| {
             let s = text.slice(r.to_range()).to_string();
-            let reversed = s.graphemes(true).rev().collect::<String>();
-            (r.to_range(), reversed)
+            (r.to_range(), s.graphemes(true).rev().collect::<String>())
         })
         .collect();
-    commit_owned(buffer, id, edits)
+    let edits: Vec<_> = owned
+        .iter()
+        .map(|(range, text)| Edit {
+            range: range.clone(),
+            text,
+        })
+        .collect();
+    let mut targets = targets.into_iter();
+    let after = old.map(|r| {
+        let b = targets.next().expect("one target per selection");
+        if r.empty() { Region::caret(b) } else { r }
+    });
+    buffer.transact(id, EditKind::Other, &edits, after)
 }
 
 /// Permutations of lines or selected strings; shuffle accepts a reproducible seed.
@@ -1263,10 +1301,18 @@ fn permute(values: &mut Vec<String>, operation: Permutation) {
 }
 /// Permutes each contiguous touched line block, preserving its terminal LF.
 pub fn permute_lines(buffer: &mut Buffer, id: ViewId, operation: Permutation) -> ChangeId {
-    // ST-BEHAVIOR: unverified [T1]: unique is stable, shuffle is seeded; a
-    // selection ending at BOL excludes that row. All-carets acts on touched rows.
     let text = buffer.text();
-    let edits = blocks(touched_lines(text, buffer.view(id).sel()))
+    let selection = buffer.view(id).sel();
+    let groups = if selection.iter().all(Region::empty) {
+        let mut end = text.len_lines();
+        if end > 1 && text.line(end - 1).is_empty() {
+            end -= 1;
+        }
+        std::iter::once(0..end).collect()
+    } else {
+        blocks(touched_lines(text, selection))
+    };
+    let edits = groups
         .into_iter()
         .map(|g| {
             let mut lines = g.clone().map(|l| text.line(l).to_string()).collect();
@@ -1378,66 +1424,97 @@ pub fn expand_selection_to_paragraph(buffer: &mut Buffer, id: ViewId) {
     });
     buffer.set_selection(id, selection);
 }
-/// Reflows touched paragraphs at a display-column limit, preserving blank lines.
-/// Long words remain intact; the first line's space/tab indentation is retained.
+fn wrap_prefix<'a>(line: &'a str, prefixes: &[String]) -> &'a str {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let body = &line[indent..];
+    let marker = prefixes
+        .iter()
+        .map(String::as_str)
+        .filter(|prefix| !prefix.is_empty() && body.starts_with(prefix))
+        .max_by_key(|prefix| prefix.len());
+    let end = marker.map_or(indent, |marker| {
+        let tail = &body[marker.len()..];
+        indent + marker.len() + tail.len() - tail.trim_start_matches([' ', '\t']).len()
+    });
+    &line[..end]
+}
+/// Reflows text paragraphs, preserving indentation. Syntax-free text has no comment prefixes.
 pub fn wrap_lines(buffer: &mut Buffer, id: ViewId, width: usize) -> ChangeId {
+    wrap_lines_with_prefixes(buffer, id, width, &[])
+}
+/// Reflows paragraphs sharing indentation and a language-provided comment prefix. Every output
+/// line retains that prefix; adjacent code and differently prefixed comments stay separate.
+pub fn wrap_lines_with_prefixes(
+    buffer: &mut Buffer,
+    id: ViewId,
+    width: usize,
+    prefixes: &[String],
+) -> ChangeId {
     use unicode_width::UnicodeWidthStr;
-    // ST-BEHAVIOR: unverified [T4]: collapse word separators to one ASCII space,
-    // preserve first-line indentation and terminal LF; no syntax/comment heuristics.
     let text = buffer.text();
     let settings = &buffer.view(id).settings;
     let mut paragraphs = BTreeSet::new();
     for row in touched_lines(text, buffer.view(id).sel()) {
-        let p = paragraph(text, row);
-        paragraphs.insert((p.start, p.end));
+        let first = text.line(row).to_string();
+        if first.trim().is_empty() {
+            continue;
+        }
+        let prefix = wrap_prefix(&first, prefixes);
+        let same = |row| {
+            let line = text.line(row).to_string();
+            !line.trim().is_empty() && wrap_prefix(&line, prefixes) == prefix
+        };
+        let mut start = row;
+        let mut end = row + 1;
+        while start > 0 && same(start - 1) {
+            start -= 1;
+        }
+        while end < text.len_lines() && same(end) {
+            end += 1;
+        }
+        paragraphs.insert((start, end));
     }
     let edits = paragraphs
         .into_iter()
-        .filter_map(|(start, end)| {
+        .map(|(start, end)| {
             let first = text.line(start).to_string();
-            if first.chars().all(char::is_whitespace) {
-                return None;
-            }
-            let prefix: String = first
-                .chars()
-                .take_while(|c| matches!(c, ' ' | '\t'))
-                .collect();
+            let prefix = wrap_prefix(&first, prefixes);
             let indent = prefix.chars().fold(0, |col, c| {
                 if c == '\t' {
                     col + settings.tab_size - col % settings.tab_size
                 } else {
-                    col + 1
+                    col + unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
                 }
             });
-            let source = text
-                .slice(text.line_to_byte(start)..full_line_end(text, end - 1))
-                .to_string();
-            let mut value = prefix.clone();
+            let mut value = prefix.to_owned();
             let mut column = indent;
             let mut has_word = false;
-            for word in source.split_whitespace() {
-                let len = UnicodeWidthStr::width(word);
-                if has_word && column + 1 + len > width.max(1) {
-                    value.push('\n');
-                    value.push_str(&prefix);
-                    column = indent;
-                    has_word = false;
+            for row in start..end {
+                let line = text.line(row).to_string();
+                for word in line[prefix.len()..].split_whitespace() {
+                    let len = UnicodeWidthStr::width(word);
+                    if has_word && column + 1 + len > width.max(1) {
+                        value.push('\n');
+                        value.push_str(prefix);
+                        column = indent;
+                        has_word = false;
+                    }
+                    if has_word {
+                        value.push(' ');
+                        column += 1;
+                    }
+                    value.push_str(word);
+                    column += len;
+                    has_word = true;
                 }
-                if has_word {
-                    value.push(' ');
-                    column += 1;
-                }
-                value.push_str(word);
-                column += len;
-                has_word = true;
             }
-            if source.ends_with('\n') {
+            if end < text.len_lines() {
                 value.push('\n');
             }
-            Some((
+            (
                 text.line_to_byte(start)..full_line_end(text, end - 1),
                 value,
-            ))
+            )
         })
         .collect();
     commit_owned(buffer, id, edits)
@@ -1544,13 +1621,16 @@ pub fn convert_ident_case(buffer: &mut Buffer, id: ViewId, style: IdentCase) -> 
     commit_owned(buffer, id, edits)
 }
 
-const MARK: &str = "velocity.mark";
+/// Named region set used by the mark commands and clear_bookmarks {"name":"mark"}.
+pub const MARK: &str = "mark";
 const MARK_PRIMARY: &str = "velocity.mark.primary";
-const BOOKMARKS: &str = "velocity.bookmarks";
+/// Mapped bookmark regions, also consumed by the view's gutter accessor.
+pub const BOOKMARKS: &str = "velocity.bookmarks";
 /// Saves a view's directed selection as editing-mapped named regions.
 pub fn set_mark(buffer: &mut Buffer, id: ViewId) {
     // ST-BEHAVIOR: unverified [T6]: marks are per-view, persisted named regions;
     // they map through edits but are not independently text-undoable.
+    buffer.erase_regions(id, "velocity.mark");
     buffer.add_regions(id, MARK, buffer.view(id).sel().iter().collect(), false);
     let primary = buffer.view(id).sel().primary().unwrap_or_default();
     buffer.add_regions(id, MARK_PRIMARY, vec![primary], false);
@@ -1558,7 +1638,11 @@ pub fn set_mark(buffer: &mut Buffer, id: ViewId) {
 /// Extends each caret to its corresponding saved mark's caret.
 pub fn select_to_mark(buffer: &mut Buffer, id: ViewId) -> bool {
     // ST-BEHAVIOR: unverified [T6]: unequal counts use the first saved mark.
-    let Some(mark) = buffer.view(id).get_regions(MARK) else {
+    let Some(mark) = buffer
+        .view(id)
+        .get_regions(MARK)
+        .or_else(|| buffer.view(id).get_regions("velocity.mark"))
+    else {
         return false;
     };
     if mark.regions.is_empty() {
@@ -1580,7 +1664,11 @@ pub fn select_to_mark(buffer: &mut Buffer, id: ViewId) -> bool {
 /// Exchanges the saved mark regions with the current selection.
 pub fn swap_with_mark(buffer: &mut Buffer, id: ViewId) -> bool {
     // ST-BEHAVIOR: unverified [T6]: the complete directed regions are exchanged.
-    let Some(mark) = buffer.view(id).get_regions(MARK) else {
+    let Some(mark) = buffer
+        .view(id)
+        .get_regions(MARK)
+        .or_else(|| buffer.view(id).get_regions("velocity.mark"))
+    else {
         return false;
     };
     if mark.regions.is_empty() {
@@ -1600,79 +1688,173 @@ pub fn swap_with_mark(buffer: &mut Buffer, id: ViewId) -> bool {
 }
 /// Removes all bookmarks for this view.
 pub fn clear_bookmarks(buffer: &mut Buffer, id: ViewId) {
-    buffer.erase_regions(id, BOOKMARKS);
+    clear_named_regions(buffer, id, BOOKMARKS);
 }
-/// Toggles every touched line once. Bookmarks follow edits via named-region mapping.
+/// Clears a named region set, including the mark's primary-region metadata.
+pub fn clear_named_regions(buffer: &mut Buffer, id: ViewId, name: &str) {
+    buffer.erase_regions(id, name);
+    if name == MARK {
+        buffer.erase_regions(id, MARK_PRIMARY);
+        buffer.erase_regions(id, "velocity.mark");
+    }
+}
+// Inclusive interval keys distinguish an empty bookmark at p from a region ending at p.
+fn bookmark_end(region: Region) -> (usize, bool) {
+    (region.end(), region.empty())
+}
+fn bookmark_prefix_ends(regions: &[Region]) -> Vec<(usize, bool)> {
+    let mut end = (0, false);
+    regions
+        .iter()
+        .map(|r| {
+            end = end.max(bookmark_end(*r));
+            end
+        })
+        .collect()
+}
+fn overlaps_bookmarks(regions: &[Region], ends: &[(usize, bool)], query: Region) -> bool {
+    let limit = regions.partition_point(|r| (r.begin(), true) <= bookmark_end(query));
+    limit > 0 && ends[limit - 1] >= (query.begin(), true)
+}
+/// Toggles directed bookmark regions: carets remove marks touching their line, selections
+/// remove overlapping marks; selections with no matching bookmark add a complete region.
 pub fn toggle_bookmark(buffer: &mut Buffer, id: ViewId) {
-    // ST-BEHAVIOR: unverified [T7]: bookmarks are one mapped BOL caret per row,
-    // toggled independently; navigation wraps and uses current mapped rows.
-    let text = buffer.text();
-    let mut rows: BTreeSet<_> = buffer
+    // https://docs.sublimetext.io/reference/commands.html#toggle-bookmark only specifies
+    // active regions; https://www.sublimetext.com/download (4166) names improved toggling
+    // without its rule. Use the round-16 reviewer fallback: line touch for an empty caret,
+    // overlap for a selection, otherwise add. Evaluate all carets against the original set.
+    let old = buffer
         .view(id)
         .get_regions(BOOKMARKS)
-        .into_iter()
-        .flat_map(|set| &set.regions)
-        .map(|r| text.byte_to_line(r.b))
+        .map_or_else(Vec::new, |set| set.regions.clone());
+    let old_ends = bookmark_prefix_ends(&old);
+    let selections: Vec<_> = buffer.view(id).sel().iter().collect();
+    let targets: Vec<_> = selections
+        .iter()
+        .map(|r| {
+            if r.empty() {
+                let row = buffer.text().byte_to_line(r.b);
+                Region::new(
+                    buffer.text().line_to_byte(row),
+                    full_line_end(buffer.text(), row),
+                )
+            } else {
+                *r
+            }
+        })
         .collect();
-    for row in touched_lines(text, buffer.view(id).sel()) {
-        if !rows.remove(&row) {
-            rows.insert(row);
+    let mut queries = targets.clone();
+    queries.sort_by_key(|r| r.begin());
+    queries.dedup_by_key(|r| (r.begin(), r.end()));
+    let query_ends = bookmark_prefix_ends(&queries);
+    let mut regions: std::collections::BTreeMap<_, _> = old
+        .iter()
+        .filter(|r| !overlaps_bookmarks(&queries, &query_ends, **r))
+        .map(|r| ((r.begin(), r.end()), *r))
+        .collect();
+    let mut added_lines = BTreeSet::new();
+    for (region, target) in selections.into_iter().zip(targets) {
+        if !overlaps_bookmarks(&old, &old_ends, target)
+            && (!region.empty() || added_lines.insert(target.begin()))
+        {
+            regions.insert((region.begin(), region.end()), region);
         }
     }
-    let regions = rows
-        .into_iter()
-        .map(|row| Region::caret(text.line_to_byte(row)))
-        .collect();
-    buffer.add_regions(id, BOOKMARKS, regions, false);
+    buffer.add_regions(id, BOOKMARKS, regions.into_values().collect(), false);
 }
 fn navigate_bookmark(buffer: &mut Buffer, id: ViewId, forward: bool, extend: bool) -> bool {
-    let text = buffer.text();
-    let rows: BTreeSet<_> = buffer
+    let Some(set) = buffer
         .view(id)
         .get_regions(BOOKMARKS)
-        .into_iter()
-        .flat_map(|set| &set.regions)
-        .map(|r| text.byte_to_line(r.b))
-        .collect();
-    if rows.is_empty() {
+        .filter(|s| !s.regions.is_empty())
+    else {
         return false;
-    }
+    };
     let selection = buffer.view(id).sel().map(|r| {
-        let row = text.byte_to_line(r.b);
+        let marks = &set.regions;
         let next = if forward {
-            rows.range(row + 1..).next().or_else(|| rows.first())
+            let i = marks.partition_point(|b| b.begin() <= r.end());
+            marks[i % marks.len()]
         } else {
-            rows.range(..row).next_back().or_else(|| rows.last())
+            let i = marks.partition_point(|b| b.begin() < r.begin());
+            marks[if i == 0 { marks.len() - 1 } else { i - 1 }]
         };
-        let at = text.line_to_byte(*next.expect("nonempty bookmarks"));
-        Region::new(if extend { r.a } else { at }, at)
+        if extend {
+            Region::new(r.a, next.b)
+        } else {
+            next
+        }
     });
     buffer.set_selection(id, selection);
     true
 }
-/// Moves to the next bookmarked row, wrapping at EOF; optionally extends selections.
+/// Selects the next complete bookmark region, wrapping at EOF.
 pub fn next_bookmark(buffer: &mut Buffer, id: ViewId, extend: bool) -> bool {
     navigate_bookmark(buffer, id, true, extend)
 }
-/// Moves to the previous bookmarked row, wrapping at BOF; optionally extends selections.
+/// Selects the previous complete bookmark region, wrapping at BOF.
 pub fn prev_bookmark(buffer: &mut Buffer, id: ViewId, extend: bool) -> bool {
     navigate_bookmark(buffer, id, false, extend)
 }
-/// Selects all bookmark carets without changing text.
-pub fn select_bookmarks(buffer: &mut Buffer, id: ViewId) -> bool {
-    let Some(set) = buffer.view(id).get_regions(BOOKMARKS) else {
+/// Selects every stored bookmark region, preserving its direction.
+pub fn select_all_bookmarks(buffer: &mut Buffer, id: ViewId) -> bool {
+    let Some(set) = buffer
+        .view(id)
+        .get_regions(BOOKMARKS)
+        .filter(|s| !s.regions.is_empty())
+    else {
         return false;
     };
-    if set.regions.is_empty() {
-        return false;
-    }
-    let selection = Selection::from_regions(
-        set.regions
-            .iter()
-            .map(|r| Region::caret(buffer.text().line_to_byte(buffer.text().byte_to_line(r.b)))),
-    );
+    let selection = Selection::from_regions(set.regions.clone());
     buffer.set_selection(id, selection);
     true
+}
+/// Compatibility alias for select_all_bookmarks.
+pub fn select_bookmarks(buffer: &mut Buffer, id: ViewId) -> bool {
+    select_all_bookmarks(buffer, id)
+}
+/// Deletes to the saved mark and returns the removed strings for the application's kill ring.
+pub fn delete_to_mark(buffer: &mut Buffer, id: ViewId) -> Vec<String> {
+    if !select_to_mark(buffer, id) {
+        return vec![];
+    }
+    let regions: Vec<_> = buffer.view(id).sel().iter().collect();
+    let edits: Vec<_> = regions
+        .iter()
+        .filter(|r| !r.empty())
+        .map(|r| (r.to_range(), String::new()))
+        .collect();
+    if edits.is_empty() {
+        return vec![];
+    }
+    let values = regions
+        .iter()
+        .map(|r| buffer.text().slice(r.to_range()).to_string())
+        .collect();
+    commit_owned(buffer, id, edits);
+    values
+}
+/// Inserts kill-ring strings, distributing when the selection counts agree.
+pub fn yank(buffer: &mut Buffer, id: ViewId, values: &[String]) -> ChangeId {
+    if values.is_empty() {
+        return buffer.change_id();
+    }
+    let count = buffer.view(id).sel().len();
+    let joined = if values.len() == count {
+        String::new()
+    } else {
+        values.join("\n")
+    };
+    let texts = (0..count)
+        .map(|i| {
+            if values.len() == count {
+                values[i].clone()
+            } else {
+                joined.clone()
+            }
+        })
+        .collect();
+    replacements(buffer, id, texts, EditKind::Other)
 }
 /// Sublime-spelled alias for the touched-line whitespace operation.
 pub fn trim_trailing_white_space(buffer: &mut Buffer, id: ViewId) -> ChangeId {
@@ -1745,4 +1927,58 @@ pub fn rot13(buffer: &mut Buffer, id: ViewId) -> ChangeId {
         })
         .collect();
     commit_owned(buffer, id, edits)
+}
+
+/// Matches plain-text brackets for hosts without syntax services. The view replaces this
+/// with its language's code/tag pairs and string/comment scope boundaries.
+pub fn plain_bracket_command(buffer: &mut Buffer, id: ViewId, expand: bool, extend: bool) {
+    let source = buffer.text().to_string();
+    let mut stack = Vec::new();
+    let mut pairs = Vec::new();
+    for (at, c) in source.char_indices() {
+        if matches!(c, '(' | '[' | '{') {
+            stack.push((c, at));
+        } else if let Some(open) = match c {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        } && let Some((_, a)) = stack.pop_if(|(c, _)| *c == open)
+        {
+            pairs.push((a, at));
+        }
+    }
+    let selection = buffer.view(id).sel().map(|r| {
+        if expand {
+            pairs
+                .iter()
+                .flat_map(|&(a, b)| [a + 1..b, a..b + 1])
+                .filter(|p| {
+                    p.start <= r.begin()
+                        && r.end() <= p.end
+                        && (p.start < r.begin() || r.end() < p.end)
+                })
+                .min_by_key(|p| p.len())
+                .map_or(r, |p| r.directed(p.start, p.end))
+        } else {
+            pairs
+                .iter()
+                .filter(|&&(a, b)| a <= r.b && r.b <= b + 1)
+                .min_by_key(|&&(a, b)| {
+                    let priority = if r.b == a || r.b == b {
+                        0
+                    } else if r.b == a + 1 || r.b == b + 1 {
+                        1
+                    } else {
+                        2
+                    };
+                    (priority, b - a)
+                })
+                .map_or(r, |&(a, b)| {
+                    let to = if r.b >= b { a } else { b };
+                    Region::new(if extend { r.a } else { to }, to)
+                })
+        }
+    });
+    buffer.set_selection(id, selection);
 }

@@ -233,3 +233,83 @@ fn registry_domains_chains_macros_repeat_and_window_actions() {
     assert!(registry.run("unknown", &json!({}), &mut f).is_err());
     assert!(registry.run("insert", &json!({}), &mut f).is_err());
 }
+
+#[test]
+fn named_mark_kills_yank_and_repeat_use_application_state() {
+    let shared = std::rc::Rc::new(std::cell::RefCell::new(vel_commands::MacroState::default()));
+    let mut first = Registry::standard();
+    first.share_macro_state(shared.clone());
+    let mut second = Registry::standard();
+    second.share_macro_state(shared);
+    let mut a = Fixture::new("aa bb", [Region::caret(0)]);
+    first.run("set_mark", &json!({}), &mut a).unwrap();
+    a.buffer
+        .set_selection(a.id, Selection::from(Region::caret(3)));
+    first.run("delete_to_mark", &json!({}), &mut a).unwrap();
+    assert_eq!(a.buffer.text().to_string(), "bb");
+    let mut b = Fixture::new("xy", [Region::caret(0), Region::caret(2)]);
+    second.run("yank", &json!({}), &mut b).unwrap();
+    assert_eq!(b.buffer.text().to_string(), "aa xyaa ");
+    second.run("undo", &json!({}), &mut b).unwrap();
+    second.run("redo_or_repeat", &json!({}), &mut b).unwrap();
+    assert_eq!(b.buffer.text().to_string(), "aa xyaa ");
+    first
+        .run("clear_bookmarks", &json!({"name":"mark"}), &mut a)
+        .unwrap();
+    assert!(a.buffer.view(a.id).get_regions("mark").is_none());
+    let before = a.buffer.change_id();
+    first.run("delete_to_mark", &json!({}), &mut a).unwrap();
+    assert_eq!(a.buffer.change_id(), before);
+}
+
+#[test]
+fn standalone_bracket_targets_and_recorded_macro_apply_once_per_command() {
+    let mut f = Fixture::new("(abc) (abc)", [Region::caret(2), Region::caret(8)]);
+    let mut r = Registry::standard();
+    r.run("expand_selection", &json!({"to":"brackets"}), &mut f)
+        .unwrap();
+    assert_eq!(
+        f.buffer.view(f.id).sel().iter().collect::<Vec<_>>(),
+        [Region::new(1, 4), Region::new(7, 10)]
+    );
+    r.run("toggle_record_macro", &json!({}), &mut f).unwrap();
+    r.run("insert", &json!({"characters":"x"}), &mut f).unwrap();
+    r.run("new_file", &json!({}), &mut f).unwrap();
+    r.run("toggle_record_macro", &json!({}), &mut f).unwrap();
+    assert_eq!(r.macro_commands().len(), 1);
+    f.buffer.break_undo_group();
+    r.run("run_macro", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text().to_string(), "(xx) (xx)");
+    r.run("undo", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text().to_string(), "(x) (x)");
+    let commands = vel_commands::parse_macro(
+        "// own macro\n[{\"command\":\"move_to\",\"args\":{\"to\":\"eof\"},},]",
+    )
+    .unwrap();
+    assert_eq!(commands.len(), 1);
+}
+
+#[test]
+fn delete_to_mark_at_the_caret_preserves_the_application_kill_ring() {
+    let mut r = Registry::standard();
+    let mut f = Fixture::new("hello", [Region::caret(3)]);
+    f.buffer
+        .set_selection(f.id, Selection::from(Region::caret(3)));
+    r.run("set_mark", &json!({}), &mut f).unwrap();
+    r.run("delete_to_mark", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text(), "hello");
+    assert!(!f.buffer.is_dirty());
+    r.run("yank", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text(), "hello");
+    assert!(!f.buffer.is_dirty());
+    assert!(!f.buffer.undo(f.id));
+
+    f.buffer
+        .set_selection(f.id, Selection::from(Region::caret(0)));
+    r.run("delete_to_mark", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text(), "lo");
+    r.run("set_mark", &json!({}), &mut f).unwrap();
+    r.run("delete_to_mark", &json!({}), &mut f).unwrap();
+    r.run("yank", &json!({}), &mut f).unwrap();
+    assert_eq!(f.buffer.text(), "hello");
+}

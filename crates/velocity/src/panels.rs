@@ -21,6 +21,8 @@ use vel_search::{
     text::{self, Search},
 };
 mod details;
+#[path = "text_ops.rs"]
+mod macro_commands;
 
 use vel_ui::{
     Focus, Item, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input, label,
@@ -90,6 +92,7 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    macro_files: macro_commands::MacroFiles,
     vintage_prompt: Option<u64>,
     pub ui_scale: f64,
     pub review: crate::review_ui::ReviewUi,
@@ -216,6 +219,7 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            macro_files: Default::default(),
             vintage_prompt: None,
             ui_scale: 1.,
             review: Default::default(),
@@ -1135,6 +1139,38 @@ impl Panels {
         args: &Value,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if name == "save_macro" || (name == "run_macro_file" && args.get("file").is_none()) {
+            return self.macro_action(workspace, name, args, viewport);
+        }
+        // Record the document find operation at the interception boundary. Query-field
+        // typing remains a panel edit and never enters the application macro buffer.
+        if vel_commands::is_find_command(name) {
+            if let Some(find) = args.get("_macro_find") {
+                self.query.set(find["query"].as_str().unwrap_or(""));
+                self.replace.set(find["replacement"].as_str().unwrap_or(""));
+                self.options.regex = find["regex"].as_bool().unwrap_or(false);
+                self.options.case_sensitive = find["case_sensitive"].as_bool().unwrap_or(false);
+                self.options.whole_word = find["whole_word"].as_bool().unwrap_or(false);
+                self.options.wrap = find["wrap"].as_bool().unwrap_or(true);
+                self.options.preserve_case = find["preserve_case"].as_bool().unwrap_or(false);
+                self.in_selection = find["in_selection"].as_bool().unwrap_or(false);
+            }
+            if workspace.editor().registry.is_recording()
+                && workspace.editor().registry.playback_depth() == 0
+            {
+                let mut recorded = args.clone();
+                recorded["_macro_find"] = json!({"query":self.query.value(), "replacement":self.replace.value(),
+                    "regex":self.options.regex,"case_sensitive":self.options.case_sensitive,
+                    "whole_word":self.options.whole_word,"wrap":self.options.wrap,
+                    "preserve_case":self.options.preserve_case,"in_selection":self.in_selection});
+                workspace
+                    .editor_mut()
+                    .registry
+                    .record_command(name, &recorded);
+            }
+        }
+        let _find_recording_guard = vel_commands::is_find_command(name)
+            .then(|| workspace.editor().registry.suspend_recording());
         if workspace.editor().binary.is_some() && name == "goto_line" {
             return self.action(workspace, "show_input_panel", &json!({"caption":"Goto byte offset (decimal or 0x hex)","initial_text":format!("0x{:x}", workspace.editor().caret),"on_done":{"command":"goto_hex_offset","args":{}}}), viewport);
         }
@@ -1419,7 +1455,11 @@ impl Panels {
             "find_next" | "find_prev" => {
                 self.ensure_find(workspace, viewport);
                 self.remember_search(false);
-                self.find_next(workspace, name == "find_prev", false);
+                self.find_next(
+                    workspace,
+                    name == "find_prev",
+                    args["_close_panel"].as_bool().unwrap_or(false),
+                );
             }
             "find_all" => {
                 if self.panel == Some(Panel::Files) {
@@ -1613,6 +1653,16 @@ impl Panels {
         close: bool,
         report: bool,
     ) {
+        // One guard is the find interception itself; an outer guard denotes playback.
+        // Playback must finish this find before its next text command can run.
+        if workspace.editor().registry.playback_depth() > 1
+            && !self.all_matches_ready
+            && let Some(search) = &self.search
+        {
+            self.highlights = search.find(&workspace.editor().text, &self.scope());
+            self.all_matches_ready = true;
+            self.pending_navigation = None;
+        }
         if report
             && self.search.is_none()
             && let Some(error) = self.find_error.clone()
@@ -2132,6 +2182,7 @@ impl Panels {
         &mut self,
         workspace: &mut Workspace,
         side: bool,
+        viewport: Range<usize>,
     ) -> Result<Option<Invocation>, String> {
         if self.overlay == Some(Overlay::Goto) {
             let query = Query::parse(&self.quick_input.value());
@@ -2292,8 +2343,12 @@ impl Panels {
                 return Ok(invocation);
             }
             _ => {
-                self.remember_search(false);
-                self.find_next(workspace, false, self.panel == Some(Panel::Incremental));
+                self.action(
+                    workspace,
+                    "find_next",
+                    &json!({"_close_panel": self.panel == Some(Panel::Incremental)}),
+                    viewport,
+                )?;
             }
         }
         Ok(None)
@@ -2410,8 +2465,7 @@ impl Panels {
                 self.panel,
                 Some(Panel::Find | Panel::Replace | Panel::Incremental)
             ) {
-                self.remember_search(false);
-                self.find_next(workspace, true, false);
+                self.action(workspace, "find_prev", &json!({}), viewport)?;
             }
             return Ok((true, None));
         }
@@ -2438,7 +2492,10 @@ impl Panels {
             return Ok((true, None));
         }
         if key.name == "enter" {
-            return Ok((true, self.accept(workspace, key.modifiers & 9 != 0)?));
+            return Ok((
+                true,
+                self.accept(workspace, key.modifiers & 9 != 0, viewport)?,
+            ));
         }
         if key.name == "tab" {
             let count = match self.panel {
@@ -4143,7 +4200,7 @@ impl Panels {
                 if row < self.quick.items.len() {
                     self.quick.selected = row;
                     self.preview_current(workspace)?;
-                    self.pending_command = self.accept(workspace, false)?;
+                    self.pending_command = self.accept(workspace, false, viewport)?;
                 }
             }
             return Ok(true);

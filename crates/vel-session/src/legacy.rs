@@ -1,7 +1,7 @@
 //! Read compatibility for the round-seven command journal.
 use super::history::{ViewState, selection};
 use serde::{Deserialize, Deserializer};
-use vel_buffer::{Buffer, Edit, EditKind, Selection, ViewId};
+use vel_buffer::{Buffer, Edit, EditKind, ViewId};
 use vel_text::Text;
 #[derive(Clone, Debug)]
 struct Revision {
@@ -25,7 +25,7 @@ impl History {
             let mut buffer = Buffer::new(self.revisions[self.cursor].text.clone());
             let id = buffer.new_view();
             if dirty {
-                mark_dirty_without_history(&mut buffer, id);
+                buffer.mark_unsaved();
             }
             self.revisions[self.cursor].view.apply(&mut buffer, id);
             return (buffer, id);
@@ -33,9 +33,10 @@ impl History {
         let mut buffer = Buffer::new(self.revisions[0].text.clone());
         let id = buffer.new_view();
         if self.saved.is_none() {
-            mark_dirty_without_history(&mut buffer, id);
+            buffer.mark_unsaved();
         }
         self.revisions[0].view.apply(&mut buffer, id);
+        let mut undo_count = 0;
         for (index, revision) in self.revisions.iter().enumerate().skip(1) {
             let (range, inserted) = difference(buffer.text(), &revision.text);
             let before = selection(
@@ -49,6 +50,7 @@ impl History {
                 revision.view.primary,
                 &revision.text,
             );
+            let before_change = buffer.change_id();
             buffer.transact(
                 id,
                 EditKind::Other,
@@ -59,11 +61,14 @@ impl History {
                 after,
             );
             buffer.break_undo_group();
+            if index > self.cursor && buffer.change_id() != before_change {
+                undo_count += 1;
+            }
             if self.saved == Some(index) {
                 buffer.mark_saved();
             }
         }
-        for _ in self.cursor + 1..self.revisions.len() {
+        for _ in 0..undo_count {
             buffer.undo(id);
         }
         if !dirty {
@@ -140,16 +145,6 @@ impl<'de> Deserialize<'de> for History {
             saved: wire.saved,
         })
     }
-}
-
-fn mark_dirty_without_history(buffer: &mut Buffer, id: ViewId) {
-    let limits = buffer.history_limits();
-    buffer.set_history_limits(vel_buffer::HistoryLimits {
-        entries: 0,
-        ..limits
-    });
-    buffer.transact(id, EditKind::Other, &[], Selection::default());
-    buffer.set_history_limits(limits);
 }
 
 fn difference(before: &Text, after: &Text) -> (std::ops::Range<usize>, String) {

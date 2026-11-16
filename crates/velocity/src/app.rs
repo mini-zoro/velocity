@@ -39,6 +39,8 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    /// A playback may edit only the workbench sheet that started it, including nested chains.
+    macro_origin: Option<u64>,
     pending_menu: Option<context_adapter::PendingMenu>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_preferences: accessibility::Preferences,
@@ -165,6 +167,7 @@ impl App {
         );
         let session_id = sessions.borrow_mut().register();
         Self {
+            macro_origin: None,
             pending_menu: None,
             accessibility_focus: None,
             accessibility_preferences: Default::default(),
@@ -538,37 +541,94 @@ impl App {
             .emit(json!({"kind":"editor_error","message":message}));
         w.alert("Velocity", message, &["OK"]);
     }
-    fn run_named(&mut self, w: &WindowHandle, name: &str, args: &Value) {
-        self.run_named_depth(w, name, args, 0);
+    fn dispatch_key_binding(
+        &mut self,
+        window: Option<&WindowHandle>,
+        key: &vel_config::keymap::Key,
+        received: Instant,
+        viewport: std::ops::Range<usize>,
+    ) -> bool {
+        let resolution = match self.panels.resolve_key(&mut self.workspace, key, viewport) {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                self.named_error(window, &error);
+                return true;
+            }
+        };
+        match resolution {
+            vel_config::keymap::Resolution::Unbound => false,
+            vel_config::keymap::Resolution::Pending => {
+                if let Some(window) = window {
+                    self.changed(window, received, true);
+                } else {
+                    self.changed_state(received, true);
+                }
+                true
+            }
+            vel_config::keymap::Resolution::Command(invocation) => {
+                self.run_named(window, &invocation.command, &invocation.args);
+                self.input_at = Some(received);
+                true
+            }
+        }
     }
-    fn run_named_depth(&mut self, w: &WindowHandle, name: &str, args: &Value, depth: usize) {
+    fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
+        if let Err(error) = self.run_named_depth(window, name, args, 0) {
+            self.named_error(window, &error);
+        }
+    }
+    fn named_error(&mut self, window: Option<&WindowHandle>, message: &str) {
+        if let Some(window) = window {
+            self.show_error(window, message);
+        } else {
+            self.panels.message = message.into();
+        }
+    }
+    fn named_changed(&mut self, window: Option<&WindowHandle>, reveal: bool) {
+        if let Some(window) = window {
+            self.changed(window, Instant::now(), reveal);
+        } else {
+            self.changed_state(Instant::now(), reveal);
+        }
+    }
+    // The optional native handle isolates clipboard/dialog/frame effects. Headless tests
+    // execute this same dispatcher, Registry, action queue and panel/key interception.
+    fn run_named_depth(
+        &mut self,
+        window: Option<&WindowHandle>,
+        name: &str,
+        args: &Value,
+        depth: usize,
+    ) -> Result<(), String> {
+        if !self.macro_view_active() {
+            return Ok(());
+        }
         if depth >= 32 {
-            self.show_error(w, "command chain exceeds 32 levels");
-            return;
+            return Err("command chain exceeds 32 levels".into());
         }
         let palette_accept = self.panels.palette_accept_pending(name, args);
         if palette_accept && !self.accept_palette_command(name, args) {
-            return;
+            return Ok(());
         }
         if name == "chain" {
-            if let Some(commands) = args["commands"].as_array() {
-                for command in commands {
-                    if let Some(name) = command[0].as_str() {
-                        self.run_named_depth(
-                            w,
-                            name,
-                            &context_child_args(args, command.get(1).unwrap_or(&json!({}))),
-                            depth + 1,
-                        );
-                    } else {
-                        self.show_error(w, "chain entry needs [name, args]");
-                        return;
+            let commands = args["commands"].as_array().ok_or("chain needs commands")?;
+            for command in commands {
+                let name = command[0]
+                    .as_str()
+                    .ok_or("chain entry needs [name, args]")?;
+                if let Err(error) = self.run_named_depth(
+                    window,
+                    name,
+                    &context_child_args(args, command.get(1).unwrap_or(&json!({}))),
+                    depth + 1,
+                ) {
+                    if self.workspace.editor().registry.playback_depth() > 0 {
+                        return Err(error);
                     }
+                    self.named_error(window, &error);
                 }
-            } else {
-                self.show_error(w, "chain needs commands");
             }
-            return;
+            return Ok(());
         }
         if matches!(args["_context_menu"].as_str(), Some("editor" | "tab"))
             && !crate::context_menu::COMMANDS.contains(&name)
@@ -579,22 +639,26 @@ impl App {
             self.workspace.select(index);
             self.sync_active_view();
         }
-        if !palette_accept && !self.command_enabled(name, &args.to_string()) {
-            return;
+        if !self.macro_view_active() {
+            return Ok(());
         }
-        match self.context_action(w, name, args) {
+        if !palette_accept && !self.command_enabled(name, &args.to_string()) {
+            return Ok(());
+        }
+        match window.map_or(Ok(false), |window| self.context_action(window, name, args)) {
             Ok(true) => {
-                self.changed(w, Instant::now(), false);
-                return;
+                self.named_changed(window, false);
+                return Ok(());
             }
             Ok(false) => {}
             Err(error) => {
                 self.panels.message = error;
-                self.changed(w, Instant::now(), false);
-                return;
+                self.named_changed(window, false);
+                return Ok(());
             }
         }
-        if self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+        if self.workspace.editor().registry.playback_depth() == 0
+            && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
             && !matches!(
                 name,
                 "toggle_comment"
@@ -608,28 +672,35 @@ impl App {
             && !crate::html_ui::COMMANDS.contains(&name)
             && let Some(input) = self.panels.input_mut()
         {
-            input.set_clipboard(w.clipboard_text().unwrap_or_default());
-            if let Err(error) = input.run(name, args) {
-                self.show_error(w, &error);
-            }
-            if let Some(input) = self.panels.input() {
-                w.set_clipboard_text(input.clipboard());
+            let clipboard = window.map_or_else(
+                || self.workspace.editor().clipboard.clone(),
+                |window| window.clipboard_text().unwrap_or_default(),
+            );
+            input.set_clipboard(clipboard);
+            let result = input.run(name, args);
+            if let Some(window) = window
+                && let Some(input) = self.panels.input()
+            {
+                window.set_clipboard_text(input.clipboard());
             }
             let viewport = self.viewport();
             self.panels.edited(&mut self.workspace, viewport);
-            self.changed(w, Instant::now(), false);
-            return;
+            self.named_changed(window, false);
+            return result;
         }
-        self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
+        if let Some(window) = window {
+            self.workspace.editor_mut().clipboard = window.clipboard_text().unwrap_or_default();
+        }
         let before = self.workspace.editor().clipboard.clone();
-        if let Err(error) = self.workspace.editor_mut().run(name, args) {
-            self.show_error(w, &error);
+        let result = self.workspace.editor_mut().run(name, args);
+        if self.workspace.editor().clipboard != before
+            && let Some(window) = window
+        {
+            window.set_clipboard_text(&self.workspace.editor().clipboard);
         }
-        if self.workspace.editor().clipboard != before {
-            w.set_clipboard_text(&self.workspace.editor().clipboard);
-        }
-        self.handle_actions(w);
-        self.changed(w, Instant::now(), name != "scroll_lines");
+        let actions = self.handle_named_actions(window);
+        self.named_changed(window, name != "scroll_lines");
+        result.and(actions)
     }
     fn save_tab(&mut self, w: &WindowHandle, index: usize, save_as: bool) -> bool {
         let path = if save_as || self.workspace.tabs[index].path.is_none() {
@@ -704,19 +775,124 @@ impl App {
             _ => false,
         }
     }
-    fn handle_actions(&mut self, w: &WindowHandle) {
+    fn handle_named_actions(&mut self, window: Option<&WindowHandle>) -> Result<(), String> {
         let actions = std::mem::take(&mut self.workspace.editor_mut().actions);
+        let mut result = Ok(());
         for (name, args) in actions {
+            if !self.macro_view_active() {
+                break;
+            }
             let previous = self.workspace.active;
             self.workspace.tabs[previous].scroll = (self.view.scroll_x, self.view.scroll_y);
-            let result = self.apply_action(w, &name, &args);
-            if let Err(error) = result {
-                self.show_error(w, &error);
+            if let Err(error) = self.apply_named_action(window, &name, &args) {
+                // Keep draining actions already produced by one command, as before.
+                result = Err(error);
             }
             self.sync_active_view();
         }
         self.workspace.editor_mut().sync();
-        w.set_title(&self.workspace.window_title());
+        if let Some(window) = window {
+            window.set_title(&self.workspace.window_title());
+        }
+        result
+    }
+    fn macro_view_active(&mut self) -> bool {
+        if self.macro_origin.is_some_and(|sheet| {
+            self.workspace.is_empty() || self.workspace.tabs[self.workspace.active].sheet != sheet
+        }) {
+            self.panels.set_message(
+                "Macro playback stopped: the starting view is no longer active".into(),
+            );
+            return false;
+        }
+        true
+    }
+    fn apply_named_action(
+        &mut self,
+        window: Option<&WindowHandle>,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        let viewport = self.viewport();
+        if matches!(name, "run_macro" | "run_macro_file") {
+            if let Some(playback) =
+                self.panels
+                    .macro_playback(&mut self.workspace, name, args, viewport)?
+            {
+                let _recording = playback.recording;
+                let previous = self
+                    .macro_origin
+                    .replace(self.workspace.tabs[self.workspace.active].sheet);
+                let result = (|| {
+                    for (command, args) in playback.commands.iter() {
+                        if !self.macro_view_active() {
+                            break;
+                        }
+                        if self.workspace.editor().registry.kind(command).is_none() {
+                            return Err(format!("unknown command {command}"));
+                        }
+                        self.run_named_depth(window, command, args, 0)?;
+                        if !self.macro_view_active() {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.macro_origin = previous;
+                result?;
+            }
+            return Ok(());
+        }
+        // These actions need only the workspace/panels. Both native and headless named
+        // dispatch finish them here before advancing to the next macro step.
+        if vel_commands::is_find_command(name) || name == "save_macro" {
+            self.panels
+                .action(&mut self.workspace, name, args, viewport)?;
+            return Ok(());
+        }
+        if name == "new_file" {
+            return self.workspace.new_file();
+        }
+        if matches!(name, "close" | "close_file") {
+            let active = self.workspace.active;
+            let can_close = if args["force"].as_bool().unwrap_or(false) {
+                true
+            } else if let Some(window) = window {
+                self.can_close(window, active)
+            } else if !self.workspace.tabs[active].dirty() {
+                true
+            } else {
+                return Err(format!(
+                    "command {name} needs a native window to confirm unsaved changes"
+                ));
+            };
+            if can_close {
+                let last = self.workspace.tabs.len() == 1;
+                self.workspace.close(active)?;
+                if last
+                    && self
+                        .workspace
+                        .editor()
+                        .settings
+                        .bool("close_windows_when_empty", false)
+                    && let Some(window) = window
+                {
+                    window.request_close();
+                }
+            }
+            return Ok(());
+        }
+        if let Some(window) = window {
+            return self.apply_action(window, name, args);
+        }
+        if self.workspace.workbench_action(name, args)?
+            || self
+                .panels
+                .action(&mut self.workspace, name, args, viewport)?
+        {
+            return Ok(());
+        }
+        Err(format!("command {name} needs a native window"))
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
         if matches!(name, "focus_next_control" | "focus_previous_control") {
@@ -1044,21 +1220,6 @@ impl App {
                     .save_all(|suggestion| w.save_file(suggestion));
                 if !errors.is_empty() {
                     self.show_error(w, &errors.join("\n"));
-                }
-            }
-            "close" | "close_file" => {
-                if args["force"].as_bool().unwrap_or(false) || self.can_close(w, active) {
-                    let last = self.workspace.tabs.len() == 1;
-                    self.workspace.close(active)?;
-                    if last
-                        && self
-                            .workspace
-                            .editor()
-                            .settings
-                            .bool("close_windows_when_empty", false)
-                    {
-                        w.request_close();
-                    }
                 }
             }
             "next_view" | "prev_view" => {
@@ -1679,6 +1840,11 @@ impl App {
         }
     }
     fn changed(&mut self, w: &WindowHandle, received: Instant, reveal: bool) {
+        self.changed_state(received, reveal);
+        w.invalidate_character_coordinates();
+        w.request_frame();
+    }
+    fn changed_state(&mut self, received: Instant, reveal: bool) {
         let reveal = self.panels.should_reveal(reveal);
         if reveal {
             self.view.reset_caret();
@@ -1692,8 +1858,6 @@ impl App {
         if reveal {
             self.view.reveal(self.workspace.editor());
         }
-        w.invalidate_character_coordinates();
-        w.request_frame();
     }
     fn input(&mut self, w: &WindowHandle, input: TextInput, received: Instant) {
         self.log_input("text", &input);
@@ -2068,30 +2232,12 @@ impl AppHandler for App {
                 .set_viewport(top, rows);
             self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
         }
-        let resolution = match self.panels.resolve_key(&mut self.workspace, &key, viewport) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                self.show_error(w, &error);
-                return true;
-            }
-        };
-        match resolution {
-            vel_config::keymap::Resolution::Unbound => false,
-            vel_config::keymap::Resolution::Pending => {
-                self.changed(w, event.received, true);
-                true
-            }
-            vel_config::keymap::Resolution::Command(invocation) => {
-                self.run_named(w, &invocation.command, &invocation.args);
-                self.input_at = Some(event.received);
-                true
-            }
-        }
+        self.dispatch_key_binding(Some(w), &key, event.received, viewport)
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {
             match serde_json::from_str(args) {
-                Ok(args) => self.run_named(w, name, &args),
+                Ok(args) => self.run_named(Some(w), name, &args),
                 Err(e) => self.show_error(w, &e.to_string()),
             }
         }
@@ -2347,7 +2493,7 @@ impl AppHandler for App {
                     w.set_clipboard_text(input.clipboard());
                 }
                 if let Some(invocation) = invocation {
-                    self.run_named(w, &invocation.command, &invocation.args);
+                    self.run_named(Some(w), &invocation.command, &invocation.args);
                 }
                 self.changed(w, Instant::now(), true);
                 return;
@@ -2364,7 +2510,7 @@ impl AppHandler for App {
             return;
         }
         let (name, args) = crate::editor::selector_command(command);
-        self.run_named(w, name, &args);
+        self.run_named(Some(w), name, &args);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
         if event.kind == MouseKind::Down {
@@ -2392,7 +2538,7 @@ impl AppHandler for App {
                 self.show_error(w, &error);
             }
             if let Some(invocation) = self.panels.pending_command.take() {
-                self.run_named(w, &invocation.command, &invocation.args);
+                self.run_named(Some(w), &invocation.command, &invocation.args);
             }
             self.changed(w, Instant::now(), true);
             return;
@@ -2419,7 +2565,7 @@ impl AppHandler for App {
             }
             if let Some(target) = target {
                 let action = crate::html_ui::invocation(target);
-                self.run_named(w, &action.command, &action.args);
+                self.run_named(Some(w), &action.command, &action.args);
                 self.changed(w, Instant::now(), false);
                 return;
             }
@@ -2522,7 +2668,7 @@ impl AppHandler for App {
                     w.show_context_menu(&entries);
                 }
                 if let Some(invocation) = self.panels.pending_command.take() {
-                    self.run_named(w, &invocation.command, &invocation.args);
+                    self.run_named(Some(w), &invocation.command, &invocation.args);
                 }
                 if let Err(error) = self.replacement_confirmation(w) {
                     self.show_error(w, &error);
@@ -2601,7 +2747,7 @@ impl AppHandler for App {
             self.workspace.tabs[self.workspace.active].scroll =
                 (self.view.scroll_x, self.view.scroll_y);
             self.workspace.workbench.active = group;
-            self.run_named(w, "new_file", &json!({}));
+            self.run_named(Some(w), "new_file", &json!({}));
             self.changed(w, Instant::now(), false);
             return;
         }
@@ -2700,7 +2846,7 @@ impl AppHandler for App {
                 _ => None,
             });
         if let Some((name, args)) = command {
-            self.run_named(w, &name, &args);
+            self.run_named(Some(w), &name, &args);
             return;
         }
         // The middle button makes column selections, like ⌥ with the primary button.
@@ -2992,7 +3138,7 @@ impl AppHandler for App {
                 self.view.reveal(self.workspace.editor());
             }
             if let Some(invocation) = self.panels.pending_command.take() {
-                self.run_named(w, &invocation.command, &invocation.args);
+                self.run_named(Some(w), &invocation.command, &invocation.args);
             }
             if let Err(error) = self.replacement_confirmation(w) {
                 self.show_error(w, &error);
@@ -3702,6 +3848,10 @@ mod workbench_scenes {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "app_round16_tests.rs"]
+mod round16_tests;
 
 #[cfg(test)]
 mod round15_tests {

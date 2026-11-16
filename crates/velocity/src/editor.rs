@@ -110,6 +110,10 @@ pub struct Editor {
     pub actions: Vec<(String, Value)>,
     pub revision: u64,
 }
+thread_local! {
+    // Every tab/window on the application UI thread shares this one macro and kill ring.
+    static MACRO_STATE: std::rc::Rc<RefCell<vel_commands::MacroState>> = Default::default();
+}
 impl Editor {
     /// Namespaces paint state by view, including cloned views of a shared buffer.
     pub fn ui_id(&self, local: u32) -> u64 {
@@ -146,6 +150,7 @@ impl Editor {
         let preferences = settings.editor();
         let settings_revision = settings.revision();
         let mut registry = Registry::standard();
+        MACRO_STATE.with(|state| registry.share_macro_state(state.clone()));
         for name in crate::context_menu::COMMANDS {
             registry.register(name, vel_commands::Kind::WindowCommand, None);
         }
@@ -492,6 +497,14 @@ impl Editor {
         }
         changed
     }
+    /// Complete mapped bookmark regions for gutter decoration; no allocation on paint.
+    #[cfg_attr(not(test), allow(dead_code))] // Lane B consumes this accessor when drawing the gutter.
+    pub fn bookmarks(&self) -> &[Region] {
+        self.buffer
+            .view(self.id)
+            .get_regions(ops::BOOKMARKS)
+            .map_or(&[], |set| set.regions.as_slice())
+    }
     pub fn regions(&self) -> Vec<Region> {
         if let Some(composition) = &self.composition {
             let changes = ChangeSet::new(vec![Change {
@@ -602,7 +615,7 @@ impl Editor {
             self.fields = None;
             self.completion.hide();
         }
-        let mut registry = std::mem::take(&mut self.registry);
+        let mut registry = self.registry.take_for_dispatch();
         let mut result = registry.run(name, args, self);
         self.registry = registry;
         for command in std::mem::take(&mut self.vintage_requests) {
@@ -1088,6 +1101,52 @@ impl Host for Editor {
     fn settings(&self) -> EditorSettings {
         self.preferences.clone()
     }
+    fn defer_macro_playback(&self) -> bool {
+        true
+    }
+    fn wrap_width(&self) -> Option<usize> {
+        Some(self.settings.usize("wrap_width", 0))
+    }
+    fn wrap_comment_prefixes(&self) -> Vec<String> {
+        let language = self.language.borrow();
+        let Some(language) = language.as_ref() else {
+            return vec![];
+        };
+        let mut prefixes = std::collections::BTreeSet::new();
+        for region in self.buffer.view(self.id).sel().iter() {
+            let scopes = language.scopes(&self.text, region.begin());
+            let metadata = language.assets.metadata.metadata_for(&scopes);
+            for suffix in ["", "_2", "_3", "_4"] {
+                if metadata
+                    .shell_variables
+                    .get(&format!("TM_COMMENT_END{suffix}"))
+                    .is_some_and(|end| !end.is_empty())
+                {
+                    continue;
+                }
+                if let Some(start) = metadata
+                    .shell_variables
+                    .get(&format!("TM_COMMENT_START{suffix}"))
+                {
+                    let start = start.trim_end();
+                    if !start.is_empty() {
+                        prefixes.insert(start.to_owned());
+                        if start == "//" {
+                            prefixes.extend(["///".into(), "//!".into()]);
+                        }
+                    }
+                }
+            }
+            if scopes
+                .scopes
+                .iter()
+                .any(|scope| scope.build_string().starts_with("comment.block"))
+            {
+                prefixes.insert("*".into());
+            }
+        }
+        prefixes.into_iter().collect()
+    }
     fn clipboard(&mut self) -> String {
         self.clipboard.clone()
     }
@@ -1163,7 +1222,7 @@ impl ContextProvider for EditorContext<'_> {
             "panel_visible" => vec![json!(e.ui_panel_visible)],
             "panel" => vec![json!(e.ui_panel)],
             "panel_has_focus" => vec![json!(e.ui_panel_focused)],
-            "is_recording_macro" => vec![json!(e.registry.is_recording())],
+            "is_recording" | "is_recording_macro" => vec![json!(e.registry.is_recording())],
             _ => vec![],
         }
     }
@@ -1526,72 +1585,6 @@ mod keymap_tests {
         editor.set_selection(Selection::from_regions(
             regions.iter().map(|&(a, b)| Region::new(a, b)),
         ));
-    }
-    #[test]
-    fn pairing_follows_the_surrounding_text_wraps_selections_and_deletes_empty_pairs() {
-        let mut editor = Editor::new(Text::from("don\nfoo;\nfoo bar\nabc\n"));
-        select(&mut editor, &[(3, 3)]);
-        // After a letter the quote is not paired: the key falls through to plain text input.
-        assert!(!editor.key(&Key::parse("'").unwrap()).unwrap());
-        select(&mut editor, &[(7, 7)]);
-        press(&mut editor, "(");
-        assert_eq!(editor.text.line(1).to_string(), "foo();");
-        press(&mut editor, "backspace");
-        assert_eq!(
-            editor.text.line(1).to_string(),
-            "foo;",
-            "backspace deletes the pair"
-        );
-        select(&mut editor, &[(12, 12)]);
-        press(&mut editor, "(");
-        assert_eq!(editor.text.line(2).to_string(), "foo() bar");
-        let abc = editor.text.line_to_byte(3);
-        select(&mut editor, &[(abc, abc + 3)]);
-        press(&mut editor, "[");
-        assert_eq!(
-            editor.text.line(3).to_string(),
-            "[abc]",
-            "a selection is wrapped"
-        );
-    }
-    #[test]
-    fn line_editing_keys_match_the_macos_defaults() {
-        let mut editor = Editor::new(Text::from("\tone\ntwo\nthree\n"));
-        select(&mut editor, &[(2, 2)]);
-        press(&mut editor, "super+enter");
-        assert_eq!(editor.text.to_string(), "\tone\n\t\ntwo\nthree\n");
-        assert_eq!(editor.caret, 6);
-        editor.run("undo", &json!({})).unwrap();
-        select(&mut editor, &[(2, 2)]);
-        press(&mut editor, "super+shift+enter");
-        assert_eq!(editor.text.to_string(), "\t\n\tone\ntwo\nthree\n");
-        assert_eq!(editor.caret, 1);
-        editor.run("undo", &json!({})).unwrap();
-        select(&mut editor, &[(6, 6)]);
-        press(&mut editor, "ctrl+shift+k");
-        assert_eq!(editor.text.to_string(), "\tone\nthree\n");
-        select(&mut editor, &[(7, 7)]);
-        press(&mut editor, "super+backspace");
-        assert_eq!(editor.text.to_string(), "\tone\nree\n");
-        select(&mut editor, &[(2, 2)]);
-        press(&mut editor, "super+k super+k");
-        assert_eq!(editor.text.to_string(), "\to\nree\n");
-        // ⌘⇧J joins; ⌘J alone is a chord prefix.
-        select(&mut editor, &[(0, 0)]);
-        press(&mut editor, "super+shift+j");
-        assert_eq!(editor.text.to_string(), "\to ree\n");
-        // Tab with a multi-line selection indents instead of replacing it.
-        let mut editor = Editor::new(Text::from("aaa\nbbb\nccc\n"));
-        select(&mut editor, &[(0, 8)]);
-        press(&mut editor, "tab");
-        assert_eq!(editor.text.to_string(), "\taaa\n\tbbb\nccc\n");
-        // ⌘← goes to the indentation first, then to column zero.
-        let mut editor = Editor::new(Text::from("    foo"));
-        select(&mut editor, &[(7, 7)]);
-        press(&mut editor, "super+left");
-        assert_eq!(editor.caret, 4);
-        press(&mut editor, "super+left");
-        assert_eq!(editor.caret, 0);
     }
     #[test]
     fn whole_line_copies_paste_above_the_caret_line_and_line_breaks_are_normalized() {

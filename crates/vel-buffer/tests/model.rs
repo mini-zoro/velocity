@@ -46,17 +46,20 @@ fn unicode() -> impl Strategy<Value = String> {
 proptest! {
     #[test]
     fn transaction_and_full_history_match_string(initial in unicode(),commands in prop::collection::vec((any::<usize>(),any::<usize>(),unicode()),1..45)){
-        let mut b=Buffer::new(initial.as_str());let v=b.new_view();let mut model=initial;let mut states=vec![(model.clone(),b.view(v).sel().clone())];
+        let mut b=Buffer::new(initial.as_str());let v=b.new_view();let mut model=initial;let mut steps=vec![];
         for (x,y,value) in commands{
             let a=boundary(&model,x);let z=boundary(&model,y);let range=a.min(z)..a.max(z);
+            let changed=model[range.clone()]!=value;
+            let before=(model.clone(),b.view(v).sel().clone());
             model.replace_range(range.clone(),&value);
             let selection=Selection::from(Region::new(range.start,range.start+value.len()));
             b.transact(v,EditKind::Other,&[Edit{range,text:&value}],selection.clone());
-            prop_assert_eq!(b.text().to_string(),model.as_str());prop_assert_eq!(b.view(v).sel(),&selection);states.push((model.clone(),selection));
+            prop_assert_eq!(b.text().to_string(),model.as_str());prop_assert_eq!(b.view(v).sel(),&selection);
+            if changed{steps.push((before,(model.clone(),selection)));}
         }
-        for i in (0..states.len()-1).rev(){prop_assert!(b.undo(v));prop_assert_eq!(b.text().to_string(),states[i].0.as_str());prop_assert_eq!(b.view(v).sel(),&states[i].1);}
+        for (before,_) in steps.iter().rev(){prop_assert!(b.undo(v));prop_assert_eq!(b.text().to_string(),before.0.as_str());prop_assert_eq!(b.view(v).sel(),&before.1);}
         prop_assert!(!b.undo(v));
-        for (text,selection) in states.iter().skip(1){prop_assert!(b.redo(v));prop_assert_eq!(b.text().to_string(),text.as_str());prop_assert_eq!(b.view(v).sel(),selection);}
+        for (_,after) in &steps{prop_assert!(b.redo(v));prop_assert_eq!(b.text().to_string(),after.0.as_str());prop_assert_eq!(b.view(v).sel(),&after.1);}
         prop_assert!(!b.redo(v));
     }
     #[test]
@@ -67,13 +70,14 @@ proptest! {
         let mut b=Buffer::new(initial.as_str());let v=b.new_view();let old=b.view(v).sel().clone();
         let batch:Vec<_>=edits.iter().map(|(r,s)|Edit{range:r.clone(),text:s}).collect();
         b.transact(v,EditKind::Other,&batch,Selection::default());prop_assert_eq!(b.text().to_string(),model.as_str());
-        prop_assert!(b.undo(v));prop_assert_eq!(b.text().to_string(),initial);prop_assert_eq!(b.view(v).sel(),&old);prop_assert!(b.redo(v));prop_assert_eq!(b.text().to_string(),model);
+        let changed=edits.iter().any(|(r,s)| &initial[r.clone()]!=*s);
+        prop_assert_eq!(b.undo(v),changed);prop_assert_eq!(b.text().to_string(),initial);prop_assert_eq!(b.view(v).sel(),&old);prop_assert_eq!(b.redo(v),changed);prop_assert_eq!(b.text().to_string(),model);
     }
     #[test]
     fn random_position_maps_match_naive(commands in prop::collection::vec((0usize..80,0usize..80,0usize..12),1..80),seed in 0usize..80,right in any::<bool>()){
         let mut b=Buffer::new("a".repeat(80).as_str());let v=b.new_view();let origin=b.change_id();let mut model="a".repeat(80);let mut point=seed;
         for (x,y,n) in commands{let a=x%(model.len()+1);let z=y%(model.len()+1);let a=a.min(z);let z=x.max(y)%(model.len()+1);let end=a.max(z);let value="x".repeat(n);
-            point=naive_point(point,&[(a,end,n)],right);model.replace_range(a..end,&value);
+            if model[a..end]!=value { point=naive_point(point,&[(a,end,n)],right); } model.replace_range(a..end,&value);
             b.transact(v,EditKind::Other,&[Edit{range:a..end,text:&value}],Selection::default());
             prop_assert_eq!(b.transform_point_from(seed,origin,if right{Bias::Right}else{Bias::Left}),Some(point));
         }

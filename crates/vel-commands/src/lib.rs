@@ -2,7 +2,11 @@
 #![forbid(unsafe_code)]
 mod text_ops;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    rc::Rc,
+};
 use vel_buffer::{
     Buffer, Edit, EditKind, MonospaceLayout, Region, Selection, ViewId,
     ops::{self, DeleteBy, ExpandTo, MoveTo, MoveUnit, Stops},
@@ -25,6 +29,14 @@ pub trait Host {
     fn buffer(&mut self) -> (&mut Buffer, ViewId);
     /// Current view preferences.
     fn settings(&self) -> EditorSettings;
+    /// Explicit hard-wrap width; zero/None falls back to the ruler and legacy default.
+    fn wrap_width(&self) -> Option<usize> {
+        None
+    }
+    /// Comment markers supplied by the active language. Plain text has none.
+    fn wrap_comment_prefixes(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Clipboard contents.
     fn clipboard(&mut self) -> String;
     /// Writes clipboard contents.
@@ -39,6 +51,15 @@ pub trait Host {
     /// Return true after handling a command; the registry still records macros/repeat.
     fn intercept_text_command(&mut self, _name: &str, _args: &Value) -> Result<bool, String> {
         Ok(false)
+    }
+    /// Window-backed hosts dispatch macro steps at the window boundary, where panel and
+    /// document commands can finish synchronously in order. Standalone hosts execute locally.
+    fn defer_macro_playback(&self) -> bool {
+        false
+    }
+    /// Loads a package macro. Hosts resolve effective resources; built-ins are the fallback.
+    fn macro_file(&mut self, _file: &str) -> Result<Option<Vec<(String, Value)>>, String> {
+        Ok(None)
     }
     /// Observes each command boundary, including nested chain/macro commands.
     fn command_finished(&mut self) {}
@@ -58,9 +79,58 @@ struct Entry {
 #[derive(Debug, Default)]
 pub struct Registry {
     entries: BTreeMap<String, Entry>,
-    recording: bool,
-    macro_commands: Vec<(String, Value)>,
+    shared: Rc<RefCell<MacroState>>,
     last: Option<(String, Value)>,
+}
+/// Application macro buffer and kill ring, shared by editor registries on the UI thread.
+#[derive(Debug, Default)]
+pub struct MacroState {
+    recording: bool,
+    commands: Vec<(String, Value)>,
+    suspended: usize,
+    kill_ring: VecDeque<Vec<String>>,
+}
+/// Restores recording after nested playback, including command errors.
+#[derive(Debug)]
+pub struct RecordingGuard(Rc<RefCell<MacroState>>);
+impl Drop for RecordingGuard {
+    fn drop(&mut self) {
+        self.0.borrow_mut().suspended -= 1;
+    }
+}
+/// Find commands are text operations although the window owns their panel/search state.
+/// <https://www.sublimetext.com/download>, build 4107: macros now record Find commands.
+pub fn is_find_command(name: &str) -> bool {
+    matches!(
+        name,
+        "find_next"
+            | "find_prev"
+            | "find_all"
+            | "find_under"
+            | "find_under_prev"
+            | "slurp_find_string"
+            | "slurp_replace_string"
+            | "replace_next"
+            | "replace_all"
+    )
+}
+/// Parses the documented JSON macro format before executing any command.
+pub fn parse_macro(source: &str) -> Result<Vec<(String, Value)>, String> {
+    let commands = vel_config::json::Document::parse(source)?.value;
+    let commands = commands
+        .as_array()
+        .ok_or("macro commands must be an array")?;
+    commands
+        .iter()
+        .map(|v| {
+            let name = v["command"].as_str().ok_or("macro command name")?;
+            let args = v.get("args").cloned().unwrap_or_else(|| json!({}));
+            if !args.is_object() {
+                return Err("macro args must be an object".into());
+            }
+            Ok((name.into(), args))
+        })
+        .collect()
 }
 const TEXT: &[&str] = &[
     "next_modification",
@@ -126,6 +196,9 @@ const TEXT: &[&str] = &[
     "reverse_lines",
     "permute_lines",
     "run_macro_file",
+    "add_line_before",
+    "delete_to_mark",
+    "yank",
     "paste_and_indent",
     "scroll_lines",
     "show_at_center",
@@ -221,6 +294,16 @@ const WINDOW: &[&str] = &[
     "toggle_setting",
 ];
 impl Registry {
+    /// Moves the registry into a host dispatch without allocating a replacement recorder.
+    /// The temporary empty registry shares the recorder/kill ring until dispatch restores it.
+    pub fn take_for_dispatch(&mut self) -> Self {
+        let empty = Self {
+            entries: BTreeMap::new(),
+            shared: Rc::clone(&self.shared),
+            last: None,
+        };
+        std::mem::replace(self, empty)
+    }
     /// Installs our implemented command set; no bundled Default code is used.
     pub fn standard() -> Self {
         let mut registry = Self::default();
@@ -236,6 +319,7 @@ impl Registry {
             "close_window",
             "toggle_record_macro",
             "run_macro",
+            "save_macro",
             "install_cli",
             "open_crash_reports",
             "package_install_file",
@@ -265,7 +349,47 @@ impl Registry {
     }
     /// Whether commands are being recorded into the current macro.
     pub fn is_recording(&self) -> bool {
-        self.recording
+        self.shared.borrow().recording
+    }
+    /// Uses a single application's recorder and kill ring while keeping repeat state local.
+    pub fn share_macro_state(&mut self, state: Rc<RefCell<MacroState>>) {
+        self.shared = state;
+    }
+    /// Returns an owned snapshot for window-hosted playback.
+    pub fn macro_commands(&self) -> Vec<(String, Value)> {
+        self.shared.borrow().commands.clone()
+    }
+    /// Returns the recorded macro using the public JSON file format.
+    pub fn macro_source(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(
+            &self
+                .shared
+                .borrow()
+                .commands
+                .iter()
+                .map(|(name, args)| json!({"command":name,"args":args}))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| e.to_string())
+    }
+    /// Records a text/find command intercepted before registry dispatch.
+    pub fn record_command(&mut self, name: &str, args: &Value) {
+        let mut state = self.shared.borrow_mut();
+        if state.recording
+            && state.suspended == 0
+            && (self.kind(name) == Some(Kind::TextCommand) || is_find_command(name))
+        {
+            state.commands.push((name.into(), args.clone()));
+        }
+    }
+    /// Suppresses nested recording while a macro's wrapper is executed.
+    pub fn suspend_recording(&self) -> RecordingGuard {
+        self.shared.borrow_mut().suspended += 1;
+        RecordingGuard(self.shared.clone())
+    }
+    /// Current nested playback depth, shared with panel-hosted macro dispatch.
+    pub fn playback_depth(&self) -> usize {
+        self.shared.borrow().suspended
     }
     /// Executes a command with a recursion limit for chains/macros/repeat.
     pub fn run(&mut self, name: &str, args: &Value, host: &mut dyn Host) -> Result<(), String> {
@@ -292,6 +416,9 @@ impl Registry {
         if !args.is_object() {
             return Err("command args must be an object".into());
         }
+        if matches!(name, "run_macro" | "run_macro_file") && host.defer_macro_playback() {
+            return host.action(name, args);
+        }
         match name {
             "chain" => {
                 let commands = args["commands"].as_array().ok_or("chain needs commands")?;
@@ -308,34 +435,26 @@ impl Registry {
                 return Ok(());
             }
             "toggle_record_macro" => {
-                self.recording = !self.recording;
-                if self.recording {
-                    self.macro_commands.clear();
+                let mut state = self.shared.borrow_mut();
+                state.recording = !state.recording;
+                if state.recording {
+                    state.commands.clear();
                 }
                 return Ok(());
             }
             "run_macro" => {
-                if self.recording {
+                if self.is_recording() {
                     return Err("stop recording before replay".into());
                 }
                 let commands = if let Some(commands) = args.get("commands") {
-                    commands
-                        .as_array()
-                        .ok_or("macro commands must be an array")?
-                        .iter()
-                        .map(|v| {
-                            Ok((
-                                v["command"]
-                                    .as_str()
-                                    .ok_or("macro command name")?
-                                    .to_string(),
-                                v.get("args").cloned().unwrap_or(json!({})),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, String>>()?
+                    parse_macro(&commands.to_string())?
                 } else {
-                    self.macro_commands.clone()
+                    self.macro_commands()
                 };
+                let _guard = self.suspend_recording();
+                // Neither the public macros guide nor the changelog specifies undo gluing:
+                // retain today's per-command history boundaries until verified.
+                // https://docs.sublimetext.io/guide/extensibility/macros.html
                 for (name, args) in commands {
                     self.run_depth(&name, &args, host, depth + 1)?;
                 }
@@ -343,22 +462,38 @@ impl Registry {
             }
             "run_macro_file" => {
                 let file = args["file"].as_str().ok_or("run_macro_file needs a file")?;
-                let name = file
-                    .rsplit('/')
-                    .next()
-                    .and_then(|n| n.strip_suffix(".sublime-macro"))
-                    .unwrap_or(file);
-                if name == "Add Line Before" {
-                    let (b, id) = host.buffer();
-                    ops::add_line_before(b, id);
-                    host.command_finished();
-                    return Ok(());
-                }
-                let commands = builtin_macro(name)
+                let commands = host
+                    .macro_file(file)?
+                    .or_else(|| builtin_macro_file(file))
                     .ok_or_else(|| format!("macro file {file} is not available"))?;
+                self.record_command(name, args);
+                let _guard = self.suspend_recording();
                 for (name, args) in commands {
-                    self.run_depth(name, &args, host, depth + 1)?;
+                    self.run_depth(&name, &args, host, depth + 1)?;
                 }
+                return Ok(());
+            }
+            "delete_to_mark" => {
+                let (b, id) = host.buffer();
+                let values = ops::delete_to_mark(b, id);
+                if values.iter().any(|s| !s.is_empty()) {
+                    let mut state = self.shared.borrow_mut();
+                    state.kill_ring.push_front(values);
+                    state.kill_ring.truncate(32);
+                }
+                host.command_finished();
+                self.record_command(name, args);
+                self.last = Some((name.into(), args.clone()));
+                return Ok(());
+            }
+            "yank" => {
+                if let Some(values) = self.shared.borrow().kill_ring.front() {
+                    let (b, id) = host.buffer();
+                    ops::yank(b, id, values);
+                }
+                host.command_finished();
+                self.record_command(name, args);
+                self.last = Some((name.into(), args.clone()));
                 return Ok(());
             }
             "redo_or_repeat" => {
@@ -384,8 +519,10 @@ impl Registry {
             text_command(name, args, host)?;
         }
         host.command_finished();
-        if self.recording {
-            self.macro_commands.push((name.into(), args.clone()));
+        // Window-owned Find commands record after interception, with their query snapshot.
+        // Recording the queued invocation here would capture the same operation twice.
+        if !is_find_command(name) {
+            self.record_command(name, args);
         }
         if entry.kind == Kind::TextCommand
             && !matches!(
@@ -410,6 +547,23 @@ impl Registry {
 }
 /// Line-editing macros that key bindings name by their Default package file name
 /// (`res://Packages/Default/<name>.sublime-macro`).
+/// Returns only our clean-room built-in resources; other packages with the same file
+/// name must resolve through the host, never silently fall back to Default.
+pub fn builtin_macro_file(file: &str) -> Option<Vec<(String, Value)>> {
+    let path = file.strip_prefix("res://").unwrap_or(file);
+    let name = path
+        .strip_prefix("Packages/Default/")?
+        .strip_suffix(".sublime-macro")?;
+    if name == "Add Line Before" {
+        return Some(vec![("add_line_before".into(), json!({}))]);
+    }
+    builtin_macro(name).map(|commands| {
+        commands
+            .into_iter()
+            .map(|(name, args)| (name.into(), args))
+            .collect()
+    })
+}
 fn builtin_macro(name: &str) -> Option<Vec<(&'static str, Value)>> {
     Some(match name {
         "Add Line" => vec![
@@ -584,6 +738,10 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
                 "hardeol" => MoveTo::HardEol,
                 "bof" => MoveTo::Bof,
                 "eof" => MoveTo::Eof,
+                "brackets" => {
+                    ops::plain_bracket_command(b, id, false, extend);
+                    return Ok(());
+                }
                 other => return Err(format!("unknown destination {other}")),
             };
             ops::move_to(b, id, to, extend);
@@ -624,6 +782,23 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
                 "word" => ExpandTo::Word,
                 "line" => ExpandTo::Line,
                 "indentation" => ExpandTo::Indentation,
+                "brackets" | "smart" => {
+                    ops::plain_bracket_command(b, id, true, false);
+                    return Ok(());
+                }
+                "scope" => {
+                    let len = b.text().len_bytes();
+                    let selection = Selection::from_regions(b.view(id).sel().iter().map(|r| {
+                        if r.a <= r.b {
+                            Region::new(0, len)
+                        } else {
+                            Region::new(len, 0)
+                        }
+                    }));
+                    b.set_selection(id, selection);
+                    return Ok(());
+                }
+                "tag" => return Ok(()), // No markup scope provider in a standalone host.
                 other => return Err(format!("unsupported expansion {other}")),
             };
             ops::expand_selection(b, id, to);
@@ -682,6 +857,9 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
         }
         "swap_case" => {
             ops::swap_case(b, id);
+        }
+        "add_line_before" => {
+            ops::add_line_before(b, id);
         }
         "transpose" => {
             ops::transpose(b, id);

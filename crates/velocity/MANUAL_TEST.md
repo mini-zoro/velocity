@@ -1,3 +1,250 @@
+# Round 16 Lane A: editing, bookmarks/marks and macros (native review pending)
+
+Use a reviewer-built binary with an isolated profile. The sandbox runs headless tests only;
+leave every native box unchecked until review. Lane B owns the menu/palette resource rows and
+bookmark gutter drawing. `Editor::bookmarks()` exposes the complete mapped regions without an
+allocation; `Panels::macro_file_items()` exposes package macro invocations with our own captions.
+`run_macro_file` without arguments opens that catalog as a chooser.
+
+- [ ] **1.1 Undo:** at BOF, Backspace; select uppercase text and Upper Case; unindent a line
+  without indentation. None creates a dirty marker or an undo step. Undo a real edit, run each
+  no-op, then Redo: the edit returns. Repeat with Unicode, several carets, a clone, snippet
+  mirrors, language highlighting and an inline annotation. A later real edit updates all of them.
+- [ ] **1.2 Column regions:** Ctrl+Shift+Up/Down adds the previous/next visual row at both
+  endpoints of a forward or reversed selection. Repeat through short lines, tabs, CJK, wraps
+  and a collapsed fold. Follow with Up/Down: the goal column agrees, the active new region is
+  revealed, and no endpoint lies inside hidden text.
+- [ ] **2.1 Brackets/scopes/tags:** Ctrl+M from before/after either delimiter and inside the
+  pair; Ctrl+Shift+M repeatedly selects contents then delimiters then the enclosing pair.
+  Include empty/adjacent pairs, unmatched punctuation, Rust/Python/JavaScript strings and
+  comments containing their own brackets. An unmatched string bracket cannot pair with code.
+  Cmd+Shift+Space expands a scope. Cmd+Shift+A expands nested HTML/XML tags, including quoted
+  `>` attributes and fake tags in comments. Run indentation expansion through the menu/command;
+  it has no default key binding. Repeat with reversed and multiple selections.
+- [ ] **2.2 Comments:** Cmd+/ on an empty HTML/CSS selection comments its whole line;
+  pressing it twice immediately restores the line even before highlighting catches up.
+  From inside a single/multiline block comment, Cmd+/ and Cmd+Option+/ remove its delimiters.
+  Include an empty line, an indented line, multiple carets on one line, and Rust line/block
+  comments. Undo restores the complete previous state.
+- [ ] **2.3–2.5 Transpose/wrap/permutation:** Ctrl+T advances after swapping adjacent Unicode
+  graphemes, and circulates differently sized selected strings. Cmd+Option+Q retains indentation
+  and the active language's `//`, `#`, `--` comment prefixes on every output line. Plain Text
+  and Markdown keep list/heading markers only on their original first line. Test positive
+  `wrap_width`, zero with the first ruler, and explicit command width. Unique/shuffle/reverse
+  with only carets permutes the entire buffer, including an unterminated last line.
+- [ ] **2.6–2.7 Join/indent:** Cmd+Shift+J retains forward/reversed selected text and endpoint
+  positions while joining several lines, including a whitespace-only intervening line. Keep
+  Cmd+J as its existing chord prefix. Spacing before closing brackets and indentation of empty
+  lines retain the earlier behavior, pending exact documented rules (verification note below).
+- [ ] **3 Bookmarks:** Cmd+F2 stores full directed regions or empty carets. F2/Shift+F2 wraps
+  between them, Option+F2 selects all, Cmd+Shift+F2 clears them; `select_bookmarks` remains an
+  alias. Type before/between bookmarks, Undo/Redo, save/quit/relaunch, clone, and restore after
+  an external disk change invalidates history. Regions and direction survive. After Lane B's
+  drawing is integrated, verify one gutter icon on every covered bookmarked line, clipped to
+  the visible gutter and following edits/folds.
+- [ ] **3 Marks:** Cmd+K then Cmd+Space sets the mark; Cmd+A selects to it, Cmd+W deletes to
+  it, Cmd+X exchanges it, Cmd+Y yanks the last killed text, Cmd+G clears it (second keys also
+  have Cmd held). Test multiple carets, Unicode, edits before the mark and a session restart.
+  Kill in one tab and yank in another; the application kill ring distributes matching counts.
+  `clear_bookmarks {"name":"mark"}` clears only the mark and its primary-region metadata.
+- [ ] **4 Macros:** Ctrl+Q starts/stops one application macro; switch tabs/windows while
+  recording and keep the recording indicator/context. Record typing, an Add Line Before macro,
+  Find Next/Prev/Under/All and a replacement; tab/window commands must stay out of the recording.
+  Ctrl+Shift+Q applies each recorded command once across all carets. The find result must be
+  selected before the next recorded edit. Change the visible query before playback: captured
+  find options still reproduce the recording. Retest `redo_or_repeat`.
+- [ ] **4 Files/UI:** after Lane B's menu rows are integrated, use Tools Record/Playback/Save
+  Macro and Macros entries. Save writes JSON in the profile's `Packages/User`; an occupied
+  name gets a free numeric suffix, and all existing files/backups remain intact. Save three
+  recordings using the default name. Cancel the naming panel; choose an invalid name; test
+  an unwritable profile. Play a macro from another loose/installed package, override/reload it,
+  disable that package, and try malformed/recursive files. Errors restore recording state and
+  preserve editor usability. The catalog and no-argument chooser list effective package files.
+
+Verification limits: the public command reference confirms the first-ruler fallback and
+transpose semantics. The official changelog confirms find recording (4107) and maintained
+Join Lines selections (4213). Build 4166 only says that Join Lines and empty-line indentation
+improved; it does not specify the exact closing-bracket spacing or blank-line rule. The public
+macro guide does not specify one undo step per playback. Those three rules and the existing
+70-column hard-wrap fallback remain unchanged; source comments record the references.
+
+Headless validation and retained evidence (no native AppKit/Metal/scanout result is implied):
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test -p velocity --release --locked command_hook_timings_large_buffer_many_carets -- --ignored --nocapture
+python3 tools/scroll-gate/paired-headless.py \
+  --base /tmp/velocity-lane-a-r16/velocity-main-32506af --candidate target/release/velocity \
+  --bench typing1 --bench typing1000 --pairs 21 --output /tmp/velocity-lane-a-r16/paired-final
+```
+
+The baseline was frozen before edits. Current `main` at `1433d8b` has identical editor/build
+sources to `32506af`; its only additional changes are packaging forwarding fixtures, which
+are not compiled into the compared editor. Raw timing logs, hashes and summaries are retained
+under `/tmp/velocity-lane-a-r16/`. Packaging and `cargo clean` are not run for this round.
+
+Initial submission validation: fmt, strict release clippy, the full locked release workspace tests
+(default parallelism: 749 passed, 3 intentionally ignored), and rustdoc with warnings denied
+all passed. The ignored command-hook timing test was then run explicitly and passed.
+The existing `empty_window_sidebar_omits_input_adapter_before_and_after_preview` regression
+also passed; the hidden input adapter hook was retained.
+
+Paired CPU typing results: 21 alternating pairs, median of each run's reported percentile,
+main → candidate milliseconds (the combined editing/CPU scene path; no native/GPU claim).
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.200896 → 0.201500 (+0.30%) | 0.349953 → 0.345797 (−1.19%) | 7.099487 → 7.157677 (+0.82%) |
+| typing1000 | 5.263104 → 5.267021 (+0.07%) | 14.557619 → 14.606450 (+0.34%) | 27.084054 → 27.147966 (+0.24%) |
+
+All six metrics pass the 5% gate. Earlier 5-/7-pair runs crossed the threshold on variable
+samples; their raw data is retained in `paired-initial` and `paired-current`. The final run
+above followed all builds and tests, with no concurrent compilation in this lane.
+`paired-final/report.json` retains binary SHA-256 values and all paired samples.
+
+Command hooks, milliseconds per command averaged over 20 invocations with 10,000 carets:
+
+| Buffer | Insert empty text (no-op) | Type with 10,000 bookmarks | Type without bookmarks | Type while recording |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 0.5096 | 1.6481 | 1.1092 | 1.0711 |
+| 32 MiB | 0.3009 | 1.2454 | 0.9913 | 1.0213 |
+
+The same probe includes one-caret cases in `hook-timings.log`. No-op comparisons touch only
+the edited slices. Bookmark mapping uses the current change set and preserves region order;
+macro recording appends one command independently of selection count and history length.
+The review fixes below restore a stable sort after bookmark mapping; replacement-boundary
+bias can reverse their order. The sort is linear for already sorted insert/delete mappings.
+Bracket commands use the existing interval tree to collect only enclosing/touching pairs,
+and scope expansion walks only the active contiguous occurrence, with the root in constant time.
+
+Round-16 review corrections (all native boxes remain pending):
+
+- [ ] Record Find Next with Cmd+G and Enter, Find Prev with Shift+Enter, then an edit. Replay
+  with Ctrl+Shift+Q while a different query is focused. Compare text/carets with the manual
+  sequence. Each Find records exactly once. Repeat with Replace Next followed by an edit.
+- [ ] Save a user macro and invoke its Tools entry; replay package macros containing Find
+  and a subsequent edit. Find finishes before the edit. A tab/window action that closes or
+  changes the starting view stops playback before later edits, with status-bar feedback.
+  Repeat macro-backed editing keys with the Find field focused: they edit the input, and
+  the document stays untouched. Document-started playback still applies its steps to the document.
+- [ ] Bookmark at columns 2 and 4 of `a\nb\nc\nd\n`; replace bytes 2..5 with `X`, then
+  navigate both ways. Toggle at another column on a bookmarked line, and over a partially
+  overlapping region: remove the matching bookmark. Repeat after edits move the bookmark.
+- [ ] Set a mark at the caret and delete to it. No character, dirty state, undo step or kill
+  entry changes. Repeat with one empty and one nonempty mark/caret pair, then Yank.
+- [ ] Paste and Indent text identical to the selection, alone and alongside a different
+  replacement. Every affected selection collapses as after a normal paste; only real byte
+  changes dirty the document or publish layout/language changes.
+
+The new regressions use `App::run_named` and the shared native/headless key dispatcher for
+macro recording, naming-panel completion and playback. The optional native window handle
+isolates clipboard/dialog/frame operations; the Registry, action queue, panel interception,
+workspace/tab switching and ordered macro executor are the production implementations.
+Bookmark toggling uses the review's line/overlap fallback: the public command reference says
+only active regions, and the build-4166 changelog does not define the improved toggle rule.
+Sources are cited in `ops::toggle_bookmark`. Legacy round-seven restore probes cover an
+unsaved cursor-zero journal and no-op steps before/after cursor/save indexes.
+
+Review validation: fmt, strict locked release clippy, the full locked release workspace
+tests (default parallelism: 762 passed, 0 failed, 3 intentionally ignored), and
+rustdoc with warnings denied all pass. The hook timing test passes when run explicitly;
+the sidebar regression remains passing. The two existing macro-backed keymap regression
+tests now drive the application dispatcher, preserving their original assertions for line
+editing and empty-pair deletion. No GUI, packaging script, `cargo clean` or commit was used.
+
+Review paired typing results, 21 alternating pairs against the **same frozen baseline**
+(SHA-256 `4b105c8e6fc69e4105122828ba0261bab4b5dde99b06df96b645de94efab4383`), main → candidate milliseconds:
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.201146 → 0.201416 (+0.13%) | 0.346060 → 0.346509 (+0.13%) | 7.120734 → 7.078790 (-0.59%) |
+| typing1000 | 5.260395 → 5.267375 (+0.13%) | 14.595638 → 14.585129 (-0.07%) | 27.107928 → 27.103455 (-0.02%) |
+
+All six metrics pass the 5% gate. Source/binary hashes, raw samples and gate logs are in
+`/tmp/velocity-lane-a-r16-review/`; `paired/report.json` contains the binary identity.
+Reproduce with the earlier paired command, using the review evidence directory for `--base`
+and `--output` (`/tmp/velocity-lane-a-r16-review/paired`).
+
+Review hook timings, milliseconds per command averaged over 20 invocations, 10,000 carets:
+
+| Buffer | No-op insert | Type with 10,000 bookmarks | Plain typing | Recording |
+| --- | --- | --- | --- | --- |
+| 1 MiB | 0.3093 | 1.3123 | 1.0383 | 1.0770 |
+| 32 MiB | 0.2933 | 1.3217 | 1.1055 | 1.1046 |
+
+The restored stable region sort shows no buffer-size-dependent growth in this probe.
+The new bookmark-toggle overlap lookup uses sorted interval endpoints rather than scanning
+all bookmarks once per caret. Full one-caret/many-caret data is in `hook-timings.log`.
+
+Second-review native checklist (pending; headless regressions use the production key dispatcher):
+
+- [ ] With the document caret between `()` and Find text `abc`, press Backspace: input `ab`,
+  document unchanged. Repeat Cmd+Backspace and Ctrl+Shift+K with Find, the command palette,
+  and the Save Macro name field focused. Undo edits only the input. With document focus,
+  the same keys retain their usual behavior, including empty-pair deletion.
+- [ ] Add an unrelated corrupt `.sublime-package` and an unreadable loose file to a disposable
+  profile. Cmd+Enter, Ctrl+Shift+K, Cmd+Backspace, empty-pair Backspace and a User macro still
+  work. The corrupt package produces a warning; valid User macros remain in the chooser.
+  A corrupt Default archive falls back to our built-in macros. Test a loose override of an
+  installed macro, then remove/reload it: the archive supplies the next playback.
+- [ ] With 100 MB of unrelated loose data, invoke the first macro after launch and after a
+  settings/resource reload. Check responsiveness. The command path loads only its requested
+  file; the chooser uses the workspace's background filename index.
+- [ ] Record typing across tabs, stop, replay, Undo and Redo or Repeat. Edit and undo an input
+  field while the document's recorded macro stays intact. No new recorder is allocated for
+  each host dispatch (headless allocation probe: 10,000 handoffs allocate zero times).
+- [ ] Run `[close, select_all, left_delete, save]` from a clean tab next to a dirty file.
+  The origin closes, playback stops with status feedback, and the neighbor stays unchanged
+  and unsaved. Repeat through a nested `chain` and a hand-written macro file; also change the
+  active view with New File. Test normal dirty-close prompting and close-last-window behavior.
+
+The second-review code keeps the sidebar hook and its
+`empty_window_sidebar_omits_input_adapter_before_and_after_preview` regression.
+The earlier review's focused-input assertion above was corrected: a key-bound macro file
+uses the input's own registry unless document playback is already running.
+
+Second-review validation: fmt, strict locked release clippy (all targets), the full locked
+release workspace tests at default parallelism (770 passed, 0 failed, 4 intentionally ignored),
+and rustdoc with warnings denied pass. Both the 100 MB macro timing and the existing many-caret
+hook timing pass when invoked explicitly. The zero-allocation test is
+`vel-commands/tests/registry_dispatch.rs::registry_handoffs_allocate_no_placeholder_state`;
+its companion real-key regression covers shared recording, local repeat and input undo.
+
+Same 100 MB fixture before/after this review's fixes (100 loose files of 1,000,000 bytes;
+five fresh application instances, real Cmd+Enter dispatch, startup/reload work outside the timer):
+
+| Command | Before median | After median |
+| --- | --- | --- |
+| First macro key | 15.863 ms | 0.090 ms |
+| Warm macro key | 0.034 ms | 0.031 ms |
+| First macro after resource reload | 15.346 ms | 0.091 ms |
+
+The first sample after the change took 0.455 ms; all five first-key samples were below 0.5 ms.
+The same fixture directory was reused, without changing its contents. No unrelated package
+contents are retained by the macro cache; only parsed commands for invoked paths survive.
+
+Second-review paired typing, 21 alternating pairs against the same frozen baseline hash above:
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.217666 → 0.219500 (+0.84%) | 0.367498 → 0.368387 (+0.24%) | 7.065017 → 7.030640 (-0.49%) |
+| typing1000 | 5.458208 → 5.465333 (+0.13%) | 15.024710 → 15.220507 (+1.30%) | 27.924256 → 28.129881 (+0.74%) |
+
+All six metrics pass the 5% gate. Candidate SHA-256:
+`12bae0fbc43a0f23f1944d73976b3448cdd24ec5a73f8796bbaf5014ed9ed3f5`.
+Logs, the reused fixture, before/after samples and `paired/report.json` are retained in
+`/tmp/velocity-lane-a-r16-review2/`. Reproduce the timing with
+`cargo test -p velocity --release --locked macro_first_key_with_large_loose_package -- --ignored --nocapture`.
+The paired command uses the same `--base` as the first review, with
+`--candidate /tmp/velocity-lane-a-r16-review2/velocity-candidate` and
+`--output /tmp/velocity-lane-a-r16-review2/paired`. No native checks, packaging, clean or commit
+was performed.
+
+Earlier checklists follow.
+
 # Round 15: opening, saving, projects and sessions (native review pending)
 
 Use a reviewer-built binary/bundle with a disposable profile and fixture tree. Do not rebuild or

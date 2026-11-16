@@ -37,6 +37,9 @@ pub struct ViewState {
     pub scroll: (f64, f64),
     /// Folded regions.
     pub folds: Vec<Position>,
+    /// Bookmark and mark regions, retained even when native undo history is discarded.
+    #[serde(default)]
+    pub named_regions: BTreeMap<String, Vec<Position>>,
 }
 impl Default for ViewState {
     fn default() -> Self {
@@ -46,14 +49,38 @@ impl Default for ViewState {
             primary: 0,
             scroll: (0., 0.),
             folds: vec![],
+            named_regions: BTreeMap::new(),
         }
     }
 }
 impl ViewState {
-    /// Copies only selections/folds, retaining no document contents.
+    /// Copies selections, folds, bookmarks and marks, retaining no document contents.
     pub fn capture(buffer: &Buffer, id: ViewId, scroll: (f64, f64)) -> Self {
         let sel = buffer.view(id).sel();
         Self {
+            named_regions: [
+                vel_buffer::ops::BOOKMARKS,
+                vel_buffer::ops::MARK,
+                "velocity.mark.primary",
+            ]
+            .into_iter()
+            .filter_map(|name| {
+                buffer
+                    .view(id)
+                    .get_regions(name)
+                    .or_else(|| {
+                        (name == vel_buffer::ops::MARK)
+                            .then(|| buffer.view(id).get_regions("velocity.mark"))
+                            .flatten()
+                    })
+                    .map(|set| {
+                        (
+                            name.into(),
+                            set.regions.iter().copied().map(Position::from).collect(),
+                        )
+                    })
+            })
+            .collect(),
             history_view: Some(id),
             selections: sel.iter().map(Position::from).collect(),
             primary: sel.primary_index(),
@@ -70,6 +97,9 @@ impl ViewState {
         if self.selections.is_empty()
             || self.selections.len() > 1_000_000
             || self.primary >= self.selections.len()
+            || self.folds.len() > 1_000_000
+            || self.named_regions.len() > 3
+            || self.named_regions.values().map(Vec::len).sum::<usize>() > 1_000_000
             || [self.scroll.0, self.scroll.1]
                 .iter()
                 .any(|n| !n.is_finite() || *n < 0.)
@@ -77,6 +107,7 @@ impl ViewState {
                 .selections
                 .iter()
                 .chain(&self.folds)
+                .chain(self.named_regions.values().flatten())
                 .any(|p| p.xpos.is_some_and(|n| !n.is_finite()))
         {
             return Err("invalid session view state".into());
@@ -100,6 +131,27 @@ impl ViewState {
             .filter(|r| !r.empty())
             .collect();
         buffer.add_regions(id, "velocity.folds", folds, true);
+        for name in [
+            vel_buffer::ops::BOOKMARKS,
+            vel_buffer::ops::MARK,
+            "velocity.mark.primary",
+        ] {
+            if let Some(positions) = self.named_regions.get(name) {
+                let regions = positions
+                    .iter()
+                    .map(|p| Region {
+                        a: buffer
+                            .text()
+                            .floor_char_boundary(p.a.min(buffer.text().len_bytes())),
+                        b: buffer
+                            .text()
+                            .floor_char_boundary(p.b.min(buffer.text().len_bytes())),
+                        xpos: p.xpos,
+                    })
+                    .collect();
+                buffer.add_regions(id, name, regions, false);
+            }
+        }
     }
 }
 pub(super) fn selection(positions: &[Position], primary: usize, text: &Text) -> Selection {
@@ -182,18 +234,7 @@ impl History {
             *new = buffer.new_view();
         }
         if dirty {
-            let id = map
-                .values()
-                .next()
-                .copied()
-                .unwrap_or_else(|| buffer.new_view());
-            let limits = buffer.history_limits();
-            buffer.set_history_limits(vel_buffer::HistoryLimits {
-                entries: 0,
-                ..limits
-            });
-            buffer.transact(id, vel_buffer::EditKind::Other, &[], Selection::default());
-            buffer.set_history_limits(limits);
+            buffer.mark_unsaved();
         }
         Ok((buffer, map))
     }

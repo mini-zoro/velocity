@@ -476,3 +476,13 @@ fn soft_tab_backspace_rewraps_only_the_edited_line() {
     assert!(e.text.to_string().starts_with("   work();"));
     assert_eq!(e.layout.borrow().rewrapped, 1);
 }
+
+#[test]
+fn block_only_line_comments_survive_two_immediate_toggles() {
+    for syntax in ["HTML", "CSS"] {
+        let mut e = editor("", syntax);
+        e.run("toggle_comment", &json!({})).unwrap();
+        e.run("toggle_comment", &json!({})).unwrap();
+        assert_eq!(e.text.to_string(), "", "{syntax}");
+    }
+}

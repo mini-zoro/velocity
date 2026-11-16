@@ -164,3 +164,45 @@ fn closed_historical_edit_owners_remain_undoable_without_reopening_views() {
     assert_eq!(live.redo(open), restored.redo(map[&open]));
     assert_eq!(live.text(), restored.text());
 }
+
+#[test]
+fn legacy_unsaved_cursor_zero_restores_dirty_without_a_synthetic_edit() {
+    let view = vel_session::ViewState::default();
+    let wire =
+        serde_json::json!({"base":"hello", "steps":[], "cursor":0, "saved":null, "views":[view]});
+    let history: History = serde_json::from_value(wire).unwrap();
+    for keep in [false, true] {
+        let (mut b, id) = history.restore(keep, true).unwrap();
+        assert_eq!(b.text(), "hello");
+        assert!(b.is_dirty(), "keep_history={keep}");
+        assert!(!b.undo(id));
+    }
+}
+
+#[test]
+fn legacy_noop_steps_do_not_shift_the_undo_cursor_or_saved_revision() {
+    for cursor in [1, 2] {
+        for saved in [None, Some(0), Some(1), Some(2), Some(3)] {
+            let view = vel_session::ViewState::default();
+            let wire = serde_json::json!({"base":"", "steps":[
+                {"start":0,"end":0,"text":"a"},
+                {"start":1,"end":1,"text":""},
+                {"start":1,"end":1,"text":"b"}
+            ],"cursor":cursor,"saved":saved,"views":[view,view,view,view]});
+            let history: History = serde_json::from_value(wire).unwrap();
+            let (mut b, id) = history.restore(true, true).unwrap();
+            assert_eq!(b.text(), "a", "cursor={cursor}, saved={saved:?}");
+            assert_eq!(b.is_dirty(), !matches!(saved, Some(1 | 2)));
+            assert!(b.undo(id));
+            assert_eq!(b.text(), "");
+            assert_eq!(b.is_dirty(), saved != Some(0));
+            assert!(!b.undo(id));
+            assert!(b.redo(id));
+            assert_eq!(b.text(), "a");
+            assert!(b.redo(id));
+            assert_eq!(b.text(), "ab");
+            assert_eq!(b.is_dirty(), saved != Some(3));
+            assert!(!b.redo(id));
+        }
+    }
+}

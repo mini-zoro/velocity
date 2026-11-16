@@ -404,7 +404,7 @@ fn transpose_unicode_graphemes_multicursor_and_selection() {
     b.undo(v);
     b.set_selection(v, Selection::from(Region::new(0, 6)));
     transpose(&mut b, v);
-    assert_eq!(b.text().to_string(), "中e\u{301} ab");
+    assert_eq!(b.text().to_string(), "e\u{301}中 ab");
 }
 #[test]
 fn shared_views_annotations_and_undo_saved_state() {
@@ -537,9 +537,11 @@ fn invalid_transaction_is_atomic() {
     assert_eq!(b.text().to_string(), "中a");
 }
 #[test]
-fn change_ids_include_noops_undo_redo() {
+fn change_ids_exclude_noops_and_include_undo_redo() {
     let (mut b, v) = setup("", &[(0, 0)]);
-    assert_eq!(insert(&mut b, v, ""), ChangeId(1));
+    assert_eq!(insert(&mut b, v, ""), ChangeId(0));
+    assert!(!b.undo(v));
+    assert_eq!(insert(&mut b, v, "x"), ChangeId(1));
     assert!(b.undo(v));
     assert_eq!(b.change_id(), ChangeId(2));
     assert!(b.redo(v));

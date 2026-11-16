@@ -2032,5 +2032,24 @@
     ],
     "command": "focus_previous_control"
   },
-  { "keys": ["super+shift+t"], "command": "reopen_last_file" }
+  { "keys": ["super+shift+t"], "command": "reopen_last_file" },
+  // Lane A round 16: structural editing, bookmarks, marks and macros.
+  {"keys": ["ctrl+m"], "command": "move_to", "args": {"to": "brackets"}},
+  {"keys": ["ctrl+shift+m"], "command": "expand_selection", "args": {"to": "brackets"}},
+  {"keys": ["super+shift+space"], "command": "expand_selection", "args": {"to": "scope"}},
+  {"keys": ["super+shift+a"], "command": "expand_selection", "args": {"to": "tag"}},
+  {"keys": ["super+alt+q"], "command": "wrap_lines"},
+  {"keys": ["super+f2"], "command": "toggle_bookmark"},
+  {"keys": ["f2"], "command": "next_bookmark"},
+  {"keys": ["shift+f2"], "command": "prev_bookmark"},
+  {"keys": ["super+shift+f2"], "command": "clear_bookmarks"},
+  {"keys": ["alt+f2"], "command": "select_all_bookmarks"},
+  {"keys": ["super+k", "super+space"], "command": "set_mark"},
+  {"keys": ["super+k", "super+a"], "command": "select_to_mark"},
+  {"keys": ["super+k", "super+w"], "command": "delete_to_mark"},
+  {"keys": ["super+k", "super+x"], "command": "swap_with_mark"},
+  {"keys": ["super+k", "super+y"], "command": "yank"},
+  {"keys": ["super+k", "super+g"], "command": "clear_bookmarks", "args": {"name": "mark"}},
+  {"keys": ["ctrl+q"], "command": "toggle_record_macro"},
+  {"keys": ["ctrl+shift+q"], "command": "run_macro"}
 ]

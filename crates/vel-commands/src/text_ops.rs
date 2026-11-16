@@ -24,6 +24,7 @@ pub(super) fn register(registry: &mut Registry) {
         ("next_bookmark", next),
         ("prev_bookmark", previous),
         ("select_bookmarks", bookmarks),
+        ("select_all_bookmarks", bookmarks),
         ("expand_selection", expand),
         ("expand_selection_to_paragraph", paragraph),
         ("trim_trailing_white_space", trim),
@@ -57,11 +58,13 @@ fn wrap(host: &mut dyn Host, args: &Value) -> Result<(), String> {
         return Ok(());
     }
     let settings = host.settings();
-    let default_width = settings
-        .rulers
-        .first()
-        .copied()
+    // The public command reference documents an explicit width, but does not establish
+    // a fallback column: retain our existing 70 when neither setting nor ruler is set.
+    // https://docs.sublimetext.io/reference/commands.html#wrap-lines
+    let default_width = host
+        .wrap_width()
         .filter(|n| *n > 0)
+        .or_else(|| settings.rulers.first().copied().filter(|n| *n > 0))
         .unwrap_or(70);
     let width =
         args.get("width")
@@ -72,9 +75,10 @@ fn wrap(host: &mut dyn Host, args: &Value) -> Result<(), String> {
                     .filter(|n| *n > 0)
                     .ok_or("wrap width must be a positive integer")
             })?;
+    let prefixes = host.wrap_comment_prefixes();
     let (b, id) = host.buffer();
     sync_settings(b, id, &settings);
-    ops::wrap_lines(b, id, width);
+    ops::wrap_lines_with_prefixes(b, id, width, &prefixes);
     Ok(())
 }
 fn lines(host: &mut dyn Host, args: &Value) -> Result<(), String> {
@@ -176,7 +180,14 @@ macro_rules! adapter {
 adapter!(set_mark, "set_mark", set_mark);
 adapter!(select_mark, "select_to_mark", select_to_mark);
 adapter!(swap_mark, "swap_with_mark", swap_with_mark);
-adapter!(clear, "clear_bookmarks", clear_bookmarks);
+fn clear(host: &mut dyn Host, args: &Value) -> Result<(), String> {
+    if host.intercept_text_command("clear_bookmarks", args)? {
+        return Ok(());
+    }
+    let (b, id) = host.buffer();
+    ops::clear_named_regions(b, id, string(args, "name", ops::BOOKMARKS));
+    Ok(())
+}
 adapter!(toggle, "toggle_bookmark", toggle_bookmark);
 // Navigation has no settings dependency and preserves the host's selection goals.
 fn next(h: &mut dyn Host, a: &Value) -> Result<(), String> {

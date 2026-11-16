@@ -11,6 +11,11 @@ fn fixture(text: &str, regions: impl IntoIterator<Item = Region>) -> (Buffer, Vi
 }
 fn roundtrip(b: &mut Buffer, id: ViewId, original: &str, selection: &Selection, expected: &str) {
     assert_eq!(b.text().to_string(), expected);
+    if original == expected {
+        assert!(!b.undo(id));
+        assert!(!b.is_dirty());
+        return;
+    }
     assert!(b.undo(id));
     assert_eq!(b.text().to_string(), original);
     assert_eq!(b.view(id).sel(), selection);

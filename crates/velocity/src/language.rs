@@ -1349,6 +1349,162 @@ pub fn syntax_path(path: Option<&Path>) -> String {
         .into_owned()
 }
 
+/// Contiguous occurrences of the caret's active scopes, from inner to outer. Uses only
+/// published exact runs; never reparses a document on the input thread.
+pub fn command_scope_regions(language: &Language, byte: usize, prefix: &str) -> Vec<Range<usize>> {
+    let Some(snapshot) = language.scope_snapshot_at(byte) else {
+        return vec![];
+    };
+    let Some(scopes) = snapshot.scopes_at(byte) else {
+        return vec![];
+    };
+    let row = snapshot.text.byte_to_line(byte);
+    let Ok(line_index) = snapshot.lines.binary_search_by_key(&row, |line| line.line) else {
+        return vec![];
+    };
+    let mut result = Vec::new();
+    for scope in scopes
+        .iter()
+        .rev()
+        .filter(|s| s.build_string().starts_with(prefix))
+    {
+        if *scope == language.root {
+            result.push(0..snapshot.text.len_bytes());
+            continue;
+        }
+        let contains = |stack| {
+            snapshot
+                .stacks
+                .get(stack)
+                .is_some_and(|active| active.contains(scope))
+        };
+        let mut range = byte..byte;
+        // Start at the caret's run and stop at the first different scope in each
+        // direction. Unrelated runs before/after this occurrence are never visited.
+        'left: for line in snapshot.lines[..=line_index].iter().rev() {
+            if !line.exact {
+                break;
+            }
+            let start = snapshot.text.line_to_byte(line.line);
+            let local = range.start - start;
+            let limit = line
+                .runs
+                .partition_point(|run| (run.start as usize) < local);
+            for run in line.runs[..limit].iter().rev() {
+                if start + (run.end as usize) < range.start || !contains(run.stack) {
+                    break 'left;
+                }
+                range.start = start + run.start as usize;
+            }
+        }
+        'right: for line in &snapshot.lines[line_index..] {
+            if !line.exact {
+                break;
+            }
+            let start = snapshot.text.line_to_byte(line.line);
+            let local = range.end.saturating_sub(start);
+            let first = line.runs.partition_point(|run| run.end as usize <= local);
+            for run in &line.runs[first..] {
+                if start + (run.start as usize) > range.end || !contains(run.stack) {
+                    break 'right;
+                }
+                range.end = start + run.end as usize;
+            }
+        }
+        result.push(range);
+    }
+    result.sort_by_key(|r| r.len());
+    result.dedup();
+    result
+}
+
+/// Collects only pairs touching/enclosing a point using the existing interval tree.
+/// A many-caret command must not clone every unrelated pair once per caret.
+fn command_enclosing_pairs(analysis: &Analysis, byte: usize) -> Vec<Pair> {
+    fn visit(
+        analysis: &Analysis,
+        node: usize,
+        range: Range<usize>,
+        limit: usize,
+        byte: usize,
+        pairs: &mut Vec<Pair>,
+    ) {
+        if range.start >= limit || analysis.pair_tree[node] < byte {
+            return;
+        }
+        if range.len() == 1 {
+            if let Some(pair) = analysis.pairs.get(range.start) {
+                pairs.push(pair.clone());
+            }
+            return;
+        }
+        let middle = (range.start + range.end) / 2;
+        visit(analysis, node * 2, range.start..middle, limit, byte, pairs);
+        visit(
+            analysis,
+            node * 2 + 1,
+            middle..range.end,
+            limit,
+            byte,
+            pairs,
+        );
+    }
+    let mut pairs = Vec::new();
+    if !analysis.pair_tree.is_empty() {
+        visit(
+            analysis,
+            1,
+            0..analysis.pair_tree.len() / 2,
+            analysis.pairs.partition_point(|p| p.open.start <= byte),
+            byte,
+            &mut pairs,
+        );
+    }
+    pairs
+}
+
+/// Reuses analyzed code/tag pairs. Within strings/comments it matches only inside that
+/// contiguous scope, so punctuation cannot pair with a delimiter in surrounding code.
+pub fn command_pairs(language: Option<&Language>, text: &Text, byte: usize) -> Vec<Pair> {
+    let excluded = language.and_then(|l| {
+        ["string", "comment"]
+            .into_iter()
+            .find_map(|prefix| command_scope_regions(l, byte, prefix).into_iter().last())
+    });
+    if excluded.is_none()
+        && let Some(language) = language
+    {
+        return language
+            .analysis
+            .as_ref()
+            .filter(|a| a.version == language.version)
+            .map_or_else(Vec::new, |analysis| command_enclosing_pairs(analysis, byte));
+    }
+    let range = excluded.unwrap_or(0..text.len_bytes());
+    let source = text.slice(range.clone()).to_string();
+    let mut stack = Vec::new();
+    let mut pairs = Vec::new();
+    for (offset, c) in source.char_indices() {
+        let at = range.start + offset;
+        if matches!(c, '(' | '[' | '{') {
+            stack.push((c, at));
+        } else if let Some(open) = match c {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        } && let Some((_, start)) = stack.pop_if(|(c, _)| *c == open)
+        {
+            pairs.push(Pair {
+                open: start..start + 1,
+                close: at..at + 1,
+                kind: open,
+            });
+        }
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

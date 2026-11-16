@@ -81,16 +81,18 @@ impl Editor {
                 }
             }
         }
-        let changes = ChangeSet::new(
-            owned
-                .iter()
-                .map(|(r, s)| Change {
-                    old_range: r.clone(),
-                    new_len: s.len(),
-                })
-                .collect(),
-        );
+        // Selection effects belong to the requested command, including replacements whose
+        // bytes already match. Only text publication uses the filtered change set.
         let selection = after.unwrap_or_else(|| {
+            let changes = ChangeSet::new(
+                owned
+                    .iter()
+                    .map(|(r, s)| Change {
+                        old_range: r.clone(),
+                        new_len: s.len(),
+                    })
+                    .collect(),
+            );
             let old = self.buffer.view(self.id).sel();
             selection_primary(
                 old.iter()
@@ -104,6 +106,27 @@ impl Editor {
                 old.primary_index(),
             )
         });
+        owned.retain(|(range, text)| {
+            !self.buffer.edit_is_noop(&Edit {
+                range: range.clone(),
+                text,
+            })
+        });
+        if owned.is_empty() {
+            if self.buffer.view(self.id).sel() != &selection {
+                self.buffer.set_selection(self.id, selection);
+            }
+            return;
+        }
+        let changes = ChangeSet::new(
+            owned
+                .iter()
+                .map(|(r, s)| Change {
+                    old_range: r.clone(),
+                    new_len: s.len(),
+                })
+                .collect(),
+        );
         let old = self.buffer.text().clone();
         let before_version = self.buffer.change_id();
         self.layout
@@ -126,6 +149,9 @@ impl Editor {
         before_version: vel_buffer::ChangeId,
         changes: ChangeSet,
     ) {
+        if self.buffer.change_id() == before_version {
+            return;
+        }
         self.annotations.borrow_mut().change(
             &self.buffer,
             &self.settings,
@@ -348,12 +374,24 @@ impl Editor {
                     EditKind::Delete,
                 );
             }
+            "move_to" if args["to"] == "brackets" => self.bracket_command(false, args),
+            "expand_selection"
+                if matches!(
+                    args["to"].as_str(),
+                    Some("brackets" | "scope" | "tag" | "smart")
+                ) =>
+            {
+                self.bracket_command(true, args)
+            }
             "toggle_comment" => self.toggle_comment(args["block"].as_bool().unwrap_or(false))?,
             "reindent" => self.start_reindent()?,
             "fold" | "unfold" | "fold_by_level" | "unfold_all" | "fold_tag_attributes" => {
                 self.fold_command(name, args)?
             }
-            "move" if matches!(args["by"].as_str(), Some("lines" | "pages")) => {
+            "select_lines" | "move"
+                if name == "select_lines"
+                    || matches!(args["by"].as_str(), Some("lines" | "pages")) =>
+            {
                 if self.layout.borrow().total() == 0 {
                     self.layout.borrow_mut().configure(
                         &self.text,
@@ -372,33 +410,53 @@ impl Editor {
                 // The buffer's v1 VerticalLayout assumes LF line numbers. The view supplies
                 // visual row numbers here while using the same x/offset/page contract.
                 let old = self.buffer.view(self.id).sel();
-                let after = selection_primary(
-                    old.iter()
-                        .map(|r| {
-                            let x = r.xpos.unwrap_or_else(|| layout.x_of(&self.text, r.b));
-                            let row = layout.visual_at(&self.text, r.b).0;
-                            let delta = if args["by"] == "pages" {
-                                layout.lines_per_page()
-                            } else {
-                                1
-                            };
-                            let visual = if forward {
-                                row.saturating_add(delta)
-                                    .min(layout.total().saturating_sub(1))
-                            } else {
-                                row.saturating_sub(delta)
-                            };
-                            let visual = layout.editable_visual(visual, forward);
-                            let b = layout.offset_at(&self.text, visual, x);
-                            Region {
-                                a: if extend { r.a } else { b },
-                                b,
-                                xpos: Some(x),
-                            }
-                        })
-                        .collect(),
-                    old.primary_index(),
-                );
+                let mut regions = if name == "select_lines" {
+                    old.iter().collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+                regions.extend(old.iter().map(|r| {
+                    let x = r.xpos.unwrap_or_else(|| layout.x_of(&self.text, r.b));
+                    let row = layout.visual_at(&self.text, r.b).0;
+                    let delta = if args["by"] == "pages" {
+                        layout.lines_per_page()
+                    } else {
+                        1
+                    };
+                    let visual = if forward {
+                        row.saturating_add(delta)
+                            .min(layout.total().saturating_sub(1))
+                    } else {
+                        row.saturating_sub(delta)
+                    };
+                    let visual = layout.editable_visual(visual, forward);
+                    let b = layout.offset_at(&self.text, visual, x);
+                    let a = if name == "select_lines" && !r.empty() {
+                        let row = layout.visual_at(&self.text, r.a).0;
+                        let next = if forward {
+                            (row + 1).min(layout.total().saturating_sub(1))
+                        } else {
+                            row.saturating_sub(1)
+                        };
+                        layout.offset_at(
+                            &self.text,
+                            layout.editable_visual(next, forward),
+                            layout.x_of(&self.text, r.a),
+                        )
+                    } else if extend {
+                        r.a
+                    } else {
+                        b
+                    };
+                    Region {
+                        a,
+                        b,
+                        xpos: Some(x),
+                    }
+                }));
+                let primary =
+                    old.primary_index() + if name == "select_lines" { old.len() } else { 0 };
+                let after = selection_primary(regions, primary);
                 drop(layout);
                 self.buffer.set_selection(self.id, after);
             }
@@ -551,6 +609,95 @@ impl Editor {
         }
         (text, caret..caret, blank)
     }
+    fn bracket_command(&mut self, expand: bool, args: &Value) {
+        let language = self.language.borrow();
+        let old = self.buffer.view(self.id).sel();
+        let regions = old
+            .iter()
+            .map(|r| {
+                let pairs = if expand && args["to"].as_str() == Some("scope") {
+                    Vec::new()
+                } else {
+                    crate::language::command_pairs(
+                        language.as_ref(),
+                        &self.text,
+                        if expand { r.begin() } else { r.b },
+                    )
+                };
+                if !expand {
+                    let pair = pairs
+                        .iter()
+                        .filter(|p| p.kind != '<')
+                        .filter(|p| p.open.start <= r.b && r.b <= p.close.end)
+                        .min_by_key(|p| {
+                            let priority = if p.open.contains(&r.b) || p.close.contains(&r.b) {
+                                0
+                            } else if p.open.end == r.b || p.close.end == r.b {
+                                1
+                            } else {
+                                2
+                            };
+                            (priority, p.close.end - p.open.start)
+                        });
+                    return pair.map_or(r, |p| {
+                        let at = if p.close.contains(&r.b) || r.b == p.close.end {
+                            p.open.start
+                        } else {
+                            p.close.start
+                        };
+                        Region::new(
+                            if args["extend"].as_bool().unwrap_or(false) {
+                                r.a
+                            } else {
+                                at
+                            },
+                            at,
+                        )
+                    });
+                }
+                let target = args["to"].as_str().unwrap_or("brackets");
+                let mut candidates = Vec::new();
+                if matches!(target, "scope" | "smart")
+                    && let Some(l) = language.as_ref()
+                {
+                    candidates.extend(crate::language::command_scope_regions(l, r.begin(), ""));
+                }
+                if target == "scope" && language.is_none() {
+                    candidates.push(0..self.text.len_bytes());
+                }
+                for pair in pairs.iter().filter(|p| {
+                    if target == "scope" {
+                        false
+                    } else if target == "tag" {
+                        p.kind == 't'
+                    } else {
+                        p.kind != '<' && (target == "smart" || p.kind != 't')
+                    }
+                }) {
+                    candidates.push(pair.open.end..pair.close.start);
+                    candidates.push(pair.open.start..pair.close.end);
+                }
+                candidates
+                    .into_iter()
+                    .filter(|c| {
+                        c.start <= r.begin()
+                            && r.end() <= c.end
+                            && (c.start < r.begin() || r.end() < c.end)
+                    })
+                    .min_by_key(|c| c.len())
+                    .map_or(r, |c| {
+                        if r.a <= r.b {
+                            Region::new(c.start, c.end)
+                        } else {
+                            Region::new(c.end, c.start)
+                        }
+                    })
+            })
+            .collect();
+        let after = selection_primary(regions, old.primary_index());
+        drop(language);
+        self.buffer.set_selection(self.id, after);
+    }
     fn toggle_comment(&mut self, block: bool) -> Result<(), String> {
         let language = self.language.borrow();
         let l = language
@@ -577,13 +724,80 @@ impl Editor {
                     }
                 }
             }
+            let mut comments =
+                crate::language::command_scope_regions(l, region.begin(), "comment.block");
+            if comments.is_empty() && l.scope_snapshot_at(region.begin()).is_none() {
+                let row = self.text.byte_to_line(region.begin());
+                let line = self.text.line(row).to_string();
+                let base = self.text.line_to_byte(row);
+                let column = region.begin() - base;
+                for (start, end) in delimiters.iter().filter(|(_, end)| !end.is_empty()) {
+                    if let Some(a) = line[..column].rfind(start.trim_end()) {
+                        let body = a + start.trim_end().len();
+                        if !line[body..column.max(body)].contains(end.trim_start())
+                            && let Some(b) = line[body..].find(end.trim_start())
+                        {
+                            comments.push(base + a..base + body + b + end.trim_start().len());
+                        }
+                    }
+                }
+            }
+            if let Some(comment) = comments.into_iter().last()
+                && region.end() <= comment.end
+                && let Some((start, end)) = delimiters.iter().find(|(_, end)| !end.is_empty())
+            {
+                let source = self.text.slice(comment.clone()).to_string();
+                let mut start_len = if source.starts_with(start) {
+                    start.len()
+                } else {
+                    start.trim_end().len()
+                };
+                let mut end_len = if source.ends_with(end) {
+                    end.len()
+                } else {
+                    end.trim_start().len()
+                };
+                // Block-only line comments add one padding space on each side. Recognize
+                // that symmetric, single-line form without trimming a multiline body.
+                if !delimiters.iter().any(|(_, end)| end.is_empty()) && !source.contains('\n') {
+                    if start_len == start.trim_end().len()
+                        && source.as_bytes().get(start_len) == Some(&b' ')
+                    {
+                        start_len += 1;
+                    }
+                    if source.len() > start_len + end_len
+                        && end_len == end.trim_start().len()
+                        && source
+                            .as_bytes()
+                            .get(source.len().saturating_sub(end_len + 1))
+                            == Some(&b' ')
+                    {
+                        end_len += 1;
+                    }
+                }
+                if source.starts_with(start.trim_end()) && source.ends_with(end.trim_start()) {
+                    edits.insert((comment.start, comment.start + start_len), String::new());
+                    edits.insert((comment.end - end_len, comment.end), String::new());
+                    continue;
+                }
+            }
             if let Some((start, end)) = delimiters
                 .iter()
                 .find(|(_, end)| !end.is_empty())
                 .filter(|_| block || !delimiters.iter().any(|(_, end)| end.is_empty()))
             {
-                let a = region.begin();
-                let b = region.end();
+                let whole_line = region.empty() && !block;
+                let row = self.text.byte_to_line(region.b);
+                let a = if whole_line {
+                    self.text.line_to_byte(row)
+                } else {
+                    region.begin()
+                };
+                let b = if whole_line {
+                    a + self.text.line(row).len_bytes()
+                } else {
+                    region.end()
+                };
                 let selected = self.text.slice(a..b).to_string();
                 if selected.starts_with(start)
                     && selected.ends_with(end)
@@ -601,8 +815,24 @@ impl Editor {
                     edits.insert((a - start.len(), a), String::new());
                     edits.insert((b, b + end.len()), String::new());
                 } else {
-                    edits.insert((a, b), format!("{start}{selected}{end}"));
-                    enclosed.push((region, start.len()));
+                    let (left, right) = if whole_line {
+                        (
+                            format!("{} ", start.trim_end()),
+                            format!(" {}", end.trim_start()),
+                        )
+                    } else {
+                        (start.clone(), end.clone())
+                    };
+                    // Insert separate delimiters to preserve carets and selection interiors.
+                    if a == b {
+                        edits.insert((a, b), format!("{left}{right}"));
+                    } else {
+                        edits.insert((a, a), left.clone());
+                        edits.insert((b, b), right);
+                    }
+                    if !whole_line || a == b {
+                        enclosed.push((region, left.len()));
+                    }
                 }
             } else if let Some((start, _)) = delimiters.iter().find(|(_, end)| end.is_empty()) {
                 let first = self.text.byte_to_line(region.begin());
@@ -919,3 +1149,7 @@ pub fn reindent_block(text: &str, dest: &str, inline: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+#[path = "editing_round16_tests.rs"]
+mod round16_tests;
