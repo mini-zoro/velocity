@@ -439,6 +439,24 @@ fn boolean(args: &Value, key: &str) -> bool {
 fn string<'a>(args: &'a Value, key: &str, default: &'a str) -> &'a str {
     args[key].as_str().unwrap_or(default)
 }
+/// The editor settings buffer operations use.
+pub fn buffer_settings(settings: &EditorSettings) -> vel_buffer::Settings {
+    vel_buffer::Settings {
+        tab_size: settings.tab_size,
+        translate_tabs_to_spaces: settings.translate_tabs_to_spaces,
+        word_separators: settings.word_separators.clone(),
+        use_tab_stops: settings.use_tab_stops,
+    }
+}
+/// Mirrors [`buffer_settings`] into the view when they changed; returns whether they did.
+pub fn sync_buffer_settings(b: &mut Buffer, id: ViewId, settings: &EditorSettings) -> bool {
+    let wanted = buffer_settings(settings);
+    let changed = b.view(id).settings != wanted;
+    if changed {
+        b.set_settings(id, wanted);
+    }
+    changed
+}
 fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), String> {
     if host.intercept_text_command(name, args)? {
         return Ok(());
@@ -447,6 +465,10 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
         let (buffer, id) = host.buffer();
         let mut selection = buffer.view(id).sel().clone();
         let whole_lines = selection.iter().all(Region::empty);
+        if whole_lines && !host.settings().copy_with_empty_selection {
+            return Ok(());
+        }
+        let (buffer, id) = host.buffer();
         if whole_lines {
             let regions = selection.iter().map(|r| {
                 let row = buffer.text().byte_to_line(r.b);
@@ -485,20 +507,7 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
     };
     let settings = host.settings();
     let (b, id) = host.buffer();
-    let current = &b.view(id).settings;
-    if current.tab_size != settings.tab_size
-        || current.translate_tabs_to_spaces != settings.translate_tabs_to_spaces
-        || current.word_separators != settings.word_separators
-    {
-        b.set_settings(
-            id,
-            vel_buffer::Settings {
-                tab_size: settings.tab_size,
-                translate_tabs_to_spaces: settings.translate_tabs_to_spaces,
-                word_separators: settings.word_separators.clone(),
-            },
-        );
-    }
+    sync_buffer_settings(b, id, &settings);
     let layout = MonospaceLayout {
         tab_size: settings.tab_size,
         page_lines: args["page_lines"].as_u64().unwrap_or(30) as usize,
@@ -631,15 +640,11 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
                 .sel()
                 .iter()
                 .map(|r| {
-                    if settings.translate_tabs_to_spaces {
-                        let row = b.text().byte_to_line(r.begin());
-                        let prefix = b
-                            .text()
-                            .slice(b.text().line_to_byte(row)..r.begin())
-                            .to_string();
+                    if settings.translate_tabs_to_spaces && !settings.use_tab_stops {
+                        " ".repeat(settings.tab_size)
+                    } else if settings.translate_tabs_to_spaces {
                         use vel_buffer::VerticalLayout;
                         let col = layout.x_of(b.text(), r.begin()) as usize;
-                        let _ = prefix;
                         " ".repeat(settings.tab_size - col % settings.tab_size)
                     } else {
                         "\t".into()

@@ -11,6 +11,20 @@
   "drag_text": true,
   // Pressing Enter on a line that only holds indentation leaves it empty.
   "trim_automatic_white_space": true,
+  // Enter keeps the indentation of the current line.
+  "auto_indent": true,
+  // With auto_indent, the syntax's indentation rules add or remove a level.
+  "smart_indent": true,
+  // Tab completes the word before the caret; false limits Tab to exact snippet triggers.
+  "tab_completion": true,
+  // shift+tab unindents everywhere instead of only in leading white space or across lines.
+  "shift_tab_unindent": false,
+  // With spaces, Tab and Backspace go to the next / previous tab stop.
+  "use_tab_stops": true,
+  // Copy and cut with no selection take the whole caret line.
+  "copy_with_empty_selection": true,
+  // Characters that end a word for double click, word motions and super+d.
+  "word_separators": "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?",
   "rulers": [],
   "ensure_newline_at_eof_on_save": false,
   "trim_trailing_white_space_on_save": false,

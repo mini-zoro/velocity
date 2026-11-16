@@ -314,7 +314,10 @@ impl Editor {
                         self.text.prev_grapheme_boundary(r.b)
                     };
                     // Preserve vel-buffer's tab-stop deletion while forwarding exact edits.
-                    if name == "left_delete" && self.preferences.translate_tabs_to_spaces {
+                    if name == "left_delete"
+                        && self.preferences.translate_tabs_to_spaces
+                        && self.preferences.use_tab_stops
+                    {
                         let begin = self.text.line_to_byte(self.text.byte_to_line(r.b));
                         let prefix = self.text.slice(begin..r.b).to_string();
                         if !prefix.is_empty() && prefix.chars().all(|c| c == ' ' || c == '\t') {
@@ -411,23 +414,23 @@ impl Editor {
         let mut delta = 0isize;
         let mut regions = Vec::new();
         let mut owned = Vec::new();
-        for r in selection.iter() {
-            let (text, relative) = self.newline(r);
+        for (i, r) in selection.iter().enumerate() {
+            let (text, relative, blank) = self.newline_with_blank(r);
             let mut range = r.to_range();
-            let row = self.text.byte_to_line(r.b);
-            let alone = selection
-                .iter()
-                .filter(|o| {
-                    self.text.byte_to_line(o.begin()) == row
-                        || self.text.byte_to_line(o.end()) == row
-                })
-                .count()
-                == 1;
-            if r.empty() && alone {
-                let start = self.text.line_to_byte(row);
-                let line = self.text.line(row).to_string();
-                if !line.is_empty() && line.trim_matches([' ', '\t']).is_empty() {
-                    range = start..start + line.len();
+            // Selections are sorted and disjoint, so only the neighbours can share the row.
+            if let Some(line) = blank.filter(|_| r.empty()) {
+                let row = self.text.byte_to_line(r.b);
+                let on_row = |o: Option<Region>, end: bool| {
+                    o.is_some_and(|o| {
+                        self.text
+                            .byte_to_line(if end { o.end() } else { o.begin() })
+                            == row
+                    })
+                };
+                if !on_row(i.checked_sub(1).and_then(|p| selection.get(p)), true)
+                    && !on_row(selection.get(i + 1), false)
+                {
+                    range = line;
                 }
             }
             let begin = (range.start as isize + delta) as usize;
@@ -439,12 +442,23 @@ impl Editor {
         self.apply_edits(owned, Some(after), EditKind::InsertChars);
     }
     fn newline(&self, r: Region) -> (String, Range<usize>) {
+        let (text, caret, _) = self.newline_with_blank(r);
+        (text, caret)
+    }
+    /// [`Self::newline`] plus the byte range of the line holding `r.begin()` when that line is
+    /// non-empty and holds only spaces and tabs.
+    fn newline_with_blank(&self, r: Region) -> (String, Range<usize>, Option<Range<usize>>) {
         let row = self.text.byte_to_line(r.begin());
         if self.text.line_len_bytes(row) >= crate::large::LONG_LINE {
-            return ("\n".into(), 1..1);
+            return ("\n".into(), 1..1, None);
+        }
+        if !self.settings.bool("auto_indent", true) {
+            return ("\n".into(), 1..1, None);
         }
         let start = self.text.line_to_byte(row);
         let line = self.text.line(row).to_string();
+        let blank = (!line.is_empty() && line.bytes().all(|b| matches!(b, b' ' | b'\t')))
+            .then(|| start..start + line.len());
         let prefix = &line[..r.begin() - start];
         let leading: String = prefix
             .chars()
@@ -463,7 +477,8 @@ impl Editor {
         let mut decrease = false;
         let mut temporary_previous = false;
         let mut excluded = false;
-        if let Some(l) = language.as_ref() {
+        let smart = self.settings.bool("smart_indent", true);
+        if let Some(l) = language.as_ref().filter(|_| smart) {
             let scopes = l.scopes(&self.text, r.begin().saturating_sub(1));
             let m = l.assets.metadata.metadata_for(&scopes);
             excluded = l
@@ -534,7 +549,7 @@ impl Editor {
                 indent.saturating_sub(self.preferences.tab_size),
             ));
         }
-        (text, caret..caret)
+        (text, caret..caret, blank)
     }
     fn toggle_comment(&mut self, block: bool) -> Result<(), String> {
         let language = self.language.borrow();

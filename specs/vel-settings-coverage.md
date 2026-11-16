@@ -20,37 +20,27 @@ accepted-no-op with the reason).
 
 ## Lane A: editing, input and find (`editing.rs`, `editor.rs`, `vel-buffer`, `vel-commands`, `panels.rs`, keymap)
 
-1. `auto_indent` (true): Enter copies the indentation of the current line; false inserts a bare
-   newline. `smart_indent` (true): the `increaseIndentPattern` / `decreaseIndentPattern` /
-   `bracketIndentNextLinePattern` rules (`editing.rs` ~481) apply only when true.
-   `indent_to_bracket` (false): when true, a newline inside an open `(`/`[` aligns with the column
-   after the bracket.
-2. `tab_completion` (true): Tab inserts the best completion only when true (keymap context
-   `setting.tab_completion` on the `insert_best_completion` bindings).
-   `shift_tab_unindent` (false): when true, shift+tab unindents even with an empty or single-line
-   selection (keymap context).
-3. `use_tab_stops` (true): with `translate_tabs_to_spaces`, Tab inserts spaces up to the next tab
-   stop and Backspace in leading white space deletes back to the previous tab stop; false inserts /
-   deletes `tab_size` spaces or one character.
-4. `copy_with_empty_selection` (true): copy/cut with only empty selections copies / cuts whole
-   lines (current behaviour); false copies nothing and leaves the clipboard untouched.
-5. `find_selected_text` (true): opening Find/Replace/Incremental seeds the query from a non-empty
+1. `indent_to_bracket` (false): when true, a newline inside an open `(`/`[` aligns with the column
+   after the bracket. (Already done by the reviewer, do not redo: `auto_indent`, `smart_indent`,
+   `tab_completion` (+ `exact` argument of `insert_best_completion`), `shift_tab_unindent` with
+   Sublime's shift+tab bindings, `use_tab_stops`, `copy_with_empty_selection`, shift+enter.)
+2. `find_selected_text` (true): opening Find/Replace/Incremental seeds the query from a non-empty
    single-line selection (or the word under the caret, per Sublime); false keeps the last query.
    `auto_find_in_selection` (false): opening Find with a multi-line selection turns "In selection"
    on. (If lane A round 15 already did these, only add tests.)
-6. `close_find_after_find_all` / `close_find_after_replace_all`: close the panel after Find All /
+3. `close_find_after_find_all` / `close_find_after_replace_all`: close the panel after Find All /
    Replace All when true (check defaults in the docs).
-7. `move_to_limit_on_up_down` (false): Up on the first line moves to the start of the buffer, Down
+4. `move_to_limit_on_up_down` (false): Up on the first line moves to the start of the buffer, Down
    on the last line to the end, when true.
-8. `auto_close_tags` (true): typing `</` in markup scopes (`text.html`, `text.xml`) inserts the
+5. `auto_close_tags` (true): typing `</` in markup scopes (`text.html`, `text.xml`) inserts the
    name of the innermost open tag and `>`.
-9. `auto_complete_trailing_symbols` (false) / `auto_complete_trailing_spaces` (true): when
+6. `auto_complete_trailing_symbols` (false) / `auto_complete_trailing_spaces` (true): when
    committing a completion, keep or drop trailing punctuation / a space from the completion text as
    the docs describe.
-10. `save_on_focus_lost` (false): when the window or a tab loses focus, save dirty file-backed tabs
-    (not untitled, not read-only), like Save without a dialog.
-11. `scroll_speed` (1.0): animation speed for keyboard-driven scrolling (page up/down,
-    `show_at_center`); 0 disables the animation. Wheel/trackpad scrolling is unaffected.
+7. `save_on_focus_lost` (false): when the window or a tab loses focus, save dirty file-backed tabs
+   (not untitled, not read-only), like Save without a dialog.
+8. `scroll_speed` (1.0): animation speed for keyboard-driven scrolling (page up/down,
+   `show_at_center`); 0 disables the animation. Wheel/trackpad scrolling is unaffected.
 
 ## Lane B: display, tabs, side bar and window chrome (`view.rs`, `vel-render`, `vel-ui`, `app.rs` drawing, `workbench.rs`)
 

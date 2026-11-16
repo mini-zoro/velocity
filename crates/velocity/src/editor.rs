@@ -212,19 +212,7 @@ impl Editor {
     }
     pub fn adopt_document(&mut self) {
         self.language_buffer = Some(self.buffer.id());
-        let current = &self.buffer.view(self.id).settings;
-        if current.tab_size != self.preferences.tab_size
-            || current.translate_tabs_to_spaces != self.preferences.translate_tabs_to_spaces
-            || current.word_separators != self.preferences.word_separators
-        {
-            self.buffer.set_settings(
-                self.id,
-                vel_buffer::Settings {
-                    tab_size: self.preferences.tab_size,
-                    translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
-                    word_separators: self.preferences.word_separators.clone(),
-                },
-            );
+        if vel_commands::sync_buffer_settings(&mut self.buffer, self.id, &self.preferences) {
             self.buffer.break_undo_group();
         }
     }
@@ -323,20 +311,7 @@ impl Editor {
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
             self.configure_vintage();
-            let current = &self.buffer.view(self.id).settings;
-            if current.tab_size != self.preferences.tab_size
-                || current.translate_tabs_to_spaces != self.preferences.translate_tabs_to_spaces
-                || current.word_separators != self.preferences.word_separators
-            {
-                self.buffer.set_settings(
-                    self.id,
-                    vel_buffer::Settings {
-                        tab_size: self.preferences.tab_size,
-                        translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
-                        word_separators: self.preferences.word_separators.clone(),
-                    },
-                );
-            }
+            vel_commands::sync_buffer_settings(&mut self.buffer, self.id, &self.preferences);
         }
         if !self.shared_shadow && self.layout_version != self.buffer.change_id() {
             let edits = self.layout_edits.borrow();
@@ -1454,6 +1429,65 @@ mod keymap_tests {
         assert_eq!(editor.text.to_string(), "he");
         editor.run("undo", &json!({})).unwrap();
         assert_eq!(editor.text.to_string(), "hello");
+    }
+    #[test]
+    fn indentation_tab_and_copy_settings_switch_their_behaviour() {
+        let set = |editor: &mut Editor, key: &str, value: serde_json::Value| {
+            editor.settings.set(Layer::View, key, value);
+            editor.sync();
+        };
+        // auto_indent: Enter keeps the indentation only when on.
+        let mut editor = Editor::new(Text::from("\tfoo"));
+        select(&mut editor, &[(4, 4)]);
+        set(&mut editor, "auto_indent", json!(false));
+        press(&mut editor, "enter");
+        assert_eq!(editor.text.to_string(), "\tfoo\n");
+        // use_tab_stops with spaces: Tab goes to the next stop, Backspace to the previous one;
+        // without, Tab inserts tab_size spaces and Backspace deletes one.
+        let mut editor = Editor::new(Text::from("ab"));
+        set(&mut editor, "translate_tabs_to_spaces", json!(true));
+        select(&mut editor, &[(0, 0)]);
+        editor.run("insert", &json!({"characters": " "})).unwrap();
+        press(&mut editor, "tab");
+        assert_eq!(editor.text.to_string(), "    ab");
+        press(&mut editor, "backspace");
+        assert_eq!(editor.text.to_string(), "ab");
+        set(&mut editor, "use_tab_stops", json!(false));
+        editor.run("insert", &json!({"characters": " "})).unwrap();
+        press(&mut editor, "tab");
+        assert_eq!(editor.text.to_string(), "     ab");
+        press(&mut editor, "backspace");
+        assert_eq!(editor.text.to_string(), "    ab");
+        // shift+tab unindents in leading white space, inserts a tab after text, and unindents
+        // everywhere with shift_tab_unindent.
+        let mut editor = Editor::new(Text::from("\tfoo bar"));
+        select(&mut editor, &[(1, 1)]);
+        press(&mut editor, "shift+tab");
+        assert_eq!(editor.text.to_string(), "foo bar");
+        select(&mut editor, &[(3, 3)]);
+        press(&mut editor, "shift+tab");
+        assert_eq!(editor.text.to_string(), "foo\t bar");
+        set(&mut editor, "shift_tab_unindent", json!(true));
+        editor.run("undo", &json!({})).unwrap();
+        press(&mut editor, "tab");
+        assert_eq!(editor.text.to_string(), "foo\t bar");
+        select(&mut editor, &[(0, 0)]);
+        press(&mut editor, "tab");
+        select(&mut editor, &[(5, 5)]);
+        press(&mut editor, "shift+tab");
+        assert_eq!(editor.text.to_string(), "foo\t bar");
+        // copy_with_empty_selection: off, an empty selection copies nothing.
+        let mut editor = Editor::new(Text::from("one\ntwo\n"));
+        editor.clipboard = "kept".into();
+        set(&mut editor, "copy_with_empty_selection", json!(false));
+        select(&mut editor, &[(1, 1)]);
+        editor.run("cut", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "one\ntwo\n");
+        assert_eq!(editor.clipboard, "kept");
+        set(&mut editor, "copy_with_empty_selection", json!(true));
+        editor.run("cut", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "two\n");
+        assert_eq!(editor.clipboard, "one\n");
     }
     #[test]
     fn enter_on_an_indentation_only_line_leaves_it_empty() {

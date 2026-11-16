@@ -57,7 +57,8 @@ impl Default for HistoryLimits {
     }
 }
 /// Text semantics passed explicitly to operations; no global configuration dependency.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Characters classified as punctuation.
     pub word_separators: String,
@@ -65,6 +66,9 @@ pub struct Settings {
     pub tab_size: usize,
     /// Indent with spaces and erase leading spaces to a previous tab stop.
     pub translate_tabs_to_spaces: bool,
+    /// With spaces, Backspace in leading white space erases back to the previous tab stop
+    /// (`use_tab_stops`); otherwise one character.
+    pub use_tab_stops: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -72,6 +76,7 @@ impl Default for Settings {
             word_separators: "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?".into(),
             tab_size: 4,
             translate_tabs_to_spaces: true,
+            use_tab_stops: true,
         }
     }
 }

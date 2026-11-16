@@ -126,20 +126,7 @@ fn sync_settings(
     id: vel_buffer::ViewId,
     settings: &vel_config::settings::EditorSettings,
 ) {
-    let current = &b.view(id).settings;
-    if current.tab_size != settings.tab_size
-        || current.translate_tabs_to_spaces != settings.translate_tabs_to_spaces
-        || current.word_separators != settings.word_separators
-    {
-        b.set_settings(
-            id,
-            vel_buffer::Settings {
-                tab_size: settings.tab_size,
-                translate_tabs_to_spaces: settings.translate_tabs_to_spaces,
-                word_separators: settings.word_separators.clone(),
-            },
-        );
-    }
+    crate::sync_buffer_settings(b, id, settings);
 }
 fn convert(host: &mut dyn Host, args: &Value) -> Result<(), String> {
     // ST-BEHAVIOR: unverified [T5]: public changelog names the feature, not its

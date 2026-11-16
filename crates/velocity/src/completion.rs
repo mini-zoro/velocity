@@ -871,8 +871,13 @@ impl Editor {
                                     }))
                         })
                         .map(|s| s.content.clone());
+                    // `exact` (and `tab_completion: false`) limits Tab to exact snippet triggers.
+                    let exact = args["exact"].as_bool().unwrap_or(false)
+                        || !self.settings.bool("tab_completion", true);
                     if let Some(content) = content {
                         self.expand_snippet(&content, &ranges)?;
+                    } else if exact {
+                        return Ok(false);
                     } else if self.language.borrow().is_some() {
                         self.completion.request(Invocation::Tab, true);
                     } else {

@@ -265,7 +265,7 @@ fn delete(buffer: &mut Buffer, id: ViewId, forward: bool, word: bool) -> ChangeI
         } else {
             text.prev_grapheme_boundary(r.b)
         };
-        if !forward && !word && s.translate_tabs_to_spaces {
+        if !forward && !word && s.translate_tabs_to_spaces && s.use_tab_stops {
             let row = text.byte_to_line(r.b);
             let start = text.line_to_byte(row);
             let prefix = text.slice(start..r.b);

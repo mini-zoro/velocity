@@ -232,6 +232,10 @@ pub struct EditorSettings {
     pub auto_match_enabled: bool,
     /// Replace existing files using temp + rename when that keeps their identity.
     pub atomic_save: bool,
+    /// Tab / Backspace with spaces move to tab stops instead of a fixed `tab_size` / one space.
+    pub use_tab_stops: bool,
+    /// Copy / cut with only empty selections take the caret lines.
+    pub copy_with_empty_selection: bool,
 }
 impl Default for EditorSettings {
     fn default() -> Self {
@@ -256,6 +260,8 @@ impl Default for EditorSettings {
             highlight_line: true,
             auto_match_enabled: true,
             atomic_save: false,
+            use_tab_stops: true,
+            copy_with_empty_selection: true,
         }
     }
 }
