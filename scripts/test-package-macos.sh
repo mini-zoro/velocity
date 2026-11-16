@@ -13,7 +13,15 @@ plutil -lint "$VELOCITY_APP/Contents/Info.plist"
 "$VELOCITY_PYTHON" "$VELOCITY_PACKAGING/bundle.py" validate --app "$VELOCITY_APP"
 codesign --verify --deep --strict "$VELOCITY_APP"
 if [ "${VELOCITY_SIGNING_IDENTITY:--}" = - ]; then
-    codesign --display --verbose=4 "$VELOCITY_APP" 2>&1 | grep -q 'Signature=adhoc'
+    # Capture first: `codesign | grep -q` races under pipefail (grep exits early, codesign gets SIGPIPE).
+    VELOCITY_SIGNATURE=$(codesign --display --verbose=4 "$VELOCITY_APP" 2>&1)
+    case $VELOCITY_SIGNATURE in
+        *Signature=adhoc*) ;;
+        *)
+            printf '%s\n' 'error: expected an ad-hoc signature' >&2
+            exit 1
+            ;;
+    esac
 fi
 VELOCITY_TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$VELOCITY_TEST_DIR"' EXIT
