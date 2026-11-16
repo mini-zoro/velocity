@@ -58,10 +58,11 @@ def main():
             except subprocess.TimeoutExpired:
                 pass
             closed.touch()
-            assert client.wait(timeout=10) == 0
+            assert client.wait(timeout=10) == 0, client.stderr.read()
+            assert client.stdout.read() == "edited by peer 你好\n", "edited stdin was not written to stdout"
             assert fixture.wait(timeout=10) == 0, fixture.stderr.read()
             assert not profile.exists(), "forwarding created an unnecessary profile"
-            print("CLI forwarding passed: paths, Unicode locations, flags, symlink, stdin, close-driven --wait")
+            print("CLI forwarding passed: paths, Unicode locations, flags, symlink, stdin, close-driven --wait, edited stdin to stdout")
         finally:
             if client and client.poll() is None:
                 client.kill()

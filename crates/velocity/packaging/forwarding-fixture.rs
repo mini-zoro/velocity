@@ -55,6 +55,17 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 stream.write_all(&[2]).unwrap();
+                // `velocity - >out`: a stdin request gets the edited text back, length-delimited.
+                if bytes
+                    .windows(b"\"stdin\":\"".len())
+                    .any(|w| w == b"\"stdin\":\"")
+                {
+                    let edited = "edited by peer 你好\n".as_bytes();
+                    stream
+                        .write_all(&(edited.len() as u64).to_le_bytes())
+                        .unwrap();
+                    stream.write_all(edited).unwrap();
+                }
             }
         }
     });
