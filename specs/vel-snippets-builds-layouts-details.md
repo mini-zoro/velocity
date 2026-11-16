@@ -1,7 +1,7 @@
 # Spec: snippets, completions, build systems, layouts and navigation details
 
-Status: P4. Round 17 together with `vel-settings-coverage.md` (lane A: sections 1-2, lane B: section 3); round 18
-(lane B: section 4, lane A: section 5).
+Status: P4. Round 18 together with `vel-settings-coverage.md` (lane A: sections 1-2, lane B: section 3); round 19
+(lane B: section 4, lane A: section 5). Round 17 is `vel-render-scheme-syntax-details.md`.
 
 Background: a reviewer detail audit (2026-11-16) compared these areas with Sublime Text 4. Each item was confirmed
 against the code (line numbers approximate) and, where marked, with a throwaway probe program. Sources:
@@ -10,7 +10,7 @@ https://www.sublimetext.com/docs/themes.html, https://docs.sublimetext.io/guide/
 Clean-room: implement the described behaviour with our own code, resources and wording; do not download, read or
 copy Sublime's Default package.
 
-## 1. Snippets (lane A, round 17; `vel-snippet`, `crates/velocity/src/completion.rs`)
+## 1. Snippets (lane A, round 18; `vel-snippet`, `crates/velocity/src/completion.rs`)
 
 1. **Environment variables:** `TM_LINE_INDEX` is the zero-based *column* of the caret (today the line number,
    `vel-snippet/src/lib.rs` ~274); add `TM_FULLNAME` (the user's full name from the system) and `TM_SCOPE` (scope
@@ -21,7 +21,7 @@ copy Sublime's Default package.
    longest matching trigger; with several snippets for the same trigger, offer a choice (quick panel) like Sublime.
 3. **Snippet entries in the command palette** are filtered by the snippet scope at the caret.
 
-## 2. Completions (lane A, round 17; `vel-complete`, `completion.rs`, Preferences)
+## 2. Completions (lane A, round 18; `vel-complete`, `completion.rs`, Preferences)
 
 1. **Tab without a visible popup:** with several candidates open the popup (mini list) instead of committing the
    first; commit directly only when exactly one candidate matches (`completion.rs` ~544, ~882).
@@ -38,7 +38,7 @@ copy Sublime's Default package.
    theme's match color, the kind name in the details footer; the namespace kind letter is `a` (today `n`,
    `vel-complete/src/lib.rs` ~608, ~724).
 
-## 3. Build systems (lane B, round 17; `vel-build`, `crates/velocity/src/build.rs`, app build hooks, menus/keymap)
+## 3. Build systems (lane B, round 18; `vel-build`, `crates/velocity/src/build.rs`, app build hooks, menus/keymap)
 
 1. **Process environment:** run `shell_cmd` through the user's login shell (`/usr/bin/env bash -l -c` on macOS) so
    the user's PATH applies (today `/bin/bash -c`, `vel-build/src/process.rs` ~66). `path` / `env` values expand
@@ -63,7 +63,7 @@ copy Sublime's Default package.
    by us), Tools › Build Results › Show / Next / Previous. `interactive` builds (stdin) may stay unsupported: report
    it in the panel instead of hanging.
 
-## 4. Layouts, groups and tabs (lane B, round 18; `workbench.rs`, `vel-ui/src/workbench.rs`, app tab hooks, menus)
+## 4. Layouts, groups and tabs (lane B, round 19; `workbench.rs`, `vel-ui/src/workbench.rs`, app tab hooks, menus)
 
 1. **Bindings:** `super+alt+1..5` (single, 2/3/4 columns, grid), `super+alt+shift+2/3` (2/3 rows); `focus_group` /
    `move_to_group` on `ctrl+1..9` / `ctrl+shift+1..9`; `super+k` chords for `new_pane`, `new_pane {move: false}`,
@@ -81,7 +81,7 @@ copy Sublime's Default package.
    tab multiselect (super/shift click on tabs); clones share the buffer with separate selection and scroll (today the
    clone is appended at the end and selected alone, `workbench.rs` ~363). Add the `group_has_multiselect` context.
 
-## 5. Navigation (lane A, round 18; `panels.rs`, editor/workspace jump history, menus/keymap)
+## 5. Navigation (lane A, round 19; `panels.rs`, editor/workspace jump history, menus/keymap)
 
 1. **Jump history** records selection changes (consecutive changes from the same command merge) and view
    activations, not only Goto Definition / symbol accepts (`panels.rs` ~888, ~1705, ~2146). After Goto Line, a find,
