@@ -3035,6 +3035,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-export"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "unicode-segmentation",
+ "unicode-width",
+ "vel-buffer",
+ "vel-color-scheme",
+ "vel-highlight",
+ "vel-text",
+]
+
+[[package]]
 name = "vel-fileio"
 version = "0.0.0"
 dependencies = [

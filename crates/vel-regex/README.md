@@ -21,7 +21,7 @@ candidate machine: forward/reverse hybrid DFAs, or Aho-Corasick for complete lit
 sets. Identical ordered lists and empty-match policies share a set. One bounded pool
 owns all machines and transition caches; LRU eviction releases them even when a parser
 checkpoint still references the matcher. Default total budget: 32 MiB for the entire
-backend (all syntaxes), with 128 KiB per-direction transition caches. `stats()` reports
+backend (all syntaxes), with up to 1 MiB per-direction transition caches. `stats()` reports
 actual API memory, evictions and first-use compile durations. Source/HIR, Onig,
 parser/checkpoint memory and transient compiler allocations are separate.
 

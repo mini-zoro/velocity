@@ -1074,3 +1074,527 @@ pub fn transpose(buffer: &mut Buffer, id: ViewId) -> ChangeId {
         .collect();
     commit_owned(buffer, id, edits)
 }
+
+/// Permutations of lines or selected strings; shuffle accepts a reproducible seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permutation {
+    /// Reverse the input order.
+    Reverse,
+    /// Keep the first occurrence of each distinct string.
+    Unique,
+    /// Fisher–Yates shuffle, driven by a deterministic 64-bit PRNG.
+    Shuffle(u64),
+}
+fn permute(values: &mut Vec<String>, operation: Permutation) {
+    match operation {
+        Permutation::Reverse => values.reverse(),
+        Permutation::Unique => {
+            let mut seen = BTreeSet::new();
+            values.retain(|s| seen.insert(s.clone()));
+        }
+        Permutation::Shuffle(mut seed) => {
+            // SplitMix64 permits every seed, including zero. Rejection sampling
+            // avoids modulo bias for non-power-of-two selection counts.
+            for i in (1..values.len()).rev() {
+                let count = i as u64 + 1;
+                let threshold = count.wrapping_neg() % count;
+                let chosen = loop {
+                    seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+                    let mut n = seed;
+                    n = (n ^ (n >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                    n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
+                    n ^= n >> 31;
+                    if n >= threshold {
+                        break (n % count) as usize;
+                    }
+                };
+                values.swap(i, chosen);
+            }
+        }
+    }
+}
+/// Permutes each contiguous touched line block, preserving its terminal LF.
+pub fn permute_lines(buffer: &mut Buffer, id: ViewId, operation: Permutation) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T1]: unique is stable, shuffle is seeded; a
+    // selection ending at BOL excludes that row. All-carets acts on touched rows.
+    let text = buffer.text();
+    let edits = blocks(touched_lines(text, buffer.view(id).sel()))
+        .into_iter()
+        .map(|g| {
+            let mut lines = g.clone().map(|l| text.line(l).to_string()).collect();
+            permute(&mut lines, operation);
+            let mut value = lines.join("\n");
+            if g.end < text.len_lines() {
+                value.push('\n');
+            }
+            (
+                text.line_to_byte(g.start)..full_line_end(text, g.end - 1),
+                value,
+            )
+        })
+        .collect();
+    commit_owned(buffer, id, edits)
+}
+/// Reorders selected strings across their original slots, ignoring empty carets.
+pub fn permute_selection(buffer: &mut Buffer, id: ViewId, operation: Permutation) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T2]: unique empties redundant slots, retaining
+    // intervening text. Empty carets do not consume a permutation slot.
+    let regions: Vec<_> = buffer
+        .view(id)
+        .sel()
+        .iter()
+        .filter(|r| !r.empty())
+        .collect();
+    let mut values = regions
+        .iter()
+        .map(|r| buffer.text().slice(r.to_range()).to_string())
+        .collect();
+    permute(&mut values, operation);
+    values.resize(regions.len(), String::new());
+    commit_owned(
+        buffer,
+        id,
+        regions
+            .into_iter()
+            .zip(values)
+            .map(|(r, s)| (r.to_range(), s))
+            .collect(),
+    )
+}
+/// Sorts selected strings across slots, optionally folding case for comparisons.
+pub fn sort_selection(
+    buffer: &mut Buffer,
+    id: ViewId,
+    case_sensitive: bool,
+    reverse: bool,
+) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T2]: stable Unicode lowercase keys when folded;
+    // reverse reverses the resulting slot order, including equal keys.
+    let regions: Vec<_> = buffer
+        .view(id)
+        .sel()
+        .iter()
+        .filter(|r| !r.empty())
+        .collect();
+    let mut values: Vec<_> = regions
+        .iter()
+        .map(|r| buffer.text().slice(r.to_range()).to_string())
+        .collect();
+    if case_sensitive {
+        values.sort();
+    } else {
+        values.sort_by_cached_key(|s| s.to_lowercase());
+    }
+    if reverse {
+        values.reverse();
+    }
+    commit_owned(
+        buffer,
+        id,
+        regions
+            .into_iter()
+            .zip(values)
+            .map(|(r, s)| (r.to_range(), s))
+            .collect(),
+    )
+}
+
+fn paragraph(text: &Text, row: usize) -> Range<usize> {
+    let blank = |l| text.line(l).chars().all(char::is_whitespace);
+    if blank(row) {
+        return row..row + 1;
+    }
+    let mut start = row;
+    let mut end = row + 1;
+    while start > 0 && !blank(start - 1) {
+        start -= 1;
+    }
+    while end < text.len_lines() && !blank(end) {
+        end += 1;
+    }
+    start..end
+}
+/// Expands each selection to complete paragraphs separated by whitespace-only lines.
+pub fn expand_selection_to_paragraph(buffer: &mut Buffer, id: ViewId) {
+    // ST-BEHAVIOR: unverified [T3]: blank rows are their own paragraph; include
+    // paragraph terminal LF, retain direction and exclude an end-at-BOL row.
+    let text = buffer.text();
+    let selection = buffer.view(id).sel().map(|r| {
+        let rows = touched_lines(text, &Selection::from(r));
+        let first = paragraph(text, *rows.first().expect("one touched row"));
+        let last = paragraph(text, *rows.last().expect("one touched row"));
+        r.directed(
+            text.line_to_byte(first.start),
+            full_line_end(text, last.end - 1),
+        )
+    });
+    buffer.set_selection(id, selection);
+}
+/// Reflows touched paragraphs at a display-column limit, preserving blank lines.
+/// Long words remain intact; the first line's space/tab indentation is retained.
+pub fn wrap_lines(buffer: &mut Buffer, id: ViewId, width: usize) -> ChangeId {
+    use unicode_width::UnicodeWidthStr;
+    // ST-BEHAVIOR: unverified [T4]: collapse word separators to one ASCII space,
+    // preserve first-line indentation and terminal LF; no syntax/comment heuristics.
+    let text = buffer.text();
+    let settings = &buffer.view(id).settings;
+    let mut paragraphs = BTreeSet::new();
+    for row in touched_lines(text, buffer.view(id).sel()) {
+        let p = paragraph(text, row);
+        paragraphs.insert((p.start, p.end));
+    }
+    let edits = paragraphs
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let first = text.line(start).to_string();
+            if first.chars().all(char::is_whitespace) {
+                return None;
+            }
+            let prefix: String = first
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .collect();
+            let indent = prefix.chars().fold(0, |col, c| {
+                if c == '\t' {
+                    col + settings.tab_size - col % settings.tab_size
+                } else {
+                    col + 1
+                }
+            });
+            let source = text
+                .slice(text.line_to_byte(start)..full_line_end(text, end - 1))
+                .to_string();
+            let mut value = prefix.clone();
+            let mut column = indent;
+            let mut has_word = false;
+            for word in source.split_whitespace() {
+                let len = UnicodeWidthStr::width(word);
+                if has_word && column + 1 + len > width.max(1) {
+                    value.push('\n');
+                    value.push_str(&prefix);
+                    column = indent;
+                    has_word = false;
+                }
+                if has_word {
+                    value.push(' ');
+                    column += 1;
+                }
+                value.push_str(word);
+                column += len;
+                has_word = true;
+            }
+            if source.ends_with('\n') {
+                value.push('\n');
+            }
+            Some((
+                text.line_to_byte(start)..full_line_end(text, end - 1),
+                value,
+            ))
+        })
+        .collect();
+    commit_owned(buffer, id, edits)
+}
+
+/// Common identifier styles; Unicode casing may change the byte length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentCase {
+    /// `snake_case`.
+    Snake,
+    /// `camelCase`.
+    Camel,
+    /// `PascalCase`.
+    Pascal,
+    /// `kebab-case`.
+    Kebab,
+    /// `UPPER_SNAKE`.
+    UpperSnake,
+}
+fn identifier_case(value: &str, style: IdentCase) -> String {
+    let chars: Vec<_> = value.chars().collect();
+    let mut words = Vec::<String>::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        // Combining marks stay with their preceding letter. Separators and
+        // acronym/lowercase transitions split words, including HTTPServer.
+        if c == '_' || c == '-' || c.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let previous = i.checked_sub(1).map(|n| chars[n]);
+        let boundary = c.is_uppercase()
+            && previous.is_some_and(|p| {
+                p.is_lowercase()
+                    || p.is_numeric()
+                    || (p.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
+            });
+        if boundary && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(c);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let mut result = String::new();
+    for (i, word) in words.iter().enumerate() {
+        match style {
+            IdentCase::Snake | IdentCase::Kebab | IdentCase::UpperSnake => {
+                if i > 0 {
+                    result.push(if style == IdentCase::Kebab { '-' } else { '_' });
+                }
+                if style == IdentCase::UpperSnake {
+                    result.push_str(&word.to_uppercase());
+                } else {
+                    result.push_str(&word.to_lowercase());
+                }
+            }
+            IdentCase::Camel if i == 0 => result.push_str(&word.to_lowercase()),
+            IdentCase::Camel | IdentCase::Pascal => {
+                let mut chars = word.chars();
+                if let Some(c) = chars.next() {
+                    result.extend(c.to_uppercase());
+                }
+                result.push_str(&chars.as_str().to_lowercase());
+            }
+        }
+    }
+    result
+}
+/// Converts selected identifier text (or the word under a caret) in one edit batch.
+pub fn convert_ident_case(buffer: &mut Buffer, id: ViewId, style: IdentCase) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T5]: acronym boundaries, separator collapse,
+    // caret word expansion and Unicode case mappings are clean-room choices.
+    let view = buffer.view(id);
+    let regions = Selection::from_regions(view.sel().iter().map(|r| {
+        if r.empty() {
+            let word = word_at(buffer.text(), r.b, &view.settings);
+            if buffer
+                .text()
+                .slice(word.to_range())
+                .chars()
+                .any(char::is_alphanumeric)
+            {
+                word
+            } else {
+                r
+            }
+        } else {
+            r
+        }
+    }));
+    let edits = regions
+        .iter()
+        .map(|r| {
+            (
+                r.to_range(),
+                identifier_case(&buffer.text().slice(r.to_range()).to_string(), style),
+            )
+        })
+        .collect();
+    commit_owned(buffer, id, edits)
+}
+
+const MARK: &str = "velocity.mark";
+const MARK_PRIMARY: &str = "velocity.mark.primary";
+const BOOKMARKS: &str = "velocity.bookmarks";
+/// Saves a view's directed selection as editing-mapped named regions.
+pub fn set_mark(buffer: &mut Buffer, id: ViewId) {
+    // ST-BEHAVIOR: unverified [T6]: marks are per-view, persisted named regions;
+    // they map through edits but are not independently text-undoable.
+    buffer.add_regions(id, MARK, buffer.view(id).sel().iter().collect(), false);
+    let primary = buffer.view(id).sel().primary().unwrap_or_default();
+    buffer.add_regions(id, MARK_PRIMARY, vec![primary], false);
+}
+/// Extends each caret to its corresponding saved mark's caret.
+pub fn select_to_mark(buffer: &mut Buffer, id: ViewId) -> bool {
+    // ST-BEHAVIOR: unverified [T6]: unequal counts use the first saved mark.
+    let Some(mark) = buffer.view(id).get_regions(MARK) else {
+        return false;
+    };
+    if mark.regions.is_empty() {
+        return false;
+    }
+    let count = buffer.view(id).sel().len();
+    let mut i = 0;
+    let selection = buffer.view(id).sel().map(|r| {
+        let region = Region::new(
+            r.b,
+            mark.regions[if count == mark.regions.len() { i } else { 0 }].b,
+        );
+        i += 1;
+        region
+    });
+    buffer.set_selection(id, selection);
+    true
+}
+/// Exchanges the saved mark regions with the current selection.
+pub fn swap_with_mark(buffer: &mut Buffer, id: ViewId) -> bool {
+    // ST-BEHAVIOR: unverified [T6]: the complete directed regions are exchanged.
+    let Some(mark) = buffer.view(id).get_regions(MARK) else {
+        return false;
+    };
+    if mark.regions.is_empty() {
+        return false;
+    }
+    let mut selection = Selection::from_regions(mark.regions.clone());
+    if let Some(primary) = buffer
+        .view(id)
+        .get_regions(MARK_PRIMARY)
+        .and_then(|set| set.regions.first())
+    {
+        selection = selection.with_primary_region(*primary);
+    }
+    set_mark(buffer, id);
+    buffer.set_selection(id, selection);
+    true
+}
+/// Removes all bookmarks for this view.
+pub fn clear_bookmarks(buffer: &mut Buffer, id: ViewId) {
+    buffer.erase_regions(id, BOOKMARKS);
+}
+/// Toggles every touched line once. Bookmarks follow edits via named-region mapping.
+pub fn toggle_bookmark(buffer: &mut Buffer, id: ViewId) {
+    // ST-BEHAVIOR: unverified [T7]: bookmarks are one mapped BOL caret per row,
+    // toggled independently; navigation wraps and uses current mapped rows.
+    let text = buffer.text();
+    let mut rows: BTreeSet<_> = buffer
+        .view(id)
+        .get_regions(BOOKMARKS)
+        .into_iter()
+        .flat_map(|set| &set.regions)
+        .map(|r| text.byte_to_line(r.b))
+        .collect();
+    for row in touched_lines(text, buffer.view(id).sel()) {
+        if !rows.remove(&row) {
+            rows.insert(row);
+        }
+    }
+    let regions = rows
+        .into_iter()
+        .map(|row| Region::caret(text.line_to_byte(row)))
+        .collect();
+    buffer.add_regions(id, BOOKMARKS, regions, false);
+}
+fn navigate_bookmark(buffer: &mut Buffer, id: ViewId, forward: bool, extend: bool) -> bool {
+    let text = buffer.text();
+    let rows: BTreeSet<_> = buffer
+        .view(id)
+        .get_regions(BOOKMARKS)
+        .into_iter()
+        .flat_map(|set| &set.regions)
+        .map(|r| text.byte_to_line(r.b))
+        .collect();
+    if rows.is_empty() {
+        return false;
+    }
+    let selection = buffer.view(id).sel().map(|r| {
+        let row = text.byte_to_line(r.b);
+        let next = if forward {
+            rows.range(row + 1..).next().or_else(|| rows.first())
+        } else {
+            rows.range(..row).next_back().or_else(|| rows.last())
+        };
+        let at = text.line_to_byte(*next.expect("nonempty bookmarks"));
+        Region::new(if extend { r.a } else { at }, at)
+    });
+    buffer.set_selection(id, selection);
+    true
+}
+/// Moves to the next bookmarked row, wrapping at EOF; optionally extends selections.
+pub fn next_bookmark(buffer: &mut Buffer, id: ViewId, extend: bool) -> bool {
+    navigate_bookmark(buffer, id, true, extend)
+}
+/// Moves to the previous bookmarked row, wrapping at BOF; optionally extends selections.
+pub fn prev_bookmark(buffer: &mut Buffer, id: ViewId, extend: bool) -> bool {
+    navigate_bookmark(buffer, id, false, extend)
+}
+/// Selects all bookmark carets without changing text.
+pub fn select_bookmarks(buffer: &mut Buffer, id: ViewId) -> bool {
+    let Some(set) = buffer.view(id).get_regions(BOOKMARKS) else {
+        return false;
+    };
+    if set.regions.is_empty() {
+        return false;
+    }
+    let selection = Selection::from_regions(
+        set.regions
+            .iter()
+            .map(|r| Region::caret(buffer.text().line_to_byte(buffer.text().byte_to_line(r.b)))),
+    );
+    buffer.set_selection(id, selection);
+    true
+}
+/// Sublime-spelled alias for the touched-line whitespace operation.
+pub fn trim_trailing_white_space(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    trim_trailing_whitespace(buffer, id)
+}
+
+/// Inserts text at EOF in one transaction, mapping existing selections through it.
+pub fn append(buffer: &mut Buffer, id: ViewId, text: &str) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T8]: EOF carets stick to appended text; other
+    // selections retain their positions. Force/scroll arguments belong to hosts.
+    let end = buffer.text().len_bytes();
+    commit_owned(buffer, id, vec![(end..end, text.into())])
+}
+/// Replaces nonempty selections by their two endpoints; keeps existing carets.
+pub fn split_selection(buffer: &mut Buffer, id: ViewId) {
+    // ST-BEHAVIOR: unverified [T9]: normalized endpoint carets, final endpoint primary.
+    let regions = buffer
+        .view(id)
+        .sel()
+        .iter()
+        .flat_map(|r| [Region::caret(r.a), Region::caret(r.b)])
+        .collect::<Vec<_>>();
+    buffer.set_selection(id, Selection::from_regions(regions));
+}
+/// Selects the complement of nonempty selections over the entire document.
+pub fn invert_selection(buffer: &mut Buffer, id: ViewId) {
+    // ST-BEHAVIOR: unverified [T9]: carets do not cut a gap; an empty complement
+    // becomes an EOF caret so the view still owns at least one selection.
+    let mut at = 0;
+    let mut regions = Vec::new();
+    for r in buffer.view(id).sel().iter().filter(|r| !r.empty()) {
+        if at < r.begin() {
+            regions.push(Region::new(at, r.begin()));
+        }
+        at = r.end();
+    }
+    if at < buffer.text().len_bytes() {
+        regions.push(Region::new(at, buffer.text().len_bytes()));
+    }
+    if regions.is_empty() {
+        regions.push(Region::caret(at));
+    }
+    buffer.set_selection(id, Selection::from_regions(regions));
+}
+/// Applies ASCII ROT13 to selected text; non-ASCII scalars remain intact.
+pub fn rot13(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    // ST-BEHAVIOR: unverified [T10]: carets expand to their word, as case commands do.
+    let view = buffer.view(id);
+    let regions = Selection::from_regions(view.sel().iter().map(|r| {
+        if r.empty() {
+            word_at(buffer.text(), r.b, &view.settings)
+        } else {
+            r
+        }
+    }));
+    let edits = regions
+        .iter()
+        .map(|r| {
+            let s = buffer
+                .text()
+                .slice(r.to_range())
+                .chars()
+                .map(|c| match c {
+                    'a'..='m' | 'A'..='M' => char::from_u32(c as u32 + 13).unwrap(),
+                    'n'..='z' | 'N'..='Z' => char::from_u32(c as u32 - 13).unwrap(),
+                    _ => c,
+                })
+                .collect();
+            (r.to_range(), s)
+        })
+        .collect();
+    commit_owned(buffer, id, edits)
+}

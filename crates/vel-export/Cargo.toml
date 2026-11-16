@@ -1,0 +1,24 @@
+[package]
+name = "vel-export"
+description = "Standalone highlighted HTML, clipboard flavours and browser print files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vel-buffer = { path = "../vel-buffer" }
+vel-text = { path = "../vel-text" }
+vel-highlight = { path = "../vel-highlight" }
+vel-color-scheme = { path = "../vel-color-scheme" }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+tempfile = "3"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

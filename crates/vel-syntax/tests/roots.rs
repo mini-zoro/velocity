@@ -32,6 +32,52 @@ fn write(root: &Path, path: &str, source: &str) {
 fn definition(name: &str, scope: &str) -> String {
     format!("name: {name}\nscope: source.{scope}\ncontexts: {{ main: [] }}\n")
 }
+
+#[test]
+fn parallel_source_reads_preserve_override_order_and_content_invalidation() {
+    let tmp = Scratch::new("parallel-content");
+    let first = tmp.dir("first");
+    let second = tmp.dir("second");
+    let cache = tmp.dir("cache");
+    for i in 0..64 {
+        let file = format!("Pkg/Item{i:02}.sublime-syntax");
+        write(
+            &first,
+            &file,
+            &definition(&format!("Old{i}"), &format!("old{i}")),
+        );
+        write(
+            &second,
+            &file,
+            &definition(&format!("New{i}"), &format!("new{i}")),
+        );
+    }
+    for expected in [CacheStatus::Yaml, CacheStatus::Hit] {
+        let (set, status) = SyntaxSet::load_cached_roots(&[&first, &second], &[], &cache).unwrap();
+        assert_eq!(status, expected);
+        assert_eq!(set.syntaxes().len(), 64);
+        assert!(set.find_syntax_by_name("New42").is_some());
+        assert!(set.find_syntax_by_name("Old42").is_none());
+    }
+    // Changed shadowed input must invalidate too; equal byte length is deliberate.
+    write(
+        &first,
+        "Pkg/Item42.sublime-syntax",
+        &definition("Alt42", "alt42"),
+    );
+    let (set, status) = SyntaxSet::load_cached_roots(&[&first, &second], &[], &cache).unwrap();
+    assert_eq!(status, CacheStatus::Yaml);
+    assert!(set.find_syntax_by_name("New42").is_some());
+    write(
+        &second,
+        "Pkg/Item42.sublime-syntax",
+        &definition("Fix42", "fix42"),
+    );
+    let (set, status) = SyntaxSet::load_cached_roots(&[&first, &second], &[], &cache).unwrap();
+    assert_eq!(status, CacheStatus::Yaml);
+    assert!(set.find_syntax_by_name("Fix42").is_some());
+    assert!(set.find_syntax_by_name("New42").is_none());
+}
 fn preferences(settings: &str) -> String {
     format!(
         "<plist version=\"1.0\"><dict><key>scope</key><string>source.fixture</string><key>settings</key><dict>{settings}</dict></dict></plist>"

@@ -1,0 +1,277 @@
+{
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 2.1593070030212402,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 9.967165231704712,
+      "log_sha256": "1774e44dd35b12ac77dc380f9818eeb9a7c29afb34fc51130bf1272464dce392"
+    },
+    {
+      "name": "clippy-features",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "vel-syntax",
+        "-p",
+        "vel-regex",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 4.247402906417847,
+      "log_sha256": "420916bef7a6979cb7a924e19263eee02972f17255928f7d60c5b39d84e02966"
+    },
+    {
+      "name": "workspace-release",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--release"
+      ],
+      "environment": {},
+      "exit_code": 101,
+      "seconds": 204.80869698524475,
+      "log_sha256": "6277b11ba7c8cb785aa2e082e46b2ff1637489e5eafbc1bb690bab4a352db2c2"
+    },
+    {
+      "name": "workspace-release",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--release"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 205.42121505737305,
+      "log_sha256": "a52653a805f64697f86648763b105440a744de4230a6cb075ca4ac4a32a033d6"
+    },
+    {
+      "name": "rustdoc",
+      "command": [
+        "cargo",
+        "doc",
+        "--workspace",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "exit_code": 0,
+      "seconds": 9.633530139923096,
+      "log_sha256": "7997c38aa974b42de63817841789c2345eed571a1050fe5f3ddd37b5398d0355"
+    },
+    {
+      "name": "buffer-model",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "vel-buffer",
+        "--release",
+        "--test",
+        "model",
+        "--test",
+        "text_ops"
+      ],
+      "environment": {
+        "PROPTEST_CASES": "1024"
+      },
+      "exit_code": 0,
+      "seconds": 6.059769153594971,
+      "log_sha256": "b160ade365f5f5b6e252516e13ffbc36e9624f210892443118513d5f6362912a"
+    },
+    {
+      "name": "candidate-buffer-build",
+      "command": [
+        "cargo",
+        "bench",
+        "-p",
+        "vel-buffer",
+        "--bench",
+        "perf",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 0.8728678226470947,
+      "log_sha256": "b795fc101563fe8b95c9cd452672ce6aeb3c6a6b2a6efa0a9da971d86c420845"
+    },
+    {
+      "name": "baseline-buffer-build",
+      "command": [
+        "cargo",
+        "bench",
+        "--manifest-path",
+        "/Users/zoro/dev/velocity-lane-b/.perf-local/round13/baseline-buffer/Cargo.toml",
+        "-p",
+        "vel-buffer",
+        "--bench",
+        "perf",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 14.322691202163696,
+      "log_sha256": "7fd3b0f33369463ce6c6dc695ac08a4398eafd3ad3ffe79576fdf7ed6340c84d"
+    },
+    {
+      "name": "export-build",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "vel-export",
+        "--example",
+        "export_bench"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 3.5008299350738525,
+      "log_sha256": "e32d1bd05ff180acc8b4705704f386ccb536f7843be7e106932fcb8fb0aeb716"
+    },
+    {
+      "name": "oracle-build",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "vel-syntax",
+        "--bin",
+        "regex-bench",
+        "--features",
+        "vel-regex/verify-prefilters"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "seconds": 6.149893283843994,
+      "log_sha256": "46cd61e984af4438b9bbabfec8f3445df4bcec9984d368606d737a1eea63be9a"
+    },
+    {
+      "name": "differential",
+      "command": [
+        "target/release/regex-bench",
+        "--diff-only",
+        "--verify-matches",
+        "--output",
+        "crates/vel-regex/round13-differential.json"
+      ],
+      "environment": {
+        "VEL_REGEX_FIXTURE_ROOT": "/Users/zoro/dev/velocity"
+      },
+      "exit_code": 0,
+      "seconds": 278.0210497379303,
+      "log_sha256": "97e2145011a69f410972af5d64328d070eaf1a22283d9c422079575f89e6f19a"
+    },
+    {
+      "name": "export-perf",
+      "command_summary": [
+        "python3",
+        "crates/vel-regex/scripts/paired-round13.py",
+        "export",
+        "--pairs",
+        "5"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "buffer-perf",
+      "command_summary": [
+        "python3",
+        "crates/vel-regex/scripts/paired-round13.py",
+        "buffer",
+        "--pairs",
+        "10"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "buffer-follow-up",
+      "command_summary": [
+        "python3",
+        "crates/vel-regex/scripts/paired-round13.py",
+        "buffer",
+        "--pairs",
+        "40",
+        "--cases",
+        "find_10000",
+        "undo_50mb",
+        "type_100000"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "final_source_sha256": {
+    "crates/vel-buffer/src/buffer.rs": "a8a0c90b9491a935ff73bb0aa968108515f2a4052c727b198b4eecc9c2ccd304",
+    "crates/vel-buffer/src/change.rs": "7930ef16bfb5cad614ade5747e748acf29daa6145b02baf975253c1627b1d6d9",
+    "crates/vel-buffer/src/history.rs": "66f56b5ab4396dba708c8a07c1daa6e8ed11b064e3e3965a8f1b2d1403299c62",
+    "crates/vel-buffer/src/layout.rs": "7499c3a7771cdab536c834bbbdb02dfd7872e4aaa9f003203226f2e5e1688828",
+    "crates/vel-buffer/src/lib.rs": "2e4581b051eeae7d6bea353be3ae33593ecd7056302dc6d0d140cfc1561242b4",
+    "crates/vel-buffer/src/ops.rs": "8c86519db4f3d5fd9236f711bb4071127f15ee6051f96af9a44ccf417abbbcae",
+    "crates/vel-buffer/src/region.rs": "9424500c38936e24a0d5a6bd021fbba807a68fea92c788046b5097aeb757c5bc",
+    "crates/vel-commands/src/lib.rs": "07afe1b84b652dc0df9ca6e4de26a2ee6da60085ef19dacdeb136798da13443d",
+    "crates/vel-commands/src/text_ops.rs": "56548ccdd87157f89f01b8ce9fa82d3670534de60faf0f3e5e409a704e438b57",
+    "crates/vel-export/src/lib.rs": "fb5a89612fe8f85e2b4bed2e1813f2ba567064be0fbfe4b97609114d7afef300",
+    "crates/vel-regex/src/frontend.rs": "c18c1f920d5a5177798314f27dcf8d257887ed03554c1b4eb631a45c0f88ec65",
+    "crates/vel-regex/src/lib.rs": "65cf93ed42838a814fa716eb482626c7c5ec7ee513515164a361659d8c9e4b81",
+    "crates/vel-regex/src/multi.rs": "986697e5634894028da840c10f13cb28eeb44478b2c5a1940baec6f3b7877da1",
+    "crates/vel-syntax/src/bin/regex-bench/profile.rs": "cc5d542e7add283d2b5aaf8de2cac3dbcf9dd9aee0328bce98980351188cce97",
+    "crates/vel-syntax/src/bin/regex-bench.rs": "98eca2a2a6e1370e6ee9300efb7244176279260b8df2cb77584bf69b87e37b84",
+    "crates/vel-syntax/src/bin/syntax-bench.rs": "ffd1dfee291bdcff66ffdc7bfdb055377ea56655057d97a522bffd378d9d532d",
+    "crates/vel-syntax/src/bin/syntax-tests.rs": "316e415640b67bb94aebd006802303a4e7190fe4d2dfb07a4aac31e765afccca",
+    "crates/vel-syntax/src/cache.rs": "9cd1cc7a9f6656ec75f41b9dd769966be976ce0bb6fe0164fd2954090bc791d5",
+    "crates/vel-syntax/src/indent.rs": "b445280c429ea4148e7e022ef5e8e22a199642077a9c4a7befc7eb16b48a113a",
+    "crates/vel-syntax/src/lib.rs": "05523964173d055fceb9bf06ddde1bbb6f497921e922a274712fdad48eeacbf3",
+    "crates/vel-syntax/src/metadata.rs": "ff9a031d70ef53a609bc88b8b6b9f9a89487e6b810b1c125fb9764f62aedd3db",
+    "crates/vel-syntax/src/parser.rs": "fe1ca1b8698638a5ec8431d5d30ea7b03b73843367a8b53f370bd82658f19293",
+    "crates/vel-syntax/src/resources.rs": "3ff9c8d63108e860849d5a6e15a746f967d6ce584e8230f6b46b8290b9e41d2c",
+    "crates/vel-syntax/src/state.rs": "c57c48e42ca19878523678b78cd3bd7fd29593ec97b15e6b2e58b8f47d532d36",
+    "crates/vel-syntax/src/syntax_definition.rs": "f0260fb3a074505eca5b204221c9efa218eac363b1ad20caf4d4db8d27b2509a",
+    "crates/vel-syntax/src/syntax_set.rs": "45e7d5c165279f82a2a79e6661dbd1a5ba4a0efc7dc06ba944e0450b2a3406c9",
+    "crates/vel-syntax/src/syntest.rs": "b12fce367ba2991dae778b14710793decd44de92780ebdd381848eb6efda2057",
+    "crates/vel-syntax/src/tm_language.rs": "29471e782c20f9811c962fbce5145c5f4fc9a735a497dc3b0fd79dd43fe0d5aa",
+    "crates/vel-syntax/src/yaml_load.rs": "748f9c3dad6a3fc27c384d1bb736d3b7cb187f95fa87be771b36ba9a661e2196",
+    "crates/vel-scope/src/lib.rs": "a531b868cd93b4d92d59059a75d1e7ba4231895432d6d1349df4a9b253d4c433"
+  },
+  "cargo_lock_sha256": "df485c2d19d72b889a128177d5871b4e466b6278ed74c94b0ab200493859fb1a",
+  "buffer_fixture": {
+    "bytes": 100000000,
+    "sha256": "30c98b601a71debe1f826378658bd20d615c215bfd1fe4990ea031d2c87d0028"
+  },
+  "head": "85e6cc14cb8d805ba0d592b004794281c833084d",
+  "buffer_regression_criterion": "maximum median paired latency change; point estimate 4.203909083885948%, find_10000; CI [-19.40%,16.08%]. Marginal find median +7.32%; see ROUND13.md."
+}

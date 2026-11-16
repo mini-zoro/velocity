@@ -1,5 +1,6 @@
 //! Sublime-named commands over the shared multi-selection buffer model.
 #![forbid(unsafe_code)]
+mod text_ops;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use vel_buffer::{
@@ -230,6 +231,7 @@ impl Registry {
         ] {
             registry.register(name, Kind::ApplicationCommand, None);
         }
+        text_ops::register(&mut registry);
         registry
     }
     /// Adds/replaces an extension command.

@@ -38,7 +38,10 @@ impl Default for MultiDfaConfig {
             adaptive: false,
             verify_matches: false,
             memory_limit: 32 * 1024 * 1024,
-            context_cache_limit: 128 * 1024,
+            // Larger combined rule sets otherwise exhaust the NFA/transition
+            // allowance and fall back to one native search per pattern. The
+            // shared 32 MiB resident budget still bounds all contexts together.
+            context_cache_limit: 1024 * 1024,
             minimum_patterns: 4,
         }
     }

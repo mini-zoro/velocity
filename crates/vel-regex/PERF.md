@@ -1,3 +1,6 @@
+Latest measurements and remaining-target status: [round 13](ROUND13.md).
+The round-10 record below is retained as historical evidence.
+
 # Lane B, round 10: syntax roots and paired worker throughput
 
 Measured November 15, 2026, Darwin 25.1.0 arm64, rustc 1.99.1 (58cf8f9c3).

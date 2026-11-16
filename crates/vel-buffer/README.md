@@ -107,6 +107,17 @@ python3 crates/vel-buffer/benches/report.py crates/vel-buffer/perf-final.jsonl
 空缓冲区和缺少尾 LF。库用 `#![forbid(unsafe_code)]`；只有基准的 OS 记账 FFI 使用有 SAFETY 注释的 unsafe。
 中间测量置于 `.perf-local/`，不随 crate 交付。最终结果与局限见 [PERF.md](PERF.md)。
 
+## Round thirteen: text operations
+
+Round 13 adds paragraph expansion/reflow (`wrap_lines`), line/selected-string
+permutations (stable unique, reverse, reproducibly seeded shuffle), selection sorting,
+five `IdentCase` conversions, mapped per-view marks/bookmarks, append, complement/
+endpoint selections and ASCII ROT13. These use the same one-batch transaction and
+undo/redo model. `trim_trailing_white_space` aliases the existing touched-line operation.
+Command adapters live separately in vel-commands/src/text_ops.rs; `chain` retains
+registry orchestration. Undocumented details are centralized in [BEHAVIOR.md](BEHAVIOR.md),
+and the public command audit is in [COVERAGE.md](../vel-commands/COVERAGE.md).
+
 ## Round seven: native Hot Exit history
 
 `Buffer::export_history() -> HistorySnapshot` captures owned groups, shared steps, both undo

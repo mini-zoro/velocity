@@ -33,6 +33,17 @@
 | L8 | `ops.rs::swap_line_*` | 连续块移动一行，边缘块不动，保留总行终止形式、caret 行内字节列及选区方向。 |
 | C1 | `ops.rs` | 空 caret 对其 word run 做大小写变换；title 使用 word classes 定首字母；Unicode scalar 大小写可改变长度，无 locale。 |
 | C2 | `ops.rs::transpose` | caret 交换相邻 grapheme，BOL/EOF 用首/末一对；非空区域逆转 grapheme，重叠请求先归并；ZWJ/组合簇内部不拆。 |
+| T1 | `ops.rs::permute_lines` | ST-BEHAVIOR: unverified — 每个连续触及行块独立排列；unique 保留第一次出现；shuffle 用显式种子、SplitMix64 + 无偏 Fisher–Yates；保留原块末尾 LF。移到最后的空行仍以 LF 表示。 |
+| T2 | `ops.rs::{permute_selection,sort_selection}` | ST-BEHAVIOR: unverified — 只排列非空选区的文本槽，间隔正文不变；unique 把唯一值向前填充，剩余槽变空；排序稳定，忽略大小写时按 Unicode lowercase 键，reverse 翻转结果。 |
+| T3 | `ops.rs::expand_selection_to_paragraph` | ST-BEHAVIOR: unverified — 由 Unicode 空白行分隔段落，空白行自身是一段；包含段尾 LF，保留方向，结束于下一 BOL 不包含该行。 |
+| T4 | `ops.rs::wrap_lines` | ST-BEHAVIOR: unverified — 触及任一行便重排完整段落；多 caret 去重；词间折叠为一个 ASCII 空格，保留第一行空格/tab 缩进和段尾 LF，按显示列换行，长词不拆；无语法/注释前缀推断。adapter 默认首个 ruler 或 70 列，支持 width/column。 |
+| T5 | `ops.rs::convert_ident_case` / `text_ops.rs` | ST-BEHAVIOR: unverified — changelog 只确认 Convert Case 功能，未公开参数 schema；本实现接受 case/to 和五种格式，按 `_`/`-`/空白、lower→Upper、HTTPServer 缩写边界拆分；数字留在前词，Unicode 无 locale 映射；空 caret 使用含字母/数字的现有 word run，空白/标点 caret 不更改正文，多 caret 重叠先归并。snake/camel/pascal/kebab/upper_snake 命令名为本项目适配别名，非已核实 ST4 spellings。 |
+| T6 | `ops.rs::{set_mark,select_to_mark,swap_with_mark}` | ST-BEHAVIOR: unverified — 每视图 marks 用 velocity.mark / velocity.mark.primary named regions 存储，随正文映射，独立于文本 undo；set/swap 保留完整方向与 primary。select_to_mark 从当前 caret 延伸到保存 caret，数量相同逐项配对，否则用首个 mark；未设 mark 则无操作。 |
+| T7 | `ops.rs::*bookmark*` | ST-BEHAVIOR: unverified — 每视图每个触及行独立 toggle，使用 velocity.bookmarks 的 BOL caret；编辑后按映射点所在行归一化；next/prev 从当前行严格前进/后退并回绕，可 extend；select_bookmarks 选择所有 BOL carets，clear 不更改正文。 |
+| T8 | `ops.rs::append` | ST-BEHAVIOR: unverified — 在 EOF 追加一次，已有选区通过变更映射，EOF caret 右黏；force/scroll_to_end 不改变 buffer 核心，需 host 策略。 |
+| T9 | `ops.rs::{split_selection,invert_selection}` | ST-BEHAVIOR: unverified — split 产生两端 caret 并普通化；invert 对非空选区取全文补集，空 caret 不切开补集，无补集时使用 EOF caret。 |
+| T10 | `ops.rs::rot13` | ST-BEHAVIOR: unverified — 只旋转 ASCII A–Z/a–z，Unicode 原样保留；空 caret 按 word run 处理。 |
+| T11 | `vel-commands::Registry::chain` | ST-BEHAVIOR: unverified — 沿用已有 `[name, args?]` 数组格式；子命令分别形成 undo 边界，保留宏/重复状态，遇错停止且已执行子命令不回滚；最多 32 层。 |
 
 公开文档有明确说明的 API 名称与属性仍以其为准；后续 golden 若否定以上决策，应先改集中策略与测试，
 不读取应用内的 Python 实现、Default 包或二进制来确认。

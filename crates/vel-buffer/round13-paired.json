@@ -1,0 +1,2415 @@
+{
+  "kind": "buffer",
+  "baseline_commit": "85e6cc14cb8d805ba0d592b004794281c833084d",
+  "before_sha256": "73b9a16e4f730a4bb79daf938b43ce9d289be114f5572c8e05b69843b190195f",
+  "after_sha256": "2e73723274ca083836741eb7600f36eb261de98c29b68143539b813012044296",
+  "worker_source_sha256": "affb7ca125b7031c93b98cc6b0dc0249e34d4f0bf888343c5d8c052c52cdbeaa",
+  "bootstrap": {
+    "draws": 20000,
+    "seed": 1313,
+    "unit": "whole_pair",
+    "interval": "percentile_95"
+  },
+  "cases": [
+    {
+      "name": "type_10000",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 980917,
+            "cpu_ns": 967000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 120963072,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 890750,
+            "cpu_ns": 891000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 122028032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 987625,
+            "cpu_ns": 983000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 120913920,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 912708,
+            "cpu_ns": 914000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 120946688,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 1015625,
+            "cpu_ns": 1017000,
+            "minor_faults": 107,
+            "major_faults": 0,
+            "peak_rss_bytes": 122339328,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 1431000,
+            "cpu_ns": 1420000,
+            "minor_faults": 35,
+            "major_faults": 0,
+            "peak_rss_bytes": 121094144,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 894917,
+            "cpu_ns": 896000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 121077760,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 900125,
+            "cpu_ns": 901000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 120881152,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 940917,
+            "cpu_ns": 942000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 121044992,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 921917,
+            "cpu_ns": 923000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 120946688,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 979458,
+            "cpu_ns": 982000,
+            "minor_faults": 122,
+            "major_faults": 0,
+            "peak_rss_bytes": 122617856,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 944375,
+            "cpu_ns": 945000,
+            "minor_faults": 41,
+            "major_faults": 0,
+            "peak_rss_bytes": 122847232,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 1083916,
+            "cpu_ns": 1047000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 122093568,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 898250,
+            "cpu_ns": 899000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 120913920,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 912417,
+            "cpu_ns": 914000,
+            "minor_faults": 28,
+            "major_faults": 0,
+            "peak_rss_bytes": 121012224,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 917042,
+            "cpu_ns": 914000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 121143296,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 978375,
+            "cpu_ns": 969000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 121683968,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 1036041,
+            "cpu_ns": 1036000,
+            "minor_faults": 106,
+            "major_faults": 0,
+            "peak_rss_bytes": 122257408,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 898792,
+            "cpu_ns": 900000,
+            "minor_faults": 25,
+            "major_faults": 0,
+            "peak_rss_bytes": 121012224,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 991000,
+            "cpu_ns": 993000,
+            "minor_faults": 26,
+            "major_faults": 0,
+            "peak_rss_bytes": 120930304,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 961375.0,
+            "ci95": [
+              917042.0,
+              998271.0
+            ]
+          },
+          "after": {
+            "estimate": 917167.0,
+            "ci95": [
+              896854.5,
+              1007749.5
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 1.0054442441596254,
+            "ci95": [
+              0.9441627479790089,
+              1.1012259332023575
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "type_100000",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_100000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 10728583,
+            "cpu_ns": 10642000,
+            "minor_faults": 372,
+            "major_faults": 0,
+            "peak_rss_bytes": 153681920,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_100000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 16018208,
+            "cpu_ns": 10491000,
+            "minor_faults": 340,
+            "major_faults": 0,
+            "peak_rss_bytes": 152911872,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_100000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 12037917,
+            "cpu_ns": 11134000,
+            "minor_faults": 332,
+            "major_faults": 0,
+            "peak_rss_bytes": 151502848,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_100000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 9862792,
+            "cpu_ns": 9785000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 151126016,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_100000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 9766208,
+            "cpu_ns": 9724000,
+            "minor_faults": 365,
+            "major_faults": 0,
+            "peak_rss_bytes": 152748032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_100000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 10835500,
+            "cpu_ns": 10617000,
+            "minor_faults": 359,
+            "major_faults": 0,
+            "peak_rss_bytes": 151371776,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_100000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 9675583,
+            "cpu_ns": 9677000,
+            "minor_faults": 364,
+            "major_faults": 0,
+            "peak_rss_bytes": 151404544,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_100000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 9184167,
+            "cpu_ns": 9185000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 149782528,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_100000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 9144291,
+            "cpu_ns": 9145000,
+            "minor_faults": 266,
+            "major_faults": 0,
+            "peak_rss_bytes": 149651456,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_100000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 9775583,
+            "cpu_ns": 9765000,
+            "minor_faults": 271,
+            "major_faults": 0,
+            "peak_rss_bytes": 150224896,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_100000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 9747334,
+            "cpu_ns": 9748000,
+            "minor_faults": 327,
+            "major_faults": 0,
+            "peak_rss_bytes": 151044096,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_100000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 9349625,
+            "cpu_ns": 9351000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 149848064,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_100000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 9609667,
+            "cpu_ns": 9585000,
+            "minor_faults": 347,
+            "major_faults": 0,
+            "peak_rss_bytes": 151076864,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_100000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 9414834,
+            "cpu_ns": 9417000,
+            "minor_faults": 366,
+            "major_faults": 0,
+            "peak_rss_bytes": 151371776,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_100000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 9120083,
+            "cpu_ns": 9121000,
+            "minor_faults": 355,
+            "major_faults": 0,
+            "peak_rss_bytes": 151142400,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_100000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 10508583,
+            "cpu_ns": 10395000,
+            "minor_faults": 364,
+            "major_faults": 0,
+            "peak_rss_bytes": 151896064,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "type_100000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 9789458,
+            "cpu_ns": 9778000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 150028288,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "type_100000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 9182875,
+            "cpu_ns": 9172000,
+            "minor_faults": 269,
+            "major_faults": 0,
+            "peak_rss_bytes": 149831680,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "type_100000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 9113084,
+            "cpu_ns": 9100000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 152059904,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "type_100000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 9136750,
+            "cpu_ns": 9114000,
+            "minor_faults": 273,
+            "major_faults": 0,
+            "peak_rss_bytes": 152010752,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 9687937.5,
+            "ci95": [
+              9184167.0,
+              10149020.5
+            ]
+          },
+          "after": {
+            "estimate": 9711458.5,
+            "ci95": [
+              9182875.0,
+              10906750.0
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 0.9542044428551321,
+            "ci95": [
+              0.877366033360742,
+              1.0343264087786157
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "find_10000",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "find_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 47208,
+            "cpu_ns": 48000,
+            "minor_faults": 10,
+            "major_faults": 0,
+            "peak_rss_bytes": 325582848,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "find_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 31000,
+            "cpu_ns": 32000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 297844736,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "find_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 39167,
+            "cpu_ns": 40000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 329547776,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "find_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 27708,
+            "cpu_ns": 29000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 256704512,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "find_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 33791,
+            "cpu_ns": 35000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 267862016,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "find_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 31167,
+            "cpu_ns": 32000,
+            "minor_faults": 1,
+            "major_faults": 0,
+            "peak_rss_bytes": 318849024,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "find_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 28375,
+            "cpu_ns": 29000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 285179904,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "find_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 26417,
+            "cpu_ns": 28000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 306380800,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "find_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 27917,
+            "cpu_ns": 29000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 285917184,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "find_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 31708,
+            "cpu_ns": 33000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 322846720,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "find_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 40083,
+            "cpu_ns": 44000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 332742656,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "find_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 27500,
+            "cpu_ns": 29000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 282722304,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "find_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 48542,
+            "cpu_ns": 50000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 324386816,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "find_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 25584,
+            "cpu_ns": 27000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 331874304,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "find_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 22750,
+            "cpu_ns": 24000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 295993344,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "find_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 41250,
+            "cpu_ns": 42000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 332218368,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "find_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 29916,
+            "cpu_ns": 30000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 319438848,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "find_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 26333,
+            "cpu_ns": 28000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 257114112,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "find_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 31000,
+            "cpu_ns": 33000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 326664192,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "find_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 26792,
+            "cpu_ns": 28000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 256884736,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 28916.5,
+            "ci95": [
+              27250.0,
+              41250.0
+            ]
+          },
+          "after": {
+            "estimate": 31000.0,
+            "ci95": [
+              26333.0,
+              35167.0
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 1.0075936038187912,
+            "ci95": [
+              0.7939362723062514,
+              1.5228387096774194
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "undo_10000",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 1114792,
+            "cpu_ns": 1116000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120733696,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_10000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 1109041,
+            "cpu_ns": 1112000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120946688,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 1110834,
+            "cpu_ns": 1111000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 123420672,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_10000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 1105667,
+            "cpu_ns": 1107000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 123092992,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 1104750,
+            "cpu_ns": 1106000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 123174912,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_10000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 1301166,
+            "cpu_ns": 1302000,
+            "minor_faults": 48,
+            "major_faults": 0,
+            "peak_rss_bytes": 124174336,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 1128125,
+            "cpu_ns": 1129000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 123420672,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_10000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 1116500,
+            "cpu_ns": 1119000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120963072,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 1123166,
+            "cpu_ns": 1123000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120946688,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_10000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 1122125,
+            "cpu_ns": 1123000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120963072,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 1101625,
+            "cpu_ns": 1104000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 122912768,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_10000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 1124166,
+            "cpu_ns": 1126000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120848384,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 1121500,
+            "cpu_ns": 1123000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 121126912,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_10000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 1139208,
+            "cpu_ns": 1140000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 122994688,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 1108083,
+            "cpu_ns": 1109000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120897536,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_10000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 1120959,
+            "cpu_ns": 1123000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120930304,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 1166000,
+            "cpu_ns": 1149000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 123027456,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_10000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 1127417,
+            "cpu_ns": 1129000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 121094144,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 1101500,
+            "cpu_ns": 1102000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120963072,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_10000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 1074583,
+            "cpu_ns": 1075000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 121159680,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 1118729.5,
+            "ci95": [
+              1105667.0,
+              1123166.0
+            ]
+          },
+          "after": {
+            "estimate": 1116479.5,
+            "ci95": [
+              1105333.0,
+              1133312.5
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 0.9981381220293206,
+            "ci95": [
+              0.9826293068002208,
+              1.0128235760254167
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "delete_50mb",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "delete_50mb",
+            "run": 1,
+            "count": 1,
+            "total_ns": 740791,
+            "cpu_ns": 742000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119832576,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "delete_50mb",
+            "run": 1,
+            "count": 1,
+            "total_ns": 677375,
+            "cpu_ns": 679000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 119947264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "delete_50mb",
+            "run": 2,
+            "count": 1,
+            "total_ns": 692541,
+            "cpu_ns": 693000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 119881728,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "delete_50mb",
+            "run": 2,
+            "count": 1,
+            "total_ns": 690708,
+            "cpu_ns": 692000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119799808,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "delete_50mb",
+            "run": 3,
+            "count": 1,
+            "total_ns": 692708,
+            "cpu_ns": 693000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119947264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "delete_50mb",
+            "run": 3,
+            "count": 1,
+            "total_ns": 743584,
+            "cpu_ns": 745000,
+            "minor_faults": 15,
+            "major_faults": 0,
+            "peak_rss_bytes": 120078336,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "delete_50mb",
+            "run": 4,
+            "count": 1,
+            "total_ns": 696625,
+            "cpu_ns": 698000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 119947264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "delete_50mb",
+            "run": 4,
+            "count": 1,
+            "total_ns": 706875,
+            "cpu_ns": 707000,
+            "minor_faults": 4,
+            "major_faults": 0,
+            "peak_rss_bytes": 119930880,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "delete_50mb",
+            "run": 5,
+            "count": 1,
+            "total_ns": 697334,
+            "cpu_ns": 699000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119996416,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "delete_50mb",
+            "run": 5,
+            "count": 1,
+            "total_ns": 705791,
+            "cpu_ns": 707000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 120012800,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "delete_50mb",
+            "run": 6,
+            "count": 1,
+            "total_ns": 673459,
+            "cpu_ns": 675000,
+            "minor_faults": 4,
+            "major_faults": 0,
+            "peak_rss_bytes": 119865344,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "delete_50mb",
+            "run": 6,
+            "count": 1,
+            "total_ns": 695875,
+            "cpu_ns": 699000,
+            "minor_faults": 10,
+            "major_faults": 0,
+            "peak_rss_bytes": 120045568,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "delete_50mb",
+            "run": 7,
+            "count": 1,
+            "total_ns": 690292,
+            "cpu_ns": 691000,
+            "minor_faults": 4,
+            "major_faults": 0,
+            "peak_rss_bytes": 119799808,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "delete_50mb",
+            "run": 7,
+            "count": 1,
+            "total_ns": 696667,
+            "cpu_ns": 697000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 119914496,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "delete_50mb",
+            "run": 8,
+            "count": 1,
+            "total_ns": 690209,
+            "cpu_ns": 692000,
+            "minor_faults": 6,
+            "major_faults": 0,
+            "peak_rss_bytes": 119947264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "delete_50mb",
+            "run": 8,
+            "count": 1,
+            "total_ns": 709584,
+            "cpu_ns": 711000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119898112,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "delete_50mb",
+            "run": 9,
+            "count": 1,
+            "total_ns": 693709,
+            "cpu_ns": 694000,
+            "minor_faults": 7,
+            "major_faults": 0,
+            "peak_rss_bytes": 120143872,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "delete_50mb",
+            "run": 9,
+            "count": 1,
+            "total_ns": 674042,
+            "cpu_ns": 675000,
+            "minor_faults": 11,
+            "major_faults": 0,
+            "peak_rss_bytes": 120012800,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "delete_50mb",
+            "run": 10,
+            "count": 1,
+            "total_ns": 712541,
+            "cpu_ns": 713000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119799808,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "delete_50mb",
+            "run": 10,
+            "count": 1,
+            "total_ns": 680375,
+            "cpu_ns": 682000,
+            "minor_faults": 5,
+            "major_faults": 0,
+            "peak_rss_bytes": 119930880,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 694792.0,
+            "ci95": [
+              690708.0,
+              706875.0
+            ]
+          },
+          "after": {
+            "estimate": 694583.0,
+            "ci95": [
+              677375.0,
+              705791.0
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 1.006033511984289,
+            "ci95": [
+              0.9728533106001469,
+              1.03067804222363
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "undo_50mb",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_50mb",
+            "run": 1,
+            "count": 1,
+            "total_ns": 1041,
+            "cpu_ns": 3000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119865344,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_50mb",
+            "run": 1,
+            "count": 1,
+            "total_ns": 1583,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119980032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_50mb",
+            "run": 2,
+            "count": 1,
+            "total_ns": 958,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119930880,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_50mb",
+            "run": 2,
+            "count": 1,
+            "total_ns": 1834,
+            "cpu_ns": 3000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120012800,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_50mb",
+            "run": 3,
+            "count": 1,
+            "total_ns": 1000,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119980032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_50mb",
+            "run": 3,
+            "count": 1,
+            "total_ns": 875,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119947264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_50mb",
+            "run": 4,
+            "count": 1,
+            "total_ns": 834,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120045568,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_50mb",
+            "run": 4,
+            "count": 1,
+            "total_ns": 917,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119881728,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_50mb",
+            "run": 5,
+            "count": 1,
+            "total_ns": 1000,
+            "cpu_ns": 1000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119881728,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_50mb",
+            "run": 5,
+            "count": 1,
+            "total_ns": 1584,
+            "cpu_ns": 3000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120012800,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_50mb",
+            "run": 6,
+            "count": 1,
+            "total_ns": 791,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120242176,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_50mb",
+            "run": 6,
+            "count": 1,
+            "total_ns": 5250,
+            "cpu_ns": 7000,
+            "minor_faults": 1,
+            "major_faults": 0,
+            "peak_rss_bytes": 119898112,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_50mb",
+            "run": 7,
+            "count": 1,
+            "total_ns": 750,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119980032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_50mb",
+            "run": 7,
+            "count": 1,
+            "total_ns": 1125,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 120029184,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_50mb",
+            "run": 8,
+            "count": 1,
+            "total_ns": 1708,
+            "cpu_ns": 3000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119865344,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_50mb",
+            "run": 8,
+            "count": 1,
+            "total_ns": 750,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119963648,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_50mb",
+            "run": 9,
+            "count": 1,
+            "total_ns": 833,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119980032,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_50mb",
+            "run": 9,
+            "count": 1,
+            "total_ns": 1042,
+            "cpu_ns": 3000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119881728,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_50mb",
+            "run": 10,
+            "count": 1,
+            "total_ns": 916,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119930880,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_50mb",
+            "run": 10,
+            "count": 1,
+            "total_ns": 833,
+            "cpu_ns": 2000,
+            "minor_faults": 0,
+            "major_faults": 0,
+            "peak_rss_bytes": 119996416,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 958.5,
+            "ci95": [
+              791.5,
+              1417.0
+            ]
+          },
+          "after": {
+            "estimate": 1000.0,
+            "ci95": [
+              875.0,
+              1583.0
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 0.854406415274623,
+            "ci95": [
+              0.648989898989899,
+              1.5069626970657295
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "map_100000",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "map_100000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 3914333,
+            "cpu_ns": 3915000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128483328,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "map_100000",
+            "run": 1,
+            "count": 1,
+            "total_ns": 3958708,
+            "cpu_ns": 3941000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 129155072,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "map_100000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 3987459,
+            "cpu_ns": 3977000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 128303104,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "map_100000",
+            "run": 2,
+            "count": 1,
+            "total_ns": 3860958,
+            "cpu_ns": 3865000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128516096,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "map_100000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 3915542,
+            "cpu_ns": 3919000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128483328,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "map_100000",
+            "run": 3,
+            "count": 1,
+            "total_ns": 3863333,
+            "cpu_ns": 3864000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 128401408,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "map_100000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 3843459,
+            "cpu_ns": 3845000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 128434176,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "map_100000",
+            "run": 4,
+            "count": 1,
+            "total_ns": 4034292,
+            "cpu_ns": 3970000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128614400,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "map_100000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 3818208,
+            "cpu_ns": 3810000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128565248,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "map_100000",
+            "run": 5,
+            "count": 1,
+            "total_ns": 3907625,
+            "cpu_ns": 3909000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 128335872,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "map_100000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 3883459,
+            "cpu_ns": 3884000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 129269760,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "map_100000",
+            "run": 6,
+            "count": 1,
+            "total_ns": 3906458,
+            "cpu_ns": 3907000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128466944,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "map_100000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 3888208,
+            "cpu_ns": 3888000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128532480,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "map_100000",
+            "run": 7,
+            "count": 1,
+            "total_ns": 4226375,
+            "cpu_ns": 4189000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 130105344,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "map_100000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 3912000,
+            "cpu_ns": 3912000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 130154496,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "map_100000",
+            "run": 8,
+            "count": 1,
+            "total_ns": 3854834,
+            "cpu_ns": 3856000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128548864,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "map_100000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 4113500,
+            "cpu_ns": 4115000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 130187264,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "map_100000",
+            "run": 9,
+            "count": 1,
+            "total_ns": 3867666,
+            "cpu_ns": 3868000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128483328,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "map_100000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 3937542,
+            "cpu_ns": 3920000,
+            "minor_faults": 36,
+            "major_faults": 0,
+            "peak_rss_bytes": 128417792,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "map_100000",
+            "run": 10,
+            "count": 1,
+            "total_ns": 3986542,
+            "cpu_ns": 3988000,
+            "minor_faults": 37,
+            "major_faults": 0,
+            "peak_rss_bytes": 128434176,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "total_ns": {
+          "before": {
+            "estimate": 3910395.5,
+            "ci95": [
+              3860958.0,
+              3986542.0
+            ]
+          },
+          "after": {
+            "estimate": 3909812.5,
+            "ci95": [
+              3867666.0,
+              3962500.5
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 0.9973564161556929,
+            "ci95": [
+              0.9768311497012496,
+              1.0310478402165661
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "undo_metadata",
+      "pairs": [
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_metadata",
+            "run": 1,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_metadata",
+            "run": 1,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_metadata",
+            "run": 2,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_metadata",
+            "run": 2,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_metadata",
+            "run": 3,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_metadata",
+            "run": 3,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_metadata",
+            "run": 4,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_metadata",
+            "run": 4,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_metadata",
+            "run": 5,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_metadata",
+            "run": 5,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_metadata",
+            "run": 6,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_metadata",
+            "run": 6,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_metadata",
+            "run": 7,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_metadata",
+            "run": 7,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_metadata",
+            "run": 8,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_metadata",
+            "run": 8,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "before",
+            "after"
+          ],
+          "before": {
+            "operation": "undo_metadata",
+            "run": 9,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "after": {
+            "operation": "undo_metadata",
+            "run": 9,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        },
+        {
+          "order": [
+            "after",
+            "before"
+          ],
+          "after": {
+            "operation": "undo_metadata",
+            "run": 10,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          },
+          "before": {
+            "operation": "undo_metadata",
+            "run": 10,
+            "count": 10000,
+            "bytes": 480489,
+            "loadavg": "unavailable: sysctl: sysctl fmt -1 1024 1: Operation not permitted"
+          }
+        }
+      ],
+      "summary": {
+        "bytes": {
+          "before": {
+            "estimate": 480489.0,
+            "ci95": [
+              480489.0,
+              480489.0
+            ]
+          },
+          "after": {
+            "estimate": 480489.0,
+            "ci95": [
+              480489.0,
+              480489.0
+            ]
+          },
+          "paired_speedup": {
+            "estimate": 1.0,
+            "ci95": [
+              1.0,
+              1.0
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

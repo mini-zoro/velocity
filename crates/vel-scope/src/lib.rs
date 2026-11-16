@@ -43,6 +43,11 @@ pub fn lock_global_scope_repo() -> MutexGuard<'static, ScopeRepository> {
 impl ScopeRepository {
     /// Interns a dotted name without imposing a scope-depth limit.
     pub fn build(&mut self, text: &str) -> Result<Scope, ParseScopeError> {
+        // Canonical names dominate deserialization and parser lookups. Avoid a
+        // temporary split/join allocation when the exact name is already interned.
+        if let Some(scope) = self.scopes.get(text) {
+            return Ok(*scope);
+        }
         let canonical = text
             .split('.')
             .filter(|s| !s.is_empty())

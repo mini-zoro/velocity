@@ -66,16 +66,43 @@ impl Resources {
                     }
                     Err(e) => return Err(LoadingError::WalkDir(Box::new(e))),
                 };
-                if crate::tm_language::is_file_entry(&entry) && accepts(entry.path()) {
+                if accepts(entry.path()) && crate::tm_language::is_file_entry(&entry) {
                     paths.push(entry.into_path());
                 }
             }
             paths.sort();
             hash.update(&(paths.len() as u64).to_le_bytes());
-            for path in paths {
+            // Read independent sources concurrently, but hash and select winners
+            // in the original sorted order. Every invocation still reads every
+            // byte (including shadowed sources); timestamps never validate a hit.
+            let bytes = if paths.len() >= 32 {
+                std::thread::scope(|scope| {
+                    let readers: Vec<_> = paths
+                        .chunks(paths.len().div_ceil(4))
+                        .map(|chunk| {
+                            scope.spawn(move || {
+                                chunk
+                                    .iter()
+                                    .map(std::fs::read)
+                                    .collect::<std::io::Result<Vec<_>>>()
+                            })
+                        })
+                        .collect();
+                    readers
+                        .into_iter()
+                        .map(|reader| reader.join().expect("resource reader panicked"))
+                        .collect::<std::io::Result<Vec<_>>>()
+                        .map(|groups| groups.into_iter().flatten().collect::<Vec<_>>())
+                })?
+            } else {
+                paths
+                    .iter()
+                    .map(std::fs::read)
+                    .collect::<std::io::Result<Vec<_>>>()?
+            };
+            for (path, bytes) in paths.into_iter().zip(bytes) {
                 let relative = path.strip_prefix(root).expect("walk stays beneath root");
                 let virtual_path = package_path(&relative.to_string_lossy())?;
-                let bytes = std::fs::read(&path)?;
                 hash_field(&mut hash, virtual_path.as_bytes());
                 hash_field(&mut hash, &bytes);
                 winners.insert(
