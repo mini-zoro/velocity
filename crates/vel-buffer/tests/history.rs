@@ -224,3 +224,28 @@ fn directed_primary_goals_and_multi_caret_steps_survive() {
     assert_eq!(b.redo(v), restored.redo(map[&v]));
     same(&b, &restored, &map);
 }
+#[test]
+fn consecutive_deletions_in_one_direction_are_one_undo_step() {
+    let mut b = Buffer::new("hello world");
+    let v = b.new_view();
+    b.set_selection(v, Selection::from(Region::caret(5)));
+    for _ in 0..3 {
+        ops::delete_left(&mut b, v, ops::DeleteBy::Char);
+    }
+    assert_eq!(b.text().to_string(), "he world");
+    // Switching direction starts a new step.
+    ops::delete_right(&mut b, v, ops::DeleteBy::Char);
+    assert_eq!(b.text().to_string(), "heworld");
+    assert!(b.undo(v));
+    assert_eq!(b.text().to_string(), "he world");
+    assert!(b.undo(v));
+    assert_eq!(b.text().to_string(), "hello world");
+    // Moving the caret in between breaks the run.
+    b.set_selection(v, Selection::from(Region::caret(5)));
+    ops::delete_left(&mut b, v, ops::DeleteBy::Char);
+    b.set_selection(v, Selection::from(Region::caret(2)));
+    ops::delete_left(&mut b, v, ops::DeleteBy::Char);
+    assert_eq!(b.text().to_string(), "hll world");
+    assert!(b.undo(v));
+    assert_eq!(b.text().to_string(), "hell world");
+}

@@ -176,15 +176,16 @@ fn vertical_keeps_goal_through_short_line_tabs_cjk() {
 #[test]
 fn absolute_moves_hard_bol_and_literal_cr() {
     let (mut b, v) = setup("  中x\r\nlast", &[(6, 6)]);
-    move_to(&mut b, v, MoveTo::HardBol, false);
+    // Bol is the smart line start: indentation first, then column zero.
+    move_to(&mut b, v, MoveTo::Bol, false);
     assert_eq!(selected(&b, v), [(2, 2)]);
-    move_to(&mut b, v, MoveTo::HardBol, false);
+    move_to(&mut b, v, MoveTo::Bol, false);
     assert_eq!(selected(&b, v), [(0, 0)]);
     move_to(&mut b, v, MoveTo::Eol, true);
     assert_eq!(selected(&b, v), [(0, 7)]);
     move_to(&mut b, v, MoveTo::HardEol, false);
     assert_eq!(selected(&b, v), [(7, 7)]);
-    move_to(&mut b, v, MoveTo::Bol, false);
+    move_to(&mut b, v, MoveTo::HardBol, false);
     assert_eq!(selected(&b, v), [(0, 0)]);
     move_to(&mut b, v, MoveTo::Eof, false);
     assert_eq!(selected(&b, v), [(12, 12)]);
@@ -296,12 +297,61 @@ fn join_lines_multiselection_and_blank_line() {
     assert_eq!(b.text().to_string(), "a  b");
 }
 #[test]
-fn duplicate_touched_lines_once_and_last_line() {
+fn duplicate_selected_text_or_caret_lines() {
     let (mut b, v) = setup("a\nb", &[(0, 1), (2, 3)]);
     duplicate_line(&mut b, v);
-    assert_eq!(b.text().to_string(), "a\na\nb\nb");
+    expect(&b, v, "aa\nbb", &[(1, 2), (4, 5)]);
     assert!(b.undo(v));
     expect(&b, v, "a\nb", &[(0, 1), (2, 3)]);
+    // Carets duplicate their line once and move onto the copy; the last line gains an LF.
+    let (mut b, v) = setup("ab\ncd", &[(1, 1), (2, 2), (4, 4)]);
+    duplicate_line(&mut b, v);
+    expect(&b, v, "ab\nab\ncd\ncd", &[(4, 4), (5, 5), (10, 10)]);
+}
+#[test]
+fn caret_words_prefer_the_word_on_the_left_at_its_end() {
+    // ⌘D at the end of a word selects it, before a space, a newline or the end of the text.
+    for (text, at, word) in [
+        ("foo bar", 3, (0, 3)),
+        ("foo\nbar", 3, (0, 3)),
+        ("foo", 3, (0, 3)),
+        ("foo bar", 4, (4, 7)),
+        ("foo.bar", 3, (0, 3)),
+    ] {
+        let (mut b, v) = setup(text, &[(at, at)]);
+        assert!(find_under_expand(&mut b, v));
+        assert_eq!(selected(&b, v), [word], "{text:?} at {at}");
+    }
+    // Several carets each take their own word.
+    let (mut b, v) = setup("one two\nthree four\n", &[(1, 1), (11, 11)]);
+    assert!(find_under_expand(&mut b, v));
+    assert_eq!(selected(&b, v), [(0, 3), (8, 13)]);
+    // The pointer variant keeps the run under the pointer.
+    let (b, v) = setup("foo bar", &[(0, 0)]);
+    assert_eq!(word_region(&b, v, 3), Region::new(3, 4));
+}
+#[test]
+fn repeated_line_expansion_takes_the_next_line() {
+    let (mut b, v) = setup("one\ntwo\nthree", &[(1, 1)]);
+    expand_selection(&mut b, v, ExpandTo::Line);
+    assert_eq!(selected(&b, v), [(0, 4)]);
+    expand_selection(&mut b, v, ExpandTo::Line);
+    assert_eq!(selected(&b, v), [(0, 8)]);
+    expand_selection(&mut b, v, ExpandTo::Line);
+    assert_eq!(selected(&b, v), [(0, 13)]);
+    expand_selection(&mut b, v, ExpandTo::Line);
+    assert_eq!(selected(&b, v), [(0, 13)]);
+}
+#[test]
+fn sorting_without_a_selection_sorts_the_whole_buffer() {
+    let (mut b, v) = setup("c\nB\na\n", &[(0, 0)]);
+    sort_lines(&mut b, v);
+    assert_eq!(b.text().to_string(), "B\na\nc\n");
+    let (mut b, v) = setup("c\nB\na", &[(0, 0)]);
+    sort_lines_folded(&mut b, v);
+    assert_eq!(b.text().to_string(), "a\nB\nc");
+    reverse_lines(&mut b, v);
+    assert_eq!(b.text().to_string(), "c\nB\na");
 }
 #[test]
 fn swap_blocks_and_preserve_final_newline_and_column() {

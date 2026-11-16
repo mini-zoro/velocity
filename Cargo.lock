@@ -3056,6 +3056,7 @@ dependencies = [
  "encoding_rs",
  "notify",
  "proptest",
+ "rustix",
  "tempfile",
  "vel-buffer",
  "vel-config",

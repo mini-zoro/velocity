@@ -187,6 +187,10 @@ impl Editor {
                 let s = args["characters"]
                     .as_str()
                     .ok_or("insert needs characters")?;
+                if s == "\n" && self.settings.bool("trim_automatic_white_space", true) {
+                    self.newline_trimming_blank_lines();
+                    return Ok(true);
+                }
                 let values = self
                     .buffer
                     .view(self.id)
@@ -202,22 +206,98 @@ impl Editor {
                     .collect();
                 self.replace_selections(values, EditKind::InsertChars);
             }
+            "paste_and_indent" => {
+                let clipboard = normalize_line_breaks(&self.clipboard);
+                let whole_lines = last_copy(&clipboard).is_some_and(|c| c.whole_lines);
+                let selection = self.buffer.view(self.id).sel().clone();
+                let mut edits = Vec::new();
+                let mut seen = std::collections::BTreeSet::new();
+                for r in selection.iter() {
+                    let row = self.text.byte_to_line(r.begin());
+                    let start = self.text.line_to_byte(row);
+                    let line = self.text.line(row).to_string();
+                    let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+                    if whole_lines && r.empty() {
+                        // Above the caret's line, at that line's indentation.
+                        if seen.insert(start) {
+                            edits.push((start..start, reindent_block(&clipboard, indent, false)));
+                        }
+                        continue;
+                    }
+                    // At the caret: inside the indentation the destination indentation is what
+                    // precedes the caret; the first pasted line keeps its place on the line.
+                    let before = &line[..(r.begin() - start).min(line.len())];
+                    let at_indent = before.trim_start_matches([' ', '\t']).is_empty();
+                    let dest = if at_indent { before } else { indent };
+                    edits.push((r.to_range(), reindent_block(&clipboard, dest, true)));
+                }
+                self.apply_edits(edits, None, EditKind::Paste);
+            }
             "paste" => {
-                let count = self.buffer.view(self.id).sel().len();
-                let lines: Vec<_> = self.clipboard.split('\n').collect();
+                // Pasted text uses the buffer's LF line breaks whatever the source used.
+                let clipboard = normalize_line_breaks(&self.clipboard);
+                let selection = self.buffer.view(self.id).sel().clone();
+                let count = selection.len();
+                let copy = last_copy(&clipboard);
+                let parts = copy
+                    .as_ref()
+                    .map(|c| c.parts.clone())
+                    .filter(|parts| parts.len() == count);
+                if copy.as_ref().is_some_and(|c| c.whole_lines)
+                    && selection.iter().all(vel_buffer::Region::empty)
+                {
+                    // Whole lines copied without a selection go above each caret's line, and the
+                    // carets stay with their text.
+                    let mut edits = Vec::new();
+                    for (i, r) in selection.iter().enumerate() {
+                        let line = self.text.byte_to_line(r.b);
+                        let start = self.text.line_to_byte(line);
+                        let value = parts.as_ref().map_or(clipboard.as_str(), |p| &p[i]);
+                        if edits
+                            .last()
+                            .is_some_and(|(at, _): &(usize, String)| *at == start)
+                        {
+                            continue;
+                        }
+                        edits.push((start, value.to_owned()));
+                    }
+                    let mut shift = 0;
+                    let mut regions = Vec::new();
+                    let mut k = 0;
+                    for r in selection.iter() {
+                        while k < edits.len() && edits[k].0 <= r.b {
+                            shift += edits[k].1.len();
+                            k += 1;
+                        }
+                        regions.push(vel_buffer::Region::caret(r.b + shift));
+                    }
+                    let owned = edits.into_iter().map(|(at, v)| (at..at, v)).collect();
+                    self.apply_edits(
+                        owned,
+                        Some(Selection::from_regions(regions)),
+                        EditKind::Paste,
+                    );
+                    return Ok(true);
+                }
+                if let Some(parts) = parts.filter(|_| count > 1) {
+                    let values = parts
+                        .into_iter()
+                        .map(|s| {
+                            let n = s.len();
+                            (s, n..n)
+                        })
+                        .collect();
+                    self.replace_selections(values, EditKind::Paste);
+                    return Ok(true);
+                }
+                let lines: Vec<_> = clipboard.split('\n').collect();
                 let values: Vec<_> = if count > 1 && lines.len() == count {
                     lines
                         .iter()
                         .map(|s| ((*s).to_owned(), s.len()..s.len()))
                         .collect()
                 } else {
-                    vec![
-                        (
-                            self.clipboard.clone(),
-                            self.clipboard.len()..self.clipboard.len()
-                        );
-                        count
-                    ]
+                    vec![(clipboard.clone(), clipboard.len()..clipboard.len()); count]
                 };
                 self.replace_selections(values, EditKind::Paste);
             }
@@ -322,6 +402,41 @@ impl Editor {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+    /// Breaks the line at every selection like `insert "\n"`, but a caret alone on a line that
+    /// holds only indentation (typically left by the previous auto-indent) leaves that line
+    /// empty instead of keeping trailing white space (`trim_automatic_white_space`).
+    fn newline_trimming_blank_lines(&mut self) {
+        let selection = self.buffer.view(self.id).sel().clone();
+        let mut delta = 0isize;
+        let mut regions = Vec::new();
+        let mut owned = Vec::new();
+        for r in selection.iter() {
+            let (text, relative) = self.newline(r);
+            let mut range = r.to_range();
+            let row = self.text.byte_to_line(r.b);
+            let alone = selection
+                .iter()
+                .filter(|o| {
+                    self.text.byte_to_line(o.begin()) == row
+                        || self.text.byte_to_line(o.end()) == row
+                })
+                .count()
+                == 1;
+            if r.empty() && alone {
+                let start = self.text.line_to_byte(row);
+                let line = self.text.line(row).to_string();
+                if !line.is_empty() && line.trim_matches([' ', '\t']).is_empty() {
+                    range = start..start + line.len();
+                }
+            }
+            let begin = (range.start as isize + delta) as usize;
+            regions.push(Region::new(begin + relative.start, begin + relative.end));
+            delta += text.len() as isize - range.len() as isize;
+            owned.push((range, text));
+        }
+        let after = selection_primary(regions, selection.primary_index());
+        self.apply_edits(owned, Some(after), EditKind::InsertChars);
     }
     fn newline(&self, r: Region) -> (String, Range<usize>) {
         let row = self.text.byte_to_line(r.begin());
@@ -490,13 +605,11 @@ impl Editor {
                 ));
             }
         }
-        // A mixed selection is commented uniformly; a fully commented one is uncommented.
+        // A mixed selection is commented uniformly; a fully commented one is uncommented. Blank
+        // lines are never commented, so they do not count either way.
         let remove = rows.iter().all(|(row, prefix)| {
-            self.text
-                .line(*row)
-                .to_string()
-                .trim_start()
-                .starts_with(prefix.trim_end())
+            let line = self.text.line(*row).to_string();
+            line.trim().is_empty() || line.trim_start().starts_with(prefix.trim_end())
         });
         for (row, prefix) in rows {
             let line = self.text.line(row).to_string();
@@ -703,4 +816,91 @@ pub(crate) fn selection_primary(mut regions: Vec<Region>, primary: usize) -> Sel
         regions.push(r);
     }
     Selection::from_regions(regions)
+}
+
+/// The regions of the last copy or cut made in this process, kept while the clipboard still
+/// holds the text it produced.
+#[derive(Clone, Debug)]
+pub struct LastCopy {
+    text: String,
+    /// Text of each copied region.
+    pub parts: Vec<String>,
+    /// The regions were whole lines copied from empty selections.
+    pub whole_lines: bool,
+}
+thread_local! {
+    static LAST_COPY: std::cell::RefCell<Option<LastCopy>> = const { std::cell::RefCell::new(None) };
+}
+/// Records a copy or cut that put `text` on the clipboard.
+pub fn remember_copy(text: &str, parts: Vec<String>, whole_lines: bool) {
+    LAST_COPY.with(|c| {
+        *c.borrow_mut() = Some(LastCopy {
+            text: normalize_line_breaks(text),
+            parts,
+            whole_lines,
+        })
+    });
+}
+/// The last copy, if the (normalized) clipboard still holds its text.
+pub fn last_copy(clipboard: &str) -> Option<LastCopy> {
+    LAST_COPY.with(|c| c.borrow().clone().filter(|c| c.text == clipboard))
+}
+/// Converts CRLF and lone CR line breaks to LF.
+pub fn normalize_line_breaks(text: &str) -> String {
+    if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Re-bases the indentation of pasted `text` onto `dest`: the whitespace prefix shared by its
+/// non-blank lines is replaced by `dest`, and blank lines become empty. With `inline` the first
+/// line continues the destination line at the caret, so it gets no prefix, and it only counts
+/// towards the shared prefix when it starts with whitespace (it was copied from a line start).
+pub fn reindent_block(text: &str, dest: &str, inline: bool) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let first_counts = !inline || lines[0].starts_with([' ', '\t']);
+    let mut base: Option<&str> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if (i == 0 && !first_counts) || line.trim().is_empty() {
+            continue;
+        }
+        let prefix = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+        base = Some(match base {
+            None => prefix,
+            Some(b) => {
+                let common = b
+                    .bytes()
+                    .zip(prefix.bytes())
+                    .take_while(|(x, y)| x == y)
+                    .count();
+                &b[..common]
+            }
+        });
+    }
+    let base = base.unwrap_or("");
+    let strip = |line: &str| -> String {
+        line.strip_prefix(base)
+            .unwrap_or_else(|| line.trim_start_matches([' ', '\t']))
+            .to_owned()
+    };
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if inline && i == 0 {
+                if first_counts {
+                    strip(line)
+                } else {
+                    (*line).to_owned()
+                }
+            } else if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{dest}{}", strip(line))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

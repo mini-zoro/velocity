@@ -54,6 +54,20 @@ pub struct DragSelect {
     scrolled: Option<Instant>,
 }
 
+/// The character under view point `point`, given the nearest boundary `at`: the boundary before
+/// `at` when the pointer is on the left half of the preceding character of the same row.
+fn under_pointer(view: &View, editor: &Editor, point: Point, at: usize) -> usize {
+    if at == 0 {
+        return at;
+    }
+    let prev = editor.text.prev_grapheme_boundary(at);
+    let (here, before) = (view.rect_at(editor, at), view.rect_at(editor, prev));
+    if before.y == here.y && here.x > point.x {
+        prev
+    } else {
+        at
+    }
+}
 /// Text byte for a unit at `at`, as a non-directional region.
 fn unit_at(editor: &mut Editor, unit: Unit, at: usize) -> Region {
     match unit {
@@ -62,7 +76,7 @@ fn unit_at(editor: &mut Editor, unit: Unit, at: usize) -> Region {
             Region::caret(at)
         }
         Unit::Word => {
-            editor.select_word(at);
+            editor.select_word_under(at);
             let r = editor.regions()[0];
             Region::new(r.begin(), r.end())
         }
@@ -90,6 +104,9 @@ impl DragSelect {
         let base = Selection::from_regions(editor.regions());
         let origin = if extend && combine == Combine::Replace && unit == Unit::Char {
             Region::caret(editor.anchor)
+        } else if unit == Unit::Word {
+            let at = under_pointer(view, editor, point, at);
+            unit_at(editor, unit, at)
         } else {
             unit_at(editor, unit, at)
         };
@@ -116,7 +133,10 @@ impl DragSelect {
         let regions = if self.column {
             self.column_regions(view, editor, point)
         } else {
-            let at = view.hit_test(editor, point);
+            let mut at = view.hit_test(editor, point);
+            if self.unit == Unit::Word {
+                at = under_pointer(view, editor, point, at);
+            }
             let current = unit_at(editor, self.unit, at);
             vec![if current.begin() >= self.origin.begin() {
                 Region::new(self.origin.begin(), current.end())
@@ -356,6 +376,43 @@ mod tests {
         let backward = at(&view, &workspace, 0, 2); // inside "alpha"
         drag.update(&view, workspace.editor_mut(), backward);
         assert_eq!(ranges(&workspace), vec![(10, 0)]);
+    }
+    #[test]
+    fn double_click_selects_the_character_run_under_the_pointer() {
+        let (mut workspace, view) = setup("foo bar\n");
+        // Right half of the last "o": the nearest boundary is after it, the word is still "foo".
+        let o = at(&view, &workspace, 0, 2);
+        let press = Point {
+            x: o.x + view.cell * 0.7,
+            y: o.y,
+        };
+        let byte = view.hit_test(workspace.editor(), press);
+        assert_eq!(byte, 3);
+        DragSelect::begin(
+            &view,
+            workspace.editor_mut(),
+            press,
+            byte,
+            Unit::Word,
+            Combine::Replace,
+            false,
+            false,
+        );
+        assert_eq!(ranges(&workspace), vec![(0, 3)]);
+        // On the space itself the run of spaces is selected.
+        let space = at(&view, &workspace, 0, 3);
+        let byte = view.hit_test(workspace.editor(), space);
+        DragSelect::begin(
+            &view,
+            workspace.editor_mut(),
+            space,
+            byte,
+            Unit::Word,
+            Combine::Replace,
+            false,
+            false,
+        );
+        assert_eq!(ranges(&workspace), vec![(3, 4)]);
     }
     #[test]
     fn triple_click_drag_extends_by_lines() {

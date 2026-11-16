@@ -88,6 +88,11 @@ pub struct Editor {
     /// Window UI state mirrored for keymap contexts (`panel_visible`, `overlay_visible`).
     pub ui_panel_visible: bool,
     pub ui_overlay_visible: bool,
+    /// Name of the visible panel (`find`, `replace`, `incremental_find`, `find_in_files`,
+    /// `output.find_results`, `output.exec`, `input`), for the `panel` key binding context.
+    pub ui_panel: &'static str,
+    /// Whether keyboard focus is in the panel, for the `panel_has_focus` context.
+    pub ui_panel_focused: bool,
     pub actions: Vec<(String, Value)>,
     pub revision: u64,
 }
@@ -199,6 +204,8 @@ impl Editor {
             clipboard: String::new(),
             ui_panel_visible: false,
             ui_overlay_visible: false,
+            ui_panel: "",
+            ui_panel_focused: false,
             actions: Vec::new(),
             revision: 0,
         }
@@ -811,7 +818,16 @@ impl Editor {
             at,
         )]));
     }
+    /// Selects the word at caret position `at` (a caret right after a word takes that word).
     pub fn select_word(&mut self, at: usize) {
+        self.select_word_impl(at, false);
+    }
+    /// Selects the word, or run of spaces or punctuation, under the pointer: the character that
+    /// starts at `at`, for double clicks.
+    pub fn select_word_under(&mut self, at: usize) {
+        self.select_word_impl(at, true);
+    }
+    fn select_word_impl(&mut self, at: usize, under: bool) {
         self.set_caret(at, false);
         if self.text.line_len_bytes(self.text.byte_to_line(self.caret)) >= crate::large::LONG_LINE {
             if self.layout.borrow().total() == 0 {
@@ -835,6 +851,11 @@ impl Editor {
                 .borrow()
                 .long_motion(&self.text, self.caret, true, true);
             self.set_selection(Selection::from_regions([Region::new(a, b)]));
+            return;
+        }
+        if under {
+            let word = ops::word_region(&self.buffer, self.id, self.caret);
+            self.set_selection(Selection::from_regions([word]));
             return;
         }
         ops::expand_selection(&mut self.buffer, self.id, ops::ExpandTo::Word);
@@ -910,6 +931,9 @@ impl Host for Editor {
     fn set_clipboard(&mut self, text: &str) {
         self.clipboard = text.into();
     }
+    fn set_clipboard_regions(&mut self, parts: Vec<String>, whole_lines: bool) {
+        crate::editing::remember_copy(&self.clipboard, parts, whole_lines);
+    }
     fn action(&mut self, name: &str, args: &Value) -> Result<(), String> {
         self.actions.push((name.into(), args.clone()));
         Ok(())
@@ -976,6 +1000,8 @@ impl ContextProvider for EditorContext<'_> {
             "auto_complete_visible" => vec![json!(e.completion.visible())],
             "overlay_visible" => vec![json!(e.ui_overlay_visible)],
             "panel_visible" => vec![json!(e.ui_panel_visible)],
+            "panel" => vec![json!(e.ui_panel)],
+            "panel_has_focus" => vec![json!(e.ui_panel_focused)],
             "is_recording_macro" => vec![json!(e.registry.is_recording())],
             _ => vec![],
         }
@@ -1320,6 +1346,144 @@ mod keymap_tests {
             .set(Layer::View, "auto_match_enabled", json!(false));
         editor.sync();
         assert!(!editor.key(&Key::parse("(").unwrap()).unwrap());
+    }
+    fn press(editor: &mut Editor, keys: &str) {
+        for key in keys.split(' ') {
+            editor.key(&Key::parse(key).unwrap()).unwrap();
+        }
+    }
+    fn select(editor: &mut Editor, regions: &[(usize, usize)]) {
+        editor.set_selection(Selection::from_regions(
+            regions.iter().map(|&(a, b)| Region::new(a, b)),
+        ));
+    }
+    #[test]
+    fn pairing_follows_the_surrounding_text_wraps_selections_and_deletes_empty_pairs() {
+        let mut editor = Editor::new(Text::from("don\nfoo;\nfoo bar\nabc\n"));
+        select(&mut editor, &[(3, 3)]);
+        // After a letter the quote is not paired: the key falls through to plain text input.
+        assert!(!editor.key(&Key::parse("'").unwrap()).unwrap());
+        select(&mut editor, &[(7, 7)]);
+        press(&mut editor, "(");
+        assert_eq!(editor.text.line(1).to_string(), "foo();");
+        press(&mut editor, "backspace");
+        assert_eq!(
+            editor.text.line(1).to_string(),
+            "foo;",
+            "backspace deletes the pair"
+        );
+        select(&mut editor, &[(12, 12)]);
+        press(&mut editor, "(");
+        assert_eq!(editor.text.line(2).to_string(), "foo() bar");
+        let abc = editor.text.line_to_byte(3);
+        select(&mut editor, &[(abc, abc + 3)]);
+        press(&mut editor, "[");
+        assert_eq!(
+            editor.text.line(3).to_string(),
+            "[abc]",
+            "a selection is wrapped"
+        );
+    }
+    #[test]
+    fn line_editing_keys_match_the_macos_defaults() {
+        let mut editor = Editor::new(Text::from("\tone\ntwo\nthree\n"));
+        select(&mut editor, &[(2, 2)]);
+        press(&mut editor, "super+enter");
+        assert_eq!(editor.text.to_string(), "\tone\n\t\ntwo\nthree\n");
+        assert_eq!(editor.caret, 6);
+        editor.run("undo", &json!({})).unwrap();
+        select(&mut editor, &[(2, 2)]);
+        press(&mut editor, "super+shift+enter");
+        assert_eq!(editor.text.to_string(), "\t\n\tone\ntwo\nthree\n");
+        assert_eq!(editor.caret, 1);
+        editor.run("undo", &json!({})).unwrap();
+        select(&mut editor, &[(6, 6)]);
+        press(&mut editor, "ctrl+shift+k");
+        assert_eq!(editor.text.to_string(), "\tone\nthree\n");
+        select(&mut editor, &[(7, 7)]);
+        press(&mut editor, "super+backspace");
+        assert_eq!(editor.text.to_string(), "\tone\nree\n");
+        select(&mut editor, &[(2, 2)]);
+        press(&mut editor, "super+k super+k");
+        assert_eq!(editor.text.to_string(), "\to\nree\n");
+        // ⌘⇧J joins; ⌘J alone is a chord prefix.
+        select(&mut editor, &[(0, 0)]);
+        press(&mut editor, "super+shift+j");
+        assert_eq!(editor.text.to_string(), "\to ree\n");
+        // Tab with a multi-line selection indents instead of replacing it.
+        let mut editor = Editor::new(Text::from("aaa\nbbb\nccc\n"));
+        select(&mut editor, &[(0, 8)]);
+        press(&mut editor, "tab");
+        assert_eq!(editor.text.to_string(), "\taaa\n\tbbb\nccc\n");
+        // ⌘← goes to the indentation first, then to column zero.
+        let mut editor = Editor::new(Text::from("    foo"));
+        select(&mut editor, &[(7, 7)]);
+        press(&mut editor, "super+left");
+        assert_eq!(editor.caret, 4);
+        press(&mut editor, "super+left");
+        assert_eq!(editor.caret, 0);
+    }
+    #[test]
+    fn whole_line_copies_paste_above_the_caret_line_and_line_breaks_are_normalized() {
+        let mut editor = Editor::new(Text::from("one\ntwo\n"));
+        select(&mut editor, &[(1, 1)]);
+        editor.run("copy", &json!({})).unwrap();
+        assert_eq!(editor.clipboard, "one\n");
+        select(&mut editor, &[(5, 5)]);
+        editor.run("paste", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "one\none\ntwo\n");
+        assert_eq!(editor.regions(), [Region::caret(9)]);
+        // Copies from several carets go one per caret.
+        let mut editor = Editor::new(Text::from("a\nb\nx\ny\n"));
+        select(&mut editor, &[(0, 1), (2, 3)]);
+        editor.run("copy", &json!({})).unwrap();
+        select(&mut editor, &[(5, 5), (7, 7)]);
+        editor.run("paste", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "a\nb\nxa\nyb\n");
+        // Text from elsewhere with CR or CRLF breaks is pasted with LF.
+        let mut editor = Editor::new(Text::from(""));
+        editor.clipboard = "a\r\nb\rc".into();
+        editor.run("paste", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "a\nb\nc");
+    }
+    #[test]
+    fn repeated_backspace_is_undone_at_once() {
+        let mut editor = Editor::new(Text::from("hello"));
+        select(&mut editor, &[(5, 5)]);
+        press(&mut editor, "backspace backspace backspace");
+        assert_eq!(editor.text.to_string(), "he");
+        editor.run("undo", &json!({})).unwrap();
+        assert_eq!(editor.text.to_string(), "hello");
+    }
+    #[test]
+    fn enter_on_an_indentation_only_line_leaves_it_empty() {
+        let mut editor = Editor::new(Text::from("\tfoo"));
+        select(&mut editor, &[(4, 4)]);
+        editor.run("insert", &json!({"characters": "\n"})).unwrap();
+        editor.run("insert", &json!({"characters": "\n"})).unwrap();
+        assert_eq!(editor.text.to_string(), "\tfoo\n\n\t");
+        assert_eq!(editor.caret, 7);
+        editor
+            .settings
+            .set(Layer::View, "trim_automatic_white_space", json!(false));
+        editor.sync();
+        editor.run("insert", &json!({"characters": "\n"})).unwrap();
+        assert_eq!(editor.text.to_string(), "\tfoo\n\n\t\n\t");
+    }
+    #[test]
+    fn paste_and_indent_rebases_the_pasted_indentation() {
+        let mut editor = Editor::new(Text::from("fn f() {\n    \n}\n"));
+        select(&mut editor, &[(13, 13)]);
+        editor.clipboard = "if a {\n    b();\n}".into();
+        editor.run("paste_and_indent", &json!({})).unwrap();
+        assert_eq!(
+            editor.text.to_string(),
+            "fn f() {\n    if a {\n        b();\n    }\n}\n"
+        );
+        assert_eq!(
+            crate::editing::reindent_block("\t\tx\n\t\t\ty\n", "  ", false),
+            "  x\n  \ty\n"
+        );
     }
     #[test]
     fn composition_preview_does_not_change_buffer_and_commit_targets_every_caret() {

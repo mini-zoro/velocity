@@ -1697,10 +1697,12 @@ mod tests {
         )
         .unwrap();
         let project = dir.path().join("test.sublime-project");
-        std::fs::write(&project, "{\"settings\":{\"tab_size\":6}}").unwrap();
+        std::fs::write(&project, "{\"settings\":{\"tab_size\":6,\"rulers\":[72]}}").unwrap();
         let mut workspace =
             Workspace::new(Text::new(), Some(dir.path().into()), Some(project), false).unwrap();
-        assert_eq!(workspace.editor().preferences.tab_size, 6);
+        // Project settings apply, but syntax-specific settings override them, like Sublime.
+        assert_eq!(workspace.editor().preferences.rulers, vec![72]);
+        assert_eq!(workspace.editor().preferences.tab_size, 3);
         assert_eq!(workspace.editor().preferences.font_size, 16.);
         assert!(
             matches!(workspace.editor_mut().resolve_key(&Key::parse("super+d").unwrap()),Resolution::Command(i) if i.command=="insert")

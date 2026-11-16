@@ -204,3 +204,98 @@ fn watcher_observes_atomic_replacement_with_metadata_fallback() {
     }
     panic!("file watcher did not observe atomic replacement");
 }
+
+#[cfg(unix)]
+#[test]
+fn new_files_get_the_umask_and_atomic_saves_keep_the_file_identity() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    // `File::create` applies the process umask to 0o666, which is what a new save must get.
+    let reference = dir.path().join("reference");
+    std::fs::File::create(&reference).unwrap();
+    let expected = std::fs::metadata(&reference).unwrap().permissions().mode() & 0o777;
+    for atomic in [false, true] {
+        let path = dir.path().join(format!("new-{atomic}"));
+        save(&path, &Text::from("x"), &Format::default(), atomic).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, expected, "atomic {atomic}");
+    }
+    // A plain file is replaced atomically: a new inode with the old permissions.
+    let plain = dir.path().join("plain");
+    std::fs::write(&plain, "a").unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let inode = std::fs::metadata(&plain).unwrap().ino();
+    save(&plain, &Text::from("b"), &Format::default(), true).unwrap();
+    let metadata = std::fs::metadata(&plain).unwrap();
+    assert_ne!(metadata.ino(), inode);
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    // Hard links stay shared.
+    let linked = dir.path().join("linked");
+    let other = dir.path().join("other-name");
+    std::fs::write(&linked, "a").unwrap();
+    std::fs::hard_link(&linked, &other).unwrap();
+    save(&linked, &Text::from("both"), &Format::default(), true).unwrap();
+    assert_eq!(std::fs::read(&other).unwrap(), b"both");
+    // Extended attributes (Finder tags, quarantine) survive.
+    let tagged = dir.path().join("tagged");
+    std::fs::write(&tagged, "a").unwrap();
+    if rustix::fs::setxattr(
+        &tagged,
+        "org.velocity.test",
+        b"kept",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .is_ok()
+    {
+        let inode = std::fs::metadata(&tagged).unwrap().ino();
+        save(&tagged, &Text::from("b"), &Format::default(), true).unwrap();
+        assert_eq!(std::fs::metadata(&tagged).unwrap().ino(), inode);
+        let mut value = [0; 8];
+        let len = rustix::fs::getxattr(&tagged, "org.velocity.test", &mut value[..]).unwrap();
+        assert_eq!(&value[..len], b"kept");
+        assert_eq!(std::fs::read(&tagged).unwrap(), b"b");
+    }
+    // Writing in place keeps the inode too, and a read-only file is not silently replaced.
+    let direct = dir.path().join("direct");
+    std::fs::write(&direct, "a").unwrap();
+    let inode = std::fs::metadata(&direct).unwrap().ino();
+    save(&direct, &Text::from("b"), &Format::default(), false).unwrap();
+    assert_eq!(std::fs::metadata(&direct).unwrap().ino(), inode);
+    std::fs::set_permissions(&direct, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(&direct)
+        .is_err()
+    {
+        for atomic in [false, true] {
+            assert!(save(&direct, &Text::from("c"), &Format::default(), atomic).is_err());
+            assert_eq!(std::fs::read(&direct).unwrap(), b"b");
+        }
+    }
+    // Unrepresentable characters fail before an in-place write truncates the file.
+    let impossible = Format {
+        encoding: "windows-1252".into(),
+        ..Default::default()
+    };
+    std::fs::write(&plain, "kept").unwrap();
+    assert!(save(&plain, &Text::from("🦀"), &impossible, false).is_err());
+    assert_eq!(std::fs::read(&plain).unwrap(), b"kept");
+}
+
+#[test]
+fn trim_all_and_the_system_line_ending() {
+    assert_eq!(LineEnding::parse("system").unwrap(), LineEnding::Lf);
+    let mut buffer = Buffer::new("tabs\t \nideographic\u{3000}\nnbsp\u{a0}\n");
+    let id = buffer.new_view();
+    let tracker = ChangeTracker::new(&buffer);
+    let settings = EditorSettings {
+        trim_trailing_white_space_on_save: vel_config::json!("all"),
+        ..Default::default()
+    };
+    prepare_save(&mut buffer, id, &settings, &tracker);
+    // Only spaces and tabs are trailing white space; other space characters are content.
+    assert_eq!(
+        buffer.text().to_string(),
+        "tabs\nideographic\u{3000}\nnbsp\u{a0}\n"
+    );
+}

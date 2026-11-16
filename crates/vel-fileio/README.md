@@ -25,10 +25,12 @@ historic position mapping, so inserting lines does not make shifted unchanged li
 for trimming. Expired history conservatively marks uncertain lines as modified. `not_on_caret`
 excludes every caret line. A successful caller marks the buffer/tracker saved.
 
-`save` converts line endings and encodings into a buffered temporary file, rejects unrepresentable
-characters, syncs it, preserves existing permissions and atomically renames it. Symlinks keep
-pointing to their target. `atomic_save:false` still validates the encoding in a temp file before
-copying into the destination, but intentionally loses rename atomicity.
+`save` converts line endings and encodings, rejects unrepresentable characters before the
+destination changes and syncs the result. New files are created directly, so they get the process
+umask. With `atomic_save` an existing file is replaced by renaming a synced temporary file with
+the same permissions over it; files with other hard links, another owner, extended attributes or a
+read-only mode are written in place instead (a read-only file therefore fails to save). Symlinks
+keep pointing to their target. `atomic_save` defaults to false, as in Sublime.
 
 `Watcher` watches parent directories through notify, surviving atomic replacements. It also
 checks watched-file metadata when polled, because native notifications may be unavailable in

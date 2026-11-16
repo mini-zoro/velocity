@@ -378,16 +378,36 @@ pub fn move_by(
     });
     buffer.set_selection(id, selection);
 }
+/// Word for a caret: like [`word_at`], but a caret right after a word and not before another
+/// takes the word on its left (`foo|`, `foo| bar`, `foo|\n`), as ⌘D and the case commands do.
+fn caret_word(text: &Text, at: usize, s: &Settings) -> Region {
+    let after_word = prev(text, at).is_some_and(|c| class(c, s) == Class::Word);
+    let before_word = ch(text, at).is_some_and(|c| class(c, s) == Class::Word);
+    if after_word && !before_word {
+        word_at(text, text.prev_grapheme_boundary(at), s)
+    } else {
+        word_at(text, at, s)
+    }
+}
+/// The word, or run of whitespace or punctuation, that starts at or contains byte `at` — the
+/// character under the pointer for a double click.
+pub fn word_region(buffer: &Buffer, id: ViewId, at: usize) -> Region {
+    word_at(
+        buffer.text(),
+        at.min(buffer.text().len_bytes()),
+        &buffer.view(id).settings,
+    )
+}
 /// Moves to an absolute destination, optionally extending from the anchor.
 pub fn move_to(buffer: &mut Buffer, id: ViewId, target: MoveTo, extend: bool) {
-    // ST-BEHAVIOR: unverified [W3]: Bol is column zero; HardBol toggles indentation; Eol/HardEol coincide without layout wrapping.
+    // Bol is the smart line start (first non-blank, then column zero, like ⌘← and Home);
+    // HardBol is column zero. Eol/HardEol coincide without layout wrapping.
     let text = buffer.text();
     let v = buffer.view(id);
     let selection = v.sel().map(|r| {
         let row = text.byte_to_line(r.b);
         let b = match target {
-            MoveTo::Bol => text.line_to_byte(row),
-            MoveTo::HardBol => {
+            MoveTo::Bol => {
                 let first = first_nonblank(text, row);
                 if r.b == first {
                     text.line_to_byte(row)
@@ -395,6 +415,7 @@ pub fn move_to(buffer: &mut Buffer, id: ViewId, target: MoveTo, extend: bool) {
                     first
                 }
             }
+            MoveTo::HardBol => text.line_to_byte(row),
             MoveTo::Eol | MoveTo::HardEol => line_end(text, row),
             MoveTo::Bof => 0,
             MoveTo::Eof => text.len_bytes(),
@@ -428,6 +449,10 @@ pub fn expand_selection(buffer: &mut Buffer, id: ViewId, to: ExpandTo) {
     let text = buffer.text();
     let v = buffer.view(id);
     let selection = v.sel().map(|r| match to {
+        ExpandTo::Word if r.empty() => {
+            let word = caret_word(text, r.b, &v.settings);
+            r.directed(word.begin(), word.end())
+        }
         ExpandTo::Word => r.directed(
             word_at(text, r.begin(), &v.settings).begin(),
             word_at(
@@ -443,10 +468,13 @@ pub fn expand_selection(buffer: &mut Buffer, id: ViewId, to: ExpandTo) {
         ),
         ExpandTo::Line => {
             let lines = touched_lines(text, &Selection::from(r));
-            r.directed(
-                text.line_to_byte(*lines.first().expect("line")),
-                full_line_end(text, *lines.last().expect("line")),
-            )
+            let start = text.line_to_byte(*lines.first().expect("line"));
+            let mut end = full_line_end(text, *lines.last().expect("line"));
+            // Already whole lines: take the next one too, so repeated ⌘L keeps going down.
+            if !r.empty() && r.begin() == start && r.end() == end && end < text.len_bytes() {
+                end = full_line_end(text, text.byte_to_line(end));
+            }
+            r.directed(start, end)
         }
         ExpandTo::Indentation => {
             // ST-BEHAVIOR: unverified [L2]: include adjacent nonblank lines with indentation >= the seed, plus blank lines between them.
@@ -583,7 +611,7 @@ fn find_seed(buffer: &Buffer, id: ViewId) -> (String, bool, Region) {
     let v = buffer.view(id);
     let r = v.sel().primary().unwrap_or_default();
     if r.empty() {
-        let r = word_at(buffer.text(), r.b, &v.settings);
+        let r = caret_word(buffer.text(), r.b, &v.settings);
         (buffer.text().slice(r.to_range()).to_string(), true, r)
     } else {
         let needle = buffer.text().slice(r.to_range()).to_string();
@@ -603,11 +631,29 @@ pub fn find_under_expand(buffer: &mut Buffer, id: ViewId) -> bool {
     }
     let v = buffer.view(id);
     if v.sel().primary().is_some_and(Region::empty) {
-        buffer.set_selection(id, Selection::from(seed));
+        // Every caret expands to its own word; selected regions stay.
+        let words: Vec<_> = v
+            .sel()
+            .iter()
+            .map(|r| {
+                if r.empty() {
+                    caret_word(buffer.text(), r.b, &v.settings)
+                } else {
+                    r
+                }
+            })
+            .collect();
+        let next = words.iter().map(|r| r.end()).max().unwrap_or(seed.end());
+        let selection = if words.len() > 1 {
+            Selection::from_regions(words)
+        } else {
+            Selection::from(seed)
+        };
+        buffer.set_selection(id, selection);
         buffer.view_mut(id).find = Some(FindState {
             needle,
             whole_word: whole,
-            next: seed.end(),
+            next,
             at: buffer.change_id(),
         });
         return true;
@@ -811,18 +857,39 @@ fn blocks(lines: BTreeSet<usize>) -> Vec<Range<usize>> {
     }
     result
 }
-fn reorder(buffer: &mut Buffer, id: ViewId, sort: bool) -> ChangeId {
-    // ST-BEHAVIOR: unverified [L5]: reorder contiguous touched blocks independently, preserve terminal LF, sort by Rust Unicode scalar order.
+/// How [`reorder`] permutes a block of lines.
+#[derive(Clone, Copy)]
+enum Order {
+    Sort { case_sensitive: bool },
+    Reverse,
+}
+fn reorder(buffer: &mut Buffer, id: ViewId, order: Order) -> ChangeId {
+    // Contiguous touched blocks are permuted independently and keep their terminal LF. Without a
+    // non-empty selection the whole buffer is permuted, leaving out the empty line after a final
+    // LF.
     let text = buffer.text();
-    let groups = blocks(touched_lines(text, buffer.view(id).sel()));
+    let selection = buffer.view(id).sel();
+    let groups = if selection.iter().all(Region::empty) {
+        let mut last = text.len_lines();
+        if last > 1 && text.line(last - 1).is_empty() {
+            last -= 1;
+        }
+        std::iter::once(0..last).collect()
+    } else {
+        blocks(touched_lines(text, selection))
+    };
     let edits = groups
         .into_iter()
         .map(|g| {
             let mut lines: Vec<_> = g.clone().map(|l| text.line(l).to_string()).collect();
-            if sort {
-                lines.sort();
-            } else {
-                lines.reverse();
+            match order {
+                Order::Sort {
+                    case_sensitive: true,
+                } => lines.sort(),
+                Order::Sort {
+                    case_sensitive: false,
+                } => lines.sort_by_cached_key(|l| l.to_lowercase()),
+                Order::Reverse => lines.reverse(),
             }
             let end = full_line_end(text, g.end - 1);
             let mut replacement = lines.join("\n");
@@ -834,13 +901,30 @@ fn reorder(buffer: &mut Buffer, id: ViewId, sort: bool) -> ChangeId {
         .collect();
     commit_owned(buffer, id, edits)
 }
-/// Sorts each contiguous block of touched lines.
+/// Sorts each contiguous block of touched lines (the whole buffer without a selection) by
+/// Unicode scalar order.
 pub fn sort_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    reorder(buffer, id, true)
+    reorder(
+        buffer,
+        id,
+        Order::Sort {
+            case_sensitive: true,
+        },
+    )
 }
-/// Reverses each contiguous block of touched lines.
+/// Like [`sort_lines`], ignoring case.
+pub fn sort_lines_folded(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    reorder(
+        buffer,
+        id,
+        Order::Sort {
+            case_sensitive: false,
+        },
+    )
+}
+/// Reverses each contiguous block of touched lines (the whole buffer without a selection).
 pub fn reverse_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    reorder(buffer, id, false)
+    reorder(buffer, id, Order::Reverse)
 }
 /// Joins touched lines, or a caret's line with its successor, inserting one space.
 pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
@@ -887,24 +971,88 @@ pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     }
     commit_owned(buffer, id, edits)
 }
-/// Duplicates each touched line once, including its LF when present.
-pub fn duplicate_line(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    // ST-BEHAVIOR: unverified [L7]: duplicate whole touched lines; unterminated last line gets an LF between copies; carets follow the original text through insertion bias.
+/// Opens an empty line above each caret's line, indented like that line, and moves the carets
+/// onto it (⇧⌘↩).
+pub fn add_line_before(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     let text = buffer.text();
-    let lines = touched_lines(text, buffer.view(id).sel());
-    let edits = lines
-        .into_iter()
-        .map(|l| {
-            let start = text.line_to_byte(l);
-            let end = full_line_end(text, l);
-            let mut s = text.slice(start..end).to_string();
-            if end == line_end(text, l) {
-                s.insert(0, '\n');
-            }
-            (end..end, s)
+    let rows: BTreeSet<usize> = buffer
+        .view(id)
+        .sel()
+        .iter()
+        .map(|r| text.byte_to_line(r.b))
+        .collect();
+    let mut edits = Vec::new();
+    let mut carets = Vec::new();
+    let mut shift = 0;
+    for row in rows {
+        let start = text.line_to_byte(row);
+        let indent = text.slice(start..first_nonblank(text, row)).to_string();
+        carets.push(Region::caret(start + shift + indent.len()));
+        shift += indent.len() + 1;
+        edits.push((start..start, format!("{indent}\n")));
+    }
+    let edit_list: Vec<_> = edits
+        .iter()
+        .map(|(range, text)| Edit {
+            range: range.clone(),
+            text,
         })
         .collect();
-    commit_owned(buffer, id, edits)
+    buffer.transact(
+        id,
+        EditKind::Other,
+        &edit_list,
+        Selection::from_regions(carets),
+    )
+}
+/// Duplicates selected text in place, or each caret's line once (including its LF), leaving the
+/// carets and selections on the second copy.
+pub fn duplicate_line(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    let text = buffer.text();
+    let selection = buffer.view(id).sel().clone();
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    let mut lines = BTreeSet::new();
+    for r in selection.iter() {
+        if r.empty() {
+            lines.insert(text.byte_to_line(r.b));
+        } else {
+            edits.push((r.begin()..r.begin(), text.slice(r.to_range()).to_string()));
+        }
+    }
+    for l in lines {
+        let start = text.line_to_byte(l);
+        let end = full_line_end(text, l);
+        let mut s = text.slice(start..end).to_string();
+        if end == line_end(text, l) {
+            s.push('\n');
+        }
+        edits.push((start..start, s));
+    }
+    edits.sort_by_key(|(r, _)| r.start);
+    let map = ChangeSet::new(
+        edits
+            .iter()
+            .map(|(r, s)| Change {
+                old_range: r.clone(),
+                new_len: s.len(),
+            })
+            .collect(),
+    );
+    // Insertions sit at or before each region, so everything moves onto the second copy.
+    let after = selection.map(|r| {
+        Region::new(
+            map.transform_point(r.a, Bias::Right),
+            map.transform_point(r.b, Bias::Right),
+        )
+    });
+    let edit_list: Vec<_> = edits
+        .iter()
+        .map(|(range, text)| Edit {
+            range: range.clone(),
+            text,
+        })
+        .collect();
+    buffer.transact(id, EditKind::Other, &edit_list, after)
 }
 fn swap_lines(buffer: &mut Buffer, id: ViewId, forward: bool) -> ChangeId {
     // ST-BEHAVIOR: unverified [L8]: move each touched block one LF line, preserve line termination and relative caret columns/direction; edge blocks stay put.
@@ -979,7 +1127,7 @@ fn case(buffer: &mut Buffer, id: ViewId, mode: u8) -> ChangeId {
     let v = buffer.view(id);
     let selection = Selection::from_regions(v.sel().iter().map(|r| {
         if r.empty() {
-            word_at(buffer.text(), r.b, &v.settings)
+            caret_word(buffer.text(), r.b, &v.settings)
         } else {
             r
         }
@@ -1369,7 +1517,7 @@ pub fn convert_ident_case(buffer: &mut Buffer, id: ViewId, style: IdentCase) -> 
     let view = buffer.view(id);
     let regions = Selection::from_regions(view.sel().iter().map(|r| {
         if r.empty() {
-            let word = word_at(buffer.text(), r.b, &view.settings);
+            let word = caret_word(buffer.text(), r.b, &view.settings);
             if buffer
                 .text()
                 .slice(word.to_range())
@@ -1575,7 +1723,7 @@ pub fn rot13(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     let view = buffer.view(id);
     let regions = Selection::from_regions(view.sel().iter().map(|r| {
         if r.empty() {
-            word_at(buffer.text(), r.b, &view.settings)
+            caret_word(buffer.text(), r.b, &view.settings)
         } else {
             r
         }

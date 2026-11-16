@@ -9,18 +9,23 @@
   "draw_white_space": "none",
   // Drag selected text with the mouse to move it; hold Option when releasing to copy.
   "drag_text": true,
+  // Pressing Enter on a line that only holds indentation leaves it empty.
+  "trim_automatic_white_space": true,
   "rulers": [],
   "ensure_newline_at_eof_on_save": false,
   "trim_trailing_white_space_on_save": false,
   "trim_only_modified_white_space": false,
-  "default_line_ending": "unix",
+  // "system" (LF on macOS), "unix" or "windows".
+  "default_line_ending": "system",
   "default_encoding": "UTF-8",
   "fallback_encoding": "Western (Windows 1252)",
   "scroll_past_end": false,
   "caret_style": "solid",
   "highlight_line": true,
   "auto_match_enabled": true,
-  "atomic_save": true,
+  // Write through a temporary file and rename it over the original. Even when true, files with
+  // hard links, another owner, extended attributes or a read-only mode are written in place.
+  "atomic_save": false,
   "folder_exclude_patterns": [
     ".git",
     "target"

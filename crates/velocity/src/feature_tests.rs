@@ -84,6 +84,15 @@ fn real_scopes_drive_quote_pairing_and_brackets_ignore_strings_comments() {
     assert_eq!(e.text.to_string(), source);
 }
 #[test]
+fn toggling_comments_ignores_blank_lines_when_deciding_to_uncomment() {
+    let mut e = editor("// a\n\n// b\n", "Rust");
+    e.set_selection(Selection::from_regions([Region::new(0, 10)]));
+    e.run("toggle_comment", &json!({})).unwrap();
+    assert_eq!(e.text.to_string(), "a\n\nb\n");
+    e.run("toggle_comment", &json!({})).unwrap();
+    assert_eq!(e.text.to_string(), "// a\n\n// b\n");
+}
+#[test]
 fn multi_cursor_comments_are_deduplicated_and_undoable() {
     let mut e = editor("fn a() {}\nfn b() {}\n", "Rust");
     e.set_selection(Selection::from_regions([

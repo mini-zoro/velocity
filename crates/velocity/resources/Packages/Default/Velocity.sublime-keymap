@@ -233,7 +233,7 @@
   },
   {
     "keys": [
-      "super+j"
+      "super+shift+j"
     ],
     "command": "join_lines"
   },
@@ -242,6 +242,104 @@
       "super+shift+d"
     ],
     "command": "duplicate_line"
+  },
+  {
+    "keys": [
+      "super+enter"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Add Line.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+shift+enter"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Add Line Before.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "ctrl+shift+k"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Line.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete to Hard BOL.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+delete"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete to Hard EOL.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete to Hard BOL.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+k",
+      "super+k"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete to Hard EOL.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "ctrl+k"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete to Hard EOL.sublime-macro"
+    }
+  },
+  {
+    "keys": [
+      "super+shift+v"
+    ],
+    "command": "paste_and_indent"
+  },
+  {
+    "keys": [
+      "f5"
+    ],
+    "command": "sort_lines",
+    "args": {
+      "case_sensitive": false
+    }
+  },
+  {
+    "keys": [
+      "ctrl+f5"
+    ],
+    "command": "sort_lines",
+    "args": {
+      "case_sensitive": true
+    }
   },
   {
     "keys": [
@@ -275,7 +373,7 @@
   },
   {
     "keys": [
-      "ctrl+alt+up"
+      "ctrl+shift+up"
     ],
     "command": "select_lines",
     "args": {
@@ -284,7 +382,7 @@
   },
   {
     "keys": [
-      "ctrl+alt+down"
+      "ctrl+shift+down"
     ],
     "command": "select_lines",
     "args": {
@@ -311,16 +409,6 @@
       "super+l"
     ],
     "command": "lower_case"
-  },
-  {
-    "keys": [
-      "super+k",
-      "super+b"
-    ],
-    "command": "toggle_setting",
-    "args": {
-      "setting": "gutter"
-    }
   },
   {
     "keys": [
@@ -687,14 +775,60 @@
       },
       {
         "key": "following_text",
-        "operator": "regex_match",
-        "operand": "\\s*([)\\]}].*)?",
+        "operator": "regex_contains",
+        "operand": "^(?:\t| |\\)|]|;|\\}|$)",
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "("
+    ],
+    "command": "insert_snippet",
+    "args": {
+      "contents": "(${0:$SELECTION})"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": false,
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Left Right.sublime-macro"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": true,
         "match_all": true
       },
       {
-        "key": "selector",
-        "operator": "not_equal",
-        "operand": "string, comment",
+        "key": "preceding_text",
+        "operator": "regex_contains",
+        "operand": "\\($",
+        "match_all": true
+      },
+      {
+        "key": "following_text",
+        "operator": "regex_contains",
+        "operand": "^\\)",
         "match_all": true
       }
     ]
@@ -746,14 +880,60 @@
       },
       {
         "key": "following_text",
-        "operator": "regex_match",
-        "operand": "\\s*([)\\]}].*)?",
+        "operator": "regex_contains",
+        "operand": "^(?:\t| |\\)|]|;|\\}|$)",
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "["
+    ],
+    "command": "insert_snippet",
+    "args": {
+      "contents": "[${0:$SELECTION}]"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": false,
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Left Right.sublime-macro"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": true,
         "match_all": true
       },
       {
-        "key": "selector",
-        "operator": "not_equal",
-        "operand": "string, comment",
+        "key": "preceding_text",
+        "operator": "regex_contains",
+        "operand": "\\[$",
+        "match_all": true
+      },
+      {
+        "key": "following_text",
+        "operator": "regex_contains",
+        "operand": "^\\]",
         "match_all": true
       }
     ]
@@ -805,14 +985,60 @@
       },
       {
         "key": "following_text",
-        "operator": "regex_match",
-        "operand": "\\s*([)\\]}].*)?",
+        "operator": "regex_contains",
+        "operand": "^(?:\t| |\\)|]|;|\\}|$)",
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "{"
+    ],
+    "command": "insert_snippet",
+    "args": {
+      "contents": "{${0:$SELECTION}}"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": false,
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Left Right.sublime-macro"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": true,
         "match_all": true
       },
       {
-        "key": "selector",
-        "operator": "not_equal",
-        "operand": "string, comment",
+        "key": "preceding_text",
+        "operator": "regex_contains",
+        "operand": "\\{$",
+        "match_all": true
+      },
+      {
+        "key": "following_text",
+        "operator": "regex_contains",
+        "operand": "^\\}",
         "match_all": true
       }
     ]
@@ -864,14 +1090,72 @@
       },
       {
         "key": "following_text",
-        "operator": "regex_match",
-        "operand": "\\s*([)\\]}].*)?",
+        "operator": "regex_contains",
+        "operand": "^(?:\t| |\\)|]|\\}|>|$)",
+        "match_all": true
+      },
+      {
+        "key": "preceding_text",
+        "operator": "not_regex_contains",
+        "operand": "[\"a-zA-Z0-9_]$",
         "match_all": true
       },
       {
         "key": "selector",
         "operator": "not_equal",
-        "operand": "string, comment",
+        "operand": "string",
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "\""
+    ],
+    "command": "insert_snippet",
+    "args": {
+      "contents": "\"${0:$SELECTION}\""
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": false,
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Left Right.sublime-macro"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": true,
+        "match_all": true
+      },
+      {
+        "key": "preceding_text",
+        "operator": "regex_contains",
+        "operand": "\"$",
+        "match_all": true
+      },
+      {
+        "key": "following_text",
+        "operator": "regex_contains",
+        "operand": "^\"",
         "match_all": true
       }
     ]
@@ -923,14 +1207,72 @@
       },
       {
         "key": "following_text",
-        "operator": "regex_match",
-        "operand": "\\s*([)\\]}].*)?",
+        "operator": "regex_contains",
+        "operand": "^(?:\t| |\\)|]|\\}|>|$)",
+        "match_all": true
+      },
+      {
+        "key": "preceding_text",
+        "operator": "not_regex_contains",
+        "operand": "[\"a-zA-Z0-9_]$",
         "match_all": true
       },
       {
         "key": "selector",
         "operator": "not_equal",
-        "operand": "string, comment",
+        "operand": "string",
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "'"
+    ],
+    "command": "insert_snippet",
+    "args": {
+      "contents": "'${0:$SELECTION}'"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": false,
+        "match_all": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "backspace"
+    ],
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Left Right.sublime-macro"
+    },
+    "context": [
+      {
+        "key": "setting.auto_match_enabled",
+        "operand": true
+      },
+      {
+        "key": "selection_empty",
+        "operand": true,
+        "match_all": true
+      },
+      {
+        "key": "preceding_text",
+        "operator": "regex_contains",
+        "operand": "'$",
+        "match_all": true
+      },
+      {
+        "key": "following_text",
+        "operator": "regex_contains",
+        "operand": "^'",
         "match_all": true
       }
     ]
@@ -1074,7 +1416,18 @@
       "alt+enter"
     ],
     "command": "find_all",
-    "args": {}
+    "args": {},
+    "context": [
+      {
+        "key": "panel_has_focus",
+        "operand": true
+      },
+      {
+        "key": "panel",
+        "operator": "not_equal",
+        "operand": "find_in_files"
+      }
+    ]
   },
   {
     "keys": [
@@ -1146,7 +1499,7 @@
   },
   {
     "keys": [
-      "ctrl+shift+h"
+      "super+alt+e"
     ],
     "command": "replace_next"
   },
@@ -1154,7 +1507,17 @@
     "keys": [
       "ctrl+alt+enter"
     ],
-    "command": "replace_all"
+    "command": "replace_all",
+    "context": [
+      {
+        "key": "panel",
+        "operand": "replace"
+      },
+      {
+        "key": "panel_has_focus",
+        "operand": true
+      }
+    ]
   },
   {
     "keys": [
@@ -1413,6 +1776,19 @@
     "keys": [
       "tab"
     ],
+    "command": "indent",
+    "context": [
+      {
+        "key": "text",
+        "operator": "regex_contains",
+        "operand": "\n"
+      }
+    ]
+  },
+  {
+    "keys": [
+      "tab"
+    ],
     "command": "next_field",
     "context": [
       {
@@ -1593,6 +1969,16 @@
     ],
     "command": "prev_misspelling"
   },
-  { "keys": ["super+f6"], "command": "focus_next_control" },
-  { "keys": ["super+shift+f6"], "command": "focus_previous_control" }
+  {
+    "keys": [
+      "super+f6"
+    ],
+    "command": "focus_next_control"
+  },
+  {
+    "keys": [
+      "super+shift+f6"
+    ],
+    "command": "focus_previous_control"
+  }
 ]

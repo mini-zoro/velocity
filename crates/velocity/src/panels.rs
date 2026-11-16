@@ -558,6 +558,16 @@ impl Panels {
         let editor = workspace.editor_mut();
         editor.ui_panel_visible = self.panel.is_some();
         editor.ui_overlay_visible = self.overlay.is_some();
+        editor.ui_panel = self.panel.map_or("", |panel| match panel {
+            Panel::Find => "find",
+            Panel::Replace => "replace",
+            Panel::Incremental => "incremental_find",
+            Panel::Files => "find_in_files",
+            Panel::Input => "input",
+            Panel::Output => "output.exec",
+            Panel::Results => "output.find_results",
+        });
+        editor.ui_panel_focused = self.panel.is_some() && self.panel_focused;
         let result = editor.resolve_key(key);
         self.sync_vintage_prompt(workspace, viewport)?;
         Ok(result)

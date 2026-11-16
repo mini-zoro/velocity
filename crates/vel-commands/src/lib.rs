@@ -4,7 +4,7 @@ mod text_ops;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use vel_buffer::{
-    Buffer, Change, ChangeSet, Edit, EditKind, MonospaceLayout, Region, Selection, ViewId,
+    Buffer, Edit, EditKind, MonospaceLayout, Region, Selection, ViewId,
     ops::{self, DeleteBy, ExpandTo, MoveTo, MoveUnit, Stops},
 };
 use vel_config::settings::EditorSettings;
@@ -29,6 +29,10 @@ pub trait Host {
     fn clipboard(&mut self) -> String;
     /// Writes clipboard contents.
     fn set_clipboard(&mut self, text: &str);
+    /// Records the regions the last copy or cut joined into the clipboard text, and whether they
+    /// were whole lines copied from empty selections, so a paste can distribute them or insert
+    /// them above the caret lines.
+    fn set_clipboard_regions(&mut self, _parts: Vec<String>, _whole_lines: bool) {}
     /// Executes a window/application action, including scrolling.
     fn action(&mut self, name: &str, args: &Value) -> Result<(), String>;
     /// Allows the view to supply language-aware edits and visual-line movement.
@@ -121,6 +125,8 @@ const TEXT: &[&str] = &[
     "sort_lines",
     "reverse_lines",
     "permute_lines",
+    "run_macro_file",
+    "paste_and_indent",
     "scroll_lines",
     "show_at_center",
 ];
@@ -335,6 +341,26 @@ impl Registry {
                 }
                 return Ok(());
             }
+            "run_macro_file" => {
+                let file = args["file"].as_str().ok_or("run_macro_file needs a file")?;
+                let name = file
+                    .rsplit('/')
+                    .next()
+                    .and_then(|n| n.strip_suffix(".sublime-macro"))
+                    .unwrap_or(file);
+                if name == "Add Line Before" {
+                    let (b, id) = host.buffer();
+                    ops::add_line_before(b, id);
+                    host.command_finished();
+                    return Ok(());
+                }
+                let commands = builtin_macro(name)
+                    .ok_or_else(|| format!("macro file {file} is not available"))?;
+                for (name, args) in commands {
+                    self.run_depth(name, &args, host, depth + 1)?;
+                }
+                return Ok(());
+            }
             "redo_or_repeat" => {
                 let (b, id) = host.buffer();
                 if b.redo(id) {
@@ -382,6 +408,31 @@ impl Registry {
         Ok(())
     }
 }
+/// Line-editing macros that key bindings name by their Default package file name
+/// (`res://Packages/Default/<name>.sublime-macro`).
+fn builtin_macro(name: &str) -> Option<Vec<(&'static str, Value)>> {
+    Some(match name {
+        "Add Line" => vec![
+            ("move_to", json!({"to": "hardeol"})),
+            ("insert", json!({"characters": "\n"})),
+        ],
+        "Add Line in Braces" => vec![("insert", json!({"characters": "\n"}))],
+        "Delete Line" => vec![
+            ("expand_selection", json!({"to": "line"})),
+            ("left_delete", json!({})),
+        ],
+        "Delete to Hard BOL" | "Delete to BOL" => vec![
+            ("move_to", json!({"to": "hardbol", "extend": true})),
+            ("left_delete", json!({})),
+        ],
+        "Delete to Hard EOL" | "Delete to EOL" => vec![
+            ("move_to", json!({"to": "hardeol", "extend": true})),
+            ("right_delete", json!({})),
+        ],
+        "Delete Left Right" => vec![("left_delete", json!({})), ("right_delete", json!({}))],
+        _ => return None,
+    })
+}
 fn boolean(args: &Value, key: &str) -> bool {
     args[key].as_bool().unwrap_or(false)
 }
@@ -395,7 +446,8 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
     if matches!(name, "copy" | "cut") {
         let (buffer, id) = host.buffer();
         let mut selection = buffer.view(id).sel().clone();
-        if selection.iter().all(Region::empty) {
+        let whole_lines = selection.iter().all(Region::empty);
+        if whole_lines {
             let regions = selection.iter().map(|r| {
                 let row = buffer.text().byte_to_line(r.b);
                 Region::new(
@@ -409,28 +461,21 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
             });
             selection = Selection::from_regions(regions);
         }
-        let text = selection
+        let parts = selection
             .iter()
             .map(|r| buffer.text().slice(r.to_range()).to_string())
-            .collect::<Vec<_>>()
-            .join(
-                if selection.iter().all(|r| {
-                    buffer
-                        .text()
-                        .slice(r.to_range())
-                        .to_string()
-                        .ends_with('\n')
-                }) {
-                    ""
-                } else {
-                    "\n"
-                },
-            );
+            .collect::<Vec<_>>();
+        let text = parts.join(if parts.iter().all(|p| p.ends_with('\n')) {
+            ""
+        } else {
+            "\n"
+        });
         if name == "cut" {
             buffer.set_selection(id, selection);
             ops::insert(buffer, id, "");
         }
         host.set_clipboard(&text);
+        host.set_clipboard_regions(parts, whole_lines);
         return Ok(());
     }
     let clipboard = if name == "paste" {
@@ -636,7 +681,9 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
         "transpose" => {
             ops::transpose(b, id);
         }
-        "sort_lines" if !args["case_sensitive"].as_bool().unwrap_or(true) => sort_folded(b, id),
+        "sort_lines" if !args["case_sensitive"].as_bool().unwrap_or(true) => {
+            ops::sort_lines_folded(b, id);
+        }
         "sort_lines" => {
             ops::sort_lines(b, id);
         }
@@ -687,70 +734,6 @@ fn replace(
         &edits,
         selection_with_primary(regions, selection.primary_index()),
     );
-}
-fn sort_folded(b: &mut Buffer, id: ViewId) {
-    let mut rows = std::collections::BTreeSet::new();
-    for r in b.view(id).sel().iter() {
-        let last = if !r.empty() && b.text().line_to_byte(b.text().byte_to_line(r.end())) == r.end()
-        {
-            b.text().byte_to_line(r.end()).saturating_sub(1)
-        } else {
-            b.text().byte_to_line(r.end())
-        };
-        rows.extend(b.text().byte_to_line(r.begin())..=last);
-    }
-    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
-    for row in rows {
-        if let Some(last) = groups.last_mut()
-            && last.end == row
-        {
-            last.end += 1;
-        } else {
-            groups.push(row..row + 1);
-        }
-    }
-    let owned: Vec<_> = groups
-        .into_iter()
-        .map(|g| {
-            let start = b.text().line_to_byte(g.start);
-            let end = if g.end < b.text().len_lines() {
-                b.text().line_to_byte(g.end)
-            } else {
-                b.text().len_bytes()
-            };
-            let old = b.text().slice(start..end).to_string();
-            let mut lines: Vec<_> = old.strip_suffix('\n').unwrap_or(&old).split('\n').collect();
-            lines.sort_by_key(|s| s.to_lowercase());
-            let mut new = lines.join("\n");
-            if old.ends_with('\n') {
-                new.push('\n');
-            }
-            (start..end, new)
-        })
-        .collect();
-    let changes = ChangeSet::new(
-        owned
-            .iter()
-            .map(|(range, text)| Change {
-                old_range: range.clone(),
-                new_len: text.len(),
-            })
-            .collect(),
-    );
-    let selection = Selection::from_regions(b.view(id).sel().iter().map(|r| {
-        Region::new(
-            changes.transform_point(r.a, vel_buffer::Bias::Right),
-            changes.transform_point(r.b, vel_buffer::Bias::Right),
-        )
-    }));
-    let edits: Vec<_> = owned
-        .iter()
-        .map(|(range, text)| Edit {
-            range: range.clone(),
-            text,
-        })
-        .collect();
-    b.transact(id, EditKind::Other, &edits, selection);
 }
 /// Minimal snippet expansion; fields navigation is intentionally deferred.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -21,10 +21,11 @@ pub enum Layer {
     Platform,
     /// User preferences.
     User,
+    /// Project values. Sublime consults them before syntax-specific settings, so a syntax file
+    /// (e.g. `Packages/User/Python.sublime-settings`) overrides the project.
+    Project,
     /// Syntax-specific values.
     Syntax,
-    /// Project values.
-    Project,
     /// Mode-specific editor overrides from Distraction Free.sublime-settings.
     DistractionFree,
     /// View overrides.
@@ -229,7 +230,7 @@ pub struct EditorSettings {
     pub highlight_line: bool,
     /// Enable context-based bracket/quote pairing.
     pub auto_match_enabled: bool,
-    /// Replace files using temp + rename.
+    /// Replace existing files using temp + rename when that keeps their identity.
     pub atomic_save: bool,
 }
 impl Default for EditorSettings {
@@ -237,7 +238,7 @@ impl Default for EditorSettings {
         Self {
             tab_size: 4,
             translate_tabs_to_spaces: false,
-            word_separators: "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}?".into(),
+            word_separators: "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?".into(),
             font_face: "Menlo".into(),
             font_size: 13.,
             line_numbers: true,
@@ -247,14 +248,14 @@ impl Default for EditorSettings {
             ensure_newline_at_eof_on_save: false,
             trim_trailing_white_space_on_save: Value::Bool(false),
             trim_only_modified_white_space: false,
-            default_line_ending: "unix".into(),
+            default_line_ending: "system".into(),
             default_encoding: "UTF-8".into(),
             fallback_encoding: "Western (Windows 1252)".into(),
             scroll_past_end: false,
             caret_style: "solid".into(),
             highlight_line: true,
             auto_match_enabled: true,
-            atomic_save: true,
+            atomic_save: false,
         }
     }
 }

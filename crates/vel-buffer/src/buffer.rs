@@ -29,7 +29,7 @@ pub enum EditKind {
     InsertChars,
     /// Paste; always its own undo step.
     Paste,
-    /// Deletion; always its own undo step.
+    /// Deletion; consecutive single deletions next to the carets in one direction group.
     Delete,
     /// All other editing commands.
     Other,
@@ -153,6 +153,10 @@ enum Run {
     Whitespace,
     Punctuation,
     Newline,
+    /// Deletions ending at every caret (backspace).
+    DeleteBack,
+    /// Deletions starting at every caret (forward delete).
+    DeleteForward,
 }
 #[derive(Clone, Debug)]
 struct LoggedChange {
@@ -437,7 +441,7 @@ impl Buffer {
         new_selection.reset_xpos();
         validate_selection(&after, &new_selection);
         // ST-BEHAVIOR: unverified [H1]: even empty/no-op transactions receive a revision and undo step.
-        let run = typing_run(kind, edits, &self.view(id).settings);
+        let run = typing_run(kind, edits, &self.view(id).settings, &before_selection);
         let merge = self.group_open
             && self
                 .undo
@@ -806,7 +810,30 @@ fn validate_selection(text: &Text, s: &Selection) {
         }
     }
 }
-fn typing_run(kind: EditKind, edits: &[Edit<'_>], settings: &Settings) -> Option<Run> {
+fn typing_run(
+    kind: EditKind,
+    edits: &[Edit<'_>],
+    settings: &Settings,
+    selection: &Selection,
+) -> Option<Run> {
+    if kind == EditKind::Delete {
+        if edits.is_empty() || edits.len() != selection.len() {
+            return None;
+        }
+        let deletes = |at: fn(&Edit<'_>) -> usize| {
+            selection
+                .iter()
+                .zip(edits)
+                .all(|(r, e)| r.empty() && e.text.is_empty() && !e.range.is_empty() && at(e) == r.b)
+        };
+        return if deletes(|e| e.range.end) {
+            Some(Run::DeleteBack)
+        } else if deletes(|e| e.range.start) {
+            Some(Run::DeleteForward)
+        } else {
+            None
+        };
+    }
     if kind != EditKind::InsertChars || edits.is_empty() {
         return None;
     }
@@ -848,10 +875,11 @@ fn can_group(
     last.owner == id
         && last.after_selection == *selection
         && selection.len() == edits.len()
-        && selection
-            .iter()
-            .zip(edits)
-            .all(|(r, e)| r.empty() && r.b == e.range.start)
+        && (matches!(run, Some(Run::DeleteBack | Run::DeleteForward))
+            || selection
+                .iter()
+                .zip(edits)
+                .all(|(r, e)| r.empty() && r.b == e.range.start))
         && (group.run == run
             || (group.run == Some(Run::Word) && run == Some(Run::Whitespace))
             || (!group.has_word && group.run == Some(Run::Whitespace) && run == Some(Run::Word)))

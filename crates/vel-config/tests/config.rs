@@ -50,8 +50,8 @@ fn layers_observe_only_effective_changes_and_keep_wrong_types_local() {
         Layer::Default,
         Layer::Platform,
         Layer::User,
-        Layer::Syntax,
         Layer::Project,
+        Layer::Syntax,
         Layer::View,
     ]
     .into_iter()
@@ -268,4 +268,23 @@ fn projected_settings_keep_values_and_revisions_distinguish_independent_configs(
     );
     assert_ne!(copy.revision(), first.revision());
     assert_eq!(copy.string("overlay_scroll_bars", ""), "enabled");
+}
+
+#[test]
+fn syntax_specific_settings_override_project_settings() {
+    let mut settings = Settings::default();
+    settings
+        .replace(Layer::User, json!({"tab_size": 4}))
+        .unwrap();
+    settings
+        .replace(Layer::Syntax, json!({"tab_size": 8}))
+        .unwrap();
+    settings
+        .replace(Layer::Project, json!({"tab_size": 2, "rulers": [80]}))
+        .unwrap();
+    assert_eq!(settings.usize("tab_size", 0), 8);
+    assert_eq!(settings.get("rulers"), Some(&json!([80])));
+    let defaults = vel_config::settings::EditorSettings::default();
+    assert_eq!(defaults.default_line_ending, "system");
+    assert!(!defaults.atomic_save);
 }
