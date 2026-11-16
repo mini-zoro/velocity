@@ -1,5 +1,7 @@
 //! Native application handler and buffered benchmark observations.
 use crate::app_scene_translate as translate_scene;
+#[path = "app_a11y.rs"]
+mod accessibility_adapter;
 use crate::{
     bench::{Bench, SCROLL_FRAMES, TYPING_INSERTIONS},
     cli::{Mode, Options},
@@ -35,6 +37,9 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    accessibility_focus: Option<accessibility::Id>,
+    accessibility_preferences: accessibility::Preferences,
+    releases: crate::release::Actions,
     title_theme: Option<(u64, u64)>,
     exact_scene: bool,
     exact_drawables: std::collections::BTreeSet<u64>,
@@ -109,6 +114,9 @@ impl App {
         );
         let session_id = sessions.borrow_mut().register();
         Self {
+            accessibility_focus: None,
+            accessibility_preferences: Default::default(),
+            releases: Default::default(),
             title_theme: None,
             sessions,
             session_id,
@@ -180,6 +188,9 @@ impl App {
     }
     pub fn restore_remaining(&mut self, windows: Vec<vel_session::Window>) {
         self.restored_windows = windows;
+    }
+    pub fn set_crash(&mut self, crash: Option<crate::release::CrashStartup>) {
+        self.releases.crash = crash;
     }
     pub fn set_instance(&mut self, instance: Option<crate::instance::Instance>) {
         self.sessions.borrow_mut().instance = instance;
@@ -567,6 +578,21 @@ impl App {
         ));
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
+        if matches!(name, "focus_next_control" | "focus_previous_control") {
+            self.next_accessibility_focus(w, name == "focus_previous_control");
+            return Ok(());
+        }
+        let viewport = self.viewport();
+        if self.releases.action(
+            &mut self.workspace,
+            &mut self.panels,
+            w,
+            name,
+            args,
+            viewport,
+        )? {
+            return Ok(());
+        }
         if name == "toggle_distraction_free" {
             self.workspace.fullscreen = w.is_full_screen();
         }
@@ -1738,6 +1764,28 @@ impl AppHandler for App {
         }
         Ok(())
     }
+    fn accessibility_tree(&self) -> accessibility::Tree {
+        self.accessible_tree()
+    }
+    fn on_accessibility(
+        &mut self,
+        w: &WindowHandle,
+        id: accessibility::Id,
+        request: accessibility::Request,
+    ) {
+        self.accessibility_action(w, id, request);
+    }
+    fn accessibility_range_rect(&self, id: accessibility::Id, range: Utf16Range) -> Rect {
+        self.accessible_range_rect(id, range)
+    }
+    fn on_accessibility_preferences(
+        &mut self,
+        w: &WindowHandle,
+        preferences: accessibility::Preferences,
+    ) {
+        self.accessibility_preferences(preferences);
+        w.request_frame();
+    }
     fn on_key(&mut self, w: &WindowHandle, event: KeyEvent) -> bool {
         self.log_input("key", &event);
         if self.options.mode.automatic() {
@@ -1755,6 +1803,17 @@ impl AppHandler for App {
             .is_some_and(vel_ui::input::Input::composing)
         {
             return false;
+        }
+        if let Some(id) = self.accessibility_focus {
+            let tree = self.accessible_tree();
+            if let Some(node) = tree.node(id) {
+                if node.text.is_none() && matches!(key.name.as_str(), "enter" | "space") {
+                    self.accessibility_action(w, id, accessibility::Request::Press);
+                    return true;
+                }
+            } else {
+                self.accessibility_focus = None;
+            }
         }
         let viewport = self.viewport();
         if self.workspace.editor().vintage.is_some() {
@@ -1806,6 +1865,19 @@ impl AppHandler for App {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
+        if name == "package_check_upgrades"
+            && self
+                .workspace
+                .settings
+                .get("package_index_url")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return false;
+        }
+        if self.releases.busy() && (name.starts_with("package_") || name == "install_cli") {
+            return false;
+        }
         match name {
             "focus_group" | "move_to_group"
                 if args["group"]
@@ -1905,6 +1977,9 @@ impl AppHandler for App {
         self.run_named(w, name, &args);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
+        if event.kind == MouseKind::Down {
+            self.accessibility_focus = None;
+        }
         if self.options.mode.automatic() {
             self.external_input += 1;
             return;
@@ -2344,6 +2419,11 @@ impl AppHandler for App {
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
         self.workspace.themes.ui.borrow_mut().density = ctx.window.scale_factor() as f32;
+        self.workspace
+            .themes
+            .ui
+            .borrow_mut()
+            .set_accessibility_preferences(self.accessibility_preferences);
         if self.done.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2373,6 +2453,12 @@ impl AppHandler for App {
                 .any(|t| t.loading.is_some() || t.binary_loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
             let mut changed = self.workspace.poll() || focus_changed;
+            self.workspace
+                .themes
+                .ui
+                .borrow_mut()
+                .set_accessibility_preferences(self.accessibility_preferences);
+            changed |= self.releases.poll(&mut self.workspace, &mut self.panels, w);
             self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
             changed |= self.workspace.themes.ui.borrow().metrics.poll_images();
             changed |= self.builds.poll(&mut self.panels);
@@ -2396,7 +2482,9 @@ impl AppHandler for App {
             if let Err(error) = self.replacement_confirmation(w) {
                 self.show_error(w, &error);
             }
-            if self.panels.busy()
+            if self.releases.busy()
+                || self.workspace.resources_busy()
+                || self.panels.busy()
                 || self.workspace.editor().annotations.borrow().pending > 0
                 || self.workspace.editor().completion.busy()
                 || self.builds.task.is_some()

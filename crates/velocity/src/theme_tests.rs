@@ -159,7 +159,7 @@ fn installed_user_theme_override_reload_appearance_and_corrupt_fallback() {
     assert!(w.themes.ui.borrow().revision > rev);
     assert!(!w.themes.ui.borrow().palette.is_dark());
     std::fs::write(&path, "{ corrupt theme").unwrap();
-    w.poll();
+    w.wait_resources();
     assert!(
         w.messages
             .iter()

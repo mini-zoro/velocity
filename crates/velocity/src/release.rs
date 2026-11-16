@@ -1,0 +1,754 @@
+//! Application release actions. Disk, settings and HTTPS work share one serial queue.
+use crate::{panels::Panels, workspace::Workspace};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::{OnceLock, mpsc},
+};
+use vel_config::{
+    Value, json,
+    keymap::Invocation,
+    settings::Settings,
+    ui::{MenuItem, PaletteItem},
+};
+use vel_packages::{
+    PackageManager,
+    cli::{CliInstallOutcome, CliInstallPlan, install_cli, install_directories},
+    https::HttpsClient,
+};
+use vel_platform::WindowHandle;
+
+type Job = Box<dyn FnOnce() + Send>;
+/// Serializes every app preferences writer with package enable/disable, across windows.
+pub(crate) fn enqueue<T: Send + 'static>(
+    job: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<mpsc::Receiver<Result<T, String>>, String> {
+    static QUEUE: OnceLock<Result<mpsc::Sender<Job>, String>> = OnceLock::new();
+    let queue = QUEUE
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("velocity-release-settings".into())
+                .spawn(move || {
+                    for job in rx {
+                        job();
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(tx)
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let (tx, rx) = mpsc::channel();
+    queue
+        .send(Box::new(move || {
+            let _ = tx.send(job());
+        }))
+        .map_err(|e| e.to_string())?;
+    Ok(rx)
+}
+
+pub fn bundle_resources() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let contents = exe.parent()?.parent()?;
+    let resources = contents.join("Resources");
+    (contents.file_name()? == "Contents" && resources.is_dir()).then_some(resources)
+}
+fn bundle_for_exe(exe: &Path) -> Result<PathBuf, String> {
+    let contents = exe
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("executable is not in Velocity.app")?;
+    let bundle = contents
+        .parent()
+        .ok_or("executable is not in Velocity.app")?;
+    if contents.file_name() != Some(std::ffi::OsStr::new("Contents"))
+        || bundle.extension().is_none_or(|s| s != "app")
+    {
+        return Err("Install Command Line Tool requires the packaged Velocity.app. Run scripts/package-macos.sh first.".into());
+    }
+    Ok(bundle.into())
+}
+fn choice(caption: String, command: &str, args: Value) -> PaletteItem {
+    PaletteItem {
+        caption,
+        invocation: Invocation {
+            command: command.into(),
+            args,
+        },
+    }
+}
+pub fn extend_commands(
+    palette: &mut Vec<PaletteItem>,
+    menus: &mut [MenuItem],
+    settings: &Settings,
+) {
+    for (caption, command) in [
+        ("Install Command Line Tool…", "install_cli"),
+        ("Open Crash Reports Folder", "open_crash_reports"),
+        ("Package: Install from File…", "package_install_file"),
+        ("Package: Install from URL…", "package_install_url"),
+        ("Package: Remove", "package_remove"),
+        ("Package: Disable/Enable", "package_toggle"),
+        ("Package: List", "package_list"),
+    ] {
+        palette.push(choice(caption.into(), command, json!({})));
+    }
+    if settings
+        .get("package_index_url")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+    {
+        palette.push(choice(
+            "Package: Check for Upgrades".into(),
+            "package_check_upgrades",
+            json!({}),
+        ));
+    }
+    if let Some(help) = menus
+        .iter_mut()
+        .find(|m| m.id == "help" || m.caption == "Help")
+    {
+        help.children.push(
+            serde_json::from_value(
+                json!({"caption":"Open Crash Reports Folder","command":"open_crash_reports"}),
+            )
+            .expect("menu"),
+        );
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CrashStartup {
+    pub reporter: vel_crash::CrashReporter,
+    pub pending: Vec<vel_crash::Report>,
+}
+impl CrashStartup {
+    pub fn install(home: &Path) -> Result<Self, String> {
+        let reporter = vel_crash::CrashReporter::new(vel_crash::Config::for_home(
+            home,
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .map_err(|e| e.to_string())?;
+        let pending = reporter.pending_reports().map_err(|e| e.to_string())?;
+        reporter.install_panic_hook();
+        #[cfg(unix)]
+        reporter
+            .install_signal_handlers()
+            .map_err(|e| e.to_string())?;
+        reporter.record(vel_crash::Level::Info, "application startup");
+        Ok(Self { reporter, pending })
+    }
+}
+#[derive(Debug)]
+enum Reply {
+    Choices(Vec<PaletteItem>),
+    Changed(String),
+    Message(String),
+    CliPlans(Vec<CliInstallPlan>),
+}
+#[derive(Debug, Default)]
+pub struct Actions {
+    rx: Option<mpsc::Receiver<Result<Reply, String>>>,
+    pub crash: Option<CrashStartup>,
+}
+impl Actions {
+    pub fn busy(&self) -> bool {
+        self.rx.is_some()
+    }
+    fn start(
+        &mut self,
+        job: impl FnOnce() -> Result<Reply, String> + Send + 'static,
+    ) -> Result<(), String> {
+        if self.busy() {
+            return Err("A package or CLI operation is still running".into());
+        }
+        self.rx = Some(enqueue(job)?);
+        Ok(())
+    }
+    pub fn action(
+        &mut self,
+        workspace: &mut Workspace,
+        panels: &mut Panels,
+        w: &WindowHandle,
+        name: &str,
+        args: &Value,
+        viewport: std::ops::Range<usize>,
+    ) -> Result<bool, String> {
+        match name {
+            "open_crash_reports" => {
+                let folder = self
+                    .crash
+                    .as_ref()
+                    .map(|c| c.reporter.directory().to_owned())
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|h| PathBuf::from(h).join("Library/Logs/Velocity"))
+                    })
+                    .ok_or("home directory unavailable")?;
+                self.start(move || {
+                    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+                    open_folder(&folder)?;
+                    Ok(Reply::Message("Opened local crash reports folder".into()))
+                })?;
+            }
+            "install_cli" => {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let home = std::env::var_os("HOME").ok_or("home directory unavailable")?;
+                self.start(move || {
+                    let bundle = bundle_for_exe(&exe)?;
+                    let [system, local] = install_directories(Path::new(&home));
+                    let mut dirs = vec![local];
+                    if directory_writable(&system) {
+                        dirs.insert(0, system);
+                    } else {
+                        dirs.push(system);
+                    }
+                    let plans = dirs
+                        .iter()
+                        .map(|dir| {
+                            CliInstallPlan::for_bundle(&bundle, dir).map_err(|e| e.to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Reply::CliPlans(plans))
+                })?;
+            }
+            "package_install_url" if args["url"].as_str().or(args["text"].as_str()).is_none() => {
+                panels.action(workspace, "show_input_panel", &json!({"caption":"HTTPS URL of a .sublime-package archive","on_done":{"command":"package_install_url","args":{}}}), viewport)?;
+            }
+            "package_install_url"
+                if args["name"].as_str().is_none()
+                    && (args["url"].as_str().is_none() || args["text"].as_str().is_none()) =>
+            {
+                let url = args["url"]
+                    .as_str()
+                    .or(args["text"].as_str())
+                    .ok_or("missing HTTPS URL")?;
+                let guess = url
+                    .split('?')
+                    .next()
+                    .unwrap_or(url)
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(".sublime-package");
+                panels.action(workspace,"show_input_panel",&json!({"caption":"Package name","initial_text":guess,"on_done":{"command":"package_install_url","args":{"url":url}}}),viewport)?;
+            }
+            "package_list" if args["detail"].as_str().is_some() => {
+                w.alert(
+                    "Package contributions",
+                    args["detail"].as_str().unwrap_or(""),
+                    &["OK"],
+                );
+            }
+            "package_install_file"
+            | "package_install_url"
+            | "package_list"
+            | "package_remove"
+            | "package_toggle"
+            | "package_check_upgrades"
+            | "package_upgrade" => {
+                let data = workspace
+                    .data_path()
+                    .ok_or("package actions require a data directory")?
+                    .to_owned();
+                let mut args = args.clone();
+                if name == "package_install_url"
+                    && args["name"].as_str().is_none()
+                    && args["url"].as_str().is_some()
+                {
+                    args["name"] = args["text"].clone();
+                }
+                if name == "package_install_file" && args["file"].as_str().is_none() {
+                    let Some(file) = w.open_files().into_iter().next() else {
+                        return Ok(true);
+                    };
+                    args["file"] = json!(file);
+                }
+                if name == "package_install_file"
+                    && args["name"].as_str().is_none()
+                    && let Some(source) = args["file"].as_str()
+                {
+                    args["name"] = json!(
+                        Path::new(source)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Package")
+                    );
+                }
+                if name == "package_remove"
+                    && args["name"].as_str().is_some()
+                    && w.alert(
+                        "Remove package?",
+                        &format!(
+                            "Move {} and its loose overrides to recoverable backups?",
+                            args["name"].as_str().unwrap_or("")
+                        ),
+                        &["Cancel", "Remove"],
+                    ) != 1
+                {
+                    return Ok(true);
+                }
+                if name == "package_upgrade" && w.alert("Upgrade package?", &format!("Install {} {} from {}? The previous archive will be backed up; disabled packages stay disabled.", args["release"]["name"].as_str().unwrap_or(""), args["release"]["version"].as_str().unwrap_or(""), args["release"]["url"].as_str().unwrap_or("")), &["Cancel", "Install"]) != 1 { return Ok(true); }
+                let name = name.to_owned();
+                let ignored = workspace.ignored_packages();
+                let index = workspace
+                    .settings
+                    .get("package_index_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.start(move || package_job(&data, &name, &args, ignored, index))?;
+                panels.message = "Working on packages…".into();
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+    pub fn poll(
+        &mut self,
+        workspace: &mut Workspace,
+        panels: &mut Panels,
+        w: &WindowHandle,
+    ) -> bool {
+        if !self.busy()
+            && let Some(crash) = &mut self.crash
+            && !crash.pending.is_empty()
+        {
+            let reports = std::mem::take(&mut crash.pending);
+            let reporter = crash.reporter.clone();
+            let open = w.alert(
+                "Velocity found a crash report",
+                &format!(
+                    "{} local report(s) from a previous launch. No report is uploaded.\n{}",
+                    reports.len(),
+                    reporter.directory().display()
+                ),
+                &["Open Report Folder", "Dismiss"],
+            ) == 0;
+            if let Err(error) = self.start(move || {
+                if open {
+                    open_folder(reporter.directory())?;
+                }
+                for report in reports {
+                    reporter.acknowledge(&report).map_err(|e| e.to_string())?;
+                }
+                Ok(Reply::Message(
+                    "Crash report prompt dismissed; reports retained locally".into(),
+                ))
+            }) {
+                panels.message = error;
+            }
+        }
+        let Some(result) = self.rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(e) => Some(Err(e.to_string())),
+        }) else {
+            return false;
+        };
+        self.rx = None;
+        match result {
+            Ok(Reply::Choices(items)) => {
+                if items.is_empty() {
+                    panels.message = "No packages or upgrades found".into();
+                } else {
+                    panels.choices(workspace, items);
+                }
+            }
+            Ok(Reply::Changed(message)) => {
+                workspace.request_resource_reload();
+                panels.message = message;
+            }
+            Ok(Reply::Message(message)) => panels.message = message,
+            Ok(Reply::CliPlans(plans)) => {
+                let Some(first) = plans.first() else {
+                    return true;
+                };
+                let detail = format!(
+                    "Source: {}\nDestination: {}\n\nAlternative: {}\n\nThe user-local directory may need to be added to PATH. Existing commands are never overwritten. No sudo is used.",
+                    first.launcher().display(),
+                    first.link().display(),
+                    plans
+                        .get(1)
+                        .map(|p| p.link().display().to_string())
+                        .unwrap_or_default()
+                );
+                let selected = w.alert(
+                    "Install Command Line Tool…",
+                    &detail,
+                    &["Cancel", "Install at Destination", "Use Alternative…"],
+                );
+                let plan = match selected {
+                    1 => plans.first(),
+                    2 => plans.get(1),
+                    _ => None,
+                }
+                .cloned();
+                if let Some(plan) = plan {
+                    let confirmed = selected == 1
+                        || w.alert(
+                            "Confirm command line tool destination",
+                            &format!(
+                                "{} → {}\nAdd {} to PATH if needed.",
+                                plan.launcher().display(),
+                                plan.link().display(),
+                                plan.link().parent().unwrap_or(Path::new("")).display()
+                            ),
+                            &["Cancel", "Install"],
+                        ) == 1;
+                    if confirmed && let Err(error) = self.start(move || install_cli(&plan, |_| true).map(|outcome| Reply::Message(match outcome {CliInstallOutcome::Declined=>"Command line tool installation cancelled".into(),CliInstallOutcome::AlreadyInstalled=>format!("Command line tool is already installed at {}",plan.link().display()),CliInstallOutcome::Installed(path)=>format!("Installed command line tool at {}. Add {} to PATH if needed.",path.display(),path.parent().unwrap_or(Path::new("")).display())})).map_err(|e| format!("{e}. Run Install Command Line Tool again and choose ~/.local/bin if the system directory is unwritable."))) { panels.message = error; }
+                }
+            }
+            Err(error) => {
+                panels.message = error.clone();
+                w.alert("Velocity package / release action", &error, &["OK"]);
+            }
+        }
+        true
+    }
+}
+fn directory_writable(path: &Path) -> bool {
+    let mut candidate = path;
+    while !candidate.exists() {
+        let Some(parent) = candidate.parent() else {
+            return false;
+        };
+        candidate = parent;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: path is a live NUL-terminated pathname; access only queries permissions.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+fn open_folder(path: &Path) -> Result<(), String> {
+    std::process::Command::new("/usr/bin/open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+fn package_job(
+    data: &Path,
+    command: &str,
+    args: &Value,
+    ignored: BTreeSet<String>,
+    index: Option<String>,
+) -> Result<Reply, String> {
+    let mut manager = PackageManager::new(data);
+    let client = HttpsClient::default();
+    let result = match command {
+        "package_install_file" | "package_install_url" => {
+            let source = args["file"]
+                .as_str()
+                .or(args["url"].as_str())
+                .or(args["text"].as_str())
+                .ok_or("missing archive path or URL")?;
+            let name = args["name"]
+                .as_str()
+                .or_else(|| {
+                    source
+                        .rsplit('/')
+                        .next()
+                        .and_then(|s| s.strip_suffix(".sublime-package"))
+                })
+                .ok_or("archive must end in .sublime-package, or supply a name")?;
+            let installed = if command == "package_install_file" {
+                manager.install_local(name, Path::new(source))
+            } else {
+                manager.install_https(name, source, &client)
+            }
+            .map_err(|e| e.to_string())?;
+            Reply::Changed(format!(
+                "Installed {}. Backup: {}",
+                installed.path.display(),
+                backup_text(installed.backup.as_deref())
+            ))
+        }
+        "package_remove" if args["name"].as_str().is_some() => {
+            let backups = manager
+                .remove(args["name"].as_str().unwrap_or(""))
+                .map_err(|e| e.to_string())?;
+            Reply::Changed(format!(
+                "Removed package. Backups: {}",
+                backups
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+        "package_toggle" if args["name"].as_str().is_some() => {
+            let name = args["name"].as_str().unwrap_or("");
+            let enabled = args["enabled"].as_bool().unwrap_or(ignored.contains(name));
+            let backup = manager
+                .set_enabled_inheriting(name, enabled, &ignored)
+                .map_err(|e| e.to_string())?;
+            Reply::Changed(format!(
+                "{} {name}. Preferences backup: {}",
+                if enabled { "Enabled" } else { "Disabled" },
+                backup_text(backup.as_deref())
+            ))
+        }
+        "package_check_upgrades" => {
+            let url = index
+                .filter(|s| !s.is_empty())
+                .ok_or("Configure package_index_url before checking for upgrades")?;
+            manager
+                .set_index_url(Some(url))
+                .map_err(|e| e.to_string())?;
+            let upgrades = manager.check_upgrades(&client).map_err(|e| e.to_string())?;
+            Reply::Choices(
+                upgrades
+                    .into_iter()
+                    .map(|u| {
+                        choice(
+                            format!(
+                                "{}: {} → {}{}",
+                                u.available.name,
+                                u.installed_version
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "unknown version".into()),
+                                u.available.version,
+                                if ignored.contains(&u.available.name) {
+                                    " (disabled)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            "package_upgrade",
+                            json!({"release":u.available}),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        "package_upgrade" => {
+            let release =
+                serde_json::from_value(args["release"].clone()).map_err(|e| e.to_string())?;
+            let installed = manager
+                .install_release(&release, &client)
+                .map_err(|e| e.to_string())?;
+            Reply::Changed(format!(
+                "Upgraded {}. Backup: {}",
+                installed.path.display(),
+                backup_text(installed.backup.as_deref())
+            ))
+        }
+        _ => {
+            let packages = manager.list().map_err(|e| e.to_string())?;
+            // The engine inventory covers seven resource families. Supplement
+            // app-owned menu/palette/mouse/metadata resources without changing it.
+            let mut resources = vel_config::resources::Resources::default();
+            resources.load(data)?;
+
+            let choices = packages
+                .into_iter()
+                .filter(|p| p.name != "User" || command == "package_list")
+                .map(|p| {
+                    let disabled = ignored.contains(&p.name);
+                    let prefix = format!("Packages/{}/", p.name);
+                    let extra = [
+                        (".sublime-menu", "Menu"),
+                        (".sublime-commands", "Command palette"),
+                        (".sublime-mousemap", "Mouse bindings"),
+                        (".tmPreferences", "Metadata"),
+                        (".hidden-color-scheme", "Color scheme"),
+                    ]
+                    .into_iter()
+                    .flat_map(|(suffix, kind)| {
+                        resources
+                            .matching(suffix)
+                            .into_iter()
+                            .filter_map(|r| {
+                                r.path
+                                    .strip_prefix(&prefix)
+                                    .map(|path| format!("{kind}: {path}"))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+
+                    let detail = format!(
+                        "{} {} — {}\n{}\n{}",
+                        p.name,
+                        p.version
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "unknown version".into()),
+                        if disabled { "disabled" } else { "enabled" },
+                        p.support().label(),
+                        p.contributions
+                            .iter()
+                            .map(|c| format!("{:?}: {}", c.kind, c.path))
+                            .chain(extra.iter().cloned())
+                            .chain(
+                                p.python_plugins
+                                    .iter()
+                                    .map(|p| format!("Python (not executed): {p}"))
+                            )
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    let caption = format!(
+                        "{}{} — {} resource(s); {}",
+                        p.name,
+                        if disabled { " (disabled)" } else { "" },
+                        p.contributions.len() + extra.len(),
+                        p.support().label()
+                    );
+                    choice(
+                        caption,
+                        command,
+                        if command == "package_list" {
+                            json!({"detail":detail})
+                        } else {
+                            json!({"name":p.name,"enabled":disabled})
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            Reply::Choices(choices)
+        }
+    };
+    Ok(result)
+}
+fn backup_text(path: Option<&Path>) -> String {
+    path.map(|p| p.display().to_string())
+        .unwrap_or_else(|| "none (first installation)".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn list_reports_plugins_and_effective_disabled_state_without_network_or_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let loose = temp.path().join("Packages/Fixture");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("plugin.py"), "raise Exception('not executed')").unwrap();
+        std::fs::write(loose.join("thing.sublime-build"), "{\"cmd\":[\"true\"]}").unwrap();
+        let reply = package_job(
+            temp.path(),
+            "package_list",
+            &json!({}),
+            ["Fixture".into()].into(),
+            None,
+        )
+        .unwrap();
+        let Reply::Choices(items) = reply else {
+            panic!("expected choices");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(items[0].caption.contains("no plugin API"));
+        assert!(items[0].caption.contains("disabled"));
+        assert!(
+            items[0].invocation.args["detail"]
+                .as_str()
+                .unwrap()
+                .contains("BuildSystem: thing.sublime-build")
+        );
+        assert!(
+            package_job(
+                temp.path(),
+                "package_check_upgrades",
+                &json!({}),
+                BTreeSet::new(),
+                None
+            )
+            .unwrap_err()
+            .contains("Configure package_index_url")
+        );
+    }
+    #[test]
+    fn menu_only_packages_report_their_app_contributions() {
+        let temp = tempfile::tempdir().unwrap();
+        let loose = temp.path().join("Packages/Menus");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("Main.sublime-menu"), "[]").unwrap();
+        std::fs::write(loose.join("Custom.sublime-commands"), "[]").unwrap();
+        let Reply::Choices(items) = package_job(
+            temp.path(),
+            "package_list",
+            &json!({}),
+            BTreeSet::new(),
+            None,
+        )
+        .unwrap() else {
+            panic!("expected inventory");
+        };
+        assert!(items[0].caption.contains("2 resource(s)"));
+        let detail = items[0].invocation.args["detail"].as_str().unwrap();
+        assert!(detail.contains("Menu: Main.sublime-menu"));
+        assert!(detail.contains("Command palette: Custom.sublime-commands"));
+    }
+    #[test]
+    fn global_worker_orders_preferences_writes_before_package_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_owned();
+        let first = data.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = enqueue(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let user = first.join("Packages/User");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(
+                user.join("Preferences.sublime-settings"),
+                "{ // retained comment\n\"added_words\":[\"alienword\"],\"unrelated\":42}",
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap();
+        let second = enqueue(move || {
+            PackageManager::new(data)
+                .set_enabled_inheriting("Fixture", false, &["Vintage".into()].into())
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert!(matches!(second.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        release_tx.send(()).unwrap();
+        writer
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap()
+            .unwrap();
+        second
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap()
+            .unwrap();
+        let source = std::fs::read_to_string(
+            temp.path()
+                .join("Packages/User/Preferences.sublime-settings"),
+        )
+        .unwrap();
+        assert!(source.contains("retained comment") && source.contains("alienword"));
+        let doc = vel_config::json::Document::parse(&source).unwrap();
+        assert_eq!(doc.value["unrelated"], 42);
+        let ignored = PackageManager::new(temp.path()).ignored_packages().unwrap();
+        assert!(ignored.contains("Vintage") && ignored.contains("Fixture"));
+    }
+    #[test]
+    fn bundle_plan_never_guesses_a_launcher_for_a_cargo_binary() {
+        assert!(bundle_for_exe(Path::new("/tmp/target/release/velocity")).is_err());
+        assert_eq!(
+            bundle_for_exe(Path::new(
+                "/Applications/Velocity.app/Contents/MacOS/velocity"
+            ))
+            .unwrap(),
+            Path::new("/Applications/Velocity.app")
+        );
+    }
+}

@@ -1573,5 +1573,7 @@
       "ctrl+shift+f6"
     ],
     "command": "prev_misspelling"
-  }
+  },
+  { "keys": ["super+f6"], "command": "focus_next_control" },
+  { "keys": ["super+shift+f6"], "command": "focus_previous_control" }
 ]

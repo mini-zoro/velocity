@@ -25,7 +25,7 @@ jobs:
       - run: cargo test --workspace --locked --release
         env:
           # Native IPC fixtures have short wall-clock deadlines; avoid test-worker contention.
-          RUST_TEST_THREADS: '1'
+          {} # Default parallelism; readiness is signalled by the IPC fixture.
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings

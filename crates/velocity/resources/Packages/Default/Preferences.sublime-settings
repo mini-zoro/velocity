@@ -116,6 +116,8 @@
   "ui_scale": 1.0,
   "ui_font_size": 12,
   "animation_enabled": true,
+  // Explicit HTTPS index; no registry, timer or network request is enabled by default.
+  "package_index_url": null,
   "overlay_scroll_bars": "system",
   "themed_title_bar": true,
   "file_tab_style": "angled",

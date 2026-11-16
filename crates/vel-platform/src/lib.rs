@@ -4,6 +4,7 @@
 //! uses logical points, top-left origin; only the native bridge converts to screen
 //! coordinates. No AppKit or Metal objects are constructed by unit tests.
 
+pub mod accessibility;
 mod display;
 mod input;
 pub use display::{DisplayStatus, display_status};
@@ -172,6 +173,29 @@ pub trait AppHandler: 'static {
     /// Approve closing this window, distinct from quitting the application.
     fn on_window_close_requested(&mut self, window: &WindowHandle) -> bool {
         self.on_quit_requested(window)
+    }
+    /// Supplies an on-demand accessibility hierarchy; never called by the scene hot path.
+    fn accessibility_tree(&self) -> accessibility::Tree {
+        accessibility::Tree::default()
+    }
+    /// Performs an accessibility action on the main event queue.
+    fn on_accessibility(
+        &mut self,
+        _window: &WindowHandle,
+        _id: accessibility::Id,
+        _request: accessibility::Request,
+    ) {
+    }
+    /// Geometry of a value-relative accessibility text range in logical content points.
+    fn accessibility_range_rect(&self, _id: accessibility::Id, range: Utf16Range) -> Rect {
+        self.text_input_rect(range).0
+    }
+    /// Observe live system display accessibility preferences.
+    fn on_accessibility_preferences(
+        &mut self,
+        _window: &WindowHandle,
+        _preferences: accessibility::Preferences,
+    ) {
     }
     /// Return an O(1) text snapshot and document-relative UTF-16 ranges.
     fn text_input_state(&self) -> TextInputState {

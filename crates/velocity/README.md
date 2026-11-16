@@ -1,6 +1,6 @@
 # velocity
 
-Native macOS editor, lane A round 11. MIT OR Apache-2.0; macOS 14+.
+Native macOS editor, lane A round 13. MIT OR Apache-2.0; macOS 14+.
 See [RUNBOOK.md](RUNBOOK.md) for exact checks and hardware measurements, and
 [MANUAL_TEST.md](MANUAL_TEST.md) for native input/editing acceptance.
 
@@ -183,3 +183,14 @@ root using `load_cached_roots`, with existing Installed Packages archive support
 or deleting definitions reloads open views, detection, the syntax picker and palette without
 replacing unsaved text. Plain Text remains virtual; corrupt/unwritable caches rebuild or use
 uncached loading. Original sample grammars are in `fixtures/user-grammars`.
+
+
+Round 13 wires local crash reports, the confirmed bundled CLI installer, and worker-backed
+package installation/removal/enable/list/explicit upgrades into native menus and the palette.
+Resources reload live through a shared ignored-package filter while documents and undo survive.
+The default package index is unset. The native accessibility bridge exposes a bounded UTF-16
+text area plus tabs, project/quick rows, panel controls, completions, status and popup links;
+Cmd+F6 / Cmd+Shift+F6 traverses controls. System Reduce Motion and stronger chrome boundaries
+follow live accessibility preferences. See [ROUND13.md](ROUND13.md) for evidence/commands and
+[MANUAL_TEST.md](MANUAL_TEST.md#round-13-release-wiring-and-voiceover-human-review-required)
+for native release and VoiceOver acceptance.

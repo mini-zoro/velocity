@@ -394,6 +394,7 @@ fn dictionary_selection_and_persistent_words_keep_existing_user_settings() {
         &json!({"key":"added_words","words":["alienword"]}),
     )
     .unwrap();
+    w.wait_resources();
     let source = std::fs::read_to_string(preferences).unwrap();
     assert!(source.contains("// retained"));
     assert!(source.contains("\"font_size\":17"));

@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+vel-crash = { path = "../vel-crash" }
+vel-packages = { path = "../vel-packages" }
 vel-vintage = { path = "../vel-vintage" }
 vel-diff = { path = "../vel-diff" }
 vel-git = { path = "../vel-git" }

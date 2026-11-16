@@ -22,7 +22,75 @@ pub struct Themes {
     pub icons: FileIcons,
     selected: Option<(String, bool, String, String)>,
 }
+/// Send-only resource preparation, including compiled appearance variants and decoded PNGs.
+#[derive(Debug)]
+pub struct Prepared {
+    ui: vel_ui::theme::PreparedUi,
+    sources: Sources,
+    compiled: BTreeMap<(String, bool, String), Compiled>,
+    unconditional: Option<Sources>,
+    guards: Vec<SettingsGuard>,
+    palettes: BTreeMap<String, Palette>,
+    mappings: Vec<(String, FileIcons)>,
+    icon_paths: BTreeMap<String, String>,
+    icons: FileIcons,
+    selected: Option<(String, bool, String, String)>,
+    images: BTreeMap<String, Arc<[u8]>>,
+}
 impl Themes {
+    pub fn prepare(
+        resources: &Resources,
+        schemes: &BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
+        settings: &Settings,
+        messages: &mut Vec<String>,
+    ) -> Prepared {
+        let mut themes = Self::load(resources, schemes, messages);
+        // Both OS appearance variants are warm before publication. Changing an
+        // installed theme via preferences creates another worker configuration.
+        for dark in [false, true] {
+            if let Err(error) = themes.select(settings, dark) {
+                messages.push(error);
+            }
+        }
+        let images = [".png", ".jpg", ".jpeg", ".gif"]
+            .into_iter()
+            .flat_map(|suffix| resources.matching(suffix))
+            .map(|r| (r.path.clone(), Arc::from(r.bytes.clone())))
+            .collect();
+        let ui = Rc::try_unwrap(themes.ui)
+            .expect("worker theme has a single owner")
+            .into_inner()
+            .into_prepared();
+        Prepared {
+            ui,
+            sources: themes.sources,
+            compiled: themes.compiled,
+            unconditional: themes.unconditional,
+            guards: themes.guards,
+            palettes: themes.palettes,
+            mappings: themes.mappings,
+            icon_paths: themes.icon_paths,
+            icons: themes.icons,
+            selected: themes.selected,
+            images,
+        }
+    }
+    pub fn publish(prepared: Prepared) -> Self {
+        let ui = ThemeUi::from_prepared(prepared.ui);
+        ui.metrics.set_image_resources(prepared.images);
+        Self {
+            ui: Rc::new(RefCell::new(ui)),
+            sources: prepared.sources,
+            compiled: prepared.compiled,
+            unconditional: prepared.unconditional,
+            guards: prepared.guards,
+            palettes: prepared.palettes,
+            mappings: prepared.mappings,
+            icon_paths: prepared.icon_paths,
+            icons: prepared.icons,
+            selected: prepared.selected,
+        }
+    }
     pub fn load(
         resources: &Resources,
         schemes: &BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,

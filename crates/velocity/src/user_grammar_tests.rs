@@ -31,8 +31,9 @@ fn open(w: &mut Workspace, path: &Path) {
 fn wait(w: &mut Workspace) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        w.poll();
-        let ready = w.tabs.iter().all(|t| t.loading.is_none())
+        w.wait_resources();
+        let ready = !w.resources_busy()
+            && w.tabs.iter().all(|t| t.loading.is_none())
             && w.editor()
                 .language
                 .borrow()
@@ -108,7 +109,7 @@ fn loose_xml_json_detection_picker_scopes_and_nested_add_edit_remove_reload() {
             .replace("Velocity Notes", "Added Notes")
             .replace("vnote", "added-note"),
     );
-    w.poll();
+    w.wait_resources();
     assert!(
         w.palette
             .iter()
@@ -188,7 +189,7 @@ fn installed_archives_loose_overrides_bundled_overrides_and_live_archive_reload(
         &data.join("Packages/Rust/Rust.sublime-syntax"),
         "name: User Rust\nfile_extensions: [rs]\nscope: source.user-rust\ncontexts: {main: []}\n",
     );
-    w.poll();
+    w.wait_resources();
     assert_eq!(
         w.assets
             .syntaxes

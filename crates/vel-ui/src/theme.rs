@@ -280,6 +280,7 @@ pub struct ThemeUi {
     textures: HashMap<String, [Option<Texture>; 3]>,
     /// Target backing density; decoded variants are selected without frame-path I/O.
     pub density: f32,
+    accessibility: vel_platform::accessibility::Preferences,
     states: fnv::FnvHashMap<u64, State>,
     setting_keys: Option<Vec<String>>,
     settings: fnv::FnvHashMap<u64, ThemeSettings>,
@@ -291,6 +292,18 @@ pub struct ThemeUi {
     now: Instant,
     origin: Instant,
     active: bool,
+}
+/// Worker-prepared theme paint data. Native font metrics and live widget caches stay local.
+#[derive(Debug)]
+pub struct PreparedUi {
+    resolver: Resolver,
+    unconditional: Option<Unconditional>,
+    scheme_color: Color,
+    accent_color: Color,
+    palette: Palette,
+    textures: HashMap<String, [Option<Texture>; 3]>,
+    setting_keys: Option<Vec<String>>,
+    revision: u64,
 }
 impl Default for ThemeUi {
     fn default() -> Self {
@@ -322,6 +335,7 @@ impl ThemeUi {
             metrics: std::rc::Rc::new(Default::default()),
             textures: HashMap::new(),
             density: 1.,
+            accessibility: Default::default(),
             states: Default::default(),
             setting_keys: None,
             settings: Default::default(),
@@ -333,6 +347,33 @@ impl ThemeUi {
             now,
             origin: now,
             active: false,
+        }
+    }
+    /// Moves compiled themes and decoded textures across a worker boundary. No native objects move.
+    pub fn into_prepared(self) -> PreparedUi {
+        PreparedUi {
+            resolver: self.resolver,
+            unconditional: self.unconditional,
+            scheme_color: self.scheme_color,
+            accent_color: self.accent_color,
+            palette: self.palette,
+            textures: self.textures,
+            setting_keys: self.setting_keys,
+            revision: self.revision,
+        }
+    }
+    /// Publishes worker-prepared paint data with fresh, thread-local metrics and widget caches.
+    pub fn from_prepared(prepared: PreparedUi) -> Self {
+        Self {
+            resolver: prepared.resolver,
+            unconditional: prepared.unconditional,
+            scheme_color: prepared.scheme_color,
+            accent_color: prepared.accent_color,
+            palette: prepared.palette,
+            textures: prepared.textures,
+            setting_keys: prepared.setting_keys,
+            revision: prepared.revision,
+            ..Self::default()
         }
     }
     /// Replaces the compiled theme and palette, invalidating cached styles/transitions.
@@ -381,6 +422,20 @@ impl ThemeUi {
         self.widgets.clear();
         self.resolver.clear();
     }
+    /// Applies live system Reduce Motion / Increase Contrast preferences.
+    pub fn set_accessibility_preferences(
+        &mut self,
+        preferences: vel_platform::accessibility::Preferences,
+    ) {
+        if self.accessibility == preferences {
+            return;
+        }
+        self.accessibility = preferences;
+        self.states.clear();
+        self.widgets.clear();
+        self.active = false;
+        self.revision += 1;
+    }
     /// Sets the monotonic frame clock. Reading a cached style never restarts a transition.
     pub fn begin_frame(&mut self, now: Instant) {
         self.now = now;
@@ -392,7 +447,7 @@ impl ThemeUi {
     }
     /// Requests another frame for a caller-owned finite animation, such as a scroll fade.
     pub fn request_animation(&mut self) {
-        self.active = true;
+        self.active |= !self.accessibility.reduce_motion;
     }
     /// Whether a visible transition or texture sequence requires another frame.
     pub fn animating(&self) -> bool {
@@ -562,6 +617,7 @@ impl ThemeUi {
         self.animate(id, style, key, enabled)
     }
     fn animate(&mut self, id: u64, mut style: Style, key: PaintKey, enabled: bool) -> Style {
+        let enabled = enabled && !self.accessibility.reduce_motion;
         if self.states.len() > 4096 {
             self.states.clear();
         }
@@ -638,6 +694,33 @@ impl ThemeUi {
     }
     /// Paints theme layers in order, including nine-slice textures and shadows.
     pub fn surface(&self, layer: &mut Layer, style: &Style, rect: Rect, clip: Rect) {
+        if self.accessibility.increase_contrast {
+            let color = style.foreground;
+            for edge in [
+                Rect {
+                    height: 1.5,
+                    ..rect
+                },
+                Rect {
+                    y: rect.y + rect.height - 1.5,
+                    height: 1.5,
+                    ..rect
+                },
+                Rect { width: 1.5, ..rect },
+                Rect {
+                    x: rect.x + rect.width - 1.5,
+                    width: 1.5,
+                    ..rect
+                },
+            ] {
+                layer.rects.push(SolidRect {
+                    rect: edge,
+                    clip,
+                    color,
+                    radius: 0.,
+                });
+            }
+        }
         if let Some(color) = style.shadow {
             layer.shadows.push(Shadow {
                 rect: Rect {
@@ -1221,5 +1304,54 @@ mod tests {
         let end = theme.style(1, &ElementPath(&hover), &disabled);
         assert_eq!(end.layers[0].color, [1.; 4]);
         assert!(!theme.animating());
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+    #[test]
+    fn reduce_motion_settles_cached_transitions_and_contrast_adds_visible_borders() {
+        let palette = Palette::default();
+        let theme=Theme::parse(r##"{"rules":[{"class":"button","layer0.tint":"#000000","layer0.opacity":1},{"class":"button","attributes":["hover"],"layer0.tint":{"target":"#ffffff","speed":5}}]}"##,&palette).unwrap();
+        let mut ui = ThemeUi::new(Arc::new(theme), palette);
+        let settings = Settings::default();
+        ui.style(
+            1,
+            &ElementPath(&[vel_theme::Element::new("button", &[])]),
+            &settings,
+        );
+        let hover = [vel_theme::Element::new("button", &["hover"])];
+        ui.style(1, &ElementPath(&hover), &settings);
+        assert!(ui.animating());
+        ui.set_accessibility_preferences(vel_platform::accessibility::Preferences {
+            reduce_motion: true,
+            increase_contrast: true,
+        });
+        let style = ui.style(1, &ElementPath(&hover), &settings);
+        assert!(!ui.animating());
+        ui.request_animation();
+        assert!(!ui.animating());
+        let mut layer = Layer::default();
+        ui.surface(
+            &mut layer,
+            &style,
+            Rect {
+                x: 10.,
+                y: 10.,
+                width: 100.,
+                height: 30.,
+            },
+            Rect {
+                x: 0.,
+                y: 0.,
+                width: 200.,
+                height: 200.,
+            },
+        );
+        assert!(layer.rects.len() >= 4);
+        ui.set_accessibility_preferences(Default::default());
+        ui.request_animation();
+        assert!(ui.animating());
     }
 }

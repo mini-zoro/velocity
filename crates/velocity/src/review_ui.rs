@@ -69,19 +69,25 @@ impl Panels {
                     tab.editor.sync();
                 }
                 if let Some(root) = workspace.data_path() {
-                    let path = root.join("Packages/User/Preferences.sublime-settings");
-                    let source = match std::fs::read_to_string(&path) {
-                        Ok(s) => s,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
-                        Err(e) => return Err(e.to_string()),
-                    };
-                    let document = vel_config::json::Document::parse(&source)?;
-                    let encoded = document.set(key, &value)?;
-                    vel_session::atomic_write(&path, |file| {
-                        use std::io::Write;
-                        file.write_all(encoded.as_bytes())
-                            .map_err(|e| e.to_string())
+                    let root = root.to_owned();
+                    let key = key.to_owned();
+                    let result = crate::release::enqueue(move || {
+                        let path = root.join("Packages/User/Preferences.sublime-settings");
+                        let source = match std::fs::read_to_string(&path) {
+                            Ok(s) => s,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+                            Err(e) => return Err(e.to_string()),
+                        };
+                        let document = vel_config::json::Document::parse(&source)?;
+                        let encoded = document.set(&key, &value)?;
+                        vel_session::atomic_write(&path, |file| {
+                            use std::io::Write;
+                            file.write_all(encoded.as_bytes())
+                                .map_err(|e| e.to_string())
+                        })?;
+                        Ok(())
                     })?;
+                    workspace.track_settings_write(result);
                 }
             }
             "show_dictionary" => {

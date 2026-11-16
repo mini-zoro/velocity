@@ -1260,7 +1260,7 @@ mod tests {
             "<snippet><content>hello $0</content><description>New resource</description></snippet>",
         )
         .unwrap();
-        workspace.poll();
+        workspace.wait_resources();
         assert!(
             workspace
                 .palette

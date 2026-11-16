@@ -377,3 +377,132 @@ For interactive checks, open the generated fixtures with `target/release/velocit
    disk reference and worker loading, with the same save restrictions, rather than treating
    the old prefix as a complete document. Verify ordinary small-file typing/scroll/IME still
    behave as in previous rounds.
+
+
+## Round 13: release wiring and VoiceOver (human review required)
+
+Run on an unlocked **macOS 14+** desktop, outside the sandbox. The script prepares a disposable
+profile, a Unicode document, a windowed document and a local declarative package with a
+Python marker. The isolated `vel-crash` tests exercise actual panic/signal hooks. The script
+does not install the CLI or any package, or change the home directory. Choose a fresh fixture
+directory; the script refuses to replace an earlier profile.
+
+```sh
+cargo build --release --locked -p velocity
+scripts/package-macos.sh /tmp/velocity-r13-bundle
+```
+
+The reviewer retains the existing minimum-macOS-14 decision and the DMG signing fix. Inspect
+`packaging-report.json`: prefer `hdiutil create` and require strict deep codesign of the mounted
+app for distribution; a `makehybrid` fallback is not evidence of a distributable signature.
+
+Release actions:
+
+For the next-launch prompt, first create a uniquely named synthetic report in the normal
+local crash directory (this does not crash the app or alter previous reports), then launch:
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+import uuid
+folder = Path.home() / 'Library/Logs/Velocity'
+folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+report = folder / ('reviewer-fixture-' + uuid.uuid4().hex + '.crash')
+with report.open('x') as stream:
+    stream.write('Synthetic Velocity reviewer report; no document contents.\n')
+report.chmod(0o600)
+print(report)
+PY
+```
+
+Launch the prepared bundle with a fresh fixture profile:
+
+```sh
+zsh crates/velocity/scripts/review-round13-gui.zsh \
+  /tmp/velocity-r13-bundle/Velocity.app /tmp/velocity-r13-review
+```
+
+After quitting, relaunch that same profile without rerunning fixture setup:
+
+```sh
+VELOCITY_GUI_PROCESS=1 /tmp/velocity-r13-bundle/Velocity.app/Contents/MacOS/velocity \
+  --data-dir /tmp/velocity-r13-review/profile
+```
+
+- [ ] Launch: the native crash alert offers **Open Report Folder** and **Dismiss**. Open reveals
+  `~/Library/Logs/Velocity`; dismiss opens nothing. The shown report becomes
+  `.seen` and remains readable. Launch the executable again with the same profile,
+  without creating another report: the alert does not recur. Help → Open Crash Reports Folder
+  reveals that same local directory. No report upload occurs. The synthetic report can be
+  removed manually after review.
+- [ ] Velocity → Install Command Line Tool… shows exact source/destination paths and two bin
+  choices. Select `~/.local/bin` (use Alternative when system bin is preferred).
+  Cancel writes nothing; confirm creates the symlink; repeat reports an existing installation.
+  Run `~/.local/bin/velocity --help`. For actual file forwarding,
+  use `--data-dir /tmp/velocity-r13-review/profile`. Do not select
+  `/usr/local/bin` for this disposable review. Unrelated existing commands must yield an error.
+  If a new local symlink was installed for this review, remove that symlink after checking its target.
+- [ ] Cmd+Shift+P → Package: Install from File… → `Reviewer Fixture.sublime-package` in the
+  fixture root. Keep typing while the worker runs. Set Syntax: Reviewer Fixture, Snippet:
+  Reviewer Fixture and the `reviewer` build system become available without reopening documents.
+  Package: List reports resources and **partially supported: no plugin API**; select its row
+  to inspect contribution paths. The Python marker never executes.
+- [ ] Package: Disable/Enable removes/restores its resource choices live. Unsaved text, undo,
+  selections, folders and open tabs survive. The preferences retain `KeepDisabled` and unrelated
+  settings. Package: Remove removes its contributions and reports recoverable backup paths.
+  Replacing an installed archive also reports the previous archive’s backup.
+- [ ] Package: Install from URL… accepts a reviewer-controlled HTTPS archive URL, then a package
+  name, including URLs with query parameters. Invalid TLS, HTTP URLs and invalid ZIPs show errors
+  while the editor stays usable. No public service is configured or needed for local checks.
+- [ ] Package: Check for Upgrades is absent with `package_index_url: null`. With an explicit
+  reviewer-controlled HTTPS version-1 index (schema in `vel-packages/README.md`), it appears.
+  Nothing fetches until invoked. Available/current versions appear before an installation
+  confirmation. Cancel retains the archive; confirmation checks digest/metadata and retains
+  disabled state. Restore the setting to null after review.
+
+VoiceOver: enable with **Cmd+F5** (or the system accessibility shortcut). **VO** below means
+Control+Option. Use Accessibility Inspector alongside VoiceOver to inspect the public AX values.
+
+- [ ] Interact with the workspace/text area (VO+Shift+Down). The editor has role `AXTextArea`,
+  a document label and the visible/windowed text value. Read `Hello 你好 😀 é` in order. Arrow,
+  Shift+Arrow and mouse selection changes announce their current caret/selection rather than
+  stale text. Typing, native IME preedit/commit and Undo update the value and selection once.
+- [ ] Inspect `AXSelectedText`, `AXSelectedTextRange(s)` and `AXInsertionPointLineNumber`.
+  UTF-16 offsets count 😀 as two units; combining marks retain valid scalar boundaries. Reverse
+  a multiline selection: insertion line follows the actual primary caret. Add multiple carets:
+  AX exposes the primary only; typing still edits all editor carets. Setting an AX range updates
+  the primary editor selection, and no half surrogate is exposed or replaced.
+- [ ] Query `AXLineForIndex`, `AXRangeForLine`, `AXStringForRange` and `AXBoundsForRange` in
+  Inspector. Include newline, end-of-document and empty ranges. Bounds align with text at 1×/2×,
+  after horizontal/vertical scrolling, wrapping, folds, window resize, UI scaling and splits.
+  Screen bounds use points; a Retina display must not double offsets or sizes.
+- [ ] Open `project/windowed.txt`, move near the end and query its value. Each value has at most
+  **65,536 UTF-16 units**; Help reports its document offset and first line. Selected/parameterized
+  ranges are relative to that value; insertion line remains document-relative. Move the caret
+  beyond the old window and confirm the next value/range queries track it. Whole-value AX
+  replacement is unavailable for a partial window. No full-document flattening or UI pause.
+- [ ] Traverse with Cmd+F6 / Cmd+Shift+F6 and VO navigation. Tabs expose document names, selected
+  state and separate Close buttons; Return/Space or VO+Space activates focused controls. Visit
+  both tabs, close/cancel a dirty tab, then switch groups. The primary editor follows the selected
+  group. Closing the quick panel restores the editor’s focus.
+- [ ] The side bar is an outline with labelled open-file/project rows, disclosure depth and
+  expansion state. Select/open files and expand/collapse directories with AX actions. Hidden
+  rows do not become duplicate elements. Goto/palette rows expose captions, badges/details and
+  selected state; filtering and Enter/VO+Space choose the announced row.
+- [ ] Find/Replace and Find in Files fields have distinct Find/Replace/Where labels. Regex,
+  case, whole-word, wrap, selection and preserve-case controls have named actions; Find Next,
+  Find All and Replace All buttons work. Standard Tab/Shift+Tab retains input routing; the
+  explicit Cmd+F6 traversal includes non-text controls.
+- [ ] Status text announces line/column, selections, encoding and current message. The syntax
+  popup opens its picker. Completion rows, context-menu choices and visible minihtml popup
+  text/links have semantic names/actions. Activate a popup link and confirm its normal action.
+- [ ] System Settings → Accessibility → Display → Reduce motion, toggled **while running**:
+  theme tint/opacity transitions and texture sequences settle immediately; no theme animation
+  resumes on resource reload. Toggle Increase contrast: chrome control boundaries strengthen.
+  Toggle back and confirm ordinary animations/appearance return. Custom syntax color contrast
+  remains the scheme author’s choice.
+
+Record macOS version, display scale, VoiceOver version/verbosity, exact failing action and AX
+attribute values. GUI behavior, actual speech and screen-coordinate alignment are **pending
+human review**; headless tests do not establish these outcomes. Binary hex documents currently
+have a read-only description rather than a navigable AX hex-text value.

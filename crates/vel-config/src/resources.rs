@@ -1,6 +1,6 @@
 //! Package resources with zip/loose overrides and deterministic User-last order.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -25,6 +25,7 @@ impl Resource {
 #[derive(Default, Debug)]
 pub struct Resources {
     entries: BTreeMap<String, Resource>,
+    ignored: BTreeSet<String>,
 }
 impl Resources {
     /// Adds an embedded resource at lowest or current priority.
@@ -108,16 +109,64 @@ impl Resources {
         }
         Ok(())
     }
+    /// Applies the effective package exclusion to every resource consumer.
+    /// User preferences always remain readable so a disabled package can be enabled.
+    pub fn set_ignored(&mut self, ignored: BTreeSet<String>) {
+        self.ignored = ignored;
+        self.ignored.remove("User");
+    }
+    /// Whether a package contributes resources in this overlay.
+    pub fn package_enabled(&self, package: &str) -> bool {
+        !self.ignored.contains(package)
+    }
+    /// Adds only public syntax and metadata resources from a package root.
+    pub fn load_syntaxes(&mut self, root: &Path) -> Result<(), String> {
+        fn visit(resources: &mut Resources, root: &Path, dir: &Path) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let ty = entry.file_type().map_err(|e| e.to_string())?;
+                let path = entry.path();
+                if ty.is_dir() {
+                    visit(resources, root, &path)?;
+                } else if ty.is_file()
+                    && path.to_str().is_some_and(|p| {
+                        [
+                            ".sublime-syntax",
+                            ".tmLanguage",
+                            ".tmLanguage.json",
+                            ".tmPreferences",
+                        ]
+                        .iter()
+                        .any(|suffix| p.ends_with(suffix))
+                    })
+                {
+                    let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
+                    resources.insert(
+                        &format!("Packages/{}", relative.to_string_lossy()),
+                        fs::read(&path).map_err(|e| e.to_string())?,
+                        path,
+                    );
+                }
+            }
+            Ok(())
+        }
+        visit(self, root, root)
+    }
     /// Finds one effective package resource.
     pub fn get(&self, path: &str) -> Option<&Resource> {
-        self.entries.get(path)
+        self.entries
+            .get(path)
+            .filter(|r| self.package_enabled(r.path.split('/').nth(1).unwrap_or("")))
     }
     /// Lists an extension in package order: Default first, User last.
     pub fn matching(&self, suffix: &str) -> Vec<&Resource> {
         let mut out: Vec<_> = self
             .entries
             .values()
-            .filter(|r| r.path.ends_with(suffix))
+            .filter(|r| {
+                r.path.ends_with(suffix)
+                    && self.package_enabled(r.path.split('/').nth(1).unwrap_or(""))
+            })
             .collect();
         out.sort_by_key(|r| {
             let package = r.path.split('/').nth(1).unwrap_or("");

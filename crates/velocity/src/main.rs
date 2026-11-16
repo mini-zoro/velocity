@@ -26,6 +26,7 @@ mod large_tests;
 mod layout;
 mod panels;
 mod parse_bench;
+mod release;
 mod report;
 mod review_bench;
 #[cfg(test)]
@@ -134,6 +135,20 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             }
             Err(e) => {
                 eprintln!("velocity: single-instance forwarding unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let crash = if options.mode == Mode::Interactive {
+        match std::env::var_os("HOME")
+            .ok_or_else(|| "home directory unavailable".to_owned())
+            .and_then(|home| release::CrashStartup::install(Path::new(&home)))
+        {
+            Ok(crash) => Some(crash),
+            Err(error) => {
+                eprintln!("velocity: local crash reporting unavailable: {error}");
                 None
             }
         }
@@ -359,6 +374,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 app.restore_remaining(restored.windows.iter().skip(1).cloned().collect());
             }
             app.set_instance(instance);
+            app.set_crash(crash);
             Platform::run_with_options(window, app)?;
             if options.mode == Mode::Interactive {
                 done.store(true, Ordering::Release);

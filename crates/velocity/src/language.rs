@@ -365,54 +365,57 @@ impl Assets {
         data: Option<&Path>,
         resources: &vel_config::resources::Resources,
     ) -> Result<Arc<Self>, String> {
-        let Some(data) = data else {
-            return Ok(base.clone());
-        };
-        let bundled = packages_root();
-        let packages = data.join("Packages");
-        let _ = std::fs::create_dir_all(packages.join("User"));
-        let mut roots = vec![bundled.as_path()];
-        if packages.is_dir() {
-            roots.push(&packages);
+        if let Some(data) = data {
+            let _ = std::fs::create_dir_all(data.join("Packages/User"));
         }
-        let mut grammar = vec![(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)];
+        let root = packages_root();
         let effective = [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
             .into_iter()
             .flat_map(|suffix| resources.matching(suffix))
             .collect::<Vec<_>>();
-        if effective.iter().any(|r| {
-            r.origin
-                .extension()
-                .is_some_and(|ext| ext == "sublime-package")
-        }) {
-            // An archive has no physical root. Its effective overlay includes loose winners,
-            // preserving loose-over-archive and User-last lookup ties without extraction.
-            for resource in effective {
-                if let Ok(text) = resource.text() {
-                    grammar.push((resource.path.as_str(), text));
-                }
-            }
-            grammar[1..].sort_by_key(|(path, _)| (path.starts_with("Packages/User/"), *path));
+        if effective.is_empty()
+            && resources
+                .get("Packages/Default/Preferences.sublime-settings")
+                .is_none()
+        {
+            return Ok(base.clone());
         }
-        let cache = data.join("Cache/Syntaxes");
-        let syntaxes = SyntaxSet::load_cached_roots(&roots, &grammar, &cache)
-            .map(|(set, _)| set)
-            .or_else(|_| SyntaxSet::load_roots(&roots, &grammar))
-            .map_err(|e| e.to_string())?;
-        let resources = resources.matching(".tmPreferences");
-        let preferences = if resources.iter().any(|r| {
-            r.origin
-                .extension()
-                .is_some_and(|ext| ext == "sublime-package")
-        }) {
-            resources
+        if effective.len() + 1 == base.syntaxes.syntaxes().len()
+            && effective.iter().all(|r| r.origin.starts_with(&root))
+            && resources
+                .matching(".tmPreferences")
                 .iter()
-                .map(|r| Ok((r.path.as_str(), r.text()?)))
-                .collect::<Result<Vec<_>, String>>()?
+                .all(|r| r.origin.starts_with(&root))
+        {
+            return Ok(base.clone());
+        }
+        let grammar = [(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)]
+            .into_iter()
+            .chain(
+                [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
+                    .into_iter()
+                    .flat_map(|suffix| resources.matching(suffix))
+                    .map(|r| Ok((r.path.as_str(), r.text()?)))
+                    .collect::<Result<Vec<_>, String>>()?,
+            )
+            .collect::<Vec<_>>();
+        // All effective grammars are virtual extras. Physical roots would bypass
+        // ignored_packages and reintroduce disabled loose/bundled grammars.
+        let load = || SyntaxSet::load_roots(&[], &grammar);
+        let syntaxes = if let Some(data) = data {
+            SyntaxSet::load_cached_roots(&[], &grammar, &data.join("Cache/Syntaxes"))
+                .map(|(set, _)| set)
+                .or_else(|_| load())
         } else {
-            Vec::new()
-        };
-        let metadata = MetadataSet::load_roots(&roots, &preferences).map_err(|e| e.to_string())?;
+            load()
+        }
+        .map_err(|e| e.to_string())?;
+        let preferences = resources
+            .matching(".tmPreferences")
+            .into_iter()
+            .map(|r| Ok((r.path.as_str(), r.text()?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let metadata = MetadataSet::load_roots(&[], &preferences).map_err(|e| e.to_string())?;
         Ok(Arc::new(Self {
             syntaxes: Arc::new(syntaxes),
             metadata: Arc::new(metadata),
@@ -420,7 +423,7 @@ impl Assets {
         }))
     }
 }
-fn packages_root() -> PathBuf {
+pub(crate) fn packages_root() -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(contents) = exe.parent().and_then(Path::parent)
     {

@@ -143,6 +143,8 @@ const WINDOW: &[&str] = &[
     "move_to_group",
     "focus_neighboring_group",
     "move_to_neighboring_group",
+    "focus_next_control",
+    "focus_previous_control",
     "new_pane",
     "close_pane",
     "clone_file",
@@ -228,6 +230,15 @@ impl Registry {
             "close_window",
             "toggle_record_macro",
             "run_macro",
+            "install_cli",
+            "open_crash_reports",
+            "package_install_file",
+            "package_install_url",
+            "package_remove",
+            "package_toggle",
+            "package_list",
+            "package_check_upgrades",
+            "package_upgrade",
         ] {
             registry.register(name, Kind::ApplicationCommand, None);
         }

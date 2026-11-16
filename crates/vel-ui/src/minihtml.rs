@@ -198,6 +198,103 @@ impl Html {
         self.scroll.y += y;
         self.clamp_scroll();
     }
+    /// Exposes visible popup text and links using the already laid-out display list.
+    /// Coordinates include the caller's translation into native content-view points.
+    pub fn accessibility_nodes(
+        &self,
+        base: u64,
+        offset: Point,
+    ) -> Vec<vel_platform::accessibility::Node> {
+        use vel_platform::accessibility::{Node, Role};
+        let translate = |r: vel_minihtml::Rect| Rect {
+            x: self.bounds.x + f64::from(r.x) - self.scroll.x + offset.x,
+            y: self.bounds.y + f64::from(r.y) - self.scroll.y + offset.y,
+            width: f64::from(r.width),
+            height: f64::from(r.height),
+        };
+        let clip = Rect {
+            x: self.clip.x + offset.x,
+            y: self.clip.y + offset.y,
+            ..self.clip
+        };
+        let intersect = |r: Rect| {
+            let x = r.x.max(clip.x);
+            let y = r.y.max(clip.y);
+            let right = (r.x + r.width).min(clip.x + clip.width);
+            let bottom = (r.y + r.height).min(clip.y + clip.height);
+            (right > x && bottom > y).then_some(Rect {
+                x,
+                y,
+                width: right - x,
+                height: bottom - y,
+            })
+        };
+        if clip.width <= 0. || clip.height <= 0. {
+            return vec![];
+        }
+        let mut nodes = vec![Node::new(
+            base,
+            None,
+            Role::Group,
+            "Information popup",
+            clip,
+        )];
+        for (i, item) in self.display.items.iter().enumerate() {
+            if let DisplayItem::Text { rect, text, .. } = item
+                && let Some(frame) = intersect(translate(*rect))
+            {
+                nodes.push(Node::new(
+                    base + 1 + i as u64,
+                    Some(base),
+                    Role::Status,
+                    text.clone(),
+                    frame,
+                ));
+            }
+        }
+        let link_base = base + 1 + self.display.items.len() as u64;
+        for (i, link) in self.display.links.iter().enumerate() {
+            if let Some(frame) = intersect(translate(link.rect)) {
+                let label = self
+                    .display
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        DisplayItem::Text { rect, text, .. }
+                            if rect.x < link.rect.x + link.rect.width
+                                && rect.x + rect.width > link.rect.x
+                                && rect.y < link.rect.y + link.rect.height
+                                && rect.y + rect.height > link.rect.y =>
+                        {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut node = Node::new(
+                    link_base + i as u64,
+                    Some(base),
+                    Role::Link,
+                    if label.is_empty() {
+                        "Open link".into()
+                    } else {
+                        label
+                    },
+                    frame,
+                );
+                node.activation = Some((
+                    Point {
+                        x: frame.x + frame.width / 2.,
+                        y: frame.y + frame.height / 2.,
+                    },
+                    false,
+                ));
+                nodes.push(node);
+            }
+        }
+        nodes
+    }
     /// Returns a link only inside the painted clipping viewport.
     pub fn link_at(&self, p: Point) -> Option<&LinkTarget> {
         if !crate::contains(self.clip, p) {
@@ -728,5 +825,42 @@ mod tests {
             },
         );
         assert!(scene.layers.iter().flat_map(|l|&l.surfaces).any(|s|matches!(s,vel_render::scene::Surface::Image(q) if q.image.width==1 && q.image.height==1)));
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+    #[test]
+    fn visible_popup_links_have_spoken_names_and_clipped_activation_geometry() {
+        let mut html = Html::new(
+            "<p>Information <a href='https://example.invalid/'>Open help</a></p>",
+            false,
+        )
+        .unwrap();
+        html.layout(&LayoutOptions::default(), 0, &Metrics::default());
+        let mut scene = Scene::default();
+        let bounds = Rect {
+            x: 20.,
+            y: 30.,
+            width: 300.,
+            height: 80.,
+        };
+        html.paint(&mut scene, bounds);
+        let nodes = html.accessibility_nodes(100, Point { x: 50., y: 60. });
+        let link = nodes
+            .iter()
+            .find(|n| n.role == vel_platform::accessibility::Role::Link)
+            .unwrap();
+        assert!(link.label.contains("Open"));
+        let point = link.activation.unwrap().0;
+        assert!(link.frame.x >= 70. && link.frame.y >= 90.);
+        assert!(
+            html.link_at(Point {
+                x: point.x - 50.,
+                y: point.y - 60.
+            })
+            .is_some()
+        );
     }
 }

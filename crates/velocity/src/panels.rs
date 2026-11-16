@@ -4295,3 +4295,7 @@ fn escape_html(text: &str) -> String {
         .replace('\"', "&quot;")
         .replace('\'', "&#39;")
 }
+
+#[path = "panels_a11y.rs"]
+mod accessibility;
+pub(crate) use accessibility::ax_id;

@@ -1,5 +1,7 @@
 //! AppKit ownership and Objective-C interop are confined to this module.
 use crate::*;
+#[path = "macos_a11y.rs"]
+mod a11y;
 use block2::RcBlock;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -229,6 +231,26 @@ impl WindowHandle {
             main.removeItemAtIndex(1);
         }
         self.0.menu_commands.borrow_mut().clear();
+        if let Some(application) = main.itemAtIndex(0).and_then(|item| item.submenu()) {
+            for index in (0..application.numberOfItems()).rev() {
+                if application
+                    .itemAtIndex(index)
+                    .is_some_and(|item| item.title().to_string() == "Install Command Line Tool…")
+                {
+                    application.removeItemAtIndex(index);
+                }
+            }
+            append_menu(
+                &self.0,
+                &application,
+                &[MenuEntry {
+                    caption: "Install Command Line Tool…".into(),
+                    command: Some("install_cli".into()),
+                    args: "{}".into(),
+                    children: vec![],
+                }],
+            );
+        }
         append_menu(&self.0, &main, entries);
     }
     /// Opens a native multi-file chooser.
@@ -375,6 +397,8 @@ enum Event {
     Resize,
     Appearance(Appearance),
     CloseRequested,
+    Accessibility(accessibility::Id, accessibility::Request),
+    AccessibilityPreferences,
 }
 struct Host {
     mtm: MainThreadMarker,
@@ -401,6 +425,10 @@ struct Host {
     error: RefCell<Option<String>>,
     menu_commands: RefCell<Vec<(String, String)>>,
     input: RefCell<TextInputState>,
+    ax_elements: RefCell<std::collections::HashMap<accessibility::Id, Retained<a11y::AxElement>>>,
+    ax_queried: Cell<bool>,
+    ax_focus: Cell<Option<accessibility::Id>>,
+    ax_layout: Cell<u64>,
 }
 impl Host {
     fn handle(self: &Rc<Self>) -> WindowHandle {
@@ -434,6 +462,10 @@ impl Host {
             };
             let w = self.handle();
             match event {
+                Event::Accessibility(id, request) => app.on_accessibility(&w, id, request),
+                Event::AccessibilityPreferences => {
+                    app.on_accessibility_preferences(&w, a11y::preferences())
+                }
                 Event::Key(e) => {
                     app.on_key(&w, e);
                 }
@@ -450,7 +482,10 @@ impl Host {
                     }
                 }
             }
-            *self.input.borrow_mut() = app.text_input_state();
+            let current = app.text_input_state();
+            let previous = self.input.replace(current.clone());
+            drop(slot);
+            a11y::notify(self, &previous, &current);
             if self.stopped.get() {
                 break;
             }
@@ -467,6 +502,7 @@ impl Host {
             return false;
         }
         self.dispatching.set(true);
+        let previous = self.input.borrow().clone();
         let handled = if let Some(app) = self.app.borrow_mut().as_mut() {
             let handled = app.on_key(&self.handle(), key);
             *self.input.borrow_mut() = app.text_input_state();
@@ -475,6 +511,8 @@ impl Host {
             false
         };
         self.dispatching.set(false);
+        let current = self.input.borrow().clone();
+        a11y::notify(self, &previous, &current);
         self.drain();
         handled
     }
@@ -511,6 +549,7 @@ impl Host {
             return;
         }
         self.dirty.set(false);
+        let previous = self.input.borrow().clone();
         let result = {
             let mut app = self.app.borrow_mut();
             if let Some(app) = app.as_mut() {
@@ -528,6 +567,8 @@ impl Host {
         };
         self.drawing.set(false);
         self.dispatching.set(false);
+        let current = self.input.borrow().clone();
+        a11y::notify(self, &previous, &current);
         if let Err(e) = result {
             self.fail(e);
         }
@@ -643,6 +684,14 @@ define_class!(
     // SAFETY: NSObjectProtocol has no additional requirements.
     unsafe impl NSObjectProtocol for EditorView {}
     impl EditorView {
+        #[unsafe(method(isAccessibilityElement))] fn ax_element(&self) -> bool { true }
+        #[unsafe(method_id(accessibilityRole))] fn ax_role(&self) -> Retained<NSString> { NSString::from_str("AXGroup") }
+        #[unsafe(method_id(accessibilityLabel))] fn ax_label(&self) -> Retained<NSString> { NSString::from_str("Velocity workspace") }
+        #[unsafe(method_id(accessibilityChildren))] fn ax_children(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| { h.ax_queried.set(true); a11y::children(&h,None) }) }
+        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))] fn ax_navigation(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| { h.ax_queried.set(true); a11y::children(&h,None) }) }
+        #[unsafe(method_id(accessibilityFocusedUIElement))] fn ax_focused(&self) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| { h.ax_queried.set(true); a11y::focused(&h) }) }
+        #[unsafe(method_id(accessibilityHitTest:))] fn ax_hit(&self, point: NSPoint) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::hit(&h,point)) }
+        #[unsafe(method(accessibilityDisplayOptionsChanged:))] fn ax_preferences(&self, _notification: &NSNotification) { if let Some(h)=self.ivars().host.upgrade() { h.dispatch(Event::AccessibilityPreferences); h.flush(); } }
         #[unsafe(method(isFlipped))] fn is_flipped(&self) -> bool { true }
         #[unsafe(method(acceptsFirstResponder))] fn accepts_first_responder(&self) -> bool { true }
         #[unsafe(method(wantsUpdateLayer))] fn wants_update_layer(&self) -> bool { true }
@@ -1003,6 +1052,18 @@ impl Delegate {
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
         window.setContentView(Some(&view));
+        // SAFETY: view is retained by the host; the notification uses a one-argument selector.
+        unsafe {
+            NSWorkspace::sharedWorkspace()
+                .notificationCenter()
+                .addObserver_selector_name_object(
+                    &view,
+                    sel!(accessibilityDisplayOptionsChanged:),
+                    Some(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
+                    None,
+                );
+        }
+        h.dispatch(Event::AccessibilityPreferences);
         window.setAcceptsMouseMovedEvents(true);
         window.makeFirstResponder(Some(&view));
         h.window
@@ -1223,6 +1284,10 @@ fn create_host(
         error: RefCell::new(None),
         menu_commands: RefCell::new(Vec::new()),
         input: RefCell::new(TextInputState::default()),
+        ax_elements: RefCell::new(Default::default()),
+        ax_queried: Cell::new(false),
+        ax_focus: Cell::new(None),
+        ax_layout: Cell::new(0),
     });
     Ok(host)
 }

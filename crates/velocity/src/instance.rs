@@ -142,6 +142,13 @@ impl Instance {
         std::env::temp_dir().join(format!("velocity-{uid}-{:016x}.sock", hash.finish()))
     }
     pub fn forward_existing(data: Option<&Path>, request: &Request) -> Result<bool, String> {
+        Self::forward_with_ack(data, request, || {})
+    }
+    fn forward_with_ack(
+        data: Option<&Path>,
+        request: &Request,
+        accepted: impl FnOnce(),
+    ) -> Result<bool, String> {
         let Ok(mut stream) = UnixStream::connect(Self::socket_path(data)) else {
             return Ok(false);
         };
@@ -155,6 +162,7 @@ impl Instance {
             .map_err(|e| e.to_string())?;
         let mut ack = [0];
         stream.read_exact(&mut ack).map_err(|e| e.to_string())?;
+        accepted();
         if request.wait {
             stream.set_read_timeout(None).map_err(|e| e.to_string())?;
             stream.read_exact(&mut ack).map_err(|e| e.to_string())?;
@@ -257,28 +265,47 @@ mod tests {
             panic!("expected primary")
         };
         assert!(!data.exists());
-        let target = data.clone();
-        let client = std::thread::spawn(move || {
-            Instance::forward_existing(Some(&target), &request).unwrap()
-        });
-        let at = std::time::Instant::now();
-        let incoming = loop {
-            if let Some(incoming) = instance.drain().pop() {
-                break incoming;
-            }
-            assert!(at.elapsed() < Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(1));
-        };
-        assert_eq!(incoming.request.stdin.as_deref(), Some("stdin 你好"));
+        // Binding is synchronous in start(). Prepare the expensive workspace before
+        // starting the client's acknowledgement timeout. Other workspace tests may
+        // concurrently compile the full syntax corpus.
         let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let target = data.clone();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let result = Instance::forward_with_ack(Some(&target), &request, || {
+                accepted_tx.send(()).unwrap();
+            });
+            closed_tx.send(result).unwrap();
+        });
+        // Channel delivery, not polling or a scheduler-speed assertion, establishes
+        // readiness. This timeout is only a deadlock watchdog, not a performance gate.
+        let watchdog = Duration::from_secs(120);
+        let incoming = instance
+            .rx
+            .recv_timeout(watchdog)
+            .expect("request delivered");
+        assert_eq!(incoming.request.stdin.as_deref(), Some("stdin 你好"));
         let sheet = workspace.tabs[0].sheet;
         let mut waiter = Waiter::acknowledge(incoming, &workspace, [sheet].into())
             .unwrap()
             .unwrap();
-        assert!(!client.is_finished());
+        accepted_rx
+            .recv_timeout(watchdog)
+            .expect("accepted acknowledgement");
+        assert!(matches!(
+            closed_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         assert!(!waiter.complete(&workspace));
         workspace.close(0).unwrap();
         assert!(waiter.complete(&workspace));
-        assert!(client.join().unwrap());
+        assert!(
+            closed_rx
+                .recv_timeout(watchdog)
+                .expect("close acknowledgement")
+                .unwrap()
+        );
+        client.join().unwrap();
     }
 }

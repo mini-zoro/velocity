@@ -220,6 +220,10 @@ pub struct Workspace {
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) project: Option<PathBuf>,
     config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
+    config_rx: Option<std::sync::mpsc::Receiver<Result<Configuration, String>>>,
+    reload_requested: bool,
+    settings_writes: Vec<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub resource_revision: u64,
 }
 fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let m = std::fs::metadata(path).ok()?;
@@ -271,13 +275,29 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
             .map_err(|e| e.to_string())
     }
 }
-impl Workspace {
-    pub fn new(
-        text: Text,
-        data_dir: Option<PathBuf>,
-        project: Option<PathBuf>,
-        watch: bool,
-    ) -> Result<Self, String> {
+#[derive(Debug)]
+struct Configuration {
+    themes: crate::theme_ui::Prepared,
+    #[cfg(test)]
+    resources: Resources,
+    settings: Settings,
+    keymap: Keymap,
+    syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
+    schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
+    assets: Arc<crate::language::Assets>,
+    catalog: Arc<crate::completion::Catalog>,
+    menus: Vec<MenuItem>,
+    mousemap: Vec<MouseBinding>,
+    palette: Vec<PaletteItem>,
+    folders: Vec<vel_search::project::Folder>,
+    distraction_settings: serde_json::Map<String, Value>,
+    build_systems: Vec<vel_build::BuildSystem>,
+    project_model: vel_session::project::Project,
+    config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
+    messages: Vec<String>,
+}
+impl Configuration {
+    fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
         let mut resources = Resources::default();
         crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
@@ -341,11 +361,49 @@ impl Workspace {
             );
         }
         let mut resource_messages = Vec::new();
+        resources.load_syntaxes(&crate::language::packages_root())?;
+        if let Some(bundle) = crate::release::bundle_resources()
+            && let Err(error) = resources.load(&bundle)
+        {
+            resource_messages.push(error);
+        }
         if let Some(data) = &data_dir
             && let Err(e) = resources.load(data)
         {
             resource_messages.push(format!("user resources: {e}"));
         }
+        // Resolve ignored_packages before loading any resource category. Reading
+        // the preferences first is necessary to allow re-enabling a package.
+        let mut ignored = std::collections::BTreeSet::new();
+        for resource in resources.matching(".sublime-settings") {
+            if (resource.path.starts_with("Packages/Default/")
+                || resource.path.starts_with("Packages/User/"))
+                && (resource.path.ends_with("/Preferences.sublime-settings")
+                    || resource
+                        .path
+                        .ends_with("/Preferences (OSX).sublime-settings"))
+                && let Ok(doc) = resource.text().and_then(Document::parse)
+                && let Some(values) = doc.value.get("ignored_packages").and_then(Value::as_array)
+            {
+                ignored = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+            }
+        }
+        if let Some(project) = &project
+            && let Ok(source) = std::fs::read_to_string(project)
+            && let Ok(doc) = Document::parse(&source)
+            && let Some(values) = doc.value["settings"]["ignored_packages"].as_array()
+        {
+            ignored = values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+        }
+        resources.set_ignored(ignored);
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
         let mut syntax = serde_json::Map::new();
@@ -435,7 +493,12 @@ impl Workspace {
                 include_str!("../../../third_party/sublime-packages/Makefile/Make.sublime-build"),
             ),
         ] {
-            if !build_systems.iter().any(|b| b.name == name) {
+            if resources.package_enabled(match name {
+                "Cargo" => "Rust",
+                "Python" => "Python",
+                _ => "Makefile",
+            }) && !build_systems.iter().any(|b| b.name == name)
+            {
                 build_systems.push(vel_build::BuildSystem::parse(name, source)?);
             }
         }
@@ -577,19 +640,11 @@ impl Workspace {
                     .map_err(|e| e.to_string())?;
             }
         }
+        crate::release::extend_commands(&mut palette, &mut menus, &settings);
         ui::extend_palette(&mut palette, &menus);
         let bundled = crate::language::Assets::bundled()?;
-        let assets = match crate::language::Assets::with_user_packages(
-            &bundled,
-            data_dir.as_deref(),
-            &resources,
-        ) {
-            Ok(assets) => assets,
-            Err(e) => {
-                resource_messages.push(format!("user grammars/metadata: {e}"));
-                bundled
-            }
-        };
+        let assets =
+            crate::language::Assets::with_user_packages(&bundled, data_dir.as_deref(), &resources)?;
         resource_messages.extend(assets.syntaxes.warnings().iter().cloned());
         for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
             palette.push(PaletteItem {
@@ -728,11 +783,69 @@ impl Workspace {
                 &mut std::collections::BTreeSet::new(),
             );
         }
+        config_stamp.retain(|(p, _)| {
+            data_dir.as_ref().is_some_and(|d| p.starts_with(d)) || project.as_ref() == Some(p)
+        });
         config_stamp.sort_by(|a, b| a.0.cmp(&b.0));
         config_stamp.dedup_by(|a, b| a.0 == b.0);
         let keymap_source = serde_json::to_string(&keys).map_err(|e| e.to_string())?;
         let mut keymap = Keymap::default();
         keymap.append(&keymap_source)?;
+        let themes = crate::theme_ui::Themes::prepare(
+            &resources,
+            &schemes,
+            &settings,
+            &mut resource_messages,
+        );
+        Ok(Self {
+            themes,
+            #[cfg(test)]
+            resources,
+            settings,
+            keymap,
+            syntax_settings,
+            schemes,
+            assets,
+            catalog,
+            menus,
+            mousemap,
+            palette,
+            folders,
+            distraction_settings,
+            build_systems,
+            project_model,
+            config_stamp,
+            messages: resource_messages,
+        })
+    }
+}
+impl Workspace {
+    pub fn new(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        watch: bool,
+    ) -> Result<Self, String> {
+        let Configuration {
+            themes,
+            #[cfg(test)]
+                resources: _,
+            settings,
+            keymap,
+            syntax_settings,
+            schemes,
+            assets,
+            catalog,
+            menus,
+            mousemap,
+            palette,
+            folders,
+            distraction_settings,
+            build_systems,
+            project_model,
+            config_stamp,
+            messages: resource_messages,
+        } = Configuration::load(data_dir.clone(), project.clone())?;
         let tab = Tab::new(text, &settings, &keymap)?;
         let mut messages = resource_messages;
         let watcher = if watch {
@@ -746,7 +859,7 @@ impl Workspace {
         } else {
             None
         };
-        let mut themes = crate::theme_ui::Themes::load(&resources, &schemes, &mut messages);
+        let mut themes = crate::theme_ui::Themes::publish(themes);
         if let Err(e) = themes.select(&settings, true) {
             messages.push(e);
         }
@@ -782,10 +895,49 @@ impl Workspace {
             data_dir,
             project,
             config_stamp,
+            config_rx: None,
+            reload_requested: false,
+            settings_writes: Vec::new(),
+            resource_revision: 0,
         };
         workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
         workspace.configure_language(0, None, true)?;
         Ok(workspace)
+    }
+    pub fn track_settings_write(&mut self, rx: std::sync::mpsc::Receiver<Result<(), String>>) {
+        self.settings_writes.push(rx);
+    }
+    #[cfg(test)]
+    pub fn wait_resources(&mut self) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            self.poll();
+            if !self.resources_busy() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "resource worker did not finish: {:?}",
+                self.messages
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+    }
+    pub fn request_resource_reload(&mut self) {
+        self.reload_requested = true;
+    }
+    pub fn resources_busy(&self) -> bool {
+        self.config_rx.is_some() || self.reload_requested || !self.settings_writes.is_empty()
+    }
+    pub fn ignored_packages(&self) -> std::collections::BTreeSet<String> {
+        self.settings
+            .get("ignored_packages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
     }
     pub fn editor(&self) -> &Editor {
         &self.tabs[self.active].editor
@@ -797,18 +949,20 @@ impl Workspace {
         &mut self.tabs[self.active].editor
     }
     pub fn language_busy(&self) -> bool {
-        self.tabs.iter().any(|tab| {
-            tab.loading.is_some()
-                || tab.binary_loading.is_some()
-                || tab.editor.layout.borrow().long.pending()
-                || tab.editor.reindent_job.is_some()
-                || tab
-                    .editor
-                    .language
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|l| l.busy())
-        })
+        self.config_rx.is_some()
+            || self.reload_requested
+            || self.tabs.iter().any(|tab| {
+                tab.loading.is_some()
+                    || tab.binary_loading.is_some()
+                    || tab.editor.layout.borrow().long.pending()
+                    || tab.editor.reindent_job.is_some()
+                    || tab
+                        .editor
+                        .language
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|l| l.busy())
+            })
     }
     pub fn new_file(&mut self) -> Result<(), String> {
         self.tabs
@@ -1163,7 +1317,44 @@ impl Workspace {
             }
         }
         self.reconcile_installs();
-        if self.config_stamp.iter().any(|(p, s)| stamp(p) != *s) {
+        self.settings_writes.retain(|rx| match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.reload_requested = true;
+                false
+            }
+            Ok(Err(error)) => {
+                self.messages.push(error);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(error) => {
+                self.messages.push(error.to_string());
+                false
+            }
+        });
+        if self.config_rx.is_none()
+            && (self.reload_requested || self.config_stamp.iter().any(|(p, s)| stamp(p) != *s))
+        {
+            self.reload_requested = false;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let data = self.data_dir.clone();
+            let project = self.project.clone();
+            match std::thread::Builder::new()
+                .name("velocity-resources".into())
+                .spawn(move || {
+                    let _ = tx.send(Configuration::load(data, project));
+                }) {
+                Ok(_) => self.config_rx = Some(rx),
+                Err(error) => self.messages.push(error.to_string()),
+            }
+        }
+        let config_result = self.config_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(error) => Some(Err(error.to_string())),
+        });
+        if let Some(result) = config_result {
+            self.config_rx = None;
             let project_changed = self.project.as_ref().is_some_and(|project| {
                 self.config_stamp
                     .iter()
@@ -1174,17 +1365,14 @@ impl Workspace {
             } else {
                 self.folders.clone()
             };
-            match Self::new(
-                Text::new(),
-                self.data_dir.clone(),
-                self.project.clone(),
-                false,
-            ) {
-                Ok(config) => {
-                    self.themes = config.themes;
+            match result {
+                Ok(mut config) => {
+                    self.messages.append(&mut config.messages);
+                    self.themes = crate::theme_ui::Themes::publish(config.themes);
                     if let Err(e) = self.themes.select(&config.settings, self.dark) {
                         self.messages.push(e);
                     }
+                    self.resource_revision = self.resource_revision.wrapping_add(1);
                     self.assets = config.assets;
                     self.catalog = config.catalog;
                     self.syntax_settings = config.syntax_settings;
@@ -1523,7 +1711,7 @@ mod tests {
             .set(Layer::View, "tab_size", json!(8));
         workspace.editor_mut().sync();
         std::fs::write(&prefs, "{\"font_size\":20,\"tab_size\":4}").unwrap();
-        assert!(workspace.poll());
+        workspace.wait_resources();
         assert_eq!(workspace.editor().preferences.font_size, 20.);
         assert_eq!(workspace.editor().preferences.tab_size, 8);
     }
@@ -1559,3 +1747,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "package_tests.rs"]
+mod package_tests;

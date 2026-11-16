@@ -307,7 +307,7 @@ fn workspace_autosave_does_not_reload_project_settings_from_parent_directory_cha
     let mut w = Workspace::new(Text::new(), None, Some(path.clone()), false).unwrap();
     let revision = w.editor().settings.revision();
     std::fs::write(path.with_extension("sublime-workspace"), "{}").unwrap();
-    w.poll();
+    w.wait_resources();
     assert_eq!(w.editor().settings.revision(), revision);
 }
 

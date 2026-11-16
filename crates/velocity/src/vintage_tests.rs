@@ -275,7 +275,7 @@ fn runtime_user_preferences_and_prompt_focus_changes_preserve_text() {
         r#"{"vintage_enabled":true,"vintage_start_in_command_mode":true}"#,
     )
     .unwrap();
-    w.poll();
+    w.wait_resources();
     assert!(w.editor().command_mode());
     let mut p = Panels::new(&w, false);
     let mut v = View::new(
@@ -288,7 +288,7 @@ fn runtime_user_preferences_and_prompt_focus_changes_preserve_text() {
     );
     key(&mut w, &mut p, &mut v, ":");
     std::fs::write(&prefs, r#"{"vintage_enabled":false}"#).unwrap();
-    w.poll();
+    w.wait_resources();
     p.poll(&mut w, 0..100);
     assert!(w.editor().vintage.is_none());
     assert!(p.panel.is_none());
@@ -298,7 +298,7 @@ fn runtime_user_preferences_and_prompt_focus_changes_preserve_text() {
         r#"{"vintage_enabled":true,"vintage_start_in_command_mode":true,"vintage_ctrl_keys":true}"#,
     )
     .unwrap();
-    w.poll();
+    w.wait_resources();
     text(&mut w, &mut p, &mut v, "/two");
     p.action(&mut w, "show_panel", &json!({"panel":"find"}), 0..100)
         .unwrap();
