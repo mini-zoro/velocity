@@ -1,0 +1,39 @@
+name: Release artifacts (no publishing)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS universal app and DMG
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Install pinned toolchain and both architectures
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and validate local ad-hoc artifacts
+        run: scripts/package-macos.sh target/release-artifacts
+      - name: Retain workflow artifacts only
+        uses: actions/upload-artifact@v4
+        with:
+          name: Velocity-macos-universal
+          path: |
+            target/release-artifacts/*.app.zip
+            target/release-artifacts/*.dmg
+            target/release-artifacts/SHA256SUMS
+            target/release-artifacts/packaging-report.json
+          if-no-files-found: error
+          retention-days: 14

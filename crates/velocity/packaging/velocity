@@ -1,0 +1,20 @@
+#!/bin/sh
+# Preserve cwd, stdin, flags and exit status. The executable owns single-instance IPC.
+set -eu
+VELOCITY_LAUNCHER=$0
+VELOCITY_LINKS=0
+while [ -L "$VELOCITY_LAUNCHER" ]; do
+    VELOCITY_LINKS=$((VELOCITY_LINKS + 1))
+    if [ "$VELOCITY_LINKS" -gt 40 ]; then
+        printf '%s\n' 'velocity: launcher symlink loop' >&2
+        exit 1
+    fi
+    VELOCITY_LINK_DIR=$(CDPATH= cd -- "$(dirname -- "$VELOCITY_LAUNCHER")" && pwd)
+    VELOCITY_LAUNCHER=$(readlink "$VELOCITY_LAUNCHER")
+    case "$VELOCITY_LAUNCHER" in
+        /*) ;;
+        *) VELOCITY_LAUNCHER=$VELOCITY_LINK_DIR/$VELOCITY_LAUNCHER ;;
+    esac
+done
+VELOCITY_BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$VELOCITY_LAUNCHER")" && pwd)
+exec "$VELOCITY_BIN_DIR/../../MacOS/velocity" "$@"
