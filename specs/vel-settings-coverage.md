@@ -68,6 +68,12 @@ accepted-no-op with the reason).
    `"disabled"`) controls the "Line N, Column M" item.
 9. `tree_animation_enabled` (true): side bar folder expand/collapse animation; false is instant.
    Respect macOS Reduce Motion as today.
+10. Project file lists (round-15 follow-up): `binary_file_patterns` defaults match Sublime's documented list (images,
+   fonts, `*.pdf`, `*.swf`, `*.jar`, `*.zip`, … — verify) — today ours is a short list of our own; Find in Files and
+   Goto Anything skip these. `index_exclude_gitignore` (true) keeps git-ignored files out of *symbol* indexing only
+   (the file lists include them since round 15); `index_files` false stops symbol indexing. Since round 15 a Rust
+   project's `target/` is listed (Sublime does not hide it by default): the project index follows file events
+   incrementally, so keep it that way — a full re-walk per file event costs seconds of CPU per second during a build.
 
 ## Rules
 
