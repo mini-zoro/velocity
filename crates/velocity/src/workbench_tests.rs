@@ -316,19 +316,30 @@ fn workspace_autosave_does_not_reload_project_settings_from_parent_directory_cha
 
 #[test]
 fn query_history_accumulates_bounded_values_and_restores_an_empty_replacement() {
-    let w = Workspace::new(Text::new(), None, None, false).unwrap();
+    let mut w = Workspace::new(Text::new(), None, None, false).unwrap();
     let mut panels = crate::panels::Panels::new(&w, false);
     let mut window = vel_session::Window::default();
     panels.query.set("first");
     panels.replace.set("replacement");
     panels.capture_session(&mut window);
+    assert!(window.find_history.is_empty());
+    assert!(window.replace_history.is_empty());
+    panels
+        .action(&mut w, "replace_all", &json!({}), 0..0)
+        .unwrap();
     panels.query.set("second");
     panels.replace.set("");
+    panels
+        .action(&mut w, "replace_all", &json!({}), 0..0)
+        .unwrap();
     panels.capture_session(&mut window);
     assert_eq!(window.find_history, vec!["first", "second"]);
     assert_eq!(window.replace_history, vec!["replacement", ""]);
     for i in 0..105 {
         panels.query.set(&format!("query{i}"));
+        panels
+            .action(&mut w, "find_next", &json!({}), 0..0)
+            .unwrap();
         panels.capture_session(&mut window);
     }
     assert_eq!(window.find_history.len(), 100);

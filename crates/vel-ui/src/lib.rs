@@ -5,6 +5,7 @@
 mod images;
 pub mod input;
 pub mod minihtml;
+pub mod status;
 pub mod theme;
 pub mod workbench;
 use std::{
@@ -312,10 +313,21 @@ pub struct QuickPanel {
 impl QuickPanel {
     /// Replaces ranking and returns the new live-preview payload.
     pub fn set_items(&mut self, items: Vec<Item>) -> Option<usize> {
+        let selected = self.items.get(self.selected).and_then(|old| {
+            items.iter().position(|item| {
+                item.caption == old.caption
+                    && item.details == old.details
+                    && item.annotation == old.annotation
+                    && item.kind == old.kind
+            })
+        });
         self.items = items;
-        self.selected = 0;
-        self.scroll.offset = 0.;
+        self.selected = selected.unwrap_or(0);
+        if selected.is_none() {
+            self.scroll.offset = 0.;
+        }
         self.scroll.rows = self.items.len();
+        self.scroll.reveal(self.selected);
         self.current()
     }
     /// Selected payload, if any.
@@ -683,5 +695,29 @@ mod tests {
         scroll.reveal(99_999);
         assert!(scroll.visible().len() <= 12);
         assert_eq!(scroll.visible().end, 100_000);
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    #[test]
+    fn quick_panel_refresh_retains_selection_or_falls_back_to_first() {
+        let item = |caption: &str, value| Item {
+            caption: caption.into(),
+            value,
+            ..Default::default()
+        };
+        let mut panel = QuickPanel::default();
+        panel.set_items(vec![item("one", 1), item("two", 2), item("three", 3)]);
+        panel.navigate(1);
+        assert_eq!(
+            panel.set_items(vec![item("three", 30), item("two", 20), item("one", 10)]),
+            Some(20)
+        );
+        assert_eq!(panel.selected, 1);
+        assert_eq!(panel.set_items(vec![item("three", 30)]), Some(30));
+        assert_eq!(panel.selected, 0);
+        assert_eq!(panel.set_items(vec![]), None);
     }
 }

@@ -20,9 +20,20 @@ use vel_search::{
     project::{Entry, Folder, Index, Rules},
     text::{self, Search},
 };
+mod details;
+
 use vel_ui::{
     Focus, Item, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input, label,
 };
+
+/// Rows of the side bar's "Open Files" list: none for the hidden input tab of an empty window.
+fn open_file_count(workspace: &Workspace) -> usize {
+    if workspace.is_empty() {
+        0
+    } else {
+        workspace.tabs.len()
+    }
+}
 
 pub const STATUS: f64 = 24.;
 const PANEL_ROW: f64 = 34.;
@@ -56,6 +67,15 @@ struct Preview {
     scroll: (f64, f64),
     transient: bool,
 }
+#[derive(Clone, Copy, Debug)]
+enum FindNavigation {
+    Preview(usize),
+    Next {
+        backwards: bool,
+        close: bool,
+        report: bool,
+    },
+}
 #[derive(Clone, Debug)]
 pub struct SideRow {
     pub path: PathBuf,
@@ -87,6 +107,22 @@ pub struct Panels {
     hover_bounds: Rect,
     hover_html: Option<vel_ui::minihtml::Popup>,
     pub restore_scroll: Option<(f64, f64)>,
+    pub reveal: bool,
+    preserve_scroll: bool,
+    incremental_origin: Option<(Preview, BufferId, vel_buffer::ChangeId)>,
+    find_origin: Option<(BufferId, usize)>,
+    history_cursor: [Option<usize>; 2],
+    history_draft: [String; 2],
+    message_seen: String,
+    message_until: Option<Instant>,
+    pub search_results_active: bool,
+    result_cursor: Option<usize>,
+    files_searched: usize,
+    files_matched: BTreeSet<PathBuf>,
+    file_matches: usize,
+    result_status: String,
+    palette_enabled: Vec<bool>,
+    palette_accept: Option<Invocation>,
     pub pending_command: Option<Invocation>,
     pub overlay: Option<Overlay>,
     pub panel: Option<Panel>,
@@ -138,10 +174,11 @@ pub struct Panels {
     selection_scope: Vec<Range<usize>>,
     scope_revision: Option<(BufferId, vel_buffer::ChangeId)>,
     search: Option<Search>,
+    find_error: Option<String>,
     search_worker: text::Worker,
     search_identity: Option<(BufferId, u64, String, text::Options, bool)>,
     all_matches_ready: bool,
-    pending_navigation: Option<bool>,
+    pending_navigation: Option<FindNavigation>,
     fuzzy_worker: fuzzy::Worker,
     candidates: Arc<Vec<fuzzy::Candidate>>,
     palette_indices: Vec<usize>,
@@ -164,6 +201,9 @@ pub struct Panels {
     local_positions: Vec<usize>,
     local_generation: u64,
     quick_revision: u64,
+    quick_query: String,
+    quick_target: &'static str,
+    quick_ready: bool,
     prepared: String,
     pub quick_elapsed_ms: f64,
     pub quick_pending: bool,
@@ -193,6 +233,22 @@ impl Default for Panels {
             hover_bounds: Rect::default(),
             hover_html: None,
             restore_scroll: None,
+            reveal: false,
+            preserve_scroll: false,
+            incremental_origin: None,
+            find_origin: None,
+            history_cursor: [None, None],
+            history_draft: Default::default(),
+            message_seen: String::new(),
+            message_until: None,
+            search_results_active: false,
+            result_cursor: None,
+            files_searched: 0,
+            files_matched: BTreeSet::new(),
+            file_matches: 0,
+            result_status: String::new(),
+            palette_enabled: Vec::new(),
+            palette_accept: None,
             pending_command: None,
             overlay: None,
             panel: None,
@@ -245,6 +301,7 @@ impl Default for Panels {
             selection_scope: vec![],
             scope_revision: None,
             search: None,
+            find_error: None,
             search_worker: text::Worker::default(),
             search_identity: None,
             all_matches_ready: false,
@@ -271,6 +328,9 @@ impl Default for Panels {
             local_positions: vec![],
             local_generation: 0,
             quick_revision: 0,
+            quick_query: String::new(),
+            quick_target: "",
+            quick_ready: false,
             prepared: String::new(),
             quick_elapsed_ms: 0.,
             panel_bounds: Rect::default(),
@@ -376,6 +436,7 @@ impl Panels {
         self.cancel_overlay(workspace);
         self.choice_items = items;
         self.overlay = Some(Overlay::Choices);
+        self.quick.set_items(Vec::new());
         self.quick_input.set("");
         self.prepared.clear();
         self.focus.show(Surface::Overlay, true);
@@ -393,12 +454,12 @@ impl Panels {
             push(&mut self.find_history, query);
         }
         let replace = self.replace.value();
-        if include_empty_replace || !replace.is_empty() || !self.replace_history.is_empty() {
+        if include_empty_replace {
             push(&mut self.replace_history, replace);
         }
+        self.history_cursor = [None, None];
     }
     pub fn capture_session(&mut self, window: &mut vel_session::Window) {
-        self.remember_search(false);
         window.sidebar_visible = self.side_visible;
         window.sidebar_expanded = self.expanded.iter().cloned().collect();
         window.sidebar_scroll = self.side_scroll.offset;
@@ -530,7 +591,8 @@ impl Panels {
                 true,
             );
         }
-        self.side_scroll.rows = workspace.tabs.len() + self.side_rows.len() + 2;
+        self.expire_message(Instant::now());
+        self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
         self.side_scroll.row_height = 24. * self.ui_scale;
         self.side_selected = self
             .side_selected
@@ -542,7 +604,8 @@ impl Panels {
         {
             self.side_selected = index;
             self.side_open = None;
-            self.side_scroll.reveal(workspace.tabs.len() + 2 + index);
+            self.side_scroll
+                .reveal(open_file_count(workspace) + 2 + index);
             self.sidebar_reveal = None;
         }
     }
@@ -845,7 +908,29 @@ impl Panels {
             && self.panel != Some(Panel::Input)
             && !self.query.composing()
         {
-            self.refresh_find(workspace, viewport);
+            self.refresh_find_input(workspace, viewport);
+        } else if self.focus_input == 1 {
+            self.history_cursor[1] = None;
+        }
+    }
+    fn refresh_find_input(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
+        let changed = self.search_identity.as_ref().is_none_or(|key| {
+            key.2 != self.query.value() || key.3 != self.options || key.4 != self.in_selection
+        });
+        if !changed {
+            return;
+        }
+        self.history_cursor[0] = None;
+        self.refresh_find(workspace, viewport);
+        if !self.in_selection
+            && matches!(self.panel, Some(Panel::Find | Panel::Incremental))
+            && self.search.is_some()
+        {
+            let origin = self
+                .find_origin
+                .filter(|(id, _)| *id == workspace.editor().buffer.id())
+                .map_or(workspace.editor().caret, |(_, at)| at);
+            self.pending_navigation = Some(FindNavigation::Preview(origin));
         }
     }
     pub fn edited(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
@@ -1146,11 +1231,14 @@ impl Panels {
                 // Keep @/: prefixes while placing the caret after them.
                 self.quick_input.command(Command::End(false));
                 self.last_preview = None;
+                self.quick.set_items(Vec::new());
+                self.prepared.clear();
                 self.query_quick(workspace);
             }
             "show_panel" | "find_in_files" | "show_input_panel" | "show_output_panel" => {
                 if name == "show_panel"
                     && args["toggle"].as_bool() == Some(true)
+                    && self.panel_focused
                     && self.panel
                         == Some(Self::panel_kind(args["panel"].as_str().unwrap_or("find")))
                 {
@@ -1158,6 +1246,7 @@ impl Panels {
                     return Ok(true);
                 }
                 self.cancel_overlay(workspace);
+                let previous_panel = self.panel;
                 let panel = args["panel"]
                     .as_str()
                     .unwrap_or(if name == "find_in_files" {
@@ -1172,6 +1261,26 @@ impl Panels {
                 } else {
                     Self::panel_kind(panel)
                 });
+                if self.panel == Some(Panel::Incremental) && previous_panel != self.panel {
+                    let editor = workspace.editor();
+                    self.incremental_origin = Some((
+                        Preview {
+                            sheet: workspace.tabs[workspace.active].sheet,
+                            selection: editor.buffer.view(editor.id).sel().clone(),
+                            scroll: workspace.tabs[workspace.active].scroll,
+                            transient: workspace.tabs[workspace.active].transient,
+                        },
+                        editor.buffer.id(),
+                        editor.buffer.change_id(),
+                    ));
+                } else if self.panel != Some(Panel::Incremental) {
+                    self.incremental_origin = None;
+                }
+                self.find_origin = Some((
+                    workspace.editor().buffer.id(),
+                    workspace.editor().selection().start,
+                ));
+                self.history_cursor = [None, None];
                 self.side_focused = false;
                 self.panel_focused = true;
                 self.focus_input = 0;
@@ -1202,11 +1311,39 @@ impl Panels {
                 } else {
                     if let Some(query) = args["text"].as_str() {
                         self.query.set(query);
+                    } else if previous_panel != self.panel
+                        && workspace.editor().settings.bool("find_selected_text", true)
+                        && !workspace.editor().selection().is_empty()
+                    {
+                        let selected = workspace
+                            .editor()
+                            .text
+                            .slice(workspace.editor().selection());
+                        if !selected.chars().any(|c| c == '\n') {
+                            self.query.set(&selected.to_string());
+                        }
+                    }
+                    if workspace
+                        .editor()
+                        .settings
+                        .bool("auto_find_in_selection", false)
+                    {
+                        self.in_selection = self.selection_scope.iter().any(|r| {
+                            workspace.editor().text.byte_to_line(r.start)
+                                != workspace.editor().text.byte_to_line(r.end)
+                        });
+                    }
+                    self.query.run("select_all", &json!({}))?;
+                    if self.panel == Some(Panel::Replace) {
+                        self.replace.run("select_all", &json!({}))?;
                     }
                     self.refresh_find(workspace, viewport);
                 }
             }
             "hide_panel" => {
+                if args["cancel"].as_bool() == Some(true) {
+                    self.cancel_incremental(workspace);
+                }
                 self.close_panel();
             }
             "toggle_side_bar" => {
@@ -1214,7 +1351,8 @@ impl Panels {
                 self.side_focused = false;
             }
             "focus_side_bar" => {
-                self.close_panel();
+                self.panel_focused = false;
+                self.focus.show(Surface::Panel, false);
                 self.side_visible = true;
                 self.side_focused = true;
                 self.side_open = Some(workspace.active);
@@ -1244,18 +1382,29 @@ impl Panels {
                     "in_selection" => self.in_selection = !self.in_selection,
                     _ => return Err("unknown find option".into()),
                 }
-                self.refresh_find(workspace, viewport);
+                self.refresh_find_input(workspace, viewport);
             }
             "slurp_find_string" | "slurp_replace_string" | "find_under" | "find_under_prev" => {
-                if workspace.editor().selection().is_empty() {
-                    let at = workspace.editor().caret;
-                    workspace.editor_mut().select_word(at);
+                let editor = workspace.editor_mut();
+                if editor.selection().is_empty() {
+                    // Expand every empty caret while retaining the primary region and the others.
+                    if editor.regions().len() == 1 {
+                        editor.select_word(editor.caret);
+                    } else {
+                        let primary_at = editor.caret;
+                        editor.run("find_under_expand", &json!({}))?;
+                        let mut regions = editor.regions();
+                        if let Some(i) = regions
+                            .iter()
+                            .position(|r| r.begin() <= primary_at && r.end() >= primary_at)
+                        {
+                            let primary = regions.remove(i);
+                            regions.push(primary);
+                            editor.set_selection(Selection::from_regions(regions));
+                        }
+                    }
                 }
-                let value = workspace
-                    .editor()
-                    .text
-                    .slice(workspace.editor().selection())
-                    .to_string();
+                let value = editor.text.slice(editor.selection()).to_string();
                 if name == "slurp_replace_string" {
                     self.replace.set(&value);
                 } else {
@@ -1263,14 +1412,20 @@ impl Panels {
                     self.refresh_find(workspace, viewport);
                 }
                 if matches!(name, "find_under" | "find_under_prev") {
-                    self.find_next(workspace, name.ends_with("prev"));
+                    self.remember_search(false);
+                    self.find_next(workspace, name.ends_with("prev"), false);
                 }
             }
             "find_next" | "find_prev" => {
                 self.ensure_find(workspace, viewport);
-                self.find_next(workspace, name == "find_prev");
+                self.remember_search(false);
+                self.find_next(workspace, name == "find_prev", false);
             }
             "find_all" => {
+                if self.panel == Some(Panel::Files) {
+                    return Ok(true);
+                }
+                self.remember_search(false);
                 if self.in_selection && self.selection_scope.is_empty() {
                     return Ok(true);
                 }
@@ -1285,6 +1440,12 @@ impl Panels {
             }
             "replace_next" | "replace_all" => {
                 self.replace_document(workspace, name == "replace_all", viewport)?;
+            }
+            "find_in_files_start" => {
+                self.start_files(workspace)?;
+            }
+            "set_indentation" => {
+                self.set_indentation(workspace, args)?;
             }
             "replace_in_files" => {
                 self.prepare_files(workspace)?;
@@ -1330,6 +1491,17 @@ impl Panels {
         }
     }
     fn close_panel(&mut self) {
+        if self.panel == Some(Panel::Results) && self.file_task.take().is_some() {
+            self.file_complete = false;
+            self.result_status = format!(
+                "Search cancelled · {} matches in {} files",
+                self.file_matches,
+                self.files_matched.len()
+            );
+            self.set_message(self.result_status.clone());
+        }
+        self.pending_navigation = None;
+        self.incremental_origin = None;
         self.panel = None;
         self.panel_focused = false;
         self.focus.show(Surface::Panel, false);
@@ -1356,6 +1528,8 @@ impl Panels {
         );
         if self.search_identity.as_ref() != Some(&key) {
             self.refresh_find(workspace, viewport);
+        } else if let Some(error) = self.find_error.clone() {
+            self.set_message(error);
         }
     }
     fn refresh_find(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
@@ -1391,6 +1565,9 @@ impl Panels {
         self.pending_navigation = None;
         match Search::new(&self.query.value(), self.options) {
             Ok(search) => {
+                if self.find_error.take().as_ref() == Some(&self.message) {
+                    self.set_message(String::new());
+                }
                 if self.in_selection && self.selection_scope.is_empty() {
                     self.message = "No selection".into();
                     self.all_matches_ready = true;
@@ -1407,15 +1584,9 @@ impl Panels {
                 } else {
                     std::iter::once(viewport).collect()
                 };
-                let at = Instant::now();
                 if !ranges.is_empty() {
                     self.highlights = search.find(&workspace.editor().text, &ranges);
                 }
-                self.message = format!(
-                    "{} visible matches · {:.3} ms",
-                    self.highlights.len(),
-                    at.elapsed().as_secs_f64() * 1000.
-                );
                 self.search_worker.search(
                     search.clone(),
                     workspace.editor().text.clone(),
@@ -1423,29 +1594,40 @@ impl Panels {
                     scopes,
                 );
                 self.search = Some(search);
-                if self.panel == Some(Panel::Incremental) {
-                    if let Some(hit) = self.highlights.first() {
-                        workspace
-                            .editor_mut()
-                            .set_selection(Selection::from_regions([Region::from(hit.clone())]));
-                    } else {
-                        self.pending_navigation = Some(false);
-                    }
-                }
             }
             Err(error) => {
-                self.message = error;
+                self.find_error = Some(error.clone());
+                self.set_message(error);
                 self.search = None;
+                self.all_matches_ready = true;
             }
         }
     }
-    fn find_next(&mut self, workspace: &mut Workspace, backwards: bool) {
-        self.remember_search(false);
+    fn find_next(&mut self, workspace: &mut Workspace, backwards: bool, close: bool) {
+        self.navigate_find(workspace, backwards, close, true);
+    }
+    fn navigate_find(
+        &mut self,
+        workspace: &mut Workspace,
+        backwards: bool,
+        close: bool,
+        report: bool,
+    ) {
+        if report
+            && self.search.is_none()
+            && let Some(error) = self.find_error.clone()
+        {
+            self.set_message(error);
+        }
+        if self.search.is_some() && !self.all_matches_ready {
+            self.pending_navigation = Some(FindNavigation::Next {
+                backwards,
+                close,
+                report,
+            });
+            return;
+        }
         if let Some(search) = &self.search {
-            if !self.all_matches_ready {
-                self.pending_navigation = Some(backwards);
-                return;
-            }
             let current = workspace.editor().selection();
             let next = search.next(
                 &self.highlights,
@@ -1457,7 +1639,13 @@ impl Panels {
                 workspace
                     .editor_mut()
                     .set_selection(Selection::from_regions([Region::from(range)]));
+                self.reveal = true;
+            } else if report && !search.query.is_empty() {
+                self.set_message(format!("Unable to find {}", search.query));
             }
+        }
+        if close {
+            self.close_panel();
         }
     }
     fn replace_document(
@@ -1475,7 +1663,7 @@ impl Panels {
         }
         self.ensure_find(workspace, viewport.clone());
         let Some(search) = &self.search else {
-            return Err(self.message.clone());
+            return Ok(()); // Compilation feedback is inline/status-only.
         };
         let mut replacements = search.replacements(
             &workspace.editor().text,
@@ -1487,7 +1675,7 @@ impl Panels {
             if let Some(current) = replacements.iter().find(|r| r.range == selection).cloned() {
                 replacements = vec![current];
             } else {
-                self.find_next(workspace, false);
+                self.find_next(workspace, false, false);
                 return Ok(());
             }
         }
@@ -1496,13 +1684,60 @@ impl Panels {
         text::apply(&mut editor.buffer, editor.id, &replacements);
         editor.sync();
         self.refresh_find(workspace, viewport);
-        self.message = format!("Replaced {count} matches");
         if !all {
-            self.find_next(workspace, false);
+            self.navigate_find(workspace, false, false, false);
         }
+        self.set_message(format!(
+            "Replaced {count} occurrence{}",
+            if count == 1 { "" } else { "s" }
+        ));
         Ok(())
     }
     fn query_quick(&mut self, workspace: &mut Workspace) {
+        let value = self.quick_input.value();
+        let query = Query::parse(&value);
+        let target = match self.overlay {
+            Some(Overlay::Goto) if query.file.is_empty() => match query.target {
+                Target::Symbol(_) => "symbol",
+                Target::Word(_) => "word",
+                Target::Line(_, _) => "line",
+                Target::File => "files",
+            },
+            Some(Overlay::Goto) => "files",
+            Some(Overlay::Palette) => "palette",
+            Some(Overlay::Syntax) => "syntax",
+            Some(Overlay::Choices) => "choices",
+            Some(Overlay::Locations) => "locations",
+            Some(Overlay::ProjectSymbols) => "project_symbols",
+            None => return,
+        };
+        if self.quick_target != target {
+            self.quick_target = target;
+            self.quick_ready = false;
+            self.prepared.clear();
+            self.local_generation += 1;
+            self.local = None;
+            self.candidates = Arc::default();
+            self.paths = Arc::default();
+            self.local_positions.clear();
+            self.quick.set_items(Vec::new());
+        } else if self.quick_query != value {
+            // A new query always starts at its best hit. Source-only refreshes retain selection.
+            self.quick.set_items(Vec::new());
+        }
+        self.quick_query = value;
+        // Symbol sources change on an edit or when analysis publishes, not on every frame.
+        if self.overlay == Some(Overlay::Goto) {
+            let query = Query::parse(&self.quick_input.value());
+            if query.file.is_empty() && matches!(query.target, Target::Symbol(_)) {
+                let source = self.local_source(workspace, "symbol");
+                if self.prepared == source
+                    && self.quick_revision == self.quick_input.buffer.change_id().0
+                {
+                    return;
+                }
+            }
+        }
         self.fuzzy_worker.cancel();
         if self.overlay == Some(Overlay::ProjectSymbols) {
             self.quick_pending = true;
@@ -1514,6 +1749,7 @@ impl Panels {
         }
         if self.overlay == Some(Overlay::Locations) {
             self.quick_pending = true;
+            self.quick_ready = true;
             self.candidates = Arc::new(
                 self.locations
                     .iter()
@@ -1526,7 +1762,6 @@ impl Panels {
         }
         self.quick_pending = true;
         self.quick_revision = self.quick_input.buffer.change_id().0;
-        self.quick.items.clear();
         if matches!(
             self.overlay,
             Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
@@ -1541,6 +1776,7 @@ impl Panels {
                 return;
             }
             self.prepared = source.into();
+            self.quick_ready = true;
             let palette = if self.overlay == Some(Overlay::Choices) {
                 &self.choice_items
             } else {
@@ -1549,17 +1785,19 @@ impl Panels {
             self.palette_indices = palette
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| {
+                .filter(|(i, p)| {
                     if self.overlay == Some(Overlay::Syntax)
                         && p.invocation.command != "set_file_type"
                     {
                         return false;
                     }
-                    workspace
-                        .editor()
-                        .registry
-                        .kind(&p.invocation.command)
-                        .is_some()
+                    (self.overlay != Some(Overlay::Palette)
+                        || self.palette_command_enabled(workspace, *i))
+                        && workspace
+                            .editor()
+                            .registry
+                            .kind(&p.invocation.command)
+                            .is_some()
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1590,19 +1828,9 @@ impl Panels {
             } else {
                 "symbol"
             };
-            let source = format!(
-                "{kind}:{:?}:{}:{}",
-                workspace.editor().buffer.id(),
-                workspace.editor().revision,
-                workspace
-                    .editor()
-                    .language
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|l| l.ready())
-            );
+            let source = self.local_source(workspace, kind);
             if self.prepared == source {
-                if self.local.is_none() {
+                if self.local.is_none() && self.quick_ready {
                     let term = match &query.target {
                         Target::Word(s) | Target::Symbol(s) => s.as_str(),
                         _ => "",
@@ -1612,6 +1840,7 @@ impl Panels {
                 return;
             }
             self.prepared = source;
+            self.quick_ready = false;
             self.local_generation += 1;
             self.local = None;
         }
@@ -1635,7 +1864,9 @@ impl Panels {
                     } else {
                         String::new()
                     };
-                    self.set_local(symbols, term);
+                    if analysis.is_some() {
+                        self.set_local(symbols, term);
+                    }
                     return;
                 }
                 Target::Word(_) => {
@@ -1673,6 +1904,7 @@ impl Panels {
             return;
         }
         self.prepared = "files".into();
+        self.quick_ready = true;
         self.local_generation += 1;
         self.local = None;
         let mut extra = Vec::new();
@@ -1708,7 +1940,79 @@ impl Panels {
         self.fuzzy_worker.set_items(self.candidates.clone());
         self.fuzzy_worker.query(query.file, 100);
     }
+    fn publish_quick(&mut self, workspace: &Workspace, hits: Vec<fuzzy::Hit>) {
+        let palette = matches!(
+            self.overlay,
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+        );
+        let palette_items = if self.overlay == Some(Overlay::Choices) {
+            &self.choice_items
+        } else {
+            &workspace.palette
+        };
+        let items = hits
+            .into_iter()
+            .map(|hit| {
+                let index = if palette {
+                    self.palette_indices[hit.index]
+                } else {
+                    hit.index
+                };
+                Item {
+                    caption: self.candidates[hit.index].label.clone(),
+                    highlights: hit.positions,
+                    value: index,
+                    kind: if palette {
+                        "command"
+                    } else if !self.local_positions.is_empty() {
+                        "symbol/word"
+                    } else {
+                        "file"
+                    }
+                    .into(),
+                    annotation: if palette {
+                        workspace
+                            .editor()
+                            .keymap
+                            .hint(&palette_items[index].invocation)
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    },
+                    details: if palette {
+                        palette_items[index].invocation.command.clone()
+                    } else {
+                        self.paths
+                            .get(hit.index)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    },
+                }
+            })
+            .collect();
+        self.quick.set_items(items);
+        if self.overlay == Some(Overlay::Locations) {
+            self.decorate_locations();
+        }
+    }
+    fn local_source(&self, workspace: &Workspace, kind: &str) -> String {
+        format!(
+            "{kind}:{:?}:{}:{}",
+            workspace.editor().buffer.id(),
+            workspace.editor().revision,
+            workspace
+                .editor()
+                .language
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.analysis.as_ref())
+                .map(|a| a.version.0)
+                .unwrap_or(u64::MAX)
+        )
+    }
     fn set_local(&mut self, symbols: Vec<(String, usize)>, term: &str) {
+        self.quick_ready = true;
+        self.paths = Arc::default();
         self.local_positions = symbols.iter().map(|(_, p)| *p).collect();
         self.candidates = Arc::new(
             symbols
@@ -1737,6 +2041,19 @@ impl Panels {
         if self.overlay != Some(Overlay::Goto) {
             return Ok(());
         }
+        let query = Query::parse(&self.quick_input.value());
+        if query.file.is_empty() {
+            let kind = match &query.target {
+                Target::Symbol(_) => Some("symbol"),
+                Target::Word(_) => Some("word"),
+                _ => None,
+            };
+            if let Some(kind) = kind
+                && (!self.quick_ready || self.prepared != self.local_source(workspace, kind))
+            {
+                return Ok(());
+            }
+        }
         let Some(index) = self.quick.current() else {
             return Ok(());
         };
@@ -1747,7 +2064,7 @@ impl Panels {
         let Some(path) = self.paths.get(index).cloned() else {
             return Ok(());
         };
-        let target = Query::parse(&self.quick_input.value()).target;
+        let target = query.target;
         if self.last_preview.as_ref() == Some(&(path.clone(), target.clone())) {
             return Ok(());
         }
@@ -1786,10 +2103,11 @@ impl Panels {
         Ok(())
     }
     fn cancel_overlay(&mut self, workspace: &mut Workspace) {
+        self.palette_accept = None;
         if self.overlay.take().is_none() {
             return;
         }
-        for index in (0..workspace.tabs.len()).rev() {
+        for index in (0..open_file_count(workspace)).rev() {
             if workspace.tabs[index].transient && !workspace.tabs[index].dirty() {
                 let _ = workspace.close(index);
             }
@@ -1802,6 +2120,7 @@ impl Panels {
             workspace.tabs[index].scroll = preview.scroll;
             workspace.tabs[index].transient = preview.transient;
             self.restore_scroll = Some(preview.scroll);
+            self.preserve_scroll = true;
         }
         self.focus.show(Surface::Overlay, false);
         self.local_generation += 1;
@@ -1814,6 +2133,40 @@ impl Panels {
         workspace: &mut Workspace,
         side: bool,
     ) -> Result<Option<Invocation>, String> {
+        if self.overlay == Some(Overlay::Goto) {
+            let query = Query::parse(&self.quick_input.value());
+            if query.file.is_empty() && matches!(query.target, Target::Symbol(_) | Target::Word(_))
+            {
+                self.query_quick(workspace);
+            }
+        }
+        if self.overlay == Some(Overlay::Goto) && self.quick_pending {
+            // An indexing/word request has no current candidates to accept yet.
+            if !self.quick_ready && self.quick_target != "line" {
+                return Ok(None);
+            }
+        }
+        if self.overlay.is_some()
+            && self.quick_pending
+            && self.quick_ready
+            && self.local.is_none()
+            && self.overlay != Some(Overlay::ProjectSymbols)
+        {
+            let query = Query::parse(&self.quick_input.value());
+            let term = if self.overlay == Some(Overlay::Goto) {
+                match &query.target {
+                    Target::Word(term) | Target::Symbol(term) if query.file.is_empty() => {
+                        term.as_str()
+                    }
+                    _ => query.file.as_str(),
+                }
+            } else {
+                &self.quick_input.value()
+            };
+            let hits = fuzzy::Matcher::default().rank(&self.candidates, term, 100);
+            self.publish_quick(workspace, hits);
+            self.quick_pending = false;
+        }
         if matches!(
             self.overlay,
             Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
@@ -1829,6 +2182,21 @@ impl Panels {
                     }
                 })
                 .map(|p| p.invocation.clone());
+            if invocation.is_none() {
+                return Ok(None);
+            }
+            if self.overlay == Some(Overlay::Palette)
+                && self
+                    .quick
+                    .current()
+                    .is_some_and(|i| !self.palette_command_enabled(workspace, i))
+            {
+                return Ok(None);
+            }
+            if self.overlay == Some(Overlay::Palette) {
+                self.palette_accept = invocation.clone();
+                return Ok(invocation);
+            }
             if let Some(invocation) = &invocation {
                 self.uses += 1;
                 self.palette_recent.insert(
@@ -1847,6 +2215,15 @@ impl Panels {
             return Ok(invocation);
         }
         if self.overlay.is_some() {
+            if self.quick.current().is_none()
+                && !(self.overlay == Some(Overlay::Goto)
+                    && matches!(
+                        Query::parse(&self.quick_input.value()).target,
+                        Target::Line(_, _)
+                    ))
+            {
+                return Ok(None);
+            }
             if matches!(
                 self.overlay,
                 Some(Overlay::ProjectSymbols | Overlay::Locations)
@@ -1914,10 +2291,10 @@ impl Panels {
                 self.close_panel();
                 return Ok(invocation);
             }
-            Some(Panel::Replace) => {
-                self.replace_document(workspace, false, 0..workspace.editor().text.len_bytes())?
+            _ => {
+                self.remember_search(false);
+                self.find_next(workspace, false, self.panel == Some(Panel::Incremental));
             }
-            _ => self.find_next(workspace, false),
         }
         Ok(None)
     }
@@ -1942,34 +2319,48 @@ impl Panels {
             }
             if self.overlay.is_some() {
                 self.cancel_overlay(workspace);
-            } else {
-                self.close_panel();
+            } else if self.side_focused {
                 self.side_focused = false;
+            } else {
+                self.cancel_incremental(workspace);
+                self.close_panel();
             }
             return Ok((true, None));
         }
+        if key.name == "f4" {
+            return Ok((false, None));
+        }
         if self.side_focused {
+            if workspace.is_empty() {
+                self.side_open = None;
+            }
             if let Some(index) = self.side_open {
                 match key.name.as_str() {
                     "up" => self.side_open = Some(index.saturating_sub(1)),
-                    "down" if index + 1 < workspace.tabs.len() => self.side_open = Some(index + 1),
+                    "down" if index + 1 < open_file_count(workspace) => {
+                        self.side_open = Some(index + 1)
+                    }
                     "down" => {
                         self.side_open = None;
                         self.side_selected = 0;
                     }
                     "enter" | "right" => {
-                        workspace.select(index.min(workspace.tabs.len() - 1));
+                        workspace.select(index.min(open_file_count(workspace).saturating_sub(1)));
                         workspace.tabs[workspace.active].transient = false;
                     }
                     _ if key.modifiers & 9 != 0 => return Ok((false, None)),
                     _ => {}
                 }
-                self.side_scroll
-                    .reveal(self.side_open.map_or(workspace.tabs.len() + 2, |i| i + 1));
+                self.side_scroll.reveal(
+                    self.side_open
+                        .map_or(open_file_count(workspace) + 2, |i| i + 1),
+                );
                 return Ok((true, None));
             }
             match key.name.as_str() {
-                "up" if self.side_selected == 0 => self.side_open = Some(workspace.tabs.len() - 1),
+                "up" if self.side_selected == 0 && open_file_count(workspace) > 0 => {
+                    self.side_open = Some(open_file_count(workspace) - 1)
+                }
                 "up" => self.side_selected = self.side_selected.saturating_sub(1),
                 "down" => {
                     self.side_selected =
@@ -2005,7 +2396,9 @@ impl Panels {
             }
             self.side_scroll.reveal(
                 self.side_open
-                    .map_or(workspace.tabs.len() + 2 + self.side_selected, |i| i + 1),
+                    .map_or(open_file_count(workspace) + 2 + self.side_selected, |i| {
+                        i + 1
+                    }),
             );
             return Ok((true, None));
         }
@@ -2013,11 +2406,35 @@ impl Panels {
             return Ok((false, None));
         }
         if self.overlay.is_none() && key.name == "enter" && key.modifiers == 4 {
-            self.find_next(workspace, true);
+            if matches!(
+                self.panel,
+                Some(Panel::Find | Panel::Replace | Panel::Incremental)
+            ) {
+                self.remember_search(false);
+                self.find_next(workspace, true, false);
+            }
             return Ok((true, None));
         }
         if self.overlay.is_none() && key.name == "enter" && key.modifiers & 2 != 0 {
-            self.action(workspace, "find_all", &json!({}), viewport)?;
+            if matches!(
+                self.panel,
+                Some(Panel::Find | Panel::Replace | Panel::Incremental)
+            ) {
+                self.action(workspace, "find_all", &json!({}), viewport)?;
+            }
+            return Ok((true, None));
+        }
+        if self.overlay.is_none() && key.name == "enter" && key.modifiers != 0 {
+            return Ok((false, None));
+        }
+        if self.overlay.is_none()
+            && key.modifiers == 0
+            && matches!(key.name.as_str(), "up" | "down")
+            && self.panel_focused
+            && self.focus_input < 2
+            && self.find_panel_visible()
+        {
+            self.walk_history(workspace, key.name == "up", viewport);
             return Ok((true, None));
         }
         if key.name == "enter" {
@@ -2095,8 +2512,10 @@ impl Panels {
             Command::Cancel => Some("escape"),
             Command::Newline => Some("enter"),
             Command::Tab => Some("tab"),
-            Command::Up(_) if self.overlay.is_some() => Some("up"),
-            Command::Down(_) if self.overlay.is_some() => Some("down"),
+            Command::Up(false) if self.overlay.is_some() || self.find_panel_visible() => Some("up"),
+            Command::Down(false) if self.overlay.is_some() || self.find_panel_visible() => {
+                Some("down")
+            }
             _ => None,
         };
         if let Some(key) = key {
@@ -2110,12 +2529,24 @@ impl Panels {
     }
     fn start_files(&mut self, workspace: &Workspace) -> Result<(), String> {
         self.remember_search(false);
-        let search = Search::new(&self.query.value(), self.options)?;
+        let search = match Search::new(&self.query.value(), self.options) {
+            Ok(search) => search,
+            Err(error) => {
+                self.set_message(error);
+                return Ok(());
+            }
+        };
         let base = workspace
             .folders
             .first()
             .map_or(Path::new("."), |f| f.path.as_path());
-        let scope = files::Where::parse(&self.where_input.value(), base)?;
+        let scope = match files::Where::parse(&self.where_input.value(), base) {
+            Ok(scope) => scope,
+            Err(error) => {
+                self.set_message(error);
+                return Ok(());
+            }
+        };
         self.file_signature = Some((self.query.value(), self.options, self.where_input.value()));
         self.replace_rx = None;
         self.replacement_plan = None;
@@ -2123,6 +2554,14 @@ impl Panels {
             .tabs
             .iter()
             .enumerate()
+            .filter(|(i, _)| *i == workspace.active)
+            .chain(
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != workspace.active),
+            )
             .map(|(i, tab)| files::OpenFile {
                 path: tab
                     .path
@@ -2131,22 +2570,36 @@ impl Panels {
                 text: tab.editor.text.clone(),
             })
             .collect();
-        self.file_task = Some(files::Task::start(files::Request {
+        let task = files::Task::start(files::Request {
             search,
             scope,
             folders: workspace.folders.clone(),
             open,
             context: 1,
-        })?);
+        });
+        match task {
+            Ok(task) => self.file_task = Some(task),
+            Err(error) => {
+                self.set_message(error);
+                return Ok(());
+            }
+        }
+        self.search_results_active = true;
+        self.result_cursor = None;
+        self.files_searched = 0;
+        self.file_matches = 0;
+        self.files_matched.clear();
         self.result_view = files::Results::default();
         self.result_selected = 0;
         self.result_scroll.offset = 0.;
         self.file_complete = false;
-        self.message = "Searching…".into();
+        self.result_status = "Searching 0 files…".into();
+        self.set_message(self.result_status.clone());
         self.panel = Some(Panel::Results);
         Ok(())
     }
     fn prepare_files(&mut self, workspace: &Workspace) -> Result<(), String> {
+        self.remember_search(true);
         if !self.file_complete {
             return Err("Finish Find in Files before preparing replacements".into());
         }
@@ -2198,6 +2651,8 @@ impl Panels {
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
         if let Some(files::Row::Line(line)) = self.result_view.rows.get(self.result_selected) {
+            self.result_cursor = Some(self.result_selected);
+            self.reveal = true;
             if let Some(index) = workspace.tabs.iter().enumerate().position(|(i, t)| {
                 t.path.as_ref() == Some(&line.path)
                     || (t.path.is_none() && line.path == Path::new(&format!("Untitled {}", i + 1)))
@@ -2315,6 +2770,9 @@ impl Panels {
                 _ => {}
             }
         }
+        if self.overlay == Some(Overlay::Palette) && self.prepared.is_empty() {
+            self.query_quick(workspace);
+        }
         if self.overlay == Some(Overlay::Goto)
             && matches!(
                 Query::parse(&self.quick_input.value()).target,
@@ -2324,6 +2782,7 @@ impl Panels {
             self.query_quick(workspace);
         }
         let mut changed = intelligence_changed || query_changed;
+        changed |= self.expire_message(Instant::now());
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
             if self.replace_signature.as_ref()
@@ -2387,60 +2846,7 @@ impl Panels {
         {
             self.quick_pending = false;
             self.quick_elapsed_ms = ranked.elapsed.as_secs_f64() * 1000.;
-            let palette = matches!(
-                self.overlay,
-                Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
-            );
-            let palette_items = if self.overlay == Some(Overlay::Choices) {
-                &self.choice_items
-            } else {
-                &workspace.palette
-            };
-            let items = ranked
-                .hits
-                .into_iter()
-                .map(|hit| {
-                    let index = if palette {
-                        self.palette_indices[hit.index]
-                    } else {
-                        hit.index
-                    };
-                    Item {
-                        caption: self.candidates[hit.index].label.clone(),
-                        highlights: hit.positions,
-                        value: index,
-                        kind: if palette {
-                            "command"
-                        } else if !self.local_positions.is_empty() {
-                            "symbol/word"
-                        } else {
-                            "file"
-                        }
-                        .into(),
-                        annotation: if palette {
-                            workspace
-                                .editor()
-                                .keymap
-                                .hint(&palette_items[index].invocation)
-                                .unwrap_or_default()
-                        } else {
-                            String::new()
-                        },
-                        details: if palette {
-                            palette_items[index].invocation.command.clone()
-                        } else {
-                            self.paths
-                                .get(hit.index)
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_default()
-                        },
-                    }
-                })
-                .collect();
-            self.quick.set_items(items);
-            if self.overlay == Some(Overlay::Locations) {
-                self.decorate_locations();
-            }
+            self.publish_quick(workspace, ranked.hits);
             if let Err(error) = self.preview_current(workspace) {
                 self.message = error;
             }
@@ -2453,11 +2859,17 @@ impl Panels {
                     && matches.revision == workspace.editor().revision
             })
         {
-            self.message = format!("{} matches", matches.ranges.len());
             self.highlights = matches.ranges;
             self.all_matches_ready = true;
-            if let Some(backwards) = self.pending_navigation.take() {
-                self.find_next(workspace, backwards);
+            if let Some(navigation) = self.pending_navigation.take() {
+                match navigation {
+                    FindNavigation::Next {
+                        backwards,
+                        close,
+                        report,
+                    } => self.navigate_find(workspace, backwards, close, report),
+                    FindNavigation::Preview(origin) => self.preview_find(workspace, origin),
+                }
             }
             changed = true;
         }
@@ -2465,6 +2877,15 @@ impl Panels {
             let old = self.search_identity.clone();
             self.ensure_find(workspace, viewport);
             changed |= old != self.search_identity;
+        }
+        if let Some(task) = &self.file_task {
+            let searched = task.searched_files();
+            if searched != self.files_searched {
+                self.files_searched = searched;
+                self.result_status = format!("Searching {searched} files…");
+                self.set_message(self.result_status.clone());
+                changed = true;
+            }
         }
         let events: Vec<_> = self
             .file_task
@@ -2474,11 +2895,18 @@ impl Panels {
         for event in events {
             match event {
                 files::Event::Line(line) => {
+                    if !line.highlights.is_empty() {
+                        self.file_matches += line.highlights.len();
+                        self.files_matched.insert(line.path.clone());
+                    }
                     self.result_view.push(line);
                 }
                 files::Event::Error(error) => self.message = error,
-                files::Event::Done { matches, files } => {
-                    self.message = format!("{matches} matching lines in {files} files");
+                files::Event::Done { files, .. } => {
+                    self.files_searched = files;
+                    self.result_status =
+                        vel_ui::status::search(self.file_matches, self.files_matched.len());
+                    self.set_message(self.result_status.clone());
                     self.file_complete = true;
                     self.file_task = None;
                 }
@@ -2538,7 +2966,7 @@ impl Panels {
             .clamp(240. * self.ui_scale, 820. * self.ui_scale)
             .min(size.width);
         self.quick_bounds = Rect {
-            x: (size.width - width) / (2. * self.ui_scale),
+            x: (size.width - width) / 2.,
             y: (54. * self.ui_scale),
             width,
             height: (size.height * 0.65).min(520. * self.ui_scale),
@@ -2807,22 +3235,11 @@ impl Panels {
                         .children
                         .push(30 + i as u64);
                 }
-                for (i, caption) in [
-                    "Find All",
-                    if panel == Panel::Files {
-                        "Replace Files"
-                    } else if panel == Panel::Replace {
-                        "Replace All"
-                    } else {
-                        "Find Next"
-                    },
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                let buttons = Self::panel_buttons(panel);
+                for (i, (caption, _)) in buttons.iter().enumerate() {
                     let rect = Rect {
                         x: self.panel_bounds.x + self.panel_bounds.width
-                            - (2 - i) as f64 * (104. * self.ui_scale),
+                            - (buttons.len() - i) as f64 * (104. * self.ui_scale),
                         y: self.panel_bounds.y + self.panel_bounds.height - (23. * self.ui_scale),
                         width: (100. * self.ui_scale),
                         height: (22. * self.ui_scale),
@@ -2832,7 +3249,7 @@ impl Panels {
                         .nodes
                         .get_mut(&(50 + i as u64))
                         .expect("button")
-                        .label = caption.into();
+                        .label = (*caption).into();
                     self.tree
                         .nodes
                         .get_mut(&2)
@@ -2858,9 +3275,9 @@ impl Panels {
         }
         if self.side_visible {
             let first = self.side_scroll.visible();
-            let base = workspace.tabs.len() + 2;
-            for i in
-                first.start.saturating_sub(1)..first.end.saturating_sub(1).min(workspace.tabs.len())
+            let base = open_file_count(workspace) + 2;
+            for i in first.start.saturating_sub(1)
+                ..first.end.saturating_sub(1).min(open_file_count(workspace))
             {
                 let tab = &workspace.tabs[i];
                 let mut attrs = Vec::new();
@@ -2930,6 +3347,17 @@ impl Panels {
             },
             &[],
         );
+        self.widget(6, "status_button", self.indentation_rect(), &[]);
+        self.tree.nodes.get_mut(&6).expect("indentation").label = vel_ui::status::indentation(
+            workspace.editor().preferences.translate_tabs_to_spaces,
+            workspace.editor().preferences.tab_size,
+        );
+        self.tree
+            .nodes
+            .get_mut(&4)
+            .expect("status")
+            .children
+            .push(6);
         self.widget(
             5,
             "text_area",
@@ -2947,7 +3375,7 @@ impl Panels {
         self.tree.index_ancestry();
     }
     pub fn paint(&mut self, workspace: &Workspace, scene: &mut Scene) {
-        self.side_scroll.rows = workspace.tabs.len() + self.side_rows.len() + 2;
+        self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
         self.sync_widgets(workspace);
         let mut theme = workspace.themes.ui.borrow_mut();
 
@@ -2969,7 +3397,10 @@ impl Panels {
             theme.surface(&mut layer, &sidebar, cap, cap);
             theme.surface(&mut layer, &sidebar, clip, clip);
             let heading = style(3, Some("sidebar_heading"), &mut theme);
-            for (caption, row) in [("Open Files", 0), ("Folders", workspace.tabs.len() + 1)] {
+            for (caption, row) in [
+                ("Open Files", 0),
+                ("Folders", open_file_count(workspace) + 1),
+            ] {
                 theme.text(
                     &mut layer,
                     &heading,
@@ -2982,7 +3413,10 @@ impl Panels {
             }
             let visible = self.side_scroll.visible();
             for i in visible.start.saturating_sub(1)
-                ..visible.end.saturating_sub(1).min(workspace.tabs.len())
+                ..visible
+                    .end
+                    .saturating_sub(1)
+                    .min(open_file_count(workspace))
             {
                 let tab = &workspace.tabs[i];
                 let id = (2 << 40) + i as u64;
@@ -3048,7 +3482,7 @@ impl Panels {
                     );
                 }
             }
-            let base = workspace.tabs.len() + 2;
+            let base = open_file_count(workspace) + 2;
             for i in visible.start.saturating_sub(base)
                 ..visible.end.saturating_sub(base).min(self.side_rows.len())
             {
@@ -3142,10 +3576,10 @@ impl Panels {
                 theme.text(
                     &mut layer,
                     &text_style,
-                    if panel == Panel::Results {
-                        "Find Results"
+                    &if panel == Panel::Results {
+                        format!("Find Results · {}", self.result_status)
                     } else {
-                        "Output"
+                        "Output".into()
                     },
                     clip.x + (10. * self.ui_scale),
                     clip.y + (20. * self.ui_scale),
@@ -3283,7 +3717,7 @@ impl Panels {
                             node.rect,
                         );
                     }
-                    for id in 50..=51 {
+                    for id in 50..50 + Self::panel_buttons(panel).len() as u64 {
                         let node = &self.tree.nodes[&id];
                         let button = style(id, None, &mut theme);
                         theme.surface(&mut layer, &button, node.rect, clip);
@@ -3315,10 +3749,7 @@ impl Panels {
                         &self.message,
                         clip.x + (8. * self.ui_scale),
                         clip.y + clip.height - (8. * self.ui_scale),
-                        Rect {
-                            width: (clip.width - (216. * self.ui_scale)).max(0.),
-                            ..clip
-                        },
+                        self.panel_message_clip(panel),
                     );
                 }
             }
@@ -3379,27 +3810,33 @@ impl Panels {
             theme.text(
                 &mut layer,
                 &text,
-                &format!(
-                    "{}{}Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
-                    document_hint,
-                    if editor.vintage.is_some() {
-                        format!("{} · ", editor.vintage_status())
-                    } else {
-                        String::new()
-                    },
-                    row + 1,
-                    col,
-                    editor.regions().len(),
-                    selected,
-                    tab.format.encoding,
-                    tab.format.line_ending.name(),
-                    if editor.preferences.translate_tabs_to_spaces {
-                        "Spaces"
-                    } else {
-                        "Tabs"
-                    },
-                    editor.preferences.tab_size
-                ),
+                &if self.message.is_empty() {
+                    format!(
+                        "{}{}{}",
+                        document_hint,
+                        if editor.vintage.is_some() {
+                            format!("{} · ", editor.vintage_status())
+                        } else {
+                            String::new()
+                        },
+                        vel_ui::status::position(
+                            row + 1,
+                            col,
+                            editor.regions().len(),
+                            selected,
+                            editor
+                                .settings
+                                .bool("show_encoding", false)
+                                .then_some(tab.format.encoding.as_str()),
+                            editor
+                                .settings
+                                .bool("show_line_endings", false)
+                                .then_some(tab.format.line_ending.name())
+                        )
+                    )
+                } else {
+                    self.message.clone()
+                },
                 10. * self.ui_scale,
                 status.y + (17. * self.ui_scale),
                 Rect {
@@ -3411,9 +3848,9 @@ impl Panels {
                             .is_some()
                             && editor.settings.bool("show_git_status_in_status_bar", true)
                         {
-                            480.
+                            600.
                         } else {
-                            180.
+                            300.
                         }) * self.ui_scale)
                         .max(0.),
                     ..status
@@ -3427,10 +3864,10 @@ impl Panels {
                     &mut layer,
                     &git_style,
                     git,
-                    (status.width - (475. * self.ui_scale)).max(10. * self.ui_scale),
+                    (status.width - (595. * self.ui_scale)).max(10. * self.ui_scale),
                     status.y + (17. * self.ui_scale),
                     Rect {
-                        x: (status.width - (480. * self.ui_scale)).max(0.),
+                        x: (status.width - (600. * self.ui_scale)).max(0.),
                         width: (300. * self.ui_scale),
                         ..status
                     },
@@ -3446,6 +3883,18 @@ impl Panels {
                     status,
                 );
             }
+            let indentation = self.indentation_rect();
+            theme.text(
+                &mut layer,
+                &text,
+                &vel_ui::status::indentation(
+                    editor.preferences.translate_tabs_to_spaces,
+                    editor.preferences.tab_size,
+                ),
+                indentation.x + 6. * self.ui_scale,
+                status.y + 17. * self.ui_scale,
+                indentation,
+            );
             let name = editor
                 .language
                 .borrow()
@@ -3657,7 +4106,7 @@ impl Panels {
             theme.text(
                 &mut overlay,
                 &panel,
-                &format!("{} · Enter open · Cmd/Ctrl+Enter split", self.message),
+                self.overlay_footer(),
                 rows.x + (8. * self.ui_scale),
                 self.quick_bounds.y + self.quick_bounds.height - (8. * self.ui_scale),
                 self.quick_bounds,
@@ -3679,17 +4128,42 @@ impl Panels {
         extend: bool,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if self.overlay.is_some() {
+            if down && !contains(self.quick_bounds, point) {
+                self.cancel_overlay(workspace);
+            } else if down && contains(self.quick_input.bounds, point) {
+                self.quick_input.click(point.x, extend);
+            } else if down
+                && contains(self.quick_bounds, point)
+                && point.y >= self.quick_bounds.y + (46. * self.ui_scale)
+            {
+                let row = ((point.y - self.quick_bounds.y - (46. * self.ui_scale)
+                    + self.quick.scroll.offset)
+                    / (44. * self.ui_scale)) as usize;
+                if row < self.quick.items.len() {
+                    self.quick.selected = row;
+                    self.preview_current(workspace)?;
+                    self.pending_command = self.accept(workspace, false)?;
+                }
+            }
+            return Ok(true);
+        }
         if let Some(invocation) = self.review_mouse(point, down) {
             self.pending_command = invocation;
             return Ok(true);
         }
         self.tree.pointer(point, Some(down));
+        if down && self.overlay.is_none() && self.chrome && contains(self.indentation_rect(), point)
+        {
+            self.indentation_choices(workspace);
+            return Ok(true);
+        }
         if down
             && self.overlay.is_none()
             && self.chrome
             && point.y >= self.size.height - (STATUS * self.ui_scale)
-            && point.x >= (self.size.width - (480. * self.ui_scale)).max(0.)
-            && point.x < self.size.width - (180. * self.ui_scale)
+            && point.x >= (self.size.width - (600. * self.ui_scale)).max(0.)
+            && point.x < self.size.width - (300. * self.ui_scale)
             && workspace
                 .editor()
                 .settings
@@ -3717,26 +4191,6 @@ impl Panels {
                 &json!({"overlay":"syntax"}),
                 viewport,
             )?;
-            return Ok(true);
-        }
-        if self.overlay.is_some() {
-            if down && contains(self.quick_input.bounds, point) {
-                self.quick_input.click(point.x, extend);
-            } else if down
-                && contains(self.quick_bounds, point)
-                && point.y >= self.quick_bounds.y + (46. * self.ui_scale)
-            {
-                let row = ((point.y - self.quick_bounds.y - (46. * self.ui_scale)
-                    + self.quick.scroll.offset)
-                    / (44. * self.ui_scale)) as usize;
-                if row < self.quick.items.len() {
-                    self.quick.selected = row;
-                    self.preview_current(workspace)?;
-                    if double {
-                        self.pending_command = self.accept(workspace, false)?;
-                    }
-                }
-            }
             return Ok(true);
         }
         if self.panel.is_some() && contains(self.panel_bounds, point) {
@@ -3796,16 +4250,10 @@ impl Panels {
                             )?;
                         } else if id == CLOSE_ID {
                             self.action(workspace, "hide_panel", &json!({}), viewport.clone())?;
-                        } else if id == 50 || id == 51 {
-                            let command = if id == 50 {
-                                "find_all"
-                            } else if self.panel == Some(Panel::Files) {
-                                "replace_in_files"
-                            } else if self.panel == Some(Panel::Replace) {
-                                "replace_all"
-                            } else {
-                                "find_next"
-                            };
+                        } else if let Some((_, command)) = self
+                            .panel
+                            .and_then(|p| Self::panel_buttons(p).get(id.wrapping_sub(50) as usize))
+                        {
                             self.action(workspace, command, &json!({}), viewport.clone())?;
                         }
                     }
@@ -3817,15 +4265,15 @@ impl Panels {
             if down {
                 let row = ((point.y - self.side_bounds.y + self.side_scroll.offset)
                     / (24. * self.ui_scale)) as usize;
-                if (1..=workspace.tabs.len()).contains(&row) {
+                if (1..=open_file_count(workspace)).contains(&row) {
                     workspace.click_sheet(row - 1, self.primary_click, extend);
                     self.side_open = Some(row - 1);
                     if double {
                         workspace.tabs[workspace.active].transient = false;
                     }
-                } else if row >= workspace.tabs.len() + 2 {
+                } else if row >= open_file_count(workspace) + 2 {
                     self.side_open = None;
-                    self.side_selected = (row - workspace.tabs.len() - 2)
+                    self.side_selected = (row - open_file_count(workspace) - 2)
                         .min(self.side_rows.len().saturating_sub(1));
                     if extend && let Some(anchor) = self.side_anchor {
                         for index in anchor.min(self.side_selected)..=anchor.max(self.side_selected)
@@ -3867,6 +4315,8 @@ impl Panels {
                     }
                 }
                 self.side_focused = true;
+                self.panel_focused = false;
+                self.focus.show(Surface::Panel, false);
             }
             return Ok(true);
         }
@@ -3982,7 +4432,9 @@ mod tests {
         // Background results and re-validation do not bring the highlights back while closed.
         panels.poll(&mut workspace, 0..11);
         assert!(panels.visible_highlights().is_empty());
-        // The search itself survives: find_next still moves the selection, like Sublime.
+        // The search itself survives. Reset the caret so this checks navigation independently
+        // of the new typing-preview selection.
+        workspace.editor_mut().set_caret(0, false);
         press(&mut panels, &mut workspace, "super+g");
         assert_eq!(workspace.editor().selection(), 0..3);
         assert!(panels.visible_highlights().is_empty());
@@ -4475,10 +4927,10 @@ impl Panels {
         }
         let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / (24. * self.ui_scale))
             as usize;
-        if row > 0 && row <= workspace.tabs.len() {
+        if row > 0 && row <= open_file_count(workspace) {
             return workspace.tabs[row - 1].path.clone().map(|p| (p, false));
         }
-        row.checked_sub(workspace.tabs.len() + 2)
+        row.checked_sub(open_file_count(workspace) + 2)
             .and_then(|i| self.side_rows.get(i))
             .map(|r| (r.path.clone(), r.directory))
     }

@@ -63,7 +63,15 @@ impl Search {
             "(?m){}(?:{source})",
             if options.case_sensitive { "" } else { "(?i)" }
         ))
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| {
+            // Report the user's expression, never the internal flag/boundary wrapper.
+            regex::RegexBuilder::new(query)
+                .multi_line(true)
+                .case_insensitive(!options.case_sensitive)
+                .build()
+                .err()
+                .map_or_else(|| "Invalid regular expression".into(), |e| e.to_string())
+        })?;
         Ok(Self {
             query: query.into(),
             options,
@@ -141,9 +149,14 @@ impl Search {
                 })
                 .cloned()
         }
-        .or_else(|| self.options.wrap.then(|| current.cloned()).flatten())
+        .or_else(|| {
+            self.options
+                .wrap
+                .then(|| current.filter(|r| matches.contains(r)).cloned())
+                .flatten()
+        })
     }
-    /// Expands numbered/named `$group`/`${group}` and `$$`, copying only captured substrings.
+    /// Expands Perl-style captures and case/character escapes, copying only captured substrings.
     pub fn replacements(
         &self,
         text: &Text,
@@ -169,44 +182,14 @@ impl Search {
                 let range = found.start()..found.end();
                 let mut replacement = String::new();
                 if self.options.regex {
-                    let mut chars = template.chars().peekable();
-                    while let Some(c) = chars.next() {
-                        if c != '$' {
-                            replacement.push(c);
-                            continue;
-                        }
-                        if chars.peek() == Some(&'$') {
-                            chars.next();
-                            replacement.push('$');
-                            continue;
-                        }
-                        let braced = chars.peek() == Some(&'{');
-                        if braced {
-                            chars.next();
-                        }
-                        let mut name = String::new();
-                        while chars
-                            .peek()
-                            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
-                        {
-                            name.push(chars.next().expect("peeked"));
-                        }
-                        if braced && chars.peek() == Some(&'}') {
-                            chars.next();
-                        }
-                        if name.is_empty() {
-                            replacement.push('$');
-                            continue;
-                        }
-                        let group = name
-                            .parse::<usize>()
+                    replacement = expand_format(template, |name| {
+                        name.parse::<usize>()
                             .ok()
                             .and_then(|n| capture.get_group(n))
-                            .or_else(|| capture.get_group_by_name(&name));
-                        if let Some(group) = group {
-                            replacement.push_str(&text.slice(group.start..group.end).to_string());
-                        }
-                    }
+                            .or_else(|| capture.get_group_by_name(name))
+                            .map(|group| text.slice(group.start..group.end).to_string())
+                            .unwrap_or_default()
+                    });
                 } else {
                     replacement.push_str(template);
                 }
@@ -224,6 +207,100 @@ impl Search {
         result
     }
 }
+// Case controls span literal text and captures; Unicode conversions may grow a scalar.
+fn expand_format(template: &str, capture: impl Fn(&str) -> String) -> String {
+    let mut chars = template.chars().peekable();
+    let mut result = String::new();
+    let mut case = None;
+    let mut next_case = None;
+    while let Some(c) = chars.next() {
+        let piece = match c {
+            '\\' => match chars.next() {
+                Some('u') => {
+                    next_case = Some(true);
+                    continue;
+                }
+                Some('l') => {
+                    next_case = Some(false);
+                    continue;
+                }
+                Some('U') => {
+                    case = Some(true);
+                    continue;
+                }
+                Some('L') => {
+                    case = Some(false);
+                    continue;
+                }
+                Some('E') => {
+                    case = None;
+                    next_case = None;
+                    continue;
+                }
+                Some('n') => "\n".into(),
+                Some('t') => "\t".into(),
+                Some('r') => "\r".into(),
+                Some(n @ '1'..='9') => capture(&n.to_string()),
+                Some(c) => c.to_string(),
+                None => "\\".into(),
+            },
+            '$' => match chars.peek() {
+                Some('$') => {
+                    chars.next();
+                    "$".into()
+                }
+                Some('&') => {
+                    chars.next();
+                    capture("0")
+                }
+                _ => {
+                    let named = chars.peek() == Some(&'+') && chars.clone().nth(1) == Some('{');
+                    if named {
+                        chars.next();
+                    }
+                    let braced = chars.peek() == Some(&'{');
+                    if braced {
+                        chars.next();
+                    }
+                    let numeric = chars.peek().is_some_and(char::is_ascii_digit);
+                    let mut name = String::new();
+                    while chars.peek().is_some_and(|c| {
+                        if numeric {
+                            c.is_ascii_digit()
+                        } else {
+                            c.is_ascii_alphanumeric() || *c == '_'
+                        }
+                    }) {
+                        name.push(chars.next().expect("peeked"));
+                    }
+                    if braced && chars.peek() == Some(&'}') {
+                        chars.next();
+                    } else if braced {
+                        format!("${}{{{name}", if named { "+" } else { "" })
+                            .chars()
+                            .for_each(|c| result.push(c));
+                        continue;
+                    }
+                    if name.is_empty() {
+                        "$".into()
+                    } else {
+                        capture(&name)
+                    }
+                }
+            },
+            c => c.to_string(),
+        };
+        for c in piece.chars() {
+            match next_case.take().or(case) {
+                Some(true) => result.extend(c.to_uppercase()),
+                Some(false) => result.extend(c.to_lowercase()),
+                None => result.push(c),
+            }
+        }
+    }
+    result
+}
+
 /// A prepared replacement in the original snapshot's byte coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Replacement {
@@ -417,6 +494,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn perl_replacement_format_table() {
+        let search = Search::new(
+            r"(?P<word>ÉCOLE)(\d)(a)?",
+            Options {
+                regex: true,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let text = Text::from("ÉCOLE7");
+        for (template, expected) in [
+            (r"\1:\2:\3", "ÉCOLE:7:"),
+            (r"$&", "ÉCOLE7"),
+            (r"$1px:$1_old:$2px:$2_old", "ÉCOLEpx:ÉCOLE_old:7px:7_old"),
+            (r"$12px:$9_old", "px:_old"),
+            (r"$1:${1}:${word}:$+{word}:$$", "ÉCOLE:ÉCOLE:ÉCOLE:ÉCOLE:$"),
+            (r"\n\t\\", "\n\t\\"),
+            (r"\L$+{word}\E", "école"),
+            (r"\l$1 \uhello", "éCOLE Hello"),
+            (r"\Uhello\E World", "HELLO World"),
+            (r"\LHELLO\E World", "hello World"),
+            (r"\u\L$1\E", "École"),
+            (r"\u${3}hello", "Hello"),
+            (r"${missing}:\9", ":"),
+            (r"\\1", r"\1"),
+        ] {
+            assert_eq!(
+                search.replacements(&text, template, &[])[0].text,
+                expected,
+                "{template}"
+            );
+        }
+        let literal = Search::new("x", Options::default()).unwrap();
+        assert_eq!(
+            literal.replacements(&Text::from("x"), r"\n$1", &[])[0].text,
+            r"\n$1"
+        );
+    }
+    #[test]
+    fn regex_errors_show_only_the_user_expression() {
+        let error = Search::new(
+            "[",
+            Options {
+                regex: true,
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        assert!(!error.contains("(?m)"));
+        assert!(!error.contains("(?i)"));
+        assert!(error.contains("unclosed character class"));
     }
     #[test]
     fn rope_seams_unicode_empty_and_zero_width() {

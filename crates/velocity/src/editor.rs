@@ -28,6 +28,11 @@ struct Composition {
     selection: Selection,
     explicit: bool,
 }
+#[derive(Debug, Default)]
+struct SelectorPoints {
+    version: Option<(vel_buffer::BufferId, vel_buffer::ChangeId)>,
+    values: std::collections::HashMap<usize, Option<vel_scope::ScopeStack>>,
+}
 #[derive(Clone, Debug)]
 pub struct SharedLayoutEdit {
     pub buffer: vel_buffer::BufferId,
@@ -65,6 +70,15 @@ pub struct Editor {
     pub snippet_path: Option<std::path::PathBuf>,
     pub language: crate::language::LanguageCell,
     pub layout: RefCell<crate::layout::Layout>,
+    selector_snapshots: RefCell<
+        Vec<(
+            vel_buffer::BufferId,
+            vel_scope::Scope,
+            Arc<vel_highlight::ScopeSnapshot>,
+        )>,
+    >,
+    selector_points: RefCell<SelectorPoints>,
+    last_visual_boundary: Option<(bool, vel_buffer::ChangeId, Selection)>,
     language_buffer: Option<vel_buffer::BufferId>,
     pub reindent_job: Option<mpsc::Receiver<ReindentResult>>,
     pub read_only: bool,
@@ -140,6 +154,7 @@ impl Editor {
         }
         for name in [
             "set_clipboard",
+            "set_indentation",
             "save_and_close",
             "new_html_sheet",
             "open_url",
@@ -189,6 +204,9 @@ impl Editor {
             layout_version: vel_buffer::ChangeId(0),
             language: std::rc::Rc::new(RefCell::new(None)),
             layout: RefCell::new(crate::layout::Layout::default()),
+            selector_snapshots: RefCell::new(Vec::new()),
+            selector_points: RefCell::default(),
+            last_visual_boundary: None,
             language_buffer: None,
             reindent_job: None,
             read_only: false,
@@ -349,6 +367,15 @@ impl Editor {
             self.fields = None;
             self.completion.hide();
             let previous = self.language.borrow_mut().take().expect("language");
+            if let Some(snapshot) = &previous.scopes {
+                let mut cache = self.selector_snapshots.borrow_mut();
+                crate::language::retire(std::mem::take(&mut *cache));
+                cache.push((
+                    self.language_buffer.unwrap_or(self.buffer.id()),
+                    previous.root,
+                    snapshot.clone(),
+                ));
+            }
             let result = crate::language::Language::with_policy(
                 previous.assets.clone(),
                 &previous.syntax,
@@ -540,6 +567,28 @@ impl Editor {
         }
         self.unmark();
         self.sync();
+        if !matches!(
+            name,
+            "move" | "move_to" | "select_all" | "copy" | "single_selection"
+        ) && self
+            .language
+            .borrow()
+            .as_ref()
+            .is_some_and(|l| l.policy.highlighting == vel_largefile::HighlightMode::Viewport)
+        {
+            let language = self.language.borrow();
+            let language = language.as_ref().expect("viewport language");
+            let mut seen = std::collections::HashSet::new();
+            // Preserve only snapshots that are currently published at a caret. Never invoke
+            // historic scope lookup just to prepare a command that may not edit anything.
+            for region in self.regions() {
+                if let Some(snapshot) = language.scope_snapshot_at(region.b)
+                    && seen.insert(Arc::as_ptr(&snapshot))
+                {
+                    self.retain_selector_snapshot(language.root, snapshot);
+                }
+            }
+        }
         let before_version = self.buffer.change_id();
         let before_selection = (
             self.anchor,
@@ -603,6 +652,116 @@ impl Editor {
             self.completion.edited(character);
         }
         result
+    }
+    /// Uses published scopes while re-highlighting; the buffer's retained edit maps relocate
+    /// the old snapshot rather than parsing a line on the input thread.
+    fn retain_selector_snapshot(
+        &self,
+        root: vel_scope::Scope,
+        snapshot: Arc<vel_highlight::ScopeSnapshot>,
+    ) {
+        let mut cache = self.selector_snapshots.borrow_mut();
+        if !cache.iter().any(|(_, _, old)| Arc::ptr_eq(old, &snapshot)) {
+            if snapshot.range == (0..snapshot.text.len_lines()) {
+                crate::language::retire(std::mem::take(&mut *cache));
+            } else if cache.len() == 32 {
+                crate::language::retire(cache.remove(0));
+            }
+            cache.push((self.buffer.id(), root, snapshot));
+            self.selector_points.borrow_mut().values.clear();
+        }
+    }
+    fn selector_scopes(&self, byte: usize) -> Option<vel_scope::ScopeStack> {
+        use vel_highlight::ScopeProvider;
+        let language = self.language.borrow();
+        let language = language.as_ref()?;
+        if self
+            .selector_snapshots
+            .borrow()
+            .iter()
+            .any(|(id, root, _)| *id != self.buffer.id() || *root != language.root)
+        {
+            crate::language::retire(std::mem::take(&mut *self.selector_snapshots.borrow_mut()));
+            self.selector_points.borrow_mut().values.clear();
+        }
+        if let Some(snapshot) = language.scope_snapshot_at(byte) {
+            self.retain_selector_snapshot(language.root, snapshot.clone());
+            return snapshot.scopes_at(byte).map(|scopes| {
+                let mut stack = vel_scope::ScopeStack::new();
+                for scope in scopes {
+                    stack.push(*scope);
+                }
+                stack
+            });
+        }
+        let mut points = self.selector_points.borrow_mut();
+        let version = (self.buffer.id(), self.buffer.change_id());
+        if points.version != Some(version) {
+            points.version = Some(version);
+            points.values.clear();
+        }
+        if let Some(scopes) = points.values.get(&byte) {
+            return scopes.clone();
+        }
+        let cache = self.selector_snapshots.borrow();
+        let scopes = language
+            .scopes
+            .iter()
+            .chain(cache.iter().rev().map(|(_, _, snapshot)| snapshot));
+        'snapshots: for snapshot in scopes {
+            // Invert the monotonic retained mapping. Inserted bytes inherit the scopes at
+            // their original boundary; deleted prefixes and Unicode offsets remain valid.
+            let mut lo = snapshot.text.line_to_byte(snapshot.range.start);
+            let mut hi = if snapshot.range.end < snapshot.text.len_lines() {
+                snapshot.text.line_to_byte(snapshot.range.end)
+            } else {
+                snapshot.text.len_bytes()
+            };
+            let Some(start) =
+                self.buffer
+                    .transform_point_from(lo, snapshot.version, vel_buffer::Bias::Left)
+            else {
+                continue;
+            };
+            let Some(end) =
+                self.buffer
+                    .transform_point_from(hi, snapshot.version, vel_buffer::Bias::Right)
+            else {
+                continue;
+            };
+            if byte < start || byte > end {
+                continue;
+            }
+            if snapshot.version == self.buffer.change_id() {
+                lo = byte;
+                hi = byte;
+            }
+            while lo < hi {
+                let mid = lo + (hi - lo).div_ceil(2);
+                let Some(mapped) =
+                    self.buffer
+                        .transform_point_from(mid, snapshot.version, vel_buffer::Bias::Left)
+                else {
+                    continue 'snapshots;
+                };
+                if mapped <= byte {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            let old_byte = snapshot.text.floor_char_boundary(lo);
+            if let Some(scopes) = snapshot.scopes_at(old_byte) {
+                let mut stack = vel_scope::ScopeStack::new();
+                for scope in scopes {
+                    stack.push(*scope);
+                }
+                points.values.insert(byte, Some(stack.clone()));
+                return Some(stack);
+            }
+        }
+        points.values.insert(byte, None);
+        None
     }
     pub fn context_matches(&self, context: &[vel_config::keymap::Context]) -> bool {
         context.iter().all(|c| c.matches(&EditorContext(self)))
@@ -880,6 +1039,32 @@ impl Editor {
 }
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        let previous_boundary = self.last_visual_boundary.take();
+        if name == "move_to"
+            && matches!(args["to"].as_str(), Some("bol" | "eol"))
+            && self.layout.borrow().wrapped()
+            && self.layout.borrow().total() > 0
+        {
+            let end = args["to"] == "eol";
+            let current = self.buffer.view(self.id).sel();
+            let repeated = previous_boundary.is_some_and(|(was_end, version, selection)| {
+                was_end == end && version == self.buffer.change_id() && &selection == current
+            });
+            let extend = args["extend"].as_bool().unwrap_or(false);
+            let mut regions: Vec<_> = current
+                .iter()
+                .map(|r| {
+                    let at = crate::view::visual_line_boundary(self, r.b, end, repeated);
+                    Region::new(if extend { r.a } else { at }, at)
+                })
+                .collect();
+            let primary = regions.remove(current.primary_index());
+            regions.push(primary);
+            let selection = Selection::from_regions(regions);
+            self.set_selection(selection.clone());
+            self.last_visual_boundary = Some((end, self.buffer.change_id(), selection));
+            return Ok(true);
+        }
         if self.vintage_command(name, args)? {
             return Ok(true);
         }
@@ -923,14 +1108,12 @@ impl ContextProvider for EditorContext<'_> {
         if self.0.marked.is_some() {
             return false;
         }
-        self.0.language.borrow().as_ref().is_none_or(|l| {
-            self.0
-                .buffer
-                .view(self.0.id)
-                .sel()
+        self.0.language.borrow().is_none()
+            || self
+                .0
+                .regions()
                 .iter()
-                .all(|r| l.scopes_ready_at(&self.0.text, r.b))
-        })
+                .all(|r| self.0.selector_scopes(r.b).is_some())
     }
     fn values(&self, key: &str) -> Vec<Value> {
         let e = self.0;
@@ -985,16 +1168,25 @@ impl ContextProvider for EditorContext<'_> {
         }
     }
     fn selector_matches(&self, selector: &str) -> Vec<bool> {
+        let plain = self.0.language.borrow().is_none();
+        let parsed = (!plain)
+            .then(|| selector.parse::<vel_scope::Selector>().ok())
+            .flatten();
         self.0
             .buffer
             .view(self.0.id)
             .sel()
             .iter()
             .map(|r| {
-                self.0.language.borrow().as_ref().map_or_else(
-                    || PlainScope.matches(selector, r.b),
-                    |l| l.selector(&self.0.text, selector, r.b),
-                )
+                if plain {
+                    PlainScope.matches(selector, r.b)
+                } else {
+                    parsed.as_ref().is_some_and(|selector| {
+                        self.0
+                            .selector_scopes(r.b)
+                            .is_some_and(|stack| selector.does_match(stack.as_slice()).is_some())
+                    })
+                }
             })
             .collect()
     }
@@ -1560,5 +1752,309 @@ mod context_tests {
             assert_eq!(context.values("following_text"), vec![json!("after")]);
             assert_eq!(context.values("text"), vec![json!("SELECT")]);
         }
+    }
+}
+
+#[cfg(test)]
+mod round15_details {
+    use super::*;
+    use vel_platform::Size;
+
+    #[test]
+    fn viewport_many_carets_with_retained_edit_history() {
+        let template = highlighted("let value = 42;\n");
+        let language = template.language.borrow();
+        let published = language.as_ref().unwrap().scopes.as_ref().unwrap();
+        let source = format!("let value = 42; // {}\n", "padding ".repeat(24)).repeat(10_000);
+        let mut e = Editor::new(Text::from(source.as_str()));
+        for _ in 0..1_000 {
+            let at = e.buffer.text().len_bytes();
+            e.buffer.transact(
+                e.id,
+                vel_buffer::EditKind::Other,
+                &[vel_text::Edit {
+                    range: at..at,
+                    text: " ",
+                }],
+                Selection::new(),
+            );
+        }
+        let mut snapshot = (**published).clone();
+        snapshot.version = e.buffer.change_id();
+        snapshot.text = e.buffer.text().clone();
+        snapshot.range = 0..snapshot.text.len_lines();
+        snapshot.lines = (0..snapshot.text.len_lines())
+            .map(|line| {
+                let mut record = published.lines[0].clone();
+                record.line = line;
+                record
+            })
+            .collect();
+        let root = language.as_ref().unwrap().root;
+        let at = e.buffer.text().len_bytes();
+        e.buffer.transact(
+            e.id,
+            vel_buffer::EditKind::Other,
+            &[vel_text::Edit {
+                range: at..at,
+                text: " ",
+            }],
+            Selection::new(),
+        );
+        e.settings
+            .set(Layer::View, "large_file.viewport_bytes", json!(1));
+        e.sync();
+        e.attach_language(
+            crate::language::Assets::bundled().unwrap(),
+            "Rust",
+            Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
+        )
+        .unwrap();
+        assert_eq!(
+            e.features.highlighting,
+            vel_largefile::HighlightMode::Viewport
+        );
+        e.selector_snapshots
+            .borrow_mut()
+            .push((e.buffer.id(), root, Arc::new(snapshot)));
+        e.set_selection(Selection::from_regions(
+            (0..10_000).map(|row| Region::caret(e.text.line_to_byte(row) + 6)),
+        ));
+        let start = std::time::Instant::now();
+        e.run("move", &json!({"by":"characters","forward":true}))
+            .unwrap();
+        let arrow = start.elapsed();
+        assert!(e.selector_points.borrow().values.is_empty());
+        let start = std::time::Instant::now();
+        assert!(EditorContext(&e).scopes_ready());
+        assert_eq!(
+            EditorContext(&e).selector_matches("string, comment"),
+            vec![false; 10_000]
+        );
+        let _ = e.resolve_key(&Key::parse("\"").unwrap());
+        let quote = start.elapsed();
+        assert_eq!(e.regions().len(), 10_000);
+        eprintln!("viewport 10k carets / 2 MiB / 1001 edits: arrow={arrow:?}, quote={quote:?}");
+    }
+    #[test]
+    fn wrapped_home_end_extend_and_hard_boundaries() {
+        let mut e = Editor::new(Text::from(
+            "    alpha beta gamma delta epsilon zeta\nsecond",
+        ));
+        e.settings.set(Layer::View, "word_wrap", json!(true));
+        let mut view = crate::view::View::new(
+            Size {
+                width: 160.,
+                height: 240.,
+            },
+            8.,
+            12.,
+        );
+        view.scene(&e);
+        let at = 22;
+        let segment = e.layout.borrow().visual_at(&e.text, at).1;
+        assert!(segment.bytes.start > 4);
+        e.set_caret(at, false);
+        e.run("move_to", &json!({"to":"bol"})).unwrap();
+        assert_eq!(e.caret, segment.bytes.start);
+        e.run("move_to", &json!({"to":"bol"})).unwrap();
+        assert_eq!(e.caret, 4);
+        e.run("move_to", &json!({"to":"bol"})).unwrap();
+        assert_eq!(e.caret, 0);
+        e.set_caret(at, false);
+        e.run("move_to", &json!({"to":"eol","extend":true}))
+            .unwrap();
+        assert_eq!(e.anchor, at);
+        assert_eq!(e.caret, e.text.prev_grapheme_boundary(segment.bytes.end));
+        assert_eq!(
+            e.layout.borrow().visual_at(&e.text, e.caret).1.bytes,
+            segment.bytes
+        );
+        e.run("move_to", &json!({"to":"eol","extend":true}))
+            .unwrap();
+        assert_eq!(e.caret, e.text.line_len_bytes(0));
+        e.run("move_to", &json!({"to":"hardbol"})).unwrap();
+        assert_eq!(e.caret, 0);
+        e.run("move_to", &json!({"to":"hardeol"})).unwrap();
+        assert_eq!(e.caret, e.text.line_len_bytes(0));
+        e.settings.set(Layer::View, "word_wrap", json!(false));
+        e.sync();
+        view.scene(&e);
+        e.set_caret(at, false);
+        e.run("move_to", &json!({"to":"bol"})).unwrap();
+        assert_eq!(e.caret, 4);
+    }
+
+    #[test]
+    fn wrapped_end_stays_on_its_row_for_drawing_home_and_vertical_movement() {
+        let mut e = Editor::new(Text::from(
+            "    alpha beta gamma delta epsilon zeta\nsecond",
+        ));
+        e.settings.set(Layer::View, "word_wrap", json!(true));
+        let mut view = crate::view::View::new(
+            Size {
+                width: 160.,
+                height: 240.,
+            },
+            8.,
+            12.,
+        );
+        view.scene(&e);
+        e.set_caret(22, false);
+        let (row, segment) = e.layout.borrow().visual_at(&e.text, e.caret);
+        let before = view.rect_at(&e, e.caret);
+        e.run("move_to", &json!({"to":"eol"})).unwrap();
+        assert_eq!(view.rect_at(&e, e.caret).y, before.y);
+        assert_eq!(e.layout.borrow().visual_at(&e.text, e.caret).0, row);
+        e.run("move_to", &json!({"to":"bol"})).unwrap();
+        assert_eq!(e.caret, segment.bytes.start);
+        e.set_caret(22, false);
+        e.run("move_to", &json!({"to":"eol"})).unwrap();
+        e.run("move", &json!({"by":"lines","forward":true}))
+            .unwrap();
+        assert_eq!(e.layout.borrow().visual_at(&e.text, e.caret).0, row + 1);
+        e.set_caret(22, false);
+        e.run("move_to", &json!({"to":"eol"})).unwrap();
+        e.run("move", &json!({"by":"lines","forward":false}))
+            .unwrap();
+        assert_eq!(e.layout.borrow().visual_at(&e.text, e.caret).0, row - 1);
+    }
+    #[test]
+    fn smart_home_streams_a_huge_unicode_logical_line() {
+        let e = Editor::new(Text::from(
+            format!(" \t  {}", "界".repeat(400_000)).as_str(),
+        ));
+        assert_eq!(
+            crate::view::visual_line_boundary(&e, e.text.floor_char_boundary(500), false, false),
+            4
+        );
+        assert_eq!(crate::view::visual_line_boundary(&e, 4, false, false), 0);
+    }
+    #[test]
+    fn viewport_preedit_retains_a_current_snapshot_once_for_many_carets() {
+        let mut e = highlighted("let value = 42;\nlet another = 0;\n");
+        let snapshot = e
+            .language
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .scopes
+            .as_ref()
+            .unwrap()
+            .clone();
+        e.settings
+            .set(Layer::View, "large_file.viewport_bytes", json!(1));
+        e.sync();
+        let mut partial = (*snapshot).clone();
+        partial.range = 0..1;
+        partial.lines = partial.lines.iter().take(1).cloned().collect();
+        e.language.borrow_mut().as_mut().unwrap().scopes = Some(Arc::new(partial));
+        e.selector_snapshots.borrow_mut().clear();
+        e.set_selection(Selection::from_regions([
+            Region::caret(2),
+            Region::caret(6),
+            Region::caret(10),
+        ]));
+        e.run("insert", &json!({"characters":"x"})).unwrap();
+        assert_eq!(e.selector_snapshots.borrow().len(), 1);
+        assert!(e.selector_points.borrow().values.is_empty());
+    }
+
+    #[test]
+    fn wrapped_boundaries_keep_unicode_multiple_carets_and_primary() {
+        let mut e = Editor::new(Text::from(
+            "  alpha 你好 beta gamma delta\n  alpha 你好 beta gamma delta",
+        ));
+        e.settings.set(Layer::View, "word_wrap", json!(true));
+        crate::view::View::new(
+            Size {
+                width: 170.,
+                height: 240.,
+            },
+            8.,
+            12.,
+        )
+        .scene(&e);
+        let second = e.text.line_to_byte(1);
+        e.set_selection(Selection::from_regions([
+            Region::caret(second + 20),
+            Region::caret(20),
+        ]));
+        let first_target = crate::view::visual_line_boundary(&e, 20, false, false);
+        let second_target = crate::view::visual_line_boundary(&e, second + 20, false, false);
+        e.run("move_to", &json!({"to":"bol","extend":true}))
+            .unwrap();
+        assert_eq!(
+            e.regions().iter().map(|r| r.b).collect::<Vec<_>>(),
+            [first_target, second_target]
+        );
+        assert_eq!(e.caret, first_target);
+        assert_eq!(e.anchor, 20);
+        assert!(e.regions().iter().all(|r| e.text.is_char_boundary(r.b)));
+    }
+    fn highlighted(source: &str) -> Editor {
+        let mut e = Editor::new(Text::from(source));
+        e.attach_language(
+            crate::language::Assets::bundled().unwrap(),
+            "Rust",
+            Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
+        )
+        .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            e.poll_language();
+            if e.language.borrow().as_ref().unwrap().scopes_ready() {
+                return e;
+            }
+            assert!(std::time::Instant::now() < until);
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+    }
+    #[test]
+    fn pending_scopes_use_published_strings_and_code_shifted_through_edits() {
+        let source = "fn main() {\n let s = \"string\";\n    \n}\n";
+        let mut e = highlighted(source);
+        let inside = source.find("string").unwrap() + 2;
+        e.set_caret(inside, false);
+        assert!(EditorContext(&e).scopes_ready());
+        assert_eq!(EditorContext(&e).selector_matches("string"), [true]);
+        e.set_caret(0, false);
+        e.run("insert", &json!({"characters":"// 你好\n"})).unwrap();
+        let shift = "// 你好\n".len();
+        e.set_caret(inside + shift, false);
+        // Deliberately do not poll the new language service.
+        assert!(EditorContext(&e).scopes_ready());
+        assert_eq!(EditorContext(&e).selector_matches("string"), [true]);
+        assert!(!e.key(&Key::parse("\"").unwrap()).unwrap());
+        let code = source.find("    \n").unwrap() + shift + 2;
+        e.set_caret(code, false);
+        assert_eq!(
+            EditorContext(&e).selector_matches("string, comment"),
+            [false]
+        );
+        assert!(e.key(&Key::parse("\"").unwrap()).unwrap());
+        assert_eq!(e.text.slice(code..code + 2).to_string(), "\"\"");
+        e.run("undo", &json!({})).unwrap();
+        e.set_caret(inside + shift, false);
+        assert_eq!(EditorContext(&e).selector_matches("string"), [true]);
+    }
+    #[test]
+    fn selectors_still_defer_when_no_scopes_have_ever_been_published() {
+        let mut e = Editor::new(Text::from("fn main() {}"));
+        e.attach_language(
+            crate::language::Assets::bundled().unwrap(),
+            "Rust",
+            Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
+        )
+        .unwrap();
+        assert!(!EditorContext(&e).scopes_ready());
+        assert!(
+            !e.context_matches(
+                &serde_json::from_value::<Vec<vel_config::keymap::Context>>(
+                    json!([{"key":"selector","operator":"not_equal","operand":"string"}])
+                )
+                .unwrap()
+            )
+        );
     }
 }

@@ -548,7 +548,12 @@ impl Layout {
             }
             col += unit.width as f64;
         }
-        text.line_to_byte(row) + segment.bytes.end
+        let end = text.line_to_byte(row) + segment.bytes.end;
+        if segment.bytes.end < body_len(text, row) {
+            text.prev_grapheme_boundary(end)
+        } else {
+            end
+        }
     }
     fn long_query<T>(
         &self,

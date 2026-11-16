@@ -546,6 +546,10 @@ impl App {
             self.show_error(w, "command chain exceeds 32 levels");
             return;
         }
+        let palette_accept = self.panels.palette_accept_pending(name, args);
+        if palette_accept && !self.accept_palette_command(name, args) {
+            return;
+        }
         if name == "chain" {
             if let Some(commands) = args["commands"].as_array() {
                 for command in commands {
@@ -575,7 +579,7 @@ impl App {
             self.workspace.select(index);
             self.sync_active_view();
         }
-        if !self.command_enabled(name, &args.to_string()) {
+        if !palette_accept && !self.command_enabled(name, &args.to_string()) {
             return;
         }
         match self.context_action(w, name, args) {
@@ -815,6 +819,7 @@ impl App {
                     self.panels.choices(&mut self.workspace, items);
                 } else {
                     self.builds.start(&self.workspace, &mut self.panels, args)?;
+                    self.panels.select_build_results();
                 }
                 return Ok(());
             }
@@ -825,8 +830,13 @@ impl App {
                 return Ok(());
             }
             "next_result" | "prev_result" => {
-                self.builds
-                    .navigate(&mut self.workspace, name == "next_result")?;
+                if self.panels.search_results_active {
+                    self.panels
+                        .navigate_result(&mut self.workspace, name == "next_result")?;
+                } else {
+                    self.builds
+                        .navigate(&mut self.workspace, name == "next_result")?;
+                }
                 return Ok(());
             }
             "prompt_open_project" | "open_project" => {
@@ -915,6 +925,9 @@ impl App {
             return Ok(());
         }
         let viewport = self.viewport();
+        if name == "show_overlay" && args["overlay"] == "command_palette" {
+            self.sync_palette_enabled();
+        }
         if self
             .panels
             .action(&mut self.workspace, name, args, viewport)?
@@ -1175,6 +1188,23 @@ impl App {
             self.view.scroll_x = scroll.0;
             self.view.scroll_y = scroll.1;
         }
+    }
+    fn sync_palette_enabled(&mut self) {
+        let enabled = self
+            .workspace
+            .palette
+            .iter()
+            .map(|item| {
+                self.command_enabled(&item.invocation.command, &item.invocation.args.to_string())
+            })
+            .collect();
+        self.panels.set_palette_enabled(enabled);
+    }
+    fn accept_palette_command(&mut self, name: &str, args: &Value) -> bool {
+        let enabled = self.command_enabled(name, &args.to_string());
+        self.panels
+            .finish_palette_accept(&mut self.workspace, name, args, enabled);
+        enabled
     }
     fn viewport(&self) -> std::ops::Range<usize> {
         self.view.viewport(self.workspace.editor())
@@ -1649,6 +1679,7 @@ impl App {
         }
     }
     fn changed(&mut self, w: &WindowHandle, received: Instant, reveal: bool) {
+        let reveal = self.panels.should_reveal(reveal);
         if reveal {
             self.view.reset_caret();
         }
@@ -2174,7 +2205,15 @@ impl AppHandler for App {
                 return false;
             }
             "cancel_build" if self.builds.task.is_none() => return false,
-            "next_result" | "prev_result" if self.builds.diagnostics.is_empty() => return false,
+            "next_result" | "prev_result"
+                if if self.panels.search_results_active {
+                    !self.panels.has_search_results()
+                } else {
+                    self.builds.diagnostics.is_empty()
+                } =>
+            {
+                return false;
+            }
             "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
                 return false;
             }
@@ -2182,6 +2221,7 @@ impl AppHandler for App {
         }
         if args["_context_menu"].is_null()
             && self.panels.input().is_some()
+            && !self.panels.palette_accept_pending(name, &args)
             && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
         {
             return true;
@@ -2332,6 +2372,29 @@ impl AppHandler for App {
         }
         if self.options.mode.automatic() {
             self.external_input += 1;
+            return;
+        }
+        if self.panels.overlay.is_some() {
+            if event.kind == MouseKind::Move {
+                self.panels.tree.pointer(event.position, None);
+                w.request_frame();
+                return;
+            }
+            let viewport = self.viewport();
+            if let Err(error) = self.panels.mouse(
+                &mut self.workspace,
+                event.position,
+                event.kind == MouseKind::Down,
+                event.click_count >= 2,
+                event.modifiers.shift(),
+                viewport,
+            ) {
+                self.show_error(w, &error);
+            }
+            if let Some(invocation) = self.panels.pending_command.take() {
+                self.run_named(w, &invocation.command, &invocation.args);
+            }
+            self.changed(w, Instant::now(), true);
             return;
         }
         if event.is_context_click() {
@@ -2917,6 +2980,13 @@ impl AppHandler for App {
             }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
+            if let Some(deadline) = self.panels.message_deadline() {
+                w.request_frame_at(deadline);
+            }
+            self.sync_active_view();
+            if std::mem::take(&mut self.panels.reveal) {
+                self.view.reveal(self.workspace.editor());
+            }
             self.flush_context_menu(w);
             if std::mem::take(&mut self.panels.review.reveal) {
                 self.view.reveal(self.workspace.editor());
@@ -3446,6 +3516,140 @@ mod workbench_scenes {
         )
     }
     #[test]
+    fn palette_filters_and_rechecks_actual_command_enablement() {
+        let workspace = Workspace::new(vel_text::Text::from("text"), None, None, false).unwrap();
+        let mut app = app(workspace);
+        app.workspace.palette = [("Close Split", "close_split"), ("New File", "new_file")]
+            .into_iter()
+            .map(|(caption, command)| vel_config::ui::PaletteItem {
+                caption: caption.into(),
+                invocation: vel_config::keymap::Invocation {
+                    command: command.into(),
+                    args: json!({}),
+                },
+            })
+            .collect();
+        app.sync_palette_enabled();
+        app.panels
+            .action(
+                &mut app.workspace,
+                "show_overlay",
+                &json!({"overlay":"command_palette"}),
+                0..4,
+            )
+            .unwrap();
+        // Acceptance before the worker publishes also uses the filtered candidates.
+        let (_, invocation) = app
+            .panels
+            .key(
+                &mut app.workspace,
+                &vel_config::keymap::Key::parse("enter").unwrap(),
+                0..4,
+            )
+            .unwrap();
+        assert_eq!(invocation.unwrap().command, "new_file");
+        crate::workbench::configure_groups(&mut app.workspace, 2).unwrap();
+        app.sync_palette_enabled();
+        app.panels
+            .action(
+                &mut app.workspace,
+                "show_overlay",
+                &json!({"overlay":"command_palette","text":"Close Split"}),
+                0..4,
+            )
+            .unwrap();
+        assert!(app.command_enabled("close_split", "{}"));
+        crate::workbench::configure_groups(&mut app.workspace, 1).unwrap();
+        app.sync_palette_enabled();
+        assert!(!app.command_enabled("close_split", "{}"));
+        let (_, invocation) = app
+            .panels
+            .key(
+                &mut app.workspace,
+                &vel_config::keymap::Key::parse("enter").unwrap(),
+                0..4,
+            )
+            .unwrap();
+        assert!(invocation.is_none());
+        assert_eq!(app.panels.overlay, Some(crate::panels::Overlay::Palette));
+    }
+
+    #[test]
+    fn palette_snapshot_is_reused_and_only_the_accepted_row_is_rechecked() {
+        let workspace = Workspace::new(vel_text::Text::from("text"), None, None, false).unwrap();
+        let mut app = app(workspace);
+        app.workspace.palette = vec![vel_config::ui::PaletteItem {
+            caption: "Close Split".into(),
+            invocation: vel_config::keymap::Invocation {
+                command: "close_split".into(),
+                args: json!({}),
+            },
+        }];
+        crate::workbench::configure_groups(&mut app.workspace, 2).unwrap();
+        app.sync_palette_enabled();
+        app.panels
+            .action(
+                &mut app.workspace,
+                "show_overlay",
+                &json!({"overlay":"command_palette"}),
+                0..4,
+            )
+            .unwrap();
+        crate::workbench::configure_groups(&mut app.workspace, 1).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        for _ in 0..50 {
+            app.panels.poll(&mut app.workspace, 0..4);
+        }
+        loop {
+            let (_, invocation) = app
+                .panels
+                .key(
+                    &mut app.workspace,
+                    &vel_config::keymap::Key::parse("enter").unwrap(),
+                    0..4,
+                )
+                .unwrap();
+            if let Some(invocation) = invocation {
+                assert!(!app.accept_palette_command(&invocation.command, &invocation.args));
+                break;
+            }
+            assert!(Instant::now() < until);
+            app.panels.poll(&mut app.workspace, 0..4);
+        }
+        assert_eq!(app.panels.overlay, Some(crate::panels::Overlay::Palette));
+        crate::workbench::configure_groups(&mut app.workspace, 2).unwrap();
+        let (_, invocation) = app
+            .panels
+            .key(
+                &mut app.workspace,
+                &vel_config::keymap::Key::parse("enter").unwrap(),
+                0..4,
+            )
+            .unwrap();
+        let invocation = invocation.unwrap();
+        assert!(app.accept_palette_command(&invocation.command, &invocation.args));
+        assert!(app.panels.overlay.is_none());
+    }
+
+    #[test]
+    fn result_enablement_uses_the_last_search_or_build_source() {
+        let workspace = Workspace::new(vel_text::Text::from("cat"), None, None, false).unwrap();
+        let mut app = app(workspace);
+        assert!(!app.command_enabled("next_result", "{}"));
+        app.panels.result_view.push(vel_search::files::Line {
+            path: "Untitled 1".into(),
+            number: 1,
+            text: "cat".into(),
+            highlights: std::iter::once(0..3).collect(),
+        });
+        app.panels.search_results_active = true;
+        assert!(app.command_enabled("next_result", "{}"));
+        assert!(app.command_enabled("prev_result", "{}"));
+        app.panels.search_results_active = false;
+        assert!(!app.command_enabled("next_result", "{}"));
+        assert!(!app.command_enabled("prev_result", "{}"));
+    }
+    #[test]
     fn four_groups_render_per_group_tabs_and_keep_actual_buffer_on_focused_sheet() {
         let mut workspace =
             Workspace::new(vel_text::Text::from("hello\nworld"), None, None, false).unwrap();
@@ -3512,6 +3716,41 @@ mod round15_tests {
             Arc::new(AtomicBool::new(false)),
             std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(data))),
         )
+    }
+    #[test]
+    fn empty_window_sidebar_omits_input_adapter_before_and_after_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("preview.txt");
+        std::fs::write(&file, "preview").unwrap();
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        workspace.close(0).unwrap();
+        let mut app = app(workspace, None);
+        for expected in [0, 1, 0] {
+            match expected {
+                1 => app
+                    .workspace
+                    .preview(crate::cli::FileLocation {
+                        path: file.clone(),
+                        line: 1,
+                        column: 1,
+                    })
+                    .unwrap(),
+                _ if !app.workspace.is_empty() => {
+                    app.workspace.close(app.workspace.active).unwrap()
+                }
+                _ => {}
+            }
+            app.scene();
+            assert_eq!(
+                app.panels
+                    .tree
+                    .nodes
+                    .values()
+                    .filter(|node| node.visible && node.class == "open_file")
+                    .count(),
+                expected
+            );
+        }
     }
     #[test]
     fn empty_windows_disable_all_save_variants() {

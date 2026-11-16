@@ -15,7 +15,7 @@
             "clip": [
               0.0,
               576.0,
-              720.0,
+              600.0,
               24.0
             ],
             "color": [
@@ -27,8 +27,29 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": "Ln 3, Col 1 · 1 selections / 0 chars · UTF-8 · LF · Tabs: 4",
+            "text": "Ln 3, Col 1",
             "x": 10.0
+          },
+          {
+            "baseline": 593.0,
+            "bold": false,
+            "clip": [
+              600.0,
+              576.0,
+              120.0,
+              24.0
+            ],
+            "color": [
+              0.8901960849761963,
+              0.9215686321258545,
+              0.9333333373069763,
+              1.0
+            ],
+            "family": "system-ui",
+            "italic": false,
+            "size": 12.0,
+            "text": "Tab Size: 4",
+            "x": 606.0
           },
           {
             "baseline": 593.0,
@@ -473,7 +494,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": " · Enter open · Cmd/Ctrl+Enter split",
+            "text": "Enter open · Cmd/Ctrl+Enter split · Esc cancel",
             "x": 143.0
           }
         ],
@@ -13866,7 +13887,7 @@
             "clip": [
               0.0,
               576.0,
-              720.0,
+              600.0,
               24.0
             ],
             "color": [
@@ -13878,8 +13899,29 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": "Ln 3, Col 1 · 1 selections / 0 chars · UTF-8 · LF · Tabs: 4",
+            "text": "Ln 3, Col 1",
             "x": 10.0
+          },
+          {
+            "baseline": 593.0,
+            "bold": false,
+            "clip": [
+              600.0,
+              576.0,
+              120.0,
+              24.0
+            ],
+            "color": [
+              0.1411764770746231,
+              0.21960784494876862,
+              0.26274511218070984,
+              1.0
+            ],
+            "family": "system-ui",
+            "italic": false,
+            "size": 12.0,
+            "text": "Tab Size: 4",
+            "x": 606.0
           },
           {
             "baseline": 593.0,
@@ -14324,7 +14366,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": " · Enter open · Cmd/Ctrl+Enter split",
+            "text": "Enter open · Cmd/Ctrl+Enter split · Esc cancel",
             "x": 143.0
           }
         ],

@@ -329,7 +329,8 @@ impl Buffer {
         if !self.retains(from) {
             return None;
         }
-        let mut maps = self.log.iter().filter(|c| c.id > from);
+        let first = self.log.partition_point(|c| c.id <= from);
+        let mut maps = self.log.range(first..);
         if let Some(first) = maps.next() {
             if point > first.old_len {
                 return None;

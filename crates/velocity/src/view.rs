@@ -14,6 +14,37 @@ use std::{
 use vel_color_scheme::{ColorScheme, FontStyle as Decoration};
 use vel_platform::{Appearance, Point, Rect, Size, Utf16Range};
 use vel_render::scene::*;
+/// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
+/// Hard line commands bypass this function and retain the buffer's logical behavior.
+pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: bool) -> usize {
+    let row = editor.text.byte_to_line(byte);
+    let start = editor.text.line_to_byte(row);
+    let (_, segment) = editor.layout.borrow().visual_at(&editor.text, byte);
+    if end {
+        if repeated {
+            start + layout::body_len(&editor.text, row)
+        } else {
+            let end = start + segment.bytes.end;
+            if segment.bytes.end < layout::body_len(&editor.text, row) {
+                // Keep the caret on this visual row; a wrap boundary belongs to the next row.
+                editor.text.prev_grapheme_boundary(end)
+            } else {
+                end
+            }
+        }
+    } else if segment.bytes.start > 0 && byte != start + segment.bytes.start && !repeated {
+        start + segment.bytes.start
+    } else {
+        let first = start
+            + editor
+                .text
+                .line(row)
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .count();
+        if byte == first { start } else { first }
+    }
+}
 pub const TAB_HEIGHT: f64 = 30.;
 #[derive(Debug)]
 struct CachedUnit {

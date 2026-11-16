@@ -3,7 +3,7 @@ use crate::{
     project::{Folder, Rules},
     text::{Search, apply},
 };
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobMatcher};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -23,61 +23,141 @@ use std::{
 };
 use vel_text::Text;
 
-/// Parsed Where field. Commas separate roots/tokens/include globs/`-exclude` globs.
+#[derive(Clone, Debug)]
+struct Pattern {
+    matcher: GlobMatcher,
+    directory: bool,
+    basename: bool,
+    project_relative: bool,
+    absolute: bool,
+}
+impl Pattern {
+    fn new(source: &str) -> Result<Self, String> {
+        let directory = source.ends_with('/');
+        let source = source.trim_end_matches('/');
+        let project_relative = source.starts_with("//");
+        let absolute = source.starts_with('/') && !project_relative;
+        let source = source.strip_prefix("//").unwrap_or(source);
+        Ok(Self {
+            matcher: GlobBuilder::new(source)
+                .literal_separator(!source.contains('/'))
+                .build()
+                .map_err(|e| e.to_string())?
+                .compile_matcher(),
+            directory,
+            basename: !source.contains('/') && !project_relative,
+            project_relative,
+            absolute,
+        })
+    }
+    fn matches(&self, path: &Path, root: &Path, project_root: &Path, directory: bool) -> bool {
+        // A directory match includes its descendants, even without a trailing slash.
+        for (i, ancestor) in path.ancestors().enumerate() {
+            if ancestor == root || !ancestor.starts_with(root) {
+                break;
+            }
+            if i == 0 && self.directory && !directory {
+                continue;
+            }
+            if self.basename {
+                if ancestor
+                    .file_name()
+                    .is_some_and(|name| self.matcher.is_match(Path::new(name)))
+                {
+                    return true;
+                }
+            } else if self.absolute {
+                if self.matcher.is_match(ancestor) {
+                    return true;
+                }
+            } else if ancestor
+                .strip_prefix(if self.project_relative {
+                    project_root
+                } else {
+                    root
+                })
+                .is_ok_and(|relative| self.matcher.is_match(relative))
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Parsed Where field. Commas separate locations, include patterns and `-exclude` patterns.
 #[derive(Clone, Debug, Default)]
 pub struct Where {
     /// Explicit folders/files.
     pub roots: Vec<PathBuf>,
-    /// Include current project roots.
+    /// Include current project/open folder roots.
     pub project: bool,
     /// Search live buffers instead of their on-disk contents.
     pub open_files: bool,
-    include: GlobSet,
-    exclude: GlobSet,
+    /// Search the first live buffer supplied in the request (the active file).
+    pub current_file: bool,
+    include: Vec<Pattern>,
+    exclude: Vec<Pattern>,
 }
 impl Where {
-    /// Parses public tokens and glob syntax. Bare/empty Where defaults to `<project>`.
+    /// Parses symbolic locations and name/path patterns; an empty location uses open folders.
     pub fn parse(input: &str, base: &Path) -> Result<Self, String> {
         let mut result = Self::default();
-        let mut include = GlobSetBuilder::new();
-        let mut exclude = GlobSetBuilder::new();
         for part in input.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let part = part.trim_matches('"');
             match part {
-                "<project>" => result.project = true,
+                "<project>" | "<open folders>" => result.project = true,
                 "<open files>" => result.open_files = true,
+                "<current file>" => result.current_file = true,
                 _ => {
                     if let Some(pattern) = part.strip_prefix('-') {
-                        exclude.add(Glob::new(pattern).map_err(|e| e.to_string())?);
-                    } else if part.contains(['*', '?', '[']) {
-                        include.add(Glob::new(part).map_err(|e| e.to_string())?);
+                        result.exclude.push(Pattern::new(pattern)?);
                     } else {
                         let path = Path::new(part);
-                        result.roots.push(if path.is_absolute() {
-                            path.into()
+                        let resolved = base.join(path);
+                        if !part.starts_with("//")
+                            && !part.contains(['*', '?', '['])
+                            && (path.is_absolute()
+                                || (part.contains('/')
+                                    && !part.ends_with('/')
+                                    && resolved.exists()))
+                        {
+                            result.roots.push(resolved);
                         } else {
-                            base.join(path)
-                        });
+                            result.include.push(Pattern::new(part)?);
+                        }
                     }
                 }
             }
         }
-        result.project |= !result.open_files && result.roots.is_empty();
-        result.include = include.build().map_err(|e| e.to_string())?;
-        result.exclude = exclude.build().map_err(|e| e.to_string())?;
+        result.project |= !result.open_files && !result.current_file && result.roots.is_empty();
         Ok(result)
     }
-    /// Applies include and then exclude to full, root-relative and basename paths.
+    /// Whether a directory and its complete subtree should be skipped by the walker.
+    pub fn prunes(&self, path: &Path, root: &Path) -> bool {
+        self.prunes_at(path, root, root)
+    }
+    /// Applies name/path patterns to the file and every containing directory.
     pub fn allows(&self, path: &Path, root: &Path) -> bool {
-        let name = Path::new(path.file_name().unwrap_or_default());
-        let relative = path.strip_prefix(root).unwrap_or(path);
+        self.allows_at(path, root, root)
+    }
+    fn prunes_at(&self, path: &Path, root: &Path, project_root: &Path) -> bool {
+        path != root
+            && self
+                .exclude
+                .iter()
+                .any(|p| p.matches(path, root, project_root, true))
+    }
+    fn allows_at(&self, path: &Path, root: &Path, project_root: &Path) -> bool {
         (self.include.is_empty()
-            || self.include.is_match(path)
-            || self.include.is_match(relative)
-            || self.include.is_match(name))
-            && !self.exclude.is_match(path)
-            && !self.exclude.is_match(relative)
-            && !self.exclude.is_match(name)
+            || self
+                .include
+                .iter()
+                .any(|p| p.matches(path, root, project_root, false)))
+            && !self
+                .exclude
+                .iter()
+                .any(|p| p.matches(path, root, project_root, false))
     }
 }
 /// A searchable live buffer. Path may be a user-facing Untitled caption.
@@ -97,7 +177,7 @@ pub struct Request {
     pub scope: Where,
     /// Ignore-aware project roots.
     pub folders: Vec<Folder>,
-    /// Live buffers used by `<open files>`.
+    /// Live buffers used by symbolic file locations; the active buffer must be first.
     pub open: Vec<OpenFile>,
     /// Context lines before/after each matching line.
     pub context: usize,
@@ -261,6 +341,7 @@ pub struct Task {
     /// Bounded streaming channel (consume regularly).
     pub events: mpsc::Receiver<Event>,
     stop: Arc<AtomicBool>,
+    searched: Arc<AtomicUsize>,
 }
 impl Task {
     /// Validates regex and spawns workers; no GUI or full-project result buffer is needed.
@@ -278,14 +359,25 @@ impl Task {
         let (tx, events) = mpsc::sync_channel(128);
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = stop.clone();
+        let searched = Arc::new(AtomicUsize::new(0));
+        let files = searched.clone();
         thread::spawn(move || {
             let matches = AtomicUsize::new(0);
-            let files = AtomicUsize::new(0);
             let seen = std::sync::Mutex::new(BTreeSet::new());
             // Live buffers take precedence over on-disk copies when both scope tokens are present.
-            if request.scope.open_files {
-                for open in &request.open {
-                    if !request.scope.allows(&open.path, Path::new("")) {
+            if request.scope.open_files || request.scope.current_file {
+                let count = if request.scope.open_files {
+                    request.open.len()
+                } else {
+                    1
+                };
+                for open in request.open.iter().take(count) {
+                    let root = request
+                        .folders
+                        .iter()
+                        .find(|f| open.path.starts_with(&f.path))
+                        .map_or(Path::new(""), |f| f.path.as_path());
+                    if !request.scope.allows(&open.path, root) {
                         continue;
                     }
                     seen.lock().expect("seen").insert(open.path.clone());
@@ -362,15 +454,32 @@ impl Task {
                         let seen = &seen;
                         let matches = &matches;
                         let files = &files;
-                        let root = &folder.path;
+                        let root = if folder.path.is_file() {
+                            folder.path.parent().unwrap_or(Path::new(""))
+                        } else {
+                            folder.path.as_path()
+                        };
+                        let project_root = request
+                            .folders
+                            .iter()
+                            .filter(|project| folder.path.starts_with(&project.path))
+                            .max_by_key(|project| project.path.components().count())
+                            .map_or(root, |project| project.path.as_path());
                         Box::new(move |result| {
                             if stop.load(Ordering::Relaxed) {
                                 return WalkState::Quit;
                             }
                             match result {
                                 Ok(entry)
+                                    if entry.depth() > 0
+                                        && entry.file_type().is_some_and(|t| t.is_dir())
+                                        && scope.prunes_at(entry.path(), root, project_root) =>
+                                {
+                                    return WalkState::Skip;
+                                }
+                                Ok(entry)
                                     if entry.file_type().is_some_and(|t| t.is_file())
-                                        && scope.allows(entry.path(), root) =>
+                                        && scope.allows_at(entry.path(), root, project_root) =>
                                 {
                                     if !seen.lock().expect("seen").insert(entry.path().into()) {
                                         return WalkState::Continue;
@@ -414,7 +523,15 @@ impl Task {
                 },
             );
         });
-        Ok(Self { events, stop })
+        Ok(Self {
+            events,
+            stop,
+            searched,
+        })
+    }
+    /// Number of live/disk files visited so far, without blocking the UI consumer.
+    pub fn searched_files(&self) -> usize {
+        self.searched.load(Ordering::Relaxed)
     }
 }
 impl Drop for Task {
@@ -571,6 +688,198 @@ mod tests {
                     break;
                 }
                 Event::Error(e) => panic!("{e}"),
+            }
+        }
+    }
+    #[test]
+    fn where_symbolic_locations_names_paths_and_directory_pruning() {
+        let root = Path::new("/project");
+        for token in ["", "<project>", "<open folders>"] {
+            let scope = Where::parse(token, root).unwrap();
+            assert!(scope.project);
+            assert!(scope.roots.is_empty());
+        }
+        for (token, open, current) in [
+            ("<open files>", true, false),
+            ("<current file>", false, true),
+            ("<current file>, <open files>", true, true),
+        ] {
+            let scope = Where::parse(token, root).unwrap();
+            assert_eq!(
+                (scope.open_files, scope.current_file, scope.project),
+                (open, current, false)
+            );
+        }
+        for token in ["-node_modules", "-node_modules/"] {
+            let scope = Where::parse(token, root).unwrap();
+            assert!(scope.prunes(Path::new("/project/sub/node_modules"), root));
+            assert!(!scope.allows(Path::new("/project/sub/node_modules/pkg/file.rs"), root));
+            assert!(scope.allows(Path::new("/project/sub/node_modules_other/file.rs"), root));
+        }
+        for (pattern, path, expected) in [
+            ("src", "/project/sub/src/file.rs", true),
+            ("src", "/project/src", true),
+            ("src/", "/project/src", false),
+            ("src/", "/project/src/file.rs", true),
+            ("//src/", "/project/src/file.rs", true),
+            ("//src/", "/project/sub/src/file.rs", false),
+            ("//*.rs", "/project/file.rs", true),
+            ("//*.rs", "/project/sub/file.rs", false),
+            ("sub/*.rs", "/project/sub/deep/file.rs", true),
+            ("*.rs", "/project/sub/file.rs", true),
+            (
+                "//src, -//src/vendor/",
+                "/project/src/vendor/file.rs",
+                false,
+            ),
+            ("//src, -//src/vendor/", "/project/src/file.rs", true),
+        ] {
+            assert_eq!(
+                Where::parse(pattern, root)
+                    .unwrap()
+                    .allows(Path::new(path), root),
+                expected,
+                "{pattern}: {path}"
+            );
+        }
+        let absolute = Where::parse("/project/src/*.rs", root).unwrap();
+        assert!(absolute.allows(Path::new("/project/src/file.rs"), root));
+        assert!(!absolute.allows(Path::new("/other/project/src/file.rs"), root));
+    }
+    #[test]
+    fn where_walk_excludes_entire_named_directories_and_explicit_root_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [
+            "src/one.rs",
+            "src/deep/two.rs",
+            "src/node_modules/no.rs",
+            "nested/node_modules/no.rs",
+            "node_modules/no.rs",
+            "other/no.txt",
+        ] {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "needle").unwrap();
+        }
+        for exclude in ["-node_modules", "-node_modules/"] {
+            let task = Task::start(Request {
+                search: Search::new("needle", crate::text::Options::default()).unwrap(),
+                scope: Where::parse(&format!("<open folders>, *.rs, {exclude}"), dir.path())
+                    .unwrap(),
+                folders: vec![Folder {
+                    path: dir.path().into(),
+                    name: "root".into(),
+                    rules: Rules::default(),
+                    follow_links: false,
+                }],
+                open: vec![],
+                context: 0,
+            })
+            .unwrap();
+            let mut found = Vec::new();
+            loop {
+                match task.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    Event::Line(line) => found.push(line.path),
+                    Event::Error(e) => panic!("{e}"),
+                    Event::Done { matches, files } => {
+                        assert_eq!((matches, files), (2, 2));
+                        break;
+                    }
+                }
+            }
+            assert_eq!(found.len(), 2);
+            assert_eq!(task.searched_files(), 2);
+        }
+        let path = dir.path().join("folder with spaces");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(
+            Where::parse(&format!("\"{}\"", path.display()), dir.path())
+                .unwrap()
+                .roots,
+            [path]
+        );
+    }
+    #[test]
+    fn relative_where_patterns_never_match_absolute_ancestors_or_prune_the_root() {
+        let root = Path::new("/Users/me/src/app");
+        for (pattern, path, expected) in [
+            ("src/*.rs", "/Users/me/src/app/main.rs", false),
+            ("src/*.rs", "/Users/me/src/app/src/main.rs", true),
+            ("src/*.rs", "/Users/me/src/app/nested/src/main.rs", false),
+            ("-src/*.rs", "/Users/me/src/app/main.rs", true),
+            ("-src/*.rs", "/Users/me/src/app/src/main.rs", false),
+            ("-me/*", "/Users/me/src/app/main.rs", true),
+        ] {
+            assert_eq!(
+                Where::parse(pattern, root)
+                    .unwrap()
+                    .allows(Path::new(path), root),
+                expected,
+                "{pattern}: {path}"
+            );
+        }
+        assert!(!Where::parse("-me/*", root).unwrap().prunes(root, root));
+        let hidden = Path::new("/Users/me/.dotfiles");
+        let scope = Where::parse("-.*", hidden).unwrap();
+        assert!(!scope.prunes(hidden, hidden));
+        assert!(scope.allows(&hidden.join("main.rs"), hidden));
+        assert!(!scope.allows(&hidden.join(".hidden/main.rs"), hidden));
+        // Explicit nested search roots and // project anchors have distinct meanings.
+        let project = Path::new("/Users/me");
+        assert!(Where::parse("//src/app/*.rs", project).unwrap().allows_at(
+            &root.join("main.rs"),
+            root,
+            project
+        ));
+        assert!(!Where::parse("src/app/*.rs", project).unwrap().allows_at(
+            &root.join("main.rs"),
+            root,
+            project
+        ));
+    }
+    #[test]
+    fn hidden_search_root_is_walked_and_explicit_nested_patterns_use_that_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("src/.dotfiles");
+        for name in ["one.rs", "src/two.rs", ".hidden/no.rs"] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "needle").unwrap();
+        }
+        for (patterns, expected) in [
+            ("-.*", 2),
+            ("src/*.rs", 1),
+            ("-src/*.rs, -.*", 1),
+            ("-src/*", 2),
+        ] {
+            let task = Task::start(Request {
+                search: Search::new("needle", crate::text::Options::default()).unwrap(),
+                scope: Where::parse(&format!("{}, {patterns}", root.display()), dir.path())
+                    .unwrap(),
+                folders: vec![Folder {
+                    path: dir.path().into(),
+                    name: "project".into(),
+                    rules: Rules::default(),
+                    follow_links: false,
+                }],
+                open: vec![],
+                context: 0,
+            })
+            .unwrap();
+            let mut found = 0;
+            loop {
+                match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+                    Event::Line(_) => found += 1,
+                    Event::Error(error) => panic!("{error}"),
+                    Event::Done { matches, files } => {
+                        assert_eq!(
+                            (found, matches, files),
+                            (expected, expected, expected),
+                            "{patterns}"
+                        );
+                        break;
+                    }
+                }
             }
         }
     }

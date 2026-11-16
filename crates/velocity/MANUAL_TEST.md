@@ -94,6 +94,99 @@ tracking were run in the sandbox; leave these boxes unchecked until native revie
 - [ ] **4.3 contexts (Lane A):** review new editor key-binding contexts with Lane A's changes;
   Lane B did not edit editor/view context providers.
 
+# Round 15: find panels, overlays, status and editing details
+
+Native checks are **pending human review**. Run an ordinary release build on an unlocked macOS
+desktop with a disposable profile and project; no GUI, Metal or packaging script was run in the
+sandbox. Keep the round-14 Finder/Dock/window-open and native context-menu checklist below.
+Record OS, input source, physical display scale, `ui_scale`, and observed results.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo build --release --locked -p velocity
+./target/release/velocity --data-dir /tmp/velocity-r15-review /path/to/disposable/project
+```
+
+- [ ] **1.1 / 1.9 Replace and buttons:** Enter / Shift+Enter in both Replace fields find
+  forward/backward without editing. Replace uses Cmd+Alt+E or its button; Replace All uses its
+  button / Ctrl+Alt+Enter. Find shows Find / Find Prev / Find All, Replace shows Find / Replace /
+  Replace All, and Find in Files shows Find / Replace. Alt+Enter in Files never selects buffer
+  matches. Confirm the reviewer's focused-panel key binding contexts still apply.
+- [ ] **1.2 / 1.3 Incremental and typing:** start partway down a long document, Cmd+I, type a
+  query with an offscreen next match. The first match at/after the original caret is selected and
+  revealed, with wrapping. Enter advances and closes. Reopen, type, then Escape: original
+  selections (including the primary region) and horizontal/vertical scroll return. Repeat with
+  `hide_panel {"cancel":true}`, and Escape before the background search completes. Ordinary Find
+  also selects/reveals while typing. After three Find Next presses, Left/Right, Cmd+A and Cmd+C
+  in the field must keep the current document match. With In Selection enabled, typing and
+  option changes must retain every original selection and reopening must retain the full scope.
+  Seed Find with a forward/reversed selection: preview starts at its beginning. Test
+  `find_selected_text` and `auto_find_in_selection`.
+  Incremental Enter intentionally follows the [public search guide](https://docs.sublimetext.io/guide/usage/search-and-replace.html#incremental-search):
+  advance to the next match and dismiss the panel; compare on the reviewer's current Sublime build.
+- [ ] **1.4–1.6 Focus and history:** reopening Find selects its query; reopening Replace also
+  selects its replacement. Click the editor with Find visible, Cmd+F focuses/selects, then Cmd+F
+  closes. Check every find panel's close button and Escape from editor/panel focus. Up/Down in
+  Find and Replace walk committed history and return to the draft. Pause during a half-typed
+  query, quit/restart and verify checkpoints did not add prefixes to history.
+- [ ] **1.7 / 1.8 Formats and feedback:** regex `(cat)([0-9]+)` with `\2:\u\1`, `$&`,
+  `$+{name}` for a named capture, `\n`, `\t`, `\\`, `\U…\E` / `\L…\E` and the existing
+  `$1`, `${1}`, `${name}`, `$$` behave as expected; Undo restores one replacement transaction.
+  A missing query shows `Unable to find …`; replacement counts survive worker completion and
+  expire after about five seconds. Invalid regex appears inline/in the status bar using the
+  user's expression, with no internal flag wrapper or modal alert. Let the message expire, then
+  retry Enter, Find Next/Prev, Find All and Replace without changing the invalid query: the error
+  must reappear. Check long feedback stops before all three Find/Replace buttons at every scale.
+  Also try `$1px` / `$1_old` (numeric capture followed by literal suffix). Repeat in Files.
+- [ ] **2.1–2.3 Files:** try `<open folders>`, `<open files>`, `<current file>`, `<project>`,
+  `*.rs`, `src/`, `//src/`, `-node_modules` and `-node_modules/`, including nested directories,
+  paths containing spaces and unsaved active/open files. See `Searching N files…` followed by
+  actual match/file counts in the header and status. Escape / hide the Results panel cancels
+  promptly. While searching, open Find, a Vintage prompt, or build output: the search keeps
+  running in the background, including when the other panel closes. Starting another search
+  replaces the prior search. F4 / Shift+F4 skip context/header rows and jump search matches after
+  the panel closes. A build switches those keys to diagnostics without dropping a running search;
+  run a new search to switch back. In a root `/.../src/app`, `src/*.rs` must match only its own
+  `src/` subtree, `-src/*.rs` must retain root-level files, and `-me/*` must not match a parent
+  directory. A hidden root such as `~/.dotfiles` with `-.*` must still search visible descendants.
+  Repeat relative patterns under an explicit nested root; `//` remains anchored at the project.
+- [ ] **3.1–3.5 Overlays:** Cmd+R lists symbols and keeps the selected symbol through repeated
+  frames and a source refresh. Filter quickly and press Enter before ranking finishes: the best
+  current file/command candidate opens/runs. Changing a query returns selection to the best row;
+  only refreshes of the same query preserve a manually selected row. Rank Cmd+P files, Escape,
+  then Cmd+R in plain text or while indexing and immediately Enter: no stale file opens and no
+  stale symbol offset is used. Switch a file query directly to `#word`, `@`, and `:line`, too.
+  Single-click a result to accept; click outside to cancel and restore the preview. Close Split is absent with one group, available with two, and
+  cannot run after becoming disabled; a rejected acceptance leaves the palette open. Idle palette
+  frames reuse the enablement captured on open, and acceptance rechecks the chosen command.
+  Footers describe each overlay and contain no find messages;
+  split hints appear only on Goto. Repeat with Pinyin/Japanese composition in overlay inputs.
+- [ ] **3.6 / 4.1 Scale and status:** at `ui_scale` 0.75, 1, 1.5 and 2 the overlay is centered;
+  right-click sidebar rows and verify the path under the pointer. A single empty caret has no
+  selection count; one/multiple regions show correct Unicode character counts and plurals.
+  Encoding/EOL appear only with `show_encoding` / `show_line_endings`. Click Spaces / Tab Size:
+  change tabs/spaces and width, convert mixed indentation, then Undo once.
+- [ ] **4.2 Side bar / round-14 regressions:** Ctrl+0 leaves Find visible; Escape returns to the
+  view without hiding Find. Retest Create File/Folder, Rename (including case-only/no-op), Trash,
+  Search This Folder, Reveal in Finder and Copy Path. Rename retains deleted/external-change
+  state; relative roots survive reload; symlinked sidebar paths target their canonical open tab.
+  Keep the round-14 tab-close/active-tab/context-argument and Finder-open checks green.
+- [ ] **5.1–5.3 Editor:** on wrapped Unicode lines, Home/End / Cmd+Left/Right reach visual
+  boundaries; End on a non-final row remains just before its wrap point, on the same drawn row.
+  Follow it with Home, Up and Down and verify the originating visual row; compare exact End
+  placement with Sublime on the native desktop. Repeated BOL reaches indentation then column
+  zero. Hard BOL/EOL remain logical. Repeat with Shift, grapheme clusters and multiple carets.
+  Home on a huge single-line file must remain responsive. Find All to create 10,000 carets in a
+  large viewport-highlighted buffer; arrows and quote keys must remain responsive with edit
+  history retained. Type quotes rapidly after edits in code, strings and comments while
+  highlighting catches up: published line scopes continue to control pairing.
+  Cmd+D, Quick Find All, Cmd+E and Find Under retain caret-word and primary-selection behavior.
+
+Earlier checklists follow.
+
 # Round 11: Vintage and user grammar review
 
 Run outside the sandbox on an awake, unlocked display:

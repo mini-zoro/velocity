@@ -197,7 +197,8 @@ impl Context {
 /// Supplies lazy context values; text predicates may return one value per selection.
 pub trait ContextProvider {
     /// Whether current-version scopes are available. Unknown scopes cannot satisfy
-    /// positive or negative selector predicates while asynchronous parsing catches up.
+    /// positive or negative selector predicates when no scopes have been published. Providers
+    /// may use the last published scopes mapped through edits while parsing catches up.
     fn scopes_ready(&self) -> bool {
         true
     }
