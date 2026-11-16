@@ -328,7 +328,11 @@ impl Intelligence {
             .chain(self.projects.iter().map(|p| p.engine.clone()))
             .collect();
         for tab in &mut workspace.tabs {
-            if tab.lazy.is_some() {
+            if tab.lazy.is_some()
+                || !tab.editor.features.indexing
+                || tab.editor.binary.is_some()
+                || tab.loading.is_some()
+            {
                 continue;
             }
             let engine = self

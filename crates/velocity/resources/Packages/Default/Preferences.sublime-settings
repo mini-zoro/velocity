@@ -120,5 +120,20 @@
   "themed_title_bar": true,
   "file_tab_style": "angled",
   "show_tab_close_buttons": true,
-  "show_tab_close_buttons_on_left": false
+  "show_tab_close_buttons_on_left": false,
+  // Huge documents: inclusive thresholds; explicit view feature commands override degradation.
+  "large_file.load_bytes": 67108864,
+  "large_file.viewport_bytes": 67108864,
+  "large_file.viewport_lines": 1000000,
+  "large_file.long_line_bytes": 16384,
+  "large_file.indexing_bytes": 67108864,
+  "large_file.wrap_bytes": 16777216,
+  "large_file.spell_bytes": 16777216,
+  "large_file.diff_bytes": 67108864,
+  "large_file.minimap_lines": 10000,
+  "large_file.max_line_bytes": 16384,
+  "large_file.max_viewport_lines": 512,
+  "large_file.max_lookback_lines": 256,
+  "large_file.checkpoint_interval": 1024,
+  "large_file.max_checkpoints": 128
 }

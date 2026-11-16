@@ -18,7 +18,7 @@ impl Editor {
         mut after: Option<Selection>,
         kind: EditKind,
     ) {
-        if owned.is_empty() {
+        if self.read_only || owned.is_empty() {
             return;
         }
         owned.sort_by_key(|(r, _)| (r.start, r.end));
@@ -325,6 +325,9 @@ impl Editor {
     }
     fn newline(&self, r: Region) -> (String, Range<usize>) {
         let row = self.text.byte_to_line(r.begin());
+        if self.text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            return ("\n".into(), 1..1);
+        }
         let start = self.text.line_to_byte(row);
         let line = self.text.line(row).to_string();
         let prefix = &line[..r.begin() - start];
@@ -694,7 +697,7 @@ impl Editor {
             .unwrap_or_default()
     }
 }
-fn selection_primary(mut regions: Vec<Region>, primary: usize) -> Selection {
+pub(crate) fn selection_primary(mut regions: Vec<Region>, primary: usize) -> Selection {
     if primary < regions.len() {
         let r = regions.remove(primary);
         regions.push(r);

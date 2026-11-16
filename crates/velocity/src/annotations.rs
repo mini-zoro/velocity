@@ -92,6 +92,7 @@ enum Job {
 }
 #[derive(Debug)]
 pub struct Annotations {
+    allowed: (bool, bool),
     staged: VecDeque<Job>,
     tx: Option<mpsc::Sender<Job>>,
     rx: Option<mpsc::Receiver<Publication>>,
@@ -111,6 +112,7 @@ pub struct Annotations {
 impl Annotations {
     pub fn new(base: Text) -> Self {
         Self {
+            allowed: (true, true),
             staged: VecDeque::new(),
             tx: None,
             rx: None,
@@ -126,6 +128,12 @@ impl Annotations {
             settings_revision: u64::MAX,
             requests: BTreeMap::new(),
             pending: 0,
+        }
+    }
+    pub fn set_policy(&mut self, diff: bool, spell: bool) {
+        if self.allowed != (diff, spell) {
+            self.allowed = (diff, spell);
+            self.refresh_reference();
         }
     }
     pub fn set_location(&mut self, path: Option<PathBuf>, packages: Option<PathBuf>) {
@@ -217,12 +225,16 @@ impl Annotations {
             || self.identity.is_none_or(|i| i.0 != buffer.id());
         if reconfigure {
             self.epoch += 1;
-            let config = Config::new(
+            let mut config = Config::new(
                 settings,
                 self.path.clone(),
                 self.packages.clone(),
                 self.epoch,
             );
+            if !self.allowed.0 {
+                config.mini = Value::Bool(false);
+            }
+            config.spell &= self.allowed.1;
             self.settings_revision = settings.revision();
             // No dictionary or diff work when both settings disable the features.
             if config.mini == false && !config.spell {

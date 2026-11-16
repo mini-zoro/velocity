@@ -40,6 +40,8 @@ pub struct Tab {
     pub tracker: ChangeTracker,
     pub scroll: (f64, f64),
     pub loading: Option<LoadTask>,
+    pub binary_loading: Option<crate::binary::Task>,
+    pub pending_restore: Option<vel_session::ViewState>,
     location: Option<FileLocation>,
     external_load: bool,
     load_started: Option<Instant>,
@@ -75,6 +77,8 @@ impl Tab {
             tracker,
             scroll: (0., 0.),
             loading: None,
+            binary_loading: None,
+            pending_restore: None,
             location: None,
             external_load: false,
             load_started: None,
@@ -107,14 +111,25 @@ impl Tab {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
-        format!("{name}{}", if self.dirty() { " •" } else { "" })
+        format!(
+            "{name}{}{}",
+            if self.editor.binary.is_some() {
+                " [hex]"
+            } else {
+                ""
+            },
+            if self.dirty() { " •" } else { "" }
+        )
     }
     pub fn progress(&self) -> Option<(u64, u64)> {
         self.loading
             .as_ref()
             .map(|t| (t.read.load(Ordering::Relaxed), t.total))
+            .or_else(|| self.binary_loading.as_ref().map(|t| (0, t.total)))
     }
     fn install(&mut self, loaded: Loaded) {
+        self.editor.binary = None;
+        self.editor.source_bytes = self.loading.as_ref().map_or(0, |t| t.total);
         self.editor.cancel_composition();
         *self.editor.html.borrow_mut() = Default::default();
         let old = self.editor.buffer.view(self.editor.id).sel().clone();
@@ -147,6 +162,13 @@ impl Tab {
             )
         });
         self.editor.set_selection(Selection::from_regions(regions));
+        if self.loading.is_none() {
+            if let Some(state) = self.pending_restore.take() {
+                state.apply(&mut self.editor.buffer, self.editor.id);
+                self.editor.sync();
+            }
+            self.editor.measure_document();
+        }
         self.disk_stamp = self.path.as_deref().and_then(stamp);
         self.disk_saved = self.path.as_deref().and_then(vel_session::DiskStamp::read);
         if let Some(location) = self.location.take() {
@@ -157,11 +179,11 @@ impl Tab {
         let text = self.editor.buffer.text();
         let row = location.line.saturating_sub(1).min(text.len_lines() - 1);
         let start = text.line_to_byte(row);
-        let line = text.line(row).to_string();
-        let offset = line
-            .char_indices()
-            .nth(location.column.saturating_sub(1))
-            .map_or(line.len(), |(i, _)| i);
+        let end = start + crate::layout::body_len(text, row);
+        let chars = text
+            .byte_to_char(start)
+            .saturating_add(location.column.saturating_sub(1));
+        let offset = text.char_to_byte(chars.min(text.len_chars())).min(end) - start;
         self.editor.set_caret(start + offset, false);
     }
 }
@@ -777,6 +799,8 @@ impl Workspace {
     pub fn language_busy(&self) -> bool {
         self.tabs.iter().any(|tab| {
             tab.loading.is_some()
+                || tab.binary_loading.is_some()
+                || tab.editor.layout.borrow().long.pending()
                 || tab.editor.reindent_job.is_some()
                 || tab
                     .editor
@@ -844,8 +868,20 @@ impl Workspace {
         let size = std::fs::metadata(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?
             .len();
-        if size > 64 * 1024 * 1024 {
+        if crate::binary::is_binary(&path)? {
+            tab.editor.source_bytes = size;
+            tab.editor.refresh_policy();
+            tab.editor.read_only = true;
+            tab.binary_loading = Some(crate::binary::Task::open(path.clone())?);
+        } else if size
+            >= tab
+                .editor
+                .settings
+                .usize("large_file.load_bytes", 64 * 1024 * 1024) as u64
+        {
             tab.load_started = Some(started);
+            tab.editor.source_bytes = size;
+            tab.editor.refresh_policy();
             tab.editor.read_only = true;
             tab.loading = Some(fileio::load_background(path.clone(), fallback)?);
         } else {
@@ -880,7 +916,7 @@ impl Workspace {
         self.prepare_sheet(index)?;
         let tab = &mut self.tabs[index];
         tab.transient = false;
-        if tab.loading.is_some() || tab.editor.read_only {
+        if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.read_only {
             return Err("file is loading or its load failed".into());
         }
         tab.editor.unmark();
@@ -979,6 +1015,49 @@ impl Workspace {
             if tab.dirty() {
                 tab.transient = false;
             }
+            if let Some(snapshot) = tab.loading.as_ref().and_then(LoadTask::try_snapshot)
+                && !tab.external_load
+            {
+                let source_bytes = tab.loading.as_ref().map_or(0, |t| t.total);
+                let pending_location = tab.location.take();
+                tab.install(Loaded {
+                    text: snapshot.text,
+                    format: Format::default(),
+                    source_bytes,
+                });
+                tab.location = pending_location;
+                tab.editor.source_bytes = source_bytes;
+                tab.editor.document_metrics = snapshot.metrics;
+                tab.editor.read_only = true;
+                tab.editor.refresh_policy();
+                self.telemetry.push(serde_json::json!({"kind":"file_open","phase":"prefix","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"loaded_bytes":tab.editor.text.len_bytes(),"source_bytes":source_bytes}));
+                changed = true;
+            }
+            if let Some(result) =
+                tab.binary_loading
+                    .as_ref()
+                    .and_then(|t| match t.result.try_recv() {
+                        Ok(result) => Some(result),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                        Err(e) => Some(Err(e.to_string())),
+                    })
+            {
+                tab.binary_loading = None;
+                match result {
+                    Ok(snapshot) => {
+                        *tab.editor.language.borrow_mut() = None;
+                        tab.editor.binary = Some(snapshot);
+                        tab.editor.read_only = true;
+                        tab.editor.caret = 0;
+                        tab.editor.anchor = 0;
+                        tab.pending_restore = None;
+                        tab.needs_detection = false;
+                        tab.disk_stamp = tab.path.as_deref().and_then(stamp);
+                    }
+                    Err(e) => self.messages.push(e),
+                }
+                changed = true;
+            }
             let result = tab
                 .loading
                 .as_ref()
@@ -1001,7 +1080,17 @@ impl Workspace {
                         }
                         tab.external_load = false;
                     }
-                    Err(e) => self.messages.push(e),
+                    Err(e) => {
+                        if !tab.external_load {
+                            tab.install(Loaded {
+                                text: Text::new(),
+                                format: Format::default(),
+                                source_bytes: 0,
+                            });
+                            tab.editor.read_only = true;
+                        }
+                        self.messages.push(e);
+                    }
                 }
                 changed = true;
             }
@@ -1018,6 +1107,7 @@ impl Workspace {
                     for path in paths {
                         for tab in &mut self.tabs {
                             if tab.loading.is_some()
+                                || tab.binary_loading.is_some()
                                 || tab.lazy.is_some()
                                 || tab.editor.shared_shadow
                                 || tab.path.as_ref() != Some(&path)
@@ -1026,6 +1116,13 @@ impl Workspace {
                                 continue;
                             }
                             tab.disk_stamp = stamp(&path);
+                            if tab.editor.binary.is_some() {
+                                match crate::binary::Task::open(path.clone()) {
+                                    Ok(task) => tab.binary_loading = Some(task),
+                                    Err(e) => self.messages.push(e),
+                                }
+                                continue;
+                            }
                             if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024 * 1024) {
                                 match fileio::load_background(
                                     path.clone(),
@@ -1177,7 +1274,7 @@ impl Workspace {
                     vel_highlight::detect_syntax(
                         &self.assets.syntaxes,
                         &p.to_string_lossy(),
-                        &self.tabs[index].editor.text.line(0).to_string(),
+                        &crate::large::first_line(&self.tabs[index].editor.text),
                         None,
                     )
                     .is_some()
@@ -1220,6 +1317,12 @@ impl Workspace {
         }
         let tab = &mut self.tabs[index];
         tab.editor.theme = self.themes.ui.clone();
+        if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.binary.is_some() {
+            *tab.editor.language.borrow_mut() = None;
+            tab.needs_detection = false;
+            tab.language_settings_revision = tab.editor.settings.revision();
+            return Ok(());
+        }
         tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
         tab.editor.snippet_path = tab.path.clone();
         let previous = tab
@@ -1236,7 +1339,7 @@ impl Workspace {
         let reference = vel_highlight::detect_syntax(
             &self.assets.syntaxes,
             &crate::language::syntax_path(tab.path.as_deref()),
-            &tab.editor.text.line(0).to_string(),
+            &crate::large::first_line(&tab.editor.text),
             chosen,
         )
         .or_else(|| {

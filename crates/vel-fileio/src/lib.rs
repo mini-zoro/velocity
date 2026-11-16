@@ -1,15 +1,13 @@
 //! Encoding-aware streaming IO, atomic saves and parent-directory file watching.
 #![forbid(unsafe_code)]
+mod progressive;
 use encoding_rs::{CoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+pub use progressive::{LoadTask, content_kind, load_background};
 use std::{
     fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver},
-    },
+    sync::mpsc::{self, Receiver},
 };
 use vel_buffer::{Buffer, Change, ChangeSet, Edit, EditKind, ViewId};
 use vel_config::settings::EditorSettings;
@@ -121,6 +119,14 @@ pub fn load(
     fallback: &str,
     mut progress: impl FnMut(Progress),
 ) -> Result<Loaded, String> {
+    load_cancellable(path, fallback, &mut progress, None)
+}
+fn load_cancellable(
+    path: &Path,
+    fallback: &str,
+    progress: &mut dyn FnMut(Progress),
+    cancel: Option<&vel_largefile::Cancellation>,
+) -> Result<Loaded, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let total = file.metadata().map_err(|e| e.to_string())?.len();
     let mut prefix = [0; 8192];
@@ -137,7 +143,7 @@ pub fn load(
         (UTF_8, false, 0)
     };
     if codec != UTF_16LE && codec != UTF_16BE && prefix[..n].contains(&0) {
-        return Err("binary file: NUL in first 8 KiB; hexadecimal view is not implemented".into());
+        return Err("binary file: NUL in first 8 KiB".into());
     }
     let attempt = |codec: &'static Encoding,
                    progress: &mut dyn FnMut(Progress)|
@@ -146,7 +152,10 @@ pub fn load(
         let mut ignored = vec![0; skip];
         file.read_exact(&mut ignored).map_err(|e| e.to_string())?;
         let mut reader = DecodeReader::new(
-            BufReader::with_capacity(128 * 1024, file),
+            progressive::CheckedReader {
+                input: BufReader::with_capacity(128 * 1024, file),
+                cancel,
+            },
             codec,
             total,
             progress,
@@ -155,14 +164,14 @@ pub fn load(
         let ending = reader.ending();
         Ok((text, ending))
     };
-    let (text, ending, codec) = match attempt(codec, &mut progress) {
+    let (text, ending, codec) = match attempt(codec, progress) {
         Ok((text, ending)) => (text, ending, codec),
         Err(first) if !bom => {
             let fallback = encoding(fallback)?;
             if fallback == UTF_8 {
                 return Err(first);
             }
-            let (text, ending) = attempt(fallback, &mut progress)?;
+            let (text, ending) = attempt(fallback, progress)?;
             (text, ending, fallback)
         }
         Err(e) => return Err(e),
@@ -298,37 +307,6 @@ impl<R: Read> Read for DecodeReader<'_, R> {
         self.cursor += n;
         Ok(n)
     }
-}
-/// Background loader progress is polled without blocking the UI thread.
-#[derive(Debug)]
-pub struct LoadTask {
-    /// Progress counter, in source bytes.
-    pub read: Arc<AtomicU64>,
-    /// File size.
-    pub total: u64,
-    /// One terminal result; disconnect is an explicit failure.
-    pub result: Receiver<Result<Loaded, String>>,
-}
-/// Starts a worker for large files (>64 MiB); also usable for smaller files.
-pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, String> {
-    let total = fs::metadata(&path).map_err(|e| e.to_string())?.len();
-    let read = Arc::new(AtomicU64::new(0));
-    let counter = Arc::clone(&read);
-    let (tx, result) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("velocity-file-load".into())
-        .spawn(move || {
-            let loaded = load(&path, &fallback, |p| {
-                counter.store(p.read, Ordering::Relaxed);
-            });
-            let _ = tx.send(loaded);
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(LoadTask {
-        read,
-        total,
-        result,
-    })
 }
 /// Saved snapshot plus the buffer's monotonic change identity. Line starts map
 /// through buffer history, so inserting lines does not mark shifted original lines.

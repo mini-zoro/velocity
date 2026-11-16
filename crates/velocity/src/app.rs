@@ -764,8 +764,13 @@ impl App {
                         .preferences
                         .fallback_encoding
                         .clone();
-                    self.workspace.tabs[active].loading =
-                        Some(vel_fileio::load_background(path, fallback)?);
+                    if self.workspace.editor().binary.is_some() {
+                        self.workspace.tabs[active].binary_loading =
+                            Some(crate::binary::Task::open(path)?);
+                    } else {
+                        self.workspace.tabs[active].loading =
+                            Some(vel_fileio::load_background(path, fallback)?);
+                    }
                     self.workspace.tabs[active].editor.read_only = true;
                 }
             }
@@ -1270,7 +1275,11 @@ impl App {
                         );
                     }
                     let caption = if let Some((read, total)) = tab.progress() {
-                        format!("Loading {}%", read.saturating_mul(100) / total.max(1))
+                        format!(
+                            "{} · {}%",
+                            tab.label(),
+                            read.saturating_mul(100) / total.max(1)
+                        )
                     } else {
                         tab.label()
                     };
@@ -1461,13 +1470,21 @@ impl App {
         renderer.persist_pipeline_cache()?;
         self.startup_done = true;
         match self.options.mode {
+            Mode::LargeFiles => {
+                self.bench = Some(Bench::new(Mode::LargeFiles, self.options.seed, vec![]));
+                w.set_animating(true);
+            }
             Mode::ThemeUi => {
                 self.bench = Some(Bench::new(Mode::ThemeUi, self.options.seed, vec![]));
                 w.set_animating(true);
             }
             Mode::Startup => self.finish(w)?,
             Mode::Open => {
-                if self.workspace.tabs.iter().all(|t| t.loading.is_none())
+                if self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .all(|t| t.loading.is_none() && t.binary_loading.is_none())
                     && self.highlighted_scanout.is_some()
                 {
                     self.finish(w)?;
@@ -1521,6 +1538,10 @@ impl App {
     fn bench_report(&mut self, w: &WindowHandle) -> Result<(), String> {
         let mode = self.options.mode;
         match mode {
+            Mode::LargeFiles => {
+                let cpu: Vec<_> = self.samples.iter().map(|s| s.event_to_submit_ms).collect();
+                self.reporter.emit(json!({"kind":"large_file_native","actions":self.samples.len(),"event_to_submit_ms":summarize(&cpu),"boundary":"scripted horizontal/vertical scroll, offset navigation or edit through CPU scene and submit","external_input_events":self.external_input}))?;
+            }
             Mode::Scroll => {
                 if self.samples.len() != SCROLL_FRAMES {
                     return Err(format!(
@@ -1648,7 +1669,7 @@ impl App {
                 let deadline = b.schedule_next(at);
                 w.request_frame_at(deadline);
             }
-            if matches!(b.mode, Mode::Panels | Mode::ThemeUi) {
+            if matches!(b.mode, Mode::Panels | Mode::ThemeUi | Mode::LargeFiles) {
                 w.request_frame_at(Instant::now() + Duration::from_millis(30));
             }
         } else if let Some(at) = self.input_at.take()
@@ -1808,14 +1829,26 @@ impl AppHandler for App {
         {
             return true;
         }
+        let tab = &self.workspace.tabs[self.workspace.active];
+        if tab.editor.read_only && matches!(name, "save" | "save_all" | "save_as") {
+            return false;
+        }
+        if matches!(name, "goto_hex_offset" | "copy_hex" | "copy_hex_text")
+            && tab.editor.binary.is_none()
+        {
+            return false;
+        }
         self.workspace
             .editor()
             .registry
             .is_enabled(name, &args, self.workspace.editor())
-            && !(self.workspace.tabs[self.workspace.active].loading.is_some()
-                && (self.workspace.editor().registry.kind(name)
+            && !((tab.loading.is_some() || tab.binary_loading.is_some())
+                && self.workspace.editor().registry.kind(name)
                     == Some(vel_commands::Kind::TextCommand)
-                    || matches!(name, "save" | "save_all")))
+                && !matches!(
+                    name,
+                    "move" | "move_to" | "select_all" | "copy" | "single_selection"
+                ))
     }
     fn on_text_input(&mut self, w: &WindowHandle, event: TextInput) {
         if self.options.mode.automatic() {
@@ -2327,8 +2360,17 @@ impl AppHandler for App {
         if focused && self.options.mode == Mode::Interactive {
             self.sessions.borrow_mut().active_window = Some(self.session_id);
         }
-        if self.startup_done && matches!(self.options.mode, Mode::Interactive | Mode::Open) {
-            let loading_before = self.workspace.tabs.iter().any(|t| t.loading.is_some());
+        if self.startup_done
+            && matches!(
+                self.options.mode,
+                Mode::Interactive | Mode::Open | Mode::LargeFiles
+            )
+        {
+            let loading_before = self
+                .workspace
+                .tabs
+                .iter()
+                .any(|t| t.loading.is_some() || t.binary_loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
             let mut changed = self.workspace.poll() || focus_changed;
             self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
@@ -2372,7 +2414,11 @@ impl AppHandler for App {
                 self.reporter.emit(record)?;
             }
             if self.options.mode == Mode::Open
-                && self.workspace.tabs.iter().all(|t| t.loading.is_none())
+                && self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .all(|t| t.loading.is_none() && t.binary_loading.is_none())
                 && self.highlighted_scanout.is_some()
             {
                 if !self.workspace.messages.is_empty() {
@@ -2590,6 +2636,31 @@ impl AppHandler for App {
             }
         }
 
+        if self.options.mode == Mode::LargeFiles {
+            self.workspace.poll();
+            if self
+                .workspace
+                .tabs
+                .iter()
+                .any(|t| t.loading.is_some() || t.binary_loading.is_some())
+            {
+                w.request_frame_at(Instant::now() + Duration::from_millis(8));
+                let scene = self.scene();
+                self.renderer.as_mut().ok_or("renderer missing")?.render(
+                    &scene,
+                    self.fonts.as_mut().ok_or("fonts missing")?,
+                    w.scale_factor() as f32,
+                    None,
+                )?;
+                return Ok(());
+            }
+            if self.bench.as_ref().is_some_and(|b| !b.pending) {
+                let step = self.bench.as_ref().unwrap().completed;
+                self.bench.as_mut().unwrap().pending = true;
+                self.bench_received = Some(Instant::now());
+                crate::large_bench::native_step(&mut self.workspace, &mut self.view, step)?;
+            }
+        }
         if self.options.mode == Mode::Panels {
             if self.bench.as_ref().is_some_and(|b| !b.pending) {
                 let index = self.bench.as_ref().expect("panel bench").completed;
@@ -2759,6 +2830,9 @@ impl AppHandler for App {
         (rect, range)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
+        if self.panels.input().is_none() && self.workspace.editor().binary.is_some() {
+            return None;
+        }
         if let Some(input) = self.panels.input() {
             return Some(input.utf16_at_x(point.x));
         }

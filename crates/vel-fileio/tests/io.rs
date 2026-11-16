@@ -3,6 +3,48 @@ use vel_buffer::{Buffer, Region, Selection, ops};
 use vel_config::settings::EditorSettings;
 use vel_fileio::*;
 use vel_text::Text;
+
+#[test]
+fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stream");
+    for (encoding, bom) in [
+        ("UTF-8", false),
+        ("UTF-8", true),
+        ("UTF-16LE", true),
+        ("UTF-16BE", true),
+        ("windows-1252", false),
+    ] {
+        let text = Text::from(format!("{}\n€\nend", "a".repeat(128 * 1024 - 1)).as_str());
+        let format = Format {
+            encoding: encoding.into(),
+            bom,
+            line_ending: LineEnding::CrLf,
+        };
+        save(&path, &text, &format, true).unwrap();
+        let task = load_background(path.clone(), "windows-1252".into()).unwrap();
+        let loaded = task
+            .result
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.text, text, "{format:?}");
+        assert_eq!(loaded.format, format);
+        assert_eq!(
+            task.read.load(std::sync::atomic::Ordering::Relaxed),
+            std::fs::metadata(&path).unwrap().len()
+        );
+    }
+    std::fs::write(&path, b"\xff\xfea").unwrap();
+    assert!(
+        load_background(path, "windows-1252".into())
+            .unwrap()
+            .result
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .is_err()
+    );
+}
 #[test]
 fn encodings_boms_and_endings_round_trip() {
     let dir = tempfile::tempdir().unwrap();

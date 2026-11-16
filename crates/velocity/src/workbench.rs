@@ -147,21 +147,38 @@ impl Workspace {
                 tab.editor.sync();
             } else if let Some(path) = &document.path {
                 let tab = &mut self.tabs[index];
-                let loaded =
-                    match vel_fileio::load(path, &tab.editor.preferences.fallback_encoding, |_| {})
-                    {
-                        Ok(loaded) => loaded,
-                        Err(e) => {
+                if crate::binary::is_binary(path)? {
+                    tab.binary_loading = Some(crate::binary::Task::open(path.clone())?);
+                    tab.editor.source_bytes =
+                        std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+                    tab.pending_restore = Some(state.clone());
+                } else if std::fs::metadata(path).map_err(|e| e.to_string())?.len()
+                    >= tab
+                        .editor
+                        .settings
+                        .usize("large_file.load_bytes", 64 * 1024 * 1024)
+                        as u64
+                {
+                    tab.loading = Some(vel_fileio::load_background(
+                        path.clone(),
+                        tab.editor.preferences.fallback_encoding.clone(),
+                    )?);
+                    tab.editor.source_bytes =
+                        std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+                    tab.pending_restore = Some(state.clone());
+                } else {
+                    let loaded =
+                        vel_fileio::load(path, &tab.editor.preferences.fallback_encoding, |_| {})
+                            .inspect_err(|_| {
                             tab.editor.read_only = true;
-                            return Err(e);
-                        }
-                    };
-                tab.install_restored(loaded);
+                        })?;
+                    tab.install_restored(loaded);
+                }
             }
             let tab = &mut self.tabs[index];
             tab.lazy = None;
-            tab.editor.read_only = false;
-            if !imported {
+            tab.editor.read_only = tab.loading.is_some() || tab.binary_loading.is_some();
+            if !imported && tab.pending_restore.is_none() {
                 state.apply(&mut tab.editor.buffer, tab.editor.id);
             }
             tab.editor.sync();
@@ -297,6 +314,11 @@ impl Workspace {
         self.sync_shared();
     }
     pub fn clone_file(&mut self) -> Result<(), String> {
+        if self.tabs[self.active].loading.is_some()
+            || self.tabs[self.active].binary_loading.is_some()
+        {
+            return Err("Wait for loading to finish before cloning this tab".into());
+        }
         self.prepare_sheet(self.active)?;
         let index = self.active;
         let id = self.tabs[index].editor.buffer.new_view();
@@ -323,6 +345,9 @@ impl Workspace {
         clone.shared_view = id;
         clone.disk_saved = self.tabs[index].disk_saved.clone();
         clone.restored_document = self.tabs[index].restored_document;
+        clone.editor.binary = self.tabs[index].editor.binary.clone();
+        clone.editor.read_only = self.tabs[index].editor.read_only;
+        clone.editor.features = self.tabs[index].editor.features;
         clone.editor.shared_shadow = true;
         clone.editor.language = self.tabs[index].editor.language.clone();
         clone.editor.layout_edits = self.tabs[index].editor.layout_edits.clone();
@@ -598,19 +623,26 @@ impl Workspace {
                     bom: owner.format.bom,
                     line_ending: owner.format.line_ending.name().into(),
                     dirty: owner.dirty(),
-                    history: Some(if !owner.dirty() {
-                        if let Some(path) = &owner.path {
-                            vel_session::History::capture_saved(
-                                &owner.editor.buffer,
-                                path.clone(),
-                                owner.format.encoding.clone(),
-                            )
+                    history: if owner.loading.is_some()
+                        || owner.binary_loading.is_some()
+                        || owner.editor.binary.is_some()
+                    {
+                        None
+                    } else {
+                        Some(if !owner.dirty() {
+                            if let Some(path) = &owner.path {
+                                vel_session::History::capture_saved(
+                                    &owner.editor.buffer,
+                                    path.clone(),
+                                    owner.format.encoding.clone(),
+                                )
+                            } else {
+                                vel_session::History::capture(&owner.editor.buffer)
+                            }
                         } else {
                             vel_session::History::capture(&owner.editor.buffer)
-                        }
-                    } else {
-                        vel_session::History::capture(&owner.editor.buffer)
-                    }),
+                        })
+                    },
                 });
             }
         }

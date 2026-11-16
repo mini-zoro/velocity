@@ -39,6 +39,19 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub binary: Option<Arc<crate::binary::Snapshot>>,
+    pub features: vel_largefile::FeaturePolicy,
+    pub document_metrics: vel_largefile::DocumentMetrics,
+    pub source_bytes: u64,
+    policy_config: crate::large::FeatureConfig,
+    metric_job: Option<
+        mpsc::Receiver<(
+            vel_buffer::BufferId,
+            vel_buffer::ChangeId,
+            vel_largefile::DocumentMetrics,
+        )>,
+    >,
+    policy_identity: Option<(vel_buffer::BufferId, vel_buffer::ChangeId, u64, u64)>,
     pub vintage: Option<crate::vintage::State>,
     pub vintage_requests: Vec<vel_config::keymap::Invocation>,
     pub theme: std::rc::Rc<RefCell<vel_ui::theme::ThemeUi>>,
@@ -125,10 +138,28 @@ impl Editor {
         ] {
             registry.register(name, vel_commands::Kind::WindowCommand, None);
         }
-        for name in ["set_clipboard", "exit_insert_mode", "vintage_submit_prompt"] {
+        for name in [
+            "set_clipboard",
+            "exit_insert_mode",
+            "vintage_submit_prompt",
+            "large_file_enable_feature",
+            "goto_hex_offset",
+            "copy_hex",
+            "copy_hex_text",
+        ] {
             registry.register(name, vel_commands::Kind::TextCommand, None);
         }
+        let document_metrics = crate::large::metrics(&text, 0);
+        let policy_config = crate::large::FeatureConfig::new(&settings);
+        let features = policy_config.evaluate(document_metrics);
         Self {
+            binary: None,
+            features,
+            policy_config,
+            document_metrics,
+            source_bytes: 0,
+            policy_identity: None,
+            metric_job: None,
             vintage: None,
             vintage_requests: Vec::new(),
             theme: crate::theme_ui::default_ui(),
@@ -185,7 +216,87 @@ impl Editor {
             self.buffer.break_undo_group();
         }
     }
+    pub fn measure_document(&mut self) {
+        if self.buffer.text().len_bytes() < crate::large::LONG_LINE {
+            return;
+        }
+        let text = self.buffer.text().clone();
+        let identity = (self.buffer.id(), self.buffer.change_id());
+        let (tx, rx) = mpsc::channel();
+        if std::thread::Builder::new()
+            .name("velocity-document-metrics".into())
+            .spawn(move || {
+                let mut longest = 0u64;
+                let mut current = 0u64;
+                for chunk in text.chunks() {
+                    for byte in chunk.bytes() {
+                        if byte == b'\n' {
+                            longest = longest.max(current);
+                            current = 0;
+                        } else {
+                            current += 1;
+                        }
+                    }
+                }
+                let _ = tx.send((
+                    identity.0,
+                    identity.1,
+                    vel_largefile::DocumentMetrics {
+                        bytes: text.len_bytes() as u64,
+                        lines: text.len_lines() as u64,
+                        longest_line_bytes: longest.max(current),
+                    },
+                ));
+            })
+            .is_ok()
+        {
+            self.metric_job = Some(rx);
+        }
+    }
+    pub fn refresh_policy(&mut self) {
+        let identity = (
+            self.buffer.id(),
+            self.buffer.change_id(),
+            self.settings.cache_identity(),
+            self.source_bytes,
+        );
+        if self.policy_identity == Some(identity) {
+            return;
+        }
+        if self.policy_identity.is_none_or(|old| old.2 != identity.2) {
+            self.policy_config = crate::large::FeatureConfig::new(&self.settings);
+        }
+        self.policy_identity = Some(identity);
+        let caret = self.buffer.view(self.id).sel().primary().map_or(0, |r| r.b);
+        let text = self.buffer.text();
+        let row = text.byte_to_line(caret);
+        let metrics = vel_largefile::DocumentMetrics {
+            bytes: (text.len_bytes() as u64).max(self.source_bytes),
+            lines: text.len_lines() as u64,
+            longest_line_bytes: (crate::layout::body_len(text, row) as u64).max(
+                self.document_metrics
+                    .longest_line_bytes
+                    .min(text.len_bytes() as u64),
+            ),
+        };
+        self.document_metrics = metrics;
+        self.features = self.policy_config.evaluate(metrics);
+        if self.source_bytes > 0 {
+            self.features.highlighting = vel_largefile::HighlightMode::Viewport;
+            self.features.indexing = false;
+            self.features.word_wrap = false;
+            self.features.spell_check = false;
+            self.features.diff_against_disk = false;
+        }
+        self.annotations
+            .borrow_mut()
+            .set_policy(self.features.diff_against_disk, self.features.spell_check);
+    }
     pub fn sync(&mut self) {
+        if self.binary.is_some() {
+            return;
+        }
+        self.refresh_policy();
         if self.fields.is_some()
             && !self.shared_shadow
             && self.fields_version != Some((self.buffer.id(), self.buffer.change_id()))
@@ -238,20 +349,25 @@ impl Editor {
         }
         let reset = !self.shared_shadow
             && self.language.borrow().as_ref().is_some_and(|l| {
-                l.version != self.buffer.change_id()
+                l.policy != self.features
+                    || (l.policy.highlighting == vel_largefile::HighlightMode::Viewport
+                        && l.viewport_settings != self.settings.cache_identity())
+                    || l.version != self.buffer.change_id()
                     || self.language_buffer != Some(self.buffer.id())
             });
         if reset {
             self.fields = None;
             self.completion.hide();
             let previous = self.language.borrow_mut().take().expect("language");
-            let result = crate::language::Language::new(
+            let result = crate::language::Language::with_policy(
                 previous.assets.clone(),
                 &previous.syntax,
                 self.buffer.text().clone(),
                 self.buffer.change_id(),
                 previous.scheme.clone(),
                 self.preferences.tab_size,
+                self.features,
+                &self.settings,
             );
             match result {
                 Ok(language) => *self.language.borrow_mut() = Some(language),
@@ -298,20 +414,35 @@ impl Editor {
         scheme: Arc<vel_color_scheme::ColorScheme>,
     ) -> Result<(), String> {
         self.completion.hide();
-        let language = crate::language::Language::new(
+        self.refresh_policy();
+        let language = crate::language::Language::with_policy(
             assets,
             syntax,
             self.buffer.text().clone(),
             self.buffer.change_id(),
             scheme,
             self.preferences.tab_size,
+            self.features,
+            &self.settings,
         )?;
         *self.language.borrow_mut() = Some(language);
         self.language_buffer = Some(self.buffer.id());
         Ok(())
     }
     pub fn poll_language(&mut self) -> bool {
-        let mut changed = self
+        let mut changed = self.layout.borrow().long.poll();
+        if let Some((buffer, version, metrics)) =
+            self.metric_job.as_ref().and_then(|rx| rx.try_recv().ok())
+        {
+            self.metric_job = None;
+            if buffer == self.buffer.id() && version == self.buffer.change_id() {
+                self.document_metrics = metrics;
+                self.policy_identity = None;
+                self.sync();
+                changed = true;
+            }
+        }
+        changed |= self
             .language
             .borrow_mut()
             .as_mut()
@@ -382,6 +513,9 @@ impl Editor {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
     }
     pub fn selected_utf16(&self) -> Utf16Range {
+        if self.binary.is_some() {
+            return Utf16Range::default();
+        }
         Utf16Range::from_bytes(&self.text, self.selection())
     }
     pub fn marked_utf16(&self) -> Option<Utf16Range> {
@@ -390,9 +524,27 @@ impl Editor {
             .map(|r| Utf16Range::from_bytes(&self.text, r))
     }
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
+        if (self.binary.is_some()
+            || self.document_metrics.longest_line_bytes >= crate::large::LONG_LINE as u64
+            || name == "large_file_enable_feature")
+            && self.large_command(name, args)?
+        {
+            return Ok(());
+        }
         if self.read_only
             && self.registry.kind(name) == Some(vel_commands::Kind::TextCommand)
             && !crate::html_ui::COMMANDS.contains(&name)
+            && !matches!(
+                name,
+                "move"
+                    | "move_to"
+                    | "select_all"
+                    | "copy"
+                    | "single_selection"
+                    | "find"
+                    | "find_next"
+                    | "find_prev"
+            )
         {
             return Ok(());
         }
@@ -554,8 +706,36 @@ impl Editor {
                     .unwrap_or_else(|| self.buffer.view(self.id).sel().clone());
                 let explicit =
                     replacement.is_some() || self.composition.as_ref().is_some_and(|c| c.explicit);
+                let compatible = self
+                    .composition
+                    .as_ref()
+                    .is_none_or(|c| c.original == original);
+                let old_preview = self.text.clone();
+                let old_range = self
+                    .composition
+                    .as_ref()
+                    .filter(|c| c.original == original)
+                    .map_or_else(
+                        || original.clone(),
+                        |c| original.start..original.start + c.contents.len(),
+                    );
+                self.layout
+                    .borrow_mut()
+                    .prepare_change((self.buffer.id(), vel_buffer::ChangeId(self.revision)));
                 self.text = self.buffer.text().clone();
                 self.text.replace(original.clone(), &text);
+                if !compatible {
+                    self.layout.borrow_mut().invalidate();
+                }
+                self.layout.borrow_mut().change(
+                    &old_preview,
+                    &self.text,
+                    (self.buffer.id(), vel_buffer::ChangeId(self.revision + 1)),
+                    &ChangeSet::new(vec![Change {
+                        old_range,
+                        new_len: text.len(),
+                    }]),
+                );
                 let relative = selected.bytes(&Text::from(text.as_str()));
                 self.anchor = original.start + relative.start;
                 self.caret = original.start + relative.end;
@@ -612,6 +792,13 @@ impl Editor {
         self.sync();
     }
     pub fn set_caret(&mut self, at: usize, extend: bool) {
+        if let Some(binary) = &self.binary {
+            self.caret = at.min(binary.view.len_bytes() as usize);
+            if !extend {
+                self.anchor = self.caret;
+            }
+            return;
+        }
         self.unmark();
         let at = self.text.floor_char_boundary(at);
         self.set_selection(Selection::from_regions([Region::new(
@@ -627,6 +814,30 @@ impl Editor {
     }
     pub fn select_word(&mut self, at: usize) {
         self.set_caret(at, false);
+        if self.text.line_len_bytes(self.text.byte_to_line(self.caret)) >= crate::large::LONG_LINE {
+            if self.layout.borrow().total() == 0 {
+                self.layout.borrow_mut().configure(
+                    &self.text,
+                    (self.buffer.id(), self.buffer.change_id()),
+                    crate::layout::Options {
+                        width: 0,
+                        tab: self.preferences.tab_size,
+                        indent: false,
+                    },
+                    &[],
+                );
+            }
+            let a = self
+                .layout
+                .borrow()
+                .long_motion(&self.text, self.caret, false, true);
+            let b = self
+                .layout
+                .borrow()
+                .long_motion(&self.text, self.caret, true, true);
+            self.set_selection(Selection::from_regions([Region::new(a, b)]));
+            return;
+        }
         ops::expand_selection(&mut self.buffer, self.id, ops::ExpandTo::Word);
         self.sync();
     }
@@ -739,14 +950,23 @@ impl ContextProvider for EditorContext<'_> {
                 .map(|r| {
                     let before_row = e.text.byte_to_line(r.begin());
                     let after_row = e.text.byte_to_line(r.end());
-                    let start = e.text.line_to_byte(before_row);
-                    let end = e.text.line_to_byte(after_row) + e.text.line(after_row).len_bytes();
+                    let start = e
+                        .text
+                        .line_to_byte(before_row)
+                        .max(e.text.floor_char_boundary(r.begin().saturating_sub(8192)));
+                    let end = (e.text.line_to_byte(after_row) + e.text.line_len_bytes(after_row))
+                        .min(e.text.floor_char_boundary(
+                            r.end().saturating_add(8192).min(e.text.len_bytes()),
+                        ));
                     json!(
                         e.text
                             .slice(match key {
                                 "preceding_text" => start..r.begin(),
                                 "following_text" => r.end()..end,
-                                _ => r.to_range(),
+                                _ =>
+                                    r.begin()
+                                        ..e.text
+                                            .floor_char_boundary((r.begin() + 8192).min(r.end())),
                             })
                             .to_string()
                     )

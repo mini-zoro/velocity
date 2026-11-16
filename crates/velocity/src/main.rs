@@ -4,6 +4,7 @@ mod annotations;
 #[cfg(target_os = "macos")]
 mod app;
 mod bench;
+mod binary;
 mod build;
 mod cli;
 mod completion;
@@ -18,6 +19,10 @@ mod instance;
 mod intelligence;
 mod intelligence_bench;
 mod language;
+mod large;
+mod large_bench;
+#[cfg(test)]
+mod large_tests;
 mod layout;
 mod panels;
 mod parse_bench;
@@ -144,6 +149,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        if options.mode == Mode::HeadlessLargeFiles {
+            return large_bench::run(&reporter, &options);
+        }
         if options.mode == Mode::HeadlessTheme {
             return theme_bench::run(&reporter, &options);
         }
@@ -188,7 +196,10 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         }
         let (text, source) = if options.restore_session {
             (Text::new(), "restored session".into())
-        } else if matches!(options.mode, Mode::Interactive | Mode::Open) {
+        } else if matches!(
+            options.mode,
+            Mode::Interactive | Mode::Open | Mode::LargeFiles
+        ) {
             if let Some(input) = &stdin {
                 (Text::from(input.as_str()), "stdin".into())
             } else {
@@ -299,7 +310,10 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                     .editor_mut()
                     .run("insert", &json!({"characters":input}))?;
             }
-            if matches!(options.mode, Mode::Interactive | Mode::Open) {
+            if matches!(
+                options.mode,
+                Mode::Interactive | Mode::Open | Mode::LargeFiles
+            ) {
                 for location in &options.files {
                     if location.path != Path::new("-") {
                         if location.path.is_dir() {

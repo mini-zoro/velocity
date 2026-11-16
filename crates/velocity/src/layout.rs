@@ -80,6 +80,7 @@ impl Heights {
 #[derive(Debug, Default)]
 pub struct Layout {
     identity: Option<(BufferId, ChangeId)>,
+    pub long: crate::large::LongLines,
     options: Options,
     lines: Vec<Line>,
     heights: Heights,
@@ -105,6 +106,9 @@ impl Layout {
     ) {
         if self.identity == Some(identity) && self.options == options && self.folds == folds {
             return;
+        }
+        if self.identity != Some(identity) {
+            self.long.reset();
         }
         self.identity = Some(identity);
         self.options = options;
@@ -184,6 +188,9 @@ impl Layout {
     ) {
         if self.identity.is_none() {
             return;
+        }
+        if let Some(before) = self.identity {
+            self.long.change(old, after, before, identity, changes);
         }
         self.identity = Some(identity);
         self.inline.clear();
@@ -434,7 +441,7 @@ impl Layout {
     pub fn segment(&self, text: &Text, row: usize, segment: usize) -> Segment {
         if self.lines.is_empty() {
             Segment {
-                bytes: 0..text.line(row).to_string().trim_end_matches('\n').len(),
+                bytes: 0..body_len(text, row),
                 indent: 0,
             }
         } else {
@@ -489,8 +496,13 @@ impl Layout {
             .filter(|f| f.begin() < byte && byte < f.end())
             .map_or(byte, |f| f.begin());
         let row = text.byte_to_line(byte);
-        let line = text.line(row).to_string();
         let col = byte - text.line_to_byte(row);
+        if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            return self.long_query(text, row, col, |i, a, c| {
+                c + i.byte_to_column(col.saturating_sub(a))
+            });
+        }
+        let line = text.line(row).to_string();
         let (_, segment) = self.visual_at(text, byte);
         let start = text.line_to_byte(row);
         let gaps: usize = self
@@ -512,6 +524,13 @@ impl Layout {
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
         let (row, n) = self.locate(visual);
         let segment = self.segment(text, row, n);
+        if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            let x = if x.is_finite() { x.max(0.) } else { 0. };
+            return text.line_to_byte(row)
+                + self.long_query(text, row, x as usize, |i, a, c| {
+                    a + i.column_to_byte(((x + 0.5) as usize).saturating_sub(c))
+                });
+        }
         let line = text.line(row).to_string();
         let mut col = segment.indent as f64;
         let x = if x.is_finite() { x.max(0.) } else { 0. };
@@ -530,6 +549,69 @@ impl Layout {
             col += unit.width as f64;
         }
         text.line_to_byte(row) + segment.bytes.end
+    }
+    fn long_query<T>(
+        &self,
+        text: &Text,
+        row: usize,
+        byte: usize,
+        f: impl FnOnce(&vel_largefile::LongLineIndex, usize, usize) -> T,
+    ) -> T {
+        self.long.query(
+            text,
+            self.identity.expect("configured layout"),
+            row,
+            self.options.tab,
+            byte,
+            f,
+        )
+    }
+    pub fn wrapped(&self) -> bool {
+        self.options.width > 0
+    }
+    pub fn long_window(
+        &self,
+        text: &Text,
+        row: usize,
+        first: usize,
+        columns: usize,
+    ) -> crate::large::Window {
+        self.long_query(text, row, first, |index, a, c| {
+            let range = index.visible_window(first.saturating_sub(c), columns);
+            // A giant combining cluster may occupy a single cell. Never flatten it on UI.
+            let end = index.text().floor_char_boundary(
+                (index.line_start() + range.end).min(index.line_start() + range.start + 64 * 1024),
+            );
+            crate::large::Window {
+                text: index
+                    .text()
+                    .slice(index.line_start() + range.start..end)
+                    .to_string(),
+                bytes: a + range.start..a + end - index.line_start(),
+                column: c + index.byte_to_column(range.start),
+            }
+        })
+    }
+    pub fn long_motion(&self, text: &Text, byte: usize, forward: bool, word: bool) -> usize {
+        let row = text.byte_to_line(byte);
+        let start = text.line_to_byte(row);
+        if forward && byte == start + body_len(text, row) && byte < text.len_bytes() {
+            return byte + 1;
+        }
+        if !forward && byte == start && start > 0 {
+            return start - 1;
+        }
+        self.long_query(text, row, byte - start, |i, a, _| {
+            let local = (byte - start).saturating_sub(a);
+            start
+                + a
+                + match (forward, word) {
+                    (true, true) => i.next_word_boundary(local),
+                    (false, true) => i.prev_word_boundary(local),
+                    (true, false) => i.next_grapheme_boundary(local),
+                    (false, false) => i.prev_grapheme_boundary(local),
+                }
+        })
     }
     pub fn visible_bytes(&self, text: &Text, first: usize, count: usize) -> Range<usize> {
         let (a, _) = self.locate(first);
@@ -601,6 +683,13 @@ pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit
         });
     }
     units
+}
+
+/// Physical line body length without allocating or scanning its contents.
+pub fn body_len(text: &Text, row: usize) -> usize {
+    let start = text.line_to_byte(row);
+    let len = text.line_len_bytes(row);
+    len - usize::from(len > 0 && text.byte_at(start + len - 1) == b'\n')
 }
 
 #[cfg(test)]

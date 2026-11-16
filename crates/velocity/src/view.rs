@@ -73,6 +73,211 @@ pub struct View {
     started: Instant,
 }
 impl View {
+    #[allow(clippy::too_many_arguments)]
+    fn paint_long_line(
+        &self,
+        e: &Editor,
+        row: usize,
+        visual: usize,
+        scheme: &ColorScheme,
+        clip: Rect,
+        layer: &mut Layer,
+    ) {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+        let left = self.gutter(e) + self.margin(e);
+        let first = (self.scroll_x / self.cell).floor().max(0.) as usize;
+        let columns = ((self.right(e) - left) / self.cell).ceil().max(1.) as usize + 2;
+        let window = e.layout.borrow().long_window(&e.text, row, first, columns);
+        let start = e.text.line_to_byte(row);
+        let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
+        let baseline = y + self.ascent + 3. + e.settings.number("line_padding_top", 0.).max(0.);
+        if e.preferences.highlight_line && e.text.byte_to_line(e.caret) == row {
+            fill(
+                layer,
+                Rect {
+                    x: clip.x,
+                    y,
+                    width: clip.width,
+                    height: self.line_height,
+                },
+                clip,
+                color(scheme, "line_highlight"),
+            );
+        }
+        if e.preferences.line_numbers {
+            let number = (row + 1).to_string();
+            text_run(
+                layer,
+                &number,
+                self.gutter(e) - 12. - number.len() as f64 * self.cell,
+                baseline,
+                e.preferences.font_size,
+                color(scheme, "gutter_foreground"),
+                FontStyle::default(),
+                Rect {
+                    x: 0.,
+                    width: self.gutter(e),
+                    ..clip
+                },
+            );
+        }
+        let regions = e.regions();
+        let mut column = window.column;
+        let mut run = String::new();
+        let mut run_x = left + column as f64 * self.cell - self.scroll_x;
+        for (byte, grapheme) in window.text.grapheme_indices(true) {
+            let width = if grapheme == "\t" {
+                e.preferences.tab_size - column % e.preferences.tab_size.max(1)
+            } else {
+                grapheme.width()
+            };
+            let at = start + window.bytes.start + byte;
+            let x = left + column as f64 * self.cell - self.scroll_x;
+            let selected = regions
+                .iter()
+                .any(|r| !r.empty() && r.begin() < at + grapheme.len() && r.end() > at);
+            if selected {
+                fill(
+                    layer,
+                    Rect {
+                        x,
+                        y,
+                        width: (width as f64 * self.cell).max(1.),
+                        height: self.line_height,
+                    },
+                    clip,
+                    color(scheme, "selection"),
+                );
+            }
+            if e.marked
+                .as_ref()
+                .is_some_and(|r| r.start <= at && at < r.end)
+            {
+                fill(
+                    layer,
+                    Rect {
+                        x,
+                        y: y + self.line_height - 2.,
+                        width: width as f64 * self.cell,
+                        height: 1.,
+                    },
+                    clip,
+                    color(scheme, "caret"),
+                );
+            }
+            if grapheme == "\t" {
+                text_run(
+                    layer,
+                    &run,
+                    run_x,
+                    baseline,
+                    e.preferences.font_size,
+                    rgba(scheme.default_style().foreground),
+                    FontStyle::default(),
+                    clip,
+                );
+                run.clear();
+                run_x = x + width as f64 * self.cell;
+            } else {
+                run.push_str(grapheme);
+            }
+            column += width;
+        }
+        text_run(
+            layer,
+            &run,
+            run_x,
+            baseline,
+            e.preferences.font_size,
+            rgba(scheme.default_style().foreground),
+            FontStyle::default(),
+            clip,
+        );
+    }
+    fn hex_scene(&mut self, e: &Editor) -> Scene {
+        self.apply_style(e);
+        let snapshot = e.binary.as_ref().expect("binary tab");
+        let scheme = fallback_scheme(self.appearance);
+        let clip = Rect {
+            x: 0.,
+            y: self.tab_height,
+            width: self.size.width,
+            height: (self.size.height - self.tab_height).max(0.),
+        };
+        let first = (self.scroll_y / self.line_height).floor().max(0.) as u64;
+        let end = (first + self.rows() as u64 + 2).min(snapshot.view.len_rows());
+        let mut layer = Layer::default();
+        for row in first..end {
+            let r = snapshot.view.row(row).expect("bounded row");
+            let y = self.tab_height + 4. + row as f64 * self.line_height - self.scroll_y;
+            let baseline = y + self.ascent + 3.;
+            text_run(
+                &mut layer,
+                &format!("{:016x}", r.offset),
+                16. - self.scroll_x,
+                baseline,
+                e.preferences.font_size,
+                color(scheme, "gutter_foreground"),
+                FontStyle::default(),
+                clip,
+            );
+            for (n, byte) in r.bytes.iter().enumerate() {
+                let at = r.offset as usize + n;
+                let x = 16. + (18 + n * 3) as f64 * self.cell - self.scroll_x;
+                if e.selection().contains(&at) || at == e.caret {
+                    fill(
+                        &mut layer,
+                        Rect {
+                            x,
+                            y,
+                            width: self.cell * 2.,
+                            height: self.line_height,
+                        },
+                        clip,
+                        color(scheme, "selection"),
+                    );
+                    fill(
+                        &mut layer,
+                        Rect {
+                            x: 16. + (68 + n) as f64 * self.cell - self.scroll_x,
+                            y,
+                            width: self.cell,
+                            height: self.line_height,
+                        },
+                        clip,
+                        color(scheme, "selection"),
+                    );
+                }
+                text_run(
+                    &mut layer,
+                    &format!("{byte:02x}"),
+                    x,
+                    baseline,
+                    e.preferences.font_size,
+                    rgba(scheme.default_style().foreground),
+                    FontStyle::default(),
+                    clip,
+                );
+            }
+            text_run(
+                &mut layer,
+                std::str::from_utf8(&r.ascii).expect("ASCII row"),
+                16. + 68. * self.cell - self.scroll_x,
+                baseline,
+                e.preferences.font_size,
+                rgba(scheme.default_style().foreground),
+                FontStyle::default(),
+                clip,
+            );
+        }
+        let mut scene = Scene {
+            background: rgba(scheme.default_style().background),
+            layers: vec![layer],
+        };
+        self.paint_scrollbar(e, &mut scene);
+        scene
+    }
     pub fn reset_caret(&mut self) {
         self.started = Instant::now();
     }
@@ -143,6 +348,9 @@ impl View {
         units
     }
     pub fn minimap_width(&self, e: &Editor) -> f64 {
+        if e.binary.is_some() {
+            return 0.;
+        }
         if e.settings.bool("show_minimap", true) {
             100f64.min(self.size.width / 4.)
         } else {
@@ -168,6 +376,9 @@ impl View {
         }
     }
     pub fn gutter(&self, e: &Editor) -> f64 {
+        if e.binary.is_some() {
+            return 16.;
+        }
         if !e.preferences.gutter {
             0.
         } else if !e.preferences.line_numbers {
@@ -201,6 +412,10 @@ impl View {
             + e.settings.number("line_padding_top", 0.).max(0.)
             + e.settings.number("line_padding_bottom", 0.).max(0.))
         .max(1.);
+        if e.binary.is_some() {
+            e.layout.borrow_mut().page = self.rows();
+            return;
+        }
         let width = ((self.right(e) - self.gutter(e) - self.margin(e) * 2.).max(self.cell)
             / self.cell)
             .floor() as usize;
@@ -208,11 +423,11 @@ impl View {
         let auto = language
             .as_ref()
             .is_none_or(|l| l.root.build_string().starts_with("text"));
-        let wrap = e
-            .settings
-            .get("word_wrap")
-            .and_then(vel_config::Value::as_bool)
-            .unwrap_or(auto);
+        let wrap = e.features.word_wrap
+            && e.settings
+                .get("word_wrap")
+                .and_then(vel_config::Value::as_bool)
+                .unwrap_or(auto);
         let configured = e.settings.usize("wrap_width", 0);
         let wrap_width = if configured == 0 {
             width
@@ -267,7 +482,7 @@ impl View {
         };
         self.scroll_y = self.scroll_y.clamp(
             0.,
-            (e.layout.borrow().total() as f64 * self.line_height - self.size.height
+            (self.total(e) as f64 * self.line_height - self.size.height
                 + self.tab_height
                 + 8.
                 + past)
@@ -281,7 +496,20 @@ impl View {
         self.scroll_y += y;
         self.clamp_scroll(e);
     }
+    pub fn total(&self, e: &Editor) -> usize {
+        e.binary
+            .as_ref()
+            .map_or_else(|| e.layout.borrow().total(), |b| b.view.len_rows() as usize)
+    }
     pub fn rect_at(&self, e: &Editor, byte: usize) -> Rect {
+        if e.binary.is_some() {
+            return Rect {
+                x: 16. + (18 + (byte % 16) * 3) as f64 * self.cell - self.scroll_x,
+                y: self.tab_height + 4. + (byte / 16) as f64 * self.line_height - self.scroll_y,
+                width: self.cell * 2.,
+                height: self.line_height,
+            };
+        }
         let layout = e.layout.borrow();
         let (visual, _) = layout.visual_at(&e.text, byte);
         Rect {
@@ -316,6 +544,18 @@ impl View {
         self.clamp_scroll(e);
     }
     pub fn hit_test(&self, e: &Editor, p: Point) -> usize {
+        if let Some(binary) = &e.binary {
+            let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
+                .floor()
+                .max(0.) as usize;
+            let col = ((p.x - 16. + self.scroll_x) / self.cell).max(0.);
+            let cell = if col >= 68. {
+                ((col - 68.) + 0.5).floor().min(16.) as usize
+            } else {
+                (((col - 18.).max(0.) + 0.5) / 3.).floor().min(16.) as usize
+            };
+            return (row.saturating_mul(16) + cell).min(binary.view.len_bytes() as usize);
+        }
         let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
             .floor()
             .max(0.) as usize;
@@ -329,27 +569,37 @@ impl View {
         e.layout.borrow().offset(&e.text, row, col)
     }
     pub fn range_rect(&self, e: &Editor, range: Utf16Range) -> (Rect, Utf16Range) {
+        if e.binary.is_some() {
+            return (self.rect_at(e, e.caret), Utf16Range::default());
+        }
         let bytes = range.bytes(&e.text);
         let row = e.text.byte_to_line(bytes.start);
         let (_, segment) = e.layout.borrow().visual_at(&e.text, bytes.start);
         let end = bytes.end.min(e.text.line_to_byte(row) + segment.bytes.end);
         let mut r = self.rect_at(e, bytes.start);
         let layout = e.layout.borrow();
-        let line = e.text.line(row).to_string();
-        let end_col = segment.indent
-            + layout::units(&line, layout.hidden(row), e.preferences.tab_size)
-                .iter()
-                .filter(|u| {
-                    u.bytes.start >= segment.bytes.start
-                        && u.bytes.end <= end - e.text.line_to_byte(row)
-                })
-                .map(|u| u.width)
-                .sum::<usize>();
+        let end_col = if e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            layout.column(&e.text, end)
+        } else {
+            let line = e.text.line(row).to_string();
+            segment.indent
+                + layout::units(&line, layout.hidden(row), e.preferences.tab_size)
+                    .iter()
+                    .filter(|u| {
+                        u.bytes.start >= segment.bytes.start
+                            && u.bytes.end <= end - e.text.line_to_byte(row)
+                    })
+                    .map(|u| u.width)
+                    .sum::<usize>()
+        };
         r.width =
             ((end_col as f64 - layout.column(&e.text, bytes.start) as f64) * self.cell).max(1.);
         (r, Utf16Range::from_bytes(&e.text, bytes.start..end))
     }
     pub fn viewport(&self, e: &Editor) -> Range<usize> {
+        if e.binary.is_some() {
+            return 0..0;
+        }
         e.layout.borrow().visible_bytes(
             &e.text,
             (self.scroll_y / self.line_height).floor().max(0.) as usize,
@@ -357,6 +607,9 @@ impl View {
         )
     }
     pub fn exact(&self, e: &Editor) -> bool {
+        if e.binary.is_some() {
+            return true;
+        }
         if e.marked.is_some() {
             return false;
         }
@@ -399,7 +652,7 @@ impl View {
             let track = (self.scroll_bar.height - self.scroll_puck.height).max(1.);
             let fraction =
                 ((point.y - self.scroll_bar.y - self.scroll_drag_offset) / track).clamp(0., 1.);
-            let height = e.layout.borrow().total() as f64 * self.line_height;
+            let height = self.total(e) as f64 * self.line_height;
             self.scroll_y = fraction * (height - self.scroll_bar.height).max(0.);
             self.scrolled = Some(Instant::now());
             self.clamp_scroll(e);
@@ -482,6 +735,9 @@ impl View {
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
         let mut phase = self.profile.as_ref().map(|_| Instant::now());
+        if e.binary.is_some() {
+            return self.hex_scene(e);
+        }
         e.theme.borrow().metrics.poll_images();
         e.theme.borrow_mut().begin_frame(Instant::now());
         e.html.borrow_mut().begin_frame();
@@ -622,14 +878,15 @@ impl View {
             .settings
             .get("indent_guide_options")
             .and_then(vel_config::Value::as_array);
-        let caret_indent = if indent_guides {
-            vel_syntax::indent::indentation(
-                &e.text.line(caret_row).to_string(),
-                e.preferences.tab_size,
-            )
-        } else {
-            0
-        };
+        let caret_indent =
+            if indent_guides && e.text.line_len_bytes(caret_row) < crate::large::LONG_LINE {
+                vel_syntax::indent::indentation(
+                    &e.text.line(caret_row).to_string(),
+                    e.preferences.tab_size,
+                )
+            } else {
+                0
+            };
         let annotations = e.annotations.borrow();
         let publication = annotations
             .current
@@ -710,6 +967,10 @@ impl View {
             }
             let (row, subrow) = layout.locate(visual);
             let segment = layout.segment(&e.text, row, subrow);
+            if !layout.wrapped() && e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
+                self.paint_long_line(e, row, visual, scheme, clip, &mut layer);
+                continue;
+            }
             let line = e.text.line(row).to_string();
             let start = e.text.line_to_byte(row);
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
@@ -1225,7 +1486,7 @@ impl View {
     fn paint_scrollbar(&mut self, e: &Editor, scene: &mut Scene) {
         let ui_scale = vel_ui::theme::ui_scale(&e.settings);
         let height = (self.size.height - self.tab_height).max(1.);
-        let content = e.layout.borrow().total() as f64 * self.line_height;
+        let content = self.total(e) as f64 * self.line_height;
         if content <= height {
             self.scroll_bar = Rect::default();
             return;
@@ -1447,8 +1708,46 @@ impl View {
             let style = theme.style(e.ui_id(0xE200), &vel_theme::ElementPath(&path), &e.settings);
             theme.surface(layer, &style, bounds, bounds);
         }
+        if (e.features.highlighting == vel_largefile::HighlightMode::Viewport
+            || !e.features.indexing)
+            && language.is_none_or(|l| l.minimap.is_empty())
+            && e.text.len_bytes() > 0
+        {
+            let step = (e.features.minimap_stride as usize)
+                .max(e.text.len_lines().div_ceil(bounds.height as usize + 1))
+                .max(1);
+            for row in (0..e.text.len_lines()).step_by(step) {
+                let start = e.text.line_to_byte(row);
+                let end = e
+                    .text
+                    .floor_char_boundary((start + 128).min(start + e.text.line_len_bytes(row)));
+                let sample = e.text.slice(start..end).to_string();
+                let cells = crate::editor::cells_with_tab(
+                    sample.trim_end_matches('\n'),
+                    e.preferences.tab_size,
+                );
+                fill(
+                    layer,
+                    Rect {
+                        x: bounds.x,
+                        y: bounds.y + row as f64 / e.text.len_lines() as f64 * bounds.height,
+                        width: (cells as f64 * 0.65).min(width),
+                        height: 1.,
+                    },
+                    bounds,
+                    rgba(scheme.default_style().foreground),
+                );
+            }
+        }
         if let Some(language) = language {
-            for line in language.minimap.iter() {
+            let existing_stride = language
+                .minimap
+                .get(1)
+                .map_or(1, |b| b.row.saturating_sub(language.minimap[0].row).max(1));
+            let sample_step = (e.features.minimap_stride as usize)
+                .div_ceil(existing_stride)
+                .max(1);
+            for line in language.minimap.iter().step_by(sample_step) {
                 let y =
                     bounds.y + line.row as f64 / e.text.len_lines().max(1) as f64 * bounds.height;
                 for token in &line.tokens {

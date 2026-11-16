@@ -884,6 +884,9 @@ impl Panels {
         args: &Value,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if workspace.editor().binary.is_some() && name == "goto_line" {
+            return self.action(workspace, "show_input_panel", &json!({"caption":"Goto byte offset (decimal or 0x hex)","initial_text":format!("0x{:x}", workspace.editor().caret),"on_done":{"command":"goto_hex_offset","args":{}}}), viewport);
+        }
         if self.review_action(workspace, name, args)? {
             return Ok(true);
         }
@@ -3083,20 +3086,59 @@ impl Panels {
             theme.surface(&mut layer, &status_style, status, status);
             let text = style(4, Some("status_container"), &mut theme);
             let editor = workspace.editor();
-            let row = editor.text.byte_to_line(editor.caret);
-            let start = editor.text.line_to_byte(row);
-            let col = editor.text.slice(start..editor.caret).len_chars() + 1;
+            let row = if editor.binary.is_some() {
+                editor.caret / 16
+            } else {
+                editor.text.byte_to_line(editor.caret)
+            };
+            let start = if editor.binary.is_some() {
+                0
+            } else {
+                editor.text.line_to_byte(row)
+            };
+            let col = if editor.binary.is_some() {
+                editor.caret % 16 + 1
+            } else {
+                editor.text.slice(start..editor.caret).len_chars() + 1
+            };
             let tab = &workspace.tabs[workspace.active];
-            let selected: usize = editor
-                .regions()
-                .iter()
-                .map(|r| editor.text.slice(r.to_range()).len_chars())
-                .sum();
+            let selected: usize = if editor.binary.is_some() {
+                editor.selection().len()
+            } else {
+                editor
+                    .regions()
+                    .iter()
+                    .map(|r| editor.text.slice(r.to_range()).len_chars())
+                    .sum()
+            };
+            let document_hint = if let Some(binary) = &editor.binary {
+                format!(
+                    "Read-only hex · Offset 0x{:x} / {} bytes · ",
+                    editor.caret,
+                    binary.view.len_bytes()
+                )
+            } else if let Some((read, total)) = tab.progress() {
+                format!(
+                    "Loading {}% · Read-only prefix · ",
+                    read.saturating_mul(100) / total.max(1)
+                )
+            } else {
+                let mut hint = crate::large::hint(editor.features);
+                if editor.layout.borrow().long.pending() {
+                    hint.push_str(" · Preparing line geometry");
+                }
+                if hint.is_empty() {
+                    String::new()
+                } else {
+                    format!("{hint} · ")
+                }
+            };
             theme.text(
                 &mut layer,
                 &text,
                 &format!(
-                    "{}Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
+                    "{}{}Ln {}, Col {} · {} selections / {} chars · {} · {} · {}: {}",
+                    document_hint,
                     if editor.vintage.is_some() {
                         format!("{} · ", editor.vintage_status())
                     } else {

@@ -339,3 +339,41 @@ OS, scale/refresh, all completion/error records and any Metal diagnostics.
 - [ ] Repeat with fresh, unwritable and corrupt profiles, then a malformed/missing User theme
   and missing image. Confirm fallback/diagnostics and continued editing. Record actual native
   timings against the round-ten budgets; CPU structural goldens are not a pixel-quality result.
+# Round 12: huge files, long lines and hex
+
+Run `zsh crates/velocity/scripts/review-round12-gui.zsh target/release/velocity
+/tmp/velocity-r12-fixtures` outside the sandbox for three automatic native runs. Each performs
+100 scripted scroll/offset/edit actions and exits. Inspect its `large_file_native` record,
+all load telemetry, Metal validation and presentation logs. No native result is claimed here.
+
+For interactive checks, open the generated fixtures with `target/release/velocity -n --log-input
+--data-dir /tmp/velocity-r12-manual /tmp/velocity-r12-fixtures/log-4gb.log
+/tmp/velocity-r12-fixtures/line-50mb.js /tmp/velocity-r12-fixtures/binary-4gb.bin`.
+
+1. On the 4 GB log, verify a visible prefix while the tab still shows a percentage, and the
+   status bar says read-only. Scroll/select/copy within that prefix. Typing must do nothing;
+   Save and Save As must be disabled and must not create a partial destination. Close during
+   loading, open another file, and verify no late content replaces it. Reopen and let loading
+   finish; the prefix restriction should clear and the file should be editable. Repeat with
+   a large UTF-16 BOM file and a Windows-1252 file containing an invalid UTF-8 byte late in it;
+   fallback may show an empty provisional view, but must retain progress and original encoding.
+2. In the 50 MB JS line, wait for “Preparing line geometry” to clear, then scroll far right,
+   move to the middle/end, select across the viewport and type/delete. Verify no full-line
+   flash or stalled scrolling. Check Shift+arrows, Option+word arrows, Home/End, a second
+   caret and pointer hit tests. Start Pinyin/emoji composition in the middle; candidate/marked
+   rectangles and committed text must follow the caret. Cancel composition and undo/redo.
+   Newline inserts LF without scanning an oversized line for automatic indentation.
+3. Verify the large-document status hint and each **Large File: Enable … for This View**
+   palette command. Explicit re-enabling can perform expensive work; automatic policy should
+   remain active in another view. Viewport syntax can start approximate; a normal line after
+   an oversized comment/string must receive repaired scopes without the scene thread parsing it.
+4. In the binary, verify 16 hex bytes plus ASCII per row. Ctrl+G `0xee6b2800` goes to the
+   `END` tail. Select those three bytes: Copy gives `45 4e 44`, **Hex: Copy Text** gives `END`.
+   Try a partial final row, decimal offsets, malformed input and offsets beyond EOF. Editing,
+   IME commits and Save must be blocked. Select All then Copy must report the clipboard size
+   limit without trying a 4 GB allocation. Scroll with the scrollbar and trackpad. Modify a
+   disposable source externally; a fresh snapshot should appear without mapping faults.
+5. Close/restart with huge or binary tabs open, including a loading tab. Restore must use a
+   disk reference and worker loading, with the same save restrictions, rather than treating
+   the old prefix as a complete document. Verify ordinary small-file typing/scroll/IME still
+   behave as in previous rounds.

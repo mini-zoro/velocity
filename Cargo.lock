@@ -3026,6 +3026,7 @@ dependencies = [
  "tempfile",
  "vel-buffer",
  "vel-config",
+ "vel-largefile",
  "vel-text",
 ]
 
@@ -3332,6 +3333,7 @@ dependencies = [
  "vel-git",
  "vel-highlight",
  "vel-index",
+ "vel-largefile",
  "vel-minihtml",
  "vel-platform",
  "vel-render",

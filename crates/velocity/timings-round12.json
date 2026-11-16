@@ -1,0 +1,996 @@
+{
+  "schema": 1,
+  "baseline": "4e6a16a2a7b06b70bccaf02034bb1ff276bb44ba",
+  "normal_file_gate": {
+    "environment": {
+      "platform": "Darwin-25.1.0-arm64-arm-64bit-Mach-O",
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+      "head": "4e6a16a2a7b06b70bccaf02034bb1ff276bb44ba",
+      "binary_sha256": {
+        "before": "09dcac292f70ea6e7647634e39de887440e43f574772147b1f10d63fa28e2ecb",
+        "after": "715d9b3828baa5bf68aef2f0c7a10e3adee2281ee1afa221ac138848167828da"
+      },
+      "runner_sha256": "a1bec3b2f5f75d9304306ca2e927224db714da0f42688b107bff5ed753c49403",
+      "source_sha256": {
+        "crates/velocity/Cargo.toml": "5a34e6cecf754069862d6aa7063b89716b509858b22d712923bfcea8611a72e9",
+        "crates/velocity/fixtures/ime-and-unicode.rs": "3add7a3a5c0226a9364eaac488330f01c03a2f60c3359ad9ada776a77cd9d60e",
+        "crates/velocity/fixtures/intel-project/main.rs": "0c4107310579a9ffa9e92c5e14d7a5cb7f3566d60829cd74b3084b82a57ddc0d",
+        "crates/velocity/fixtures/intel-project/tools.rs": "7c1a210b8711835bab6abf40a4adeb3b8c267fa7799c336679f57240c21c475e",
+        "crates/velocity/fixtures/sample.rs": "de31f5b15550e996e62e3a992464c56758264dc6962e1402d0bceb328015457d",
+        "crates/velocity/resources/Packages/Default/Distraction Free.sublime-settings": "9159180c0c03d13239950469594f01fdbe8fedb44a22891883fabedf72455e63",
+        "crates/velocity/resources/Packages/Default/Preferences (OSX).sublime-settings": "ae804c38533d264e6ee3b4f0fadf27a24634c9368225408f7e737b7ad612c36a",
+        "crates/velocity/resources/Packages/Default/Preferences.sublime-settings": "3e0fc08ee4955d379cf0b8e310976efab90839543dcd7652d48bee6035a61758",
+        "crates/velocity/resources/Packages/Default/Velocity Vintage.sublime-keymap": "66dec1c6c76df573eca447bef977efca169c96e4a9320d11d4581f368cb1ebdc",
+        "crates/velocity/resources/Packages/Default/Velocity.sublime-commands": "f8b8c96d8bffb798b9ea165509c2b1b1d837c35d98ffbcc54ec1e979cae39af5",
+        "crates/velocity/resources/Packages/Default/Velocity.sublime-keymap": "8a74d65883fbc0d106e140304ca8d495669a97fc99431dd5a11b67a46ee157c6",
+        "crates/velocity/src/annotation_commands.rs": "7fdf2bfb96950d6d9d885677e6ae655135ebfe3a2a92299bac0c90154bdd80e8",
+        "crates/velocity/src/annotations.rs": "de317249a3704cc7d630769759d4f16090aaf527daabcffbb28c090300fca170",
+        "crates/velocity/src/app.rs": "e558acd7a164c2727d517712772ea850e74a1ee169ca0920d44f12ed88f5d45f",
+        "crates/velocity/src/bench.rs": "b1d3378b13015f18e39be3de224fa602d6b65381cdeefb852b20ddea846c4e04",
+        "crates/velocity/src/binary.rs": "0f6f87781f6632b675b0597c4e7218bcf1a49f46896079a808e04f674d983082",
+        "crates/velocity/src/build.rs": "2455c8a379d39446a9fae353ea77fc472cba0085ba9da3495c4b604b6b8cc4a7",
+        "crates/velocity/src/cli.rs": "17a48cec4d0352a0f8633b5fcf00b80abd06dc09934d16ed8fdf0da8f15be85f",
+        "crates/velocity/src/completion.rs": "fc0a1893098ba1f416ae218ac62f6421baf09f848aaea7b154d364fbf5ad3a10",
+        "crates/velocity/src/editing.rs": "5859ef5f12d7700c33f83362578e12bba07442324c78d2f46e82191efd0f7d8c",
+        "crates/velocity/src/editor.rs": "e277cd9d2643667ad476b101d990a5f13e291030d9b5fbebae5bd018c3422f86",
+        "crates/velocity/src/feature_bench.rs": "736bf175c298564d3b7b87f16e3c767ccfb9e3b1deb15f904aadddc96b066536",
+        "crates/velocity/src/feature_tests.rs": "86818985208956d0d3cc0ed5b4d6c399a0689a7e29a9e41458f4d42cbebddea1",
+        "crates/velocity/src/git_ui.rs": "d34b4bc47d7cbd9f0796760e4b8320477077e35b1b23873e5273a85a05d4e876",
+        "crates/velocity/src/html_ui.rs": "d20c990c81dcef47e1614a1d5058fae9db2536136301abee2a90f1b36d8cb122",
+        "crates/velocity/src/instance.rs": "b5c3d632907d5dcfef686a136bb686bcd5e54e879f08f2474614395fdca24e78",
+        "crates/velocity/src/intelligence.rs": "f2e078889890fce54a13c89a9d913f2da60e26e3d0b80eb1f712768eaf8a3f8b",
+        "crates/velocity/src/intelligence_bench.rs": "9bd017c90eb80c297e3e5f9942368e79510e5883c7e6583cbb9569df80ea0339",
+        "crates/velocity/src/language.rs": "96b120514bab987f8877ecf30f9006db1ebc82d492b80083e3499d176a2ec097",
+        "crates/velocity/src/large.rs": "691540295fa5d5eb972126f603d2af72ed9aa4087d2979d7c70ea3cc376282dd",
+        "crates/velocity/src/large_bench.rs": "53586b1f1d00b69ed9d8d71d1946a7820f84ab9149a392b6ec6fb4d43e166432",
+        "crates/velocity/src/large_tests.rs": "10901e585e70df33f3971b98db9503e004cb004130f0539fc4cb427c7bce5897",
+        "crates/velocity/src/layout.rs": "f1738f857c6bb60d3b8d5451a2a3a94831fce8a76c766b958c20f244909fdfb9",
+        "crates/velocity/src/lexer.rs": "2a9c0b826e86ab6cadd353d21221556e4951167451b4a98e1cc619f76e3c0cd5",
+        "crates/velocity/src/main.rs": "4e7eaf3143474dc853508abc3b4f62abbcf1ea4524d3a90e9f2fb74facab5f95",
+        "crates/velocity/src/panels.rs": "6a9b838e96844fba6df356a93c365db64b73a2a60fd37584963bb403cc418a5a",
+        "crates/velocity/src/parse_bench.rs": "26676c222d82a6c1769dbd3ae0a10475d13a7fe59d4e91c452b847da8c3f50c0",
+        "crates/velocity/src/report.rs": "5bc84a67d5356e7961c27763f169dc9b749aafe6b3d0f44e16f41b6298bec72a",
+        "crates/velocity/src/review_bench.rs": "50fca784d197febb6208c7ace98dc78b88df3039c6e4e4a4e5d60065008392d3",
+        "crates/velocity/src/review_tests.rs": "da8f8e26e54e69c3e2bde43e197bd120fffa60ed2a8ea5d5d2966915cd89f835",
+        "crates/velocity/src/review_ui.rs": "fd4bb0f2d5f014372e1e988a6412e3d25aa7a6d3cf288638eea46e8045e6ff4b",
+        "crates/velocity/src/session.rs": "ab7379d209c1b0730848cced9a41e04e4655ad9b54b926cc6220484e7aebe493",
+        "crates/velocity/src/stats.rs": "c7cbefc1f73b3f8ee49b3e7356e186cea76c716b49c352cac3e5928318512304",
+        "crates/velocity/src/theme_bench.rs": "566a1ef22d32329b6f58f4f469de9e85a6dafd585a302ad8e47989723d6303a7",
+        "crates/velocity/src/theme_tests.rs": "51f05e0303b1464f84afffbea0d4d35501b684d784de51c6e004342265cefeee",
+        "crates/velocity/src/theme_ui.rs": "5ae0a825df8c7d80a915514b2be66c04c313685d293f3a5274c3941d2ea0edec",
+        "crates/velocity/src/user_grammar_tests.rs": "8d33a53bca37391fe8105da6b3549f753ada353f92e7fc6c2e179312b605715f",
+        "crates/velocity/src/view.rs": "8f5abeb0fb4bea4ea949b5b6656ff62ca271c25bf1949291177f51b6bf33fba4",
+        "crates/velocity/src/vintage.rs": "c7ad62a123a12fdea0b783a49af480e9e0c4461b5cb947ee7d98aacb296dabfc",
+        "crates/velocity/src/vintage_tests.rs": "beec65cb40ca5110b77539e3c5edfbf07a35d1799f5dfc43f84fa9ae0c6dd844",
+        "crates/velocity/src/workbench.rs": "eed2c679316dab57919fa18049f3457abcf1ea3da78dc954957a1636c09b9bc6",
+        "crates/velocity/src/workbench_bench.rs": "7e7169492073fc28e17c4a91a04faa650c19cbf002b348a58b57b1ed0705a021",
+        "crates/velocity/src/workbench_tests.rs": "0d52f192304270efb0eb055609c259fae47b1d6db6248f7d7b8734d59af11166",
+        "crates/velocity/src/workspace.rs": "687ecc1720d02a9fb395babd5eea9b256f60d00a80542e5586404795d92469cd",
+        "crates/vel-fileio/Cargo.toml": "62ce95f34d0a60d1b8387f712eacd599d9d924c92bbd477832f1d9fc09a69493",
+        "crates/vel-fileio/examples/load_bench.rs": "0d07cb194dea42dbc24b2be6281a8b92ea30e4706606f8c4bc21fefe7ab4b53b",
+        "crates/vel-fileio/src/lib.rs": "b9574bafaa98df00b2ed68e5aec2882e5c45acc7cf76f5d6dd1988feab2085a0",
+        "crates/vel-fileio/src/progressive.rs": "4eb4c3c621989fc871866494eb6dcded0c14e37fc5b511bcb5e30d0e60cae0d1",
+        "crates/vel-fileio/tests/io.rs": "92f55650b99ad464ed745fd451498eba13b6b035a944faaef3c0c182103c1c28"
+      },
+      "cargo_lock_sha256": "eaf546c8221f866bc87ef267973dd289b85109c05dd92a64bd78baad9447d72f",
+      "fixture_sha256": "d5f3d0c59a12ba34446e540cfd7b5e1a3eab6c03176f3aff048281f12e031380",
+      "schedule": "AB, BA repeated; independent processes; one process at a time; no concurrent compilation/tests",
+      "confidence": "20,000 paired process bootstrap resamples, seed 12; both p50 CI upper bounds <=1.05",
+      "gui_started": false,
+      "gpu_started": false
+    },
+    "pairs": 10,
+    "typing": {
+      "p50": {
+        "before_ms": 0.409427,
+        "after_ms": 0.37365625,
+        "paired_change_percent": -8.720202298889902,
+        "paired_ratio_ci95": [
+          0.8970940273025455,
+          0.9206580156752938
+        ],
+        "ratio_of_medians": 0.9126321664179452,
+        "ratio_of_medians_ci95": [
+          0.9047424810675683,
+          0.9210097944037746
+        ],
+        "pairs": [
+          [
+            0.4094375,
+            0.37720899999999996
+          ],
+          [
+            0.406229,
+            0.36802100000000004
+          ],
+          [
+            0.405771,
+            0.370583
+          ],
+          [
+            0.4096255,
+            0.37712500000000004
+          ],
+          [
+            0.4190835,
+            0.3718125
+          ],
+          [
+            0.407917,
+            0.37606249999999997
+          ],
+          [
+            0.409875,
+            0.3755
+          ],
+          [
+            0.40941649999999996,
+            0.37041650000000004
+          ],
+          [
+            0.40639650000000005,
+            0.360979
+          ],
+          [
+            0.4129375,
+            0.376729
+          ]
+        ]
+      },
+      "p95": {
+        "before_ms": 0.4410299,
+        "after_ms": 0.4118339,
+        "paired_change_percent": -6.434758404717956,
+        "paired_ratio_ci95": [
+          0.921596931716485,
+          0.9407000529344032
+        ],
+        "ratio_of_medians": 0.9338004067297931,
+        "ratio_of_medians_ci95": [
+          0.921596931716485,
+          0.9407000529344032
+        ],
+        "pairs": [
+          [
+            0.4400146,
+            0.41156395
+          ],
+          [
+            0.4420452,
+            0.4073875
+          ],
+          [
+            0.42837915,
+            0.40488094999999996
+          ],
+          [
+            0.44992085,
+            0.4165021
+          ],
+          [
+            0.46208954999999996,
+            0.4149622
+          ],
+          [
+            0.43978959999999995,
+            0.41371009999999997
+          ],
+          [
+            0.4438958499999999,
+            0.4158455
+          ],
+          [
+            0.4436292,
+            0.40829374999999996
+          ],
+          [
+            0.43500415,
+            0.4071479
+          ],
+          [
+            0.4367143,
+            0.41210384999999994
+          ]
+        ]
+      },
+      "p50_ci_upper_within_5_percent": true
+    },
+    "scroll": {
+      "p50": {
+        "before_ms": 0.38569824999999996,
+        "after_ms": 0.34037525,
+        "paired_change_percent": -12.159906815853795,
+        "paired_ratio_ci95": [
+          0.864183930965191,
+          0.9061999671646693
+        ],
+        "ratio_of_medians": 0.8824910405997436,
+        "ratio_of_medians_ci95": [
+          0.86318114734587,
+          0.9037601040687782
+        ],
+        "pairs": [
+          [
+            0.37804150000000003,
+            0.3330835
+          ],
+          [
+            0.38716699999999993,
+            0.33458350000000003
+          ],
+          [
+            0.389417,
+            0.340792
+          ],
+          [
+            0.3756665,
+            0.3428545
+          ],
+          [
+            0.38068749999999996,
+            0.34497900000000004
+          ],
+          [
+            0.39827049999999997,
+            0.3399585
+          ],
+          [
+            0.3994585,
+            0.3381665
+          ],
+          [
+            0.38968749999999996,
+            0.34372899999999995
+          ],
+          [
+            0.3842295,
+            0.3364795
+          ],
+          [
+            0.37354149999999997,
+            0.34116650000000004
+          ]
+        ]
+      },
+      "p95": {
+        "before_ms": 0.5038199499999998,
+        "after_ms": 0.4671685749999998,
+        "paired_change_percent": -7.486363829409692,
+        "paired_ratio_ci95": [
+          0.8941062543734338,
+          0.9346751643326789
+        ],
+        "ratio_of_medians": 0.927253029579317,
+        "ratio_of_medians_ci95": [
+          0.8941287562741475,
+          0.9410279861852597
+        ],
+        "pairs": [
+          [
+            0.50056905,
+            0.43770029999999993
+          ],
+          [
+            0.4845193999999998,
+            0.44902469999999994
+          ],
+          [
+            0.5172249999999999,
+            0.4799874999999999
+          ],
+          [
+            0.49666104999999977,
+            0.46752944999999985
+          ],
+          [
+            0.5054601,
+            0.46680769999999977
+          ],
+          [
+            0.5021797999999997,
+            0.4490020999999999
+          ],
+          [
+            0.5169767999999999,
+            0.4807101
+          ],
+          [
+            0.5122958499999998,
+            0.4711941
+          ],
+          [
+            0.5113472999999996,
+            0.4571055999999999
+          ],
+          [
+            0.501467,
+            0.47565209999999997
+          ]
+        ]
+      },
+      "p50_ci_upper_within_5_percent": true
+    },
+    "passed": true
+  },
+  "features": {
+    "environment": {
+      "platform": "Darwin-25.1.0-arm64-arm-64bit-Mach-O",
+      "binary_sha256": "715d9b3828baa5bf68aef2f0c7a10e3adee2281ee1afa221ac138848167828da",
+      "runner_sha256": "ac8e98b2e4f8785665cdb73b8b2ad32c1eb41034bf64dd6a94a118dfda5b8cf0",
+      "file": "/Users/zoro/dev/velocity/spikes/data/round12/log-4gb.log",
+      "source_bytes": 4000000000,
+      "schedule": "serial independent processes, no lane-A compilation/tests during measurement",
+      "boundary": "wall time for CPU editor/scene work; no native rendering, GPU or scanout; setup excluded",
+      "gui_started": false,
+      "gpu_started": false
+    },
+    "runs": 5,
+    "results": {
+      "large_file_prefix_scene": {
+        "process_values_ms": [
+          8.036332999999999,
+          7.333625,
+          7.347167,
+          7.035041,
+          7.935124999999999
+        ],
+        "median_ms": 7.347167,
+        "nearest_rank_p95_ms": 8.036332999999999,
+        "maximum_ms": 8.036332999999999,
+        "budget_ms": 100,
+        "all_observed_pass": true
+      },
+      "long_line_typing_scene": {
+        "process_values_ms": [
+          0.4203003,
+          0.40541605,
+          0.40625625,
+          0.4068771,
+          0.4075
+        ],
+        "median_ms": 0.4068771,
+        "nearest_rank_p95_ms": 0.4203003,
+        "maximum_ms": 0.4203003,
+        "budget_ms": 4,
+        "all_observed_pass": true
+      },
+      "long_line_horizontal_scene": {
+        "process_values_ms": [
+          0.022875,
+          0.022625000000000003,
+          0.022542,
+          0.023004149999999998,
+          0.022625000000000003
+        ],
+        "median_ms": 0.022625000000000003,
+        "nearest_rank_p95_ms": 0.023004149999999998,
+        "maximum_ms": 0.023004149999999998,
+        "budget_ms": 2,
+        "all_observed_pass": true
+      },
+      "binary_4gb_scene": {
+        "process_values_ms": [
+          0.10457534999999997,
+          0.1025893,
+          0.10121314999999999,
+          0.1018548,
+          0.09912705
+        ],
+        "median_ms": 0.1018548,
+        "nearest_rank_p95_ms": 0.10457534999999997,
+        "maximum_ms": 0.10457534999999997,
+        "budget_ms": null,
+        "all_observed_pass": true
+      }
+    },
+    "records": [
+      {
+        "large_file_prefix_scene": {
+          "boundary": "Workspace::open -> poll -> first nonempty CPU scene; no native pixels",
+          "budget_ms": 100,
+          "elapsed_ms": 8.036332999999999,
+          "kind": "large_file_prefix_scene",
+          "loaded_bytes": 2097152,
+          "loading": true,
+          "logged_main_ms": 1002.4066250000001,
+          "mode": "headless-large-files",
+          "pid": 87580,
+          "read_only": true,
+          "run_id": "1794756981931320-87580",
+          "schema": 1,
+          "source_bytes": 4000000000
+        },
+        "long_line_typing_scene": {
+          "boundary": "TextInput -> registry/Buffer transaction -> update_after_edit -> reveal -> CPU Scene; setup excluded",
+          "budget_p95_ms": 4,
+          "bytes": 50000000,
+          "kind": "long_line_typing_scene",
+          "logged_main_ms": 2136.751541,
+          "mode": "headless-large-files",
+          "pid": 87580,
+          "run_id": "1794756981931320-87580",
+          "samples": 500,
+          "schema": 1,
+          "stats_ms": {
+            "count": 500,
+            "max": 0.911792,
+            "mean": 0.39066542600000026,
+            "p50": 0.38339599999999996,
+            "p95": 0.4203003,
+            "p99": 0.81402634
+          }
+        },
+        "long_line_horizontal_scene": {
+          "budget_p95_ms": 2,
+          "kind": "long_line_horizontal_scene",
+          "logged_main_ms": 2150.401,
+          "mode": "headless-large-files",
+          "pid": 87580,
+          "run_id": "1794756981931320-87580",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.032417,
+            "mean": 0.022577216666666587,
+            "p50": 0.022500000000000003,
+            "p95": 0.022875,
+            "p99": 0.02416783
+          }
+        },
+        "binary_4gb_scene": {
+          "boundary": "offset navigation -> reveal -> 16-byte HexView rows -> CPU scene; private snapshot setup excluded",
+          "kind": "binary_4gb_scene",
+          "logged_main_ms": 2216.381791,
+          "mode": "headless-large-files",
+          "pid": 87580,
+          "read_only": true,
+          "run_id": "1794756981931320-87580",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 1.1026250000000002,
+            "mean": 0.10058270000000004,
+            "p50": 0.093542,
+            "p95": 0.10457534999999997,
+            "p99": 0.17455616999999998
+          },
+          "tail_copy": "45 4e 44"
+        }
+      },
+      {
+        "large_file_prefix_scene": {
+          "boundary": "Workspace::open -> poll -> first nonempty CPU scene; no native pixels",
+          "budget_ms": 100,
+          "elapsed_ms": 7.333625,
+          "kind": "large_file_prefix_scene",
+          "loaded_bytes": 2097152,
+          "loading": true,
+          "logged_main_ms": 937.771709,
+          "mode": "headless-large-files",
+          "pid": 87585,
+          "read_only": true,
+          "run_id": "1794756984174431-87585",
+          "schema": 1,
+          "source_bytes": 4000000000
+        },
+        "long_line_typing_scene": {
+          "boundary": "TextInput -> registry/Buffer transaction -> update_after_edit -> reveal -> CPU Scene; setup excluded",
+          "budget_p95_ms": 4,
+          "bytes": 50000000,
+          "kind": "long_line_typing_scene",
+          "logged_main_ms": 2044.6915,
+          "mode": "headless-large-files",
+          "pid": 87585,
+          "run_id": "1794756984174431-87585",
+          "samples": 500,
+          "schema": 1,
+          "stats_ms": {
+            "count": 500,
+            "max": 0.43025,
+            "mean": 0.37089048800000013,
+            "p50": 0.3710835,
+            "p95": 0.40541605,
+            "p99": 0.41234884
+          }
+        },
+        "long_line_horizontal_scene": {
+          "budget_p95_ms": 2,
+          "kind": "long_line_horizontal_scene",
+          "logged_main_ms": 2058.261334,
+          "mode": "headless-large-files",
+          "pid": 87585,
+          "run_id": "1794756984174431-87585",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.036958,
+            "mean": 0.022469581666666794,
+            "p50": 0.022416000000000002,
+            "p95": 0.022625000000000003,
+            "p99": 0.023251249999999998
+          }
+        },
+        "binary_4gb_scene": {
+          "boundary": "offset navigation -> reveal -> 16-byte HexView rows -> CPU scene; private snapshot setup excluded",
+          "kind": "binary_4gb_scene",
+          "logged_main_ms": 2125.737459,
+          "mode": "headless-large-files",
+          "pid": 87585,
+          "read_only": true,
+          "run_id": "1794756984174431-87585",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 1.446208,
+            "mean": 0.10265444499999983,
+            "p50": 0.095541,
+            "p95": 0.1025893,
+            "p99": 0.12480666999999926
+          },
+          "tail_copy": "45 4e 44"
+        }
+      },
+      {
+        "large_file_prefix_scene": {
+          "boundary": "Workspace::open -> poll -> first nonempty CPU scene; no native pixels",
+          "budget_ms": 100,
+          "elapsed_ms": 7.347167,
+          "kind": "large_file_prefix_scene",
+          "loaded_bytes": 2097152,
+          "loading": true,
+          "logged_main_ms": 949.842709,
+          "mode": "headless-large-files",
+          "pid": 87586,
+          "read_only": true,
+          "run_id": "1794756986323686-87586",
+          "schema": 1,
+          "source_bytes": 4000000000
+        },
+        "long_line_typing_scene": {
+          "boundary": "TextInput -> registry/Buffer transaction -> update_after_edit -> reveal -> CPU Scene; setup excluded",
+          "budget_p95_ms": 4,
+          "bytes": 50000000,
+          "kind": "long_line_typing_scene",
+          "logged_main_ms": 2058.342834,
+          "mode": "headless-large-files",
+          "pid": 87586,
+          "run_id": "1794756986323686-87586",
+          "samples": 500,
+          "schema": 1,
+          "stats_ms": {
+            "count": 500,
+            "max": 0.8410839999999999,
+            "mean": 0.3730193580000002,
+            "p50": 0.3707705,
+            "p95": 0.40625625,
+            "p99": 0.41818908
+          }
+        },
+        "long_line_horizontal_scene": {
+          "budget_p95_ms": 2,
+          "kind": "long_line_horizontal_scene",
+          "logged_main_ms": 2071.730459,
+          "mode": "headless-large-files",
+          "pid": 87586,
+          "run_id": "1794756986323686-87586",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.028458,
+            "mean": 0.022173601666666754,
+            "p50": 0.022333000000000002,
+            "p95": 0.022542,
+            "p99": 0.02304283
+          }
+        },
+        "binary_4gb_scene": {
+          "boundary": "offset navigation -> reveal -> 16-byte HexView rows -> CPU scene; private snapshot setup excluded",
+          "kind": "binary_4gb_scene",
+          "logged_main_ms": 2135.789709,
+          "mode": "headless-large-files",
+          "pid": 87586,
+          "read_only": true,
+          "run_id": "1794756986323686-87586",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.667416,
+            "mean": 0.09755326999999987,
+            "p50": 0.094584,
+            "p95": 0.10121314999999999,
+            "p99": 0.12719475999999996
+          },
+          "tail_copy": "45 4e 44"
+        }
+      },
+      {
+        "large_file_prefix_scene": {
+          "boundary": "Workspace::open -> poll -> first nonempty CPU scene; no native pixels",
+          "budget_ms": 100,
+          "elapsed_ms": 7.035041,
+          "kind": "large_file_prefix_scene",
+          "loaded_bytes": 2097152,
+          "loading": true,
+          "logged_main_ms": 960.677833,
+          "mode": "headless-large-files",
+          "pid": 87589,
+          "read_only": true,
+          "run_id": "1794756988509828-87589",
+          "schema": 1,
+          "source_bytes": 4000000000
+        },
+        "long_line_typing_scene": {
+          "boundary": "TextInput -> registry/Buffer transaction -> update_after_edit -> reveal -> CPU Scene; setup excluded",
+          "budget_p95_ms": 4,
+          "bytes": 50000000,
+          "kind": "long_line_typing_scene",
+          "logged_main_ms": 2064.3828750000002,
+          "mode": "headless-large-files",
+          "pid": 87589,
+          "run_id": "1794756988509828-87589",
+          "samples": 500,
+          "schema": 1,
+          "stats_ms": {
+            "count": 500,
+            "max": 0.435958,
+            "mean": 0.371651886,
+            "p50": 0.3717705,
+            "p95": 0.4068771,
+            "p99": 0.41448342
+          }
+        },
+        "long_line_horizontal_scene": {
+          "budget_p95_ms": 2,
+          "kind": "long_line_horizontal_scene",
+          "logged_main_ms": 2077.755292,
+          "mode": "headless-large-files",
+          "pid": 87589,
+          "run_id": "1794756988509828-87589",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.042583,
+            "mean": 0.022133310000000003,
+            "p50": 0.021792000000000002,
+            "p95": 0.023004149999999998,
+            "p99": 0.027805589999999988
+          }
+        },
+        "binary_4gb_scene": {
+          "boundary": "offset navigation -> reveal -> 16-byte HexView rows -> CPU scene; private snapshot setup excluded",
+          "kind": "binary_4gb_scene",
+          "logged_main_ms": 2140.7964169999996,
+          "mode": "headless-large-files",
+          "pid": 87589,
+          "read_only": true,
+          "run_id": "1794756988509828-87589",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.2495,
+            "mean": 0.09636247666666654,
+            "p50": 0.09425,
+            "p95": 0.1018548,
+            "p99": 0.13556724999999975
+          },
+          "tail_copy": "45 4e 44"
+        }
+      },
+      {
+        "large_file_prefix_scene": {
+          "boundary": "Workspace::open -> poll -> first nonempty CPU scene; no native pixels",
+          "budget_ms": 100,
+          "elapsed_ms": 7.935124999999999,
+          "kind": "large_file_prefix_scene",
+          "loaded_bytes": 2097152,
+          "loading": true,
+          "logged_main_ms": 930.948875,
+          "mode": "headless-large-files",
+          "pid": 87592,
+          "read_only": true,
+          "run_id": "1794756990713199-87592",
+          "schema": 1,
+          "source_bytes": 4000000000
+        },
+        "long_line_typing_scene": {
+          "boundary": "TextInput -> registry/Buffer transaction -> update_after_edit -> reveal -> CPU Scene; setup excluded",
+          "budget_p95_ms": 4,
+          "bytes": 50000000,
+          "kind": "long_line_typing_scene",
+          "logged_main_ms": 2034.6752499999998,
+          "mode": "headless-large-files",
+          "pid": 87592,
+          "run_id": "1794756990713199-87592",
+          "samples": 500,
+          "schema": 1,
+          "stats_ms": {
+            "count": 500,
+            "max": 0.484208,
+            "mean": 0.37046166600000013,
+            "p50": 0.370271,
+            "p95": 0.4075,
+            "p99": 0.41325208
+          }
+        },
+        "long_line_horizontal_scene": {
+          "budget_p95_ms": 2,
+          "kind": "long_line_horizontal_scene",
+          "logged_main_ms": 2048.286916,
+          "mode": "headless-large-files",
+          "pid": 87592,
+          "run_id": "1794756990713199-87592",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.035250000000000004,
+            "mean": 0.022512311666666732,
+            "p50": 0.022458000000000002,
+            "p95": 0.022625000000000003,
+            "p99": 0.023378329999999996
+          }
+        },
+        "binary_4gb_scene": {
+          "boundary": "offset navigation -> reveal -> 16-byte HexView rows -> CPU scene; private snapshot setup excluded",
+          "kind": "binary_4gb_scene",
+          "logged_main_ms": 2110.585125,
+          "mode": "headless-large-files",
+          "pid": 87592,
+          "read_only": true,
+          "run_id": "1794756990713199-87592",
+          "samples": 600,
+          "schema": 1,
+          "stats_ms": {
+            "count": 600,
+            "max": 0.192416,
+            "mean": 0.09431075333333343,
+            "p50": 0.093083,
+            "p95": 0.09912705,
+            "p99": 0.10408566
+          },
+          "tail_copy": "45 4e 44"
+        }
+      }
+    ],
+    "passed": true
+  },
+  "validation": {
+    "baseline": "4e6a16a2a7b06b70bccaf02034bb1ff276bb44ba",
+    "tests_passed": 464,
+    "tests_failed": 0,
+    "tests_ignored": 0,
+    "commands": [
+      {
+        "command": "cargo fmt --all --check",
+        "exit_code": 0,
+        "log": null,
+        "sha256": null
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets -- -D warnings",
+        "exit_code": 0,
+        "log": "/tmp/velocity-round12/clippy-verified.log",
+        "sha256": "57d2f9881a66f910291fa6a50e49632d1d94bb47137187de9d17507598cd59a9"
+      },
+      {
+        "command": "cargo test --workspace --release",
+        "exit_code": 0,
+        "log": "/tmp/velocity-round12/tests-verified.log",
+        "sha256": "34ea7f199c0a7f80fe5db43b0b1ad7e778e3f3e1aacd3d34544a37ad9a843199"
+      },
+      {
+        "command": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps",
+        "exit_code": 0,
+        "log": "/tmp/velocity-round12/rustdoc-verified.log",
+        "sha256": "e3ca25cb452f1961caa435582bca73ff159c8a213c2621a71eb78d0b07dd1ea2"
+      }
+    ],
+    "gui_started": false,
+    "gpu_started": false,
+    "committed": false
+  },
+  "raw_observations": {
+    "normal": "round12-normal.jsonl",
+    "features": "round12-features.jsonl",
+    "full_logs_and_frozen_binaries": "/tmp/velocity-round12"
+  },
+  "experiments": {
+    "rejected_minimap_pilot": {
+      "status": "rejected pilot; stopped before final pair and before scroll suite",
+      "reason": "plain minimap fallback ran for ordinary documents with an empty minimap cache; corrected and measured separately",
+      "pairs": [
+        [
+          0.4664165,
+          1.7048125
+        ],
+        [
+          0.4093965,
+          1.687833
+        ],
+        [
+          0.41508350000000005,
+          1.684104
+        ],
+        [
+          0.41412499999999997,
+          1.6861875
+        ],
+        [
+          0.41187500000000005,
+          1.684021
+        ],
+        [
+          0.409104,
+          1.7
+        ],
+        [
+          0.4070835,
+          1.683667
+        ],
+        [
+          0.40829150000000003,
+          1.6850625
+        ],
+        [
+          0.41193749999999996,
+          1.691021
+        ]
+      ],
+      "paired_change_percent": 310.50426338947057
+    },
+    "component_profiles": {
+      "before": {
+        "command_ms": {
+          "count": 500,
+          "max": 0.15175,
+          "mean": 0.08671698599999995,
+          "p50": 0.079646,
+          "p95": 0.11496729999999998,
+          "p99": 0.12222925
+        },
+        "view_ms": {
+          "count": 500,
+          "max": 0.429459,
+          "mean": 0.2955670939999999,
+          "p50": 0.2936665,
+          "p95": 0.31208605,
+          "p99": 0.32383143
+        },
+        "chrome_ms": {
+          "count": 500,
+          "max": 0.041749999999999995,
+          "mean": 0.02534124999999997,
+          "p50": 0.025084,
+          "p95": 0.02754615,
+          "p99": 0.029061169999999983
+        },
+        "scene_profile": {
+          "frames": 11810,
+          "total_ms": [
+            17.478359999999842,
+            1370.8021770000169,
+            166.02394900000138,
+            4870.842463000022,
+            364.0936359999969,
+            6.234715999999967,
+            2.165264999999943,
+            19.5734020000009,
+            7.14072499999981
+          ]
+        },
+        "theme_cache_calls_misses": [
+          74,
+          26,
+          71
+        ]
+      },
+      "after": {
+        "command_ms": {
+          "count": 500,
+          "max": 0.148833,
+          "mean": 0.11101234999999979,
+          "p50": 0.11064550000000001,
+          "p95": 0.1257952,
+          "p99": 0.13117324
+        },
+        "view_ms": {
+          "count": 500,
+          "max": 1.959125,
+          "mean": 1.5513490700000017,
+          "p50": 1.5503330000000002,
+          "p95": 1.5666774,
+          "p99": 1.63239458
+        },
+        "chrome_ms": {
+          "count": 500,
+          "max": 0.040208,
+          "mean": 0.027565555999999984,
+          "p50": 0.027166,
+          "p95": 0.030421149999999997,
+          "p99": 0.035047419999999996
+        },
+        "scene_profile": {
+          "frames": 5892,
+          "total_ms": [
+            9.446971000000104,
+            554.3139500000038,
+            82.41321300000075,
+            2367.270627,
+            159.19126100000224,
+            8172.973451999993,
+            1.6942390000000196,
+            18.73331100000047,
+            5.3315540000000095
+          ]
+        },
+        "theme_cache_calls_misses": [
+          74,
+          26,
+          71
+        ]
+      },
+      "fixed": {
+        "command_ms": {
+          "count": 500,
+          "max": 0.149917,
+          "mean": 0.08673343799999995,
+          "p50": 0.079625,
+          "p95": 0.12025625,
+          "p99": 0.13538375
+        },
+        "view_ms": {
+          "count": 500,
+          "max": 0.369708,
+          "mean": 0.25986177999999976,
+          "p50": 0.25875,
+          "p95": 0.27417115,
+          "p99": 0.29253624999999994
+        },
+        "chrome_ms": {
+          "count": 500,
+          "max": 0.037208,
+          "mean": 0.02590414599999992,
+          "p50": 0.025457999999999998,
+          "p95": 0.028458,
+          "p99": 0.029835659999999996
+        },
+        "scene_profile": {
+          "frames": 12303,
+          "total_ms": [
+            17.86089999999981,
+            1248.8323680000249,
+            178.67260200000305,
+            5126.737869999989,
+            346.9296780000054,
+            6.168673000000043,
+            3.084227000000253,
+            18.770963000001114,
+            6.42274999999992
+          ]
+        },
+        "theme_cache_calls_misses": [
+          74,
+          26,
+          71
+        ]
+      }
+    }
+  },
+  "limits": [
+    "Headless wall time for CPU editor/scene paths; no native pixels, font shaping, GPU or scanout measured.",
+    "Index construction and binary snapshot creation excluded from edit/scroll timing.",
+    "Log is 4 GB real ASCII; binary is sparse with a checked END tail.",
+    "No cache flush. This lane stopped builds/tests during timing; external host load was not measured.",
+    "Five feature processes do not establish a hard latency bound or cold-disk behavior."
+  ],
+  "source_changes_since_binary_freeze": [],
+  "committed": false
+}

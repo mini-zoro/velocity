@@ -38,12 +38,119 @@ struct HighlightFrontend {
     latest: Arc<AtomicU64>,
 }
 impl HighlightFrontend {
+    fn viewport(
+        text: Text,
+        version: ChangeId,
+        assets: Arc<Assets>,
+        syntax: String,
+        scheme: Arc<ColorScheme>,
+        settings: &vel_config::settings::Settings,
+    ) -> Result<Self, String> {
+        let (tx, commands) = mpsc::channel();
+        let (results, rx) = mpsc::channel();
+        let (_scope_tx, scopes) = mpsc::channel();
+        let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ready = complete.clone();
+        let latest = Arc::new(AtomicU64::new(version.0));
+        let current = latest.clone();
+        let options = vel_highlight::ViewportOptions {
+            max_line_bytes: settings.usize("large_file.max_line_bytes", 16 * 1024),
+            max_viewport_lines: settings.usize("large_file.max_viewport_lines", 512),
+            max_lookback_lines: settings.usize("large_file.max_lookback_lines", 256),
+            checkpoint_interval: settings.usize("large_file.checkpoint_interval", 1024),
+            max_checkpoints: settings.usize("large_file.max_checkpoints", 128),
+        };
+        std::thread::Builder::new()
+            .name("velocity-viewport-highlight".into())
+            .spawn(move || {
+                let Some(reference) =
+                    vel_highlight::detect_syntax(&assets.syntaxes, "", "", Some(&syntax))
+                else {
+                    return;
+                };
+                let mut engine = vel_highlight::ViewportHighlighter::new(
+                    text,
+                    version,
+                    assets.syntaxes.clone(),
+                    reference,
+                    scheme,
+                    options,
+                );
+                let mut watched: Vec<Range<usize>> = Vec::new();
+                let mut refresh = true;
+                loop {
+                    match commands.recv_timeout(std::time::Duration::from_millis(16)) {
+                        Ok(HighlightCommand::Edit(text, version, changes, _)) => {
+                            if let Err(e) = engine.apply_change(text, version, &changes) {
+                                let _ = results.send(Err(e.to_string()));
+                            }
+                            refresh = true;
+                        }
+                        Ok(HighlightCommand::Scheme(scheme, _)) => {
+                            engine.set_color_scheme(scheme);
+                            refresh = true;
+                        }
+                        Ok(HighlightCommand::Request(version, lines))
+                            if version == engine.version() =>
+                        {
+                            watched = lines;
+                            refresh = true;
+                        }
+                        Ok(HighlightCommand::Request(..)) => {}
+                        Ok(HighlightCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    if engine.version().0 != current.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let before = engine.progress();
+                    if refresh {
+                        for lines in &watched {
+                            let batch = engine
+                                .request_lines(
+                                    engine.version(),
+                                    lines.clone(),
+                                    std::time::Duration::from_millis(2),
+                                )
+                                .map_err(|e| e.to_string());
+                            if results.send(batch).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    if !before.complete() {
+                        let result = if before.long_line.is_some() {
+                            engine.repair_long_line()
+                        } else {
+                            engine.advance(std::time::Duration::from_millis(2))
+                        };
+                        if let Err(e) = result {
+                            let _ = results.send(Err(e.to_string()));
+                        }
+                    }
+                    let after = engine.progress();
+                    ready.store(after.complete(), Ordering::Release);
+                    refresh = after.parsed_lines != before.parsed_lines;
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            tx,
+            rx,
+            scopes,
+            complete,
+            latest,
+        })
+    }
     fn new(
         engine: DocumentHighlighter,
         mut text: Text,
         mut scheme: Arc<ColorScheme>,
         mut tab: usize,
         analysis: mpsc::Sender<Job>,
+        indexing: bool,
     ) -> Result<Self, String> {
         let version = engine.version().0;
         let mut service = HighlightService::new(engine).map_err(|e| e.to_string())?;
@@ -126,12 +233,14 @@ impl HighlightFrontend {
                                 Ok(symbols) if symbols.complete => {
                                     let scopes = Arc::new(scopes);
                                     let _ = scope_tx.send(scopes.clone());
-                                    let _ = analysis.send(Job {
-                                        scopes,
-                                        symbols: Arc::new(symbols),
-                                        scheme: scheme.clone(),
-                                        tab,
-                                    });
+                                    if indexing {
+                                        let _ = analysis.send(Job {
+                                            scopes,
+                                            symbols: Arc::new(symbols),
+                                            scheme: scheme.clone(),
+                                            tab,
+                                        });
+                                    }
                                     published = true;
                                 }
                                 Err(e) => {
@@ -487,6 +596,8 @@ impl AnalysisTask {
 /// One instance per Buffer; split views borrow its results through RefCell.
 #[derive(Debug)]
 pub struct Language {
+    pub viewport_settings: u64,
+    pub policy: vel_largefile::FeaturePolicy,
     pub assets: Arc<Assets>,
     pub syntax: String,
     pub name: String,
@@ -508,13 +619,16 @@ pub struct Language {
 }
 pub type LanguageCell = std::rc::Rc<RefCell<Option<Language>>>;
 impl Language {
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_policy(
         assets: Arc<Assets>,
         syntax: &str,
         text: Text,
         version: ChangeId,
         scheme: Arc<ColorScheme>,
         tab: usize,
+        policy: vel_largefile::FeaturePolicy,
+        settings: &vel_config::settings::Settings,
     ) -> Result<Self, String> {
         let reference = vel_highlight::detect_syntax(&assets.syntaxes, "", "", Some(syntax))
             .ok_or_else(|| format!("unknown syntax {syntax}"))?;
@@ -522,21 +636,35 @@ impl Language {
         let name = reference.name.clone();
         let root = reference.scope;
         let task = AnalysisTask::new(version)?;
-        let service = HighlightFrontend::new(
-            DocumentHighlighter::new(
+        let service = if policy.highlighting == vel_largefile::HighlightMode::Viewport {
+            HighlightFrontend::viewport(
                 text.clone(),
                 version,
-                assets.syntaxes.clone(),
-                reference,
+                assets.clone(),
+                path.clone(),
                 scheme.clone(),
-            )
-            .with_metadata(assets.metadata.clone()),
-            text.clone(),
-            scheme.clone(),
-            tab,
-            task.tx.clone(),
-        )?;
+                settings,
+            )?
+        } else {
+            HighlightFrontend::new(
+                DocumentHighlighter::new(
+                    text.clone(),
+                    version,
+                    assets.syntaxes.clone(),
+                    reference,
+                    scheme.clone(),
+                )
+                .with_metadata(assets.metadata.clone()),
+                text.clone(),
+                scheme.clone(),
+                tab,
+                task.tx.clone(),
+                policy.indexing,
+            )?
+        };
         Ok(Self {
+            viewport_settings: settings.cache_identity(),
+            policy,
             assets,
             syntax: path,
             name,
@@ -753,11 +881,15 @@ impl Language {
         changed
     }
     pub fn ready(&self) -> bool {
+        if self.policy.highlighting == vel_largefile::HighlightMode::Viewport {
+            return !self.busy();
+        }
         self.scopes_ready()
-            && self
-                .analysis
-                .as_ref()
-                .is_some_and(|a| a.version == self.version)
+            && (!self.policy.indexing
+                || self
+                    .analysis
+                    .as_ref()
+                    .is_some_and(|a| a.version == self.version))
     }
     pub fn scopes_ready(&self) -> bool {
         self.scopes.as_ref().is_some_and(|s| {
@@ -780,6 +912,13 @@ impl Language {
             .cloned()
     }
     pub fn busy(&self) -> bool {
+        if self.policy.highlighting == vel_largefile::HighlightMode::Viewport {
+            return self.requested.as_ref().is_some_and(|(_, _, ranges)| {
+                ranges
+                    .iter()
+                    .any(|r| r.clone().any(|row| !self.styled.contains_key(&row)))
+            });
+        }
         !self.ready()
             || !self.highlight_complete()
             || self.requested.as_ref().is_some_and(|(_, _, ranges)| {
@@ -1176,7 +1315,8 @@ pub fn detect_indentation(text: &Text) -> Option<(usize, bool)> {
     let mut deltas = BTreeMap::<usize, usize>::new();
     let mut previous = 0;
     for line in text.lines().take(1000) {
-        let line = line.to_string();
+        let end = line.floor_char_boundary(line.len_bytes().min(8192));
+        let line = line.slice(0..end).to_string();
         if line.trim().is_empty() {
             continue;
         }

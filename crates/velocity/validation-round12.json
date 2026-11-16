@@ -1,0 +1,35 @@
+{
+  "baseline": "4e6a16a2a7b06b70bccaf02034bb1ff276bb44ba",
+  "tests_passed": 464,
+  "tests_failed": 0,
+  "tests_ignored": 0,
+  "commands": [
+    {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0,
+      "log": null,
+      "sha256": null
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit_code": 0,
+      "log": "/tmp/velocity-round12/clippy-verified.log",
+      "sha256": "57d2f9881a66f910291fa6a50e49632d1d94bb47137187de9d17507598cd59a9"
+    },
+    {
+      "command": "cargo test --workspace --release",
+      "exit_code": 0,
+      "log": "/tmp/velocity-round12/tests-verified.log",
+      "sha256": "34ea7f199c0a7f80fe5db43b0b1ad7e778e3f3e1aacd3d34544a37ad9a843199"
+    },
+    {
+      "command": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps",
+      "exit_code": 0,
+      "log": "/tmp/velocity-round12/rustdoc-verified.log",
+      "sha256": "e3ca25cb452f1961caa435582bca73ff159c8a213c2621a71eb78d0b07dd1ea2"
+    }
+  ],
+  "gui_started": false,
+  "gpu_started": false,
+  "committed": false
+}

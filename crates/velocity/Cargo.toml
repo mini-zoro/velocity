@@ -25,6 +25,7 @@ vel-snippet = { path = "../vel-snippet" }
 vel-syntax = { path = "../vel-syntax" }
 vel-scope = { path = "../vel-scope" }
 vel-color-scheme = { path = "../vel-color-scheme" }
+vel-largefile = { path = "../vel-largefile" }
 vel-buffer = { path = "../vel-buffer" }
 vel-config = { path = "../vel-config" }
 vel-commands = { path = "../vel-commands" }

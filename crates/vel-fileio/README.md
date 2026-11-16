@@ -9,7 +9,15 @@ Ties choose LF, then CRLF. A leading UTF-8 U+FEFF byte sequence is interpreted a
 
 A streaming decoder feeds `vel_text::Text::from_reader`, including CR/UTF-8/UTF-16 boundary
 handling. `load_background` exposes byte progress and a terminal channel without UI dependencies.
-Velocity queues files above 64 MiB on this worker and shows a loading tab before completion.
+Velocity queues files at/above 64 MiB on this worker. UTF-8 uses `vel_largefile::stream_utf8`
+through a bounded CR/CRLF normalizer, publishing shared prefix snapshots from the first 2 MiB.
+`LoadTask::try_snapshot` is a nonblocking, coalescing mailbox; poll it before the terminal result.
+Prefixes are provisional and must remain read-only and unsavable. Closing/dropping a task cancels
+at the next read/build boundary without joining the UI thread. Encoding fallback clears the
+prefix before the existing full worker decoder retries; cancellation also covers that decoder.
+Progress counts source bytes, while the snapshot metrics describe normalized UTF-8. The final
+`Format` preserves BOM, encoding and majority source line endings. `content_kind` exposes the
+first-8-KiB/BOM heuristic so the editor can route binary files to a hex tab before decoding.
 
 `prepare_save` makes whitespace/final-newline cleanup one undoable buffer transaction and maps
 all selections. `ChangeTracker` retains the saved text/change identity and uses the buffer's

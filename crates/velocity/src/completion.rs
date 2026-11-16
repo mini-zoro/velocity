@@ -177,7 +177,7 @@ impl Completion {
         }
     }
     fn poll(&mut self, editor: &Editor) -> Result<bool, String> {
-        if editor.marked.is_some() {
+        if editor.marked.is_some() || !editor.features.indexing || editor.binary.is_some() {
             self.hide();
             return Ok(false);
         }

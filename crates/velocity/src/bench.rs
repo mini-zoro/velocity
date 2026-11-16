@@ -61,7 +61,7 @@ impl Bench {
                 >= match self.mode {
                     Mode::Scroll => SCROLL_FRAMES,
                     Mode::Typing => TYPING_INSERTIONS,
-                    Mode::Panels | Mode::ThemeUi => PANEL_ACTIONS,
+                    Mode::Panels | Mode::ThemeUi | Mode::LargeFiles => PANEL_ACTIONS,
                     Mode::Memory => self.positions.len(),
                     _ => 0,
                 }
