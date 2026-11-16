@@ -811,12 +811,6 @@ impl Editor {
             at,
         )]));
     }
-    pub fn add_caret(&mut self, at: usize) {
-        self.unmark();
-        let mut selection = self.buffer.view(self.id).sel().clone();
-        selection.add(Region::caret(self.text.floor_char_boundary(at)));
-        self.set_selection(selection);
-    }
     pub fn select_word(&mut self, at: usize) {
         self.set_caret(at, false);
         if self.text.line_len_bytes(self.text.byte_to_line(self.caret)) >= crate::large::LONG_LINE {

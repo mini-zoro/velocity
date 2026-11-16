@@ -7,6 +7,8 @@
   "line_numbers": true,
   "gutter": true,
   "draw_white_space": "none",
+  // Drag selected text with the mouse to move it; hold Option when releasing to copy.
+  "drag_text": true,
   "rulers": [],
   "ensure_newline_at_eof_on_save": false,
   "trim_trailing_white_space_on_save": false,

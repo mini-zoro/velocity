@@ -24,6 +24,7 @@ mod large_bench;
 #[cfg(test)]
 mod large_tests;
 mod layout;
+mod mouse_select;
 mod panels;
 mod parse_bench;
 mod release;

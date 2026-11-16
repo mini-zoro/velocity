@@ -55,8 +55,15 @@ pub struct App {
     group_bounds: Vec<Rect>,
     workbench_bounds: Rect,
     tab_hits: Vec<(u64, Rect)>,
+    /// Tab bar of each group and its largest scroll offset, for clicks on its empty part and
+    /// for clamping wheel scrolling.
+    tab_bars: Vec<(usize, Rect, f64)>,
     tab_close_hits: Vec<(u64, Rect)>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
+    /// Text selection gesture between a press in the text area and its release.
+    drag_select: Option<crate::mouse_select::DragSelect>,
+    /// Selected text being dragged to a new position.
+    drag_text: Option<crate::mouse_select::DragText>,
     builds: crate::build::Builds,
     normal_sidebar: bool,
     distraction_sidebar: Option<bool>,
@@ -152,8 +159,11 @@ impl App {
             group_bounds: Vec::new(),
             workbench_bounds: Rect::default(),
             tab_hits: Vec::new(),
+            tab_bars: Vec::new(),
             tab_close_hits: Vec::new(),
             dragging_splitter: None,
+            drag_select: None,
+            drag_text: None,
             builds: crate::build::Builds::default(),
             normal_sidebar: true,
             distraction_sidebar: None,
@@ -1072,6 +1082,7 @@ impl App {
         self.sheet_bounds.clear();
         self.group_bounds.clear();
         self.tab_hits.clear();
+        self.tab_bars.clear();
         self.tab_close_hits.clear();
         self.workspace
             .themes
@@ -1207,10 +1218,9 @@ impl App {
                 );
                 theme.surface(&mut chrome, &bar_style, bar, bar);
                 drop(theme);
-                let scroll = group.tab_scroll.clamp(
-                    0.,
-                    (group.sheets.len() as f64 * tab_width - bar.width).max(0.),
-                );
+                let max_scroll = (group.sheets.len() as f64 * tab_width - bar.width).max(0.);
+                self.tab_bars.push((group_index, bar, max_scroll));
+                let scroll = group.tab_scroll.clamp(0., max_scroll);
                 for (position, sheet) in group.sheets.iter().enumerate() {
                     let Some(index) = self.workspace.sheet_index(*sheet) else {
                         continue;
@@ -2132,7 +2142,12 @@ impl AppHandler for App {
                 .copied()
         {
             if let Some(index) = self.workspace.sheet_index(sheet) {
-                if self
+                if event.button == 2 {
+                    // Middle click closes the tab under the pointer, like Sublime.
+                    if self.can_close_many(w, &[index]) {
+                        let _ = self.workspace.close(index);
+                    }
+                } else if self
                     .tab_close_hits
                     .iter()
                     .any(|(id, rect)| *id == sheet && vel_ui::contains(*rect, event.position))
@@ -2170,6 +2185,22 @@ impl AppHandler for App {
                 }
                 self.changed(w, Instant::now(), false);
             }
+            return;
+        }
+        if event.kind == MouseKind::Down
+            && event.button == 0
+            && event.click_count == 2
+            && let Some(&(group, _, _)) = self
+                .tab_bars
+                .iter()
+                .find(|(_, bar, _)| vel_ui::contains(*bar, event.position))
+        {
+            // A double click on the empty part of a tab bar opens a new file in that group.
+            self.workspace.tabs[self.workspace.active].scroll =
+                (self.view.scroll_x, self.view.scroll_y);
+            self.workspace.workbench.active = group;
+            self.run_named(w, "new_file", &json!({}));
+            self.changed(w, Instant::now(), false);
             return;
         }
         if event.kind == MouseKind::Drag
@@ -2270,52 +2301,111 @@ impl AppHandler for App {
             self.run_named(w, &name, &args);
             return;
         }
-        if event.button != 0 {
+        // The middle button makes column selections, like ⌥ with the primary button.
+        let middle = event.button == 2;
+        if event.button != 0 && !middle {
             return;
         }
-        match self.view.pointer(
-            self.workspace.editor_mut(),
-            Point {
-                x: event.position.x - self.content.x,
-                y: event.position.y - self.content.y,
-            },
-            event.kind == MouseKind::Down,
-            event.kind == MouseKind::Drag,
-            event.kind == MouseKind::Up,
-        ) {
-            Ok(true) => {
-                self.changed(w, Instant::now(), false);
-                return;
+        let local = Point {
+            x: event.position.x - self.content.x,
+            y: event.position.y - self.content.y,
+        };
+        if !middle {
+            match self.view.pointer(
+                self.workspace.editor_mut(),
+                local,
+                event.kind == MouseKind::Down,
+                event.kind == MouseKind::Drag,
+                event.kind == MouseKind::Up,
+            ) {
+                Ok(true) => {
+                    self.changed(w, Instant::now(), false);
+                    return;
+                }
+                Err(e) => {
+                    self.show_error(w, &e);
+                    return;
+                }
+                _ => {}
             }
-            Err(e) => {
-                self.show_error(w, &e);
-                return;
-            }
-            _ => {}
         }
-        let at = self.view.hit_test(
-            self.workspace.editor(),
-            Point {
-                x: event.position.x - self.content.x,
-                y: event.position.y - self.content.y,
-            },
-        );
+        let at = self.view.hit_test(self.workspace.editor(), local);
+        if self.workspace.editor().binary.is_some() {
+            // The hex view keeps byte-granular selection.
+            match event.kind {
+                MouseKind::Down => self
+                    .workspace
+                    .editor_mut()
+                    .set_caret(at, event.modifiers.shift()),
+                MouseKind::Drag => self.workspace.editor_mut().set_caret(at, true),
+                MouseKind::Up | MouseKind::Move => {}
+            }
+            self.changed(w, Instant::now(), false);
+            return;
+        }
         match event.kind {
-            MouseKind::Down if event.click_count >= 3 => {
-                self.workspace.editor_mut().select_line(at)
+            MouseKind::Down => {
+                use crate::mouse_select::{Combine, DragSelect, Unit};
+                let m = event.modifiers;
+                // A click on the line numbers selects the line (fold buttons were handled above).
+                let numbers =
+                    !middle && local.x >= 0. && local.x < self.view.gutter(self.workspace.editor());
+                let unit = if event.click_count >= 3 || numbers {
+                    Unit::Line
+                } else if event.click_count == 2 {
+                    Unit::Word
+                } else {
+                    Unit::Char
+                };
+                let combine = match (m.command(), m.shift()) {
+                    (true, true) => Combine::Subtract,
+                    (true, false) => Combine::Add,
+                    _ => Combine::Replace,
+                };
+                self.drag_select = None;
+                self.drag_text = None;
+                if unit == Unit::Char
+                    && !middle
+                    && !(m.command() || m.shift() || m.option() || m.control())
+                {
+                    self.drag_text =
+                        crate::mouse_select::DragText::begin(self.workspace.editor(), local, at);
+                    if self.drag_text.is_some() {
+                        return;
+                    }
+                }
+                self.drag_select = Some(DragSelect::begin(
+                    &self.view,
+                    self.workspace.editor_mut(),
+                    local,
+                    at,
+                    unit,
+                    combine,
+                    m.shift() && !m.command(),
+                    middle || (m.option() && unit == Unit::Char),
+                ));
             }
-            MouseKind::Down if event.click_count == 2 => {
-                self.workspace.editor_mut().select_word(at)
+            MouseKind::Drag => {
+                if let Some(drag) = self.drag_text.as_mut() {
+                    drag.update(&mut self.view, self.workspace.editor(), local);
+                } else if let Some(drag) = self.drag_select.as_mut() {
+                    drag.update(&self.view, self.workspace.editor_mut(), local);
+                } else {
+                    return;
+                }
             }
-            MouseKind::Down if event.modifiers.command() => {
-                self.workspace.editor_mut().add_caret(at)
+            MouseKind::Up => {
+                self.drag_select = None;
+                if let Some(drag) = self.drag_text.take() {
+                    drag.finish(
+                        &mut self.view,
+                        self.workspace.editor_mut(),
+                        local,
+                        event.modifiers.option(),
+                    );
+                }
             }
-            MouseKind::Down => self
-                .workspace
-                .editor_mut()
-                .set_caret(at, event.modifiers.shift()),
-            MouseKind::Drag => self.workspace.editor_mut().set_caret(at, true),
-            MouseKind::Up | MouseKind::Move => {}
+            MouseKind::Move => {}
         }
         self.changed(w, Instant::now(), false);
     }
@@ -2334,10 +2424,14 @@ impl AppHandler for App {
                 && event.position.y < r.y + crate::view::TAB_HEIGHT
                 && vel_ui::contains(*r, event.position)
         }) {
+            let max = self
+                .tab_bars
+                .iter()
+                .find(|(g, _, _)| *g == group)
+                .map_or(f64::INFINITY, |(_, _, max)| *max);
+            let current = self.workspace.workbench.groups[group].tab_scroll.min(max);
             self.workspace.workbench.groups[group].tab_scroll =
-                (self.workspace.workbench.groups[group].tab_scroll
-                    - (event.delta_x + event.delta_y) * scale)
-                    .max(0.);
+                (current - (event.delta_x + event.delta_y) * scale).clamp(0., max);
             self.changed(w, Instant::now(), false);
             return;
         }
@@ -2426,6 +2520,17 @@ impl AppHandler for App {
             return Ok(());
         }
         let w = ctx.window;
+        if !w.is_focused() && (self.drag_select.is_some() || self.drag_text.is_some()) {
+            // No button release arrives after focus moves away mid-gesture.
+            self.drag_select = None;
+            self.drag_text = None;
+            self.view.drop_caret = None;
+        }
+        if let Some(drag) = self.drag_select.as_mut()
+            && drag.autoscroll(&mut self.view, self.workspace.editor_mut(), Instant::now())
+        {
+            self.changed(w, Instant::now(), false);
+        }
         let observations = w.take_presentations();
         if self.startup_done {
             for p in &observations {

@@ -61,6 +61,11 @@ pub struct View {
     pub minimap_drag: bool,
     pub gutter_hover: bool,
     pub tab_height: f64,
+    /// Drop position while dragging selected text (`drag_text`).
+    pub drop_caret: Option<usize>,
+    /// Widest line drawn so far for the shown buffer (cells), bounding horizontal scrolling;
+    /// `None` width once a windowed long line was drawn (no bound).
+    widest: (Option<vel_buffer::BufferId>, Option<usize>),
     scroll_bar: Rect,
     scroll_puck: Rect,
     scroll_bar_drag: bool,
@@ -296,6 +301,8 @@ impl View {
             focused: true,
             minimap_hover: false,
             minimap_drag: false,
+            widest: (None, Some(0)),
+            drop_caret: None,
             gutter_hover: false,
             tab_height: TAB_HEIGHT,
             scroll_bar: Rect::default(),
@@ -473,6 +480,35 @@ impl View {
             self.scroll_x = 0.;
         }
     }
+    /// Records the width of a drawn line for the horizontal scroll bound.
+    fn note_width(&mut self, e: &Editor, width: Option<usize>) {
+        if self.widest.0 != Some(e.buffer.id()) {
+            self.widest = (Some(e.buffer.id()), Some(0));
+        }
+        self.widest.1 = match (self.widest.1, width) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+    }
+    /// Largest horizontal scroll offset: the widest line seen (or the caret's line) fits at the
+    /// right edge, like Sublime; unbounded with word wrap off only after a windowed long line.
+    fn max_scroll_x(&mut self, e: &Editor) -> f64 {
+        let layout = e.layout.borrow();
+        if e.binary.is_some() || layout.wrapped() || layout.total() == 0 {
+            return if layout.wrapped() { 0. } else { f64::INFINITY };
+        }
+        let row = e.text.byte_to_line(e.caret);
+        let len = e.text.line_len_bytes(row);
+        let caret_line = (len < crate::large::LONG_LINE)
+            .then(|| layout.column(&e.text, e.text.line_to_byte(row) + len));
+        drop(layout);
+        self.note_width(e, caret_line);
+        let Some(widest) = self.widest.1 else {
+            return f64::INFINITY;
+        };
+        let visible = self.right(e) - self.gutter(e) - self.margin(e) * 2.;
+        (widest as f64 * self.cell + self.cell - visible).max(0.)
+    }
     pub fn clamp_scroll(&mut self, e: &Editor) {
         self.apply_style(e);
         let past = if e.preferences.scroll_past_end {
@@ -488,7 +524,8 @@ impl View {
                 + past)
                 .max(0.),
         );
-        self.scroll_x = self.scroll_x.max(0.);
+        let max_x = self.max_scroll_x(e);
+        self.scroll_x = self.scroll_x.min(max_x).max(0.);
     }
     pub fn scroll(&mut self, e: &Editor, x: f64, y: f64) {
         self.scrolled = Some(Instant::now());
@@ -684,9 +721,12 @@ impl View {
             self.clamp_scroll(e);
             return Ok(true);
         }
+        // Only the fold button column (right of the line numbers) toggles folds; a click on a
+        // line number selects that line.
         if down
             && self.gutter_hover
             && e.settings.bool("fold_buttons", true)
+            && point.x >= self.gutter(e) - 14.
             && point.y >= self.tab_height
         {
             let visual = ((point.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
@@ -968,6 +1008,7 @@ impl View {
             let (row, subrow) = layout.locate(visual);
             let segment = layout.segment(&e.text, row, subrow);
             if !layout.wrapped() && e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
+                self.note_width(e, None);
                 self.paint_long_line(e, row, visual, scheme, clip, &mut layer);
                 continue;
             }
@@ -1094,6 +1135,10 @@ impl View {
                 }
             }
             let display = self.line_units(&line, layout.hidden(row), e.preferences.tab_size);
+            if !layout.wrapped() {
+                let width = segment.indent + display.iter().map(|u| u.width).sum::<usize>();
+                self.note_width(e, Some(width));
+            }
             let inline_phantoms = layout.has_phantom_inline();
             let column_at = |byte: usize| {
                 if inline_phantoms {
@@ -1449,6 +1494,11 @@ impl View {
             if self.focused {
                 fill(&mut carets, caret, clip, color);
             }
+        }
+        if let Some(at) = self.drop_caret {
+            let mut caret = self.rect_at(e, at);
+            caret.width = 2.;
+            fill(&mut carets, caret, clip, global("caret"));
         }
         let mut minimap = Layer {
             minimap: true,
@@ -1928,6 +1978,45 @@ pub fn caret_alpha(style: &str, seconds: f64) -> f32 {
 mod tests {
     use super::*;
     use vel_text::Text;
+    #[test]
+    fn horizontal_scroll_stops_at_the_widest_line() {
+        let size = Size {
+            width: 400.,
+            height: 200.,
+        };
+        // Every line fits: a horizontal swipe must not move the text.
+        let mut e = Editor::new(Text::from("short\nlines\n"));
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "word_wrap",
+            vel_config::json!(false),
+        );
+        e.sync();
+        let mut v = View::new(size, 8., 12.);
+        v.scene(&e);
+        v.scroll(&e, 300., 0.);
+        assert_eq!(v.scroll_x, 0.);
+        // A 200-column line bounds the offset so its end reaches the right edge.
+        let long = format!("{}\nshort\n", "x".repeat(200));
+        let mut e = Editor::new(Text::from(long.as_str()));
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "word_wrap",
+            vel_config::json!(false),
+        );
+        e.sync();
+        let mut v = View::new(size, 8., 12.);
+        v.scene(&e);
+        v.scroll(&e, 10_000., 0.);
+        let visible = v.right(&e) - v.gutter(&e) - v.margin(&e) * 2.;
+        assert!(
+            (v.scroll_x - (201. * 8. - visible)).abs() < 0.01,
+            "{}",
+            v.scroll_x
+        );
+        v.scroll(&e, -20_000., 0.);
+        assert_eq!(v.scroll_x, 0.);
+    }
     #[test]
     fn utf16_geometry_hit_testing_scroll_and_retina_independence() {
         let mut e = Editor::new(Text::from("a🦀你\nnext"));
