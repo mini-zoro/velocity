@@ -1021,7 +1021,8 @@
     ],
     "command": "show_panel",
     "args": {
-      "panel": "find"
+      "panel": "find",
+      "toggle": true
     }
   },
   {
@@ -1030,7 +1031,8 @@
     ],
     "command": "show_panel",
     "args": {
-      "panel": "replace"
+      "panel": "replace",
+      "toggle": true
     }
   },
   {
@@ -1039,7 +1041,8 @@
     ],
     "command": "show_panel",
     "args": {
-      "panel": "incremental_find"
+      "panel": "incremental_find",
+      "toggle": true
     }
   },
   {
@@ -1048,7 +1051,8 @@
     ],
     "command": "show_panel",
     "args": {
-      "panel": "find_in_files"
+      "panel": "find_in_files",
+      "toggle": true
     }
   },
   {
@@ -1441,6 +1445,21 @@
     "context": [
       {
         "key": "has_next_field",
+        "operand": true
+      }
+    ]
+  },
+  {
+    "keys": [
+      "escape"
+    ],
+    "command": "hide_panel",
+    "args": {
+      "cancel": true
+    },
+    "context": [
+      {
+        "key": "panel_visible",
         "operand": true
       }
     ]

@@ -85,6 +85,9 @@ pub struct Editor {
     pub registry: Registry,
     pub keymap: Keymap,
     pub clipboard: String,
+    /// Window UI state mirrored for keymap contexts (`panel_visible`, `overlay_visible`).
+    pub ui_panel_visible: bool,
+    pub ui_overlay_visible: bool,
     pub actions: Vec<(String, Value)>,
     pub revision: u64,
 }
@@ -194,6 +197,8 @@ impl Editor {
             registry,
             keymap,
             clipboard: String::new(),
+            ui_panel_visible: false,
+            ui_overlay_visible: false,
             actions: Vec::new(),
             revision: 0,
         }
@@ -975,7 +980,8 @@ impl ContextProvider for EditorContext<'_> {
             "has_prev_field" => vec![json!(e.field_previous())],
             "has_next_field" => vec![json!(e.fields.as_ref().is_some_and(|s| s.has_next_field()))],
             "auto_complete_visible" => vec![json!(e.completion.visible())],
-            "overlay_visible" | "panel_visible" => vec![json!(false)],
+            "overlay_visible" => vec![json!(e.ui_overlay_visible)],
+            "panel_visible" => vec![json!(e.ui_panel_visible)],
             "is_recording_macro" => vec![json!(e.registry.is_recording())],
             _ => vec![],
         }

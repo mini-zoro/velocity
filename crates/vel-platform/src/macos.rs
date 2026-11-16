@@ -223,7 +223,24 @@ impl WindowHandle {
         }
     }
     /// Installs resource-defined menus, retaining the standard application menu.
+    /// Installs the application menu. Identical requests from the window that installed the
+    /// current menu are ignored: rebuilding NSMenu forces AppKit to relayout and redraw the
+    /// menu bar, which dominated main-thread time while background results streamed in.
     pub fn set_menu(&self, entries: &[MenuEntry]) {
+        let unchanged = INSTALLED_MENU.with(|installed| {
+            let mut installed = installed.borrow_mut();
+            if installed
+                .as_ref()
+                .is_some_and(|(owner, current)| *owner == self.0.id && current == entries)
+            {
+                return true;
+            }
+            *installed = Some((self.0.id, entries.to_vec()));
+            false
+        });
+        if unchanged {
+            return;
+        }
         let main = NSApplication::sharedApplication(self.0.mtm)
             .mainMenu()
             .expect("application menu");
@@ -400,7 +417,14 @@ enum Event {
     Accessibility(accessibility::Id, accessibility::Request),
     AccessibilityPreferences,
 }
+thread_local! {
+    /// Window that installed the current application menu, and the entries it installed.
+    static INSTALLED_MENU: RefCell<Option<(u64, Vec<MenuEntry>)>> = const { RefCell::new(None) };
+}
+static NEXT_HOST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 struct Host {
+    /// Unique for the process lifetime, unlike the Rc address.
+    id: u64,
     mtm: MainThreadMarker,
     app: RefCell<Option<Box<dyn AppHandler>>>,
     pending: RefCell<VecDeque<Event>>,
@@ -768,7 +792,7 @@ define_class!(
             if let Some(h) = self.ivars().host.upgrade() {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 h.dispatch(Event::Scroll(ScrollEvent { position: Point { x: p.x, y: p.y }, delta_x: e.scrollingDeltaX(), delta_y: e.scrollingDeltaY(), precise: e.hasPreciseScrollingDeltas(), phase: e.phase().0 as u64, momentum_phase: e.momentumPhase().0 as u64, modifiers: Modifiers(e.modifierFlags().0 as u64), timestamp: e.timestamp() }));
-                h.handle().invalidate_character_coordinates(); h.flush();
+                // Coalesced: the app requests a frame and the display link draws it at vsync.
             }
         }
         #[unsafe(method(undo:))] fn undo(&self, _sender: Option<&AnyObject>) { self.command(Command::Undo); }
@@ -863,7 +887,11 @@ impl EditorView {
                 modifiers: Modifiers(e.modifierFlags().0 as u64),
                 timestamp: e.timestamp(),
             }));
-            h.flush();
+            // Clicks draw immediately; moves and drags arrive faster than the display refreshes,
+            // so their frames are coalesced onto the display link.
+            if matches!(kind, MouseKind::Down | MouseKind::Up) {
+                h.flush();
+            }
         }
     }
 }
@@ -1260,6 +1288,7 @@ fn create_host(
         return Err("invalid window size".into());
     }
     let host = Rc::new(Host {
+        id: NEXT_HOST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         mtm,
         app: RefCell::new(Some(app)),
         pending: RefCell::new(VecDeque::new()),

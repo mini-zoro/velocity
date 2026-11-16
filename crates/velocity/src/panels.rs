@@ -26,6 +26,10 @@ use vel_ui::{
 
 pub const STATUS: f64 = 24.;
 const PANEL_ROW: f64 = 34.;
+/// Side of the find-panel close button, in points.
+const CLOSE_BUTTON: f64 = 22.;
+/// Retained widget id of the find-panel close button.
+const CLOSE_ID: u64 = 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
     Find,
@@ -551,7 +555,10 @@ impl Panels {
         {
             return Ok(Resolution::Unbound);
         }
-        let result = workspace.editor_mut().resolve_key(key);
+        let editor = workspace.editor_mut();
+        editor.ui_panel_visible = self.panel.is_some();
+        editor.ui_overlay_visible = self.overlay.is_some();
+        let result = editor.resolve_key(key);
         self.sync_vintage_prompt(workspace, viewport)?;
         Ok(result)
     }
@@ -983,6 +990,14 @@ impl Panels {
                 self.query_quick(workspace);
             }
             "show_panel" | "find_in_files" | "show_input_panel" | "show_output_panel" => {
+                if name == "show_panel"
+                    && args["toggle"].as_bool() == Some(true)
+                    && self.panel
+                        == Some(Self::panel_kind(args["panel"].as_str().unwrap_or("find")))
+                {
+                    self.close_panel();
+                    return Ok(true);
+                }
                 self.cancel_overlay(workspace);
                 let panel = args["panel"]
                     .as_str()
@@ -996,14 +1011,7 @@ impl Panels {
                 } else if name == "show_output_panel" {
                     Panel::Output
                 } else {
-                    match panel {
-                        "replace" => Panel::Replace,
-                        "incremental_find" => Panel::Incremental,
-                        "find_in_files" => Panel::Files,
-                        "find_results" => Panel::Results,
-                        "output.exec" => Panel::Output,
-                        _ => Panel::Find,
-                    }
+                    Self::panel_kind(panel)
                 });
                 self.side_focused = false;
                 self.panel_focused = true;
@@ -1125,6 +1133,42 @@ impl Panels {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+    /// Find-family panels show a close button; Escape and a toggling Cmd+F also close them.
+    fn find_panel_visible(&self) -> bool {
+        matches!(
+            self.panel,
+            Some(Panel::Find | Panel::Replace | Panel::Incremental | Panel::Files)
+        )
+    }
+    fn close_button_rect(&self) -> Rect {
+        Rect {
+            x: self.panel_bounds.x + self.panel_bounds.width
+                - ((CLOSE_BUTTON + 8.) * self.ui_scale),
+            y: self.panel_bounds.y + (11. * self.ui_scale),
+            width: CLOSE_BUTTON * self.ui_scale,
+            height: CLOSE_BUTTON * self.ui_scale,
+        }
+    }
+    fn panel_kind(panel: &str) -> Panel {
+        match panel {
+            "replace" => Panel::Replace,
+            "incremental_find" => Panel::Incremental,
+            "find_in_files" => Panel::Files,
+            "find_results" => Panel::Results,
+            "output.exec" => Panel::Output,
+            _ => Panel::Find,
+        }
+    }
+    /// Find matches to draw in the active view. Matches stay computed after the panel closes so
+    /// `find_next`/`find_prev` keep working, but like Sublime they are only drawn while a find
+    /// panel is visible.
+    pub fn visible_highlights(&self) -> &[Range<usize>] {
+        if self.find_panel_visible() {
+            &self.highlights
+        } else {
+            &[]
+        }
     }
     fn close_panel(&mut self) {
         self.panel = None;
@@ -2350,6 +2394,11 @@ impl Panels {
         self.quick.scroll.viewport = (self.quick_bounds.height - (72. * self.ui_scale)).max(1.);
         self.quick.scroll.rows = self.quick.items.len();
         self.quick.scroll.scroll(0.);
+        let close = if self.find_panel_visible() {
+            CLOSE_BUTTON + 6.
+        } else {
+            0.
+        };
         for (i, input) in [&mut self.query, &mut self.replace, &mut self.where_input]
             .into_iter()
             .enumerate()
@@ -2359,7 +2408,7 @@ impl Panels {
                 y: self.panel_bounds.y
                     + (8. * self.ui_scale)
                     + i as f64 * PANEL_ROW * self.ui_scale,
-                width: (self.panel_bounds.width - (92. * self.ui_scale)).max(1.),
+                width: (self.panel_bounds.width - ((92. + close) * self.ui_scale)).max(1.),
                 height: (28. * self.ui_scale),
             };
             input.reveal();
@@ -2632,6 +2681,20 @@ impl Panels {
                         .children
                         .push(50 + i as u64);
                 }
+            }
+            if self.find_panel_visible() {
+                self.widget(CLOSE_ID, "button", self.close_button_rect(), &[]);
+                self.tree
+                    .nodes
+                    .get_mut(&CLOSE_ID)
+                    .expect("close button")
+                    .label = "Close find panel".into();
+                self.tree
+                    .nodes
+                    .get_mut(&2)
+                    .expect("panel")
+                    .children
+                    .push(CLOSE_ID);
             }
         }
         if self.side_visible {
@@ -3064,6 +3127,19 @@ impl Panels {
                             node.rect.x + (7. * self.ui_scale),
                             node.rect.y + (16. * self.ui_scale),
                             node.rect,
+                        );
+                    }
+                    if let Some(node) = self.tree.nodes.get(&CLOSE_ID).filter(|n| n.visible) {
+                        let rect = node.rect;
+                        let button = style(CLOSE_ID, None, &mut theme);
+                        theme.surface(&mut layer, &button, rect, clip);
+                        theme.text(
+                            &mut layer,
+                            &button,
+                            "\u{d7}",
+                            rect.x + (6. * self.ui_scale),
+                            rect.y + (16. * self.ui_scale),
+                            rect,
                         );
                     }
                     theme.text(
@@ -3551,6 +3627,8 @@ impl Panels {
                                 &json!({"option":option}),
                                 viewport.clone(),
                             )?;
+                        } else if id == CLOSE_ID {
+                            self.action(workspace, "hide_panel", &json!({}), viewport.clone())?;
                         } else if id == 50 || id == 51 {
                             let command = if id == 50 {
                                 "find_all"
@@ -3685,6 +3763,154 @@ mod tests {
             .unwrap();
         assert_eq!(workspace.editor().caret, 0);
         assert_eq!(panels.focus.route().0, Surface::Panel);
+    }
+    /// Resolves `key` through the panel router and runs the resulting command like the app does.
+    fn press(panels: &mut Panels, workspace: &mut Workspace, key: &str) -> Option<String> {
+        use vel_config::keymap::Resolution;
+        match panels
+            .resolve_key(workspace, &Key::parse(key).unwrap(), 0..11)
+            .unwrap()
+        {
+            Resolution::Command(invocation) => {
+                let handled = panels
+                    .action(workspace, &invocation.command, &invocation.args, 0..11)
+                    .unwrap();
+                if !handled {
+                    workspace
+                        .editor_mut()
+                        .run(&invocation.command, &invocation.args)
+                        .unwrap();
+                }
+                Some(invocation.command)
+            }
+            Resolution::Pending => Some(String::new()),
+            Resolution::Unbound => None,
+        }
+    }
+    fn wait_for_matches(panels: &mut Panels, workspace: &mut Workspace) {
+        let until = Instant::now() + std::time::Duration::from_secs(5);
+        while !panels.all_matches_ready {
+            panels.poll(workspace, 0..11);
+            assert!(Instant::now() < until, "find worker did not finish");
+            std::thread::yield_now();
+        }
+    }
+    #[test]
+    fn find_panel_toggles_closes_from_editor_focus_and_hides_matches() {
+        let mut workspace = workspace();
+        let mut panels = Panels::new(&workspace, false);
+        assert_eq!(
+            press(&mut panels, &mut workspace, "super+f").as_deref(),
+            Some("show_panel")
+        );
+        assert_eq!(panels.panel, Some(Panel::Find));
+        panels.query.set("cat");
+        panels.input_changed(&mut workspace, 0..11);
+        wait_for_matches(&mut panels, &mut workspace);
+        assert_eq!(panels.visible_highlights().len(), 3);
+        // Pressing the shortcut again closes the panel and hides the matches.
+        press(&mut panels, &mut workspace, "super+f");
+        assert_eq!(panels.panel, None);
+        assert!(panels.visible_highlights().is_empty());
+        // Background results and re-validation do not bring the highlights back while closed.
+        panels.poll(&mut workspace, 0..11);
+        assert!(panels.visible_highlights().is_empty());
+        // The search itself survives: find_next still moves the selection, like Sublime.
+        press(&mut panels, &mut workspace, "super+g");
+        assert_eq!(workspace.editor().selection(), 0..3);
+        assert!(panels.visible_highlights().is_empty());
+        // Reopening keeps the query and shows the matches again.
+        press(&mut panels, &mut workspace, "super+f");
+        assert_eq!(panels.panel, Some(Panel::Find));
+        assert_eq!(panels.query.value(), "cat");
+        wait_for_matches(&mut panels, &mut workspace);
+        assert_eq!(panels.visible_highlights().len(), 3);
+        // A different find-family shortcut switches panels instead of closing.
+        press(&mut panels, &mut workspace, "super+alt+f");
+        assert_eq!(panels.panel, Some(Panel::Replace));
+        press(&mut panels, &mut workspace, "super+alt+f");
+        assert_eq!(panels.panel, None);
+        // Escape with keyboard focus in the editor closes a visible panel through the keymap.
+        press(&mut panels, &mut workspace, "super+f");
+        panels.panel_focused = false;
+        panels.focus.show(Surface::Panel, false);
+        assert!(!panels.captured());
+        assert_eq!(
+            press(&mut panels, &mut workspace, "escape").as_deref(),
+            Some("hide_panel")
+        );
+        assert_eq!(panels.panel, None);
+        assert!(panels.visible_highlights().is_empty());
+    }
+    #[test]
+    fn escape_without_a_panel_keeps_its_editor_meanings() {
+        let mut workspace = workspace();
+        let mut panels = Panels::new(&workspace, false);
+        workspace
+            .editor_mut()
+            .set_selection(Selection::from_regions([
+                Region::new(0, 0),
+                Region::new(8, 8),
+            ]));
+        assert_eq!(
+            press(&mut panels, &mut workspace, "escape").as_deref(),
+            Some("single_selection")
+        );
+        assert_eq!(workspace.editor().regions().len(), 1);
+        // Escape still collapses to one caret and never reports hide_panel without a panel.
+        assert_eq!(
+            press(&mut panels, &mut workspace, "escape").as_deref(),
+            Some("single_selection")
+        );
+        assert_eq!(panels.panel, None);
+    }
+    #[test]
+    fn find_panel_close_button_hides_the_panel() {
+        let mut workspace = workspace();
+        let mut panels = Panels::new(&workspace, false);
+        panels
+            .action(
+                &mut workspace,
+                "show_panel",
+                &json!({"panel":"find","text":"cat"}),
+                0..11,
+            )
+            .unwrap();
+        panels.layout(Size {
+            width: 1200.,
+            height: 800.,
+        });
+        let mut scene = Scene::default();
+        panels.paint(&workspace, &mut scene);
+        let close = panels.close_button_rect();
+        let query = panels.query.bounds;
+        assert!(
+            close.x >= query.x + query.width,
+            "close button overlaps the query field"
+        );
+        assert!(close.x + close.width <= panels.panel_bounds.x + panels.panel_bounds.width);
+        let center = Point {
+            x: close.x + close.width / 2.,
+            y: close.y + close.height / 2.,
+        };
+        panels
+            .mouse(&mut workspace, center, true, false, false, 0..11)
+            .unwrap();
+        panels
+            .mouse(&mut workspace, center, false, false, false, 0..11)
+            .unwrap();
+        assert_eq!(panels.panel, None);
+        assert!(panels.visible_highlights().is_empty());
+        // Panels without find semantics have no close button.
+        panels
+            .action(
+                &mut workspace,
+                "show_panel",
+                &json!({"panel":"output.exec"}),
+                0..11,
+            )
+            .unwrap();
+        assert!(!panels.find_panel_visible());
     }
     #[test]
     fn preview_tabs_do_not_replace_or_lose_original_and_commit_pins() {

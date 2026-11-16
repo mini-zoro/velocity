@@ -215,7 +215,7 @@ pub trait AppHandler: 'static {
     }
 }
 /// Resource-defined native menu entry. Arguments remain opaque JSON to the platform.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MenuEntry {
     /// Visible caption, or "-" for a separator.
     pub caption: String,

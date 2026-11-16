@@ -1159,12 +1159,10 @@ impl App {
                 view.apply_style(&self.workspace.tabs[index].editor);
                 if *sheet == focused {
                     let viewport = view.viewport(&self.workspace.tabs[index].editor);
-                    let first = self
-                        .panels
-                        .highlights
-                        .partition_point(|r| r.end < viewport.start);
+                    let highlights = self.panels.visible_highlights();
+                    let first = highlights.partition_point(|r| r.end < viewport.start);
                     view.find_matches.extend(
-                        self.panels.highlights[first..]
+                        highlights[first..]
                             .iter()
                             .take_while(|r| r.start <= viewport.end)
                             .cloned(),
