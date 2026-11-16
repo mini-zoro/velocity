@@ -789,6 +789,9 @@ pub fn apply_remove_folder(workspace: &mut crate::workspace::Workspace, path: &P
         .and_then(Path::parent)
         .unwrap_or(Path::new("."))
         .to_owned();
+    // The root can already be in Trash. Resolve its still-existing project directory
+    // (e.g. /var -> /private/var) before matching entries whose last component is gone.
+    let project_base = fs::canonicalize(&project_base).unwrap_or(project_base);
     let previous_model = workspace.project_model.folders.len();
     workspace.project_model.folders.retain(|folder| {
         let resolved = if folder.path.is_absolute() {

@@ -36,14 +36,16 @@ fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallba
         );
     }
     std::fs::write(&path, b"\xff\xfea").unwrap();
-    assert!(
-        load_background(path, "windows-1252".into())
-            .unwrap()
-            .result
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap()
-            .is_err()
-    );
+    let loaded = load_background(path, "windows-1252".into())
+        .unwrap()
+        .result
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    // Fallback interprets every original byte, including the invalid BOM prefix.
+    assert_eq!(loaded.text.to_string(), "ÿþa");
+    assert_eq!(loaded.format.encoding, "windows-1252");
+    assert!(!loaded.format.bom);
 }
 #[test]
 fn encodings_boms_and_endings_round_trip() {

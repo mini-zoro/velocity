@@ -33,7 +33,8 @@ pub struct Tab {
     pub shared_view: vel_buffer::ViewId,
     pub lazy: Option<(vel_session::Document, vel_session::ViewState)>,
     language_settings_revision: u64,
-    needs_detection: bool,
+    pub(crate) needs_detection: bool,
+    pub(crate) indentation_initialized: bool,
     pub transient: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
@@ -59,6 +60,18 @@ impl Tab {
         editor.settings = settings.clone();
         editor.sync();
         editor.keymap = keymap.clone();
+        for command in [
+            "reopen_last_file",
+            "reopen_encoding",
+            "save_encoding",
+            "open_recent_file",
+            "open_recent_folder",
+            "clear_recent_items",
+        ] {
+            editor
+                .registry
+                .register(command, vel_commands::Kind::WindowCommand, None);
+        }
         let format = fileio::default_format(&settings.editor()).unwrap_or_default();
         Ok(Self {
             shared_dirty: false,
@@ -74,6 +87,7 @@ impl Tab {
             lazy: None,
             language_settings_revision: u64::MAX,
             needs_detection: true,
+            indentation_initialized: false,
             transient: false,
             editor,
             path: None,
@@ -113,22 +127,60 @@ impl Tab {
         {
             return title.into();
         }
-        let name = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".into());
+        let name = self.name();
         format!(
-            "{name}{}{}{}",
+            "{name}{}{}{}{}",
             if self.editor.binary.is_some() {
                 " [hex]"
+            } else {
+                ""
+            },
+            if self.path.is_some()
+                && self.disk_saved.is_none()
+                && self.lazy.is_none()
+                && !self.deleted
+                && !self.editor.read_only
+            {
+                " [new]"
             } else {
                 ""
             },
             if self.deleted { " [deleted]" } else { "" },
             if self.dirty() { " •" } else { "" }
         )
+    }
+    pub fn name(&self) -> String {
+        if let Some(title) = self
+            .editor
+            .settings
+            .get("velocity_html_sheet_title")
+            .and_then(Value::as_str)
+        {
+            return title.into();
+        }
+        self.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                if !self.editor.settings.bool("set_unsaved_view_name", true) {
+                    return "Untitled".into();
+                }
+                let name: String = self
+                    .editor
+                    .text
+                    .line(0)
+                    .chars()
+                    .skip_while(|c| c.is_whitespace())
+                    .take(50)
+                    .collect();
+                let name = name.trim_end().to_owned();
+                if name.is_empty() {
+                    "Untitled".into()
+                } else {
+                    name
+                }
+            })
     }
     pub fn progress(&self) -> Option<(u64, u64)> {
         self.loading
@@ -159,7 +211,7 @@ impl Tab {
         self.previous_document = Some(self.document);
         self.document = self.editor.buffer.id();
         self.shared_view = self.editor.id;
-        self.needs_detection = true;
+        self.needs_detection = !self.indentation_initialized;
         self.saved_format = loaded.format.clone();
         self.format = loaded.format;
         self.tracker.mark_saved(&self.editor.buffer);
@@ -215,10 +267,17 @@ pub struct Workspace {
     pub recent_files: Vec<PathBuf>,
     pub recent_folders: Vec<PathBuf>,
     pub recent_projects: Vec<PathBuf>,
+    recent_menu_state: Option<([Vec<PathBuf>; 3], u64)>,
     pub(crate) distraction_settings: serde_json::Map<String, Value>,
     pub folders: Vec<vel_search::project::Folder>,
     pub tabs: Vec<Tab>,
     pub active: usize,
+    /// An empty window retains an input adapter but has no workbench sheet.
+    pub(crate) empty: bool,
+    pub(crate) closed_files: Vec<(PathBuf, vel_session::ViewState)>,
+    /// Final stdin text is retained until its CLI waiter consumes it.
+    pub(crate) closed_text: BTreeMap<u64, Text>,
+    pub(crate) stdout_sheets: std::collections::BTreeSet<u64>,
     pub menus: Vec<MenuItem>,
     /// Resource-layered native context menus, keyed by their complete resource filename.
     pub context_menus: BTreeMap<String, Vec<MenuItem>>,
@@ -238,7 +297,7 @@ pub struct Workspace {
     settings_writes: Vec<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub resource_revision: u64,
 }
-fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
+pub(crate) fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.len(), m.modified().ok()?))
 }
@@ -557,6 +616,10 @@ impl Configuration {
                 .cloned()
                 .unwrap_or_default();
         }
+        if let (_, Some(warning)) = fileio::fallback_encoding(&settings.editor().fallback_encoding)
+        {
+            resource_messages.push(warning);
+        }
         let mut folders = Vec::new();
         let patterns = |value: Option<&Value>| -> Vec<String> {
             value
@@ -602,8 +665,12 @@ impl Configuration {
                             .into_owned()
                     }),
                 path,
-                rules: vel_search::project::Rules::new(&excludes[0], &excludes[1], &excludes[2])?,
-                follow_links: folder["follow_symlinks"].as_bool().unwrap_or(false),
+                rules: vel_search::project::Rules::new(&excludes[0], &excludes[1], &excludes[2])?
+                    .with_includes(
+                    &patterns(folder.get("file_include_patterns")),
+                    &patterns(folder.get("folder_include_patterns")),
+                )?,
+                follow_links: folder["follow_symlinks"].as_bool().unwrap_or(true),
             });
         }
         let mut keys = Vec::new();
@@ -916,9 +983,14 @@ impl Workspace {
             recent_files: Vec::new(),
             recent_folders: Vec::new(),
             recent_projects: Vec::new(),
+            recent_menu_state: None,
             folders,
             tabs: vec![tab],
             active: 0,
+            empty: false,
+            closed_files: Vec::new(),
+            closed_text: BTreeMap::new(),
+            stdout_sheets: Default::default(),
             menus,
             context_menus,
             mousemap,
@@ -940,6 +1012,56 @@ impl Workspace {
         workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
         workspace.configure_language(0, None, true)?;
         Ok(workspace)
+    }
+    /// Refreshes the resource-defined recent submenu only when its source changes.
+    pub fn refresh_file_menus(&mut self) -> bool {
+        let recent = [
+            &self.recent_files,
+            &self.recent_folders,
+            &self.recent_projects,
+        ];
+        if self
+            .recent_menu_state
+            .as_ref()
+            .is_some_and(|(old, revision)| {
+                *revision == self.resource_revision && old.iter().zip(recent).all(|(a, b)| a == b)
+            })
+        {
+            return false;
+        }
+        let mut children = Vec::new();
+        for (paths, command, key) in [
+            (&self.recent_files, "open_recent_file", "file"),
+            (&self.recent_folders, "open_recent_folder", "dir"),
+            (&self.recent_projects, "open_project", "file"),
+        ] {
+            for path in paths.iter().take(20) {
+                children.push(serde_json::json!({"caption":path.display().to_string(), "command":command, "args":{key:path}}));
+            }
+        }
+        children.push(serde_json::json!({"caption":"Clear Items", "command":"clear_recent_items"}));
+        if let Some(menu) = self
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == "file")
+            .and_then(|menu| {
+                menu.children
+                    .iter_mut()
+                    .find(|item| item.id == "open_recent")
+            })
+        {
+            menu.children =
+                serde_json::from_value(serde_json::json!(children)).expect("authored recent menu");
+        }
+        self.recent_menu_state = Some((
+            [
+                self.recent_files.clone(),
+                self.recent_folders.clone(),
+                self.recent_projects.clone(),
+            ],
+            self.resource_revision,
+        ));
+        true
     }
     pub fn track_settings_write(&mut self, rx: std::sync::mpsc::Receiver<Result<(), String>>) {
         self.settings_writes.push(rx);
@@ -982,19 +1104,11 @@ impl Workspace {
     /// Active document title, including its dirty marker and optional project name.
     pub fn window_title(&self) -> String {
         let tab = &self.tabs[self.active];
-        let name = tab
-            .editor
-            .settings
-            .get("velocity_html_sheet_title")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                tab.path
-                    .as_deref()
-                    .and_then(Path::file_name)
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "Untitled".into());
+        let name = if self.is_empty() {
+            "Velocity".into()
+        } else {
+            tab.name()
+        };
         let title = format!(
             "{name}{}{}",
             if tab.deleted { " [deleted]" } else { "" },
@@ -1034,17 +1148,37 @@ impl Workspace {
                         .is_some_and(|l| l.busy())
             })
     }
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
+    /// Attach the empty window's input adapter when its first edit arrives.
+    pub fn materialize_input(&mut self) {
+        if self.empty && self.tabs[0].dirty() {
+            self.empty = false;
+            self.workbench.groups[self.workbench.active].add(self.tabs[0].sheet, false);
+        }
+    }
     pub fn new_file(&mut self) -> Result<(), String> {
+        if self.empty {
+            self.tabs.clear();
+            self.empty = false;
+        }
         self.tabs
             .push(Tab::new(Text::new(), &self.settings, &self.keymap)?);
         self.workbench.groups[self.workbench.active]
             .add(self.tabs.last().expect("tab").sheet, false);
         self.active = self.tabs.len() - 1;
+        // An untitled buffer is already loaded; it has no disk indentation to detect.
+        self.tabs[self.active].needs_detection = false;
+        self.tabs[self.active].indentation_initialized = true;
         self.configure_language(self.active, None, false)?;
         Ok(())
     }
     pub fn select(&mut self, index: usize) {
-        if index < self.tabs.len() {
+        if !self.empty
+            && index < self.tabs.len()
+            && self.workbench.group_of(self.tabs[index].sheet).is_some()
+        {
             if index != self.active {
                 self.editor_mut().completion.hide();
             }
@@ -1070,6 +1204,7 @@ impl Workspace {
         self.open_mode(location, true)
     }
     fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
+        self.materialize_input();
         let path = absolute(&location.path)?;
         if let Some(index) = self
             .tabs
@@ -1094,10 +1229,22 @@ impl Workspace {
         tab.path = Some(path.clone());
         tab.location = Some(location);
         let fallback = tab.editor.settings.editor().fallback_encoding;
-        let size = std::fs::metadata(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?
-            .len();
-        if crate::binary::is_binary(&path)? {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Some(metadata),
+            Ok(_) => {
+                return Err(format!(
+                    "{}: only regular files can be opened",
+                    path.display()
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let size = metadata.as_ref().map_or(0, |m| m.len());
+        if metadata.is_none() {
+            let location = tab.location.take().expect("open location");
+            tab.goto(&location);
+        } else if crate::binary::is_binary(&path)? {
             tab.editor.source_bytes = size;
             tab.editor.refresh_policy();
             tab.editor.read_only = true;
@@ -1117,14 +1264,18 @@ impl Workspace {
             tab.install(fileio::load(&path, &fallback, |_| {})?);
         }
         self.telemetry.push(serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}));
-        if let Some(w) = self.watcher.as_mut() {
+        if let Some(w) = self.watcher.as_mut()
+            && path.parent().is_some_and(Path::is_dir)
+        {
             w.watch(&path)?;
         }
-        if self.tabs.len() == 1
-            && !preview
-            && self.tabs[0].path.is_none()
-            && !self.tabs[0].editor.buffer.is_dirty()
-            && self.tabs[0].editor.text.len_bytes() == 0
+        // The empty window's input adapter is never a sheet, including during preview.
+        if self.empty
+            || (self.tabs.len() == 1
+                && !preview
+                && self.tabs[0].path.is_none()
+                && !self.tabs[0].editor.buffer.is_dirty()
+                && self.tabs[0].editor.text.len_bytes() == 0)
         {
             self.workbench
                 .groups
@@ -1136,12 +1287,17 @@ impl Workspace {
             self.tabs.push(tab);
             self.active = self.tabs.len() - 1;
         }
+        self.empty = false;
         self.workbench.groups[self.workbench.active].add(self.tabs[self.active].sheet, false);
         crate::workbench::remember(&mut self.recent_files, path);
         self.configure_language(self.active, None, true)?;
         Ok(())
     }
     pub fn save(&mut self, index: usize, path: Option<PathBuf>) -> Result<(), String> {
+        self.materialize_input();
+        if self.empty {
+            return Err("no file to save".into());
+        }
         self.prepare_sheet(index)?;
         let tab = &mut self.tabs[index];
         tab.transient = false;
@@ -1213,24 +1369,130 @@ impl Workspace {
         if let Err(e) = self.configure_language(index, None, true) {
             self.messages.push(e);
         }
+        crate::workbench::remember(&mut self.recent_files, target);
         Ok(())
     }
+    /// Saves dirty documents independently. Cancellation skips that document; errors
+    /// include its path/name and do not prevent later documents from being saved.
+    pub fn save_all(&mut self, mut choose: impl FnMut(&str) -> Option<PathBuf>) -> Vec<String> {
+        let mut errors = Vec::new();
+        for index in 0..self.tabs.len() {
+            if !self.tabs[index].dirty() {
+                continue;
+            }
+            let path = if self.tabs[index].path.is_none() {
+                let Some(path) = choose(&self.tabs[index].name()) else {
+                    continue;
+                };
+                Some(path)
+            } else {
+                None
+            };
+            if let Err(error) = self.save(index, path) {
+                errors.push(format!("{}: {error}", self.tabs[index].name()));
+            }
+        }
+        errors
+    }
     pub fn close(&mut self, index: usize) -> Result<(), String> {
+        if self.empty {
+            return Ok(());
+        }
         self.prepare_close_sheet(index)?;
-        let sheet = self.tabs[index].sheet;
+        let tab = &self.tabs[index];
+        let sheet = tab.sheet;
+        let active = self.tabs[self.active].sheet;
+        let group = self
+            .workbench
+            .group_of(sheet)
+            .unwrap_or(self.workbench.active);
+        let order = &self.workbench.groups[group].sheets;
+        let at = order.iter().position(|id| *id == sheet).unwrap_or(0);
+        let neighbor = order
+            .get(at + 1)
+            .or_else(|| at.checked_sub(1).and_then(|i| order.get(i)))
+            .copied();
+        if (!tab.transient || tab.dirty())
+            && let Some(path) = &tab.path
+        {
+            self.closed_files.push((
+                path.clone(),
+                vel_session::ViewState::capture(&tab.editor.buffer, tab.editor.id, tab.scroll),
+            ));
+            if self.closed_files.len() > 100 {
+                self.closed_files.remove(0);
+            }
+        }
+        if self.stdout_sheets.contains(&sheet) {
+            self.closed_text.insert(sheet, tab.editor.text.clone());
+        }
         for group in &mut self.workbench.groups {
             group.remove(sheet);
         }
         self.tabs.remove(index);
-        // Closing a tab before the active one shifts it down; keep the same tab active.
-        if index < self.active {
-            self.active -= 1;
-        }
         if self.tabs.is_empty() {
-            self.new_file()?;
+            self.tabs
+                .push(Tab::new(Text::new(), &self.settings, &self.keymap)?);
+            self.active = 0;
+            self.empty = true;
+            self.tabs[0].needs_detection = false;
+            self.tabs[0].indentation_initialized = true;
+            self.configure_language(0, None, false)?;
+        } else {
+            let target = if sheet == active {
+                neighbor
+            } else {
+                Some(active)
+            }
+            .and_then(|id| self.sheet_index(id))
+            .or_else(|| {
+                self.workbench
+                    .groups
+                    .iter()
+                    .filter_map(|g| g.focused)
+                    .find_map(|id| self.sheet_index(id))
+            })
+            .unwrap_or(0);
+            self.active = target;
+            self.select(target);
         }
-        self.active = self.active.min(self.tabs.len() - 1);
-        self.select(self.active);
+        Ok(())
+    }
+    /// Reopens the most recently closed path with its selection, folds and viewport.
+    pub fn reopen_last_file(&mut self) -> Result<(), String> {
+        while let Some((path, state)) = self.closed_files.pop() {
+            // A deleted file is skipped, rather than reopened as a new named buffer.
+            if matches!(path.try_exists(), Ok(false)) {
+                continue;
+            }
+            self.open(FileLocation {
+                path,
+                line: 1,
+                column: 1,
+            })?;
+            let tab = &mut self.tabs[self.active];
+            tab.pending_center = false;
+            tab.scroll = state.scroll;
+            if tab.loading.is_some() || tab.binary_loading.is_some() {
+                tab.pending_restore = Some(state);
+            } else {
+                state.apply(&mut tab.editor.buffer, tab.editor.id);
+                tab.editor.sync();
+            }
+            break;
+        }
+        Ok(())
+    }
+    /// Reopens a saved file with an explicit codec. Failed decoding leaves edits intact.
+    pub fn reopen_encoding(&mut self, name: &str) -> Result<(), String> {
+        let index = self.active;
+        let tab = &self.tabs[index];
+        let path = tab.path.as_deref().ok_or("Reopen requires a saved file")?;
+        let loaded = fileio::load_with_encoding(path, name)?;
+        self.tabs[index].install(loaded);
+        self.tabs[index].deleted = false;
+        self.tabs[index].restored_format_dirty = false;
+        self.reconcile_installs();
         Ok(())
     }
     /// Automatic resource stamps are sampled at most every 500 ms. Explicit reloads,
@@ -1252,6 +1514,7 @@ impl Workspace {
     }
     /// Polls jobs/notifications and reports whether scene content changed.
     pub fn poll(&mut self) -> bool {
+        self.materialize_input();
         let enabled = self.settings.bool("show_git_status", true);
         let mut roots: Vec<_> = self.folders.iter().map(|f| f.path.clone()).collect();
         for tab in &self.tabs {
@@ -1377,6 +1640,7 @@ impl Workspace {
             .as_ref()
             .map(Watcher::changed)
             .unwrap_or_default();
+        let mut close_deleted = Vec::new();
         for event in events {
             match event {
                 Err(e) => self.messages.push(e),
@@ -1393,6 +1657,22 @@ impl Workspace {
                                 continue;
                             }
                             tab.disk_stamp = stamp(&path);
+                            if matches!(path.try_exists(), Ok(false)) {
+                                if self.settings.bool("close_deleted_files", false) && !tab.dirty()
+                                {
+                                    close_deleted.push(tab.sheet);
+                                }
+                                tab.deleted = true;
+                                tab.transient = false;
+                                tab.external = None;
+                                changed = true;
+                                continue;
+                            }
+                            if path.is_file() && tab.deleted {
+                                // Deletion is a close/save marker, not an edit to the buffer.
+                                tab.deleted = false;
+                                changed = true;
+                            }
                             if tab.editor.binary.is_some() {
                                 match crate::binary::Task::open(path.clone()) {
                                     Ok(task) => tab.binary_loading = Some(task),
@@ -1423,6 +1703,7 @@ impl Workspace {
                                     if tab.tracker.is_saved(&loaded.text)
                                         && tab.format == loaded.format
                                     {
+                                        tab.disk_saved = vel_session::DiskStamp::read(&path);
                                         continue;
                                     }
                                     if tab.dirty() || tab.editor.marked.is_some() {
@@ -1437,6 +1718,13 @@ impl Workspace {
                         }
                     }
                 }
+            }
+        }
+        for sheet in close_deleted {
+            if let Some(index) = self.sheet_index(sheet)
+                && let Err(error) = self.close(index)
+            {
+                self.messages.push(error);
             }
         }
         self.reconcile_installs();
@@ -1543,7 +1831,7 @@ impl Workspace {
                         }
                         tab.editor.sync();
                         tab.language_settings_revision = u64::MAX;
-                        tab.needs_detection = true;
+                        // Resource reloads preserve the buffer's detected/manual indentation.
                         tab.editor.keymap = self.keymap.clone();
                     }
                     changed = true;
@@ -1671,19 +1959,22 @@ impl Workspace {
                 .settings
                 .replace(Layer::Syntax, Value::Object(values))?;
         }
-        if detect
-            && tab.needs_detection
-            && tab.editor.settings.bool("detect_indentation", true)
-            && let Some((size, spaces)) = crate::language::detect_indentation(&tab.editor.text)
-        {
-            tab.editor
-                .settings
-                .set(Layer::View, "tab_size", serde_json::json!(size));
-            tab.editor.settings.set(
-                Layer::View,
-                "translate_tabs_to_spaces",
-                serde_json::json!(spaces),
-            );
+        if detect && tab.lazy.is_none() && tab.needs_detection {
+            if tab.editor.settings.bool("detect_indentation", true)
+                && let Some((size, spaces)) = crate::language::detect_indentation(&tab.editor.text)
+            {
+                tab.editor
+                    .settings
+                    .set(Layer::View, "tab_size", serde_json::json!(size));
+                tab.editor.settings.set(
+                    Layer::View,
+                    "translate_tabs_to_spaces",
+                    serde_json::json!(spaces),
+                );
+            }
+            // A load with detection disabled also consumes the one load-time attempt.
+            tab.needs_detection = false;
+            tab.indentation_initialized = true;
         }
         tab.editor.sync();
         let settings = Value::Object(tab.editor.settings.effective());
@@ -1724,7 +2015,6 @@ impl Workspace {
                 tab.editor.preferences.tab_size,
             );
         }
-        tab.needs_detection = false;
         tab.language_settings_revision = tab.editor.settings.revision();
         Ok(())
     }
@@ -2203,3 +2493,719 @@ mod tests {
 #[cfg(test)]
 #[path = "package_tests.rs"]
 mod package_tests;
+
+#[cfg(test)]
+mod round15_tests {
+    use super::*;
+    use vel_config::{json, settings::Layer};
+    fn location(path: PathBuf) -> FileLocation {
+        FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        }
+    }
+    fn workspace() -> Workspace {
+        Workspace::new(Text::new(), None, None, false).unwrap()
+    }
+    #[test]
+    fn missing_paths_are_named_new_documents_and_save_errors_keep_the_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        let mut w = workspace();
+        w.open(location(path.clone())).unwrap();
+        assert_eq!(w.tabs[0].path.as_ref(), Some(&path));
+        assert_eq!(w.editor().text.len_bytes(), 0);
+        assert!(w.tabs[0].label().contains("[new]"));
+        w.editor_mut()
+            .run("insert", &json!({"characters":"created"}))
+            .unwrap();
+        w.save(0, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "created");
+        assert_eq!(w.recent_files.first(), Some(&path));
+        assert!(!w.tabs[0].dirty());
+        assert!(!w.tabs[0].label().contains("[new]"));
+        let missing_parent = dir.path().join("missing/child.txt");
+        w.open(location(missing_parent.clone())).unwrap();
+        w.editor_mut()
+            .run("insert", &json!({"characters":"keep me"}))
+            .unwrap();
+        let error = w.save(w.active, None).unwrap_err();
+        assert!(error.contains("missing"));
+        assert!(!missing_parent.parent().unwrap().exists());
+        assert_eq!(w.editor().text.to_string(), "keep me");
+        assert!(w.tabs[w.active].dirty());
+    }
+    #[test]
+    fn active_close_chooses_right_then_left_in_its_own_group() {
+        let mut w = workspace();
+        for text in ["left", "right", "other"] {
+            w.new_file().unwrap();
+            w.editor_mut()
+                .run("insert", &json!({"characters":text}))
+                .unwrap();
+        }
+        w.workbench
+            .set_layout(vel_ui::workbench::Layout::grid(2, 1))
+            .unwrap();
+        w.workbench.move_selected(1).unwrap();
+        let other = w.tabs[3].sheet;
+        w.select(1);
+        let right = w.tabs[2].sheet;
+        w.close(1).unwrap();
+        assert_eq!(w.tabs[w.active].sheet, right);
+        assert_eq!(w.workbench.active, 0);
+        w.close(w.active).unwrap();
+        assert_ne!(w.tabs[w.active].sheet, other);
+        assert_eq!(w.workbench.active, 0);
+    }
+    #[test]
+    fn focusing_an_unused_pane_never_edits_another_groups_document() {
+        let mut w = Workspace::new(Text::from("original group"), None, None, false).unwrap();
+        w.workbench
+            .set_layout(vel_ui::workbench::Layout::grid(2, 1))
+            .unwrap();
+        w.workbench.active = 1;
+        w.focus_current_group().unwrap();
+        assert_eq!(w.editor().text.len_bytes(), 0);
+        w.editor_mut()
+            .run("insert", &json!({"characters":"new group"}))
+            .unwrap();
+        assert_eq!(w.tabs[0].editor.text.to_string(), "original group");
+        assert_eq!(w.workbench.group_of(w.tabs[w.active].sheet), Some(1));
+    }
+    #[test]
+    fn final_close_leaves_no_sheet_and_typing_or_new_file_materializes_on_demand() {
+        let mut w = workspace();
+        w.close(0).unwrap();
+        assert!(w.is_empty());
+        assert!(w.workbench.groups[0].sheets.is_empty());
+        assert_eq!(w.window_title(), "Velocity");
+        let (window, docs) = w.snapshot().unwrap();
+        assert!(window.sheets.is_empty());
+        assert!(docs.is_empty());
+        let mut restored = workspace();
+        restored.restore_window(&window, &docs).unwrap();
+        assert!(restored.is_empty());
+        restored
+            .editor_mut()
+            .run("insert", &json!({"characters":"first edit"}))
+            .unwrap();
+        restored.sync_shared();
+        assert!(!restored.is_empty());
+        assert_eq!(restored.workbench.groups[0].sheets.len(), 1);
+        assert_eq!(restored.editor().text.to_string(), "first edit");
+        w.new_file().unwrap();
+        assert!(!w.is_empty());
+        assert_eq!(w.tabs.len(), 1);
+        assert_eq!(w.workbench.groups[0].sheets.len(), 1);
+    }
+    #[test]
+    fn save_all_skips_clean_tabs_and_continues_after_cancel_and_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = workspace();
+        // The initial clean untitled tab must not summon a save dialog.
+        for text in ["cancel this", "failure", "save this", "read only"] {
+            w.new_file().unwrap();
+            w.editor_mut()
+                .run("insert", &json!({"characters":text}))
+                .unwrap();
+        }
+        w.editor_mut().read_only = true;
+        let mut prompted = Vec::new();
+        let errors = w.save_all(|name| {
+            prompted.push(name.to_owned());
+            match name {
+                "cancel this" => None,
+                "failure" => Some(dir.path().join("absent/child")),
+                other => Some(dir.path().join(other)),
+            }
+        });
+        assert!(!prompted.iter().any(|s| s == "Untitled"));
+        assert_eq!(errors.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("save this")).unwrap(),
+            "save this"
+        );
+        assert!(w.tabs[1].dirty());
+        assert!(w.tabs[2].dirty());
+        assert!(!w.tabs[3].dirty());
+        assert_eq!(w.recent_files.first(), Some(&dir.path().join("save this")));
+        assert!(w.tabs[4].dirty());
+    }
+    #[test]
+    fn explicit_reopen_decodes_selected_codec_and_failure_preserves_dirty_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("encoding.txt");
+        std::fs::write(&path, "é").unwrap();
+        let mut w = workspace();
+        w.open(location(path.clone())).unwrap();
+        w.reopen_encoding("Western (Windows 1252)").unwrap();
+        assert_eq!(w.editor().text.to_string(), "Ã©");
+        w.editor_mut()
+            .run("insert", &json!({"characters":"keep unsaved "}))
+            .unwrap();
+        let old = w.editor().text.clone();
+        std::fs::write(&path, b"a").unwrap();
+        assert!(w.reopen_encoding("UTF-16 LE with BOM").is_err());
+        assert_eq!(w.editor().text, old);
+        assert!(w.tabs[0].dirty());
+    }
+    #[test]
+    fn disabled_hot_exit_routes_cli_projects_to_a_separate_window() {
+        let mut w = workspace();
+        w.settings.set(Layer::User, "hot_exit", json!(false));
+        w.editor_mut()
+            .run("insert", &json!({"characters":"preserve"}))
+            .unwrap();
+        let options = crate::cli::Options {
+            project: Some("project.sublime-project".into()),
+            ..Default::default()
+        };
+        let request = crate::instance::Request::new(&options, None).unwrap();
+        assert!(crate::open_requests::request_needs_window(&w, &request));
+        w.settings.set(Layer::User, "hot_exit", json!("always"));
+        assert!(!crate::open_requests::request_needs_window(&w, &request));
+    }
+    #[test]
+    fn close_deleted_files_closes_clean_watched_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deleted.txt");
+        std::fs::write(&path, "clean").unwrap();
+        let mut w = Workspace::new(Text::new(), None, None, true).unwrap();
+        w.settings
+            .set(Layer::User, "close_deleted_files", json!(true));
+        w.open(location(path.clone())).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !w.is_empty() {
+            w.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        assert!(w.workbench.groups[0].sheets.is_empty());
+    }
+    #[test]
+    fn untitled_names_are_unicode_bounded_and_close_names_have_no_dirty_marker() {
+        let mut w = workspace();
+        let first = "你好".repeat(40);
+        w.editor_mut()
+            .run(
+                "insert",
+                &json!({"characters":format!("  {first}\nsecond")}),
+            )
+            .unwrap();
+        assert_eq!(w.tabs[0].name().chars().count(), 50);
+        assert!(!w.tabs[0].name().contains('•'));
+        assert!(w.tabs[0].label().ends_with(" •"));
+        w.editor_mut()
+            .settings
+            .set(Layer::View, "set_unsaved_view_name", json!(false));
+        assert_eq!(w.tabs[0].name(), "Untitled");
+    }
+    #[test]
+    fn reopen_stack_is_window_local_and_restores_selection_and_scroll() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("closed.txt");
+        std::fs::write(&path, "abcdef\n").unwrap();
+        let mut w = workspace();
+        w.open(location(path.clone())).unwrap();
+        w.editor_mut()
+            .set_selection(Selection::from_regions([Region::new(4, 1)]));
+        w.tabs[0].scroll = (15., 96.);
+        w.close(0).unwrap();
+        assert_eq!(w.closed_files.len(), 1);
+        assert!(workspace().closed_files.is_empty());
+        w.reopen_last_file().unwrap();
+        assert!(w.closed_files.is_empty());
+        assert_eq!(w.tabs[0].path.as_ref(), Some(&path.canonicalize().unwrap()));
+        assert_eq!(w.editor().regions(), vec![Region::new(4, 1)]);
+        assert_eq!(w.tabs[0].scroll, (15., 96.));
+        assert!(!w.take_pending_center());
+    }
+    #[test]
+    fn project_save_as_preserves_relative_paths_unknown_folder_keys_and_absent_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_dir = dir.path().join("old");
+        let new_dir = dir.path().join("new");
+        std::fs::create_dir_all(old_dir.join("src")).unwrap();
+        std::fs::create_dir(&new_dir).unwrap();
+        let old = old_dir.join("app.sublime-project");
+        std::fs::write(&old, r#"{"folders":[{"path":"src","file_include_patterns":["*.rs"],"folder_include_patterns":["code*"],"custom_folder":{"keep":7}}],"custom_project":42}"#).unwrap();
+        let mut w = Workspace::new(Text::new(), None, Some(old.clone()), false).unwrap();
+        assert!(w.folders[0].follow_links);
+        let new = new_dir.join("renamed.sublime-project");
+        w.save_project_as(new.clone()).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&new).unwrap()).unwrap();
+        assert_eq!(saved["folders"][0]["path"], "../old/src");
+        assert_eq!(saved["folders"][0]["custom_folder"]["keep"], 7);
+        assert_eq!(saved["custom_project"], 42);
+        for key in [
+            "follow_symlinks",
+            "file_exclude_patterns",
+            "folder_exclude_patterns",
+            "binary_file_patterns",
+        ] {
+            assert!(saved["folders"][0].get(key).is_none(), "{key}");
+        }
+        assert!(saved.get("settings").is_none());
+        assert!(saved.get("build_systems").is_none());
+        assert!(w.folders[0].rules.allows(
+            &w.folders[0].path,
+            &w.folders[0].path.join("main.rs"),
+            false,
+            true
+        ));
+        assert!(!w.folders[0].rules.allows(
+            &w.folders[0].path,
+            &w.folders[0].path.join("main.txt"),
+            false,
+            true
+        ));
+        assert!(
+            std::fs::read_to_string(old)
+                .unwrap()
+                .contains("\"path\":\"src\"")
+        );
+    }
+    #[test]
+    fn documented_exclusions_hide_build_objects_but_allow_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("app.sublime-project");
+        std::fs::write(&project, r#"{"folders":[{"path":"."}]}"#).unwrap();
+        let w = Workspace::new(Text::new(), None, Some(project), false).unwrap();
+        let folder = &w.folders[0];
+        for name in ["target", "node_modules", "src"] {
+            assert!(
+                folder
+                    .rules
+                    .allows(&folder.path, &folder.path.join(name), true, false),
+                "{name}"
+            );
+        }
+        for name in [".svn", ".hg", ".git", "CVS"] {
+            assert!(
+                !folder
+                    .rules
+                    .allows(&folder.path, &folder.path.join(name), true, false),
+                "{name}"
+            );
+        }
+        for name in [
+            ".DS_Store",
+            "module.o",
+            "module.obj",
+            "app.sublime-workspace",
+            "module.pyc",
+        ] {
+            assert!(
+                !folder
+                    .rules
+                    .allows(&folder.path, &folder.path.join(name), false, true),
+                "{name}"
+            );
+        }
+    }
+    #[test]
+    fn indentation_choices_survive_resource_and_external_reload_and_project_watching() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("profile");
+        let file = dir.path().join("indent.rs");
+        let project = dir.path().join("project.sublime-project");
+        std::fs::write(&file, "fn main() {\n  first();\n  second();\n}\n").unwrap();
+        std::fs::write(&project, r#"{"folders":[{"path":"."}]}"#).unwrap();
+        let mut w = Workspace::new(Text::new(), Some(data), None, true).unwrap();
+        w.open_project(project).unwrap();
+        assert!(w.watcher.is_some());
+        w.open(location(file.clone())).unwrap();
+        assert_eq!(w.editor().settings.usize("tab_size", 0), 2);
+        w.editor_mut()
+            .settings
+            .set(Layer::View, "tab_size", json!(8));
+        w.editor_mut()
+            .settings
+            .set(Layer::View, "translate_tabs_to_spaces", json!(false));
+        w.request_resource_reload();
+        w.wait_resources();
+        assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
+        std::fs::write(&file, "fn main() {\n    changed();\n    again();\n}\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !w.editor().text.to_string().contains("changed") {
+            w.poll();
+            assert!(Instant::now() < deadline, "{:?}", w.messages);
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
+        assert!(!w.editor().settings.bool("translate_tabs_to_spaces", true));
+        std::fs::remove_file(&file).unwrap();
+        while !w.tabs[w.active].deleted {
+            w.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        assert!(w.tabs[w.active].dirty());
+        assert!(w.tabs[w.active].label().contains("[deleted]"));
+        w.save(w.active, None).unwrap();
+        assert!(file.exists());
+        assert!(!w.tabs[w.active].deleted);
+    }
+    #[test]
+    fn missing_files_do_not_abort_restore_and_close_deleted_files_keeps_dirty_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+        let healthy = dir.path().join("healthy.txt");
+        std::fs::write(&missing, "saved").unwrap();
+        std::fs::write(&healthy, "healthy").unwrap();
+        let mut w = workspace();
+        w.open(location(missing.clone())).unwrap();
+        w.open(location(healthy)).unwrap();
+        let (window, documents) = w.snapshot().unwrap();
+        std::fs::remove_file(missing).unwrap();
+        let mut restored = workspace();
+        restored.restore_window(&window, &documents).unwrap();
+        assert_eq!(restored.tabs.len(), 2);
+        restored.select(0);
+        assert!(restored.tabs[0].deleted);
+        assert!(restored.tabs[0].dirty());
+        restored.select(1);
+        assert_eq!(restored.editor().text.to_string(), "healthy");
+        let mut close_deleted = workspace();
+        close_deleted
+            .settings
+            .set(Layer::User, "close_deleted_files", json!(true));
+        close_deleted.restore_window(&window, &documents).unwrap();
+        assert_eq!(close_deleted.tabs.len(), 1);
+        let mut dirty_docs = documents;
+        dirty_docs[0].dirty = true;
+        let mut buffer = vel_buffer::Buffer::new("retained dirty text");
+        buffer.new_view();
+        dirty_docs[0].history = Some(vel_session::History::capture(&buffer));
+        close_deleted.restore_window(&window, &dirty_docs).unwrap();
+        assert_eq!(close_deleted.tabs.len(), 2);
+        close_deleted.select(0);
+        assert_eq!(
+            close_deleted.editor().text.to_string(),
+            "retained dirty text"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn failing_visible_and_lazy_restore_is_reported_once_and_other_tabs_load() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("failed.txt");
+        let good = dir.path().join("good.txt");
+        std::fs::write(&bad, "bad").unwrap();
+        std::fs::write(&good, "good").unwrap();
+        let mut w = workspace();
+        w.open(location(bad.clone())).unwrap();
+        w.open(location(good)).unwrap();
+        let (mut window, documents) = w.snapshot().unwrap();
+        // Bypass the saved history to exercise the plain file loader's lazy failure.
+        let mut documents = documents;
+        documents[0].history = None;
+        std::fs::remove_file(&bad).unwrap();
+        let _socket = UnixListener::bind(bad).unwrap();
+        let mut restored = workspace();
+        restored.restore_window(&window, &documents).unwrap();
+        assert_eq!(restored.editor().text.to_string(), "good");
+        assert!(restored.prepare_sheet(0).is_err());
+        assert!(restored.tabs[0].lazy.is_none());
+        assert!(restored.prepare_sheet(0).is_ok());
+        let sheets = window.workbench.groups[0].sheets.clone();
+        window.workbench.groups[0].selected.extend(sheets);
+        let mut visible = workspace();
+        visible.restore_window(&window, &documents).unwrap();
+        assert_eq!(
+            visible
+                .messages
+                .iter()
+                .filter(|m| m.contains("failed.txt"))
+                .count(),
+            1
+        );
+        visible.select(0);
+        visible.editor_mut();
+        assert_eq!(
+            visible
+                .messages
+                .iter()
+                .filter(|m| m.contains("failed.txt"))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn legacy_hot_exit_false_and_recent_encoding_commands_are_wired() {
+        let mut w = workspace();
+        w.settings.set(Layer::User, "hot_exit", json!(false));
+        assert_eq!(w.hot_exit(), vel_session::HotExit::Disabled);
+        let key = vel_config::keymap::Key::parse("super+shift+t").unwrap();
+        assert!(
+            matches!(w.editor_mut().resolve_key(&key), vel_config::keymap::Resolution::Command(ref command) if command.command == "reopen_last_file")
+        );
+        w.recent_files.push("/tmp/a.txt".into());
+        w.recent_folders.push("/tmp/folder".into());
+        w.recent_projects
+            .push("/tmp/project.sublime-project".into());
+        assert!(w.refresh_file_menus());
+        assert!(!w.refresh_file_menus());
+        let file = w.menus.iter().find(|m| m.id == "file").unwrap();
+        let recent = file
+            .children
+            .iter()
+            .find(|m| m.id == "open_recent")
+            .unwrap();
+        assert_eq!(recent.children.len(), 4);
+        for command in ["reopen_encoding", "save_encoding"] {
+            let submenu = file
+                .children
+                .iter()
+                .find(|m| {
+                    m.children
+                        .first()
+                        .is_some_and(|c| c.command.as_deref() == Some(command))
+                })
+                .unwrap();
+            assert_eq!(submenu.children.len(), vel_fileio::ENCODINGS.len());
+        }
+    }
+}
+
+#[cfg(test)]
+mod review15_tests {
+    use super::*;
+    use vel_config::json;
+    fn workspace(watch: bool) -> Workspace {
+        Workspace::new(Text::new(), None, None, watch).unwrap()
+    }
+    fn location(path: &Path) -> FileLocation {
+        FileLocation {
+            path: path.into(),
+            line: 1,
+            column: 1,
+        }
+    }
+    fn until(w: &mut Workspace, condition: impl Fn(&Workspace) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !condition(w) {
+            w.poll();
+            assert!(Instant::now() < deadline, "{:?}", w.messages);
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+    }
+    #[test]
+    fn empty_window_previews_never_leak_sheets_or_break_all_window_hot_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "first").unwrap();
+        std::fs::write(&b, "second").unwrap();
+        let mut w = workspace(false);
+        w.close(0).unwrap();
+        let hidden = w.tabs[0].sheet;
+        w.preview(location(&a)).unwrap();
+        assert_eq!(w.tabs.len(), 1);
+        assert_ne!(w.tabs[0].sheet, hidden);
+        w.preview(location(&b)).unwrap(); // Replacing the only transient creates another empty adapter.
+        assert_eq!(w.tabs.len(), 1);
+        assert_eq!(w.workbench.groups[0].sheets, vec![w.tabs[0].sheet]);
+        let mut other = workspace(false);
+        other
+            .editor_mut()
+            .run("insert", &json!({"characters":"unsaved in another window"}))
+            .unwrap();
+        let mut sessions = crate::session::Sessions::new(Some(dir.path()));
+        for window in [&mut w, &mut other] {
+            let id = sessions.register();
+            let (snapshot, documents) = window.snapshot().unwrap();
+            sessions
+                .publish(
+                    id,
+                    snapshot,
+                    documents,
+                    Default::default(),
+                    crate::session::Policy {
+                        hot: vel_session::HotExit::Always,
+                        quitting: true,
+                        closing: false,
+                        remember: true,
+                    },
+                )
+                .unwrap();
+        }
+        sessions.flush().unwrap();
+        let restored = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert!(restored.messages.is_empty(), "{:?}", restored.messages);
+        restored.session.validate().unwrap();
+        assert_eq!(restored.session.windows.len(), 2);
+        assert!(
+            restored
+                .session
+                .documents
+                .iter()
+                .any(|d| d.history.as_ref().is_some_and(|h| h
+                    .current_text()
+                    .is_ok_and(|t| t == "unsaved in another window")))
+        );
+        w.close(w.active).unwrap(); // Escape's close, then a stale select of the old origin.
+        w.select(0);
+        assert!(w.is_empty());
+        assert!(w.snapshot().unwrap().0.sheets.is_empty());
+        w.editor_mut()
+            .run("insert", &json!({"characters":"visible input"}))
+            .unwrap();
+        w.materialize_input();
+        assert!(!w.is_empty());
+        assert_eq!(w.workbench.groups[0].sheets, vec![w.tabs[0].sheet]);
+        assert_eq!(w.tabs.len(), 1);
+        assert!(w.closed_files.is_empty());
+    }
+    #[test]
+    fn cancelled_goto_in_an_empty_window_leaves_no_ghost_untitled() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("preview.txt");
+        std::fs::write(&file, "preview").unwrap();
+        let mut w = workspace(false);
+        w.close(0).unwrap();
+        let mut panels = crate::panels::Panels::new(&w, false);
+        panels
+            .action(&mut w, "show_overlay", &json!({"overlay":"goto"}), 0..0)
+            .unwrap();
+        w.preview(location(&file)).unwrap();
+        panels
+            .key(
+                &mut w,
+                &vel_config::keymap::Key::parse("escape").unwrap(),
+                0..7,
+            )
+            .unwrap();
+        assert!(w.is_empty());
+        assert!(w.workbench.groups.iter().all(|g| g.sheets.is_empty()));
+        assert!(w.snapshot().unwrap().1.is_empty());
+        assert!(w.closed_files.is_empty());
+    }
+    #[test]
+    fn recreated_files_clear_deletion_and_reload_only_without_real_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkout.txt");
+        std::fs::write(&file, "original").unwrap();
+        let mut w = workspace(true);
+        w.open(location(&file)).unwrap();
+        w.clone_file().unwrap();
+        for replacement in ["original", "changed checkout"] {
+            std::fs::remove_file(&file).unwrap();
+            until(&mut w, |w| w.tabs.iter().all(|t| t.deleted));
+            std::fs::write(&file, replacement).unwrap();
+            until(&mut w, |w| {
+                w.tabs.iter().all(|t| !t.deleted) && w.editor().text == replacement
+            });
+            assert!(w.tabs.iter().all(|t| !t.dirty() && t.external.is_none()));
+        }
+        std::fs::remove_file(&file).unwrap();
+        until(&mut w, |w| w.tabs.iter().all(|t| t.deleted));
+        w.editor_mut()
+            .run("insert", &json!({"characters":"local edit "}))
+            .unwrap();
+        let local = w.editor().text.clone();
+        std::fs::write(&file, "new disk text").unwrap();
+        until(&mut w, |w| w.tabs[w.active].external.is_some());
+        assert!(!w.tabs[w.active].deleted);
+        assert!(w.tabs[w.active].dirty());
+        assert_eq!(w.editor().text, local);
+    }
+    #[test]
+    fn reopen_skips_preview_closes_and_missing_entries_but_keeps_real_view_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("real.txt");
+        let b = dir.path().join("missing.txt");
+        let c = dir.path().join("preview.txt");
+        for path in [&a, &b, &c] {
+            std::fs::write(path, "abcdef").unwrap();
+        }
+        let mut w = workspace(false);
+        w.open(location(&a)).unwrap();
+        w.editor_mut()
+            .set_selection(Selection::from_regions([Region::new(5, 2)]));
+        w.tabs[0].scroll = (2., 50.);
+        w.close(0).unwrap();
+        w.open(location(&b)).unwrap();
+        w.close(0).unwrap();
+        std::fs::remove_file(&b).unwrap();
+        w.preview(location(&c)).unwrap();
+        w.close(0).unwrap();
+        assert_eq!(w.closed_files.len(), 2);
+        w.reopen_last_file().unwrap();
+        assert_eq!(
+            w.tabs[w.active].path.as_deref(),
+            Some(a.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(w.editor().regions(), vec![Region::new(5, 2)]);
+        assert_eq!(w.tabs[w.active].scroll, (2., 50.));
+        assert!(w.closed_files.is_empty());
+        w.close(w.active).unwrap();
+        std::fs::remove_file(a).unwrap();
+        w.reopen_last_file().unwrap();
+        assert!(w.is_empty());
+        assert!(w.closed_files.is_empty());
+    }
+    #[test]
+    fn hidden_input_cannot_be_saved_as_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unintended.txt");
+        let mut w = workspace(false);
+        w.close(0).unwrap();
+        assert!(w.save(0, Some(path.clone())).is_err());
+        assert!(!path.exists());
+        w.editor_mut()
+            .run("insert", &json!({"characters":"intended"}))
+            .unwrap();
+        w.save(0, Some(path.clone())).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "intended");
+    }
+}
+
+#[cfg(test)]
+mod review15_indentation_tests {
+    use super::*;
+    use vel_config::json;
+    #[test]
+    fn untitled_and_cloned_manual_indentation_is_not_redetected_without_a_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = Workspace::new(Text::new(), None, None, false).unwrap();
+        for empty in [false, true] {
+            if empty {
+                while !w.is_empty() {
+                    w.close(w.active).unwrap();
+                }
+            } else {
+                w.new_file().unwrap();
+            }
+            w.editor_mut()
+                .settings
+                .set(Layer::View, "tab_size", json!(8));
+            w.editor_mut()
+                .run(
+                    "insert",
+                    &json!({"characters":"fn main() {\n  one();\n  two();\n}\n"}),
+                )
+                .unwrap();
+            w.materialize_input();
+            w.clone_file().unwrap();
+            w.set_appearance(true).unwrap();
+            w.poll();
+            w.save(
+                w.active,
+                Some(dir.path().join(format!("manual-{empty}.rs"))),
+            )
+            .unwrap();
+            assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
+            let path = w.tabs[w.active].path.clone().unwrap();
+            std::fs::write(&path, "fn main() {\n    changed();\n    again();\n}\n").unwrap();
+            w.tabs[w.active].external = Some(fileio::load(&path, "windows-1252", |_| {}).unwrap());
+            w.reload_external(w.active, true);
+            w.poll();
+            assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
+        }
+    }
+}

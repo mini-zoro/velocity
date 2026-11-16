@@ -375,9 +375,11 @@ mod tests {
         let text = node.text.as_ref().unwrap();
         assert_eq!(text.selected, a.workspace.editor().selected_utf16());
         assert!(node.help.contains("2"));
-        assert!(tree.nodes.iter().any(|n| n.role == Role::Tab
-            && n.label.contains("Untitled")
-            && n.activation.is_some()));
+        assert!(
+            tree.nodes
+                .iter()
+                .any(|n| n.role == Role::Tab && n.label.contains("a😀é") && n.activation.is_some())
+        );
         let range = Utf16Range::new(1, 2);
         let mut expected = a.view.range_rect(a.workspace.editor(), range).0;
         expected.x += a.content.x;

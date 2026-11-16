@@ -38,6 +38,14 @@ impl HotExit {
             _ => Self::Always,
         }
     }
+    /// Accepts current strings and the legacy boolean (`false` disables Hot Exit).
+    pub fn from_setting(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Bool(false) => Self::Disabled,
+            serde_json::Value::String(value) => Self::parse(value),
+            _ => Self::Always,
+        }
+    }
     /// Whether a close may retain dirty contents without prompting.
     pub fn retain(self, quitting: bool) -> bool {
         self == Self::Always || (quitting && self == Self::OnlyOnQuit)

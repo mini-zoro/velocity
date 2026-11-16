@@ -75,6 +75,80 @@ fn main() {
         std::process::exit(1);
     }
 }
+#[cfg(target_os = "macos")]
+struct NativeForwarder {
+    relay: open_requests::Forwarder,
+    options: Options,
+    reporter: Reporter,
+}
+#[cfg(target_os = "macos")]
+impl vel_platform::AppHandler for NativeForwarder {
+    fn on_start(&mut self, window: &vel_platform::WindowHandle) -> Result<(), String> {
+        window.close();
+        Ok(())
+    }
+    fn on_open_paths(
+        &mut self,
+        _window: &vel_platform::WindowHandle,
+        paths: &[std::path::PathBuf],
+    ) {
+        self.relay.enqueue(paths.to_vec(), Instant::now());
+    }
+    fn on_reopen(&mut self, _window: &vel_platform::WindowHandle) {
+        self.relay.enqueue(vec![], Instant::now());
+    }
+    fn on_idle(&mut self, window: &vel_platform::WindowHandle) {
+        match self.relay.poll(Instant::now()) {
+            open_requests::ForwardPoll::Waiting => {}
+            open_requests::ForwardPoll::Quit => window.quit(),
+            open_requests::ForwardPoll::Failed(error) => {
+                eprintln!("velocity: native open forwarding failed: {error}");
+                window.quit();
+            }
+            open_requests::ForwardPoll::Primary { instance, paths } => {
+                let result = (|| {
+                    let data = self
+                        .options
+                        .data_dir
+                        .clone()
+                        .or_else(workspace::Workspace::default_data_dir);
+                    let workspace = workspace::Workspace::new(Text::new(), data, None, true)?;
+                    let mut options = self.options.clone();
+                    options.forward_native_opens = false;
+                    let mut app = app::App::new(
+                        options,
+                        Clock::new(Instant::now(), SystemTime::now()),
+                        self.reporter.clone(),
+                        workspace,
+                        Arc::new(AtomicBool::new(false)),
+                        std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(None))),
+                    );
+                    app.take_over_native_primary(instance)?;
+                    if let Err(error) = app.open_received_paths(&paths) {
+                        eprintln!("velocity: {error}");
+                    }
+                    if let Some(home) = std::env::var_os("HOME") {
+                        match release::CrashStartup::install(Path::new(&home)) {
+                            Ok(crash) => app.set_crash(Some(crash)),
+                            Err(error) => {
+                                eprintln!("velocity: crash reporting unavailable: {error}")
+                            }
+                        }
+                    }
+                    window.new_window(WindowOptions::default(), app)?;
+                    Ok::<_, String>(())
+                })();
+                if let Err(error) = result {
+                    eprintln!("velocity: native primary takeover failed: {error}");
+                    window.quit();
+                }
+            }
+        }
+    }
+    fn on_frame(&mut self, _context: &mut vel_platform::FrameContext<'_>) -> Result<(), String> {
+        Ok(())
+    }
+}
 fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     let Some(mut options) = Options::parse(std::env::args().skip(1))? else {
         print!("{}", cli::HELP);
@@ -186,6 +260,16 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     clock.attach(reporter.clone())?;
     clock.mark("instrumentation_ready");
     let result = (|| {
+        #[cfg(target_os = "macos")]
+        if options.forward_native_opens {
+            // This recipient owns no editor/session/renderer. Close its native host
+            // before orderFront and let the closed-window timer pump the relay.
+            return Platform::run(NativeForwarder {
+                relay: open_requests::Forwarder::new(data_dir.clone(), Instant::now()),
+                options: options.clone(),
+                reporter: reporter.clone(),
+            });
+        }
         if options.mode == Mode::HeadlessLargeFiles {
             return large_bench::run(&reporter, &options);
         }
@@ -278,14 +362,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             )));
             let mut restored_ui = None;
             let restored = sessions.borrow().restored.clone();
-            let first = if (options.mode == Mode::Interactive || options.restore_session)
-                && options.project.is_none()
-                && options.files.is_empty()
-            {
-                restored.windows.first().cloned()
-            } else {
-                None
-            };
+            let reserved = sessions.borrow_mut().reserve_recovered();
+            let selected = open_requests::restored_window(&restored.windows, &options);
+            let first = selected.map(|index| restored.windows[index].clone());
             let project = options.project.clone().or_else(|| {
                 first
                     .as_ref()
@@ -301,14 +380,20 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             );
             let mut workspace = match initial_workspace {
                 Ok(workspace) => workspace,
-                Err(e) if options.project.is_none() && first.is_some() => {
+                Err(e) if project.is_some() || first.is_some() => {
                     let mut workspace = workspace::Workspace::new(
                         Text::new(),
                         data_dir.clone(),
                         None,
                         options.mode == Mode::Interactive,
                     )?;
-                    workspace.messages.push(format!("Restored project: {e}"));
+                    workspace.messages.push(format!(
+                        "{}: {e}",
+                        project.as_deref().map_or_else(
+                            || "Session project".into(),
+                            |path| path.display().to_string()
+                        )
+                    ));
                     workspace
                 }
                 Err(e) => return Err(e),
@@ -350,16 +435,17 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 options.mode,
                 Mode::Interactive | Mode::Open | Mode::LargeFiles
             ) {
-                for location in &options.files {
-                    if location.path != Path::new("-") {
-                        if location.path.is_dir() {
-                            let mut panels = panels::Panels::new(&workspace, false);
-                            panels.add_folder(&mut workspace, location.path.clone())?;
-                        } else {
-                            workspace.open(location.clone())?;
-                        }
-                    }
-                }
+                let mut panels = panels::Panels::new(&workspace, false);
+                let errors = open_requests::open_locations(
+                    &mut workspace,
+                    &mut panels,
+                    options
+                        .files
+                        .iter()
+                        .filter(|location| location.path != Path::new("-"))
+                        .cloned(),
+                );
+                workspace.messages.extend(errors);
             } else if !options.restore_session {
                 let path = options
                     .file
@@ -392,9 +478,20 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             if let Some(window) = &restored_ui {
                 app.restore_ui(window);
             }
-            if first.is_some() {
-                app.restore_remaining(restored.windows.iter().skip(1).cloned().collect());
+            if let Some(index) = selected {
+                app.restore_session_id(reserved[index]);
             }
+            // The selected recovery keeps its reserved live ID. Restore every other window
+            // exactly once, including when the explicit project matched a non-first window.
+            let (windows, ids) = restored
+                .windows
+                .into_iter()
+                .zip(reserved)
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != selected)
+                .map(|(_, pair)| pair)
+                .unzip();
+            app.restore_remaining_reserved(windows, ids);
             app.set_instance(instance);
             app.set_crash(crash);
             Platform::run_with_options(window, app)?;

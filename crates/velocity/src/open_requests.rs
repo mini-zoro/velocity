@@ -12,6 +12,43 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Chooses an already recovered window for an explicit project or directory launch.
+/// An explicit new-window request always creates an additional window.
+pub(crate) fn restored_window(windows: &[vel_session::Window], options: &Options) -> Option<usize> {
+    if options.new_window
+        || (options.mode != crate::cli::Mode::Interactive && !options.restore_session)
+    {
+        return None;
+    }
+    if let Some(project) = &options.project {
+        return windows.iter().position(|window| {
+            window
+                .project
+                .as_deref()
+                .is_some_and(|p| same_path(p, project))
+        });
+    }
+    let directories: Vec<_> = options.files.iter().filter(|f| f.path.is_dir()).collect();
+    if !options.add_to_window && !directories.is_empty() {
+        return windows.iter().position(|window| {
+            directories.iter().all(|directory| {
+                window
+                    .folders
+                    .iter()
+                    .any(|folder| same_path(folder, &directory.path))
+            })
+        });
+    }
+    (!windows.is_empty()).then_some(0)
+}
+fn same_path(a: &Path, b: &Path) -> bool {
+    let normalized = |path: &Path| fs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    match (normalized(a), normalized(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Result of relaying a secondary LaunchServices process's actual open event.
 #[derive(Debug)]
 pub enum NativeForward {
@@ -32,7 +69,7 @@ pub fn forward_native_paths(
         Start::Primary(instance) => Ok(NativeForward::Primary(instance)),
     }
 }
-fn native_request(paths: &[PathBuf]) -> Result<Request, String> {
+pub(crate) fn native_request(paths: &[PathBuf]) -> Result<Request, String> {
     let mut request = Request::new(
         &Options {
             files: paths
@@ -43,13 +80,100 @@ fn native_request(paths: &[PathBuf]) -> Result<Request, String> {
                     column: 1,
                 })
                 .collect(),
-            add_to_window: true,
+            add_to_window: false,
             ..Options::default()
         },
         None,
     )?;
     request.native_open = true;
     Ok(request)
+}
+
+/// Asynchronous, ordered LaunchServices relay. A quiet period lets Apple events that
+/// arrive during an acknowledgement join the same recipient before it exits.
+#[derive(Debug)]
+pub struct Forwarder {
+    data: Option<PathBuf>,
+    pending: VecDeque<Vec<PathBuf>>,
+    inflight: Option<std::sync::mpsc::Receiver<Result<NativeForward, String>>>,
+    current: Vec<PathBuf>,
+    last_activity: std::time::Instant,
+}
+#[derive(Debug)]
+pub enum ForwardPoll {
+    Waiting,
+    Quit,
+    Primary {
+        instance: Instance,
+        paths: Vec<PathBuf>,
+    },
+    Failed(String),
+}
+impl Forwarder {
+    pub const QUIET: std::time::Duration = std::time::Duration::from_secs(1);
+    pub fn new(data: Option<PathBuf>, now: std::time::Instant) -> Self {
+        Self {
+            data,
+            pending: VecDeque::new(),
+            inflight: None,
+            current: vec![],
+            last_activity: now,
+        }
+    }
+    fn failure(&self, error: &str) -> String {
+        let paths = self
+            .current
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            format!("Native reopen: {error}")
+        } else {
+            format!("{}: {error}", paths.join(", "))
+        }
+    }
+    pub fn enqueue(&mut self, paths: Vec<PathBuf>, now: std::time::Instant) {
+        self.pending.push_back(paths);
+        self.last_activity = now;
+    }
+    pub fn poll(&mut self, now: std::time::Instant) -> ForwardPoll {
+        if let Some(rx) = &self.inflight {
+            let result = match rx.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return ForwardPoll::Waiting,
+                Err(error) => Err(error.to_string()),
+            };
+            self.inflight = None;
+            self.last_activity = now;
+            match result {
+                Ok(NativeForward::Forwarded) => self.current.clear(),
+                Ok(NativeForward::Primary(instance)) => {
+                    let mut paths = std::mem::take(&mut self.current);
+                    paths.extend(self.pending.drain(..).flatten());
+                    return ForwardPoll::Primary { instance, paths };
+                }
+                Err(error) => return ForwardPoll::Failed(self.failure(&error)),
+            }
+        }
+        if let Some(paths) = self.pending.pop_front() {
+            self.current = paths.clone();
+            let data = self.data.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            match std::thread::Builder::new()
+                .name("velocity-native-forward".into())
+                .spawn(move || {
+                    let _ = tx.send(forward_native_paths(data.as_deref(), &paths));
+                }) {
+                Ok(_) => self.inflight = Some(rx),
+                Err(error) => return ForwardPoll::Failed(self.failure(&error.to_string())),
+            }
+            ForwardPoll::Waiting
+        } else if now.saturating_duration_since(self.last_activity) >= Self::QUIET {
+            ForwardPoll::Quit
+        } else {
+            ForwardPoll::Waiting
+        }
+    }
 }
 
 /// Ordered native open requests retained until the target window is ready.
@@ -79,6 +203,71 @@ impl Router {
     }
 }
 
+/// Whether a request needs a new window. Directories use a new window unless --add
+/// explicitly targets the current one, including native folders delivered by Finder.
+pub fn needs_new_window(request: &Request, open_files_in_new_window: bool) -> bool {
+    request.new_window
+        || (!request.add
+            && (open_files_in_new_window
+                || request.files.iter().any(|location| location.path.is_dir())))
+}
+/// Includes the session policy in window routing so --project cannot overwrite dirty
+/// buffers when Hot Exit is disabled. Menu switches instead use normal close prompts.
+pub fn request_needs_window(workspace: &Workspace, request: &Request) -> bool {
+    needs_new_window(
+        request,
+        workspace.global_bool("open_files_in_new_window", false),
+    ) || (request.project.is_some()
+        && !workspace.hot_exit().retain(false)
+        && workspace.tabs.iter().any(|tab| tab.dirty()))
+}
+/// Apply every CLI location, collecting all failures in order without aborting the batch.
+pub fn open_locations(
+    workspace: &mut Workspace,
+    panels: &mut Panels,
+    locations: impl IntoIterator<Item = FileLocation>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for location in locations {
+        let path = location.path.clone();
+        let result = if path.is_dir() {
+            panels.add_folder(workspace, path.clone())
+        } else {
+            workspace.open(location)
+        };
+        if let Err(error) = result {
+            errors.push(format!("{}: {error}", path.display()));
+        }
+    }
+    errors
+}
+/// Apply successful trash paths, detaching any affected project roots through the same
+/// persistence/refresh path as Detach. Failed trash entries must not be supplied here.
+pub fn apply_trashed(
+    workspace: &mut Workspace,
+    panels: &mut Panels,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    crate::context_menu::apply_delete(workspace, paths);
+    let roots: Vec<_> = workspace
+        .folders
+        .iter()
+        .filter(|folder| paths.iter().any(|path| folder.path.starts_with(path)))
+        .map(|folder| folder.path.clone())
+        .collect();
+    let mut errors = Vec::new();
+    for root in roots {
+        if let Err(error) = panels.remove_sidebar_folder(workspace, &root) {
+            errors.push(error);
+        }
+    }
+    panels.refresh_sidebar(workspace);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
 /// Open literal native paths in an existing window; the caller presents any errors.
 /// Numeric colon suffixes are part of the filename here, never CLI line/column syntax.
 pub fn open_paths(
@@ -94,7 +283,17 @@ pub fn open_paths(
 fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Result<(), String> {
     // Validate before selecting existing tabs too: missing or unreadable native requests
     // must report their path rather than silently succeeding against an old buffer.
-    let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let path = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return workspace.open(FileLocation {
+                path: path.into(),
+                line: 1,
+                column: 1,
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
     if metadata.is_dir() {
         // Test actual access rather than Unix mode bits (ACLs and user identity matter).
@@ -144,7 +343,7 @@ mod tests {
         let request =
             native_request(&[PathBuf::from("literal:2:3"), PathBuf::from("folder")]).unwrap();
         assert!(request.native_open);
-        assert!(request.add);
+        assert!(!request.add);
         assert!(!request.new_window);
         assert!(!request.wait);
         assert!(request.stdin.is_none());
@@ -234,22 +433,16 @@ mod tests {
         }
     }
     #[test]
-    fn missing_paths_report_errors_and_later_valid_paths_still_open() {
+    fn missing_native_paths_open_as_new_and_later_valid_paths_still_open() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing");
         let valid = directory.path().join("valid.txt");
-        let later_missing = directory.path().join("later missing");
         fs::write(&valid, "valid").unwrap();
         let (mut workspace, mut panels) = window();
-        let error = open_paths(
-            &mut workspace,
-            &mut panels,
-            &[missing.clone(), valid, later_missing.clone()],
-        )
-        .unwrap_err();
-        assert!(error.contains(&missing.display().to_string()));
-        assert!(error.contains(&later_missing.display().to_string()));
-        assert_eq!(workspace.tabs.len(), 1);
+        open_paths(&mut workspace, &mut panels, &[missing.clone(), valid]).unwrap();
+        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(workspace.tabs[0].path.as_ref(), Some(&missing));
+        assert!(!workspace.tabs[0].deleted);
         assert_eq!(workspace.editor().text.to_string(), "valid");
     }
     #[cfg(unix)]
@@ -338,5 +531,255 @@ mod tests {
             8
         );
         assert!(workspace.editor().read_only);
+    }
+}
+
+#[cfg(test)]
+mod round15_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use vel_text::Text;
+    #[test]
+    fn primary_takeover_keeps_inflight_and_all_later_native_batches_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = Request::new(&Options::default(), None).unwrap();
+        let Start::Primary(instance) = Instance::start(Some(dir.path()), &request).unwrap() else {
+            panic!("primary")
+        };
+        let now = Instant::now();
+        let mut relay = Forwarder::new(Some(dir.path().into()), now);
+        relay.current = vec!["first".into(), "second".into()];
+        relay.enqueue(vec!["third".into()], now);
+        relay.enqueue(vec!["fourth".into(), "fifth".into()], now);
+        let (tx, rx) = std::sync::mpsc::channel();
+        relay.inflight = Some(rx);
+        tx.send(Ok(NativeForward::Primary(instance))).unwrap();
+        let ForwardPoll::Primary {
+            instance: _instance,
+            paths,
+        } = relay.poll(now)
+        else {
+            panic!("takeover")
+        };
+        assert_eq!(
+            paths,
+            ["first", "second", "third", "fourth", "fifth"].map(PathBuf::from)
+        );
+        assert!(relay.pending.is_empty());
+    }
+    #[test]
+    fn directories_choose_new_windows_unless_explicitly_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = native_request(&[dir.path().into()]).unwrap();
+        assert!(needs_new_window(&request, false));
+        request.add = true;
+        assert!(!needs_new_window(&request, false));
+        request.new_window = true;
+        assert!(needs_new_window(&request, false));
+        request.new_window = false;
+        request.files.clear();
+        assert!(!needs_new_window(&request, true));
+        request.add = false;
+        assert!(needs_new_window(&request, true));
+    }
+    #[test]
+    fn forwarder_without_events_quits_and_waits_for_inflight_and_later_batches() {
+        let now = Instant::now();
+        let mut relay = Forwarder::new(None, now);
+        assert!(matches!(relay.poll(now), ForwardPoll::Waiting));
+        assert!(matches!(
+            relay.poll(now + Forwarder::QUIET),
+            ForwardPoll::Quit
+        ));
+        let mut relay = Forwarder::new(None, now);
+        let (tx, rx) = std::sync::mpsc::channel();
+        relay.current = vec!["first".into()];
+        relay.inflight = Some(rx);
+        relay.enqueue(vec!["second".into()], now + Duration::from_secs(3));
+        assert!(matches!(
+            relay.poll(now + Duration::from_secs(30)),
+            ForwardPoll::Waiting
+        ));
+        assert_eq!(relay.pending.len(), 1);
+        tx.send(Ok(NativeForward::Forwarded)).unwrap();
+        // Replace the next worker by a controlled acknowledgement to test quiet timing.
+        relay.pending.clear();
+        let received = now + Duration::from_secs(31);
+        assert!(matches!(relay.poll(received), ForwardPoll::Waiting));
+        relay.enqueue(vec!["late".into()], received + Duration::from_millis(500));
+        assert_eq!(
+            relay.pending.pop_front().unwrap(),
+            vec![PathBuf::from("late")]
+        );
+        assert!(matches!(
+            relay.poll(received + Duration::from_secs(1)),
+            ForwardPoll::Waiting
+        ));
+        assert!(matches!(
+            relay.poll(received + Duration::from_secs(2)),
+            ForwardPoll::Quit
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cli_batch_reports_all_errors_and_opens_later_files_and_new_paths() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.socket");
+        let second = dir.path().join("second.socket");
+        let _a = UnixListener::bind(&first).unwrap();
+        let _b = UnixListener::bind(&second).unwrap();
+        let good = dir.path().join("good.txt");
+        let new = dir.path().join("new.txt");
+        fs::write(&good, "good").unwrap();
+        let mut w = Workspace::new(Text::new(), None, None, false).unwrap();
+        let mut p = Panels::new(&w, false);
+        let errors = open_locations(
+            &mut w,
+            &mut p,
+            [first.clone(), good, second.clone(), new.clone()]
+                .into_iter()
+                .map(|path| FileLocation {
+                    path,
+                    line: 1,
+                    column: 1,
+                }),
+        );
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains(&first.display().to_string()));
+        assert!(errors[1].contains(&second.display().to_string()));
+        assert_eq!(w.tabs.len(), 2);
+        assert_eq!(w.tabs[w.active].path.as_ref(), Some(&new));
+    }
+    #[test]
+    fn successful_root_trash_detaches_and_persists_while_failed_paths_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let keep = dir.path().join("keep");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&keep).unwrap();
+        let project = dir.path().join("app.sublime-project");
+        fs::write(
+            &project,
+            r#"{"folders":[{"path":"root"},{"path":"keep","custom":7}],"custom":42}"#,
+        )
+        .unwrap();
+        let mut w = Workspace::new(Text::new(), None, Some(project.clone()), false).unwrap();
+        let mut p = Panels::new(&w, false);
+        let root = root.canonicalize().unwrap();
+        fs::rename(&root, dir.path().join("trashed-root")).unwrap();
+        apply_trashed(&mut w, &mut p, &[root]).unwrap();
+        assert_eq!(w.folders.len(), 1);
+        assert!(w.folders[0].path.ends_with("keep"));
+        let saved = vel_session::project::Project::load(&project).unwrap();
+        assert_eq!(saved.folders.len(), 1);
+        assert_eq!(saved.folders[0].path, PathBuf::from("keep"));
+        assert_eq!(saved.folders[0].extra["custom"], 7);
+        assert_eq!(saved.extra["custom"], 42);
+        assert_eq!(saved.folders[0].follow_symlinks, None);
+    }
+}
+
+#[cfg(test)]
+mod review15_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn explicit_project_and_directory_launches_reuse_the_matching_recovered_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("app.sublime-project");
+        fs::write(&project, "{}").unwrap();
+        let windows = vec![
+            vel_session::Window::default(),
+            vel_session::Window {
+                project: Some(project.clone()),
+                folders: vec![dir.path().into()],
+                ..Default::default()
+            },
+        ];
+        let mut options = Options {
+            project: Some(project),
+            ..Default::default()
+        };
+        assert_eq!(restored_window(&windows, &options), Some(1));
+        options.project = None;
+        options.files.push(crate::cli::FileLocation {
+            path: dir.path().into(),
+            line: 1,
+            column: 1,
+        });
+        assert_eq!(restored_window(&windows, &options), Some(1));
+        options.new_window = true;
+        assert_eq!(restored_window(&windows, &options), None);
+        options.new_window = false;
+        options.add_to_window = true;
+        assert_eq!(restored_window(&windows, &options), Some(0));
+        options.add_to_window = false;
+        options.project = Some(dir.path().join("other.sublime-project"));
+        assert_eq!(restored_window(&windows, &options), None);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn recovery_matching_accepts_symlink_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("app.sublime-project"), "{}").unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let windows = [vel_session::Window {
+            project: Some(root.join("app.sublime-project")),
+            folders: vec![root],
+            ..Default::default()
+        }];
+        let mut options = Options {
+            project: Some(alias.join("app.sublime-project")),
+            ..Default::default()
+        };
+        assert_eq!(restored_window(&windows, &options), Some(0));
+        options.project = None;
+        options.files.push(crate::cli::FileLocation {
+            path: alias,
+            line: 1,
+            column: 1,
+        });
+        assert_eq!(restored_window(&windows, &options), Some(0));
+    }
+    #[test]
+    fn relay_quiet_period_starts_after_the_last_request_and_ack_and_errors_name_paths() {
+        let start = Instant::now();
+        let mut relay = Forwarder::new(None, start);
+        let late = start + Forwarder::QUIET - Duration::from_millis(1);
+        relay.enqueue(vec!["first.txt".into(), "second.txt".into()], late);
+        relay.current = relay.pending.pop_front().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        relay.inflight = Some(rx);
+        assert!(matches!(
+            relay.poll(start + Forwarder::QUIET),
+            ForwardPoll::Waiting
+        ));
+        let ack = start + Duration::from_secs(3);
+        tx.send(Ok(NativeForward::Forwarded)).unwrap();
+        assert!(matches!(relay.poll(ack), ForwardPoll::Waiting));
+        assert!(matches!(
+            relay.poll(ack + Forwarder::QUIET - Duration::from_millis(1)),
+            ForwardPoll::Waiting
+        ));
+        assert!(matches!(
+            relay.poll(ack + Forwarder::QUIET),
+            ForwardPoll::Quit
+        ));
+        relay.current = vec!["failed one.txt".into(), "failed two.txt".into()];
+        let (tx, rx) = std::sync::mpsc::channel();
+        relay.inflight = Some(rx);
+        tx.send(Err("socket disconnected".into())).unwrap();
+        let ForwardPoll::Failed(message) = relay.poll(ack) else {
+            panic!("failure expected")
+        };
+        assert!(
+            message.contains("failed one.txt")
+                && message.contains("failed two.txt")
+                && message.contains("socket disconnected")
+        );
     }
 }

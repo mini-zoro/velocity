@@ -100,13 +100,14 @@ pub struct App {
 }
 impl App {
     /// Restores retained documents before a temporary native receiver can write the profile.
-    fn take_over_native_primary(
+    pub(crate) fn take_over_native_primary(
         &mut self,
         instance: crate::instance::Instance,
     ) -> Result<(), String> {
         let directory = self.workspace.data_path().map(Path::to_owned);
         let mut sessions = crate::session::Sessions::new(directory.as_deref());
         let restored = sessions.restored.clone();
+        let mut reserved = sessions.reserve_recovered().into_iter();
         let first = restored.windows.first().cloned();
         let project = first
             .as_ref()
@@ -120,7 +121,6 @@ impl App {
         workspace.recent_folders = restored.recent_folders;
         workspace.recent_projects = restored.recent_projects;
         workspace.messages.append(&mut sessions.messages);
-        let mut reserved = sessions.reserve_recovered().into_iter();
         let id = reserved.next().unwrap_or_else(|| sessions.register());
         sessions.instance = Some(instance);
         self.sessions = std::rc::Rc::new(std::cell::RefCell::new(sessions));
@@ -242,8 +242,19 @@ impl App {
         self.distraction_sidebar = window.distraction_sidebar;
         self.fullscreen_before_distraction = window.fullscreen_before_distraction;
     }
-    pub fn restore_remaining(&mut self, windows: Vec<vel_session::Window>) {
+    pub fn restore_session_id(&mut self, id: u64) {
+        self.session_id = id;
+        self.sessions.borrow_mut().active_window = Some(id);
+    }
+    pub fn restore_remaining_reserved(&mut self, windows: Vec<vel_session::Window>, ids: Vec<u64>) {
         self.restored_windows = windows;
+        self.restored_reserved_ids = ids.into();
+    }
+    pub(crate) fn open_received_paths(
+        &mut self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(), String> {
+        crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths)
     }
     pub fn set_crash(&mut self, crash: Option<crate::release::CrashStartup>) {
         self.releases.crash = crash;
@@ -252,12 +263,16 @@ impl App {
         self.sessions.borrow_mut().instance = instance;
     }
     fn hot_exit(&self) -> vel_session::HotExit {
-        vel_session::HotExit::parse(self.workspace.global_string("hot_exit", "always"))
+        self.workspace.hot_exit()
     }
     fn checkpoint(&mut self, quitting: bool) -> Result<(), String> {
         self.checkpoint_reason(quitting, false)
     }
     fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
+        // Cache stdin clients' current contents before a project switch can replace
+        // this window's documents. Completion still waits until their sheets close.
+        self.waiters
+            .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let active = self.workspace.active;
         self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
         let (mut window, documents) = self.workspace.snapshot()?;
@@ -326,7 +341,7 @@ impl App {
             app.restore_ui(window);
         }
         if let Some(id) = reserved_id {
-            app.session_id = id;
+            app.restore_session_id(id);
         }
         w.new_window(
             WindowOptions {
@@ -340,6 +355,9 @@ impl App {
         )
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
+        if self.workspace.refresh_file_menus() {
+            w.set_menu(&native_menu(&self.workspace.menus));
+        }
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
             let id = self.restored_reserved_ids.pop_front();
@@ -368,7 +386,7 @@ impl App {
             }
         }
         self.waiters
-            .retain_mut(|waiter| !waiter.complete(&self.workspace));
+            .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let messages = self.sessions.borrow_mut().poll();
         for message in messages {
             self.panels.message = message.clone();
@@ -389,13 +407,8 @@ impl App {
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         let native_open = incoming.request.native_open;
-        let new_window = incoming.request.new_window
-            || (!incoming.request.add
-                && self
-                    .workspace
-                    .editor()
-                    .settings
-                    .bool("open_files_in_new_window", false));
+        let new_window =
+            crate::open_requests::request_needs_window(&self.workspace, &incoming.request);
         if new_window {
             let workspace = Workspace::new(
                 vel_text::Text::new(),
@@ -433,53 +446,87 @@ impl App {
         }
         Ok(())
     }
+    fn open_native_window_request(
+        &mut self,
+        w: &WindowHandle,
+        request: crate::instance::Request,
+    ) -> Result<(), String> {
+        let (stream, _client) =
+            std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
+        let mut request = request;
+        request.queued_ack = true;
+        request.new_window = true;
+        self.receive_request(w, crate::instance::Incoming { request, stream })
+    }
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
         let request = incoming.request.clone();
         let mut ids = std::collections::BTreeSet::new();
-        if let Some(project) = request.project {
-            if !self.hot_exit().retain(false) && self.workspace.tabs.iter().any(|t| t.dirty()) {
-                return Err(
-                    "Save or close dirty files before switching this window's project, or use -n"
-                        .into(),
-                );
+        let mut errors = Vec::new();
+        if let Some(project) = request.project.clone() {
+            let retain = self.hot_exit().retain(false);
+            let result = (|| {
+                self.checkpoint_reason(false, true)?;
+                self.sessions.borrow().flush()?;
+                self.workspace
+                    .open_project(project.clone())
+                    .map_err(|error| format!("{}: {error}", project.display()))?;
+                self.sessions
+                    .borrow_mut()
+                    .retain_departing(self.session_id, retain);
+                self.panels = crate::panels::Panels::new(&self.workspace, true);
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = result {
+                errors.push(error);
             }
-            self.checkpoint_reason(false, true)?;
-            self.sessions.borrow().flush()?;
-            self.workspace.open_project(project)?;
-            self.panels = crate::panels::Panels::new(&self.workspace, true);
         }
         if request.native_open {
             let paths = request
                 .files
-                .into_iter()
-                .map(|location| location.path)
+                .iter()
+                .map(|location| location.path.clone())
                 .collect::<Vec<_>>();
             if let Err(error) =
                 crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, &paths)
             {
-                self.panels.message = error;
+                errors.push(error);
             }
         } else {
-            for location in request.files {
-                if location.path.is_dir() {
-                    self.panels.add_folder(&mut self.workspace, location.path)?;
-                } else {
-                    self.workspace.open(location)?;
+            for location in &request.files {
+                let result = crate::open_requests::open_locations(
+                    &mut self.workspace,
+                    &mut self.panels,
+                    std::iter::once(location.clone()),
+                );
+                if result.is_empty() && !location.path.is_dir() {
                     ids.insert(self.workspace.tabs[self.workspace.active].sheet);
                 }
+                errors.extend(result);
             }
         }
-        if let Some(text) = request.stdin {
-            self.workspace.new_file()?;
-            self.workspace
-                .editor_mut()
-                .run("insert", &json!({"characters":text}))?;
+        if let Some(text) = request.stdin.clone() {
+            let result = self.workspace.new_file().and_then(|()| {
+                self.workspace
+                    .editor_mut()
+                    .run("insert", &json!({"characters":text}))
+            });
+            if let Err(error) = result {
+                errors.push(error);
+            } else {
+                let sheet = self.workspace.tabs[self.workspace.active].sheet;
+                ids.insert(sheet);
+                self.workspace.stdout_sheets.insert(sheet);
+            }
+        }
+        if request.files.is_empty() && request.stdin.is_none() && !self.workspace.is_empty() {
             ids.insert(self.workspace.tabs[self.workspace.active].sheet);
         }
-        if ids.is_empty() {
-            ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+        if !errors.is_empty() {
+            self.panels.message = errors.join("\n");
         }
-        if let Some(waiter) = crate::instance::Waiter::acknowledge(incoming, &self.workspace, ids)?
+        // Path failures do not suppress the accepted/closed protocol or later paths.
+        if let Some(waiter) =
+            crate::instance::Waiter::acknowledge(incoming, &mut self.workspace, ids)?
         {
             self.waiters.push(waiter);
         }
@@ -587,7 +634,7 @@ impl App {
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled.txt".into());
+                .unwrap_or_else(|| self.workspace.tabs[index].name());
             let Some(path) = w.save_file(&suggested) else {
                 return false;
             };
@@ -645,11 +692,11 @@ impl App {
         }
         match w.alert(
             "Save changes?",
-            &self.workspace.tabs[index].label(),
-            &["Save", "Cancel", "Discard"],
+            &self.workspace.tabs[index].name(),
+            &["Save", "Don't Save", "Cancel"],
         ) {
             0 => self.save_tab(w, index, false),
-            2 => true,
+            1 => true,
             _ => false,
         }
     }
@@ -796,7 +843,13 @@ impl App {
                     }
                     self.checkpoint_reason(false, true)?;
                     self.sessions.borrow().flush()?;
-                    self.workspace.open_project(path)?;
+                    let retain = self.hot_exit().retain(false);
+                    self.workspace
+                        .open_project(path.clone())
+                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                    self.sessions
+                        .borrow_mut()
+                        .retain_departing(self.session_id, retain);
                     self.panels = crate::panels::Panels::new(&self.workspace, true);
                 }
                 return Ok(());
@@ -819,7 +872,11 @@ impl App {
                 }
                 self.checkpoint_reason(false, true)?;
                 self.sessions.borrow().flush()?;
+                let retain = self.hot_exit().retain(false);
                 self.workspace.close_project()?;
+                self.sessions
+                    .borrow_mut()
+                    .retain_departing(self.session_id, retain);
                 self.panels = crate::panels::Panels::new(&self.workspace, true);
                 return Ok(());
             }
@@ -868,6 +925,46 @@ impl App {
         let active = self.workspace.active;
         match name {
             "new_file" => self.workspace.new_file()?,
+            "reopen_last_file" => self.workspace.reopen_last_file()?,
+            "clear_recent_items" => {
+                self.workspace.recent_files.clear();
+                self.workspace.recent_folders.clear();
+                self.workspace.recent_projects.clear();
+                self.sessions.borrow_mut().clear_recent(self.session_id);
+            }
+            "open_recent_file" => {
+                self.workspace.open(crate::cli::FileLocation {
+                    path: args["file"].as_str().ok_or("missing file")?.into(),
+                    line: 1,
+                    column: 1,
+                })?;
+            }
+            "open_recent_folder" => {
+                self.open_native_window_request(
+                    w,
+                    crate::instance::Request {
+                        files: vec![crate::cli::FileLocation {
+                            path: args["dir"].as_str().ok_or("missing directory")?.into(),
+                            line: 1,
+                            column: 1,
+                        }],
+                        ..crate::instance::Request::new(&Options::default(), None)?
+                    },
+                )?;
+            }
+            "reopen_encoding" => {
+                if self.can_close_document(w, active) {
+                    self.workspace
+                        .reopen_encoding(args["encoding"].as_str().ok_or("missing encoding")?)?;
+                }
+            }
+            "save_encoding" => {
+                self.workspace.tabs[active].format = vel_fileio::encoding_format(
+                    args["encoding"].as_str().ok_or("missing encoding")?,
+                    self.workspace.tabs[active].format.line_ending,
+                )?;
+                self.save_tab(w, active, false);
+            }
             "open_file" => {
                 if let Some(file) = args["file"].as_str() {
                     self.workspace.open(crate::cli::FileLocation::parse(file))?;
@@ -891,12 +988,19 @@ impl App {
                 }
             }
             "prompt_open_file" => {
-                for path in w.open_files() {
-                    self.workspace.open(crate::cli::FileLocation {
-                        path,
-                        line: 1,
-                        column: 1,
-                    })?;
+                let errors = crate::open_requests::open_locations(
+                    &mut self.workspace,
+                    &mut self.panels,
+                    w.open_files()
+                        .into_iter()
+                        .map(|path| crate::cli::FileLocation {
+                            path,
+                            line: 1,
+                            column: 1,
+                        }),
+                );
+                if !errors.is_empty() {
+                    self.show_error(w, &errors.join("\n"));
                 }
             }
             "save" | "save_and_close" => {
@@ -922,10 +1026,11 @@ impl App {
                 self.save_tab(w, active, true);
             }
             "save_all" => {
-                for index in 0..self.workspace.tabs.len() {
-                    if !self.save_tab(w, index, false) {
-                        break;
-                    }
+                let errors = self
+                    .workspace
+                    .save_all(|suggestion| w.save_file(suggestion));
+                if !errors.is_empty() {
+                    self.show_error(w, &errors.join("\n"));
                 }
             }
             "close" | "close_file" => {
@@ -1012,11 +1117,10 @@ impl App {
                 let requested = args["encoding"]
                     .as_str()
                     .ok_or("set_encoding needs encoding")?;
-                let codec = vel_fileio::encoding(requested)?;
-                self.workspace.tabs[active].format.encoding = codec.name().into();
-                self.workspace.tabs[active].format.bom = requested
-                    .eq_ignore_ascii_case("utf-8 with bom")
-                    || codec.name().starts_with("UTF-16");
+                self.workspace.tabs[active].format = vel_fileio::encoding_format(
+                    requested,
+                    self.workspace.tabs[active].format.line_ending,
+                )?;
             }
             "scroll_lines" => {
                 let amount = args["amount"].as_f64().unwrap_or(1.);
@@ -1965,27 +2069,22 @@ impl AppHandler for App {
         if self.options.mode != Mode::Interactive {
             return;
         }
-        if self.options.forward_native_opens {
-            let directory = self.workspace.data_path().map(Path::to_owned);
-            match crate::open_requests::forward_native_paths(directory.as_deref(), paths) {
-                Ok(crate::open_requests::NativeForward::Forwarded) => {
-                    self.done.store(true, Ordering::Release);
-                    w.quit();
-                    return;
-                }
-                Ok(crate::open_requests::NativeForward::Primary(instance)) => {
-                    if let Err(error) = self.take_over_native_primary(instance) {
-                        self.panels.message = format!("Could not restore primary session: {error}");
-                        self.changed(w, Instant::now(), false);
-                        return;
-                    }
-                }
-                Err(error) => {
-                    self.panels.message = format!("Native open forwarding failed: {error}");
-                    self.changed(w, Instant::now(), false);
-                    return;
-                }
+        let request = match crate::open_requests::native_request(paths) {
+            Ok(request) => request,
+            Err(error) => {
+                self.show_error(w, &error);
+                return;
             }
+        };
+        if crate::open_requests::needs_new_window(
+            &request,
+            self.workspace
+                .global_bool("open_files_in_new_window", false),
+        ) {
+            if let Err(error) = self.open_native_window_request(w, request) {
+                self.show_error(w, &error);
+            }
+            return;
         }
         if let Err(error) =
             crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths)
@@ -2055,6 +2154,15 @@ impl AppHandler for App {
             return false;
         }
         match name {
+            "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
+            "reopen_encoding" if self.workspace.tabs[target].path.is_none() => return false,
+            "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
+            | "save_encoding"
+                if self.workspace.is_empty() =>
+            {
+                return false;
+            }
+            "save_all" => return self.workspace.tabs.iter().any(|tab| tab.dirty()),
             "focus_group" | "move_to_group"
                 if args["group"]
                     .as_u64()
@@ -2087,7 +2195,12 @@ impl AppHandler for App {
         {
             return false;
         }
-        if tab.editor.read_only && matches!(name, "save" | "save_all" | "save_as") {
+        if tab.editor.read_only
+            && matches!(
+                name,
+                "save" | "save_as" | "prompt_save_as" | "save_encoding"
+            )
+        {
             return false;
         }
         if matches!(name, "goto_hex_offset" | "copy_hex" | "copy_hex_text")
@@ -3190,6 +3303,9 @@ impl AppHandler for App {
                 self.panels.message = error;
             }
         }
+        for waiter in &mut self.waiters {
+            waiter.finish(&mut self.workspace);
+        }
         true
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
@@ -3223,6 +3339,9 @@ impl AppHandler for App {
         self.sessions.borrow_mut().close(self.session_id, retain);
         // Closing a window closes its sheets even when Hot Exit retains their buffers.
         // The retained Dock template must not keep CLI -w clients blocked.
+        for waiter in &mut self.waiters {
+            waiter.finish(&mut self.workspace);
+        }
         self.waiters.clear();
         let _ = self.sessions.borrow().flush();
         true
@@ -3377,5 +3496,110 @@ mod workbench_scenes {
                 .values()
                 .all(|r| (r.width - width).abs() < 0.01)
         );
+    }
+}
+
+#[cfg(test)]
+mod round15_tests {
+    use super::*;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    fn app(workspace: Workspace, data: Option<&Path>) -> App {
+        App::new(
+            Options::default(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            Reporter::for_options(&Options::default(), Instant::now()).unwrap(),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(data))),
+        )
+    }
+    #[test]
+    fn empty_windows_disable_all_save_variants() {
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        workspace.close(0).unwrap();
+        let app = app(workspace, None);
+        for command in [
+            "save",
+            "save_as",
+            "prompt_save_as",
+            "save_and_close",
+            "save_encoding",
+            "save_all",
+        ] {
+            assert!(!app.command_enabled(command, "{}"), "{command}");
+        }
+    }
+    #[test]
+    fn save_all_is_enabled_for_dirty_siblings_with_a_read_only_active_tab() {
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        workspace
+            .editor_mut()
+            .run("insert", &json!({"characters":"dirty sibling"}))
+            .unwrap();
+        workspace.new_file().unwrap();
+        workspace.editor_mut().read_only = true;
+        let app = app(workspace, None);
+        assert!(app.command_enabled("save_all", "{}"));
+        assert!(!app.command_enabled("save", "{}"));
+    }
+    #[test]
+    fn cli_batch_acknowledges_errors_and_keeps_all_later_successes() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.socket");
+        let _socket = UnixListener::bind(&bad).unwrap();
+        let good = dir.path().join("good.txt");
+        std::fs::write(&good, "good").unwrap();
+        let mut request = crate::instance::Request::new(&Options::default(), None).unwrap();
+        request.files = [bad.clone(), good, bad]
+            .into_iter()
+            .map(|path| crate::cli::FileLocation {
+                path,
+                line: 1,
+                column: 1,
+            })
+            .collect();
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        let mut app = app(
+            Workspace::new(vel_text::Text::new(), None, None, false).unwrap(),
+            None,
+        );
+        app.accept_request(crate::instance::Incoming { request, stream })
+            .unwrap();
+        let mut ack = [0];
+        client.read_exact(&mut ack).unwrap();
+        assert_eq!(ack, [1]);
+        assert_eq!(app.workspace.editor().text.to_string(), "good");
+        assert_eq!(app.panels.message.lines().count(), 2);
+    }
+    #[test]
+    fn cli_project_switch_retains_dirty_untitled_window_and_publishes_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("new.sublime-project");
+        std::fs::write(&project, "{}").unwrap();
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        workspace
+            .editor_mut()
+            .run("insert", &json!({"characters":"recover this untitled"}))
+            .unwrap();
+        let mut app = app(workspace, Some(dir.path()));
+        let options = Options {
+            project: Some(project),
+            ..Options::default()
+        };
+        let request = crate::instance::Request::new(&options, None).unwrap();
+        let (stream, _client) = UnixStream::pair().unwrap();
+        app.accept_request(crate::instance::Incoming { request, stream })
+            .unwrap();
+        app.checkpoint(false).unwrap();
+        app.sessions.borrow().flush().unwrap();
+        let recovered = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert_eq!(recovered.session.windows.len(), 2);
+        assert!(recovered.session.documents.iter().any(|d| {
+            d.history
+                .as_ref()
+                .and_then(|h| h.current_text().ok())
+                .is_some_and(|text| text == "recover this untitled")
+        }));
     }
 }

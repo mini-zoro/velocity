@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 /// A folder's persisted discovery rules.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Folder {
     /// Absolute or project-relative directory.
     pub path: PathBuf,
@@ -16,6 +16,15 @@ pub struct Folder {
     /// File globs to hide.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_exclude_patterns: Vec<String>,
+    /// Files admitted before exclusions (an empty list admits all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_include_patterns: Vec<String>,
+    /// Directories admitted before exclusions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_include_patterns: Vec<String>,
+    /// Extension data, retained when the project is edited.
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
     /// Files excluded from text navigation/search.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binary_file_patterns: Vec<String>,
@@ -59,6 +68,18 @@ impl Project {
             }
         }
     }
+    /// Rebase originally relative paths for Save As; absolute paths stay absolute.
+    pub fn rebase(&mut self, old: &Path, new: &Path) {
+        let old = std::path::absolute(old).unwrap_or_else(|_| old.into());
+        let new = std::path::absolute(new).unwrap_or_else(|_| new.into());
+        let old_base = old.parent().unwrap_or(Path::new("."));
+        let new_base = new.parent().unwrap_or(Path::new("."));
+        for folder in &mut self.folders {
+            if folder.path.is_relative() {
+                folder.path = relative_path(&old_base.join(&folder.path), new_base);
+            }
+        }
+    }
     /// Saves without truncating an existing project on failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         super::atomic_write(path, |f| {
@@ -66,7 +87,160 @@ impl Project {
         })
     }
 }
+/// Computes a relative path, preserving OS resolution across symlinked parents.
+/// Missing descendants are resolved against their nearest existing ancestor.
+pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
+    fn resolved(path: &Path) -> Option<PathBuf> {
+        let absolute = std::path::absolute(path).ok()?;
+        let mut ancestor = absolute.as_path();
+        let mut tail = Vec::new();
+        loop {
+            if let Ok(mut canonical) = std::fs::canonicalize(ancestor) {
+                for part in tail.into_iter().rev() {
+                    canonical.push(part);
+                }
+                return Some(canonical);
+            }
+            tail.push(ancestor.file_name()?);
+            ancestor = ancestor.parent()?;
+        }
+    }
+    fn lexical(target: &Path, base: &Path) -> PathBuf {
+        let normalize = |p: &Path| {
+            let mut out = PathBuf::new();
+            for part in p.components() {
+                match part {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        out.pop();
+                    }
+                    part => out.push(part.as_os_str()),
+                }
+            }
+            out
+        };
+        let target = normalize(target);
+        let base = normalize(base);
+        let target_parts: Vec<_> = target.components().collect();
+        let base_parts: Vec<_> = base.components().collect();
+        let common = target_parts
+            .iter()
+            .zip(&base_parts)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common == 0 && target.is_absolute() {
+            return target;
+        }
+        let mut out = PathBuf::new();
+        for _ in common..base_parts.len() {
+            out.push("..");
+        }
+        for part in &target_parts[common..] {
+            out.push(part.as_os_str());
+        }
+        if out.as_os_str().is_empty() {
+            out.push(".");
+        }
+        out
+    }
+    let relative = lexical(target, base);
+    if [target, base, &relative].iter().any(|path| {
+        path.components()
+            .any(|c| c == std::path::Component::ParentDir)
+    }) {
+        // A lexical `..` may escape to a different parent after following a symlink.
+        // Prefer a relative path between the canonical parents only when needed.
+        if let (Some(target), Some(base)) = (resolved(target), resolved(base)) {
+            if resolved(&base.join(&relative)).as_ref() == Some(&target) {
+                return relative;
+            }
+            return lexical(&target, &base);
+        }
+        // Without resolvable parents, an absolute spelling is the safe fallback.
+        return std::path::absolute(target).unwrap_or_else(|_| target.into());
+    }
+    relative
+}
 /// Workspace lives beside its project, including on a fresh directory tree.
 pub fn workspace_path(project: &Path) -> PathBuf {
     project.with_extension("sublime-workspace")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn save_as_rebases_a_relative_project_filename_and_retains_folder_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("new")).unwrap();
+        let original = dir.path().join("original.sublime-project");
+        std::fs::write(
+            &original,
+            r#"{"folders":[{"path":"src","custom":{"kept":true}}]}"#,
+        )
+        .unwrap();
+        let relative = relative_path(&original, &std::env::current_dir().unwrap());
+        assert!(relative.is_relative());
+        let mut project = Project::load(&relative).unwrap();
+        let new = dir.path().join("new/project.sublime-project");
+        project.rebase(&relative, &new);
+        project.save(&new).unwrap();
+        let saved = Project::load(&new).unwrap();
+        assert!(saved.folders[0].path.is_relative());
+        assert_eq!(
+            new.parent()
+                .unwrap()
+                .join(&saved.folders[0].path)
+                .canonicalize()
+                .unwrap(),
+            dir.path().join("src").canonicalize().unwrap()
+        );
+        assert_eq!(saved.folders[0].extra["custom"]["kept"], true);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod review15_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    #[test]
+    fn relative_paths_resolve_across_symlinked_parents_and_missing_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let physical = root.join("physical/deep");
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(&physical).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        symlink(&physical, root.join("alias")).unwrap();
+        let base = root.join("alias");
+        let target = sibling.join("src");
+        std::fs::create_dir(&target).unwrap();
+        let relative = relative_path(&target, &base);
+        assert_eq!(
+            base.join(&relative).canonicalize().unwrap(),
+            target.canonicalize().unwrap()
+        );
+        assert_eq!(
+            relative_path(&target, &physical),
+            Path::new("../../sibling/src")
+        );
+        let missing = target.join("not-created/nested");
+        let relative_missing = relative_path(&missing, &base);
+        std::fs::create_dir_all(&missing).unwrap();
+        assert_eq!(
+            base.join(relative_missing).canonicalize().unwrap(),
+            missing.canonicalize().unwrap()
+        );
+        let mut project = Project::parse(r#"{"folders":[{"path":"sibling/src"}]}"#).unwrap();
+        project.rebase(
+            &root.join("old.sublime-project"),
+            &base.join("new.sublime-project"),
+        );
+        project.resolve(&base.join("new.sublime-project"));
+        assert_eq!(
+            project.folders[0].path.canonicalize().unwrap(),
+            target.canonicalize().unwrap()
+        );
+    }
 }

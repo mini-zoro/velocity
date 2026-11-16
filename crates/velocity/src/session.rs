@@ -19,6 +19,7 @@ pub struct Sessions {
     pub active_window: Option<u64>,
     recent: [Vec<PathBuf>; 3],
     recent_heads: BTreeMap<u64, [Option<PathBuf>; 3]>,
+    forgotten_recent: [BTreeSet<PathBuf>; 3],
     hot: HotExit,
     remember: bool,
     pub messages: Vec<String>,
@@ -46,6 +47,7 @@ impl Sessions {
             active_window: None,
             recent: Default::default(),
             recent_heads: BTreeMap::new(),
+            forgotten_recent: Default::default(),
             hot: HotExit::Always,
             remember: true,
             messages,
@@ -69,6 +71,18 @@ impl Sessions {
     /// process cannot collide with IDs from an earlier process. `restored` stays intact
     /// for lazy workspace restoration; this method does not publish to disk.
     pub fn reserve_recovered(&mut self) -> Vec<u64> {
+        // Reserved windows keep their old sheet IDs until lazily restored. Do not let
+        // new tabs/documents reuse those IDs before the first snapshot is published.
+        if let Some(maximum) = self
+            .restored
+            .windows
+            .iter()
+            .flat_map(|window| window.sheets.iter().map(|sheet| sheet.id))
+            .chain(self.restored.documents.iter().map(|document| document.id))
+            .max()
+        {
+            crate::workbench::reserve_sheet_ids(maximum);
+        }
         self.recent = [
             self.restored.recent_files.clone(),
             self.restored.recent_folders.clone(),
@@ -125,7 +139,15 @@ impl Sessions {
         self.windows.insert(id, (window.clone(), documents.clone()));
         let heads = std::array::from_fn(|index| recent[index].first().cloned());
         let previous = self.recent_heads.insert(id, heads);
-        for (index, incoming) in recent.into_iter().enumerate() {
+        for (index, mut incoming) in recent.into_iter().enumerate() {
+            if let Some(head) = incoming.first()
+                && previous
+                    .as_ref()
+                    .is_some_and(|old| old[index].as_ref() != Some(head))
+            {
+                self.forgotten_recent[index].remove(head);
+            }
+            incoming.retain(|path| !self.forgotten_recent[index].contains(path));
             for path in incoming.iter().rev() {
                 if !self.recent[index].contains(path) {
                     self.recent[index].insert(0, path.clone());
@@ -211,6 +233,30 @@ impl Sessions {
             let _ = writer.changed(session);
         }
     }
+    /// Retain a departing window independently before its live ID is reused by a project.
+    /// The application has already published and flushed the old snapshot at this point.
+    pub fn retain_departing(&mut self, id: u64, retain: bool) {
+        if let Some((window, documents)) = self.windows.remove(&id)
+            && retain
+            && documents.iter().any(|document| {
+                document.dirty
+                    || (document.path.is_none()
+                        && document.history.as_ref().is_some_and(|history| {
+                            history
+                                .current_text()
+                                .is_ok_and(|text| text.len_bytes() > 0)
+                        }))
+            })
+        {
+            self.closed.push((window, documents));
+        }
+    }
+    pub fn clear_recent(&mut self, id: u64) {
+        for (paths, forgotten) in self.recent.iter_mut().zip(&mut self.forgotten_recent) {
+            forgotten.extend(paths.drain(..));
+        }
+        self.recent_heads.insert(id, Default::default());
+    }
     pub fn flush(&self) -> Result<(), String> {
         if let Some(writer) = &self.writer {
             writer.flush()?;
@@ -273,6 +319,14 @@ mod tests {
         let mut sessions = Sessions::new(Some(dir.path()));
         let reserved = sessions.reserve_recovered();
         assert_eq!(reserved.len(), 2);
+        let maximum = recovered
+            .windows
+            .iter()
+            .flat_map(|window| window.sheets.iter().map(|sheet| sheet.id))
+            .chain(recovered.documents.iter().map(|document| document.id))
+            .max()
+            .unwrap();
+        assert!(crate::workbench::next_sheet() > maximum);
         assert!(reserved[0] < reserved[1]);
         assert_eq!(sessions.active_window, Some(reserved[0]));
         assert_eq!(
@@ -428,5 +482,179 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod round15_tests {
+    use super::*;
+    #[test]
+    fn clear_recents_survives_other_window_autosave_and_can_remember_a_reopened_item() {
+        let mut sessions = Sessions::new(None);
+        let first = sessions.register();
+        let second = sessions.register();
+        let mut w =
+            crate::workspace::Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let (window, documents) = w.snapshot().unwrap();
+        let recent = [
+            vec![PathBuf::from("old.txt")],
+            vec![PathBuf::from("old-folder")],
+            vec![],
+        ];
+        let policy = Policy {
+            hot: HotExit::Always,
+            quitting: false,
+            remember: true,
+            closing: false,
+        };
+        for id in [first, second] {
+            sessions
+                .publish(
+                    id,
+                    window.clone(),
+                    documents.clone(),
+                    recent.clone(),
+                    policy,
+                )
+                .unwrap();
+        }
+        sessions.clear_recent(first);
+        sessions
+            .publish(
+                first,
+                window.clone(),
+                documents.clone(),
+                Default::default(),
+                policy,
+            )
+            .unwrap();
+        sessions
+            .publish(
+                second,
+                window.clone(),
+                documents.clone(),
+                recent.clone(),
+                policy,
+            )
+            .unwrap();
+        assert!(
+            sessions
+                .collect(sessions.recent.clone())
+                .recent_files
+                .is_empty()
+        );
+        sessions
+            .publish(first, window, documents, recent, policy)
+            .unwrap();
+        assert_eq!(
+            sessions.collect(sessions.recent.clone()).recent_files,
+            vec![PathBuf::from("old.txt")]
+        );
+    }
+    #[test]
+    fn project_switch_retains_the_untitled_window_beside_the_new_project_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sessions = Sessions::new(Some(dir.path()));
+        let id = sessions.register();
+        let mut w =
+            crate::workspace::Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        w.editor_mut()
+            .run(
+                "insert",
+                &serde_json::json!({"characters":"unsaved before project"}),
+            )
+            .unwrap();
+        let (window, documents) = w.snapshot().unwrap();
+        let policy = Policy {
+            hot: HotExit::Always,
+            quitting: false,
+            remember: true,
+            closing: true,
+        };
+        sessions
+            .publish(id, window, documents, Default::default(), policy)
+            .unwrap();
+        sessions.flush().unwrap();
+        sessions.retain_departing(id, true);
+        let project = dir.path().join("new.sublime-project");
+        std::fs::write(&project, "{}").unwrap();
+        w.open_project(project).unwrap();
+        let (window, documents) = w.snapshot().unwrap();
+        sessions
+            .publish(id, window, documents, Default::default(), policy)
+            .unwrap();
+        sessions.flush().unwrap();
+        let recovered = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert!(recovered.messages.is_empty());
+        assert_eq!(recovered.session.windows.len(), 2);
+        assert!(recovered.session.documents.iter().any(|d| {
+            d.history
+                .as_ref()
+                .and_then(|h| h.current_text().ok())
+                .is_some_and(|text| text == "unsaved before project")
+        }));
+    }
+}
+
+#[cfg(test)]
+mod review15_tests {
+    use super::*;
+    use crate::{cli::FileLocation, workspace::Workspace};
+    use vel_text::Text;
+    #[test]
+    fn project_switches_keep_only_dirty_or_untitled_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("saved.txt");
+        std::fs::write(&file, "clean saved text").unwrap();
+        let mut w = Workspace::new(Text::new(), None, None, false).unwrap();
+        w.open(FileLocation {
+            path: file,
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+        let mut sessions = Sessions::new(Some(dir.path()));
+        let id = sessions.register();
+        for _ in 0..3 {
+            let (mut window, documents) = w.snapshot().unwrap();
+            window.project = Some(dir.path().join("departing.sublime-project"));
+            window.folders = vec![dir.path().into()];
+            sessions.windows.insert(id, (window, documents));
+            sessions.retain_departing(id, true);
+        }
+        assert!(sessions.closed.is_empty());
+        for dirty in [false, true] {
+            let mut unsaved =
+                Workspace::new(Text::from("untitled content"), None, None, false).unwrap();
+            if dirty {
+                unsaved
+                    .editor_mut()
+                    .run("insert", &vel_config::json!({"characters":"dirty "}))
+                    .unwrap();
+            }
+            sessions.windows.insert(id, unsaved.snapshot().unwrap());
+            sessions.retain_departing(id, true);
+        }
+        assert_eq!(sessions.closed.len(), 2);
+        let (window, documents) = w.snapshot().unwrap();
+        sessions
+            .publish(
+                id,
+                window,
+                documents,
+                Default::default(),
+                Policy {
+                    hot: HotExit::Always,
+                    quitting: true,
+                    closing: false,
+                    remember: true,
+                },
+            )
+            .unwrap();
+        sessions.flush().unwrap();
+        let persisted = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert!(persisted.messages.is_empty(), "{:?}", persisted.messages);
+        assert_eq!(persisted.session.windows.len(), 3);
+        persisted.session.validate().unwrap();
     }
 }

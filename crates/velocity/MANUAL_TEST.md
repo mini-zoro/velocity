@@ -1,3 +1,99 @@
+# Round 15: opening, saving, projects and sessions (native review pending)
+
+Use a reviewer-built binary/bundle with a disposable profile and fixture tree. Do not rebuild or
+replace the currently running `target/package-macos` bundle. No GUI, Finder, dialogs or menu
+tracking were run in the sandbox; leave these boxes unchecked until native review.
+
+- [ ] **1.1–1.3 opening:** CLI-open a missing filename and one under a missing parent. Both
+  produce named new tabs; Save creates only the former and reports the latter's path. Mix
+  unreadable/special paths with valid files in CLI/Finder batches: later files open, errors
+  list all failed paths, the CLI returns its ack. Open a directory normally (new window),
+  then with `-a` / `--add` (current window). Repeat with several windows and no live window.
+- [ ] **1.4 stdin:** run `printf 'original\n' | velocity --data-dir PROFILE - > /tmp/vel-r15-out`,
+  edit to include Unicode, close the tab and compare stdout. Repeat after Save As and by
+  closing the whole window / quitting; the caller waits and receives the final edited text.
+- [ ] **1.5 symlinks:** project root contains a linked directory with a link back to an ancestor.
+  With follow_symlinks omitted, expand once and use Goto Anything / Find in Files; linked
+  content appears, cycles do not expand forever. Set explicit false and repeat. Save the
+  project: the absent key stays absent and false stays false.
+- [ ] **2.1 Save All:** dirty named/untitled tabs, clean tabs and a read-only active hex tab.
+  Save All remains enabled; only dirty documents save. Cancel an untitled dialog and fail
+  another save, then confirm later dirty files still save and skipped buffers remain dirty.
+- [ ] **2.2–2.4 deleted files and names:** delete a loaded file externally; its title shows
+  deleted and closing prompts. Save recreates it. Restore a session with missing files;
+  other tabs restore. With close_deleted_files true, clean missing tabs close but dirty
+  contents remain. Close prompt buttons are Save / Don't Save / Cancel; its filename has
+  no dirty dot. Untitled names and Save suggestions use the first line, capped at 50 scalars.
+- [ ] **2.5–2.6 empty/reopen/recent:** close the last tab: empty tab bar, no new Untitled tab.
+  Type, Cmd+N and double-click empty tab-bar space to create on demand. Close a saved file
+  with a directed selection and scrolled viewport; Cmd+Shift+T / File → Reopen Closed File
+  restores both. File → Open Recent lists files/folders/projects; Clear Items persists across
+  relaunch. A recent folder opens a new window. Test independent reopen stacks in two windows.
+- [ ] **2.7–2.8 policy/errors:** set hot_exit to boolean false, make dirty text and close/quit:
+  normal Save/Don't Save/Cancel behavior. Unreadable small and background-loaded files must
+  report the actual path once, without repeated errors on tab access.
+- [ ] **3.1–3.2 projects:** switch a dirty untitled window into a project using the menu and
+  running-instance --project. With Hot Exit, quit/relaunch and recover the departed untitled
+  window as well as the project. With Hot Exit disabled, verify prompts (menu) or a separate
+  window (CLI). Change an opened project's file externally: watching still reloads it.
+- [ ] **3.3–3.5 folder rules:** Save Project As into a sibling directory, then reopen it;
+  original relative roots still resolve and unknown top-level/folder keys remain. Include
+  patterns apply before excludes. Default filters hide VCS folders, .DS_Store, compiled
+  objects and workspace files, while target remains visible. A .gitignore-only file appears
+  in Goto Anything and Find in Files; the side bar retains its existing ignore behavior.
+- [ ] **4.1–4.2 settings/encoding:** load detected indentation, manually choose width/style,
+  reload resources and externally reload the file: manual choices remain. Exercise File →
+  Reopen with Encoding and Save with Encoding (Windows 1251, UTF-16 LE/BE with BOM, UTF-8
+  with/without BOM), default_encoding and fallback_encoding display names. Invalid fallback
+  reports once and uses Windows-1252; invalid data after a BOM falls back. Reopen cancellation
+  or decode failure must preserve unsaved text. Retest syntax-over-project settings precedence.
+- [ ] **Review (a) and (c):** interleave tabs from two groups, close an earlier tab (focus stays),
+  close active middle/rightmost tabs (choose right then left in the same group). Trash a
+  project root from the side bar: only successfully trashed roots detach, including from the
+  saved project; other roots/unknown keys/relative paths survive. Test failed trash/save too.
+- [ ] **Review (d), LaunchServices:** while a primary runs, force a secondary `open -na` with
+  no document event: no ordinary secondary window/session is left behind and it exits after
+  the quiet interval. Repeat with the primary blocked in a native save dialog and several
+  Finder/Dock batches during relay: UI does not wait on the socket, requests retain order,
+  no spurious timeout failure/duplicate local opens, and the receiver exits after the last ack
+  plus a quiet interval. Quit the primary during relay: takeover restores all dirty windows,
+  installs the crash handler and opens all retained paths. These timing/routing cases need
+  native evidence; deterministic headless tests cover the relay state/protocol only.
+- [ ] **Review 1 / 10 / 11, empty preview:** close the last tab, single-click a side-bar
+  file and preview several Goto Anything results, including replacement of the only
+  transient tab. Escape leaves an empty tab bar and Open Files has no ghost Untitled.
+  Typing creates one visible tab. Save As / Save and Close are disabled while empty.
+  Quit with dirty content in another window and relaunch: all retained content survives.
+  Preview cancellation does not add to Reopen Closed File. Close two real files, delete
+  the latest on disk, then Cmd+Shift+T: skip it and restore the older file's view state.
+  Compare the deleted-file reopen behavior with Sublime on the reviewer's native machine.
+- [ ] **Review 2 / 3 / 4, filesystem changes:** expand a folder containing dangling/self/
+  ancestor symlink loops and unreadable children; healthy siblings remain visible. Run
+  Replace in Files twice with empty user excludes: our recovery backups remain hidden
+  from side bar, Goto Anything and Find in Files and keep their original contents.
+  Create/delete/rename files and subfolders while the index is running: native watcher
+  events refresh Goto Anything (the headless index thread test disables native watching
+  to exercise unavailable-watcher polling; FSEvents delivers no events in the sandbox).
+  Delete/recreate a clean tab's file with identical then different content (also cloned
+  tabs): deleted markers clear, clean tabs reload, real local edits retain a conflict.
+- [ ] **Review 5 / 6 / 8 / 9, session details:** repeatedly switch a clean saved-file window
+  between projects / Close Project, quit and relaunch: no extra departed windows return.
+  Repeat with dirty/untitled contents: those windows recover. Make a dirty session file
+  unreadable or invalid on disk, restore and activate it: retained unsaved text is shown
+  and survives another quit/relaunch. Hidden restored saved tabs do not show `[new]`;
+  activate a lazily restored file with two-space indentation after appearance setup:
+  detection runs, and later appearance/resource reloads keep manual indentation choices.
+- [ ] **Review 12 / 13 / 14, paths and routing:** Save Project As across a symlinked parent
+  (including `/tmp` and `/private/tmp`) and reopen: each relative root resolves to the
+  same directory. Folder-name includes exclude unmatched ancestors as documented; an
+  included descendant does not bypass its excluded parent. Launch with `--project X`
+  or X's directory when a recovered window already contains it: reuse that window once;
+  `--new-window` still creates another. Send a late Finder event just before relay quiet
+  expiry: wait for the last request/ack plus the quiet interval. Force a relay failure:
+  its error names all paths in the failed batch.
+- [ ] **4.3 contexts (Lane A):** review new editor key-binding contexts with Lane A's changes;
+  Lane B did not edit editor/view context providers.
+
 # Round 11: Vintage and user grammar review
 
 Run outside the sandbox on an awake, unlocked display:

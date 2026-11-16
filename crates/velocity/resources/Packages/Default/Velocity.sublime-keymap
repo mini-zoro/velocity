@@ -2031,5 +2031,6 @@
       "super+shift+f6"
     ],
     "command": "focus_previous_control"
-  }
+  },
+  { "keys": ["super+shift+t"], "command": "reopen_last_file" }
 ]

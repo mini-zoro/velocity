@@ -349,8 +349,7 @@ impl App {
                 result?;
             }
             SidebarEffect::Deleted { paths, failures } => {
-                menus::apply_delete(&mut self.workspace, &paths);
-                self.panels.refresh_sidebar(&mut self.workspace);
+                crate::open_requests::apply_trashed(&mut self.workspace, &mut self.panels, &paths)?;
                 if !failures.is_empty() {
                     return Err(failures.join("\n"));
                 }
@@ -414,6 +413,8 @@ mod tests {
             .unwrap()
             .join("literal:120:7");
         std::fs::write(&file, "native document").unwrap();
+        let socket = file.with_file_name("failed.socket");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
         workspace
             .open(crate::cli::FileLocation {
@@ -434,7 +435,7 @@ mod tests {
                 column: 7,
             },
             crate::cli::FileLocation {
-                path: file.with_file_name("missing"),
+                path: socket,
                 line: 1,
                 column: 1,
             },
@@ -448,7 +449,7 @@ mod tests {
         assert_eq!(app.workspace.tabs.len(), 1);
         assert_eq!(app.workspace.editor().caret, 5);
         assert!(!app.workspace.take_pending_center());
-        assert!(app.panels.message.contains("missing"));
+        assert!(app.panels.message.contains("failed.socket"));
     }
     #[test]
     fn context_state_uses_clicked_sheet_and_disables_stale_or_read_only_actions() {

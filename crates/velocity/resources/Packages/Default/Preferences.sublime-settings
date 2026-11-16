@@ -41,11 +41,12 @@
   // hard links, another owner, extended attributes or a read-only mode are written in place.
   "atomic_save": false,
   "folder_exclude_patterns": [
-    ".git",
-    "target"
+    ".svn", ".git", ".hg", "CVS", ".Trash", ".Trash-*"
   ],
   "file_exclude_patterns": [
-    "*.velocity-backup-*"
+    "*.pyc", "*.pyo", "*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib",
+    "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store",
+    "*.class", "*.psd", "*.db", "*.sublime-workspace"
   ],
   "binary_file_patterns": [
     "*.png",
@@ -90,6 +91,8 @@
   "hot_exit": "always",
   "remember_open_files": true,
   "close_windows_when_empty": false,
+  "close_deleted_files": false,
+  "set_unsaved_view_name": true,
   "open_files_in_new_window": false,
   "show_errors_inline": true,
   "index_files": true,

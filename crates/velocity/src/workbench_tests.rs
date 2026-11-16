@@ -97,7 +97,10 @@ fn lazy_restore_keeps_hidden_file_unopened_and_clones_attach_on_demand() {
     }
     .validate()
     .unwrap();
-    assert!(restored.prepare_sheet(2).is_err());
+    restored.prepare_sheet(2).unwrap();
+    assert!(restored.tabs[2].deleted);
+    assert!(restored.tabs[2].dirty());
+    assert!(restored.tabs[2].lazy.is_none());
     assert_eq!(restored.tabs[0].editor.text.to_string(), "unsaved");
 }
 #[test]
@@ -410,4 +413,118 @@ fn lazy_clone_snapshot_uses_the_actual_owner_after_several_activation_transfers(
     assert_eq!(again.editor().text, "updatedshared");
     again.editor_mut().run("undo", &json!({})).unwrap();
     assert_eq!(again.editor().text, "shared");
+}
+
+#[test]
+fn review15_lazy_labels_and_first_load_indentation_survive_appearance_setup() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("lazy.rs");
+    let new = dir.path().join("new.rs");
+    std::fs::write(&file, "fn main() {\n  one();\n  two();\n}\n").unwrap();
+    let mut live = Workspace::new(Text::from("anchor"), None, None, false).unwrap();
+    for path in [&file, &new] {
+        live.open(FileLocation {
+            path: path.into(),
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    }
+    live.select(0);
+    let (window, documents) = live.snapshot().unwrap();
+    let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+    restored.restore_window(&window, &documents).unwrap();
+    assert!(restored.tabs[1].lazy.is_some());
+    assert!(!restored.tabs[1].label().contains("[new]"));
+    assert!(restored.tabs[2].label().contains("[deleted]"));
+    restored.set_appearance(true).unwrap();
+    restored.set_appearance(false).unwrap();
+    assert!(restored.tabs[1].lazy.is_some());
+    restored.prepare_sheet(1).unwrap();
+    assert_eq!(restored.tabs[1].editor.settings.usize("tab_size", 0), 2);
+    restored.tabs[1]
+        .editor
+        .settings
+        .set(Layer::View, "tab_size", json!(8));
+    restored.set_appearance(true).unwrap();
+    assert_eq!(restored.tabs[1].editor.settings.usize("tab_size", 0), 8);
+}
+
+#[cfg(unix)]
+#[test]
+fn review15_dirty_lazy_history_never_reads_unreadable_or_invalid_disk_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unsaved.txt");
+    for failure in ["permissions", "decode", "missing"] {
+        std::fs::write(&file, "disk text").unwrap();
+        let mut live = Workspace::new(Text::from("anchor"), None, None, false).unwrap();
+        live.open(FileLocation {
+            path: file.clone(),
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+        live.editor_mut()
+            .run("insert", &json!({"characters":"UNSAVED "}))
+            .unwrap();
+        live.clone_file().unwrap();
+        let expected = live.editor().text.clone();
+        live.select(0);
+        let (window, documents) = live.snapshot().unwrap();
+        let wire = serde_json::to_vec(&vel_session::Session {
+            windows: vec![window],
+            documents,
+            ..Default::default()
+        })
+        .unwrap();
+        let session: vel_session::Session = serde_json::from_slice(&wire).unwrap();
+        match failure {
+            "permissions" => {
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).unwrap()
+            }
+            "decode" => {
+                std::fs::write(&file, b"\0invalid disk text").unwrap();
+                assert!(vel_fileio::load(&file, "windows-1252", |_| {}).is_err());
+            }
+            _ => std::fs::remove_file(&file).unwrap(),
+        }
+        let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+        restored
+            .restore_window(&session.windows[0], &session.documents)
+            .unwrap();
+        assert!(restored.tabs[1].lazy.is_some());
+        for index in [1, 2, 1] {
+            restored.prepare_sheet(index).unwrap();
+            assert_eq!(restored.tabs[index].editor.text, expected, "{failure}");
+            assert!(!restored.tabs[index].editor.read_only);
+            assert!(restored.tabs[index].dirty());
+        }
+        let (window, documents) = restored.snapshot().unwrap();
+        let again = dir.path().join(format!("{failure}.sublime-session"));
+        vel_session::save(
+            &again,
+            &vel_session::Session {
+                windows: vec![window],
+                documents,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let reloaded = vel_session::load(&again);
+        assert!(reloaded.messages.is_empty(), "{:?}", reloaded.messages);
+        let document = reloaded
+            .session
+            .documents
+            .iter()
+            .find(|d| d.path.is_some())
+            .unwrap();
+        assert_eq!(
+            document.history.as_ref().unwrap().current_text().unwrap(),
+            expected
+        );
+        if file.exists() {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
 }

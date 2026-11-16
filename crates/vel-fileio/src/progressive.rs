@@ -14,12 +14,12 @@ use vel_largefile::{Cancellation, ContentKind, LoadError, LoadOptions, LoadSnaps
 
 /// Samples the same first 8 KiB/BOM heuristic as the large-file engine.
 pub fn content_kind(path: &Path) -> Result<ContentKind, String> {
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut bytes = Vec::with_capacity(8192);
     file.by_ref()
         .take(8192)
         .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(vel_largefile::detect_content(&bytes))
 }
 
@@ -58,7 +58,9 @@ impl Drop for LoadTask {
 /// Starts a progressive UTF-8 worker. Other encodings discard prefixes and fully decode
 /// on this same worker, retaining original-byte progress and cancellation.
 pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, String> {
-    let total = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    let total = std::fs::metadata(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
     let read = Arc::new(AtomicU64::new(0));
     let counter = read.clone();
     let latest = Arc::new(Mutex::new(None));
@@ -81,7 +83,7 @@ pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, Stri
                     return Err("binary file: use hexadecimal view".into());
                 }
                 if kind == ContentKind::Utf8 {
-                    let file = File::open(&path).map_err(|e| e.to_string())?;
+                    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                     let mut normalized =
                         Normalized::new(file, counter.clone(), cancellation.clone());
                     match vel_largefile::stream_utf8(
@@ -128,7 +130,7 @@ pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, Stri
                     Some(&cancellation),
                 )
             })();
-            let _ = tx.send(loaded);
+            let _ = tx.send(loaded.map_err(|e| format!("{}: {e}", path.display())));
         })
         .map_err(|e| e.to_string())?;
     Ok(LoadTask {

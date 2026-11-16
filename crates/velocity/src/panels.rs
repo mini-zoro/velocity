@@ -454,7 +454,7 @@ impl Panels {
                     &patterns("folder_exclude_patterns"),
                     &patterns("binary_file_patterns"),
                 )?,
-                follow_links: false,
+                follow_links: true,
             });
             self.expanded.insert(path.clone());
             self.restart_index(workspace);
@@ -661,7 +661,8 @@ impl Panels {
                             folder_exclude_patterns: vec![],
                             file_exclude_patterns: vec![],
                             binary_file_patterns: vec![],
-                            follow_symlinks: folder.follow_links.then_some(true),
+                            follow_symlinks: (!folder.follow_links).then_some(false),
+                            ..Default::default()
                         });
                 }
             }
@@ -2347,7 +2348,7 @@ impl Panels {
             changed = true;
         }
         if let Some(snapshot) = self.index.as_ref().and_then(Index::poll) {
-            self.file_paths = Arc::new(snapshot.files);
+            self.file_paths = snapshot.files;
             self.file_candidates = snapshot.candidates;
             self.prepared.clear();
             workspace.messages.extend(snapshot.errors);

@@ -14,6 +14,10 @@ use vel_session::{Document, Sheet, Window};
 use vel_text::Text;
 use vel_ui::workbench::{Direction, Layout};
 static SHEET: AtomicU64 = AtomicU64::new(1);
+/// Keep new process-local identities above snapshots reserved from a previous process.
+pub fn reserve_sheet_ids(maximum: u64) {
+    SHEET.fetch_max(maximum.saturating_add(1), Ordering::Relaxed);
+}
 pub fn next_sheet() -> u64 {
     SHEET.fetch_add(1, Ordering::Relaxed)
 }
@@ -46,7 +50,10 @@ impl Workspace {
         if let Some(index) = group.focused.and_then(|id| self.sheet_index(id)) {
             self.prepare_sheet(index)?;
             self.active = index;
-        } else {
+        } else if !self.empty {
+            // Explicitly focusing an unused pane must not keep editing another pane's
+            // document. Preserve its existing on-demand new-file behavior, while an
+            // entirely empty window keeps its hidden input adapter without a tab.
             self.new_file()?;
         }
         Ok(())
@@ -77,6 +84,18 @@ impl Workspace {
     /// Transfers the actual shared Buffer between editor adapters. Inactive clones retain
     /// read-only rope snapshots; all edits and visible scenes use this actual buffer/view.
     pub fn prepare_sheet(&mut self, index: usize) -> Result<(), String> {
+        let result = self.prepare_sheet_inner(index);
+        if result.is_err()
+            && let Some(tab) = self.tabs.get_mut(index)
+        {
+            // Consume a failing lazy restore once. Repeated paint/access must not retry IO
+            // or flood the error log; explicit Reopen is the user's retry operation.
+            tab.lazy = None;
+            tab.editor.read_only = true;
+        }
+        result
+    }
+    fn prepare_sheet_inner(&mut self, index: usize) -> Result<(), String> {
         if index >= self.tabs.len() {
             return Err("unknown sheet".into());
         }
@@ -94,6 +113,8 @@ impl Workspace {
                 .map(|(i, _)| i);
             if let Some(owner) = owner {
                 self.tabs[index].lazy = None;
+                self.tabs[index].needs_detection = self.tabs[owner].needs_detection;
+                self.tabs[index].indentation_initialized = self.tabs[owner].indentation_initialized;
                 let existing = self.tabs[index].shared_view;
                 let view = if self.tabs[owner]
                     .editor
@@ -122,7 +143,15 @@ impl Workspace {
                 .as_deref()
                 .is_some_and(|p| vel_session::DiskStamp::read(p) != document.disk);
             let mut imported = false;
-            if let Some(history) = &document.history {
+            let missing = document
+                .path
+                .as_deref()
+                .is_some_and(|p| matches!(p.try_exists(), Ok(false)));
+            if missing && !document.history.as_ref().is_some_and(|h| h.retains_text()) {
+                self.tabs[index].deleted = true;
+            } else if let Some(history) = &document.history {
+                // Dirty/untitled histories retain their text and restore without reading the
+                // file. Permission/decoding failures on disk cannot discard those edits.
                 let dirty = document.dirty || (changed && history.retains_text());
                 let restored = history.restore_views(!changed, dirty);
                 imported = restored.is_ok() && !changed;
@@ -187,6 +216,7 @@ impl Workspace {
             tab.shared_view = tab.editor.id;
             tab.shared_dirty = false;
             tab.disk_saved = document.disk;
+            tab.disk_stamp = tab.path.as_deref().and_then(crate::workspace::stamp);
             if let Some(w) = self.watcher.as_mut()
                 && let Some(path) = &tab.path
             {
@@ -230,6 +260,7 @@ impl Workspace {
     }
     /// Refreshes inactive clone snapshots after commands without copying document bytes.
     pub fn sync_shared(&mut self) {
+        self.materialize_input();
         let owners: Vec<_> = self
             .tabs
             .iter()
@@ -278,6 +309,7 @@ impl Workspace {
                 self.tabs[index].saved_format = self.tabs[owner].saved_format.clone();
                 self.tabs[index].tracker = self.tabs[owner].tracker.clone();
                 self.tabs[index].disk_saved = self.tabs[owner].disk_saved.clone();
+                self.tabs[index].disk_stamp = self.tabs[owner].disk_stamp;
                 self.tabs[index].restored_format_dirty = self.tabs[owner].restored_format_dirty;
             }
             self.tabs[owner].shared_dirty = false;
@@ -315,6 +347,9 @@ impl Workspace {
         self.sync_shared();
     }
     pub fn clone_file(&mut self) -> Result<(), String> {
+        if self.empty {
+            self.new_file()?;
+        }
         if self.tabs[self.active].loading.is_some()
             || self.tabs[self.active].binary_loading.is_some()
         {
@@ -346,6 +381,9 @@ impl Workspace {
         clone.document = self.tabs[index].document;
         clone.shared_view = id;
         clone.disk_saved = self.tabs[index].disk_saved.clone();
+        clone.disk_stamp = self.tabs[index].disk_stamp;
+        clone.needs_detection = self.tabs[index].needs_detection;
+        clone.indentation_initialized = self.tabs[index].indentation_initialized;
         clone.restored_document = self.tabs[index].restored_document;
         clone.editor.binary = self.tabs[index].editor.binary.clone();
         clone.editor.read_only = self.tabs[index].editor.read_only;
@@ -527,13 +565,23 @@ impl Workspace {
         Ok(true)
     }
     pub fn snapshot(&mut self) -> Result<(Window, Vec<Document>), String> {
+        self.materialize_input();
         self.sync_shared();
         let active = self.active;
         let mut documents = Vec::new();
         let mut sheets = Vec::new();
         let mut seen = BTreeSet::new();
-        for index in 0..self.tabs.len() {
+        let assigned: BTreeSet<_> = self
+            .workbench
+            .groups
+            .iter()
+            .flat_map(|group| group.sheets.iter().copied())
+            .collect();
+        for index in 0..if self.empty { 0 } else { self.tabs.len() } {
             let tab = &self.tabs[index];
+            if !assigned.contains(&tab.sheet) {
+                continue;
+            }
             let doc = tab.document;
             let identity = tab.session_document;
             if let Some((document, view)) = &tab.lazy {
@@ -697,7 +745,7 @@ impl Workspace {
                             &patterns("binary_file_patterns"),
                         )?
                     },
-                    follow_links: false,
+                    follow_links: true,
                 });
             }
         }
@@ -709,6 +757,13 @@ impl Workspace {
             let document = docs
                 .get(&sheet.document)
                 .ok_or("session document missing")?;
+            let missing = document
+                .path
+                .as_deref()
+                .is_some_and(|p| matches!(p.try_exists(), Ok(false)));
+            if missing && self.settings.bool("close_deleted_files", false) && !document.dirty {
+                continue;
+            }
             let mut tab = Tab::new(Text::new(), &self.settings, &self.keymap)?;
             remap.insert(sheet.id, tab.sheet);
             tab.restored_document = Some(document.id);
@@ -726,6 +781,7 @@ impl Workspace {
                 line_ending: vel_fileio::LineEnding::parse(&document.line_ending)?,
             };
             tab.saved_format = tab.format.clone();
+            tab.disk_saved = document.disk.clone();
             tab.scroll = sheet.view.scroll;
             tab.transient = sheet.transient;
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
@@ -745,10 +801,12 @@ impl Workspace {
             }
             tabs.push(tab);
         }
-        if tabs.is_empty() {
-            return Ok(());
+        self.empty = tabs.is_empty();
+        if self.empty {
+            tabs.push(Tab::new(Text::new(), &self.settings, &self.keymap)?);
         }
         self.tabs = tabs;
+        self.active = 0;
         self.workbench = window.workbench.clone();
         for g in &mut self.workbench.groups {
             g.sheets = g
@@ -772,7 +830,9 @@ impl Workspace {
             .filter_map(|s| self.sheet_index(s))
             .collect();
         for index in visible {
-            self.prepare_sheet(index)?;
+            if let Err(error) = self.prepare_sheet(index) {
+                self.messages.push(error);
+            }
         }
         self.distraction_free = false;
         self.fullscreen = window.fullscreen;
@@ -780,9 +840,20 @@ impl Workspace {
         if window.distraction_free {
             self.workbench_action("toggle_distraction_free", &json!({}))?;
         }
-        self.focus_current_group()?;
+        if let Err(error) = self.focus_current_group() {
+            self.messages.push(error);
+        }
         self.sync_shared();
         Ok(())
+    }
+    /// Accept legacy boolean hot_exit without weakening the string policies.
+    pub fn hot_exit(&self) -> vel_session::HotExit {
+        for layer in [Layer::User, Layer::Platform, Layer::Default] {
+            if let Some(value) = self.settings.layer(layer).get("hot_exit") {
+                return vel_session::HotExit::from_setting(value);
+            }
+        }
+        vel_session::HotExit::parse(self.global_string("hot_exit", "always"))
     }
     pub fn global_string<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
         [Layer::User, Layer::Platform, Layer::Default]
@@ -810,7 +881,7 @@ impl Workspace {
             Text::new(),
             self.data_dir.clone(),
             Some(path.clone()),
-            false,
+            self.watcher.is_some(),
         )?;
         config.recent_files = self.recent_files.clone();
         config.recent_folders = self.recent_folders.clone();
@@ -827,17 +898,24 @@ impl Workspace {
     pub fn save_project_as(&mut self, path: PathBuf) -> Result<(), String> {
         // Keep exclusion rules/unknown fields from the original shareable project.
         let mut project = self.project_model.clone();
+        let path = std::path::absolute(path).map_err(|e| e.to_string())?;
         let base = self.project.as_deref().unwrap_or(&path);
-        project.resolve(base);
+        project.rebase(base, &path);
+        let new_base = path.parent().unwrap_or(Path::new("."));
         for folder in &self.folders {
-            if !project.folders.iter().any(|f| f.path == folder.path) {
+            if !project.folders.iter().any(|f| {
+                let candidate = new_base.join(&f.path);
+                candidate == folder.path
+                    || candidate.canonicalize().ok().as_ref() == Some(&folder.path)
+            }) {
                 project.folders.push(vel_session::project::Folder {
-                    path: folder.path.clone(),
+                    path: vel_session::project::relative_path(&folder.path, new_base),
                     name: Some(folder.name.clone()),
                     folder_exclude_patterns: vec![],
                     file_exclude_patterns: vec![],
                     binary_file_patterns: vec![],
-                    follow_symlinks: Some(folder.follow_links),
+                    follow_symlinks: (!folder.follow_links).then_some(false),
+                    ..Default::default()
                 });
             }
         }

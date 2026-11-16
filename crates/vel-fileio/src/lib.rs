@@ -71,29 +71,103 @@ impl Default for Format {
         }
     }
 }
+/// Display names accepted by file settings and encoding menus, with encoding_rs labels.
+/// Captions are independently authored; no application package resources are used.
+pub const ENCODINGS: &[(&str, &str)] = &[
+    ("UTF-8", "utf-8"),
+    ("UTF-8 with BOM", "utf-8"),
+    ("UTF-16 LE", "utf-16le"),
+    ("UTF-16 LE with BOM", "utf-16le"),
+    ("UTF-16 BE", "utf-16be"),
+    ("UTF-16 BE with BOM", "utf-16be"),
+    ("Western (Windows 1252)", "windows-1252"),
+    ("Western (ISO 8859-1)", "windows-1252"),
+    ("Western (ISO 8859-3)", "iso-8859-3"),
+    ("Western (ISO 8859-15)", "iso-8859-15"),
+    ("Western (Mac Roman)", "macintosh"),
+    ("Arabic (Windows 1256)", "windows-1256"),
+    ("Arabic (ISO 8859-6)", "iso-8859-6"),
+    ("Baltic (Windows 1257)", "windows-1257"),
+    ("Baltic (ISO 8859-4)", "iso-8859-4"),
+    ("Celtic (ISO 8859-14)", "iso-8859-14"),
+    ("Central European (Windows 1250)", "windows-1250"),
+    ("Central European (ISO 8859-2)", "iso-8859-2"),
+    ("Cyrillic (Windows 1251)", "windows-1251"),
+    ("Cyrillic (Windows 866)", "ibm866"),
+    ("Cyrillic (ISO 8859-5)", "iso-8859-5"),
+    ("Cyrillic (KOI8-R)", "koi8-r"),
+    ("Cyrillic (KOI8-U)", "koi8-u"),
+    ("Cyrillic (Mac Cyrillic)", "x-mac-cyrillic"),
+    ("Greek (Windows 1253)", "windows-1253"),
+    ("Greek (ISO 8859-7)", "iso-8859-7"),
+    ("Hebrew (Windows 1255)", "windows-1255"),
+    ("Hebrew (ISO 8859-8)", "iso-8859-8"),
+    ("Nordic (ISO 8859-10)", "iso-8859-10"),
+    ("Romanian (ISO 8859-16)", "iso-8859-16"),
+    ("Turkish (Windows 1254)", "windows-1254"),
+    ("Turkish (ISO 8859-9)", "windows-1254"),
+    ("Vietnamese (Windows 1258)", "windows-1258"),
+    ("Thai (Windows 874)", "windows-874"),
+    ("Japanese (Shift JIS)", "shift_jis"),
+    ("Japanese (EUC-JP)", "euc-jp"),
+    ("Japanese (ISO 2022-JP)", "iso-2022-jp"),
+    ("Korean (EUC-KR)", "euc-kr"),
+    ("Chinese Simplified (GBK)", "gbk"),
+    ("Chinese Simplified (GB18030)", "gb18030"),
+    ("Chinese Traditional (Big5)", "big5"),
+];
 /// Maps display names and standard encoding labels to encoding_rs codecs.
 pub fn encoding(name: &str) -> Result<&'static Encoding, String> {
     let name = name.trim();
-    match name.to_ascii_lowercase().as_str() {
-        "western (windows 1252)" | "western (windows-1252)" => Ok(WINDOWS_1252),
-        "utf-8 with bom" => Ok(UTF_8),
-        "utf-16 le" => Ok(UTF_16LE),
-        "utf-16 be" => Ok(UTF_16BE),
-        _ => Encoding::for_label(name.as_bytes()).ok_or_else(|| format!("unknown encoding {name}")),
+    let name = if name.eq_ignore_ascii_case("Western (Windows-1252)") {
+        "Western (Windows 1252)"
+    } else {
+        name
+    };
+    let label = ENCODINGS
+        .iter()
+        .find(|(display, _)| display.eq_ignore_ascii_case(name))
+        .map_or(name, |(_, label)| *label);
+    Encoding::for_label(label.as_bytes()).ok_or_else(|| format!("unknown encoding {name}"))
+}
+/// Resolves a fallback, returning a diagnostic once per invalid name per process.
+/// Invalid settings use Windows-1252 so a single bad preference cannot block every open.
+pub fn fallback_encoding(name: &str) -> (&'static Encoding, Option<String>) {
+    match encoding(name) {
+        Ok(codec) => (codec, None),
+        Err(error) => {
+            static REPORTED: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::BTreeSet<String>>,
+            > = std::sync::OnceLock::new();
+            let first = REPORTED
+                .get_or_init(Default::default)
+                .lock()
+                .expect("encoding diagnostics")
+                .insert(name.into());
+            (
+                WINDOWS_1252,
+                first.then(|| format!("{error}; using Western (Windows 1252)")),
+            )
+        }
     }
+}
+/// Format for an explicit encoding choice; UTF-16 selections include a BOM.
+pub fn encoding_format(name: &str, line_ending: LineEnding) -> Result<Format, String> {
+    let codec = encoding(name)?;
+    Ok(Format {
+        encoding: codec.name().into(),
+        bom: name.trim().eq_ignore_ascii_case("UTF-8 with BOM")
+            || codec == UTF_16LE
+            || codec == UTF_16BE,
+        line_ending,
+    })
 }
 /// New-file metadata from effective settings.
 pub fn default_format(settings: &EditorSettings) -> Result<Format, String> {
-    let enc = encoding(&settings.default_encoding)?;
-    Ok(Format {
-        encoding: enc.name().into(),
-        bom: settings
-            .default_encoding
-            .eq_ignore_ascii_case("utf-8 with bom")
-            || enc == UTF_16LE
-            || enc == UTF_16BE,
-        line_ending: LineEnding::parse(&settings.default_line_ending)?,
-    })
+    encoding_format(
+        &settings.default_encoding,
+        LineEnding::parse(&settings.default_line_ending)?,
+    )
 }
 /// A decoded LF-normalized document.
 #[derive(Debug)]
@@ -104,6 +178,44 @@ pub struct Loaded {
     pub format: Format,
     /// Original disk size.
     pub source_bytes: u64,
+}
+/// Decodes with an explicit codec for Reopen with Encoding, preserving the line convention.
+pub fn load_with_encoding(path: &Path, name: &str) -> Result<Loaded, String> {
+    let codec = encoding(name)?;
+    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let total = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    let mut prefix = [0; 3];
+    let n = file
+        .read(&mut prefix)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let marker: &[u8] = if codec == UTF_8 {
+        &[0xef, 0xbb, 0xbf]
+    } else if codec == UTF_16LE {
+        &[0xff, 0xfe]
+    } else if codec == UTF_16BE {
+        &[0xfe, 0xff]
+    } else {
+        &[]
+    };
+    let bom = !marker.is_empty() && prefix[..n].starts_with(marker);
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(if bom { marker.len() as u64 } else { 0 }))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut progress = |_| {};
+    let mut reader = DecodeReader::new(BufReader::new(file), codec, total, &mut progress);
+    let text = Text::from_reader(&mut reader).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Loaded {
+        text,
+        source_bytes: total,
+        format: Format {
+            encoding: codec.name().into(),
+            bom,
+            line_ending: reader.ending(),
+        },
+    })
 }
 /// Progress in original file bytes; may advance before UTF-8 tree construction completes.
 #[derive(Clone, Copy, Debug)]
@@ -147,6 +259,7 @@ fn load_cancellable(
         return Err("binary file: NUL in first 8 KiB".into());
     }
     let attempt = |codec: &'static Encoding,
+                   skip: usize,
                    progress: &mut dyn FnMut(Progress)|
      -> Result<(Text, LineEnding), String> {
         let mut file = File::open(path).map_err(|e| e.to_string())?;
@@ -165,17 +278,22 @@ fn load_cancellable(
         let ending = reader.ending();
         Ok((text, ending))
     };
-    let (text, ending, codec) = match attempt(codec, progress) {
-        Ok((text, ending)) => (text, ending, codec),
-        Err(first) if !bom => {
-            let fallback = encoding(fallback)?;
-            if fallback == UTF_8 {
+    let (text, ending, codec, bom) = match attempt(codec, skip, progress) {
+        Ok((text, ending)) => (text, ending, codec, bom),
+        Err(first) => {
+            if cancel.is_some_and(vel_largefile::Cancellation::is_cancelled) {
                 return Err(first);
             }
-            let (text, ending) = attempt(fallback, progress)?;
-            (text, ending, fallback)
+            let (fallback, warning) = fallback_encoding(fallback);
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            if fallback == codec {
+                return Err(first);
+            }
+            let (text, ending) = attempt(fallback, 0, progress)?;
+            (text, ending, fallback, false)
         }
-        Err(e) => return Err(e),
     };
     progress(Progress { read: total, total });
     Ok(Loaded {
