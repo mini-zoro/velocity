@@ -1,6 +1,6 @@
 # Spec: settings coverage
 
-Status: P4, round 16 (after the round-15 detail specs). Two lanes, split below.
+Status: P4, round 17 (after the round-15 detail specs and `vel-editing-commands-details.md` in round 16). Two lanes, split below.
 
 Background: a reviewer audit (2026-11-16) grepped the code for the documented Sublime Text 4
 preferences. The behaviours mostly exist, but about thirty common settings are not read at all, so
