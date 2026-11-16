@@ -1,0 +1,52 @@
+// Original Velocity menu captions and layout; authored from public behavior.
+[
+  {
+    "caption": "Open Selected Entry",
+    "command": "side_bar_open"
+  },
+  {
+    "caption": "Create File Here…",
+    "command": "side_bar_new_file"
+  },
+  {
+    "caption": "Create Folder Here…",
+    "command": "side_bar_new_folder"
+  },
+  {
+    "caption": "Change Entry Name…",
+    "command": "side_bar_rename"
+  },
+  {
+    "caption": "Move Entry to Trash…",
+    "command": "side_bar_delete"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "caption": "Copy Full Path",
+    "command": "copy_file_path"
+  },
+  {
+    "caption": "Copy Project-Relative Path",
+    "command": "copy_relative_path"
+  },
+  {
+    "caption": "Show in File Browser",
+    "command": "reveal_in_finder"
+  },
+  {
+    "caption": "Search This Folder…",
+    "command": "side_bar_find_in_folder"
+  },
+  {
+    "caption": "Detach Project Folder",
+    "command": "side_bar_remove_folder"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "id": "velocity_dynamic"
+  }
+]

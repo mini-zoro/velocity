@@ -354,7 +354,7 @@ mod tests {
         App::new(
             Options::default(),
             Clock::new(Instant::now(), std::time::SystemTime::now()),
-            Reporter::new(Mode::Headless, None, Instant::now()).unwrap(),
+            Reporter::for_options(&Options::default(), Instant::now()).unwrap(),
             Workspace::new(vel_text::Text::from(text), None, None, false).unwrap(),
             Arc::new(AtomicBool::new(false)),
             std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),

@@ -182,7 +182,7 @@ fn project_comments_relative_rules_and_fresh_workspace_destination() {
     project.save(&path).unwrap();
     let read = vel_session::project::Project::load(&path).unwrap();
     assert!(read.folders[0].path.is_absolute());
-    assert!(read.folders[0].follow_symlinks);
+    assert_eq!(read.folders[0].follow_symlinks, Some(true));
     assert_eq!(read.extra["extension_key"], 42);
     assert_eq!(
         vel_session::project::workspace_path(&path),

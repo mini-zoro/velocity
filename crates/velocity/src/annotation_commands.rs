@@ -25,7 +25,10 @@ impl Editor {
                     .borrow_mut()
                     .sync(&self.buffer, &self.settings);
                 self.annotations.borrow_mut().poll();
-                let row = self.text.byte_to_line(self.caret);
+                let at = args["_context_byte"]
+                    .as_u64()
+                    .map_or(self.caret, |at| at as usize);
+                let row = self.text.byte_to_line(at.min(self.text.len_bytes()));
                 let mut annotations = self.annotations.borrow_mut();
                 let Some(p) = annotations
                     .exact(self.buffer.id(), self.buffer.change_id())

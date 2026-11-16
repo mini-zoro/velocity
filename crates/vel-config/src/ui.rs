@@ -109,10 +109,183 @@ pub fn merge_menu(target: &mut Vec<MenuItem>, source: Vec<MenuItem>) {
             if !item.caption.is_empty() {
                 existing.caption = item.caption;
             }
+            if item.command.is_some() {
+                existing.command = item.command;
+                existing.args = item.args;
+            } else if item.args != empty_args() {
+                existing.args = item.args;
+            }
+            if item.platform.is_some() {
+                existing.platform = item.platform;
+            }
+            if item.mnemonic.is_some() {
+                existing.mnemonic = item.mnemonic;
+            }
         } else {
             target.push(item);
         }
     }
+}
+
+/// Loads one menu filename through the effective Default/package/User overlay.
+///
+/// Loose resources already replace archives at the same resource path; entries with
+/// stable IDs then merge across enabled packages in deterministic package order.
+/// A malformed layer returns its resource path and never publishes a partial menu.
+pub fn load_menu(
+    resources: &crate::resources::Resources,
+    filename: &str,
+) -> Result<Vec<MenuItem>, String> {
+    let mut items = Vec::new();
+    for resource in resources.matching(&format!("/{filename}")) {
+        let layer = parse(resource.text()?).map_err(|e| format!("{}: {e}", resource.path))?;
+        merge_menu(&mut items, layer);
+    }
+    Ok(items)
+}
+
+/// Current command state, evaluated with the invocation's complete context args.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandState {
+    /// Whether selecting the command is allowed.
+    pub enabled: bool,
+    /// Whether the row is included in the menu.
+    pub visible: bool,
+    /// Whether the native row displays a checkmark.
+    pub checked: bool,
+}
+impl Default for CommandState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            visible: true,
+            checked: false,
+        }
+    }
+}
+
+/// Platform-independent menu row ready for conversion to a native menu.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedMenuItem {
+    /// Display text, or `-` for a separator.
+    pub caption: String,
+    /// Resource identity, retained for dynamic menu extensions.
+    pub id: String,
+    /// Command and effective resource/context args, absent for submenus/separators.
+    pub invocation: Option<Invocation>,
+    /// Visible, recursively evaluated submenu rows.
+    pub children: Vec<ResolvedMenuItem>,
+    /// Whether the row can be selected.
+    pub enabled: bool,
+    /// Whether the native row displays a checkmark.
+    pub checked: bool,
+}
+
+/// Adds context keywords to resource args.
+///
+/// Internal `_`-prefixed keys always come from the click. Public keys (`paths`, `group`,
+/// `index`, `event`, …) fill in only what the resource leaves open: an absent key or the
+/// placeholders `null`, `-1` and `[]` (menu files write `{"group": -1, "index": -1}` or
+/// `{"paths": []}` to ask for the clicked location). A concrete resource value, such as
+/// `{"group": 1}` for `move_to_group`, is kept. Non-object resource/context values are
+/// treated as empty keyword dictionaries.
+pub fn context_invocation(invocation: &Invocation, context: &Value) -> Invocation {
+    let mut args = invocation.args.as_object().cloned().unwrap_or_default();
+    if let Some(context) = context.as_object() {
+        for (key, value) in context {
+            merge_context_arg(&mut args, key, value);
+        }
+    }
+    Invocation {
+        command: invocation.command.clone(),
+        args: Value::Object(args),
+    }
+}
+
+/// Inserts one click-context keyword following the rules of [`context_invocation`].
+pub fn merge_context_arg(args: &mut serde_json::Map<String, Value>, key: &str, value: &Value) {
+    let open = |v: &Value| {
+        v.is_null() || v.as_i64() == Some(-1) || v.as_array().is_some_and(Vec::is_empty)
+    };
+    if key.starts_with('_') || args.get(key).is_none_or(open) {
+        args.insert(key.into(), value.clone());
+    }
+}
+
+/// Evaluates command state, platform filters and nested menus without a UI host.
+///
+/// Hidden commands are omitted, empty submenus disappear, and redundant separators
+/// are removed. The state callback sees exactly the invocation later dispatched.
+pub fn resolve_menu(
+    items: &[MenuItem],
+    platform: &str,
+    context: &Value,
+    mut command_state: impl FnMut(&Invocation) -> CommandState,
+) -> Vec<ResolvedMenuItem> {
+    fn visit(
+        items: &[MenuItem],
+        platform: &str,
+        context: &Value,
+        command_state: &mut impl FnMut(&Invocation) -> CommandState,
+    ) -> Vec<ResolvedMenuItem> {
+        let mut rows: Vec<ResolvedMenuItem> = Vec::new();
+        for item in items {
+            if let Some(filter) = item.platform.as_deref() {
+                let matches = filter
+                    .strip_prefix('!')
+                    .map_or(filter == platform, |excluded| excluded != platform);
+                if !matches {
+                    continue;
+                }
+            }
+            if item.caption == "-" {
+                if rows.last().is_some_and(|row| row.caption != "-") {
+                    rows.push(ResolvedMenuItem {
+                        caption: "-".into(),
+                        id: item.id.clone(),
+                        invocation: None,
+                        children: Vec::new(),
+                        enabled: false,
+                        checked: false,
+                    });
+                }
+                continue;
+            }
+            let invocation = item.command.as_ref().map(|command| {
+                context_invocation(
+                    &Invocation {
+                        command: command.clone(),
+                        args: item.args.clone(),
+                    },
+                    context,
+                )
+            });
+            let state = invocation
+                .as_ref()
+                .map_or_else(CommandState::default, &mut *command_state);
+            if !state.visible {
+                continue;
+            }
+            let children = visit(&item.children, platform, context, command_state);
+            if invocation.is_none() && children.is_empty() {
+                continue;
+            }
+            rows.push(ResolvedMenuItem {
+                caption: item.caption.clone(),
+                id: item.id.clone(),
+                enabled: state.enabled
+                    && (invocation.is_some() || children.iter().any(|child| child.enabled)),
+                checked: state.checked,
+                invocation,
+                children,
+            });
+        }
+        if rows.last().is_some_and(|row| row.caption == "-") {
+            rows.pop();
+        }
+        rows
+    }
+    visit(items, platform, context, &mut command_state)
 }
 
 /// Parses mouse bindings and compiles optional context regular expressions.

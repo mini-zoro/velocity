@@ -41,6 +41,39 @@ def copy_tree(source, destination):
                     ignore=lambda _path, names: [n for n in names if n.startswith(".") or n == "tests"])
 
 
+def document_types():
+    """Offer text editing, generic-file opening and folder viewing as alternate handlers."""
+    return [
+        {
+            "CFBundleTypeName": "Text and Source Code", "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Alternate", "CFBundleTypeExtensions": EXTENSIONS.copy(),
+            "LSItemContentTypes": ["public.plain-text", "public.source-code", "public.text", "public.json"],
+        },
+        {
+            "CFBundleTypeName": "Files", "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.data"],
+        },
+        {
+            "CFBundleTypeName": "Folders", "CFBundleTypeRole": "Viewer",
+            "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.folder"],
+        },
+    ]
+
+
+def validate_document_types(plist):
+    """Require the native-open contract without changing default file ownership."""
+    types = plist["CFBundleDocumentTypes"]
+    for expected in document_types():
+        for uti in expected["LSItemContentTypes"]:
+            matches = [entry for entry in types if uti in entry.get("LSItemContentTypes", [])]
+            assert matches, f"missing document type: {uti}"
+            for entry in matches:
+                assert entry["CFBundleTypeRole"] == expected["CFBundleTypeRole"], uti
+                assert entry["LSHandlerRank"] == "Alternate", uti
+                if "CFBundleTypeExtensions" in expected:
+                    assert set(EXTENSIONS) <= set(entry.get("CFBundleTypeExtensions", [])), uti
+
+
 def assemble(args):
     repo, app = Path(args.repo), Path(args.app)
     metadata = json.loads(Path(args.metadata).read_text())
@@ -58,11 +91,7 @@ def assemble(args):
         "CFBundleVersion": numeric_version, "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "14.0", "NSPrincipalClass": "NSApplication",
         "NSRequiresAquaSystemAppearance": False, "NSSupportsAutomaticTermination": False,
-        "CFBundleDocumentTypes": [{
-            "CFBundleTypeName": "Text and Source Code", "CFBundleTypeRole": "Editor",
-            "LSHandlerRank": "Alternate", "CFBundleTypeExtensions": EXTENSIONS,
-            "LSItemContentTypes": ["public.plain-text", "public.source-code", "public.text", "public.json"],
-        }],
+        "CFBundleDocumentTypes": document_types(),
     }
     (contents / "Info.plist").write_bytes(plistlib.dumps(plist, sort_keys=True))
     shutil.copy2(args.binary, contents / "MacOS/velocity")
@@ -107,9 +136,7 @@ def validate(args):
     assert plist["NSHighResolutionCapable"] is True
     assert plist["LSMinimumSystemVersion"] == "14.0"
     assert plist["NSRequiresAquaSystemAppearance"] is False
-    document_type = plist["CFBundleDocumentTypes"][0]
-    assert document_type["CFBundleTypeRole"] == "Editor"
-    assert set(EXTENSIONS) <= set(document_type["CFBundleTypeExtensions"])
+    validate_document_types(plist)
     required = ["Velocity.icns", "Syntaxes/LICENSE", "Syntaxes/Rust/Rust.sublime-syntax",
                 "Packages/Default/Preferences.sublime-settings",
                 "Packages/Theme - Velocity/Velocity.sublime-theme",

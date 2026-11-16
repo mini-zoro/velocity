@@ -299,3 +299,35 @@ fn trim_all_and_the_system_line_ending() {
         "tabs\nideographic\u{3000}\nnbsp\u{a0}\n"
     );
 }
+
+#[test]
+fn rename_no_replace_refuses_existing_targets_but_allows_case_only_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    std::fs::write(&a, "a").unwrap();
+    std::fs::write(&b, "b").unwrap();
+    let error = rename_no_replace(&a, &b).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "b");
+    // A hard link to the same file under another name is still an existing target.
+    let link = dir.path().join("link.txt");
+    std::fs::hard_link(&a, &link).unwrap();
+    assert!(rename_no_replace(&a, &link).is_err());
+    assert!(a.exists() && link.exists());
+    let c = dir.path().join("c.txt");
+    rename_no_replace(&a, &c).unwrap();
+    assert!(!a.exists());
+    assert_eq!(std::fs::read_to_string(&c).unwrap(), "a");
+    // Works on case-insensitive (default APFS) and case-sensitive volumes alike.
+    let upper = dir.path().join("C.txt");
+    rename_no_replace(&c, &upper).unwrap();
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.contains(&"C.txt".to_string()), "{names:?}");
+    assert!(!names.contains(&"c.txt".to_string()), "{names:?}");
+    assert_eq!(std::fs::read_to_string(&upper).unwrap(), "a");
+}

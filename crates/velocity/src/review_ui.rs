@@ -6,6 +6,8 @@ use vel_platform::{Point, Rect};
 use vel_ui::contains;
 #[derive(Debug, Default)]
 pub struct ReviewUi {
+    /// Native tracking owns menu painting, keyboard input and accessibility.
+    pub native_context: bool,
     pub reveal: bool,
     pub items: Vec<PaletteItem>,
     pub point: Point,
@@ -147,14 +149,17 @@ impl Panels {
                     "git_blame_file" | "git_line_history" => {
                         command.arg("blame").arg(&path);
                         if name == "git_line_history" {
-                            command.arg(
-                                (workspace
-                                    .editor()
-                                    .text
-                                    .byte_to_line(workspace.editor().caret)
-                                    + 1)
-                                .to_string(),
-                            );
+                            command.arg(args["line"].as_u64().map_or_else(
+                                || {
+                                    (workspace
+                                        .editor()
+                                        .text
+                                        .byte_to_line(workspace.editor().caret)
+                                        + 1)
+                                    .to_string()
+                                },
+                                |line| line.to_string(),
+                            ));
                         }
                     }
                     _ => {
@@ -229,9 +234,17 @@ impl Panels {
             self.review.items = self.git_items(workspace, &path, folder);
             return;
         }
-        workspace.editor_mut().set_caret(byte, false);
+        // Preserve all selections when the pointer is inside any one of them. In
+        // particular, invoking Copy from a context menu must not collapse the range.
+        if !crate::context_menu::right_click_preserves_selection(
+            &workspace.editor().regions(),
+            byte,
+        ) {
+            workspace.editor_mut().set_caret(byte, false);
+        }
         let editor = workspace.editor();
         let row = editor.text.byte_to_line(byte);
+        let hunk_args = json!({"_context_byte":byte,"_context_version":editor.revision});
         let annotations = editor.annotations.borrow();
         if let Some(p) = annotations
             .current
@@ -249,16 +262,16 @@ impl Panels {
                         "Show Diff Hunk"
                     },
                     "toggle_inline_diff",
-                    json!({}),
+                    hunk_args.clone(),
                 ));
                 self.review.items.push(item(
                     "Show Only This Diff Hunk",
                     "toggle_inline_diff",
-                    json!({"show_only":true}),
+                    json!({"show_only":true,"_context_byte":byte,"_context_version":editor.revision}),
                 ));
                 self.review
                     .items
-                    .push(item("Revert Diff Hunk", "revert_hunk", json!({})));
+                    .push(item("Revert Diff Hunk", "revert_hunk", hunk_args));
             }
             if let Some(error) = p
                 .spelling
@@ -291,6 +304,11 @@ impl Panels {
             self.review
                 .items
                 .extend(self.git_items(workspace, path, false));
+        }
+        for item in &mut self.review.items {
+            if item.invocation.command == "git_line_history" {
+                item.invocation.args["line"] = json!(row + 1);
+            }
         }
     }
     pub fn review_poll(&mut self, workspace: &mut Workspace) -> bool {
@@ -389,6 +407,17 @@ impl Panels {
         }
         changed
     }
+    /// Whether the word under the context pointer still has an outstanding suggestion job.
+    pub fn review_suggestions_pending(&self) -> bool {
+        self.review.suggestion.is_some()
+    }
+    /// Discards menu choices while retaining independent diff/navigation jobs.
+    pub fn cancel_review_menu(&mut self) {
+        self.review.items.clear();
+        self.review.context_identity = None;
+        self.review.suggestion = None;
+        self.review.tooltip = None;
+    }
     pub fn review_paint(
         &mut self,
         workspace: &Workspace,
@@ -398,7 +427,7 @@ impl Panels {
         let mut layer = vel_render::scene::Layer::default();
         let mut theme = workspace.themes.ui.borrow_mut();
         let settings = &workspace.editor().settings;
-        if !self.review.items.is_empty() {
+        if !self.review.native_context && !self.review.items.is_empty() {
             let height = self.review.items.len() as f64 * 26. + 8.;
             let rect = Rect {
                 x: self.review.point.x.min((size.width - 300.).max(0.)),
@@ -472,7 +501,7 @@ impl Panels {
         }
     }
     pub fn review_mouse(&mut self, point: Point, down: bool) -> Option<Option<Invocation>> {
-        if self.review.items.is_empty() {
+        if self.review.native_context || self.review.items.is_empty() {
             return None;
         }
         if !down {
@@ -491,7 +520,7 @@ impl Panels {
         Some(invocation)
     }
     pub fn review_key(&mut self, key: &vel_config::keymap::Key) -> Option<Option<Invocation>> {
-        if self.review.items.is_empty() {
+        if self.review.native_context || self.review.items.is_empty() {
             return None;
         }
         let result = match key.name.as_str() {

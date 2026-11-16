@@ -2,6 +2,8 @@
 use crate::app_scene_translate as translate_scene;
 #[path = "app_a11y.rs"]
 mod accessibility_adapter;
+#[path = "app_context.rs"]
+mod context_adapter;
 use crate::{
     bench::{Bench, SCROLL_FRAMES, TYPING_INSERTIONS},
     cli::{Mode, Options},
@@ -37,6 +39,7 @@ struct Sample {
 }
 #[derive(Debug)]
 pub struct App {
+    pending_menu: Option<context_adapter::PendingMenu>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_preferences: accessibility::Preferences,
     releases: crate::release::Actions,
@@ -72,6 +75,7 @@ pub struct App {
     session_id: u64,
     session_due: Option<Instant>,
     restored_windows: Vec<vel_session::Window>,
+    restored_reserved_ids: std::collections::VecDeque<u64>,
     waiters: Vec<crate::instance::Waiter>,
     view_buffer: Option<u64>,
     options: Options,
@@ -95,6 +99,46 @@ pub struct App {
     waiting_since: Option<Instant>,
 }
 impl App {
+    /// Restores retained documents before a temporary native receiver can write the profile.
+    fn take_over_native_primary(
+        &mut self,
+        instance: crate::instance::Instance,
+    ) -> Result<(), String> {
+        let directory = self.workspace.data_path().map(Path::to_owned);
+        let mut sessions = crate::session::Sessions::new(directory.as_deref());
+        let restored = sessions.restored.clone();
+        let first = restored.windows.first().cloned();
+        let project = first
+            .as_ref()
+            .and_then(|window| window.project.clone())
+            .filter(|path| path.is_file());
+        let mut workspace = Workspace::new(vel_text::Text::new(), directory, project, true)?;
+        if let Some(window) = &first {
+            workspace.restore_window(window, &restored.documents)?;
+        }
+        workspace.recent_files = restored.recent_files;
+        workspace.recent_folders = restored.recent_folders;
+        workspace.recent_projects = restored.recent_projects;
+        workspace.messages.append(&mut sessions.messages);
+        let mut reserved = sessions.reserve_recovered().into_iter();
+        let id = reserved.next().unwrap_or_else(|| sessions.register());
+        sessions.instance = Some(instance);
+        self.sessions = std::rc::Rc::new(std::cell::RefCell::new(sessions));
+        self.session_id = id;
+        self.workspace = workspace;
+        self.panels = crate::panels::Panels::new(&self.workspace, true);
+        self.panels.review.native_context = true;
+        self.title_theme = None;
+        self.view_buffer = None;
+        self.sheet_views.clear();
+        if let Some(window) = &first {
+            self.restore_ui(window);
+        }
+        self.restored_windows = restored.windows.into_iter().skip(1).collect();
+        self.restored_reserved_ids = reserved.collect();
+        self.options.forward_native_opens = false;
+        Ok(())
+    }
     pub fn new(
         options: Options,
         clock: Clock,
@@ -121,6 +165,7 @@ impl App {
         );
         let session_id = sessions.borrow_mut().register();
         Self {
+            pending_menu: None,
             accessibility_focus: None,
             accessibility_preferences: Default::default(),
             releases: Default::default(),
@@ -129,6 +174,7 @@ impl App {
             session_id,
             session_due: Some(Instant::now()),
             restored_windows: Vec::new(),
+            restored_reserved_ids: Default::default(),
             waiters: Vec::new(),
             exact_scene: false,
             exact_drawables: Default::default(),
@@ -248,6 +294,7 @@ impl App {
         &mut self,
         w: &WindowHandle,
         restored: Option<vel_session::Window>,
+        reserved_id: Option<u64>,
     ) -> Result<WindowHandle, String> {
         let project = restored.as_ref().and_then(|s| s.project.clone());
         let mut workspace = Workspace::new(
@@ -278,6 +325,9 @@ impl App {
         if let Some(window) = &restored {
             app.restore_ui(window);
         }
+        if let Some(id) = reserved_id {
+            app.session_id = id;
+        }
         w.new_window(
             WindowOptions {
                 title: "Velocity".into(),
@@ -292,7 +342,8 @@ impl App {
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
-            if let Err(e) = self.open_native_window(w, Some(window)) {
+            let id = self.restored_reserved_ids.pop_front();
+            if let Err(e) = self.open_native_window(w, Some(window), id) {
                 self.workspace.messages.push(e);
             }
         }
@@ -337,6 +388,7 @@ impl App {
         w: &WindowHandle,
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
+        let native_open = incoming.request.native_open;
         let new_window = incoming.request.new_window
             || (!incoming.request.add
                 && self
@@ -377,7 +429,7 @@ impl App {
         } else {
             self.accept_request(incoming)?;
             w.focus();
-            self.changed(w, Instant::now(), true);
+            self.changed(w, Instant::now(), !native_open);
         }
         Ok(())
     }
@@ -396,12 +448,25 @@ impl App {
             self.workspace.open_project(project)?;
             self.panels = crate::panels::Panels::new(&self.workspace, true);
         }
-        for location in request.files {
-            if location.path.is_dir() {
-                self.panels.add_folder(&mut self.workspace, location.path)?;
-            } else {
-                self.workspace.open(location)?;
-                ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+        if request.native_open {
+            let paths = request
+                .files
+                .into_iter()
+                .map(|location| location.path)
+                .collect::<Vec<_>>();
+            if let Err(error) =
+                crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, &paths)
+            {
+                self.panels.message = error;
+            }
+        } else {
+            for location in request.files {
+                if location.path.is_dir() {
+                    self.panels.add_folder(&mut self.workspace, location.path)?;
+                } else {
+                    self.workspace.open(location)?;
+                    ids.insert(self.workspace.tabs[self.workspace.active].sheet);
+                }
             }
         }
         if let Some(text) = request.stdin {
@@ -441,7 +506,7 @@ impl App {
                         self.run_named_depth(
                             w,
                             name,
-                            command.get(1).unwrap_or(&json!({})),
+                            &context_child_args(args, command.get(1).unwrap_or(&json!({}))),
                             depth + 1,
                         );
                     } else {
@@ -454,8 +519,29 @@ impl App {
             }
             return;
         }
+        if matches!(args["_context_menu"].as_str(), Some("editor" | "tab"))
+            && !crate::context_menu::COMMANDS.contains(&name)
+            && crate::context_menu::TabCloseKind::from_command(name).is_none()
+            && let Some(sheet) = args["_context_sheet"].as_u64()
+            && let Some(index) = self.workspace.sheet_index(sheet)
+        {
+            self.workspace.select(index);
+            self.sync_active_view();
+        }
         if !self.command_enabled(name, &args.to_string()) {
             return;
+        }
+        match self.context_action(w, name, args) {
+            Ok(true) => {
+                self.changed(w, Instant::now(), false);
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.panels.message = error;
+                self.changed(w, Instant::now(), false);
+                return;
+            }
         }
         if self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
             && !matches!(
@@ -579,13 +665,7 @@ impl App {
             self.sync_active_view();
         }
         self.workspace.editor_mut().sync();
-        let tab = &self.workspace.tabs[self.workspace.active];
-        w.set_title(&format!(
-            "{} — {} · {} — Velocity",
-            tab.label(),
-            tab.format.encoding,
-            tab.format.line_ending.name()
-        ));
+        w.set_title(&self.workspace.window_title());
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
         if matches!(name, "focus_next_control" | "focus_previous_control") {
@@ -890,7 +970,7 @@ impl App {
                 }
             }
             "new_window" => {
-                self.open_native_window(w, None)?;
+                self.open_native_window(w, None, None)?;
             }
             "close_window" => {
                 w.request_close();
@@ -1045,6 +1125,9 @@ impl App {
                 height: self.window_size.height,
             };
             self.view.size = self.window_size;
+            if self.workspace.take_pending_center() {
+                self.view.center_caret(self.workspace.editor());
+            }
             let scene = self.view.scene(self.workspace.editor());
             self.exact_scene = self.view.exact(self.workspace.editor())
                 && self.workspace.tabs[self.workspace.active].loading.is_none();
@@ -1168,6 +1251,10 @@ impl App {
                     && !self.panels.side_focused;
                 view.find_matches.clear();
                 view.apply_style(&self.workspace.tabs[index].editor);
+                if std::mem::take(&mut self.workspace.tabs[index].pending_center) {
+                    view.center_caret(&self.workspace.tabs[index].editor);
+                    self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+                }
                 if *sheet == focused {
                     let viewport = view.viewport(&self.workspace.tabs[index].editor);
                     let highlights = self.panels.visible_highlights();
@@ -1732,6 +1819,8 @@ impl AppHandler for App {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        self.panels.review.native_context = true;
+        w.set_title(&self.workspace.window_title());
         w.set_menu(&native_menu(&self.workspace.menus));
         self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":self.workspace.palette.len()}))?;
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
@@ -1795,6 +1884,9 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_key(&mut self, w: &WindowHandle, event: KeyEvent) -> bool {
+        if event.state == KeyState::Down {
+            self.cancel_context(w);
+        }
         self.log_input("key", &event);
         if self.options.mode.automatic() {
             if event.state == KeyState::Down {
@@ -1869,10 +1961,86 @@ impl AppHandler for App {
             }
         }
     }
+    fn on_open_paths(&mut self, w: &WindowHandle, paths: &[std::path::PathBuf]) {
+        if self.options.mode != Mode::Interactive {
+            return;
+        }
+        if self.options.forward_native_opens {
+            let directory = self.workspace.data_path().map(Path::to_owned);
+            match crate::open_requests::forward_native_paths(directory.as_deref(), paths) {
+                Ok(crate::open_requests::NativeForward::Forwarded) => {
+                    self.done.store(true, Ordering::Release);
+                    w.quit();
+                    return;
+                }
+                Ok(crate::open_requests::NativeForward::Primary(instance)) => {
+                    if let Err(error) = self.take_over_native_primary(instance) {
+                        self.panels.message = format!("Could not restore primary session: {error}");
+                        self.changed(w, Instant::now(), false);
+                        return;
+                    }
+                }
+                Err(error) => {
+                    self.panels.message = format!("Native open forwarding failed: {error}");
+                    self.changed(w, Instant::now(), false);
+                    return;
+                }
+            }
+        }
+        if let Err(error) =
+            crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths)
+        {
+            self.panels.message = error;
+        }
+        self.changed(w, Instant::now(), false);
+        w.focus();
+    }
+    fn on_reopen(&mut self, w: &WindowHandle) {
+        if self.options.mode == Mode::Interactive
+            && let Err(error) = self.open_native_window(w, None, None)
+        {
+            self.show_error(w, &error);
+        }
+    }
+    fn on_idle(&mut self, w: &WindowHandle) {
+        if self.options.mode != Mode::Interactive {
+            return;
+        }
+        let requests = self
+            .sessions
+            .borrow()
+            .instance
+            .as_ref()
+            .map(|i| i.drain())
+            .unwrap_or_default();
+        for mut incoming in requests {
+            // There is no live key window; route this request into a fresh one.
+            incoming.request.new_window = true;
+            if let Err(error) = self.receive_request(w, incoming) {
+                self.show_error(w, &error);
+            }
+        }
+    }
     fn command_enabled(&self, name: &str, args: &str) -> bool {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
+        let context_tab = args["_context_sheet"]
+            .as_u64()
+            .map(|sheet| self.workspace.sheet_index(sheet));
+        if context_tab == Some(None) {
+            return false;
+        }
+        let target = context_tab.flatten().unwrap_or(self.workspace.active);
+        if args["_context_version"]
+            .as_u64()
+            .is_some_and(|version| version != self.workspace.tabs[target].editor.revision)
+        {
+            return false;
+        }
+        if let Some(state) = self.context_state(name, &args) {
+            return state.enabled;
+        }
         if name == "package_check_upgrades"
             && self
                 .workspace
@@ -1904,12 +2072,21 @@ impl AppHandler for App {
             }
             _ => {}
         }
-        if self.panels.input().is_some()
+        if args["_context_menu"].is_null()
+            && self.panels.input().is_some()
             && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
         {
             return true;
         }
-        let tab = &self.workspace.tabs[self.workspace.active];
+        let tab = &self.workspace.tabs[target];
+        if tab.editor.read_only
+            && matches!(
+                name,
+                "cut" | "paste" | "paste_and_indent" | "revert_hunk" | "replace_misspelling"
+            )
+        {
+            return false;
+        }
         if tab.editor.read_only && matches!(name, "save" | "save_all" | "save_as") {
             return false;
         }
@@ -1930,7 +2107,58 @@ impl AppHandler for App {
                     "move" | "move_to" | "select_all" | "copy" | "single_selection"
                 ))
     }
+    fn command_visible(&self, name: &str, args: &str) -> bool {
+        let Ok(args) = serde_json::from_str::<Value>(args) else {
+            return false;
+        };
+        self.context_state(name, &args)
+            .is_none_or(|state| state.visible)
+            && (name != "package_check_upgrades"
+                || self
+                    .workspace
+                    .settings
+                    .get("package_index_url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| !url.is_empty()))
+    }
+    fn command_checked(&self, name: &str, args: &str) -> bool {
+        let Ok(args) = serde_json::from_str::<Value>(args) else {
+            return false;
+        };
+        if let Some(state) = self.context_state(name, &args) {
+            return state.checked;
+        }
+        let target = args["_context_sheet"]
+            .as_u64()
+            .and_then(|sheet| self.workspace.sheet_index(sheet))
+            .unwrap_or(self.workspace.active);
+        let editor = &self.workspace.tabs[target].editor;
+        match name {
+            "toggle_setting" => args["setting"]
+                .as_str()
+                .is_some_and(|key| editor.settings.bool(key, false)),
+            "toggle_side_bar" => self.panels.side_visible,
+            "toggle_inline_diff" => {
+                let byte = args["_context_byte"]
+                    .as_u64()
+                    .map_or(editor.caret, |byte| byte as usize);
+                let row = editor.text.byte_to_line(byte.min(editor.text.len_bytes()));
+                let annotations = editor.annotations.borrow();
+                annotations
+                    .current
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        snapshot.hunks.iter().find(|hunk| {
+                            hunk.new.start <= row && row < hunk.new.end.max(hunk.new.start + 1)
+                        })
+                    })
+                    .is_some_and(|hunk| annotations.inline.contains(&hunk.new.start))
+            }
+            _ => false,
+        }
+    }
     fn on_text_input(&mut self, w: &WindowHandle, event: TextInput) {
+        self.cancel_context(w);
         if self.options.mode.automatic() {
             self.external_input += 1;
             return;
@@ -1950,6 +2178,7 @@ impl AppHandler for App {
         self.input(w, event, Instant::now());
     }
     fn on_command(&mut self, w: &WindowHandle, command: Command) {
+        self.cancel_context(w);
         self.log_input("command", command);
         if self.options.mode.automatic() {
             self.external_input += 1;
@@ -1992,6 +2221,14 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        if event.is_context_click() {
+            self.begin_context_menu(w, event.position);
+            return;
+        }
+        if event.kind == MouseKind::Down {
+            self.pending_menu = None;
+            self.panels.cancel_review_menu();
+        }
         let local = Point {
             x: event.position.x - self.content.x,
             y: event.position.y - self.content.y,
@@ -2012,31 +2249,6 @@ impl AppHandler for App {
             }
         }
 
-        if event.kind == MouseKind::Down
-            && (event.button == 1 || (event.button == 0 && event.modifiers.control()))
-        {
-            let side = self
-                .panels
-                .review_side_path(&self.workspace, event.position);
-            let byte = self.view.hit_test(
-                self.workspace.editor(),
-                Point {
-                    x: event.position.x - self.content.x,
-                    y: event.position.y - self.content.y,
-                },
-            );
-            self.panels
-                .review_context(&mut self.workspace, event.position, byte, side);
-            self.changed(w, Instant::now(), false);
-            return;
-        }
-        if event.kind == MouseKind::Down && !self.panels.review.items.is_empty() {
-            if let Some(Some(invocation)) = self.panels.review_mouse(event.position, true) {
-                self.run_named(w, &invocation.command, &invocation.args);
-            }
-            self.changed(w, Instant::now(), false);
-            return;
-        }
         if event.kind == MouseKind::Down {
             self.dragging_splitter =
                 self.workspace
@@ -2119,6 +2331,20 @@ impl AppHandler for App {
             viewport,
         ) {
             Ok(true) => {
+                if !self.panels.review.items.is_empty() {
+                    // The Git status control uses the same native tracking path.
+                    let items = std::mem::take(&mut self.panels.review.items);
+                    let entries: Vec<_> = items
+                        .into_iter()
+                        .map(|item| MenuEntry {
+                            caption: item.caption,
+                            command: Some(item.invocation.command),
+                            args: item.invocation.args.to_string(),
+                            children: vec![],
+                        })
+                        .collect();
+                    w.show_context_menu(&entries);
+                }
                 if let Some(invocation) = self.panels.pending_command.take() {
                     self.run_named(w, &invocation.command, &invocation.args);
                 }
@@ -2410,6 +2636,7 @@ impl AppHandler for App {
         self.changed(w, Instant::now(), false);
     }
     fn on_scroll(&mut self, w: &WindowHandle, event: ScrollEvent) {
+        self.cancel_context(w);
         if self.options.mode.automatic() {
             self.external_input += 1;
             return;
@@ -2531,6 +2758,7 @@ impl AppHandler for App {
         {
             self.changed(w, Instant::now(), false);
         }
+        w.set_title(&self.workspace.window_title());
         let observations = w.take_presentations();
         if self.startup_done {
             for p in &observations {
@@ -2576,6 +2804,7 @@ impl AppHandler for App {
             }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
+            self.flush_context_menu(w);
             if std::mem::take(&mut self.panels.review.reveal) {
                 self.view.reveal(self.workspace.editor());
             }
@@ -2992,6 +3221,9 @@ impl AppHandler for App {
             let _ = self.checkpoint_reason(false, true);
         }
         self.sessions.borrow_mut().close(self.session_id, retain);
+        // Closing a window closes its sheets even when Hot Exit retains their buffers.
+        // The retained Dock template must not keep CLI -w clients blocked.
+        self.waiters.clear();
         let _ = self.sessions.borrow().flush();
         true
     }
@@ -3042,6 +3274,27 @@ impl AppHandler for App {
     }
 }
 
+fn context_child_args(parent: &Value, child: &Value) -> Value {
+    if parent.get("_context_menu").is_none() {
+        return child.clone();
+    }
+    let mut args = child.as_object().cloned().unwrap_or_default();
+    for key in [
+        "paths",
+        "group",
+        "index",
+        "event",
+        "_context_menu",
+        "_context_sheet",
+        "_context_version",
+        "_context_byte",
+    ] {
+        if let Some(value) = parent.get(key) {
+            vel_config::ui::merge_context_arg(&mut args, key, value);
+        }
+    }
+    Value::Object(args)
+}
 fn native_menu(items: &[vel_config::ui::MenuItem]) -> Vec<MenuEntry> {
     items
         .iter()
@@ -3063,7 +3316,7 @@ fn native_menu(items: &[vel_config::ui::MenuItem]) -> Vec<MenuEntry> {
 mod workbench_scenes {
     use super::*;
     fn app(workspace: Workspace) -> App {
-        let reporter = Reporter::new(Mode::HeadlessWorkbench, None, Instant::now()).unwrap();
+        let reporter = Reporter::for_options(&Options::default(), Instant::now()).unwrap();
         App::new(
             Options::default(),
             Clock::new(Instant::now(), std::time::SystemTime::now()),

@@ -1,0 +1,42 @@
+// Original Velocity menu captions and layout; authored from public behavior.
+[
+  {
+    "caption": "Close This Tab",
+    "command": "close_file",
+    "id": "velocity_close_tab"
+  },
+  {
+    "caption": "Keep Only This Tab",
+    "command": "close_other_tabs"
+  },
+  {
+    "caption": "Close Following Tabs",
+    "command": "close_tabs_to_right"
+  },
+  {
+    "caption": "Close Saved Tabs",
+    "command": "close_unmodified_tabs"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "caption": "Create Untitled File",
+    "command": "new_file"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "caption": "Copy Full File Path",
+    "command": "copy_file_path"
+  },
+  {
+    "caption": "Locate in Project Tree",
+    "command": "reveal_in_side_bar"
+  },
+  {
+    "caption": "Show in File Browser",
+    "command": "reveal_in_finder"
+  }
+]

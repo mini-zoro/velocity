@@ -2,17 +2,24 @@
 use crate::*;
 #[path = "macos_a11y.rs"]
 mod a11y;
+#[path = "macos_requests.rs"]
+mod lifecycle;
+#[path = "macos_menu.rs"]
+mod menus;
+use crate::requests::{ContextRequest, MenuInstallation, WindowTitle};
 use block2::RcBlock;
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject, Sel},
     sel,
 };
 use objc2_app_kit::*;
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSNotification, NSObject, NSObjectProtocol,
-    NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSFileManager, NSNotification, NSObject,
+    NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_metal::MTLDrawable;
 use objc2_quartz_core::{
@@ -24,6 +31,7 @@ use std::{
     collections::VecDeque,
     ffi::c_void,
     fmt,
+    path::{Path, PathBuf},
     ptr::NonNull,
     rc::{Rc, Weak},
     sync::{
@@ -48,17 +56,22 @@ thread_local! {
     static WINDOWS: RefCell<Vec<Retained<Delegate>>> = const { RefCell::new(Vec::new()) };
 }
 impl WindowHandle {
+    /// Registers a process-wide factory independent of any one window's lifetime.
+    /// With a factory installed, closing the final window leaves the application
+    /// running. Dock reopen and subsequent Finder opens create a fresh host.
+    pub fn set_window_factory(
+        &self,
+        factory: impl FnMut() -> Result<(WindowOptions, Box<dyn AppHandler>), String> + 'static,
+    ) {
+        lifecycle::set_factory(Box::new(factory));
+    }
     /// Creates another independently owned native window on the same AppKit loop.
     pub fn new_window(
         &self,
         options: WindowOptions,
         app: impl AppHandler,
     ) -> Result<WindowHandle, String> {
-        let host = create_host(self.0.mtm, &options, Box::new(app))?;
-        let delegate = create_delegate(self.0.mtm, host.clone(), options);
-        WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
-        delegate.launch()?;
-        Ok(host.handle())
+        launch_window(self.0.mtm, options, Box::new(app))
     }
     /// Requests normal per-window close handling, including unsaved changes.
     pub fn request_close(&self) {
@@ -66,8 +79,11 @@ impl WindowHandle {
     }
     /// Closes one approved window while other windows keep running.
     pub fn close(&self) {
-        self.0.stopped.set(true);
+        if self.0.stopped.replace(true) {
+            return;
+        }
         self.0.visible.set(false);
+        *self.0.context.borrow_mut() = ContextRequest::default();
         self.0.pace();
         if let Some(timer) = self.0.timer.take() {
             timer.invalidate();
@@ -82,12 +98,15 @@ impl WindowHandle {
                 .any(|d| !d.ivars().host.stopped.get())
         });
         if !any {
-            self.quit();
+            lifecycle::keep_template(Rc::clone(&self.0));
         }
     }
     /// Brings this window forward for an interactive file/project request.
     pub fn focus(&self) {
         if let Some(window) = self.0.window.get() {
+            if window.isMiniaturized() {
+                window.deminiaturize(None);
+            }
             window.makeKeyAndOrderFront(None);
         }
         #[allow(deprecated)]
@@ -216,29 +235,22 @@ impl WindowHandle {
             .unwrap_or_else(NSColor::windowBackgroundColor);
         window.setBackgroundColor(Some(&color));
     }
-    /// Changes the native title.
+    /// Changes the native title only when its text changes.
     pub fn set_title(&self, title: &str) {
-        if let Some(w) = self.0.window.get() {
-            w.setTitle(&NSString::from_str(title));
+        let Some(w) = self.0.window.get() else {
+            return;
+        };
+        if !self.0.title.borrow_mut().update(title) {
+            return;
         }
+        w.setTitle(&NSString::from_str(title));
     }
     /// Installs resource-defined menus, retaining the standard application menu.
     /// Installs the application menu. Identical requests from the window that installed the
     /// current menu are ignored: rebuilding NSMenu forces AppKit to relayout and redraw the
     /// menu bar, which dominated main-thread time while background results streamed in.
     pub fn set_menu(&self, entries: &[MenuEntry]) {
-        let unchanged = INSTALLED_MENU.with(|installed| {
-            let mut installed = installed.borrow_mut();
-            if installed
-                .as_ref()
-                .is_some_and(|(owner, current)| *owner == self.0.id && current == entries)
-            {
-                return true;
-            }
-            *installed = Some((self.0.id, entries.to_vec()));
-            false
-        });
-        if unchanged {
+        if !INSTALLED_MENU.with(|installed| installed.borrow_mut().update(self.0.id, entries)) {
             return;
         }
         let main = NSApplication::sharedApplication(self.0.mtm)
@@ -269,6 +281,55 @@ impl WindowHandle {
             );
         }
         append_menu(&self.0, &main, entries);
+    }
+    /// Queues a native context menu for the most recent unconsumed mouse press.
+    /// Its native event survives `on_mouse` so a later frame can offer spelling
+    /// results. A later press replaces it; displaying a menu consumes it. Primary
+    /// clicks are also captured for Git badges. Returns false without a captured
+    /// press, for an empty menu, or a closed window.
+    /// Tracking starts on a later main-run-loop turn,
+    /// after app borrows end. Commands retain their exact serialized arguments
+    /// and arrive through `on_named_command` after tracking returns.
+    pub fn show_context_menu(&self, entries: &[MenuEntry]) -> bool {
+        if self.0.stopped.get() || !self.0.context.borrow_mut().request(entries) {
+            return false;
+        }
+        lifecycle::register_context(&self.0);
+        self.0.schedule_context_menu();
+        true
+    }
+    /// Cancels a deferred popup and its retained mouse origin before tracking starts.
+    /// Call alongside clearing any app-side pending spelling menu on keyboard,
+    /// text, command, or scroll input. An already-scheduled selector becomes a
+    /// no-op. This only clears Rust state; it does not enter AppKit or dismiss
+    /// a menu that is already tracking.
+    pub fn cancel_context_menu(&self) {
+        if !self.0.context_tracking.get() {
+            self.0.context.borrow_mut().cancel();
+        }
+    }
+    /// Moves a file or folder to the system Trash, without an unlink fallback.
+    /// The caller confirms with the user before invoking this operation.
+    pub fn trash_file(&self, path: &Path) -> Result<(), String> {
+        let url = file_url(path)?;
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, None)
+            .map_err(|error| {
+                format!(
+                    "could not move {} to Trash: {}",
+                    path.display(),
+                    error.localizedDescription()
+                )
+            })
+    }
+    /// Selects a file or folder in Finder. Errors do not change the filesystem.
+    pub fn reveal_file(&self, path: &Path) -> Result<(), String> {
+        let url = file_url(path)?;
+        std::fs::symlink_metadata(path)
+            .map_err(|error| format!("could not reveal {}: {error}", path.display()))?;
+        NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
+        Ok(())
     }
     /// Opens a native multi-file chooser.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {
@@ -409,7 +470,8 @@ enum Event {
     Text(TextInput),
     Command(Command),
     NamedCommand(String, String),
-    Mouse(MouseEvent),
+    Mouse(MouseEvent, Option<Retained<NSEvent>>),
+    OpenPaths(Vec<PathBuf>),
     Scroll(ScrollEvent),
     Resize,
     Appearance(Appearance),
@@ -419,7 +481,7 @@ enum Event {
 }
 thread_local! {
     /// Window that installed the current application menu, and the entries it installed.
-    static INSTALLED_MENU: RefCell<Option<(u64, Vec<MenuEntry>)>> = const { RefCell::new(None) };
+    static INSTALLED_MENU: RefCell<MenuInstallation> = RefCell::new(MenuInstallation::default());
 }
 static NEXT_HOST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 struct Host {
@@ -448,6 +510,10 @@ struct Host {
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
     menu_commands: RefCell<Vec<(String, String)>>,
+    title: RefCell<WindowTitle>,
+    context: RefCell<ContextRequest<Retained<NSEvent>>>,
+    context_scheduled: Cell<bool>,
+    context_tracking: Cell<bool>,
     input: RefCell<TextInputState>,
     ax_elements: RefCell<std::collections::HashMap<accessibility::Id, Retained<a11y::AxElement>>>,
     ax_queried: Cell<bool>,
@@ -472,6 +538,10 @@ impl Host {
         self.drain();
     }
     fn drain(self: &Rc<Self>) {
+        if self.stopped.get() {
+            self.pending.borrow_mut().clear();
+            return;
+        }
         if self.dispatching.get() || self.drawing.get() {
             return;
         }
@@ -496,7 +566,17 @@ impl Host {
                 Event::NamedCommand(name, args) => app.on_named_command(&w, &name, &args),
                 Event::Text(e) => app.on_text_input(&w, e),
                 Event::Command(e) => app.on_command(&w, e),
-                Event::Mouse(e) => app.on_mouse(&w, e),
+                Event::Mouse(e, native) => {
+                    let button_press = e.kind == MouseKind::Down;
+                    if button_press {
+                        self.context.borrow_mut().begin_click(native);
+                    }
+                    app.on_mouse(&w, e);
+                    if button_press {
+                        self.context.borrow_mut().end_dispatch();
+                    }
+                }
+                Event::OpenPaths(paths) => app.on_open_paths(&w, &paths),
                 Event::Scroll(e) => app.on_scroll(&w, e),
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
@@ -514,15 +594,21 @@ impl Host {
                 break;
             }
         }
-        if self.stopped.get() {
+        if self.stopped.get() && !lifecycle::is_template(self.id) {
             self.app.borrow_mut().take();
             *self.input.borrow_mut() = TextInputState::default();
         }
         self.dispatching.set(false);
         self.flush_ime_coordinates();
+        lifecycle::schedule_contexts();
+        lifecycle::schedule();
     }
     fn offer_key(self: &Rc<Self>, key: KeyEvent) -> bool {
-        if self.input.borrow().marked.is_some() || self.dispatching.get() || self.drawing.get() {
+        if self.stopped.get()
+            || self.input.borrow().marked.is_some()
+            || self.dispatching.get()
+            || self.drawing.get()
+        {
             return false;
         }
         self.dispatching.set(true);
@@ -612,6 +698,44 @@ impl Host {
         if self.input_depth.get() == 0 {
             self.render(FrameReason::Input, false);
         }
+    }
+    fn schedule_context_menu(&self) {
+        if self.stopped.get()
+            || self.context_tracking.get()
+            || !self.context.borrow().is_pending()
+            || self.context_scheduled.replace(true)
+        {
+            return;
+        }
+        if let Some(view) = self.view.get() {
+            // SAFETY: the delayed selector takes one optional object. AppKit retains
+            // the view until delivery; no app borrow crosses this scheduling call.
+            unsafe {
+                view.performSelector_withObject_afterDelay(
+                    sel!(showDeferredContextMenu:),
+                    None,
+                    0.,
+                );
+            }
+        } else {
+            self.context_scheduled.set(false);
+        }
+    }
+    fn show_context_menu(self: &Rc<Self>) {
+        self.context_scheduled.set(false);
+        let busy = lifecycle::hosts_busy() || self.context_tracking.get();
+        if self.stopped.get() {
+            self.context.borrow_mut().take_if_idle(false);
+            return;
+        }
+        let request = self.context.borrow_mut().take_if_idle(busy);
+        let Some((entries, event)) = request else {
+            return;
+        };
+        self.context_tracking.set(true);
+        menus::popup(self, &entries, &event);
+        self.context_tracking.set(false);
+        lifecycle::schedule_contexts();
     }
     fn resize(self: &Rc<Self>) {
         let (Some(view), Some(window), Some(layer)) =
@@ -738,6 +862,10 @@ define_class!(
         }
         #[unsafe(method(tick:))] fn tick(&self, _link: &CADisplayLink) { if let Some(h) = self.ivars().host.upgrade() { h.render(FrameReason::DisplayLink, false); } }
         #[unsafe(method(wake:))] fn wake(&self, _timer: &NSTimer) { if let Some(h) = self.ivars().host.upgrade() { h.timer.take(); h.render(FrameReason::Timer, true); } }
+        #[unsafe(method(showDeferredContextMenu:))]
+        fn show_deferred_context_menu(&self, _sender: Option<&AnyObject>) {
+            if let Some(h) = self.ivars().host.upgrade() { h.show_context_menu(); }
+        }
         #[unsafe(method(keyDown:))] fn key_down(&self, event: &NSEvent) {
             if let Some(h) = self.ivars().host.upgrade() {
                 let key = key_event(event, KeyState::Down);
@@ -802,6 +930,34 @@ define_class!(
         #[unsafe(method(paste:))] fn paste(&self, _sender: Option<&AnyObject>) { self.command(Command::Paste); }
         #[unsafe(method(selectAll:))] fn select_all(&self, _sender: Option<&AnyObject>) { self.command(Command::SelectAll); }
     }
+    // SAFETY: selectors match NSMenuDelegate; menu updates snapshot app flags
+    // before mutating AppKit objects and never initiate nested menu tracking.
+    unsafe impl NSMenuDelegate for EditorView {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            if let Some(host) = self.ivars().host.upgrade() { menus::update_menu_bar(&host, menu); }
+        }
+    }
+    // SAFETY: the view is main-thread-only and the sender is AppKit's live drag
+    // session. Only file URLs are accepted; the source item is never moved.
+    unsafe impl NSDraggingDestination for EditorView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.file_drag_operation(sender)
+        }
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.file_drag_operation(sender)
+        }
+        #[unsafe(method(prepareForDragOperation:))]
+        fn prepare_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            !self.file_drag_operation(sender).is_empty()
+        }
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.perform_file_drop(sender)
+        }
+    }
     // SAFETY: all required NSTextInputClient signatures below match AppKit. Ranges
     // are UTF-16 and all nullable out-pointers are checked before writing.
     unsafe impl NSTextInputClient for EditorView {
@@ -850,6 +1006,41 @@ define_class!(
     }
 );
 impl EditorView {
+    fn perform_file_drop(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        if self.file_drag_operation(sender).is_empty() {
+            return false;
+        }
+        let paths = pasteboard_paths(&sender.draggingPasteboard());
+        if paths.is_empty() {
+            return false;
+        }
+        if let Some(host) = self.ivars().host.upgrade()
+            && !host.stopped.get()
+        {
+            host.dispatch(Event::OpenPaths(paths));
+            host.handle().focus();
+            host.flush();
+            true
+        } else {
+            false
+        }
+    }
+    fn file_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        if !sender
+            .draggingSourceOperationMask()
+            .contains(NSDragOperation::Copy)
+            || self
+                .ivars()
+                .host
+                .upgrade()
+                .is_none_or(|host| host.stopped.get())
+            || pasteboard_paths(&sender.draggingPasteboard()).is_empty()
+        {
+            NSDragOperation::None
+        } else {
+            NSDragOperation::Copy
+        }
+    }
     fn state(&self) -> TextInputState {
         self.ivars()
             .host
@@ -879,14 +1070,16 @@ impl EditorView {
                 }
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
-            h.dispatch(Event::Mouse(MouseEvent {
+            let event = MouseEvent {
                 button: e.buttonNumber().max(0) as usize,
                 kind,
                 position: Point { x: p.x, y: p.y },
                 click_count: e.clickCount().max(0) as usize,
                 modifiers: Modifiers(e.modifierFlags().0 as u64),
                 timestamp: e.timestamp(),
-            }));
+            };
+            let native = (kind == MouseKind::Down).then(|| e.retain());
+            h.dispatch(Event::Mouse(event, native));
             // Clicks draw immediately; moves and drags arrive faster than the display refreshes,
             // so their frames are coalesced onto the display link.
             if matches!(kind, MouseKind::Down | MouseKind::Up) {
@@ -936,6 +1129,54 @@ fn plain_string(value: &AnyObject) -> String {
         String::new()
     }
 }
+fn file_url(path: &Path) -> Result<Retained<NSURL>, String> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .join(path)
+    };
+    let name = CString::new(absolute.as_os_str().as_bytes())
+        .map_err(|_| "file path contains a NUL byte")?;
+    let directory = std::fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.is_dir());
+    // SAFETY: the absolute, NUL-terminated filesystem representation lives
+    // through the call, which copies it. Symlinks are not canonicalized.
+    Ok(unsafe {
+        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+            NonNull::new(name.as_ptr().cast_mut()).expect("CString pointer"),
+            directory,
+            None,
+        )
+    })
+}
+fn path_from_url(url: &NSURL) -> Option<PathBuf> {
+    use std::{
+        ffi::{CStr, OsStr},
+        os::unix::ffi::OsStrExt,
+    };
+    if !url.isFileURL() {
+        return None;
+    }
+    // SAFETY: NSURL owns a non-null NUL-terminated filesystem representation
+    // valid for this call; copy the bytes before releasing the URL.
+    let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) }.to_bytes();
+    Some(PathBuf::from(OsStr::from_bytes(bytes)))
+}
+fn pasteboard_paths(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
+    // SAFETY: the class array requests only NSURL pasteboard readers, and absent
+    // options means no untyped option values. Filter out every non-file URL.
+    let objects = unsafe {
+        pasteboard.readObjectsForClasses_options(&NSArray::from_slice(&[NSURL::class()]), None)
+    };
+    objects.map_or_else(Vec::new, |objects| {
+        objects
+            .iter()
+            .filter_map(|object| object.downcast_ref::<NSURL>().and_then(path_from_url))
+            .collect()
+    })
+}
 struct DelegateIvars {
     host: Rc<Host>,
     options: WindowOptions,
@@ -956,6 +1197,23 @@ define_class!(
                 self.ivars().host.fail(e);
             }
         }
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+            lifecycle::receive(urls.iter().filter_map(|url| path_from_url(&url)).collect());
+        }
+        #[unsafe(method(application:openFiles:))]
+        fn open_files(&self, app: &NSApplication, filenames: &NSArray<NSString>) {
+            lifecycle::receive(filenames.iter().map(|name| PathBuf::from(name.to_string())).collect());
+            // Success acknowledges queue ownership; file validation and user-facing
+            // errors are handled by the destination app when its window is ready.
+            app.replyToOpenOrPrint(NSApplicationDelegateReply::Success);
+        }
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn reopen(&self, _app: &NSApplication, has_visible_windows: bool) -> bool {
+            if has_visible_windows { true } else { lifecycle::reopen(); false }
+        }
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn terminate_after_close(&self, _app: &NSApplication) -> bool { false }
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
             let hosts = WINDOWS.with(|windows| {
@@ -981,6 +1239,12 @@ define_class!(
             self.ivars().host.handle().quit();
             NSApplicationTerminateReply::TerminateCancel
         }
+    }
+    impl Delegate {
+        #[unsafe(method(drainPlatformRequests:))]
+        fn drain_platform_requests(&self, _sender: Option<&AnyObject>) { lifecycle::drain(); }
+        #[unsafe(method(pollClosedWindow:))]
+        fn poll_closed_window(&self, _timer: &NSTimer) { lifecycle::idle(); }
     }
     // SAFETY: methods match NSWindowDelegate; the host owns the NSWindow.
     unsafe impl NSWindowDelegate for Delegate {
@@ -1080,6 +1344,9 @@ impl Delegate {
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
         window.setContentView(Some(&view));
+        // SAFETY: file-URL pasteboard types are immutable AppKit constants. The
+        // one content view covers editor, tab bar, and side bar hit regions.
+        view.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         // SAFETY: view is retained by the host; the notification uses a one-argument selector.
         unsafe {
             NSWorkspace::sharedWorkspace()
@@ -1116,13 +1383,20 @@ impl Delegate {
             .map_err(|_| "display link initialized twice")?;
         h.resize();
         h.dispatching.set(true);
-        {
+        let started = {
             let mut slot = h.app.borrow_mut();
-            let app = slot.as_mut().ok_or("missing app handler")?;
-            app.on_start(&h.handle())?;
-            *h.input.borrow_mut() = app.text_input_state();
-        }
+            if let Some(app) = slot.as_mut() {
+                let result = app.on_start(&h.handle());
+                if result.is_ok() {
+                    *h.input.borrow_mut() = app.text_input_state();
+                }
+                result
+            } else {
+                Err("missing app handler".into())
+            }
+        };
         h.dispatching.set(false);
+        started?;
         h.drain();
         h.ready.set(true);
         h.render(FrameReason::StartupPrepare, true);
@@ -1140,6 +1414,7 @@ impl Delegate {
         #[allow(deprecated)]
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         h.phase("launch_callback_finished");
+        lifecycle::launched();
         Ok(())
     }
 }
@@ -1198,6 +1473,9 @@ fn build_menu(mtm: MainThreadMarker) {
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
 }
 fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
+    if let Some(view) = host.view.get() {
+        menu.setDelegate(Some(ProtocolObject::from_ref(&**view)));
+    }
     for entry in entries {
         if entry.caption == "-" {
             menu.addItem(&NSMenuItem::separatorItem(host.mtm));
@@ -1272,7 +1550,43 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     }
     nsapp.setDelegate(None);
     nsapp.setMainMenu(None);
+    lifecycle::reset();
+    INSTALLED_MENU.with(|installed| *installed.borrow_mut() = MenuInstallation::default());
     error.map_or(Ok(()), Err)
+}
+
+fn launch_window(
+    mtm: MainThreadMarker,
+    options: WindowOptions,
+    app: Box<dyn AppHandler>,
+) -> Result<WindowHandle, String> {
+    let host = create_host(mtm, &options, app)?;
+    let delegate = create_delegate(mtm, Rc::clone(&host), options);
+    WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
+    if let Err(error) = delegate.launch() {
+        // Failed construction must not leave an unready live destination, or
+        // replace the approved closed-window template needed for another retry.
+        host.stopped.set(true);
+        if let Some(link) = host.link.get() {
+            link.invalidate();
+        }
+        if let Some(timer) = host.timer.take() {
+            timer.invalidate();
+        }
+        host.app.borrow_mut().take();
+        if let Some(window) = host.window.get() {
+            window.setDelegate(None);
+            window.orderOut(None);
+            window.setContentView(None);
+        }
+        WINDOWS.with(|windows| {
+            windows
+                .borrow_mut()
+                .retain(|delegate| delegate.ivars().host.id != host.id)
+        });
+        return Err(error);
+    }
+    Ok(host.handle())
 }
 
 fn create_host(
@@ -1312,6 +1626,10 @@ fn create_host(
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
         menu_commands: RefCell::new(Vec::new()),
+        title: RefCell::new(WindowTitle::new(options.title.clone())),
+        context: RefCell::new(ContextRequest::default()),
+        context_scheduled: Cell::new(false),
+        context_tracking: Cell::new(false),
         input: RefCell::new(TextInputState::default()),
         ax_elements: RefCell::new(Default::default()),
         ax_queried: Cell::new(false),

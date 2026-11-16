@@ -59,7 +59,9 @@ Velocity.app/Contents/
 ```
 
 Info.plist declares common text/source extensions and public text/source UTIs with Editor
-role and Alternate handler rank; it does not seize default document ownership. It enables
+role and Alternate handler rank. `public.data` (Editor, Alternate) offers Open With for other
+files, including binaries; `public.folder` (Viewer, Alternate) offers folder opening. These
+declarations do not seize default document ownership. It enables
 Retina and system appearance changes. The icon is an original cyan folded V with two motion
 bars on an indigo rounded square, drawn entirely by `generate-icon.swift`. No external artwork,
 font or Sublime asset is used. `bundle.py` writes its PNG representations into an ICNS container
@@ -112,9 +114,9 @@ signing identity or notarization credentials were present for this lane; only lo
 signing was exercised. The release-artifacts workflow triggers on `v*` tags and manual dispatch,
 installs both architectures, runs the same checks, and retains workflow artifacts only. It
 has read-only repository permissions and never invokes a release/publish action. CI runs
-the native packaging path as well. Its Rust test harness runs serially because the existing
-native IPC fixture has short wall-clock deadlines that can expire under parallel test-worker
-contention; every test still runs. Neither workflow is triggered by this worktree's changes.
+the native packaging path as well. Rust checks use the default test parallelism. The earlier
+IPC fixture flake was resolved with readiness/acknowledgement synchronization and a deadlock
+watchdog; serialization is no longer required. Neither workflow is triggered by this worktree's changes.
 
 ## Lane A integration required
 
@@ -169,3 +171,74 @@ whenever possible (locally outside a sandbox and on GitHub Actions), falls back 
 warning, and — when the image can be attached — mounts it and requires strict deep signature
 verification of the shipped app. `packaging-report.json` records `dmg_method` and
 `dmg_app_strict_codesign`.
+
+
+## Round 14 native launch and telemetry contract
+
+System UI aliases and discovered private system names are routed through CoreText's UI-font
+API in `vel-render/src/native.rs` instead of looking those names up again (which may substitute
+Times).
+
+Path-free interactive launches remain in the process selected by LaunchServices when its
+parent is launchd (PID 1) or it supplies the legacy `-psn_<high>_<low>` argument. These are
+independent signals; no bundle/source-path assumption is used. Keeping that process alive
+allows its native delegate to receive Finder/Dock open events. A secondary native process
+that finds an existing primary stays alive until it relays the actual event paths, rather
+than treating an empty startup probe as the document request. Its temporary session stays
+in memory, so it cannot overwrite the primary process's session. If the primary exits before
+the event arrives, the receiver claims the instance socket and opens the paths locally.
+Interactive CLI invocations
+with file or stdin arguments keep the existing GUI re-exec and per-profile IPC forwarding.
+An explicit `VELOCITY_GUI_PROCESS=1` still selects an in-process GUI for reviewer fixtures.
+Benchmark/headless modes ignore the LaunchServices heuristic.
+
+Interactive telemetry is off unless `--log-input` or `--output` is given. Measurement modes
+also enable it. Without `--output`, every mode writes a new
+`interactive-<runid>-<pid>.jsonl` under `$VELOCITY_LOG_DIR`, falling back to
+`~/Library/Logs/Velocity/`. The JSON `mode` field distinguishes measurement types.
+An empty `VELOCITY_LOG_DIR` uses the home fallback. If neither runtime directory is available,
+measurement fails with an instruction to set one or use `--output`. Existing results are
+never overwritten. The build machine's source directory is never a default output path.
+
+Headless contract checks (no packaging or GUI):
+
+```sh
+/usr/bin/python3 -B -m unittest discover -s crates/velocity/packaging -p test_bundle.py
+cargo test -p velocity --release cli::
+cargo test -p velocity --release report::
+cargo test -p velocity --release open_requests::
+cargo test -p velocity --release workspace::tests::
+```
+
+Native acceptance checklist (outside the sandbox; results remain pending human review):
+
+- [ ] From a stopped app, Finder Open With → Velocity opens a text file, a binary and a
+  large text file through their normal loaders; the startup open event is retained.
+- [ ] After explicitly choosing Velocity in Get Info → Open with → Change All…, double-click
+  a disposable text file. Repeat while Velocity is running: its key window receives the tab.
+- [ ] Drop files and a folder onto the Dock icon, then onto the editor, tab strip and side bar.
+  Files open as tabs and folders appear in the side bar. Duplicate symlink/relative paths
+  focus the same tab/root and retain unsaved edits. Text drops keep their existing behavior.
+- [ ] Open a missing or unreadable path and a valid file in the same request: the error names
+  the failed path and the valid file still opens. Click the Dock icon after closing all windows:
+  a new window appears.
+- [ ] Start through Finder and through the CLI without measurement flags: no interactive JSONL
+  is created. Repeat with `--log-input`, first with a temporary `VELOCITY_LOG_DIR`, then without
+  it; confirm the exact runtime destination/name above. An explicit `--output` survives CLI
+  GUI re-exec and cannot overwrite a previous result.
+- [ ] Open `file:line:col` at startup and over IPC. The requested location is centered after
+  viewport layout. Switch tabs and edit/save: titles show filename, dirty marker and project
+  name without diagnostic text. Reload user preferences and a menu resource: changes appear
+  within the 500 ms stamp polling interval plus worker time; explicit reload starts immediately.
+
+A focused resource-stamp benchmark helper is available for paired release samples:
+
+```sh
+cargo test -p velocity --release workspace::tests::benchmark_resource_stamp_polling -- --ignored --nocapture
+```
+
+It prints five paired baseline/throttled samples in ns per poll, with resource-stamp counts.
+It does not initialize AppKit/Metal and does not substitute for the full typing/scroll gate.
+An embedded-only configuration can report zero filesystem stamps; that result cannot measure
+stamp-scan savings. Use a populated native profile and the manual profiler checklist for
+the per-frame AppKit result.

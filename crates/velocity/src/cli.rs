@@ -71,6 +71,10 @@ pub struct Options {
     pub project: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub log_input: bool,
+    /// Legacy LaunchServices process serial number, never a document path.
+    pub launch_services_psn: bool,
+    /// A secondary native launch must await and relay its Apple-event paths.
+    pub forward_native_opens: bool,
     pub seed: u64,
     pub timeout_seconds: u64,
 }
@@ -95,12 +99,27 @@ impl Default for Options {
             project: None,
             output: None,
             log_input: false,
+            launch_services_psn: false,
+            forward_native_opens: false,
             seed: 0x7665_6c6f_6369_7479,
             timeout_seconds: 180,
         }
     }
 }
 impl Options {
+    /// Keep LaunchServices' Apple-event recipient alive instead of spawning a GUI child.
+    /// Modern macOS launches are adopted by launchd (parent 1); older launches supply
+    /// `-psn_<high>_<low>`. Only a path-free interactive launch uses either heuristic:
+    /// terminal invocations with files/stdin and measurement modes retain CLI behavior.
+    pub fn launched_by_launch_services(&self, parent_pid: u32) -> bool {
+        self.mode == Mode::Interactive
+            && self.files.is_empty()
+            && (parent_pid == 1 || self.launch_services_psn)
+    }
+    /// Normal editing creates no telemetry; explicit measurements opt in.
+    pub fn telemetry_enabled(&self) -> bool {
+        self.mode.automatic() || self.log_input || self.output.is_some()
+    }
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>, String> {
         let mut options = Self::default();
         let mut args = args.into_iter();
@@ -243,6 +262,7 @@ impl Options {
                         return Err("only Fifo is supported".into());
                     }
                 }
+                _ if is_process_serial_number(&arg) => options.launch_services_psn = true,
                 _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
                 _ => {
                     options.add_file(&arg);
@@ -266,6 +286,17 @@ impl Options {
         }
         self.files.push(location);
     }
+}
+fn is_process_serial_number(arg: &str) -> bool {
+    let Some(serial) = arg.strip_prefix("-psn_") else {
+        return false;
+    };
+    let Some((high, low)) = serial.split_once('_') else {
+        return false;
+    };
+    [high, low]
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 /// File path with one-based CLI row/scalar column suffixes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -300,13 +331,57 @@ impl FileLocation {
     }
 }
 
-pub const HELP: &str = "Theme UI: --headless-theme-ui (CPU), --bench-theme-ui (automatic native)\nvelocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-large-files [4GB-log]  editor prefix, 50MB line and 4GB hex CPU budgets\n  --bench-large-files FILE  automatic native huge/long-line/hex viewport exercise\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --headless-review-history  50 dirty documents, native full-history save/restore; requires --data-dir\n  --review-ui on|off     Git/diff/spell A/B fixture for intelligence modes\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            log native keys, selectors, IME ranges and input latency\n  --output PATH          new JSONL file; existing results are never overwritten\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
+pub const HELP: &str = "Theme UI: --headless-theme-ui (CPU), --bench-theme-ui (automatic native)\nvelocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-large-files [4GB-log]  editor prefix, 50MB line and 4GB hex CPU budgets\n  --bench-large-files FILE  automatic native huge/long-line/hex viewport exercise\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --headless-review-history  50 dirty documents, native full-history save/restore; requires --data-dir\n  --review-ui on|off     Git/diff/spell A/B fixture for intelligence modes\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            enable native input/latency JSONL (off for normal editing)\n  --output PATH          enable JSONL at PATH; existing results are never overwritten\n  Default logs: $VELOCITY_LOG_DIR, else ~/Library/Logs/Velocity/\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn parse(s: &[&str]) -> Result<Option<Options>, String> {
         Options::parse(s.iter().map(|s| s.to_string()))
+    }
+    #[test]
+    fn launch_services_keeps_only_path_free_interactive_launches_in_process() {
+        let normal = parse(&[]).unwrap().unwrap();
+        assert!(normal.launched_by_launch_services(1));
+        assert!(!normal.launched_by_launch_services(200));
+        let legacy = parse(&["-psn_0_12345"]).unwrap().unwrap();
+        assert!(legacy.launch_services_psn);
+        assert!(legacy.files.is_empty());
+        assert!(legacy.launched_by_launch_services(200));
+        for args in [
+            vec!["document.txt"],
+            vec!["-"],
+            vec!["-psn_0_12345", "document.txt"],
+            vec!["--bench-scroll"],
+            vec!["-psn_0_12345", "--headless-smoke"],
+            vec!["--", "-psn_0_12345"],
+        ] {
+            assert!(
+                !parse(&args)
+                    .unwrap()
+                    .unwrap()
+                    .launched_by_launch_services(1),
+                "{args:?}"
+            );
+        }
+        for arg in ["-psn_", "-psn_0_", "-psn_0_a", "-psn_0_1_2"] {
+            assert!(parse(&[arg]).is_err(), "{arg}");
+        }
+    }
+    #[test]
+    fn telemetry_requires_an_explicit_measurement() {
+        assert!(!parse(&[]).unwrap().unwrap().telemetry_enabled());
+        assert!(!parse(&["file.txt"]).unwrap().unwrap().telemetry_enabled());
+        for args in [
+            vec!["--log-input"],
+            vec!["--output", "run.jsonl"],
+            vec!["--headless-smoke"],
+        ] {
+            assert!(
+                parse(&args).unwrap().unwrap().telemetry_enabled(),
+                "{args:?}"
+            );
+        }
     }
     #[test]
     fn defaults_and_large() {

@@ -4,3 +4,5 @@
 *.profraw
 *.trace/
 /perf/local/
+__pycache__/
+*.pyc

@@ -165,6 +165,14 @@ pub struct MouseEvent {
     /// Native timestamp in seconds.
     pub timestamp: f64,
 }
+impl MouseEvent {
+    /// A secondary-button (including trackpad) or Control-primary-button press.
+    /// Use this before primary-click caret/selection handling.
+    pub fn is_context_click(self) -> bool {
+        self.kind == MouseKind::Down
+            && (self.button == 1 || self.button == 0 && self.modifiers.control())
+    }
+}
 /// Trackpad or wheel scroll with native phase bitmasks.
 #[derive(Clone, Copy, Debug)]
 pub struct ScrollEvent {

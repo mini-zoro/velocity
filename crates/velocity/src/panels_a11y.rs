@@ -205,7 +205,7 @@ impl Panels {
                     .accessibility_nodes(ax_id(2000), Point::default()),
             );
         }
-        if !self.review.items.is_empty() {
+        if !self.review.native_context && !self.review.items.is_empty() {
             let bounds = self.review.bounds;
             out.nodes.push(AxNode::new(
                 ax_id(1000),

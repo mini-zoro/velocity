@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::Ordering,
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use vel_buffer::{Region, Selection};
 use vel_config::{
@@ -21,6 +21,8 @@ use vel_text::Text;
 #[derive(Debug)]
 pub struct Tab {
     pub shared_dirty: bool,
+    /// The file was removed while its in-memory document remains open.
+    pub deleted: bool,
     pub restored_format_dirty: bool,
     pub previous_document: Option<vel_buffer::BufferId>,
     pub restored_document: Option<u64>,
@@ -42,6 +44,8 @@ pub struct Tab {
     pub loading: Option<LoadTask>,
     pub binary_loading: Option<crate::binary::Task>,
     pub pending_restore: Option<vel_session::ViewState>,
+    /// Center this location once the active view has its final viewport geometry.
+    pub pending_center: bool,
     location: Option<FileLocation>,
     external_load: bool,
     load_started: Option<Instant>,
@@ -58,6 +62,7 @@ impl Tab {
         let format = fileio::default_format(&settings.editor()).unwrap_or_default();
         Ok(Self {
             shared_dirty: false,
+            deleted: false,
             restored_format_dirty: false,
             previous_document: None,
             restored_document: None,
@@ -79,6 +84,7 @@ impl Tab {
             loading: None,
             binary_loading: None,
             pending_restore: None,
+            pending_center: false,
             location: None,
             external_load: false,
             load_started: None,
@@ -89,8 +95,10 @@ impl Tab {
     pub fn install_restored(&mut self, loaded: Loaded) {
         self.install(loaded);
     }
+    /// Includes removed files whose retained contents have no saved disk copy.
     pub fn dirty(&self) -> bool {
-        self.shared_dirty
+        self.deleted
+            || self.shared_dirty
             || self.restored_format_dirty
             || self.lazy.as_ref().is_some_and(|(d, _)| d.dirty)
             || self.editor.buffer.is_dirty()
@@ -112,12 +120,13 @@ impl Tab {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
         format!(
-            "{name}{}{}",
+            "{name}{}{}{}",
             if self.editor.binary.is_some() {
                 " [hex]"
             } else {
                 ""
             },
+            if self.deleted { " [deleted]" } else { "" },
             if self.dirty() { " •" } else { "" }
         )
     }
@@ -185,6 +194,7 @@ impl Tab {
             .saturating_add(location.column.saturating_sub(1));
         let offset = text.char_to_byte(chars.min(text.len_chars())).min(end) - start;
         self.editor.set_caret(start + offset, false);
+        self.pending_center = true;
     }
 }
 #[derive(Debug)]
@@ -210,6 +220,8 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub menus: Vec<MenuItem>,
+    /// Resource-layered native context menus, keyed by their complete resource filename.
+    pub context_menus: BTreeMap<String, Vec<MenuItem>>,
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
     pub messages: Vec<String>,
@@ -221,6 +233,7 @@ pub struct Workspace {
     pub(crate) project: Option<PathBuf>,
     config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
     config_rx: Option<std::sync::mpsc::Receiver<Result<Configuration, String>>>,
+    last_config_check: Option<Instant>,
     reload_requested: bool,
     settings_writes: Vec<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub resource_revision: u64,
@@ -287,6 +300,7 @@ struct Configuration {
     assets: Arc<crate::language::Assets>,
     catalog: Arc<crate::completion::Catalog>,
     menus: Vec<MenuItem>,
+    context_menus: BTreeMap<String, Vec<MenuItem>>,
     mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
     folders: Vec<vel_search::project::Folder>,
@@ -324,6 +338,18 @@ impl Configuration {
             (
                 "Main.sublime-menu",
                 include_str!("../resources/Packages/Default/Main.sublime-menu"),
+            ),
+            (
+                "Context.sublime-menu",
+                include_str!("../resources/Packages/Default/Context.sublime-menu"),
+            ),
+            (
+                "Tab Context.sublime-menu",
+                include_str!("../resources/Packages/Default/Tab Context.sublime-menu"),
+            ),
+            (
+                "Side Bar.sublime-menu",
+                include_str!("../resources/Packages/Default/Side Bar.sublime-menu"),
             ),
             (
                 "Velocity.sublime-mousemap",
@@ -582,6 +608,7 @@ impl Configuration {
         }
         let mut keys = Vec::new();
         let mut menus = Vec::new();
+        let mut context_menus: BTreeMap<String, Vec<MenuItem>> = BTreeMap::new();
         let mut mousemap = Vec::new();
         let mut palette = Vec::new();
         for resource in resources.matching(".sublime-keymap") {
@@ -608,11 +635,17 @@ impl Configuration {
             }
         }
         for resource in resources.matching(".sublime-menu") {
-            if resource.path.ends_with("/Main.sublime-menu") {
-                match resource.text().and_then(ui::parse) {
-                    Ok(items) => ui::merge_menu(&mut menus, items),
-                    Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+            let name = resource.path.rsplit('/').next().unwrap_or_default();
+            let target = match name {
+                "Main.sublime-menu" => &mut menus,
+                "Context.sublime-menu" | "Tab Context.sublime-menu" | "Side Bar.sublime-menu" => {
+                    context_menus.entry(name.to_owned()).or_default()
                 }
+                _ => continue,
+            };
+            match resource.text().and_then(ui::parse) {
+                Ok(items) => ui::merge_menu(target, items),
+                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
         for resource in resources.matching(".sublime-mousemap") {
@@ -808,6 +841,7 @@ impl Configuration {
             assets,
             catalog,
             menus,
+            context_menus,
             mousemap,
             palette,
             folders,
@@ -837,6 +871,7 @@ impl Workspace {
             assets,
             catalog,
             menus,
+            context_menus,
             mousemap,
             palette,
             folders,
@@ -885,6 +920,7 @@ impl Workspace {
             tabs: vec![tab],
             active: 0,
             menus,
+            context_menus,
             mousemap,
             palette,
             messages,
@@ -896,6 +932,7 @@ impl Workspace {
             project,
             config_stamp,
             config_rx: None,
+            last_config_check: None,
             reload_requested: false,
             settings_writes: Vec::new(),
             resource_revision: 0,
@@ -909,6 +946,9 @@ impl Workspace {
     }
     #[cfg(test)]
     pub fn wait_resources(&mut self) {
+        // Tests explicitly await a disk observation as well as any asynchronous worker.
+        // Force that observation without changing the production polling interval.
+        self.last_config_check = None;
         let deadline = Instant::now() + std::time::Duration::from_secs(120);
         loop {
             self.poll();
@@ -938,6 +978,36 @@ impl Workspace {
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect()
+    }
+    /// Active document title, including its dirty marker and optional project name.
+    pub fn window_title(&self) -> String {
+        let tab = &self.tabs[self.active];
+        let name = tab
+            .editor
+            .settings
+            .get("velocity_html_sheet_title")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                tab.path
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "Untitled".into());
+        let title = format!(
+            "{name}{}{}",
+            if tab.deleted { " [deleted]" } else { "" },
+            if tab.dirty() { " •" } else { "" }
+        );
+        match self.project.as_deref().and_then(Path::file_stem) {
+            Some(project) => format!("{title} — {}", project.to_string_lossy()),
+            None => title,
+        }
+    }
+    /// Consume only the active tab's explicit location-centering request.
+    pub fn take_pending_center(&mut self) -> bool {
+        std::mem::take(&mut self.tabs[self.active].pending_center)
     }
     pub fn editor(&self) -> &Editor {
         &self.tabs[self.active].editor
@@ -1009,6 +1079,11 @@ impl Workspace {
             self.select(index);
             if !preview {
                 self.tabs[index].transient = false;
+            }
+            // A duplicate open during background loading must retain the latest location
+            // until the final text is installed, rather than clamp it to the empty prefix.
+            if self.tabs[index].loading.is_some() || self.tabs[index].binary_loading.is_some() {
+                self.tabs[index].location = Some(location.clone());
             }
             self.tabs[index].goto(&location);
             return Ok(());
@@ -1098,6 +1173,8 @@ impl Workspace {
         tab.restored_format_dirty = false;
         tab.tracker.mark_saved(&tab.editor.buffer);
         tab.path = Some(target.clone());
+        tab.deleted = false;
+        let document = tab.session_document;
         tab.disk_stamp = stamp(&target);
         tab.disk_saved = vel_session::DiskStamp::read(&target);
         tab.editor.annotations.borrow_mut().reference(
@@ -1105,6 +1182,31 @@ impl Workspace {
             tab.path.clone(),
             self.data_dir.as_ref().map(|d| d.join("Packages")),
         );
+        let saved_format = tab.saved_format.clone();
+        let disk_saved = tab.disk_saved.clone();
+        self.sync_shared();
+        for sibling in &mut self.tabs {
+            if sibling.session_document == document {
+                sibling.deleted = false;
+                // Hidden restored clones have not attached to the live buffer yet.
+                // Their lazy metadata must reflect this save too, including Save As.
+                if let Some((saved, _)) = &mut sibling.lazy {
+                    sibling.path = Some(target.clone());
+                    sibling.format = saved_format.clone();
+                    sibling.saved_format = saved_format.clone();
+                    sibling.disk_saved = disk_saved.clone();
+                    sibling.restored_format_dirty = false;
+                    saved.path = Some(target.clone());
+                    saved.disk = disk_saved.clone();
+                    saved.encoding = saved_format.encoding.clone();
+                    saved.bom = saved_format.bom;
+                    saved.line_ending = saved_format.line_ending.name().into();
+                    saved.dirty = false;
+                }
+            } else if sibling.path.as_ref() == Some(&target) {
+                sibling.deleted = false;
+            }
+        }
         if let Some(w) = self.watcher.as_mut() {
             w.watch(&target)?;
         }
@@ -1120,12 +1222,33 @@ impl Workspace {
             group.remove(sheet);
         }
         self.tabs.remove(index);
+        // Closing a tab before the active one shifts it down; keep the same tab active.
+        if index < self.active {
+            self.active -= 1;
+        }
         if self.tabs.is_empty() {
             self.new_file()?;
         }
         self.active = self.active.min(self.tabs.len() - 1);
         self.select(self.active);
         Ok(())
+    }
+    /// Automatic resource stamps are sampled at most every 500 ms. Explicit reloads,
+    /// including completed package/settings writes, bypass the interval on the next poll.
+    fn configuration_changed(&mut self, now: Instant) -> bool {
+        if !self.reload_requested
+            && self.last_config_check.is_some_and(|last| {
+                now.saturating_duration_since(last) < Duration::from_millis(500)
+            })
+        {
+            return false;
+        }
+        self.last_config_check = Some(now);
+        self.reload_requested
+            || self
+                .config_stamp
+                .iter()
+                .any(|(path, saved)| stamp(path) != *saved)
     }
     /// Polls jobs/notifications and reports whether scene content changed.
     pub fn poll(&mut self) -> bool {
@@ -1332,9 +1455,7 @@ impl Workspace {
                 false
             }
         });
-        if self.config_rx.is_none()
-            && (self.reload_requested || self.config_stamp.iter().any(|(p, s)| stamp(p) != *s))
-        {
+        if self.config_rx.is_none() && self.configuration_changed(Instant::now()) {
             self.reload_requested = false;
             let (tx, rx) = std::sync::mpsc::channel();
             let data = self.data_dir.clone();
@@ -1410,6 +1531,7 @@ impl Workspace {
                     }
                     self.keymap = config.keymap;
                     self.menus = config.menus;
+                    self.context_menus = config.context_menus;
                     self.mousemap = config.mousemap;
                     self.palette = config.palette;
                     self.config_stamp = config.config_stamp;
@@ -1633,6 +1755,25 @@ mod tests {
         keymap::{Key, Resolution},
     };
     #[test]
+    fn closing_an_earlier_tab_keeps_the_active_tab() {
+        let mut workspace = Workspace::new(Text::from("a"), None, None, false).unwrap();
+        for text in ["b", "c", "d"] {
+            workspace.new_file().unwrap();
+            workspace
+                .editor_mut()
+                .run("insert", &json!({"characters": text}))
+                .unwrap();
+        }
+        workspace.select(2);
+        assert_eq!(workspace.editor().text.to_string(), "c");
+        workspace.close(0).unwrap();
+        assert_eq!(workspace.active, 1);
+        assert_eq!(workspace.editor().text.to_string(), "c");
+        // Closing a later tab leaves the active one alone too.
+        workspace.close(2).unwrap();
+        assert_eq!(workspace.editor().text.to_string(), "c");
+    }
+    #[test]
     fn tabs_cli_positions_edit_save_and_format_dirty_state() {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.txt");
@@ -1682,6 +1823,315 @@ mod tests {
         workspace.close(1).unwrap();
         workspace.close(0).unwrap();
         assert_eq!(workspace.tabs.len(), 1);
+    }
+    #[test]
+    fn titles_follow_active_document_dirty_project_and_deleted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("文書.rs");
+        std::fs::write(&file, "saved").unwrap();
+        let project = dir.path().join("Example.sublime-project");
+        std::fs::write(&project, "{}").unwrap();
+        let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+        assert_eq!(workspace.window_title(), "Untitled");
+        workspace
+            .open(FileLocation {
+                path: file,
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        assert_eq!(workspace.window_title(), "文書.rs");
+        workspace
+            .editor_mut()
+            .run("insert", &json!({"characters":"changed "}))
+            .unwrap();
+        assert_eq!(workspace.window_title(), "文書.rs •");
+        workspace.project = Some(project);
+        assert_eq!(workspace.window_title(), "文書.rs • — Example");
+        workspace.tabs[0].deleted = true;
+        assert_eq!(workspace.tabs[0].label(), "文書.rs [deleted] •");
+        assert_eq!(workspace.window_title(), "文書.rs [deleted] • — Example");
+        workspace.save(0, None).unwrap();
+        assert!(!workspace.tabs[0].deleted);
+        assert_eq!(workspace.window_title(), "文書.rs — Example");
+        workspace.new_file().unwrap();
+        assert_eq!(workspace.window_title(), "Untitled — Example");
+    }
+    #[test]
+    fn deleted_clean_files_are_dirty_and_retain_contents_across_session_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("clean.txt");
+        let contents = "clean contents\nretained after trash 你好\n";
+        std::fs::write(&file, contents).unwrap();
+        let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+        workspace
+            .open(FileLocation {
+                path: file.clone(),
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        workspace.clone_file().unwrap();
+        assert!(workspace.tabs.iter().all(|tab| !tab.dirty()));
+        assert!(!workspace.editor().buffer.is_dirty());
+        std::fs::remove_file(&file).unwrap();
+        crate::context_menu::apply_delete(&mut workspace, std::slice::from_ref(&file));
+        // Cloning after deletion must retain the same missing-file state too.
+        workspace.clone_file().unwrap();
+        assert!(workspace.tabs.iter().all(|tab| tab.deleted && tab.dirty()));
+        assert!(!workspace.editor().buffer.is_dirty());
+        assert!(
+            workspace
+                .tabs
+                .iter()
+                .all(|tab| tab.label() == "clean.txt [deleted] •")
+        );
+        assert_eq!(workspace.window_title(), "clean.txt [deleted] •");
+        let (window, documents) = workspace.snapshot().unwrap();
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0].dirty);
+        assert!(documents[0].history.as_ref().unwrap().retains_text());
+        let mut session = vel_session::Session {
+            windows: vec![window],
+            documents,
+            ..Default::default()
+        };
+        session.apply_policy(vel_session::HotExit::Always, false, true);
+        let session: vel_session::Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        session.validate().unwrap();
+        let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+        restored
+            .restore_window(&session.windows[0], &session.documents)
+            .unwrap();
+        assert!(restored.tabs.iter().any(|tab| tab.lazy.is_some()));
+        for index in 0..restored.tabs.len() {
+            restored.prepare_sheet(index).unwrap();
+            assert!(restored.tabs[index].deleted);
+            assert!(restored.tabs[index].dirty());
+            assert_eq!(restored.tabs[index].label(), "clean.txt [deleted] •");
+            assert_eq!(restored.tabs[index].editor.text, contents);
+        }
+        assert!(!file.exists());
+        let (_, retained) = restored.snapshot().unwrap();
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].dirty);
+        assert_eq!(
+            retained[0]
+                .history
+                .as_ref()
+                .unwrap()
+                .current_text()
+                .unwrap(),
+            contents
+        );
+    }
+    #[test]
+    fn deleted_file_save_clears_shared_and_lazy_markers_including_save_as() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let original = root.join("original.txt");
+        let replacement = root.join("replacement.txt");
+        let contents = "saved contents\n";
+        std::fs::write(&original, contents).unwrap();
+        let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+        workspace
+            .open(FileLocation {
+                path: original.clone(),
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        for _ in 0..2 {
+            workspace.clone_file().unwrap();
+        }
+        std::fs::remove_file(&original).unwrap();
+        crate::context_menu::apply_delete(&mut workspace, std::slice::from_ref(&original));
+        let (window, documents) = workspace.snapshot().unwrap();
+        let session: vel_session::Session = serde_json::from_slice(
+            &serde_json::to_vec(&vel_session::Session {
+                windows: vec![window],
+                documents,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+        restored
+            .restore_window(&session.windows[0], &session.documents)
+            .unwrap();
+        assert_eq!(restored.tabs.len(), 3);
+        assert!(restored.tabs.iter().any(|tab| tab.lazy.is_some()));
+        let active = restored.active;
+        assert!(restored.save(active, Some(dir.path().to_owned())).is_err());
+        assert!(restored.tabs.iter().all(|tab| tab.deleted && tab.dirty()));
+        restored.save(active, Some(replacement.clone())).unwrap();
+        assert!(!original.exists());
+        assert_eq!(std::fs::read_to_string(&replacement).unwrap(), contents);
+        assert!(restored.tabs.iter().all(|tab| !tab.deleted && !tab.dirty()));
+        assert!(
+            restored
+                .tabs
+                .iter()
+                .all(|tab| tab.path.as_ref() == Some(&replacement))
+        );
+        for index in 0..restored.tabs.len() {
+            restored.select(index);
+            assert_eq!(restored.editor().text, contents);
+            assert!(!restored.tabs[index].deleted);
+            assert!(!restored.tabs[index].dirty());
+        }
+        std::fs::remove_file(&replacement).unwrap();
+        crate::context_menu::apply_delete(&mut restored, std::slice::from_ref(&replacement));
+        assert!(restored.tabs.iter().all(|tab| tab.deleted && tab.dirty()));
+        restored.save(restored.active, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&replacement).unwrap(), contents);
+        assert!(restored.tabs.iter().all(|tab| !tab.deleted && !tab.dirty()));
+        let (_, documents) = restored.snapshot().unwrap();
+        assert_eq!(documents.len(), 1);
+        assert!(!documents[0].dirty);
+    }
+    #[test]
+    fn pending_center_only_tracks_locations_and_is_consumed_per_active_tab() {
+        let mut workspace =
+            Workspace::new(Text::from("first\n你好\nthird"), None, None, false).unwrap();
+        assert!(!workspace.take_pending_center());
+        workspace.editor_mut().set_caret(1, false);
+        assert!(!workspace.take_pending_center());
+        workspace.tabs[0].goto(&FileLocation {
+            path: "unused".into(),
+            line: 2,
+            column: 2,
+        });
+        assert_eq!(workspace.editor().caret, "first\n你".len());
+        workspace.new_file().unwrap();
+        assert!(!workspace.take_pending_center());
+        workspace.select(0);
+        assert!(workspace.take_pending_center());
+        assert!(!workspace.take_pending_center());
+        workspace.tabs[0].install(Loaded {
+            text: Text::from("replacement"),
+            format: Format::default(),
+            source_bytes: 11,
+        });
+        assert!(!workspace.take_pending_center());
+        // The same install path is used when an asynchronous text load finishes.
+        workspace.tabs[0].location = Some(FileLocation {
+            path: "unused".into(),
+            line: 2,
+            column: 2,
+        });
+        workspace.tabs[0].install(Loaded {
+            text: Text::from("first\n你好\nthird"),
+            format: Format::default(),
+            source_bytes: 18,
+        });
+        assert_eq!(workspace.editor().caret, "first\n你".len());
+        assert!(workspace.take_pending_center());
+        assert!(!workspace.take_pending_center());
+    }
+    #[test]
+    fn stamp_polling_waits_500ms_but_explicit_reload_bypasses_the_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("Packages/User");
+        std::fs::create_dir_all(&user).unwrap();
+        let prefs = user.join("Preferences.sublime-settings");
+        std::fs::write(&prefs, r#"{"font_size":15}"#).unwrap();
+        let mut workspace =
+            Workspace::new(Text::new(), Some(dir.path().into()), None, false).unwrap();
+        let now = Instant::now();
+        assert!(!workspace.configuration_changed(now));
+        std::fs::write(&prefs, r#"{"font_size":20,"tab_size":4}"#).unwrap();
+        assert!(!workspace.configuration_changed(now + Duration::from_millis(499)));
+        assert!(workspace.configuration_changed(now + Duration::from_millis(500)));
+        workspace.request_resource_reload();
+        assert!(workspace.configuration_changed(now + Duration::from_millis(501)));
+        workspace.last_config_check = Some(Instant::now());
+        workspace.poll();
+        assert!(workspace.config_rx.is_some() || workspace.resource_revision > 0);
+        workspace.wait_resources();
+        assert_eq!(workspace.editor().preferences.font_size, 20.);
+    }
+    #[test]
+    fn context_menu_resources_layer_and_hot_reload_with_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("Packages/Fixture");
+        let user = dir.path().join("Packages/User");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            package.join("Context.sublime-menu"),
+            r#"[{"id":"fixture","caption":"Package","command":"copy"}]"#,
+        )
+        .unwrap();
+        let menu = user.join("Context.sublime-menu");
+        std::fs::write(
+            &menu,
+            r#"[{"id":"fixture","caption":"User","command":"paste"}]"#,
+        )
+        .unwrap();
+        let mut workspace =
+            Workspace::new(Text::new(), Some(dir.path().into()), None, false).unwrap();
+        for name in [
+            "Context.sublime-menu",
+            "Tab Context.sublime-menu",
+            "Side Bar.sublime-menu",
+        ] {
+            assert!(!workspace.context_menus[name].is_empty(), "{name}");
+        }
+        let item = workspace.context_menus["Context.sublime-menu"]
+            .iter()
+            .find(|item| item.id == "fixture")
+            .unwrap();
+        assert_eq!(item.caption, "User");
+        assert_eq!(item.command.as_deref(), Some("paste"));
+        assert!(!workspace.menus.iter().any(|item| item.id == "fixture"));
+        std::fs::write(
+            menu,
+            r#"[{"id":"fixture","caption":"Reloaded","command":"cut"}]"#,
+        )
+        .unwrap();
+        workspace.wait_resources();
+        let item = workspace.context_menus["Context.sublime-menu"]
+            .iter()
+            .find(|item| item.id == "fixture")
+            .unwrap();
+        assert_eq!(item.caption, "Reloaded");
+        assert_eq!(item.command.as_deref(), Some("cut"));
+    }
+    /// Small paired helper for the stamp traversal changed in round 14. This measures
+    /// resource polling alone; the main agent still runs full typing/scroll gates.
+    #[test]
+    #[ignore = "manual release benchmark; prints paired resource-stamp scan costs"]
+    fn benchmark_resource_stamp_polling() {
+        let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+        let iterations = 10_000;
+        let mut baseline = Vec::new();
+        let mut throttled = Vec::new();
+        for _ in 0..5 {
+            let before = Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(
+                    workspace
+                        .config_stamp
+                        .iter()
+                        .any(|(path, saved)| stamp(path) != *saved),
+                );
+            }
+            baseline.push(before.elapsed().as_secs_f64() * 1e9 / iterations as f64);
+            workspace.last_config_check = None;
+            let before = Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(workspace.configuration_changed(Instant::now()));
+            }
+            throttled.push(before.elapsed().as_secs_f64() * 1e9 / iterations as f64);
+        }
+        println!(
+            "{}",
+            serde_json::json!({"kind":"resource_stamp_poll_benchmark","iterations_per_sample":iterations,"resource_stamps":workspace.config_stamp.len(),"baseline_ns_per_poll":baseline,"throttled_ns_per_poll":throttled,"scope":"resource stamps only; no GUI/GPU or full-frame performance claim"})
+        );
     }
     #[test]
     fn settings_project_view_and_user_keymap_precedence_reload() {

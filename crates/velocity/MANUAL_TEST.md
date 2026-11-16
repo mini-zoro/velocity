@@ -506,3 +506,149 @@ Record macOS version, display scale, VoiceOver version/verbosity, exact failing 
 attribute values. GUI behavior, actual speech and screen-coordinate alignment are **pending
 human review**; headless tests do not establish these outcomes. Binary hex documents currently
 have a read-only description rather than a navigable AX hex-text value.
+
+## Round 14: native opens, context menus and round-12 regressions
+
+Run on an unlocked macOS 14+ desktop, outside the sandbox, using a bundle prepared by the
+reviewer. This round does **not** run the packaging script. The headless plist test only
+serializes document-type declarations; it does not assemble, sign or launch an application.
+Replace the app path below with the reviewer's updated bundle. Use a new fixture directory.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --release
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+/usr/bin/python3 -B -m unittest discover -s crates/velocity/packaging -p 'test_bundle.py'
+cargo build --release --locked -p velocity
+python3 crates/velocity/scripts/review-round14-fixtures.py /tmp/velocity-r14-native --huge
+
+APP=/absolute/path/to/Velocity.app
+FIXTURE=/tmp/velocity-r14-native
+PROFILE="$FIXTURE/profile"
+DOCS="$FIXTURE/Project with spaces"
+# Cold LaunchServices launch: the filename travels in the open Apple event, not argv.
+/usr/bin/open -na "$APP" "$DOCS/one.rs" --args --data-dir "$PROFILE"
+# With the first instance still running, route to its key window.
+/usr/bin/open -a "$APP" "$DOCS/two.txt"
+# CLI locations still use the existing per-profile socket.
+"$APP/Contents/SharedSupport/bin/velocity" --data-dir "$PROFILE" "$DOCS/one.rs:120:7"
+```
+
+- [ ] **Cold Finder Open With:** quit Velocity, then Finder → Open With → this bundle for
+  `one.rs`. Repeat for `any-file.velocity-blob`, a folder, and `literal:12:3`. Text opens in
+  a tab, binary data in read-only hex, folders in the sidebar, and the native colon filename
+  remains literal. Text/data are Alternate Editor handlers; folders are Alternate Viewer
+  handlers. Check the receiving process remains alive rather than handing off an empty GUI.
+- [ ] **Double-click:** on a disposable fixture extension, Get Info → Open With → Velocity →
+  Change All…, quit, and double-click. Verify cold and running launches. Restore the previous
+  association afterward. Velocity must not take document ownership merely by being installed.
+- [ ] **Dock drop:** drag several files and a folder onto Velocity's Dock icon, first cold and
+  then running. While startup/loading is busy, issue another open. Requests retain order and
+  are applied after window initialization. Drop a duplicate, a symlink alias and an edited
+  open file: focus its existing tab while preserving its text, selections and scroll.
+- [ ] **Window drop:** drop files/folders over the editor, tab row and sidebar, including
+  Unicode/space-containing paths. Existing text dragging/input behavior remains usable. Drop
+  `huge.log` and the binary: retain background prefix/huge-file and hex behavior. Use an
+  inaccessible or subsequently removed file and confirm a path-specific error, with later
+  valid entries still opened.
+- [ ] **Running instance/windows:** open two windows, make the second key and use Finder Open
+  With and `open -a` again. Only that key window receives the files. Close all windows without
+  quitting, then click the Dock icon: create a fresh window. Repeat with a Finder open and a
+  CLI request while no window exists. The retained template polls IPC without rendering.
+  `velocity --data-dir "$PROFILE" -w "$DOCS/two.txt"` must return when its sheet/window closes.
+  Force a secondary LaunchServices process with
+  `open -na "$APP" "$DOCS/literal:12:3" "$DOCS/two.txt" --args --data-dir "$PROFILE"`:
+  its queued batches must reach the primary before the temporary receiver quits. Repeat while
+  the primary quits; takeover must retain all recovered windows and dirty documents.
+
+Menu resources are original Velocity files in `Packages/Default`: `Context.sublime-menu`,
+`Tab Context.sublime-menu` and `Side Bar.sublime-menu`. Enabled packages and User extend their
+stable IDs with the same resource precedence as the menu bar. `velocity_dynamic` inserts the
+existing spelling, diff and Git choices. Commands receive resource args plus literal `paths`,
+clicked `group`, group-local `index`, and the window-local `event: {x,y}` point. Internal sheet
+identity keeps targets stable while workers/IPC progress during tracking.
+
+- [ ] **Native tracking:** right-click, two-finger click and Control-click on each surface.
+  Verify native menu appearance, keyboard navigation, Escape dismissal, disabled rows and
+  checks. Keep a menu open while indexing/loading and IPC complete; select an action, then
+  type/scroll immediately. No borrow panic, hung tracking loop or menu-bar replacement occurs.
+  During the spelling-worker wait, Escape, typing and scrolling cancel the deferred popup.
+  A User menu `chain` and a window command such as `toggle_setting` inherit the clicked tab's
+  context and check its state even when another tab was previously active.
+- [ ] **Editor:** right-click inside either of two selections and Copy: preserve all regions.
+  Right-click outside all selections: move the caret first. Repeat in an inactive split.
+  Cut/Copy/Paste/Select Document, cached/worker spelling replacements, dictionary actions,
+  diff show/revert and configured Git actions work on the pointed document/hunk/word. Copy
+  Full File Path, Locate in Project Tree and Show in File Browser use the pointed document.
+- [ ] **Tabs:** right-click an inactive tab and use Close This Tab, Keep Only This Tab, Close
+  Following Tabs and Close Saved Tabs. Targets follow that group's visual order. Dirty
+  prompts, Save/Discard/Cancel and shared views retain their usual behavior. Create Untitled
+  File opens in the clicked group; path/reveal actions use the clicked tab.
+- [ ] **Sidebar:** Open Selected Entry expands directories/opens files. Create File/Folder
+  and Change Entry Name use the existing input panel; Escape cancels, an existing destination
+  reports an error, and separators/traversal names are rejected. Rename an open dirty file and
+  a parent directory: retarget all sheets/descendants, keep undo and watch the new path.
+  Move Entry to Trash first asks confirmation; Cancel changes nothing. Confirm moves to Finder
+  Trash, including symlink entries, with no permanent-delete fallback. Open buffers remain
+  readable, marked `[deleted]` and dirty, and can be saved. A previously clean deleted buffer
+  must prompt on close and survive Hot Exit; saving either shared view clears the markers.
+  Clipboard/reveal/permission errors surface.
+- [ ] Copy Full Path and Copy Project-Relative Path have the expected text. Search This Folder
+  opens Find in Files with that directory in Where. Detach Project Folder removes the root
+  without deleting its files; configured Git choices retain the selected path. Repeat with
+  User menu overrides, disabled packages and a hot resource reload.
+- [ ] **Accessibility:** VoiceOver reads native menu items and their disabled/checked state;
+  no second custom context list appears in the workspace AX tree. Dismissal leaves the round-13
+  editor/tab/sidebar/input AX elements and focus behavior intact.
+
+Round-12 regressions and change checks:
+
+- [ ] CLI `one.rs:120:7` centers line 120 at startup and over IPC, even after restoring an old
+  scroll position. Repeat in a resized/split/wrapped view and while a large file is loading.
+- [ ] In light and dark themes at multiple UI scales, the strip above the sidebar matches its
+  themed background and contains no black clear-color rectangle.
+- [ ] Window title is the file name plus dirty marker and optional ` — project`; switching,
+  typing, saving and external changes update it. No debug/native AppKit title or encoding/EOL
+  suffix. Unchanged frames do not call the native title setter.
+- [ ] UI labels/headings use system sans-serif regular/bold/italic faces at their actual sizes.
+  No CoreText message about requesting private `.SFNS-*` names or substituting Times appears.
+  The renderer side is `vel-render/src/native.rs` (`font_location` uses the CoreText UI font for
+  system names).
+- [ ] A normal launch creates no interactive telemetry file. Quit, then opt in with the direct
+  command below. Confirm the exact default name `interactive-<runid>-<pid>.jsonl`, valid JSONL,
+  and the JSON mode/PID; no compile-time source directory receives output. Unset
+  `VELOCITY_LOG_DIR` and repeat to check `~/Library/Logs/Velocity/`. Explicit `--output` is an
+  opt-in destination, creates a new file and refuses to overwrite one.
+
+```sh
+VELOCITY_GUI_PROCESS=1 VELOCITY_LOG_DIR="$FIXTURE/logs" \
+  "$APP/Contents/MacOS/velocity" --data-dir "$PROFILE" --log-input "$DOCS/one.rs"
+```
+
+- [ ] **Reviewer regressions:** Cmd+F/Replace/Incremental/Find in Files toggle; Escape from
+  editor focus and each find panel's close button hide the panel/match paint without losing
+  Find Next. Scroll and mouse moves stay coalesced on the display link; keys/clicks remain
+  immediate. The resource-stamp walk runs at most every 500 ms; an explicit package reload
+  takes effect immediately.
+- [ ] **Real-event profile:** while scrolling a 10 MB file using the trackpad, sample the app
+  (for example `sample PID 10 -file /tmp/velocity-r14-native/native-sample.txt`). Inspect
+  native menu/title work: no per-frame `setMainMenu`/menu reconstruction or unchanged title
+  mutation. Record receipt-to-submit p50/p95, display refresh rate and frame gaps using lane
+  B's native scroll gate after integration. Headless CPU numbers do not establish native
+  AppKit, font rasterization, GPU, scanout, VoiceOver or Finder/Dock outcomes.
+
+Paired CPU reviewer commands (use the retained clean `4b65f50` binary as BEFORE):
+
+```sh
+python3 crates/velocity/scripts/measure-typing.py \
+  --before /tmp/velocity-r14-baseline/velocity-main-4b65f50 \
+  --after target/release/velocity --runs 10 --output-dir /tmp/velocity-r14-typing-review
+python3 crates/velocity/scripts/compare-scroll.py \
+  --old /tmp/velocity-r14-baseline/velocity-main-4b65f50 \
+  --new target/release/velocity --pairs 10 --output-dir /tmp/velocity-r14-scroll-review
+```
+
+Run pairs sequentially with no concurrent compilation. Retain raw JSONL, binary hashes and
+summary confidence intervals. Typing and scrolling each have a **≤5% regression** budget;
+report CPU budgets separately from pending native measurements.

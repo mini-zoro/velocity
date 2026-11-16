@@ -101,6 +101,7 @@ pub struct Panels {
     pub side_visible: bool,
     pub side_focused: bool,
     pub side_selected: usize,
+    sidebar_reveal: Option<PathBuf>,
     side_open: Option<usize>,
     pub side_scroll: Scroll,
     pub side_rows: Vec<SideRow>,
@@ -206,6 +207,7 @@ impl Default for Panels {
             side_visible: true,
             side_focused: false,
             side_selected: 0,
+            sidebar_reveal: None,
             side_open: None,
             side_scroll: Scroll::default(),
             side_rows: vec![],
@@ -529,10 +531,156 @@ impl Panels {
             );
         }
         self.side_scroll.rows = workspace.tabs.len() + self.side_rows.len() + 2;
-        self.side_scroll.row_height = 24.;
+        self.side_scroll.row_height = 24. * self.ui_scale;
         self.side_selected = self
             .side_selected
             .min(self.side_rows.len().saturating_sub(1));
+        if let Some(index) = self
+            .sidebar_reveal
+            .as_ref()
+            .and_then(|path| self.side_rows.iter().position(|row| &row.path == path))
+        {
+            self.side_selected = index;
+            self.side_open = None;
+            self.side_scroll.reveal(workspace.tabs.len() + 2 + index);
+            self.sidebar_reveal = None;
+        }
+    }
+    /// Refreshes directory snapshots and indexes after an explicit filesystem operation.
+    pub fn refresh_sidebar(&mut self, workspace: &mut Workspace) {
+        self.children.retain(|path, _| path.is_dir());
+        self.expanded.retain(|path| path.is_dir());
+        self.restart_index(workspace);
+        for path in self.expanded.clone() {
+            self.request_directory(workspace, &path, true);
+        }
+        self.rebuild_side(workspace);
+    }
+    /// Reveals a document by expanding its ancestors; directory reads stay on workers.
+    pub fn reveal_sidebar_path(
+        &mut self,
+        workspace: &mut Workspace,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        let path = path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if !workspace
+            .folders
+            .iter()
+            .any(|folder| path.starts_with(&folder.path))
+        {
+            self.add_folder(
+                workspace,
+                path.parent()
+                    .ok_or("document has no parent folder")?
+                    .to_owned(),
+            )?;
+        }
+        let root = workspace
+            .folders
+            .iter()
+            .filter(|f| path.starts_with(&f.path))
+            .max_by_key(|f| f.path.components().count())
+            .map(|f| f.path.clone())
+            .ok_or("document is outside the sidebar folders")?;
+        for parent in path
+            .ancestors()
+            .skip(1)
+            .take_while(|p| p.starts_with(&root))
+        {
+            self.expanded.insert(parent.to_owned());
+            self.request_directory(workspace, parent, false);
+        }
+        self.sidebar_reveal = Some(path);
+        self.side_visible = true;
+        self.rebuild_side(workspace);
+        Ok(())
+    }
+    /// Expands an existing directory without treating it as a new project root.
+    pub fn open_sidebar_directory(
+        &mut self,
+        workspace: &mut Workspace,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        if !workspace
+            .folders
+            .iter()
+            .any(|folder| path.starts_with(&folder.path))
+        {
+            self.add_folder(workspace, path.clone())?;
+        }
+        self.expanded.insert(path.clone());
+        self.request_directory(workspace, &path, false);
+        self.side_visible = true;
+        self.rebuild_side(workspace);
+        Ok(())
+    }
+    /// Gives an editor context click the same input focus as an ordinary editor click.
+    pub fn focus_editor_for_context(&mut self) {
+        self.side_focused = false;
+        self.panel_focused = false;
+        self.focus.show(Surface::Panel, false);
+    }
+    /// Removes a project root without touching its files.
+    pub fn remove_sidebar_folder(
+        &mut self,
+        workspace: &mut Workspace,
+        path: &Path,
+    ) -> Result<(), String> {
+        let previous_folders = workspace.folders.clone();
+        let previous_model = workspace.project_model.clone();
+        let project = workspace.project_path().map(Path::to_owned);
+        if let Some(project) = &project {
+            // Edit the project file as written on disk: the other entries keep their
+            // relative paths, names and keys.
+            workspace.project_model = vel_session::project::Project::load(project)?;
+        }
+        crate::context_menu::apply_remove_folder(workspace, path);
+        if let Some(project) = &project {
+            // Folders added to this project window belong to the project; append them.
+            let base = project.parent().unwrap_or(Path::new("."));
+            let same = |a: &Path, b: &Path| {
+                a == b
+                    || std::fs::canonicalize(a)
+                        .is_ok_and(|a| std::fs::canonicalize(b).ok() == Some(a))
+            };
+            for folder in &workspace.folders {
+                if !workspace
+                    .project_model
+                    .folders
+                    .iter()
+                    .any(|entry| same(&base.join(&entry.path), &folder.path))
+                {
+                    workspace
+                        .project_model
+                        .folders
+                        .push(vel_session::project::Folder {
+                            path: folder.path.clone(),
+                            name: Some(folder.name.clone()),
+                            folder_exclude_patterns: vec![],
+                            file_exclude_patterns: vec![],
+                            binary_file_patterns: vec![],
+                            follow_symlinks: folder.follow_links.then_some(true),
+                        });
+                }
+            }
+        }
+        if let Some(project) = project
+            && let Err(error) = workspace.project_model.save(&project)
+        {
+            workspace.folders = previous_folders;
+            workspace.project_model = previous_model;
+            return Err(error);
+        }
+        // An already-running worker may have read the previous project. Follow it
+        // with an explicit reload so it cannot leave a detached root installed.
+        workspace.request_resource_reload();
+        self.children.retain(|folder, _| !folder.starts_with(path));
+        self.expanded.retain(|folder| !folder.starts_with(path));
+        self.restart_index(workspace);
+        self.rebuild_side(workspace);
+        Ok(())
     }
     /// Shared native/headless keyboard route: focused widgets, Vintage, then the keymap.
     pub fn resolve_key(
@@ -2810,6 +2958,14 @@ impl Panels {
         if self.side_visible {
             let clip = self.side_bounds;
             let sidebar = style(3, None, &mut theme);
+            // The sidebar begins below the tab row. Paint its cap explicitly too;
+            // the renderer's cleared background is not a theme colour.
+            let cap = Rect {
+                y: 0.,
+                height: clip.y,
+                ..clip
+            };
+            theme.surface(&mut layer, &sidebar, cap, cap);
             theme.surface(&mut layer, &sidebar, clip, clip);
             let heading = style(3, Some("sidebar_heading"), &mut theme);
             for (caption, row) in [("Open Files", 0), ("Folders", workspace.tabs.len() + 1)] {
@@ -4316,7 +4472,8 @@ impl Panels {
         if !self.side_visible || !contains(self.side_bounds, point) {
             return None;
         }
-        let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / 24.) as usize;
+        let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / (24. * self.ui_scale))
+            as usize;
         if row > 0 && row <= workspace.tabs.len() {
             return workspace.tabs[row - 1].path.clone().map(|p| (p, false));
         }
@@ -4325,7 +4482,10 @@ impl Panels {
             .map(|r| (r.path.clone(), r.directory))
     }
     pub fn review_hover(&mut self, workspace: &Workspace, point: Point) {
-        if !self.review.items.is_empty() && contains(self.review.bounds, point) {
+        if !self.review.native_context
+            && !self.review.items.is_empty()
+            && contains(self.review.bounds, point)
+        {
             self.review.selected = (((point.y - self.review.bounds.y - 4.).max(0.) / 26.) as usize)
                 .min(self.review.items.len() - 1);
             self.review.tooltip = None;

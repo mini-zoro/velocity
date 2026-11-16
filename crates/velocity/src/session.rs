@@ -1,6 +1,6 @@
 //! Application-wide session coordinator shared by all native window controllers.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -61,6 +61,56 @@ impl Sessions {
         self.next += 1;
         self.active_window = Some(id);
         id
+    }
+    /// Reserves recovered windows before any live window can replace their snapshot.
+    ///
+    /// Returns window IDs in restored order and retains only each window's referenced
+    /// documents. Reserved copies use fresh document IDs so snapshots from the new
+    /// process cannot collide with IDs from an earlier process. `restored` stays intact
+    /// for lazy workspace restoration; this method does not publish to disk.
+    pub fn reserve_recovered(&mut self) -> Vec<u64> {
+        self.recent = [
+            self.restored.recent_files.clone(),
+            self.restored.recent_folders.clone(),
+            self.restored.recent_projects.clone(),
+        ];
+        let documents: BTreeMap<_, _> = self
+            .restored
+            .documents
+            .iter()
+            .map(|document| (document.id, crate::workbench::next_sheet()))
+            .collect();
+        let mut reserved = Vec::with_capacity(self.restored.windows.len());
+        for index in 0..self.restored.windows.len() {
+            let mut window = self.restored.windows[index].clone();
+            let referenced: BTreeSet<_> =
+                window.sheets.iter().map(|sheet| sheet.document).collect();
+            let retained = self
+                .restored
+                .documents
+                .iter()
+                .filter(|document| referenced.contains(&document.id))
+                .map(|document| {
+                    let mut document = document.clone();
+                    document.id = documents[&document.id];
+                    document
+                })
+                .collect();
+            for sheet in &mut window.sheets {
+                if let Some(document) = documents.get(&sheet.document) {
+                    sheet.document = *document;
+                }
+            }
+            let id = self.register();
+            self.recent_heads.insert(
+                id,
+                std::array::from_fn(|index| self.recent[index].first().cloned()),
+            );
+            self.windows.insert(id, (window, retained));
+            reserved.push(id);
+        }
+        self.active_window = reserved.first().copied().or(self.active_window);
+        reserved
     }
     pub fn publish(
         &mut self,
@@ -187,13 +237,103 @@ impl Sessions {
 mod tests {
     use super::*;
     fn snapshot() -> (Window, Vec<Document>) {
+        snapshot_text("dirty")
+    }
+    fn snapshot_text(text: &str) -> (Window, Vec<Document>) {
         let mut workspace =
             crate::workspace::Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
         workspace
             .editor_mut()
-            .run("insert", &vel_config::json!({"characters":"dirty"}))
+            .run("insert", &vel_config::json!({"characters":text}))
             .unwrap();
         workspace.snapshot().unwrap()
+    }
+    #[test]
+    fn recovered_reservations_preserve_other_dirty_windows_during_first_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Sessions/Session.sublime-session");
+        let (first, mut first_documents) = snapshot_text("recovered first");
+        let (mut second, mut second_documents) = snapshot_text("recovered second");
+        let (published, published_documents) = snapshot_text("updated first");
+        // An earlier process may have used exactly the ID of a new live document.
+        // Its other recovered window must survive the first live publish unchanged.
+        second_documents[0].id = published_documents[0].id;
+        second.sheets[0].document = second_documents[0].id;
+        first_documents.extend(second_documents);
+        let recovered = Session {
+            windows: vec![first, second],
+            documents: first_documents,
+            recent_files: vec![dir.path().join("recent-file")],
+            recent_folders: vec![dir.path().join("recent-folder")],
+            recent_projects: vec![dir.path().join("recent-project.sublime-project")],
+            ..Session::default()
+        };
+        vel_session::save(&path, &recovered).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut sessions = Sessions::new(Some(dir.path()));
+        let reserved = sessions.reserve_recovered();
+        assert_eq!(reserved.len(), 2);
+        assert!(reserved[0] < reserved[1]);
+        assert_eq!(sessions.active_window, Some(reserved[0]));
+        assert_eq!(
+            sessions.restored.windows[1].sheets[0].document,
+            published_documents[0].id
+        );
+        for (index, id) in reserved.iter().enumerate() {
+            let (window, documents) = &sessions.windows[id];
+            assert_eq!(window.sheets[0].id, recovered.windows[index].sheets[0].id);
+            assert_eq!(documents.len(), 1);
+            assert_eq!(window.sheets[0].document, documents[0].id);
+            assert!(documents[0].dirty);
+            assert_ne!(documents[0].id, published_documents[0].id);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(sessions.register() > reserved[1]);
+        sessions
+            .publish(
+                reserved[0],
+                published,
+                published_documents,
+                Default::default(),
+                Policy {
+                    hot: HotExit::Always,
+                    quitting: false,
+                    closing: false,
+                    remember: true,
+                },
+            )
+            .unwrap();
+        sessions.flush().unwrap();
+        let persisted = vel_session::load(&path);
+        assert!(persisted.messages.is_empty(), "{:?}", persisted.messages);
+        let persisted = persisted.session;
+        assert_eq!(persisted.windows.len(), 2);
+        assert_eq!(persisted.documents.len(), 2);
+        assert_eq!(persisted.recent_files, recovered.recent_files);
+        assert_eq!(persisted.recent_folders, recovered.recent_folders);
+        assert_eq!(persisted.recent_projects, recovered.recent_projects);
+        for (index, expected) in ["updated first", "recovered second"].iter().enumerate() {
+            let document = persisted
+                .documents
+                .iter()
+                .find(|document| document.id == persisted.windows[index].sheets[0].document)
+                .unwrap();
+            assert!(document.dirty);
+            assert_eq!(
+                document.history.as_ref().unwrap().current_text().unwrap(),
+                *expected
+            );
+        }
+        persisted.validate().unwrap();
+    }
+    #[test]
+    fn reserving_empty_recovery_creates_no_windows_or_writer() {
+        let mut sessions = Sessions::new(None);
+        assert!(sessions.reserve_recovered().is_empty());
+        assert!(sessions.windows.is_empty());
+        assert!(sessions.writer.is_none());
+        assert_eq!(sessions.active_window, None);
+        assert_eq!(sessions.register(), 1);
     }
     #[test]
     fn independent_windows_and_closed_hot_exit_windows_survive_fresh_storage() {

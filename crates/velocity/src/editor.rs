@@ -132,6 +132,9 @@ impl Editor {
         let preferences = settings.editor();
         let settings_revision = settings.revision();
         let mut registry = Registry::standard();
+        for name in crate::context_menu::COMMANDS {
+            registry.register(name, vel_commands::Kind::WindowCommand, None);
+        }
         for name in crate::html_ui::COMMANDS {
             registry.register(name, vel_commands::Kind::TextCommand, None);
         }

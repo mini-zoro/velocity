@@ -557,6 +557,17 @@ impl View {
             height: self.line_height,
         }
     }
+    /// Centers a requested file location after the final pane geometry and layout are known.
+    pub fn center_caret(&mut self, e: &Editor) {
+        self.apply_style(e);
+        let r = self.rect_at(e, e.caret);
+        let top = self.tab_height + 4.;
+        let middle = top + (self.size.height - top - 4.).max(self.line_height) / 2.;
+        self.scroll_y += r.y + r.height / 2. - middle;
+        self.clamp_scroll(e);
+        // Also reveal a column beyond the right edge without disturbing the centered row.
+        self.reveal(e);
+    }
     pub fn reveal(&mut self, e: &Editor) {
         self.apply_style(e);
         let r = self.rect_at(e, e.caret);
@@ -2069,6 +2080,45 @@ mod tests {
         v.reveal(&e);
         let caret = v.rect_at(&e, e.caret).clamped(v.size);
         assert!(caret.y >= 0. && caret.y + caret.height <= v.size.height);
+    }
+    #[test]
+    fn requested_location_centers_after_stale_scroll_resize_and_wrapping() {
+        let mut e = Editor::new(Text::from(
+            "a long source line with words\n".repeat(1000).as_str(),
+        ));
+        let mut v = View::new(
+            Size {
+                width: 800.,
+                height: 600.,
+            },
+            8.,
+            12.,
+        );
+        e.set_caret(e.text.line_to_byte(119) + 9, false);
+        for (height, stale) in [(600., 7000.), (360., 0.), (480., 12000.)] {
+            v.size.height = height;
+            v.scroll_y = stale;
+            v.center_caret(&e);
+            let r = v.rect_at(&e, e.caret);
+            let expected = (v.tab_height + v.size.height) / 2.;
+            assert!((r.y + r.height / 2. - expected).abs() < 0.01);
+        }
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "word_wrap",
+            vel_config::json!(true),
+        );
+        v.size.width = 130.;
+        v.center_caret(&e);
+        let r = v.rect_at(&e, e.caret);
+        assert!((r.y + r.height / 2. - (v.tab_height + v.size.height) / 2.).abs() < 0.01);
+        e.set_caret(0, false);
+        v.center_caret(&e);
+        assert_eq!(v.scroll_y, 0.);
+        e.set_caret(e.text.len_bytes(), false);
+        v.center_caret(&e);
+        let r = v.rect_at(&e, e.caret);
+        assert!(r.y >= v.tab_height && r.y + r.height <= v.size.height);
     }
     #[test]
     fn caret_modes_and_whitespace_selection_have_distinct_output() {

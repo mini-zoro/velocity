@@ -2,9 +2,21 @@
 #[cfg(target_os = "macos")]
 pub fn font_location(name: &str) -> Result<(std::path::PathBuf, String, NativeFont), String> {
     use objc2_core_foundation::{CFString, CFURL};
-    use objc2_core_text::{CTFont, kCTFontURLAttribute};
-    // SAFETY: the string lives through the call and a null matrix requests the identity transform.
-    let font = unsafe { CTFont::with_name(&CFString::from_str(name), 13., std::ptr::null()) };
+    use objc2_core_text::{CTFont, CTFontUIFontType, kCTFontURLAttribute};
+    let font = if matches!(
+        name,
+        "system" | "system-ui" | "sans-serif" | ".AppleSystemUIFont"
+    ) || name.starts_with(".SFNS")
+    {
+        // SAFETY: the system UI type, positive point size and default language are valid.
+        // Private system face names from a prior discovery must never make a
+        // CTFontCreateWithName round trip (it may silently substitute Times).
+        unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, 13., None) }
+            .ok_or("CoreText could not create the system UI font")?
+    } else {
+        // SAFETY: the string outlives the call; a null matrix preserves the transform.
+        unsafe { CTFont::with_name(&CFString::from_str(name), 13., std::ptr::null()) }
+    };
     // SAFETY: both methods only read a valid retained CTFont; the exported key is immutable.
     let (attribute, postscript) = unsafe {
         (

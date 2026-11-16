@@ -1,0 +1,44 @@
+// Original Velocity menu captions and layout; authored from public behavior.
+[
+  {
+    "caption": "Cut Selection",
+    "command": "cut",
+    "id": "velocity_cut"
+  },
+  {
+    "caption": "Copy Selection",
+    "command": "copy",
+    "id": "velocity_copy"
+  },
+  {
+    "caption": "Paste Clipboard",
+    "command": "paste",
+    "id": "velocity_paste"
+  },
+  {
+    "caption": "Select Document",
+    "command": "select_all",
+    "id": "velocity_select_all"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "id": "velocity_dynamic"
+  },
+  {
+    "caption": "-"
+  },
+  {
+    "caption": "Copy Full File Path",
+    "command": "copy_file_path"
+  },
+  {
+    "caption": "Locate in Project Tree",
+    "command": "reveal_in_side_bar"
+  },
+  {
+    "caption": "Show in File Browser",
+    "command": "reveal_in_finder"
+  }
+]

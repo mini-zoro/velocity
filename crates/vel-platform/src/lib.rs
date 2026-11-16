@@ -7,7 +7,11 @@
 pub mod accessibility;
 mod display;
 mod input;
+#[cfg(any(target_os = "macos", test))]
+mod requests;
+mod services;
 pub use display::{DisplayStatus, display_status};
+pub use services::NativeFileOperations;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod metrics;
@@ -148,9 +152,34 @@ pub trait AppHandler: 'static {
     }
     /// Execute a command selected from a resource-defined native menu.
     fn on_named_command(&mut self, _window: &WindowHandle, _name: &str, _args: &str) {}
+    /// Open files or add folders delivered by Finder, the Dock, or a window drop.
+    /// Requests wait for `on_start` and are delivered to the key window when available.
+    /// All currently queued native batches coalesce in arrival order before the
+    /// callback, so a one-shot forwarding handler can acknowledge them and quit.
+    /// The app handles canonicalization, existing tabs, file kinds, and user-facing errors.
+    fn on_open_paths(&mut self, _window: &WindowHandle, _paths: &[std::path::PathBuf]) {}
+    /// Reopen from the Dock, or before an external open with no live windows.
+    /// The last closed handler and its handle are retained as a template. Create
+    /// a fresh window here (for example with `window.new_window(...)`).
+    /// Called directly with the template borrowed once; ordinary events are not
+    /// dispatched to its closed view. A registered factory is a fallback.
+    fn on_reopen(&mut self, _window: &WindowHandle) {}
+    /// Poll background work such as IPC while all windows are closed.
+    /// Runs on the main thread every 100 ms on the retained template handler,
+    /// without calling `on_frame` or acquiring a drawable. A new window may be
+    /// created through the supplied handle. Stops when a live window exists.
+    fn on_idle(&mut self, _window: &WindowHandle) {}
     /// Validate a native menu action in the current view.
     fn command_enabled(&self, _name: &str, _args: &str) -> bool {
         true
+    }
+    /// Whether a resource-defined menu action is included in the native menu.
+    fn command_visible(&self, _name: &str, _args: &str) -> bool {
+        true
+    }
+    /// Whether a resource-defined menu action displays a native checkmark.
+    fn command_checked(&self, _name: &str, _args: &str) -> bool {
+        false
     }
     /// Apply insert/marked/unmark updates, including native replacement ranges.
     fn on_text_input(&mut self, _window: &WindowHandle, _event: TextInput) {}
@@ -230,7 +259,8 @@ pub struct MenuEntry {
 #[derive(Debug)]
 pub struct Platform;
 impl Platform {
-    /// Runs until close, explicit completion, or a callback failure. macOS 14+.
+    /// Runs until explicit quit/completion or a callback failure. macOS 14+.
+    /// Closing the last window retains a template handler for Dock reopen and IPC.
     pub fn run(app: impl AppHandler) -> Result<(), String> {
         Self::run_with_options(WindowOptions::default(), app)
     }

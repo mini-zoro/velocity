@@ -22,6 +22,10 @@ use std::{
 /// Serialized CLI request. All paths are made absolute at the sending process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
+    /// Literal native paths: focus duplicate tabs without interpreting a CLI location.
+    /// Older CLI/packaging clients omit this field and retain their existing behavior.
+    #[serde(default)]
+    pub native_open: bool,
     pub files: Vec<FileLocation>,
     pub project: Option<PathBuf>,
     pub new_window: bool,
@@ -40,6 +44,7 @@ impl Request {
             }
         };
         Ok(Self {
+            native_open: false,
             files: options
                 .files
                 .iter()
@@ -251,6 +256,18 @@ impl Drop for Instance {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn older_cli_requests_omit_native_marker_and_native_requests_roundtrip() {
+        let mut value = serde_json::json!({"files":[],"project":null,"new_window":false,"add":false,"wait":false,"stdin":null});
+        let legacy: super::Request = serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.native_open);
+        value["native_open"] = serde_json::json!(true);
+        let native: super::Request = serde_json::from_value(value).unwrap();
+        assert!(native.native_open);
+        let roundtrip: super::Request =
+            serde_json::from_slice(&serde_json::to_vec(&native).unwrap()).unwrap();
+        assert!(roundtrip.native_open);
+    }
     use super::*;
     #[test]
     fn fresh_profile_socket_forwarding_waits_for_requested_sheet_close() {

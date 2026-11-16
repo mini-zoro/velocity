@@ -191,7 +191,7 @@ fn project_save_as_keeps_rules_and_unknown_keys_and_loads_inline_builds() {
     let model = vel_session::project::Project::load(&new).unwrap();
     assert_eq!(model.extra["custom"], 42);
     assert_eq!(model.folders[0].file_exclude_patterns, vec!["*.bak"]);
-    assert!(model.folders[0].follow_symlinks);
+    assert_eq!(model.folders[0].follow_symlinks, Some(true));
     w.close_project().unwrap();
     assert!(w.folders.is_empty());
     assert!(w.project_path().is_none());

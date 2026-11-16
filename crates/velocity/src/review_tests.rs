@@ -51,6 +51,98 @@ fn setup(text: &str) -> (Workspace, Panels, View) {
     )
 }
 #[test]
+fn native_context_keeps_multiple_selections_and_omits_custom_menu_accessibility() {
+    let (mut workspace, mut panels, _) = setup("alpha beta gamma");
+    let selection = vel_buffer::Selection::from_regions([
+        vel_buffer::Region::new(0, 5),
+        vel_buffer::Region::new(10, 16),
+    ]);
+    workspace.editor_mut().set_selection(selection.clone());
+    panels.review.native_context = true;
+    panels.review_context(
+        &mut workspace,
+        vel_platform::Point { x: 250., y: 100. },
+        2,
+        None,
+    );
+    assert_eq!(
+        workspace.editor().regions(),
+        selection.iter().collect::<Vec<_>>()
+    );
+    workspace.editor_mut().run("copy", &json!({})).unwrap();
+    assert!(workspace.editor().clipboard.contains("alpha"));
+    assert!(workspace.editor().clipboard.contains("gamma"));
+    panels.review.items.push(vel_config::ui::PaletteItem {
+        caption: "Native choice".into(),
+        invocation: vel_config::keymap::Invocation {
+            command: "copy".into(),
+            args: json!({}),
+        },
+    });
+    panels.layout(vel_platform::Size {
+        width: 900.,
+        height: 600.,
+    });
+    let mut scene = vel_render::scene::Scene::default();
+    panels.paint(&workspace, &mut scene);
+    assert!(
+        !scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .any(|run| run.text == "Native choice")
+    );
+    assert!(
+        !panels
+            .accessibility(&workspace)
+            .nodes
+            .iter()
+            .any(|node| node.label == "Context menu")
+    );
+    panels.review_context(&mut workspace, vel_platform::Point::default(), 7, None);
+    assert_eq!(workspace.editor().caret, 7);
+    assert!(workspace.editor().selection().is_empty());
+}
+#[test]
+fn context_diff_command_uses_pointed_hunk_while_preserving_selection() {
+    let (mut workspace, mut panels, mut view) = setup("first\nmiddle\nlast\n");
+    workspace.editor_mut().set_caret(6, false);
+    workspace
+        .editor_mut()
+        .run("insert", &json!({"characters":"changed "}))
+        .unwrap();
+    wait(&mut workspace, &mut panels, &mut view, |workspace, _| {
+        workspace
+            .editor()
+            .annotations
+            .borrow()
+            .current
+            .as_ref()
+            .is_some_and(|p| p.hunks.len() == 1)
+    });
+    let end = workspace.editor().text.len_bytes();
+    workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from(vel_buffer::Region::new(0, end)));
+    let selection = workspace.editor().regions();
+    panels.review_context(&mut workspace, vel_platform::Point::default(), 7, None);
+    assert_eq!(workspace.editor().regions(), selection);
+    let invocation = panels
+        .review
+        .items
+        .iter()
+        .find(|item| item.invocation.command == "toggle_inline_diff")
+        .unwrap()
+        .invocation
+        .clone();
+    workspace
+        .editor_mut()
+        .run(&invocation.command, &invocation.args)
+        .unwrap();
+    assert!(workspace.editor().annotations.borrow().inline.contains(&1));
+    assert_eq!(workspace.editor().regions(), selection);
+}
+#[test]
 fn diff_navigation_inline_geometry_revert_undo_and_snapshot_gap() {
     let (mut w, mut p, mut v) = setup("one\ntwo\nthree\n");
     w.editor_mut().set_caret(4, false);

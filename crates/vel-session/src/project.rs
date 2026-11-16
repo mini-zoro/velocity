@@ -11,17 +11,18 @@ pub struct Folder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Directory globs to hide.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_exclude_patterns: Vec<String>,
     /// File globs to hide.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_exclude_patterns: Vec<String>,
     /// Files excluded from text navigation/search.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binary_file_patterns: Vec<String>,
-    /// Whether directory symlinks are followed.
-    #[serde(default)]
-    pub follow_symlinks: bool,
+    /// Whether directory symlinks are followed; `None` keeps the key absent (the default
+    /// applies) so saving a project never pins the current default into the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_symlinks: Option<bool>,
 }
 /// Shareable `.sublime-project`; unknown keys survive editing and Save As.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -30,8 +31,10 @@ pub struct Project {
     /// Discovery roots.
     pub folders: Vec<Folder>,
     /// Project editor settings.
+    #[serde(skip_serializing_if = "Map::is_empty")]
     pub settings: Map<String, Value>,
     /// Inline named build definitions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub build_systems: Vec<Value>,
     /// Extension data retained verbatim semantically.
     #[serde(flatten)]

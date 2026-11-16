@@ -1,9 +1,10 @@
 //! Adapted from Velocity’s MIT OR Apache-2.0 P0 prototype.
 //! JSONL output, startup milestones, and a bounded-run watchdog.
-use crate::cli::Mode;
+use crate::cli::{Mode, Options};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    ffi::OsStr,
     fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -52,6 +53,9 @@ impl Clock {
         }
     }
     pub fn attach(&mut self, reporter: Reporter) -> Result<(), String> {
+        if !reporter.is_enabled() {
+            return Ok(());
+        }
         for milestone in &self.milestones {
             reporter.emit(json!({"kind":"milestone","milestone":milestone}))?;
         }
@@ -85,24 +89,56 @@ struct Sink {
 }
 #[derive(Clone, Debug)]
 pub struct Reporter {
-    sink: Arc<Mutex<Sink>>,
+    sink: Option<Arc<Mutex<Sink>>>,
     pub path: PathBuf,
     run_id: String,
     mode: Mode,
     entered: Instant,
 }
 impl Reporter {
+    /// Select a real sink only for a requested measurement.
+    pub fn for_options(options: &Options, entered: Instant) -> Result<Self, String> {
+        if options.telemetry_enabled() {
+            Self::new(options.mode, options.output.as_deref(), entered)
+        } else {
+            Ok(Self {
+                sink: None,
+                path: PathBuf::new(),
+                run_id: String::new(),
+                mode: options.mode,
+                entered,
+            })
+        }
+    }
+    /// Whether emitting a record performs any output or memory measurement.
+    pub fn is_enabled(&self) -> bool {
+        self.sink.is_some()
+    }
     pub fn new(mode: Mode, path: Option<&Path>, entered: Instant) -> Result<Self, String> {
+        Self::in_directories(
+            mode,
+            path,
+            entered,
+            std::env::var_os("VELOCITY_LOG_DIR").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+    fn in_directories(
+        mode: Mode,
+        path: Option<&Path>,
+        entered: Instant,
+        log_dir: Option<&OsStr>,
+        home: Option<&OsStr>,
+    ) -> Result<Self, String> {
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_micros();
-        let run_id = format!("{epoch}-{}", std::process::id());
-        let path = path.map(Path::to_owned).unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("output")
-                .join(format!("{}-{run_id}.jsonl", mode.name()))
-        });
+        let run_id = epoch.to_string();
+        let path = match path {
+            Some(path) => path.to_owned(),
+            None => default_output_path(&run_id, std::process::id(), log_dir, home)?,
+        };
         if path.extension().is_none_or(|e| e != "jsonl") {
             return Err("--output must end in .jsonl".into());
         }
@@ -118,7 +154,7 @@ impl Reporter {
             .map_err(|e| format!("{}: {e} (results are never overwritten)", path.display()))?;
         eprintln!("JSONL: {}", path.display());
         Ok(Self {
-            sink: Arc::new(Mutex::new(Sink { file })),
+            sink: Some(Arc::new(Mutex::new(Sink { file }))),
             path,
             run_id,
             mode,
@@ -126,6 +162,9 @@ impl Reporter {
         })
     }
     pub fn emit(&self, mut value: Value) -> Result<(), String> {
+        let Some(sink) = &self.sink else {
+            return Ok(());
+        };
         let object = value
             .as_object_mut()
             .ok_or("JSONL record must be an object")?;
@@ -135,7 +174,7 @@ impl Reporter {
         object.insert("pid".into(), json!(std::process::id()));
         object.insert("logged_main_ms".into(), json!(ms(self.entered.elapsed())));
         let bytes = json_line(&value)?;
-        let mut sink = self.sink.lock().map_err(|_| "output lock poisoned")?;
+        let mut sink = sink.lock().map_err(|_| "output lock poisoned")?;
         sink.file
             .write_all(&bytes)
             .and_then(|()| sink.file.flush())
@@ -152,6 +191,9 @@ impl Reporter {
         Ok(())
     }
     pub fn rss(&self, phase: &str, details: Value) -> Result<(), String> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
         self.emit(memory_record(
             phase,
             details,
@@ -159,6 +201,23 @@ impl Reporter {
             native::phys_footprint_bytes(),
         ))
     }
+}
+/// Runtime-only destination shared by interactive and automatic measurements.
+fn default_output_path(
+    run_id: &str,
+    pid: u32,
+    log_dir: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let directory = log_dir
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|p| !p.is_empty())
+                .map(|p| Path::new(p).join("Library/Logs/Velocity"))
+        })
+        .ok_or("telemetry needs VELOCITY_LOG_DIR, HOME, or an explicit --output path")?;
+    Ok(directory.join(format!("interactive-{run_id}-{pid}.jsonl")))
 }
 fn memory_record(
     phase: &str,
@@ -217,6 +276,88 @@ impl Drop for Watchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_interactive_reporter_has_no_sink_or_output() {
+        let reporter = Reporter::for_options(&Options::default(), Instant::now()).unwrap();
+        assert!(!reporter.is_enabled());
+        assert!(reporter.path.as_os_str().is_empty());
+        // A disabled sink returns before serialization, validation and native RSS calls.
+        reporter.emit(Value::Null).unwrap();
+        reporter.rss("disabled", json!({})).unwrap();
+        let mut clock = Clock::new(Instant::now(), SystemTime::now());
+        clock.attach(reporter).unwrap();
+        assert!(clock.reporter.is_none());
+    }
+    #[test]
+    fn measurement_paths_use_runtime_log_directory_and_exact_name() {
+        let resolve = |log_dir: Option<&str>, home: Option<&str>| {
+            default_output_path("123456", 42, log_dir.map(OsStr::new), home.map(OsStr::new))
+        };
+        assert_eq!(
+            resolve(Some("/tmp/log folder"), Some("/home/build")).unwrap(),
+            Path::new("/tmp/log folder/interactive-123456-42.jsonl")
+        );
+        assert_eq!(
+            resolve(None, Some("/Users/editor")).unwrap(),
+            Path::new("/Users/editor/Library/Logs/Velocity/interactive-123456-42.jsonl")
+        );
+        assert_eq!(
+            resolve(Some("/tmp/bench"), None).unwrap(),
+            Path::new("/tmp/bench/interactive-123456-42.jsonl")
+        );
+        assert_eq!(
+            resolve(Some(""), Some("/Users/editor")).unwrap(),
+            Path::new("/Users/editor/Library/Logs/Velocity/interactive-123456-42.jsonl")
+        );
+        assert!(resolve(None, None).is_err());
+    }
+    #[test]
+    fn automatic_default_filename_is_interactive_and_record_retains_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        for mode in [Mode::Scroll, Mode::Typing, Mode::Headless] {
+            let reporter = Reporter::in_directories(
+                mode,
+                None,
+                Instant::now(),
+                Some(directory.path().as_os_str()),
+                None,
+            )
+            .unwrap();
+            let filename = reporter.path.file_name().unwrap().to_string_lossy();
+            assert!(filename.starts_with("interactive-"));
+            assert!(filename.ends_with(&format!("-{}.jsonl", std::process::id())));
+            reporter.emit(json!({"kind":"test"})).unwrap();
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(&reporter.path).unwrap()).unwrap();
+            assert_eq!(record["mode"], mode.name());
+        }
+    }
+    #[test]
+    fn explicit_measurement_creates_jsonl_and_refuses_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run.jsonl");
+        let options = Options {
+            output: Some(path.clone()),
+            log_input: true,
+            ..Options::default()
+        };
+        let reporter = Reporter::for_options(&options, Instant::now()).unwrap();
+        assert!(reporter.is_enabled());
+        reporter.emit(json!({"kind":"test"})).unwrap();
+        let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(record["mode"], "interactive");
+        assert_eq!(record["pid"], std::process::id());
+        assert!(
+            record["run_id"]
+                .as_str()
+                .unwrap()
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(Reporter::for_options(&options, Instant::now()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
     #[test]
     fn memory_json_keeps_rss_and_footprint_distinct_with_independent_errors() {
         let record = memory_record("first", json!({"lines":5000}), Ok(100), Ok(60));

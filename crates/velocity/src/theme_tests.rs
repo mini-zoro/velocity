@@ -23,6 +23,86 @@ fn view() -> View {
     )
 }
 #[test]
+fn sidebar_cap_matches_themed_sidebar_in_light_and_dark() {
+    let mut workspace = workspace();
+    let mut panels = Panels::new(&workspace, false);
+    panels.side_visible = true;
+    panels.layout(Size {
+        width: 900.,
+        height: 600.,
+    });
+    for dark in [false, true] {
+        workspace.set_appearance(dark).unwrap();
+        let mut scene = Scene::default();
+        panels.paint(&workspace, &mut scene);
+        let sidebar = panels.tree.nodes[&3].rect;
+        let fills: Vec<_> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.surfaces)
+            .filter_map(|surface| match surface {
+                Surface::Fill(fill) => Some(fill),
+                _ => None,
+            })
+            .collect();
+        let cap = fills
+            .iter()
+            .find(|fill| {
+                fill.rect.x == 0.
+                    && fill.rect.y == 0.
+                    && fill.rect.width == sidebar.width
+                    && fill.rect.height == sidebar.y
+            })
+            .expect("themed sidebar cap");
+        let body = fills
+            .iter()
+            .find(|fill| fill.rect == sidebar)
+            .expect("themed sidebar body");
+        assert_eq!(cap.color, body.color);
+        assert!(cap.color[3] > 0. && cap.color[..3].iter().any(|c| *c > 0.));
+    }
+}
+#[test]
+fn sidebar_root_removal_updates_project_and_survives_resource_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let folder = root.join("configured");
+    let added = root.join("runtime");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::create_dir(&added).unwrap();
+    std::fs::create_dir(root.join("kept")).unwrap();
+    let project = root.join("fixture.sublime-project");
+    std::fs::write(
+        &project,
+        r#"{"folders":[{"path":"configured"},{"path":"kept","name":"Kept"}],"future":{"keep":true}}"#,
+    )
+    .unwrap();
+    let mut workspace = Workspace::new(Text::new(), None, Some(project.clone()), false).unwrap();
+    let mut panels = Panels::new(&workspace, false);
+    panels.add_folder(&mut workspace, added.clone()).unwrap();
+    workspace.request_resource_reload();
+    workspace.poll();
+    panels
+        .remove_sidebar_folder(&mut workspace, &folder)
+        .unwrap();
+    workspace.wait_resources();
+    assert!(!workspace.folders.iter().any(|entry| entry.path == folder));
+    assert!(workspace.folders.iter().any(|entry| entry.path == added));
+    let saved = vel_session::project::Project::load(&project).unwrap();
+    assert_eq!(saved.folders.len(), 2);
+    // The remaining entry keeps its relative spelling; no default keys are pinned.
+    assert_eq!(saved.folders[0].path, std::path::Path::new("kept"));
+    assert_eq!(saved.folders[0].name.as_deref(), Some("Kept"));
+    assert_eq!(saved.folders[1].path, added);
+    assert_eq!(saved.extra["future"]["keep"], true);
+    let raw = std::fs::read_to_string(&project).unwrap();
+    assert!(
+        !raw.contains("follow_symlinks") && !raw.contains("exclude_patterns"),
+        "{raw}"
+    );
+    assert!(folder.is_dir());
+}
+#[test]
 fn phantoms_reserve_flow_and_track_edits_undo_while_annotations_do_not_add_rows() {
     let mut e = Editor::new(Text::from("alpha beta\nsecond line\n"));
     let mut view = view();

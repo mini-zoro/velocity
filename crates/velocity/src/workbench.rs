@@ -272,6 +272,7 @@ impl Workspace {
                     self.tabs[index].editor.revision = version;
                 }
                 self.tabs[index].shared_dirty = dirty;
+                self.tabs[index].deleted = self.tabs[owner].deleted;
                 self.tabs[index].path = self.tabs[owner].path.clone();
                 self.tabs[index].format = self.tabs[owner].format.clone();
                 self.tabs[index].saved_format = self.tabs[owner].saved_format.clone();
@@ -341,6 +342,7 @@ impl Workspace {
             &self.keymap,
         )?;
         clone.session_document = self.tabs[index].session_document;
+        clone.deleted = self.tabs[index].deleted;
         clone.document = self.tabs[index].document;
         clone.shared_view = id;
         clone.disk_saved = self.tabs[index].disk_saved.clone();
@@ -712,6 +714,12 @@ impl Workspace {
             tab.restored_document = Some(document.id);
             tab.session_document = *document_ids.entry(document.id).or_insert_with(next_sheet);
             tab.path = document.path.clone();
+            // Missing files with retained contents must still prompt/save after restore.
+            // Derive the marker from disk without extending the session wire format.
+            tab.deleted = tab
+                .path
+                .as_deref()
+                .is_some_and(|path| matches!(path.try_exists(), Ok(false)));
             tab.format = vel_fileio::Format {
                 encoding: document.encoding.clone(),
                 bom: document.bom,
@@ -829,7 +837,7 @@ impl Workspace {
                     folder_exclude_patterns: vec![],
                     file_exclude_patterns: vec![],
                     binary_file_patterns: vec![],
-                    follow_symlinks: folder.follow_links,
+                    follow_symlinks: Some(folder.follow_links),
                 });
             }
         }

@@ -4,6 +4,13 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Retains no factory on unsupported platforms; native windows require macOS.
+    pub fn set_window_factory(
+        &self,
+        _factory: impl FnMut() -> Result<(crate::WindowOptions, Box<dyn crate::AppHandler>), String>
+        + 'static,
+    ) {
+    }
     /// Native windows require macOS.
     pub fn new_window(
         &self,
@@ -39,6 +46,20 @@ impl WindowHandle {
     }
     /// No native menus on this platform.
     pub fn set_menu(&self, _entries: &[crate::MenuEntry]) {}
+    /// No native context event can be captured on unsupported platforms.
+    pub fn show_context_menu(&self, _entries: &[crate::MenuEntry]) -> bool {
+        false
+    }
+    /// No native deferred popup exists on unsupported platforms.
+    pub fn cancel_context_menu(&self) {}
+    /// No native Trash exists on unsupported platforms; never deletes the item.
+    pub fn trash_file(&self, _path: &std::path::Path) -> Result<(), String> {
+        Err("the system Trash requires macOS".into())
+    }
+    /// No native file viewer exists on unsupported platforms.
+    pub fn reveal_file(&self, _path: &std::path::Path) -> Result<(), String> {
+        Err("revealing files requires macOS".into())
+    }
     /// No native chooser on this platform.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
@@ -66,7 +87,6 @@ impl WindowHandle {
     pub fn request_frame_at(&self, _deadline: Instant) {}
     /// Enables continuous display-linked animation.
     pub fn set_animating(&self, _active: bool) {}
-    /// Changes the native window title.
     /// Portable no-op counterpart of native title-bar theming.
     pub fn set_title_bar_theme(
         &self,
@@ -74,6 +94,7 @@ impl WindowHandle {
         _background: Option<[f32; 4]>,
     ) {
     }
+    /// Changes the native window title (a no-op on unsupported platforms).
     pub fn set_title(&self, _title: &str) {}
     /// Logical-to-physical pixel scale.
     pub fn scale_factor(&self) -> f64 {

@@ -8,6 +8,7 @@ mod binary;
 mod build;
 mod cli;
 mod completion;
+mod context_menu;
 mod editing;
 mod editor;
 mod feature_bench;
@@ -25,6 +26,7 @@ mod large_bench;
 mod large_tests;
 mod layout;
 mod mouse_select;
+mod open_requests;
 mod panels;
 mod parse_bench;
 mod release;
@@ -74,7 +76,7 @@ fn main() {
     }
 }
 fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
-    let Some(options) = Options::parse(std::env::args().skip(1))? else {
+    let Some(mut options) = Options::parse(std::env::args().skip(1))? else {
         print!("{}", cli::HELP);
         return Ok(());
     };
@@ -89,12 +91,28 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         stdin = Some(input);
     }
+    let launch_services = options.launched_by_launch_services(parent_pid());
     let instance = if options.mode == Mode::Interactive {
-        let request = instance::Request::new(&options, stdin.clone())?;
+        let mut request = instance::Request::new(&options, stdin.clone())?;
+        if launch_services {
+            // This startup probe may focus an existing window, but cannot substitute
+            // for the Apple event that LaunchServices has yet to deliver to us.
+            request.native_open = true;
+            request.add = true;
+            request.wait = false;
+        }
         match instance::Instance::start(data_dir.as_deref(), &request) {
+            Ok(instance::Start::Forwarded) if launch_services => {
+                // Retain the native event recipient until its actual paths are relayed.
+                // This temporary receiver must never restore or overwrite the primary session.
+                options.forward_native_opens = true;
+                None
+            }
             Ok(instance::Start::Forwarded) => return Ok(()),
             Ok(instance::Start::Primary(instance)) => {
-                if std::env::var_os("VELOCITY_GUI_PROCESS").is_none() {
+                // Finder/Dock launches must retain the process receiving Apple events.
+                // See Options::launched_by_launch_services for the path-free heuristics.
+                if std::env::var_os("VELOCITY_GUI_PROCESS").is_none() && !launch_services {
                     drop(instance);
                     let mut command = std::process::Command::new(
                         std::env::current_exe().map_err(|e| e.to_string())?,
@@ -114,6 +132,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                     ]);
                     if options.log_input {
                         command.arg("--log-input");
+                    }
+                    if let Some(output) = &options.output {
+                        command.arg("--output").arg(output);
                     }
                     let mut child = command.spawn().map_err(|e| e.to_string())?;
                     let at = Instant::now();
@@ -142,7 +163,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     } else {
         None
     };
-    let crash = if options.mode == Mode::Interactive {
+    let crash = if options.mode == Mode::Interactive && !options.forward_native_opens {
         match std::env::var_os("HOME")
             .ok_or_else(|| "home directory unavailable".to_owned())
             .and_then(|home| release::CrashStartup::install(Path::new(&home)))
@@ -157,7 +178,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         None
     };
     let mut clock = Clock::new(entered, wall);
-    let reporter = Reporter::new(options.mode, options.output.as_deref(), entered)?;
+    let reporter = Reporter::for_options(&options, entered)?;
     let _watchdog = options
         .mode
         .automatic()
@@ -239,18 +260,17 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         let done = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "macos")]
         {
-            let window = WindowOptions {
-                title: options.file.as_ref().map_or_else(
-                    || "Velocity · native AppKit".into(),
-                    |p| format!("{} — Velocity", p.display()),
-                ),
+            let mut window = WindowOptions {
+                title: "Velocity".into(),
                 size: Size {
                     width: options.width as f64,
                     height: options.height as f64,
                 },
             };
             let sessions = std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(
-                if options.mode == Mode::Interactive || options.restore_session {
+                if !options.forward_native_opens
+                    && (options.mode == Mode::Interactive || options.restore_session)
+                {
                     data_dir.as_deref()
                 } else {
                     None
@@ -360,6 +380,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             if options.groups > 1 {
                 workbench::configure_groups(&mut workspace, options.groups)?;
             }
+            window.title = workspace.window_title();
             let mut app = app::App::new(
                 options.clone(),
                 clock,
@@ -395,6 +416,17 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         let _ = reporter.emit(json!({"kind":"error","stage":"run","message":e,"complete":false}));
     }
     result
+}
+fn parent_pid() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: getppid has no arguments, borrowed pointers, or other preconditions.
+        unsafe { libc::getppid() as u32 }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 fn load(path: Option<&Path>, limit: usize) -> Result<(Text, String), String> {
     if let Some(path) = path {
