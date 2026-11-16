@@ -3080,6 +3080,7 @@ name = "vel-highlight"
 version = "0.0.0"
 dependencies = [
  "fnv",
+ "proptest",
  "serde_json",
  "thiserror",
  "vel-buffer",
@@ -3192,6 +3193,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-core-text",
  "pollster",
+ "proptest",
  "serde_json",
  "swash",
  "unicode-segmentation",

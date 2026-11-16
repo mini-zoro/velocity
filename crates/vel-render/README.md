@@ -75,3 +75,21 @@ glyphs, with a distinct key namespace. CPU geometry and shader validation run wi
 TextRun's optional family selects proportional UI shaping; absent families retain the editor
 monospace grid. Native measurements and painting use the same size/family/weight/slant/fallback
 path. Mutable user font files are copied; only sealed system font files are memory mapped.
+
+## Round 14: scroll frame costs
+
+`LineLayoutCache` now keeps an indexed doubly linked LRU. Hash lookup, recency
+updates and eviction take expected O(1) cache operations, with the same 2048-entry
+renderer capacity, 16 KiB content cap, style keys and collision checking. Reused
+slots retain their String capacity. Property tests compare every operation and
+the full recency order with a simple list model, including overwrites and a
+single-entry cache.
+
+A dirty-range instance upload (persistent staging belt plus a resident comparison) was
+measured and rejected: it copied fewer bytes but cost 47-69% more CPU per frame in the common
+unchanged / indicator-only cases, and the native gate did not show a net gain.
+
+`cargo run --release -p vel-render --example scroll_costs` alternates the baseline and
+candidate caches. Native paired runs, exact reviewer
+commands and remaining app-level findings are in
+[tools/scroll-gate](../../tools/scroll-gate/README.md) and its RESULTS.md.

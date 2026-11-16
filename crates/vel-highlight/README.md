@@ -264,3 +264,24 @@ a retained stable state, without a document-tail scan. A palette swap increments
 discards styled records and reparses. All old-coordinate/undo/redo integration rules above still
 apply. New tests and paired construction/viewport measurements are linked from
 [vel-largefile/PERF.md](../vel-largefile/PERF.md).
+
+## Round 14: constant-time snapshot completeness
+
+`ScopeSnapshot::complete()` reads an inexact-line count accumulated while its
+records are collected. Repeated full-file completeness checks are O(1).
+`ScopeSnapshot.lines` is now `ScopeLines`: a collection exposing slice
+indexing, `.iter()` and borrowed iteration. Construct it with `.collect()` from
+`ScopedLine` records. Published snapshots have a precomputed count. For compatibility
+with existing mutable consumers (including the spelling fixture), `.iter_mut()` and
+borrowed mutable iteration invalidate the count; the next completeness query scans
+once and caches it again. The renderer/highlight publication paths collect new
+records, so their per-frame queries stay O(1). Clones preserve cache validity.
+
+A property test compares the cached result with the old scan for arbitrary
+exactness patterns, all-exact/all-inexact records, one inexact line, empty intervals,
+arbitrary viewport subranges and cloned snapshots. Existing edit, rewind, palette
+and sparse viewport tests still exercise the real snapshot construction paths.
+`cargo run --release -p vel-highlight --example completeness_bench` measures the
+old and new query against the actual 10 MB fixture in nine alternating pairs.
+Results and paired application benches are in
+[tools/scroll-gate/RESULTS.md](../../tools/scroll-gate/RESULTS.md).

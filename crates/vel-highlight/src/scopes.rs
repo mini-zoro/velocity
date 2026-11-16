@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use vel_buffer::ChangeId;
 use vel_scope::{MatchScore, Scope, ScopeStack, ScopeStackOp, Selector};
@@ -51,6 +51,63 @@ pub struct ScopedLine {
     /// Whether parsing has validated this line at the snapshot version.
     pub exact: bool,
 }
+/// Line records with an incrementally accumulated completeness count.
+///
+/// Collect an iterator of [`ScopedLine`]s to construct this collection. Records
+/// use a cached count for immutable published snapshots. Legacy mutable iteration
+/// invalidates that count; its next completeness query rebuilds it once. Slice
+/// indexing and iteration remain available through [`std::ops::Deref`].
+#[derive(Debug, Clone, Default)]
+pub struct ScopeLines {
+    records: Vec<ScopedLine>,
+    inexact: OnceLock<usize>,
+}
+impl FromIterator<ScopedLine> for ScopeLines {
+    fn from_iter<T: IntoIterator<Item = ScopedLine>>(iter: T) -> Self {
+        let mut inexact = 0;
+        // Preserve Vec's exact-size/trusted-length collection specialization;
+        // counting must not add a capacity check to every collected line.
+        let records = iter
+            .into_iter()
+            .inspect(|line| {
+                inexact += usize::from(!line.exact);
+            })
+            .collect();
+        Self {
+            records,
+            inexact: OnceLock::from(inexact),
+        }
+    }
+}
+impl ScopeLines {
+    /// Mutable iteration for legacy snapshot consumers. Invalidates completeness;
+    /// the first query after mutation scans once, then caches its result again.
+    /// Prefer collecting new records so their count is accumulated during construction.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, ScopedLine> {
+        self.inexact.take();
+        self.records.iter_mut()
+    }
+}
+impl std::ops::Deref for ScopeLines {
+    type Target = [ScopedLine];
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
+}
+impl<'a> IntoIterator for &'a ScopeLines {
+    type Item = &'a ScopedLine;
+    type IntoIter = std::slice::Iter<'a, ScopedLine>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.records.iter()
+    }
+}
+impl<'a> IntoIterator for &'a mut ScopeLines {
+    type Item = &'a mut ScopedLine;
+    type IntoIter = std::slice::IterMut<'a, ScopedLine>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
 /// Read-only scope input shared by editor features and the completion engine.
 pub trait ScopeProvider: Send + Sync {
     /// Buffer transaction identity.
@@ -68,14 +125,19 @@ pub struct ScopeSnapshot {
     /// Half-open line interval represented by `lines`.
     pub range: Range<usize>,
     /// One scope record per requested line.
-    pub lines: Vec<ScopedLine>,
+    pub lines: ScopeLines,
     /// Table resolving the document-local stack IDs.
     pub stacks: ScopeStacks,
 }
 impl ScopeSnapshot {
-    /// True when every requested line has exact scopes.
+    /// True when every requested line has exact scopes; O(1) for published snapshots.
+    /// Legacy mutable iteration through `lines` requires one scan to refresh its count.
     pub fn complete(&self) -> bool {
-        self.lines.iter().all(|line| line.exact)
+        *self
+            .lines
+            .inexact
+            .get_or_init(|| self.lines.iter().filter(|line| !line.exact).count())
+            == 0
     }
     /// Returns scopes without parsing, with UTF-8 and line bounds checked.
     pub fn scope_at(&self, line: usize, byte: usize) -> Option<ScopeStackId> {

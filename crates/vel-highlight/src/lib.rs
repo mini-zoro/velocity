@@ -20,7 +20,8 @@ mod scopes;
 mod viewport;
 use scopes::ScopeInterner;
 pub use scopes::{
-    ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine, SymbolList,
+    ScopeLines, ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine,
+    SymbolList,
 };
 use vel_text::Text;
 pub use viewport::{ViewportHighlighter, ViewportOptions, ViewportProgress};

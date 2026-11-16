@@ -1,0 +1,23 @@
+Sampling process 42 for 4 seconds with 1 millisecond of run time between samples
+Call graph:
+    1000 Thread_100   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 1000 start
+    +   1000 main
+    +     1000 -[NSApplication run]
+    +       1000 CFRunLoopRunSpecific
+    +         1000 __CFRunLoopRun
+    +           730 __CFRunLoopServiceMachPort
+    +           ! 730 mach_msg
+    +           !   730 mach_msg_overwrite
+    +           !     730 mach_msg2_trap
+    +           170 __CFRunLoopDoSources0
+    +           : 170 Renderer::render
+    +           :   100 CAMetalLayer nextDrawable
+    +           :   | 100 mach_msg
+    +           :   |   100 mach_msg2_trap
+    +           :   70 Queue::write_buffer
+    +           100 App::scene
+    1000 Thread_200   highlight-worker
+    + 1000 mach_msg2_trap
+Total number in stack (recursive counted multiple, when >=5):
+        1730 mach_msg2_trap
