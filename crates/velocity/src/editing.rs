@@ -1087,20 +1087,22 @@ impl Editor {
         Ok(())
     }
     pub fn fold_command(&mut self, name: &str, args: &Value) -> Result<(), String> {
-        if name == "unfold_all" {
-            self.buffer.erase_regions(self.id, FOLDS);
-            self.layout.borrow_mut().invalidate();
+        if name == "unfold_all" || (name == "fold_by_level" && args["level"] == 0) {
+            self.set_folded(Vec::new());
             return Ok(());
         }
         let selections: Vec<_> = self.buffer.view(self.id).sel().iter().collect();
         let mut current = self.folded();
         if name == "unfold" {
+            // Remove only the visible parent; its nested children stay folded.
+            let visible = vel_render::fold::outermost(current.iter().map(|r| r.to_range()));
             current.retain(|fold| {
-                !selections.iter().any(|r| {
-                    let row = self.text.byte_to_line(r.b);
-                    (fold.begin() <= r.end() && r.begin() <= fold.end())
-                        || self.text.byte_to_line(fold.begin()) == row
-                })
+                !visible.contains(&fold.to_range())
+                    || !selections.iter().any(|r| {
+                        let row = self.text.byte_to_line(r.b);
+                        (fold.begin() <= r.end() && r.begin() <= fold.end())
+                            || self.text.byte_to_line(fold.begin()) == row
+                    })
             });
         } else {
             let language = self.language.borrow();
@@ -1110,6 +1112,9 @@ impl Editor {
                 .ok_or("Syntax analysis is still running; retry folding shortly")?;
             if name == "fold_by_level" || name == "fold_tag_attributes" {
                 let level = args["level"].as_u64().unwrap_or(1) as usize;
+                if name == "fold_by_level" {
+                    current.clear();
+                }
                 current.extend(
                     analysis
                         .folds
@@ -1146,26 +1151,217 @@ impl Editor {
                 }
             }
         }
-        current.sort_by_key(|r| (r.begin(), std::cmp::Reverse(r.end())));
-        let mut disjoint: Vec<Region> = Vec::new();
-        for region in current {
-            if disjoint
-                .last()
-                .is_none_or(|last| last.end() <= region.begin())
-            {
-                disjoint.push(region);
-            }
-        }
-        self.buffer.add_regions(self.id, FOLDS, disjoint, true);
-        self.layout.borrow_mut().invalidate();
+        self.set_folded(current);
         Ok(())
     }
+    /// Installs a fold forest without discarding nested children.
+    pub fn set_folded(&mut self, mut folds: Vec<Region>) {
+        folds.retain(|r| !r.empty() && r.end() <= self.text.len_bytes());
+        folds.sort_by_key(|r| (r.begin(), std::cmp::Reverse(r.end())));
+        folds.dedup_by_key(|r| r.to_range());
+        let old = self.buffer.view(self.id).sel();
+        let primary = old.primary_index();
+        let outer = vel_render::fold::outermost(folds.iter().map(|r| r.to_range()));
+        let mut at = 0;
+        let mut snap = |p| {
+            while outer.get(at).is_some_and(|f| f.end <= p) {
+                at += 1;
+            }
+            outer
+                .get(at)
+                .filter(|f| f.start < p && p < f.end)
+                .map_or(p, |f| f.start)
+        };
+        let selection = selection_primary(
+            old.iter()
+                .map(|r| {
+                    let a = snap(r.begin());
+                    let b = snap(r.end());
+                    Region {
+                        a: if r.a <= r.b { a } else { b },
+                        b: if r.a <= r.b { b } else { a },
+                        ..r
+                    }
+                })
+                .collect(),
+            primary,
+        );
+        let moved = old != &selection;
+        self.buffer.set_selection(self.id, selection);
+        self.buffer.add_regions(self.id, FOLDS, folds, true);
+        self.annotations.borrow_mut().reset_folds(self.id);
+        self.layout.borrow_mut().invalidate();
+        if moved {
+            self.sync();
+        }
+    }
+    /// Returns the live fold forest. Selection endpoints reveal every enclosing
+    /// fold, including queries after Find/Goto/undo and before the next scene.
     pub fn folded(&self) -> Vec<Region> {
-        self.buffer
+        self.annotations.borrow_mut().folded(&self.buffer, self.id)
+    }
+
+    /// Captures the visible forest, including reveals since the last text edit.
+    pub(crate) fn folded_view_state(
+        &self,
+        id: vel_buffer::ViewId,
+        scroll: (f64, f64),
+    ) -> vel_session::ViewState {
+        let mut state = vel_session::ViewState::capture(&self.buffer, id, scroll);
+        state.folds = self
+            .annotations
+            .borrow_mut()
+            .folded(&self.buffer, id)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        state
+    }
+
+    /// Native undo history restores raw region sets. The saved live forest is
+    /// authoritative for each sheet, including already imported clone views.
+    pub(crate) fn restore_folded_view_state(
+        &mut self,
+        state: &vel_session::ViewState,
+        id: vel_buffer::ViewId,
+    ) {
+        let text = self.buffer.text();
+        let folds = state
+            .folds
+            .iter()
+            .map(|p| {
+                Region::new(
+                    text.floor_char_boundary(p.a.min(text.len_bytes())),
+                    text.floor_char_boundary(p.b.min(text.len_bytes())),
+                )
+            })
+            .filter(|r| !r.empty())
+            .collect();
+        self.buffer.add_regions(id, FOLDS, folds, true);
+        self.annotations.borrow_mut().reset_folds(id);
+        self.layout.borrow_mut().invalidate();
+    }
+
+    /// Fold-aware horizontal motions run at the host's first text-command hook.
+    pub(crate) fn fold_navigation_command(&mut self, name: &str, args: &Value) -> bool {
+        if self
+            .buffer
             .view(self.id)
             .get_regions(FOLDS)
-            .map(|set| set.regions.clone())
-            .unwrap_or_default()
+            .is_none_or(|set| set.regions.is_empty())
+        {
+            return false;
+        }
+        let mut folds = self.folded();
+        // Expose selected/deleted bytes, and insertion at a hidden fold end. Public
+        // build 4143 notes (https://www.sublimetext.com/download) specify the fold
+        // range, but not insertion at its end: reveal it so the caret and edit agree.
+        if matches!(
+            name,
+            "insert"
+                | "paste"
+                | "paste_and_indent"
+                | "insert_snippet"
+                | "left_delete"
+                | "right_delete"
+                | "delete_word"
+                | "insert_best_completion"
+                | "commit_completion"
+        ) {
+            let insertion = !matches!(name, "left_delete" | "right_delete" | "delete_word");
+            let mut edits: Vec<_> = self
+                .buffer
+                .view(self.id)
+                .sel()
+                .iter()
+                .map(|r| {
+                    if !r.empty() {
+                        r.to_range()
+                    } else if name == "left_delete"
+                        || (name == "delete_word" && args["forward"] != true)
+                    {
+                        self.text.prev_grapheme_boundary(r.b)..r.b
+                    } else if name == "right_delete" || name == "delete_word" {
+                        r.b..self.text.next_grapheme_boundary(r.b)
+                    } else {
+                        r.b..r.b
+                    }
+                })
+                .collect();
+            if !edits.is_sorted_by_key(|r| r.start) {
+                edits.sort_unstable_by_key(|r| r.start);
+            }
+            let mut at = 0;
+            folds.retain(|f| {
+                while edits.get(at).is_some_and(|r| r.end <= f.begin()) {
+                    at += 1;
+                }
+                !edits.get(at).is_some_and(|r| {
+                    r.start < f.end()
+                        || (insertion && r.is_empty() && r.start == f.end() && {
+                            let row = self.text.byte_to_line(f.end());
+                            let start = self.text.line_to_byte(row);
+                            // Only an empty projected suffix is drawn on
+                            // the header; a visible closing line starts at 0.
+                            f.end() > start
+                                && f.end() == start + crate::layout::body_len(&self.text, row)
+                        })
+                })
+            });
+        }
+        if self
+            .buffer
+            .view(self.id)
+            .get_regions(FOLDS)
+            .is_some_and(|set| set.regions != folds)
+        {
+            self.buffer.add_regions(self.id, FOLDS, folds.clone(), true);
+            self.annotations.borrow_mut().reset_folds(self.id);
+            self.layout.borrow_mut().invalidate();
+        }
+        if folds.is_empty() {
+            return false;
+        }
+        if name != "move" || args["by"].as_str().unwrap_or("characters") != "characters" {
+            return false;
+        }
+        let forward = args["forward"].as_bool().unwrap_or(false);
+        let extend = args["extend"].as_bool().unwrap_or(false);
+        let old = self.buffer.view(self.id).sel();
+        let primary = old.primary_index();
+        let outer = vel_render::fold::outermost(folds.iter().map(|r| r.to_range()));
+        let mut fold_at = 0;
+        let regions = old
+            .iter()
+            .map(|r| {
+                let mut at = if !extend && !r.empty() {
+                    if forward { r.end() } else { r.begin() }
+                } else {
+                    let next = if forward {
+                        self.text.next_grapheme_boundary(r.b)
+                    } else {
+                        self.text.prev_grapheme_boundary(r.b)
+                    };
+                    while outer.get(fold_at).is_some_and(|f| f.end < r.b) {
+                        fold_at += 1;
+                    }
+                    outer
+                        .get(fold_at)
+                        .filter(|f| {
+                            if forward {
+                                f.start <= r.b && next < f.end
+                            } else {
+                                f.start < next && r.b <= f.end
+                            }
+                        })
+                        .map_or(next, |f| if forward { f.end } else { f.start })
+                };
+                at = at.min(self.text.len_bytes());
+                Region::new(if extend { r.a } else { at }, at)
+            })
+            .collect();
+        self.set_selection(selection_primary(regions, primary));
+        true
     }
 }
 pub(crate) fn selection_primary(mut regions: Vec<Region>, primary: usize) -> Selection {

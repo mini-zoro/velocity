@@ -2056,8 +2056,20 @@
   // https://docs.sublimetext.io/reference/keyboard_shortcuts_osx.html
   {"keys": ["ctrl+super+shift+f"], "command": "toggle_distraction_free"},
   {"keys": ["ctrl+alt+up"], "command": "scroll_lines", "args": {"amount": 1}},
-  {"keys": ["ctrl+alt+down"], "command": "scroll_lines", "args": {"amount": -1}}
+  {"keys": ["ctrl+alt+down"], "command": "scroll_lines", "args": {"amount": -1}},
   // That reference does not document Cmd+plus. Retain the current Cmd+= zoom
   // binding until its requested alias can be confirmed from a documentation source.
-
+  // Lane B round 16: sections 5–9. Existing spelling chords stay unchanged.
+  // Unfold-all chord: https://sublimetext-markdown.github.io/MarkdownEditing/usage/
+  // Keep the original super+k super+0 -> unfold_all and level-1 entries above.
+  {"keys": ["super+k", "super+2"], "command": "fold_by_level", "args": {"level": 2}},
+  {"keys": ["super+k", "super+3"], "command": "fold_by_level", "args": {"level": 3}},
+  {"keys": ["super+k", "super+4"], "command": "fold_by_level", "args": {"level": 4}},
+  {"keys": ["super+k", "super+5"], "command": "fold_by_level", "args": {"level": 5}},
+  {"keys": ["super+k", "super+6"], "command": "fold_by_level", "args": {"level": 6}},
+  {"keys": ["super+k", "super+7"], "command": "fold_by_level", "args": {"level": 7}},
+  {"keys": ["super+k", "super+8"], "command": "fold_by_level", "args": {"level": 8}},
+  {"keys": ["super+k", "super+9"], "command": "fold_by_level", "args": {"level": 9}},
+  {"keys": ["super+k", "super+j"], "command": "unfold_all"},
+  {"keys": ["super+k", "super+t"], "command": "fold_tag_attributes"}
 ]

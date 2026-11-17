@@ -41,6 +41,16 @@ fn corner_distance(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
 @fragment fn fs_main(input: Out) -> @location(0) vec4<f32> {
     if input.position.x < input.clip.x || input.position.y < input.clip.y || input.position.x >= input.clip.z || input.position.y >= input.clip.w { discard; }
     let kind = u32(input.primitive.x);
+    if kind == 6u {
+        let edge = min(min(input.local.x, input.size.x-input.local.x), min(input.local.y, input.size.y-input.local.y));
+        if edge >= input.params.x { discard; }
+        return input.color;
+    }
+    if kind == 5u {
+        // One stippled guide per quad. Period/on-length are in physical pixels.
+        if (input.local.y % max(input.params.x, 1.)) >= input.params.y { discard; }
+        return input.color;
+    }
     if kind == 2u { return textureSampleLevel(atlas,atlas_sampler,input.uv,i32(input.primitive.y),0.) * input.color; }
     if kind == 4u {
         var coverage = 1. - smoothstep(-0.5,0.5,corner_distance(input.local,input.size,input.params));

@@ -6,7 +6,8 @@
   "font_size": 13,
   "line_numbers": true,
   "gutter": true,
-  "draw_white_space": "none",
+  // Public settings reference (https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html): selection by default.
+  "draw_white_space": ["selection"],
   // Drag selected text with the mouse to move it; hold Option when releasing to copy.
   "drag_text": true,
   // Pressing Enter on a line that only holds indentation leaves it empty.
@@ -35,7 +36,8 @@
   "fallback_encoding": "Western (Windows 1252)",
   "scroll_past_end": false,
   "caret_style": "solid",
-  "highlight_line": true,
+  // Public settings reference: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
+  "highlight_line": false,
   "auto_match_enabled": true,
   // Write through a temporary file and rename it over the original. Even when true, files with
   // hard links, another owner, extended attributes or a read-only mode are written in place.
@@ -68,10 +70,10 @@
   "wrap_width_style": "auto",
   "indent_subsequent_lines": true,
   "draw_indent_guides": true,
-  "indent_guide_options": [
-    "draw_normal",
-    "draw_active"
-  ],
+  // Active guides disabled by default: https://www.sublimetext.com/updates/2/stable/release_notes.html
+  "indent_guide_options": ["draw_normal"],
+  // Public settings reference (Visual Settings): other selected-word occurrences.
+  "match_selection": true,
   "caret_extra_width": 0,
   "line_padding_top": 0,
   "line_padding_bottom": 0,
@@ -125,14 +127,19 @@
   "git_diff_target": "index",
   "mini_diff": true,
   "spell_check": false,
-  "spelling_selector": "comment, string, text",
+  // Public scope selector reference: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#system-and-miscellaneous-settings
+  "spelling_selector": "markup.raw, source string.quoted - punctuation - meta.preprocessor.c.include, source comment - source comment.block.preprocessor, -(source, constant, keyword, storage, support, variable, markup.underline.link, meta.tag)",
   "dictionary": "Packages/Language - English/en_US.dic",
   "added_words": [],
   "ignored_words": [],
   "sublime_merge_path": "",
+  // https://www.sublimetext.com/docs/vintage.html#enabling-vintage
+  "ignored_packages": ["Vintage"],
   "vintage_enabled": false,
   "vintage_start_in_command_mode": false,
-  "vintage_ctrl_keys": false,
+  // Null uses the documented platform default (enabled on macOS).
+  // https://www.sublimetext.com/docs/vintage.html#ctrl-keys
+  "vintage_ctrl_keys": null,
   "vintage_use_clipboard": false,
   "theme": "auto",
   "dark_theme": "Velocity.sublime-theme",

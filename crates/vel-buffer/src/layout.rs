@@ -3,6 +3,9 @@ use unicode_width::UnicodeWidthStr;
 use vel_text::Text;
 /// Geometry interface supplied by layout; all offsets are UTF-8 bytes.
 pub trait VerticalLayout {
+    /// Refreshes cached geometry before a command, including internal macro keys.
+    /// Stateless layouts need no synchronization.
+    fn synchronize(&self, _buffer: &crate::Buffer, _view: crate::ViewId) {}
     /// Horizontal position of a scalar boundary.
     fn x_of(&self, text: &Text, offset: usize) -> f64;
     /// Closest grapheme boundary on another LF line at the requested position.

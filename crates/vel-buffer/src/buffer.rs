@@ -152,6 +152,12 @@ struct Group {
     run: Option<Run>,
     has_word: bool,
 }
+/// A buffer-local undo boundary, valid while its revision remains in undo history.
+#[derive(Clone, Copy, Debug)]
+pub struct UndoMarker {
+    buffer: BufferId,
+    state: u64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Run {
     Word,
@@ -373,6 +379,42 @@ impl Buffer {
     /// Ends continuous typing explicitly.
     pub fn break_undo_group(&mut self) {
         self.group_open = false;
+    }
+    /// Starts a boundary that can later glue completed native typing groups.
+    /// Recording a marker does not change undo/redo behavior until gluing.
+    pub fn mark_undo_group(&mut self) -> UndoMarker {
+        self.break_undo_group();
+        UndoMarker {
+            buffer: self.id,
+            state: self.state,
+        }
+    }
+    /// Glues the undo groups after `marker` into one, preserving all transactions
+    /// and soft-history events. Returns false if the boundary was undone, pruned,
+    /// or belongs to another buffer; unrelated history is never absorbed.
+    pub fn glue_undo_groups(&mut self, marker: UndoMarker) -> bool {
+        self.break_undo_group();
+        if marker.buffer != self.id || marker.state == self.state {
+            return false;
+        }
+        let Some(start) = self.undo.iter().rposition(|g| {
+            g.steps
+                .first()
+                .is_some_and(|s| s.before_state == marker.state)
+        }) else {
+            return false;
+        };
+        let groups = self.undo.split_off(start);
+        let mut group = Group {
+            steps: Vec::new(),
+            run: None,
+            has_word: false,
+        };
+        for mut next in groups {
+            group.steps.append(&mut next.steps);
+        }
+        self.undo.push_back(group);
+        true
     }
     /// Replaces all history limits and immediately enforces them.
     pub fn set_history_limits(&mut self, mut limits: HistoryLimits) {

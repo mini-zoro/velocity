@@ -17,12 +17,43 @@ pub struct FontStyle {
 pub struct SolidRect {
     /// Bounds in logical points.
     pub rect: Rect,
-    /// Corner radius in points; zero is a solid rectangle.
+    /// Corner radius in points; zero is solid. Reserved negative style tags are
+    /// emitted only by [`SolidRect::stippled_guide`] and [`SolidRect::outline`].
     pub radius: f32,
     /// Fill color.
     pub color: Color,
     /// Scissor bounds, in logical points.
     pub clip: Rect,
+}
+impl SolidRect {
+    /// One vertical stippled guide. The reserved negative radius is a compact
+    /// style tag, so existing scene translation/clipping and rectangle batches
+    /// carry the stroke without another primitive array or draw call.
+    pub fn stippled_guide(rect: Rect, clip: Rect, color: Color) -> Self {
+        Self {
+            rect,
+            clip,
+            color,
+            radius: -1.,
+        }
+    }
+    /// A one-point outline carried by a single rectangle instance.
+    pub fn outline(rect: Rect, clip: Rect, color: Color) -> Self {
+        Self {
+            rect,
+            clip,
+            color,
+            radius: -2.,
+        }
+    }
+    /// Whether this rectangle carries the reserved outline style tag.
+    pub fn is_outline(&self) -> bool {
+        self.radius == -2.
+    }
+    /// Whether this rectangle carries the reserved vertical-guide style tag.
+    pub fn is_stippled_guide(&self) -> bool {
+        self.radius == -1.
+    }
 }
 /// A single-baseline text run; tab expansion belongs to the UI layout.
 #[derive(Clone, Debug)]

@@ -1,10 +1,13 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+mod insert;
 mod motion;
+pub use insert::InsertChange;
 use motion::{Motion, bol, end, first, line_range, normal};
 use std::{collections::BTreeMap, ops::Range};
 use vel_buffer::{
-    Bias, Buffer, BufferId, ChangeId, Edit, EditKind, Region, Selection, VerticalLayout, ViewId,
+    Bias, Buffer, BufferId, ChangeId, Edit, EditKind, Region, Selection, UndoMarker,
+    VerticalLayout, ViewId,
 };
 
 /// A decoded editor key. Text input carries complete Unicode graphemes.
@@ -22,6 +25,10 @@ pub enum Key {
     Backspace,
     /// A control chord, with a lowercase character.
     Ctrl(char),
+    /// An Alt/Option chord for sub-word motions.
+    Alt(char),
+    /// A committed ordinary-editor insertion or selection motion.
+    HostInsert(InsertChange),
     /// Left arrow.
     Left,
     /// Right arrow.
@@ -102,6 +109,7 @@ pub struct Register {
 }
 #[derive(Debug, Clone)]
 struct Group {
+    // Transactions, not native undo groups: continuous typing can merge them.
     steps: usize,
     before: Selection,
     after: Selection,
@@ -135,6 +143,7 @@ pub struct Vintage {
     change_ran: bool,
     steps: usize,
     before: Option<Selection>,
+    undo_start: Option<UndoMarker>,
     host_action: Option<(Selection, Vec<Key>)>,
     undo: Vec<Group>,
     redo: Vec<Group>,
@@ -161,6 +170,11 @@ pub struct Vintage {
     viewport_height: Option<usize>,
     insert_count: usize,
     inserted: String,
+    host_insert: bool,
+    insert_snapshot: Option<insert::Snapshot>,
+    // Session snapshots are cold outside insert mode. Keep them off the inline
+    // engine/editor layout, including editors where Vintage is disabled.
+    insert_session: Option<Box<insert::Session>>,
 }
 impl Default for Vintage {
     fn default() -> Self {
@@ -189,6 +203,7 @@ impl Vintage {
             change_ran: false,
             steps: 0,
             before: None,
+            undo_start: None,
             host_action: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -215,6 +230,9 @@ impl Vintage {
             viewport_height: None,
             insert_count: 1,
             inserted: String::new(),
+            host_insert: false,
+            insert_snapshot: None,
+            insert_session: None,
         }
     }
     /// Current mode.
@@ -305,6 +323,10 @@ impl Vintage {
         layout: &dyn VerticalLayout,
     ) -> Outcome {
         let key = key.into();
+        if matches!(key,Key::Alt(c) if !matches!(c,'w'|'b')) {
+            return Outcome::PassThrough;
+        }
+        self.observe_insert(buffer, view);
         if self.bound != Some((buffer.id(), view))
             || self.seen.is_some_and(|id| id != buffer.change_id())
         {
@@ -313,19 +335,46 @@ impl Vintage {
             self.steps = 0;
             self.change_ran = false;
             self.before = None;
+            self.undo_start = None;
             self.host_action = None;
             self.replace_restore.clear();
             self.command_keys.clear();
+            self.visual.clear();
+            self.reset();
+            if self.mode != Mode::Insert {
+                self.mode = Mode::Normal;
+            }
             if self.bound.is_some_and(|bound| bound != (buffer.id(), view)) {
                 self.marks.clear();
-                self.visual.clear();
-                self.reset();
                 self.mode = Mode::Normal;
             }
             self.bound = Some((buffer.id(), view));
         }
+        if self.mode == Mode::Normal && buffer.view(view).sel().iter().any(|r| !r.empty()) {
+            self.mode = Mode::VisualChar;
+            self.visual = buffer
+                .view(view)
+                .sel()
+                .iter()
+                .map(|r| {
+                    if r.empty() {
+                        r
+                    } else if r.a <= r.b {
+                        Region::new(r.a, buffer.text().prev_grapheme_boundary(r.b))
+                    } else {
+                        Region::new(buffer.text().prev_grapheme_boundary(r.a), r.b)
+                    }
+                })
+                .collect();
+            // The visual model stores inclusive endpoints. Publish it even for
+            // empty host carets, so every operator sees one selected grapheme.
+            self.render_visual(buffer, view, layout);
+        }
         self.request = None;
         self.replay_budget = 10000;
+        if self.mode == Mode::Insert && matches!(key, Key::Escape | Key::Ctrl('[')) {
+            self.finish_host_insert(buffer, view);
+        }
         if let Some(reg) = self.recording
             && !(key == Key::Char('q')
                 && self.mode == Mode::Normal
@@ -336,6 +385,7 @@ impl Vintage {
         }
         let outcome = self.feed(key, buffer, view, layout);
         self.seen = Some(buffer.change_id());
+        self.observe_insert(buffer, view);
         if let Some(command) = self.request.take() {
             Outcome::NeedsCommand(command)
         } else {
@@ -349,8 +399,21 @@ impl Vintage {
         view: ViewId,
         layout: &dyn VerticalLayout,
     ) -> Outcome {
+        layout.synchronize(buffer, view);
+        // Stored inclusive visual endpoints may outlive a host undo/redo. Check
+        // scalar boundaries before any motion, object, selection or prompt uses them.
+        for r in &mut self.visual {
+            r.a = buffer
+                .text()
+                .floor_char_boundary(r.a.min(buffer.text().len_bytes()));
+            r.b = buffer
+                .text()
+                .floor_char_boundary(r.b.min(buffer.text().len_bytes()));
+        }
         if self.before.is_none() {
             self.before = Some(buffer.view(view).sel().clone());
+            self.undo_start
+                .get_or_insert_with(|| buffer.mark_undo_group());
             if self.mode == Mode::Insert && self.command_keys.is_empty() {
                 self.command_keys.push(Key::Char('i'));
             }
@@ -379,12 +442,15 @@ impl Vintage {
                 self.undo.push(group);
                 self.redo.clear();
             }
-            if self.change_ran && !self.repeating {
+            // Host insert sessions count observed transactions in `steps` without
+            // going through `apply`, so a recorded step is a dot target as well.
+            if (self.change_ran || self.steps > 0) && !self.repeating {
                 self.last_change = self.command_keys.clone();
             }
             self.change_ran = false;
             self.steps = 0;
             self.before = None;
+            self.undo_start = None;
             self.command_keys.clear();
             self.register = '"';
             buffer.break_undo_group();
@@ -419,7 +485,21 @@ impl Vintage {
     }
     fn escape(&mut self, buffer: &mut Buffer, view: ViewId) {
         if matches!(self.mode, Mode::Insert | Mode::Replace) {
-            if self.insert_count > 1 && !self.inserted.is_empty() {
+            let recorded: Vec<_> = self
+                .command_keys
+                .iter()
+                .filter(|k| matches!(k, Key::HostInsert(_)))
+                .cloned()
+                .collect();
+            if self.insert_count > 1 && !recorded.is_empty() {
+                for _ in 1..self.insert_count {
+                    for key in &recorded {
+                        if let Key::HostInsert(record) = key {
+                            self.replay_insert(record.clone(), buffer, view);
+                        }
+                    }
+                }
+            } else if self.insert_count > 1 && !self.inserted.is_empty() {
                 let text = self.inserted.repeat(self.insert_count - 1);
                 self.insert_text(buffer, view, &text, false);
             }
@@ -439,6 +519,13 @@ impl Vintage {
                 view,
                 Self::selection(regions, buffer.view(view).sel().primary_index()),
             );
+            // Our vi semantics: native per-word undo while inserting, then one
+            // host undo/redo for the completed insertion/change. Public Vintage
+            // docs confirm ordinary insert editing, but do not specify gluing:
+            // https://www.sublimetext.com/docs/vintage.html#whats-not
+            if let Some(marker) = self.undo_start.take() {
+                buffer.glue_undo_groups(marker);
+            }
         } else if self.is_visual() {
             self.collapse_visual(buffer, view);
         }
@@ -471,6 +558,15 @@ impl Vintage {
             return self.prompt_key(key, buffer, view, layout);
         }
         if matches!(self.mode, Mode::Insert | Mode::Replace) {
+            if let Key::HostInsert(record) = key {
+                self.replay_insert(record, buffer, view);
+                return Outcome::Handled;
+            }
+            // https://www.sublimetext.com/docs/vintage.html#whats-not:
+            // the integrated host keeps its normal insert-mode key bindings.
+            if self.mode == Mode::Insert && self.host_insert && !self.repeating {
+                return Outcome::PassThrough;
+            }
             match key {
                 Key::Char(c) => {
                     let text = c.to_string();
@@ -556,8 +652,33 @@ impl Vintage {
                     '+'
                 }
             }
+            Key::Alt(c) if matches!(c, 'w' | 'b') => {
+                self.move_key(
+                    buffer,
+                    view,
+                    layout,
+                    if c == 'w' { "alt+w" } else { "alt+b" },
+                    self.count.max(1),
+                    false,
+                );
+                self.count = 0;
+                return Outcome::Handled;
+            }
             Key::Ctrl(c) if self.settings.vintage_ctrl_keys => {
                 match c {
+                    'e' | 'y' => {
+                        // https://www.sublimetext.com/docs/vintage.html#ctrl-keys
+                        self.request = Some(Command {
+                            name: "scroll_lines",
+                            args: BTreeMap::from([(
+                                "amount".into(),
+                                (if c == 'e' { -1isize } else { 1 })
+                                    .saturating_mul(self.count.max(1) as isize)
+                                    .to_string(),
+                            )]),
+                        });
+                        self.count = 0;
+                    }
                     'r' => {
                         self.history(buffer, view, true, self.count.max(1));
                         self.reset();
@@ -868,6 +989,9 @@ impl Vintage {
                         .iter()
                         .filter_map(|r| buffer.transform_point_from(r.b, *id, Bias::Right))
                         .map(|p| {
+                            let p = buffer
+                                .text()
+                                .floor_char_boundary(p.min(buffer.text().len_bytes()));
                             Region::caret(if pending == "'" {
                                 first(buffer.text(), p)
                             } else {
@@ -1099,9 +1223,14 @@ impl Vintage {
         &mut self,
         buffer: &mut Buffer,
         view: ViewId,
-        targets: Vec<Motion>,
+        mut targets: Vec<Motion>,
         layout: &dyn VerticalLayout,
     ) {
+        for target in &mut targets {
+            target.point = buffer
+                .text()
+                .floor_char_boundary(target.point.min(buffer.text().len_bytes()));
+        }
         let regions = if self.is_visual() {
             self.visual.clone()
         } else {
@@ -1308,6 +1437,19 @@ impl Vintage {
         // Dot remembers the attempted change even when the buffer filters identical edits.
         // Undo groups below still count only actual transactions.
         self.change_ran = true;
+        for rep in &mut reps {
+            rep.caret = rep.caret.min(rep.text.len());
+            while !rep.text.is_char_boundary(rep.caret) {
+                rep.caret -= 1;
+            }
+            rep.range.start = buffer
+                .text()
+                .floor_char_boundary(rep.range.start.min(buffer.text().len_bytes()));
+            rep.range.end = buffer
+                .text()
+                .floor_char_boundary(rep.range.end.min(buffer.text().len_bytes()))
+                .max(rep.range.start);
+        }
         if reps.iter().all(|r| r.range.is_empty() && r.text.is_empty()) {
             return;
         }
@@ -1652,6 +1794,7 @@ impl Vintage {
         self.apply(buffer, view, reps);
     }
     fn enter_insert(&mut self, buffer: &mut Buffer, view: ViewId, key: char, count: usize) {
+        buffer.break_undo_group();
         self.insert_count = count;
         self.inserted.clear();
         self.replace_restore.clear();
@@ -1909,7 +2052,8 @@ impl Vintage {
                     .byte_to_line(buffer.text().prev_grapheme_boundary(r.end()))
             } else {
                 (row + count - 1).min(buffer.text().len_lines() - 1)
-            };
+            }
+            .max(row);
             let mut a = buffer.text().line_to_byte(row);
             let b = end(buffer.text(), buffer.text().line_to_byte(last));
             if a == b {
@@ -1960,22 +2104,40 @@ impl Vintage {
             };
             if let Some(group) = group {
                 let mut ok = true;
-                for _ in 0..group.steps {
-                    ok &= if redo {
+                let mut remaining = group.steps;
+                while remaining > 0 {
+                    let from = buffer.change_id();
+                    ok = if redo {
                         buffer.redo(view)
                     } else {
                         buffer.undo(view)
                     };
+                    if !ok {
+                        break;
+                    }
+                    // A native typing group may contain several transactions.
+                    // Count the transactions actually restored, never undo past it.
+                    remaining = remaining.saturating_sub((buffer.change_id().0 - from.0) as usize);
                 }
                 if ok {
-                    buffer.set_selection(
-                        view,
-                        if redo {
-                            group.after.clone()
-                        } else {
-                            group.before.clone()
-                        },
+                    let saved = if redo { &group.after } else { &group.before };
+                    let clip = |p: usize| {
+                        buffer
+                            .text()
+                            .floor_char_boundary(p.min(buffer.text().len_bytes()))
+                    };
+                    let bounded = Self::selection(
+                        saved
+                            .iter()
+                            .map(|r| Region {
+                                a: clip(r.a),
+                                b: clip(r.b),
+                                ..r
+                            })
+                            .collect(),
+                        saved.primary_index(),
                     );
+                    buffer.set_selection(view, bounded);
                     if redo {
                         self.undo.push(group);
                     } else {
@@ -2143,3 +2305,6 @@ impl Vintage {
         Outcome::Handled
     }
 }
+
+#[cfg(test)]
+mod review_tests;

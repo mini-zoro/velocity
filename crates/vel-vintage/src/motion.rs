@@ -131,6 +131,25 @@ pub(crate) fn motion(
     let row = text.byte_to_line(p);
     let last = text.len_lines().saturating_sub(1);
     let point = match key {
+        "alt+w" | "alt+b" => {
+            let mut b = vel_buffer::Buffer::new(text.clone());
+            let v = b.new_view();
+            b.set_selection(
+                v,
+                vel_buffer::Selection::from_regions([vel_buffer::Region::caret(p)]),
+            );
+            for _ in 0..count {
+                vel_buffer::ops::move_by(
+                    &mut b,
+                    v,
+                    vel_buffer::ops::MoveUnit::Subwords,
+                    key == "alt+w",
+                    false,
+                    None,
+                );
+            }
+            b.view(v).sel().primary().expect("selection").b
+        }
         "h" => {
             let mut n = p;
             for _ in 0..count {

@@ -631,14 +631,22 @@ impl Renderer {
 
             let first = self.data.len() as u32;
             for r in &layer.rects {
-                self.data.push(quad(
+                let mut q = quad(
                     r.rect,
                     r.clip,
                     r.color,
                     scale,
-                    [r.radius * scale, 0., 0., 0.],
+                    [r.radius.max(0.) * scale, 0., 0., 0.],
                     PrimitiveKind::Rect,
-                ));
+                );
+                if r.is_stippled_guide() {
+                    q.meta[0] = 5.;
+                    q.params = [4. * scale, scale, 0., 0.];
+                } else if r.is_outline() {
+                    q.meta[0] = 6.;
+                    q.params = [scale, 0., 0., 0.];
+                }
+                self.data.push(q);
             }
             self.batch(layer_index, PrimitiveKind::Rect, first);
             let first = self.data.len() as u32;

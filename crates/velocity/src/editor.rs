@@ -371,7 +371,7 @@ impl Editor {
         if reset {
             self.fields = None;
             self.completion.hide();
-            let previous = self.language.borrow_mut().take().expect("language");
+            let mut previous = self.language.borrow_mut().take().expect("language");
             if let Some(snapshot) = &previous.scopes {
                 let mut cache = self.selector_snapshots.borrow_mut();
                 crate::language::retire(std::mem::take(&mut *cache));
@@ -392,7 +392,13 @@ impl Editor {
                 &self.settings,
             );
             match result {
-                Ok(language) => *self.language.borrow_mut() = Some(language),
+                Ok(mut language) => {
+                    if self.language_buffer == Some(self.buffer.id()) {
+                        let changes = self.buffer.changes_since(previous.version);
+                        language.inherit_guides(&mut previous, changes.as_deref());
+                    }
+                    *self.language.borrow_mut() = Some(language);
+                }
                 Err(e) => self
                     .actions
                     .push(("language_error".into(), json!({"message": e}))),
@@ -1053,30 +1059,29 @@ impl Editor {
 impl Host for Editor {
     fn intercept_text_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
         let previous_boundary = self.last_visual_boundary.take();
-        if name == "move_to"
-            && matches!(args["to"].as_str(), Some("bol" | "eol"))
-            && self.layout.borrow().wrapped()
-            && self.layout.borrow().total() > 0
-        {
-            let end = args["to"] == "eol";
-            let current = self.buffer.view(self.id).sel();
-            let repeated = previous_boundary.is_some_and(|(was_end, version, selection)| {
-                was_end == end && version == self.buffer.change_id() && &selection == current
-            });
-            let extend = args["extend"].as_bool().unwrap_or(false);
-            let mut regions: Vec<_> = current
-                .iter()
-                .map(|r| {
-                    let at = crate::view::visual_line_boundary(self, r.b, end, repeated);
-                    Region::new(if extend { r.a } else { at }, at)
-                })
-                .collect();
-            let primary = regions.remove(current.primary_index());
-            regions.push(primary);
-            let selection = Selection::from_regions(regions);
-            self.set_selection(selection.clone());
-            self.last_visual_boundary = Some((end, self.buffer.change_id(), selection));
-            return Ok(true);
+        if name == "move_to" && matches!(args["to"].as_str(), Some("bol" | "eol")) {
+            self.synchronize_layout();
+            if self.layout.borrow().wrapped() || self.layout.borrow().has_folds() {
+                let end = args["to"] == "eol";
+                let current = self.buffer.view(self.id).sel();
+                let repeated = previous_boundary.is_some_and(|(was_end, version, selection)| {
+                    was_end == end && version == self.buffer.change_id() && &selection == current
+                });
+                let extend = args["extend"].as_bool().unwrap_or(false);
+                let mut regions: Vec<_> = current
+                    .iter()
+                    .map(|r| {
+                        let at = crate::view::visual_line_boundary(self, r.b, end, repeated);
+                        Region::new(if extend { r.a } else { at }, at)
+                    })
+                    .collect();
+                let primary = regions.remove(current.primary_index());
+                regions.push(primary);
+                let selection = Selection::from_regions(regions);
+                self.set_selection(selection.clone());
+                self.last_visual_boundary = Some((end, self.buffer.change_id(), selection));
+                return Ok(true);
+            }
         }
         if self.vintage_command(name, args)? {
             return Ok(true);

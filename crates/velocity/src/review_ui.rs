@@ -49,8 +49,10 @@ impl Panels {
             }
             "navigate_misspelling" => {
                 let editor = workspace.editor_mut();
-                editor.settings.set(Layer::View, "spell_check", json!(true));
-                editor.sync();
+                editor
+                    .annotations
+                    .borrow_mut()
+                    .prepare_navigation(&editor.buffer, &editor.settings);
                 self.review.navigation = Some((
                     workspace.tabs[workspace.active].sheet,
                     workspace.editor().revision,
@@ -110,6 +112,24 @@ impl Panels {
                             })
                         }));
                     }
+                }
+                // Build 4107: https://www.sublimetext.com/download#spell-checking
+                if let Some(root) = vel_spell::system_spelling_directory() {
+                    items.extend(
+                        vel_spell::SpellChecker::system_dictionaries(&root)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|path| {
+                                item(
+                                    &format!(
+                                        "System: {}",
+                                        path.file_stem().unwrap_or_default().to_string_lossy()
+                                    ),
+                                    "set_dictionary",
+                                    json!({"dictionary":path.to_string_lossy()}),
+                                )
+                            }),
+                    );
                 }
                 self.choices(workspace, items);
             }

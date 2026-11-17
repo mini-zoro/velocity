@@ -47,7 +47,7 @@ impl Heights {
         Self { tree }
     }
     fn before(&self, row: usize) -> usize {
-        let mut i = row;
+        let mut i = row.min(self.tree.len().saturating_sub(1));
         let mut n = 0;
         while i > 0 {
             n += self.tree[i];
@@ -85,13 +85,22 @@ pub struct Layout {
     lines: Vec<Line>,
     heights: Heights,
     folds: Vec<Region>,
+    requested_folds: Vec<Region>,
     count: usize,
     inline: Vec<(usize, usize)>,
     phantom_inline: Vec<(usize, usize)>,
     pub rewrapped: usize,
     pub page: usize,
+    /// Last viewport width in cells, also used for commands between frames.
+    pub viewport_width: usize,
 }
 impl Layout {
+    pub fn current(&self, identity: (BufferId, ChangeId), options: Options) -> bool {
+        self.identity == Some(identity) && self.options == options
+    }
+    pub fn has_folds(&self) -> bool {
+        !self.folds.is_empty()
+    }
     pub fn prepare_change(&mut self, identity: (BufferId, ChangeId)) {
         if self.identity != Some(identity) {
             self.invalidate();
@@ -104,7 +113,10 @@ impl Layout {
         options: Options,
         folds: &[Region],
     ) {
-        if self.identity == Some(identity) && self.options == options && self.folds == folds {
+        if self.identity == Some(identity)
+            && self.options == options
+            && self.requested_folds == folds
+        {
             return;
         }
         if self.identity != Some(identity) {
@@ -112,7 +124,11 @@ impl Layout {
         }
         self.identity = Some(identity);
         self.options = options;
-        self.folds = folds.to_vec();
+        self.requested_folds = folds.to_vec();
+        self.folds = vel_render::fold::outermost(folds.iter().map(|r| r.to_range()))
+            .into_iter()
+            .map(Region::from)
+            .collect();
         self.count = text.len_lines();
         self.rewrapped = 0;
         if options.width == 0 && folds.is_empty() {
@@ -132,21 +148,24 @@ impl Layout {
                 };
                 self.count
             ];
-            for fold in folds {
+            for fold in &self.folds {
                 let first = text.byte_to_line(fold.begin());
                 let last = text.byte_to_line(fold.end());
                 let start = text.line_to_byte(first);
                 let len = text.line_len_bytes(first);
-                self.lines[first] = Line {
-                    segments: Arc::from([Segment {
-                        bytes: 0..len,
-                        indent: 0,
-                    }]),
-                    hidden: std::iter::once(
-                        fold.begin() - start..fold.end().min(start + len) - start,
-                    )
-                    .collect(),
-                };
+                // A multiline marker consumes the header's LF. Giving it a real byte
+                // span keeps the caret before it and assigns it to exactly one wrap row.
+                let hidden_end = fold
+                    .end()
+                    .min(start + len + usize::from(first + 1 < self.count))
+                    - start;
+                let line = &mut self.lines[first];
+                let visible_start = line.segments.first().map_or(0, |s| s.bytes.start);
+                line.segments = Arc::from([Segment {
+                    bytes: visible_start..len.max(hidden_end),
+                    indent: 0,
+                }]);
+                line.hidden.push(fold.begin() - start..hidden_end);
                 for row in first + 1..last {
                     self.lines[row] = Line::default();
                 }
@@ -194,11 +213,15 @@ impl Layout {
         }
         self.identity = Some(identity);
         self.inline.clear();
-        self.folds = self
-            .folds
+        self.requested_folds = self
+            .requested_folds
             .iter()
             .map(|r| changes.transform_region(*r))
             .filter(|r| !r.empty())
+            .collect();
+        self.folds = vel_render::fold::outermost(self.requested_folds.iter().map(|r| r.to_range()))
+            .into_iter()
+            .map(Region::from)
             .collect();
         self.count = after.len_lines();
         self.rewrapped = 0;
@@ -264,7 +287,13 @@ impl Layout {
                 continue;
             }
             if fold.begin() >= start && fold.begin() <= start + len {
-                hidden.push(fold.begin() - start..fold.end().min(start + len) - start);
+                hidden.push(
+                    fold.begin() - start
+                        ..fold
+                            .end()
+                            .min(start + len + usize::from(row + 1 < self.count))
+                            - start,
+                );
             }
         }
         let units: Vec<_> = units(&content[..len], &hidden, self.options.tab)
@@ -439,48 +468,64 @@ impl Layout {
         }
     }
     pub fn segment(&self, text: &Text, row: usize, segment: usize) -> Segment {
-        if self.lines.is_empty() {
+        let row = row.min(text.len_lines().saturating_sub(1));
+        if let Some(line) = self.lines.get(row)
+            && let Some(segment) = line
+                .segments
+                .get(segment.min(line.segments.len().saturating_sub(1)))
+        {
+            let mut segment = segment.clone();
+            if segment.bytes.end == usize::MAX {
+                segment.bytes.end = text.line_len_bytes(row);
+            } else if self.identity.is_none() {
+                // Normal configured segments already contain valid byte ranges.
+                // Only an invalidated cache needs a per-row text lookup here;
+                // offset() also clamps against its actual line before returning.
+                let len = text.line_len_bytes(row);
+                // An unwrapped multiline marker can extend one byte past the
+                // header's LF. Keep that projection span for folded_segment_end.
+                segment.bytes.end = segment
+                    .bytes
+                    .end
+                    .min(len.saturating_add(usize::from(!line.hidden.is_empty())));
+            }
+            segment.bytes.start = segment.bytes.start.min(segment.bytes.end);
+            segment
+        } else {
             Segment {
                 bytes: 0..body_len(text, row),
                 indent: 0,
             }
-        } else {
-            let mut segment = self.lines[row].segments[segment].clone();
-            if segment.bytes.end == usize::MAX {
-                segment.bytes.end = text.line_len_bytes(row);
-            }
-            segment
         }
     }
     pub fn hidden(&self, row: usize) -> &[Range<usize>] {
         self.lines.get(row).map_or(&[], |l| &l.hidden)
     }
     pub fn visual_at(&self, text: &Text, byte: usize) -> (usize, Segment) {
+        let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
         let mut row = text.byte_to_line(byte);
         let mut col = byte - text.line_to_byte(row);
         if !self.lines.is_empty()
-            && self.lines[row].segments.is_empty()
+            && self.lines.get(row).is_some_and(|l| l.segments.is_empty())
             && let Some(fold) = self
                 .folds
-                .get(self.folds.partition_point(|f| f.end() <= byte))
-                .filter(|f| f.begin() <= byte && byte < f.end())
+                .get(self.folds.partition_point(|f| f.end() < byte))
+                .filter(|f| f.begin() <= byte && byte <= f.end())
         {
-            row = text.byte_to_line(fold.begin());
-            col = fold.begin() - text.line_to_byte(row);
+            let begin = text.floor_char_boundary(fold.begin().min(text.len_bytes()));
+            row = text.byte_to_line(begin);
+            col = begin - text.line_to_byte(row);
         }
         let before = if self.lines.is_empty() {
             row
         } else {
             self.heights.before(row)
         };
-        let segment = if self.lines.is_empty() {
-            0
-        } else {
-            self.lines[row]
-                .segments
+        let segment = self.lines.get(row).map_or(0, |line| {
+            line.segments
                 .partition_point(|s| s.bytes.end <= col)
-                .min(self.lines[row].segments.len().saturating_sub(1))
-        };
+                .min(line.segments.len().saturating_sub(1))
+        });
         let shift: usize = self
             .inline
             .iter()
@@ -490,17 +535,31 @@ impl Layout {
         (before + segment + shift, self.segment(text, row, segment))
     }
     pub fn column(&self, text: &Text, byte: usize) -> usize {
-        let byte = self
+        let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
+        let fold = self
             .folds
-            .get(self.folds.partition_point(|f| f.end() <= byte))
-            .filter(|f| f.begin() < byte && byte < f.end())
-            .map_or(byte, |f| f.begin());
+            .get(self.folds.partition_point(|f| f.end() < byte))
+            .filter(|f| {
+                f.begin() < byte
+                    && (byte < f.end()
+                        || (byte == f.end()
+                            && !self.lines.is_empty()
+                            && self
+                                .lines
+                                .get(text.byte_to_line(byte))
+                                .is_some_and(|l| l.segments.is_empty())))
+            });
+        let after_marker = usize::from(fold.is_some_and(|f| byte == f.end()));
+        let byte = fold.map_or(byte, |f| {
+            text.floor_char_boundary(f.begin().min(text.len_bytes()))
+        });
         let row = text.byte_to_line(byte);
         let col = byte - text.line_to_byte(row);
         if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
-            return self.long_query(text, row, col, |i, a, c| {
-                c + i.byte_to_column(col.saturating_sub(a))
-            });
+            return after_marker
+                + self.long_query(text, row, col, |i, a, c| {
+                    c + i.byte_to_column(col.saturating_sub(a))
+                });
         }
         let line = text.line(row).to_string();
         let (_, segment) = self.visual_at(text, byte);
@@ -511,7 +570,9 @@ impl Layout {
             .filter(|(at, _)| *at >= start + segment.bytes.start && *at < byte)
             .map(|(_, n)| n)
             .sum();
-        gaps + segment.indent
+        after_marker
+            + gaps
+            + segment.indent
             + units(&line, self.hidden(row), self.options.tab)
                 .iter()
                 .filter(|u| {
@@ -522,7 +583,9 @@ impl Layout {
                 .sum::<usize>()
     }
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
+        let visual = visual.min(self.total().saturating_sub(1));
         let (row, n) = self.locate(visual);
+        let row = row.min(text.len_lines().saturating_sub(1));
         let segment = self.segment(text, row, n);
         if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
             let x = if x.is_finite() { x.max(0.) } else { 0. };
@@ -540,20 +603,56 @@ impl Layout {
         {
             let gap = self.phantom_gap(text.line_to_byte(row) + unit.bytes.start) as f64;
             if x <= col + gap {
-                return text.line_to_byte(row) + unit.bytes.start;
+                return text.floor_char_boundary(
+                    (text.line_to_byte(row) + unit.bytes.start).min(text.len_bytes()),
+                );
             }
             col += gap;
             if x <= col + unit.width as f64 / 2. {
-                return text.line_to_byte(row) + unit.bytes.start;
+                return text.floor_char_boundary(
+                    (text.line_to_byte(row) + unit.bytes.start).min(text.len_bytes()),
+                );
             }
             col += unit.width as f64;
         }
-        let end = text.line_to_byte(row) + segment.bytes.end;
+        if let Some(end) = self.folded_segment_end(text, row, visual, &segment) {
+            return end;
+        }
+        let end =
+            text.line_to_byte(row) + line.floor_char_boundary(segment.bytes.end.min(line.len()));
         if segment.bytes.end < body_len(text, row) {
             text.prev_grapheme_boundary(end)
         } else {
             end
         }
+    }
+    /// Caret endpoint of a marker ending this segment, shared by hit testing and
+    /// visual EOL. A closing line on a separate row must not capture its header.
+    pub(crate) fn folded_segment_end(
+        &self,
+        text: &Text,
+        row: usize,
+        visual: usize,
+        segment: &Segment,
+    ) -> Option<usize> {
+        let row = row.min(text.len_lines().saturating_sub(1));
+        let hidden = self
+            .hidden(row)
+            .iter()
+            .find(|r| r.end == segment.bytes.end)?;
+        let start = text.line_to_byte(row);
+        let fold = self
+            .folds
+            .get(
+                self.folds
+                    .partition_point(|f| f.begin() < start + hidden.start),
+            )
+            .filter(|f| f.begin() == start + hidden.start)?;
+        Some(if self.visual_at(text, fold.end()).0 == visual {
+            text.floor_char_boundary(fold.end().min(text.len_bytes()))
+        } else {
+            text.floor_char_boundary((start + hidden.start).min(text.len_bytes()))
+        })
     }
     fn long_query<T>(
         &self,
@@ -564,8 +663,8 @@ impl Layout {
     ) -> T {
         self.long.query(
             text,
-            self.identity.expect("configured layout"),
-            row,
+            self.identity.unwrap_or((BufferId(0), ChangeId(0))),
+            row.min(text.len_lines().saturating_sub(1)),
             self.options.tab,
             byte,
             f,
@@ -598,6 +697,7 @@ impl Layout {
         })
     }
     pub fn long_motion(&self, text: &Text, byte: usize, forward: bool, word: bool) -> usize {
+        let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
         let row = text.byte_to_line(byte);
         let start = text.line_to_byte(row);
         if forward && byte == start + body_len(text, row) && byte < text.len_bytes() {
@@ -620,7 +720,8 @@ impl Layout {
     }
     pub fn visible_bytes(&self, text: &Text, first: usize, count: usize) -> Range<usize> {
         let (a, _) = self.locate(first);
-        let (b, _) = self.locate(first + count);
+        let a = a.min(text.len_lines().saturating_sub(1));
+        let (b, _) = self.locate(first.saturating_add(count));
         text.line_to_byte(a)..if b + 1 < text.len_lines() {
             text.line_to_byte(b + 1)
         } else {
@@ -637,6 +738,34 @@ impl VerticalLayout for Layout {
     }
     fn lines_per_page(&self) -> usize {
         self.page.max(1)
+    }
+}
+/// Revalidates geometry at each internal vi key, including edit/motion macro
+/// sequences that execute entirely between two frames. Unchanged keys are O(1).
+pub(crate) struct MotionLayout<'a> {
+    pub layout: &'a std::cell::RefCell<Layout>,
+    pub annotations: &'a std::cell::RefCell<crate::annotations::Annotations>,
+    pub options: Options,
+}
+impl VerticalLayout for MotionLayout<'_> {
+    fn synchronize(&self, buffer: &vel_buffer::Buffer, view: vel_buffer::ViewId) {
+        let identity = (buffer.id(), buffer.change_id());
+        if self.layout.borrow().current(identity, self.options) {
+            return;
+        }
+        let folds = self.annotations.borrow_mut().folded(buffer, view);
+        self.layout
+            .borrow_mut()
+            .configure(buffer.text(), identity, self.options, &folds);
+    }
+    fn x_of(&self, text: &Text, offset: usize) -> f64 {
+        self.layout.borrow().x_of(text, offset)
+    }
+    fn offset_at(&self, text: &Text, line: usize, x: f64) -> usize {
+        self.layout.borrow().offset_at(text, line, x)
+    }
+    fn lines_per_page(&self) -> usize {
+        self.layout.borrow().lines_per_page()
     }
 }
 /// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
@@ -656,7 +785,8 @@ pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit
                 width: 1,
             });
             column += 1;
-            at = fold.end;
+            // A stale cache must not turn the next string slice into a split scalar.
+            at = line.ceil_char_boundary(fold.end.min(line.len()));
             fold_index += 1;
             if fold.is_empty() { /* A fold starting at EOL still draws its marker below. */ }
             continue;
@@ -692,6 +822,7 @@ pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit
 
 /// Physical line body length without allocating or scanning its contents.
 pub fn body_len(text: &Text, row: usize) -> usize {
+    let row = row.min(text.len_lines().saturating_sub(1));
     let start = text.line_to_byte(row);
     let len = text.line_len_bytes(row);
     len - usize::from(len > 0 && text.byte_at(start + len - 1) == b'\n')

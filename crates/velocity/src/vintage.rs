@@ -10,7 +10,9 @@ use vel_vintage::{Mode, Outcome, Settings, Vintage};
 /// One vi engine per view; settings changes do not alter document preferences.
 #[derive(Debug)]
 pub struct State {
-    pub engine: Vintage,
+    // Vintage is disabled in the default editing path. Its growing histories and
+    // session state must not enlarge the inline editor or move its hot fields.
+    pub engine: Box<Vintage>,
     ctrl: bool,
     clipboard: bool,
     pending: String,
@@ -27,11 +29,24 @@ impl State {
 impl Editor {
     /// Updates the optional engine only when configuration changes.
     pub fn configure_vintage(&mut self) {
-        if !self.settings.bool("vintage_enabled", false) {
+        // https://www.sublimetext.com/docs/vintage.html#enabling-vintage
+        // Application-level setting: https://www.sublimetext.com/docs/settings.html
+        let package_enabled = [
+            vel_config::settings::Layer::User,
+            vel_config::settings::Layer::Platform,
+            vel_config::settings::Layer::Default,
+        ]
+        .into_iter()
+        .find_map(|layer| self.settings.layer(layer).get("ignored_packages"))
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.iter().any(|s| s == "Vintage"));
+        if !self.settings.bool("vintage_enabled", false) && !package_enabled {
             self.vintage = None;
             return;
         }
-        let ctrl = self.settings.bool("vintage_ctrl_keys", false);
+        let ctrl = self
+            .settings
+            .bool("vintage_ctrl_keys", cfg!(target_os = "macos"));
         let clipboard = self.settings.bool("vintage_use_clipboard", false);
         if self
             .vintage
@@ -46,16 +61,20 @@ impl Editor {
         );
         self.cancel_composition();
         self.vintage = Some(State {
-            engine: Vintage::new(Settings {
+            engine: Box::new(Vintage::new(Settings {
                 vintage_start_in_command_mode: normal,
                 vintage_ctrl_keys: ctrl,
                 vintage_use_clipboard: clipboard,
-            }),
+            })),
             ctrl,
             clipboard,
             pending: String::new(),
             host: None,
         });
+        if let Some(vi) = &mut self.vintage {
+            vi.engine.use_host_insert();
+            vi.engine.observe_insert(&mut self.buffer, self.id);
+        }
         self.keymap.cancel();
         self.buffer.break_undo_group();
     }
@@ -92,7 +111,8 @@ impl Editor {
     /// Routes decoded document keys before the ordinary keymap. Printable insert-mode
     /// keys wait for native committed text so input methods retain first refusal.
     pub fn vintage_key(&mut self, key: &Key) -> Option<Resolution> {
-        let vi = self.vintage.as_ref()?;
+        let vi = self.vintage.as_mut()?;
+        vi.engine.observe_insert(&mut self.buffer, self.id);
         if self.read_only {
             return None;
         }
@@ -100,13 +120,28 @@ impl Editor {
             return None;
         }
         let decoded = decode(key)?;
-        if vi.engine.mode() == Mode::Insert && matches!(decoded, vel_vintage::Key::Char(_)) {
+        if vi.engine.mode() == Mode::Insert
+            && !matches!(
+                decoded,
+                vel_vintage::Key::Escape | vel_vintage::Key::Ctrl('[')
+            )
+        {
             return None;
         }
         Some(self.feed_vintage(decoded, &display_key(key)))
     }
-    /// Commits complete IME/paste text through the engine, retaining vi undo/dot history.
+    /// Routes complete insert-mode IME/paste text to ordinary editing, with the
+    /// engine observing committed changes for vi undo/dot history.
     pub fn vintage_text(&mut self, text: &str) -> Option<Invocation> {
+        if let Some(vi) = &mut self.vintage
+            && vi.engine.mode() == Mode::Insert
+        {
+            vi.engine.observe_insert(&mut self.buffer, self.id);
+            return Some(Invocation {
+                command: "insert".into(),
+                args: json!({"characters":text}),
+            });
+        }
         match self.feed_vintage(vel_vintage::Key::Text(text.into()), text) {
             Resolution::Command(command) => Some(command),
             _ => None,
@@ -128,9 +163,14 @@ impl Editor {
         }
         let old = self.buffer.text().clone();
         let version = self.buffer.change_id();
+        let motion_layout = crate::layout::MotionLayout {
+            layout: &self.layout,
+            annotations: &self.annotations,
+            options: crate::view::motion_layout_options(self),
+        };
         let outcome = vi
             .engine
-            .handle_key(key, &mut self.buffer, self.id, &*self.layout.borrow());
+            .handle_key(key, &mut self.buffer, self.id, &motion_layout);
         if !matches!(&outcome, Outcome::PassThrough) {
             if vi.engine.context("vi_has_count")
                 || vi.engine.context("vi_has_action")
@@ -168,7 +208,9 @@ impl Editor {
                             .args
                             .into_iter()
                             .map(|(k, v)| {
-                                let value = if k == "force" {
+                                let value = if k == "amount" {
+                                    json!(v.parse::<i64>().unwrap_or(1))
+                                } else if k == "force" {
                                     json!(v == "true")
                                 } else {
                                     json!(v)
@@ -200,6 +242,15 @@ impl Editor {
     }
     /// Handles vi host operations through the application's ordinary command registry.
     pub fn vintage_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
+        // This is the first host text-command hook, including ordinary editing
+        // when Vintage is disabled. Keep fold navigation ahead of buffer motions.
+        if self.fold_navigation_command(name, args) {
+            return Ok(true);
+        }
+        if let Some(vi) = &mut self.vintage {
+            vi.engine
+                .prepare_host_command(name, &mut self.buffer, self.id);
+        }
         match name {
             "set_clipboard" => self.clipboard = args["text"].as_str().unwrap_or("").into(),
             "exit_insert_mode" if self.vintage.is_some() => {
@@ -254,8 +305,11 @@ fn character(key: &Key) -> Option<char> {
 }
 fn decode(key: &Key) -> Option<vel_vintage::Key> {
     use vel_vintage::Key as Vi;
-    if key.modifiers & 10 != 0 {
+    if key.modifiers & 8 != 0 || key.modifiers & 3 == 3 {
         return None;
+    }
+    if key.modifiers & 2 != 0 {
+        return character(key).map(|c| Vi::Alt(c.to_ascii_lowercase()));
     }
     if key.modifiers & 1 != 0 {
         return character(key).map(|c| Vi::Ctrl(c.to_ascii_lowercase()));

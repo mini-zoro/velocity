@@ -12,6 +12,11 @@ use vel_highlight::ScopeSnapshot;
 use vel_spell::{DocumentSpelling, Misspelling, SpellChecker};
 use vel_text::Text;
 
+#[path = "fold_state.rs"]
+mod fold_state;
+// Public spelling_selector default (scope facts, not bundled package content):
+// https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#system-and-miscellaneous-settings
+pub const SPELLING_SELECTOR: &str = "markup.raw, source string.quoted - punctuation - meta.preprocessor.c.include, source comment - source comment.block.preprocessor, -(source, constant, keyword, storage, support, variable, markup.underline.link, meta.tag)";
 pub const ENGLISH: &str = "Packages/Language - English/en_US.dic";
 #[derive(Clone, Debug, PartialEq)]
 struct Config {
@@ -21,6 +26,7 @@ struct Config {
     fallback: String,
     mini: Value,
     spell: bool,
+    navigation_dictionary: bool,
     selector: String,
     dictionary: String,
     added: Vec<String>,
@@ -58,8 +64,9 @@ impl Config {
                 .cloned()
                 .unwrap_or(Value::Bool(true)),
             spell: settings.bool("spell_check", false),
+            navigation_dictionary: false,
             selector: settings
-                .string("spelling_selector", "comment, string, text")
+                .string("spelling_selector", SPELLING_SELECTOR)
                 .into(),
             dictionary: settings.string("dictionary", ENGLISH).into(),
             added: words("added_words"),
@@ -106,6 +113,8 @@ pub struct Annotations {
     epoch: u64,
     serial: u64,
     settings_revision: u64,
+    navigation_dictionary: bool,
+    fold_states: fold_state::FoldStates,
     requests: BTreeMap<ViewId, (ChangeId, Range<usize>, usize)>,
     pub pending: usize,
 }
@@ -126,6 +135,8 @@ impl Annotations {
             epoch: 0,
             serial: 0,
             settings_revision: u64::MAX,
+            navigation_dictionary: false,
+            fold_states: Default::default(),
             requests: BTreeMap::new(),
             pending: 0,
         }
@@ -235,9 +246,10 @@ impl Annotations {
                 config.mini = Value::Bool(false);
             }
             config.spell &= self.allowed.1;
+            config.navigation_dictionary = self.navigation_dictionary && self.allowed.1;
             self.settings_revision = settings.revision();
             // No dictionary or diff work when both settings disable the features.
-            if config.mini == false && !config.spell {
+            if config.mini == false && !config.spell && !config.navigation_dictionary {
                 self.config = Some(config);
                 self.identity = Some(identity);
                 self.clear_current();
@@ -258,7 +270,7 @@ impl Annotations {
             if self
                 .config
                 .as_ref()
-                .is_some_and(|c| c.mini == false && !c.spell)
+                .is_some_and(|c| c.mini == false && !c.spell && !c.navigation_dictionary)
             {
                 self.identity = Some(identity);
                 return;
@@ -281,9 +293,18 @@ impl Annotations {
     }
     /// Called at each directly observed transaction, before another command can edit again.
     pub fn committed(&mut self, buffer: &Buffer, settings: &Settings) {
+        // Selection-only syncs also publish here: Find/Goto/undo/mouse must reveal
+        // hidden endpoints before a later command or viewport can move them away.
+        self.fold_states.observe(buffer);
         if self.tx.is_some() || !self.staged.is_empty() {
             self.sync(buffer, settings);
         }
+    }
+    pub(crate) fn folded(&mut self, buffer: &Buffer, view: ViewId) -> Vec<vel_buffer::Region> {
+        self.fold_states.visible(buffer, view)
+    }
+    pub(crate) fn reset_folds(&mut self, view: ViewId) {
+        self.fold_states.forget(view);
     }
     pub fn check(&mut self, view: ViewId, scopes: Arc<ScopeSnapshot>, lines: Range<usize>) {
         if !self.config.as_ref().is_some_and(|c| c.spell) {
@@ -294,6 +315,15 @@ impl Annotations {
             self.requests.insert(view, key);
             self.send(Job::Check(view, scopes, lines));
         }
+    }
+    /// Loads a dictionary for explicit navigation without enabling viewport checks
+    /// or writing the user's spell_check preference. Reuse it for subsequent jumps.
+    pub fn prepare_navigation(&mut self, buffer: &Buffer, settings: &Settings) {
+        if !self.navigation_dictionary {
+            self.navigation_dictionary = true;
+            self.epoch += 1;
+        }
+        self.sync(buffer, settings);
     }
     pub fn navigate(&mut self, scopes: Arc<ScopeSnapshot>, caret: usize, forward: bool) -> u64 {
         self.serial += 1;
@@ -386,10 +416,19 @@ impl State {
         }
         let enabled = error.is_none() && (config.mini == true || (config.mini == "auto" && repo));
         let selector = vel_scope::Selector::parse(&config.selector)
-            .unwrap_or_else(|_| vel_scope::Selector::parse("comment, string, text").unwrap());
-        let checker = if config.spell {
+            .unwrap_or_else(|_| vel_scope::Selector::parse(SPELLING_SELECTOR).unwrap());
+        let checker = if config.spell || config.navigation_dictionary {
             let loaded = if config.dictionary == ENGLISH {
                 SpellChecker::english()
+            } else if std::path::Path::new(&config.dictionary).is_absolute() {
+                vel_spell::system_spelling_directory()
+                    .ok_or(vel_spell::Error::PackagePath)
+                    .and_then(|root| {
+                        SpellChecker::from_system_directory(
+                            &root,
+                            std::path::Path::new(&config.dictionary),
+                        )
+                    })
             } else if let Some(root) = &config.packages {
                 SpellChecker::from_package(root, &config.dictionary)
             } else {
@@ -445,7 +484,7 @@ impl State {
                         text,
                         identity.1,
                         vel_scope::Selector::parse(&self.config.selector).unwrap_or_else(|_| {
-                            vel_scope::Selector::parse("comment, string, text").unwrap()
+                            vel_scope::Selector::parse(SPELLING_SELECTOR).unwrap()
                         }),
                     );
                 }

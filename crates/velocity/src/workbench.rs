@@ -128,6 +128,9 @@ impl Workspace {
                     state.apply(&mut self.tabs[owner].editor.buffer, view);
                     view
                 };
+                self.tabs[owner]
+                    .editor
+                    .restore_folded_view_state(&state, view);
                 self.tabs[index].document = self.tabs[owner].document;
                 self.tabs[index].shared_view = view;
                 self.tabs[index].editor.shared_shadow = true;
@@ -207,8 +210,11 @@ impl Workspace {
             let tab = &mut self.tabs[index];
             tab.lazy = None;
             tab.editor.read_only = tab.loading.is_some() || tab.binary_loading.is_some();
-            if !imported && tab.pending_restore.is_none() {
-                state.apply(&mut tab.editor.buffer, tab.editor.id);
+            if tab.pending_restore.is_none() {
+                if !imported {
+                    state.apply(&mut tab.editor.buffer, tab.editor.id);
+                }
+                tab.editor.restore_folded_view_state(&state, tab.editor.id);
             }
             tab.editor.sync();
             tab.restored_format_dirty = document.dirty && !tab.editor.buffer.is_dirty();
@@ -613,13 +619,7 @@ impl Workspace {
                     id: tab.sheet,
                     document: identity,
                     view: loaded
-                        .map(|owner| {
-                            vel_session::ViewState::capture(
-                                &owner.editor.buffer,
-                                tab.shared_view,
-                                tab.scroll,
-                            )
-                        })
+                        .map(|owner| owner.editor.folded_view_state(tab.shared_view, tab.scroll))
                         .unwrap_or_else(|| view.clone()),
                     syntax: tab
                         .editor
@@ -636,8 +636,9 @@ impl Workspace {
                 .iter()
                 .position(|t| t.editor.buffer.id() == doc)
                 .unwrap_or(index);
-            let buffer = &self.tabs[owner].editor.buffer;
-            let view = vel_session::ViewState::capture(buffer, tab.shared_view, tab.scroll);
+            let view = self.tabs[owner]
+                .editor
+                .folded_view_state(tab.shared_view, tab.scroll);
             sheets.push(Sheet {
                 html: tab
                     .editor

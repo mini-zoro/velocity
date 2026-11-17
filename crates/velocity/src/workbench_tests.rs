@@ -133,7 +133,8 @@ fn session_selections_folds_syntax_and_changed_disk_keep_edits_drop_history() {
     assert_eq!(restored.editor().text.to_string(), "local saved line\n");
     assert!(restored.tabs[0].dirty());
     assert_eq!(restored.editor().regions(), vec![Region::new(2, 7)]);
-    assert_eq!(restored.editor().folded(), vec![Region::new(1, 5)]);
+    // Restoring a selection endpoint inside a fold reveals that fold (round 16).
+    assert!(restored.editor().folded().is_empty());
     assert_eq!(restored.tabs[0].scroll, (2., 12.));
     assert!(restored.editor().settings.get("syntax").is_some());
     let before = restored.editor().text.clone();

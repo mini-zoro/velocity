@@ -17,6 +17,11 @@ fn setup(text: &str) -> (Workspace, Panels, View) {
     w.editor_mut()
         .settings
         .set(Layer::View, "vintage_start_in_command_mode", json!(true));
+    // These passthrough fixtures explicitly disable control chords; the macOS
+    // default is covered by the round-16 defaults test.
+    w.editor_mut()
+        .settings
+        .set(Layer::View, "vintage_ctrl_keys", json!(false));
     w.editor_mut().sync();
     let p = Panels::new(&w, false);
     let v = View::new(
@@ -140,8 +145,8 @@ fn visual_block_carets_multicursor_clipboard_and_passthrough_contexts() {
 fn insert_ime_multicaret_undo_and_live_enable_disable_keep_native_preview() {
     let (mut w, mut p, mut v) = setup("a🦀z\nb🦀q");
     w.editor_mut().set_selection(Selection::from_regions([
-        Region::from(1..5),
-        Region::from(8..12),
+        Region::caret(1),
+        Region::caret(8),
     ]));
     key(&mut w, &mut p, &mut v, "i");
     // Re-establish selected ranges after the normal-to-insert transition.

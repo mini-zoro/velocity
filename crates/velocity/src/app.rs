@@ -362,7 +362,7 @@ impl App {
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         if self.workspace.refresh_file_menus() {
-            w.set_menu(&native_menu(&self.workspace.menus));
+            w.set_menu(&self.application_menu());
         }
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
@@ -579,6 +579,13 @@ impl App {
                 true
             }
         }
+    }
+    fn application_menu(&mut self) -> Vec<MenuEntry> {
+        let macros = self
+            .panels
+            .macro_file_items(&self.workspace)
+            .unwrap_or_default();
+        native_menu(&self.workspace.menus, &macros)
     }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
@@ -2123,7 +2130,7 @@ impl AppHandler for App {
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
         self.panels.review.native_context = true;
         w.set_title(&self.workspace.window_title());
-        w.set_menu(&native_menu(&self.workspace.menus));
+        w.set_menu(&self.application_menu());
         self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":self.workspace.palette.len()}))?;
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
@@ -2616,7 +2623,7 @@ impl AppHandler for App {
                 self.poll_workbench(w)?;
             }
             if focus_changed {
-                w.set_menu(&native_menu(&self.workspace.menus));
+                w.set_menu(&self.application_menu());
             }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
@@ -2651,7 +2658,7 @@ impl AppHandler for App {
                 self.view.reveal(self.workspace.editor());
             }
             if changed {
-                w.set_menu(&native_menu(&self.workspace.menus));
+                w.set_menu(&self.application_menu());
             }
             for record in std::mem::take(&mut self.workspace.telemetry) {
                 self.reporter.emit(record)?;
@@ -3127,7 +3134,10 @@ fn context_child_args(parent: &Value, child: &Value) -> Value {
     }
     Value::Object(args)
 }
-fn native_menu(items: &[vel_config::ui::MenuItem]) -> Vec<MenuEntry> {
+fn native_menu(
+    items: &[vel_config::ui::MenuItem],
+    macros: &[vel_config::ui::PaletteItem],
+) -> Vec<MenuEntry> {
     items
         .iter()
         .filter(|item| {
@@ -3139,7 +3149,19 @@ fn native_menu(items: &[vel_config::ui::MenuItem]) -> Vec<MenuEntry> {
             caption: item.caption.clone(),
             command: item.command.clone(),
             args: item.args.to_string(),
-            children: native_menu(&item.children),
+            children: if item.id == "macros" {
+                macros
+                    .iter()
+                    .map(|row| MenuEntry {
+                        caption: row.caption.clone(),
+                        command: Some(row.invocation.command.clone()),
+                        args: row.invocation.args.to_string(),
+                        children: Vec::new(),
+                    })
+                    .collect()
+            } else {
+                native_menu(&item.children, macros)
+            },
         })
         .collect()
 }
@@ -3492,3 +3514,7 @@ mod round15_tests {
         }));
     }
 }
+
+#[cfg(test)]
+#[path = "round16_review_app_tests.rs"]
+mod round16_review_tests;

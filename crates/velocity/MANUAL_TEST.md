@@ -532,6 +532,116 @@ was performed.
 
 Earlier checklists follow.
 
+# Round 16 Lane B: folding, guides, Vintage, spelling and menus (native review pending)
+
+Use a reviewer-built binary and a disposable profile. Do not replace or rebuild the running
+`target/package-macos/` bundle. All boxes below remain unchecked: the sandbox ran CPU-only
+scenes, command/state tests and resource resolution, with no AppKit, fonts, GPU or native input.
+
+- [ ] **5.1:** collapse a block, then enter it using Find, Goto Line, Goto Definition and
+  undo/redo. Its hidden selection endpoints become visible, including in a cloned view.
+  Left/Right and Shift+Left/Right cross one marker as one unit. Type at either boundary,
+  replace a selected marker and Backspace/Delete across it: affected hidden text is exposed.
+  Click the text marker and the gutter arrow separately; expanding must retain the selection.
+- [ ] **5.2–5.3:** collapse an inner block, then its outer block, with and without wrapping.
+  No inner line leaks through the outer fold; expanding the outer retains the inner fold.
+  Cmd+K Cmd+1…9 replaces the current fold level; Cmd+K Cmd+0 and Cmd+K Cmd+J expand all.
+  Cmd+K Cmd+T collapses tag attributes. Repeat after edits, undo, session restore and splits.
+- [ ] **5.4:** Python indentation blocks retain trailing blank lines and the final newline
+  when collapsed, including EOF without a newline. `fold_style` values could not be confirmed
+  from public documentation; this setting's behavior remains as before this round.
+- [ ] **6.1–6.3:** tabs/spaces and blank lines show guides at 0, tab, 2×tab, stopping before
+  the text. Enable `draw_active`: only the containing block's guide changes color, without
+  lighting another block at the same column. `solid` produces a continuous stroke; otherwise
+  guides are stippled. Repeat with wrap, folds, zoom, horizontal/fractional scrolling and
+  1×/2× displays. Fresh-profile defaults: selection whitespace, no line highlight, normal
+  guides only. Explicit string and array whitespace settings both work.
+- [ ] **6.4:** select a whole Unicode word: other whole-word occurrences in the visible
+  viewport have outlines, including wrapped rows and horizontally windowed long lines.
+  Partial words and carets produce none. Edit, clear selection, switch tabs and disable
+  `match_selection`: old outlines disappear immediately. Folded text has no outline leak.
+- [ ] **7.1–7.2:** in Vintage insert mode compare Enter/auto-indent, paired Backspace,
+  arrows/Shift+arrows, completion navigation/acceptance, snippets and Chinese/Japanese IME
+  with ordinary editing. Counts and dot replay the committed changes, including completion
+  and pair edits; `u` restores the insertion. Cmd+D, Find and mouse selections feed c/d/y
+  as visual selections, preserving direction and exclusive endpoints.
+- [ ] **7.3–7.4:** a fresh profile leaves Vintage ignored/off. Remove Vintage from
+  `ignored_packages` to enable it; check the `vintage_enabled` alias and live changes.
+  macOS enables control chords by default; explicit false restores ordinary Ctrl bindings.
+  Ctrl+E/Ctrl+Y scroll one line without moving the caret; Option+W/Option+B move by subword.
+- [ ] **8.1–8.3:** prose, quoted source strings and comments receive spelling diagnostics;
+  HTML tag/attribute names and values, embedded JS/CSS identifiers, keywords and links do not.
+  With spell checking OFF, Ctrl+F6/Ctrl+Shift+F6 navigate and wrap without enabling squiggles
+  or changing preferences. Their existing shortcut defaults remain pending native comparison.
+  View → Dictionary lists packaged pairs and valid `.dic`/`.aff` pairs in
+  `~/Library/Spelling`; selecting either uses that dictionary. Test missing/broken pairs.
+- [ ] **9 and 3.2 gutter integration:** inspect Edit/Selection/Find/Goto/Tools and the palette.
+  Check captions, arguments, fold levels, marks/bookmarks, case conversion, wrap/permutation
+  and macro resources. All rows now resolve; disabling must follow the current context.
+  Bookmark symbols appear once per touched line, without obscuring line numbers/fold buttons.
+  Check Tools → Macros with package/user macros, background catalog refresh, overrides and
+  ignored packages; run an entry and compare it with the command palette/chooser.
+- [ ] **Review 1/4/8d — Vintage:** type `one`, Escape, `a`, type `two`, Cmd+Z, Escape, `u`.
+  Repeat with Cmd+Shift+Z before Escape and Ctrl+R after `u`; the editor stays usable and
+  selections remain valid. Repeat with an Upper Case command during insert, several carets,
+  Unicode completion, dot and macro replay. An unhandled Option+character in command mode
+  must reach the host without changing a pending count or the recorded macro.
+- [ ] **Review 2/5 — fold boundaries:** for Rust braces, HTML tags and Python indentation,
+  click right of a folded header and move Up/Down through it. Repeat unwrapped and at
+  wrap widths 7, 12 and 80. Type immediately after an indentation marker: the hidden
+  endpoint expands and the new text agrees with the caret. Type or press Enter at a visible
+  brace/tag closing line, or after a manual whole-line fold: the fold stays collapsed.
+  Undo restores the text; it does not restore an automatically expanded fold.
+- [ ] **Review 8a/8e — restore/lag:** reveal an outer fold with Find, move away, keep its
+  inner fold, then quit/relaunch with cloned tabs using different fold states. Revealed
+  folds stay revealed. During rapid typing/newline insertion, Undo/Redo and clone edits,
+  blank-line guides and the active block retain their last published geometry until analysis
+  replaces it; they do not blink to the current line's own indentation.
+- [ ] **Review 6/8b/8c — large/optional data:** scroll a document with 200,000 bookmarks;
+  keep gutter/typing responsive. With `~/Library/Spelling` missing, unreadable or a regular
+  file, the dictionary chooser still offers packaged dictionaries. Opposing project-level
+  `ignored_packages` settings cannot override user/default Preferences or enable Vintage.
+- [ ] **Second review 1 — Unicode history:** start with `éa` and a final newline, then
+  Escape, `i`, type `x`, Escape, `u`, `l`, `v`, Cmd+Shift+Z, Left. No crash or split scalar.
+  Repeat in character/line/block visual modes, with marks and pending motions, host Undo/Redo,
+  source transforms, several carets, composed accents and emoji.
+- [ ] **Second review 2 — visual boundaries:** Cmd+Left/Right, repeated Cmd+Right and
+  Shift+Cmd+Right on brace/tag/indentation headers and wrapped marker segments leave folds
+  collapsed. Start both before and after an indentation marker; Cmd+Left/Right must
+  neither reveal hidden text nor produce an out-of-range caret. Home/End retain document
+  navigation. Repeat without folds and at widths 7/12/80.
+- [ ] **Second review 3/5 — insert groups and repeat:** type `two two` one key at a time:
+  Cmd+Z removes the last word, exactly as with Vintage off; Cmd+Shift+Z restores it. Escape,
+  `u` undoes the whole vi insert, Ctrl+R restores it. Type `one`, Escape, `a`, type `two`,
+  Cmd+Z, type `xy`, Escape, `.`: text is `onexyxy`. A session invalidated by an unrelated
+  source transform must not repeat an older insertion. After host Undo in a counted append,
+  dot repeats only the surviving net text once. History across change/open-line entries
+  retires dot when the entry effect cannot be reconstructed. Compare completion, pair edits,
+  count/macro replay and IME with ordinary editing.
+- [ ] **Second review 6 — long insert:** use 10,000 carets and type at least 100 keys,
+  then Escape, Undo, Redo and dot. Recording metadata stays bounded by the caret count;
+  host text/history storage may grow with inserted content. Keep typing responsive.
+- [ ] **Third review 1 — mixed Visual operators:** Escape, drag `ab`, Cmd-click the
+  start of `cd`, then Shift+J in `ab\ncd\nef\ngh\n`. No crash. Repeat delete,
+  change, yank, indent, case, replacement and paste with forward/reversed selections,
+  empty lines and Unicode carets; Undo/Redo keep valid selections.
+- [ ] **Third review 2 — projected Home/End:** repeat Home/End and Cmd+Left/Right,
+  with and without Shift, at widths 0/7/12/80. Start before/on/after each marker,
+  including the hidden end of an indentation fold and nested folds. Folds stay closed.
+- [ ] **Third review 3 — completed insertion:** `A`, type `two three four` one key
+  at a time. While inserting, Cmd+Z removes a native word group and redo restores it.
+  After Escape, either Cmd+Z or `u` removes the entire session and one redo restores it.
+  Repeat with Enter, Backspace, IME commits, `cw`, `o` and `3A`.
+- [ ] **Third review 4 — input before frames:** record a vi macro with insertion,
+  Escape and `j`/`k` or Ctrl+V plus motion; replay it repeatedly. Also type several
+  edits and immediately Cmd+Left/Right while changing wrap settings. Check selections,
+  line geometry and responsiveness before/after the next frame.
+- [ ] **Native performance:** repeat actual scroll/typing/idle profiling with folds and a
+  selected word, at the reviewer's display size/refresh/scale. Record event→submit/present,
+  process CPU and memory; headless paired results establish only the CPU scene/command budget.
+  The review report records paired CLI times/instructions, CPU/RSS, steady idle CPU and
+  the matching full-size scene probe, with raw pairs retained for scheduling-noise review.
+
 # Round 15: opening, saving, projects and sessions (native review pending)
 
 Use a reviewer-built binary/bundle with a disposable profile and fixture tree. Do not rebuild or

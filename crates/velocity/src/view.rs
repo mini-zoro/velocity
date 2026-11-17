@@ -17,10 +17,17 @@ use vel_render::scene::*;
 /// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
 /// Hard line commands bypass this function and retain the buffer's logical behavior.
 pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: bool) -> usize {
-    let row = editor.text.byte_to_line(byte);
+    editor.synchronize_layout();
+    let layout = editor.layout.borrow();
+    let (visual, segment) = layout.visual_at(&editor.text, byte);
+    // A fold end can belong to a hidden physical line while its caret is drawn
+    // after the header marker. Segment byte ranges belong to the projected row.
+    let row = layout.locate(visual).0;
     let start = editor.text.line_to_byte(row);
-    let (_, segment) = editor.layout.borrow().visual_at(&editor.text, byte);
     if end {
+        if let Some(end) = layout.folded_segment_end(&editor.text, row, visual, &segment) {
+            return end;
+        }
         if repeated {
             start + layout::body_len(&editor.text, row)
         } else {
@@ -43,6 +50,47 @@ pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: b
                 .take_while(|c| matches!(c, ' ' | '\t'))
                 .count();
         if byte == first { start } else { first }
+    }
+}
+/// Resolve wrap settings against the last viewport even when input precedes a frame.
+pub(crate) fn motion_layout_options(e: &Editor) -> Options {
+    let auto = e
+        .language
+        .borrow()
+        .as_ref()
+        .is_none_or(|l| l.root.build_string().starts_with("text"));
+    let wrap = e.features.word_wrap
+        && e.settings
+            .get("word_wrap")
+            .and_then(vel_config::Value::as_bool)
+            .unwrap_or(auto);
+    let viewport = match e.layout.borrow().viewport_width {
+        0 => 80,
+        width => width,
+    };
+    let configured = e.settings.usize("wrap_width", 0);
+    let width = if configured == 0 {
+        viewport
+    } else if e.settings.string("wrap_width_style", "auto") == "fixed" {
+        configured
+    } else {
+        configured.min(viewport)
+    };
+    Options {
+        width: if wrap { width.max(1) } else { 0 },
+        tab: e.preferences.tab_size,
+        indent: e.settings.bool("indent_subsequent_lines", true),
+    }
+}
+impl Editor {
+    pub(crate) fn synchronize_layout(&self) {
+        use vel_buffer::VerticalLayout;
+        crate::layout::MotionLayout {
+            layout: &self.layout,
+            annotations: &self.annotations,
+            options: motion_layout_options(self),
+        }
+        .synchronize(&self.buffer, self.id);
     }
 }
 pub const TAB_HEIGHT: f64 = 30.;
@@ -118,6 +166,7 @@ impl View {
         scheme: &ColorScheme,
         clip: Rect,
         layer: &mut Layer,
+        occurrence: Option<&str>,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
         use unicode_width::UnicodeWidthStr;
@@ -159,6 +208,10 @@ impl View {
             );
         }
         let regions = e.regions();
+        let occurrences: Vec<_> = occurrence
+            .map(|word| word_occurrences(&window.text, word).collect())
+            .unwrap_or_default();
+        let mut occurrence_index = 0;
         let mut column = window.column;
         let mut run = String::new();
         let mut run_x = left + column as f64 * self.cell - self.scroll_x;
@@ -170,6 +223,37 @@ impl View {
             };
             let at = start + window.bytes.start + byte;
             let x = left + column as f64 * self.cell - self.scroll_x;
+            if let Some(range) = occurrences.get(occurrence_index)
+                && range.start == byte
+            {
+                let absolute = start + window.bytes.start + range.start
+                    ..start + window.bytes.start + range.end;
+                let whole = (absolute.start == 0
+                    || !word_character(
+                        e.text
+                            .char_at(e.text.floor_char_boundary(absolute.start - 1)),
+                    ))
+                    && (absolute.end == e.text.len_bytes()
+                        || !word_character(e.text.char_at(absolute.end)));
+                if whole
+                    && !regions
+                        .iter()
+                        .any(|r| !r.empty() && r.to_range() == absolute)
+                {
+                    outline(
+                        layer,
+                        Rect {
+                            x,
+                            y,
+                            width: window.text[range.clone()].width() as f64 * self.cell,
+                            height: self.line_height,
+                        },
+                        clip,
+                        color(scheme, "selection_border"),
+                    );
+                }
+                occurrence_index += 1;
+            }
             let selected = regions
                 .iter()
                 .any(|r| !r.empty() && r.begin() < at + grapheme.len() && r.end() > at);
@@ -457,32 +541,14 @@ impl View {
         let width = ((self.right(e) - self.gutter(e) - self.margin(e) * 2.).max(self.cell)
             / self.cell)
             .floor() as usize;
-        let language = e.language.borrow();
-        let auto = language
-            .as_ref()
-            .is_none_or(|l| l.root.build_string().starts_with("text"));
-        let wrap = e.features.word_wrap
-            && e.settings
-                .get("word_wrap")
-                .and_then(vel_config::Value::as_bool)
-                .unwrap_or(auto);
-        let configured = e.settings.usize("wrap_width", 0);
-        let wrap_width = if configured == 0 {
-            width
-        } else if e.settings.string("wrap_width_style", "auto") == "fixed" {
-            configured
-        } else {
-            configured.min(width)
-        };
+        e.layout.borrow_mut().viewport_width = width;
+        let folds = e.folded();
+        let options = motion_layout_options(e);
         e.layout.borrow_mut().configure(
             &e.text,
             (e.buffer.id(), vel_buffer::ChangeId(e.revision)),
-            Options {
-                width: if wrap { wrap_width.max(1) } else { 0 },
-                tab: e.preferences.tab_size,
-                indent: e.settings.bool("indent_subsequent_lines", true),
-            },
-            &e.folded(),
+            options,
+            &folds,
         );
         let annotations = e.annotations.borrow();
         let mut blocks: Vec<(usize, usize)> = annotations
@@ -507,7 +573,7 @@ impl View {
         e.layout.borrow_mut().set_phantom_inline(&e.text, inline);
         e.layout.borrow_mut().set_inline(blocks);
         e.layout.borrow_mut().page = self.rows();
-        if wrap && wrap_width <= width {
+        if options.width > 0 && options.width <= width {
             self.scroll_x = 0.;
         }
     }
@@ -652,6 +718,12 @@ impl View {
             return (self.rect_at(e, e.caret), Utf16Range::default());
         }
         let bytes = range.bytes(&e.text);
+        if bytes.is_empty() {
+            return (
+                self.rect_at(e, bytes.start),
+                Utf16Range::from_bytes(&e.text, bytes),
+            );
+        }
         let row = e.text.byte_to_line(bytes.start);
         let (_, segment) = e.layout.borrow().visual_at(&e.text, bytes.start);
         let end = bytes.end.min(e.text.line_to_byte(row) + segment.bytes.end);
@@ -782,13 +854,7 @@ impl View {
                 .get(existing.partition_point(|r| r.begin() < start))
                 .filter(|r| r.begin() <= end)
             {
-                e.buffer.add_regions(
-                    e.id,
-                    layout::FOLDS,
-                    existing.iter().filter(|r| *r != fold).copied().collect(),
-                    true,
-                );
-                e.layout.borrow_mut().invalidate();
+                e.set_folded(existing.iter().filter(|r| *r != fold).copied().collect());
                 return Ok(true);
             }
             let fold = e
@@ -807,9 +873,31 @@ impl View {
             if let Some(fold) = fold {
                 let mut folds = existing;
                 folds.push(vel_buffer::Region::from(fold));
-                folds.sort_by_key(|r| r.begin());
-                e.buffer.add_regions(e.id, layout::FOLDS, folds, true);
-                e.layout.borrow_mut().invalidate();
+                e.set_folded(folds);
+                return Ok(true);
+            }
+        }
+        if down && point.x >= self.gutter(e) && point.y >= self.tab_height {
+            let visual = ((point.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
+                .floor()
+                .max(0.) as usize;
+            let folds = e.folded();
+            let hit = folds
+                .iter()
+                .find(|f| {
+                    let layout = e.layout.borrow();
+                    if layout.visual_at(&e.text, f.begin()).0 != visual {
+                        return false;
+                    }
+                    let x = self.gutter(e)
+                        + self.margin(e)
+                        + layout.column(&e.text, f.begin()) as f64 * self.cell
+                        - self.scroll_x;
+                    point.x >= x && point.x < x + self.cell
+                })
+                .copied();
+            if let Some(hit) = hit {
+                e.set_folded(folds.into_iter().filter(|f| *f != hit).collect());
                 return Ok(true);
             }
         }
@@ -944,6 +1032,11 @@ impl View {
                 global("rulers"),
             );
         }
+        let whitespace_selection_only = e.settings.get("draw_white_space").is_some_and(|v| {
+            v == "selection"
+                || v.as_array()
+                    .is_some_and(|a| a.len() == 1 && a[0] == "selection")
+        });
         let draw_whitespace = e.settings.string("draw_white_space", "none") != "none"
             || e.settings
                 .get("draw_white_space")
@@ -960,15 +1053,21 @@ impl View {
             .settings
             .get("indent_guide_options")
             .and_then(vel_config::Value::as_array);
-        let caret_indent =
-            if indent_guides && e.text.line_len_bytes(caret_row) < crate::large::LONG_LINE {
-                vel_syntax::indent::indentation(
-                    &e.text.line(caret_row).to_string(),
-                    e.preferences.tab_size,
-                )
-            } else {
-                0
-            };
+        let guides = language.map(|l| &l.guides);
+        let active = if guide_options.is_some_and(|o| o.iter().any(|s| s == "draw_active")) {
+            guides.and_then(|g| g.active(caret_row, e.preferences.tab_size))
+        } else {
+            None
+        };
+        let solid_guides = guide_options.is_some_and(|o| o.iter().any(|s| s == "solid"));
+        let normal_guides = guide_options.is_none_or(|o| o.iter().any(|s| s == "draw_normal"));
+        let occurrence = selected_word(e, &regions);
+        let bookmarks = if e.bookmarks().is_empty() {
+            &[]
+        } else {
+            let visible = layout.visible_bytes(&e.text, first, last.saturating_sub(first));
+            visible_bookmarks(e, visible)
+        };
         let annotations = e.annotations.borrow();
         let publication = annotations
             .current
@@ -1051,7 +1150,15 @@ impl View {
             let segment = layout.segment(&e.text, row, subrow);
             if !layout.wrapped() && e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
                 self.note_width(e, None);
-                self.paint_long_line(e, row, visual, scheme, clip, &mut layer);
+                self.paint_long_line(
+                    e,
+                    row,
+                    visual,
+                    scheme,
+                    clip,
+                    &mut layer,
+                    occurrence.as_deref(),
+                );
                 continue;
             }
             let line = e.text.line(row).to_string();
@@ -1109,6 +1216,30 @@ impl View {
                             global(name),
                         );
                     }
+                }
+                if !bookmarks.is_empty()
+                    && bookmarked_line(
+                        bookmarks,
+                        start..if row + 1 < e.text.len_lines() {
+                            e.text.line_to_byte(row + 1)
+                        } else {
+                            e.text.len_bytes() + 1
+                        },
+                    )
+                {
+                    text_run(
+                        &mut layer,
+                        "◆",
+                        1.,
+                        baseline,
+                        e.preferences.font_size,
+                        global("gutter_foreground"),
+                        FontStyle::default(),
+                        Rect {
+                            width: gutter,
+                            ..all
+                        },
+                    );
                 }
                 if e.preferences.line_numbers {
                     let number =
@@ -1330,34 +1461,86 @@ impl View {
             }
             if indent_guides {
                 let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
-                let columns =
-                    crate::editor::cells_with_tab(&line[..leading], e.preferences.tab_size);
-                for col in (e.preferences.tab_size..=columns).step_by(e.preferences.tab_size) {
-                    let active = col == caret_indent;
-                    let enabled = guide_options.is_none_or(|o| {
-                        o.iter()
-                            .any(|s| s == if active { "draw_active" } else { "draw_normal" })
-                    });
-                    if enabled {
-                        let name = if active {
-                            "active_guide"
-                        } else if col < caret_indent {
-                            "stack_guide"
-                        } else {
-                            "guide"
+                let columns = guides.and_then(|g| g.columns(row)).unwrap_or_else(|| {
+                    crate::editor::cells_with_tab(&line[..leading], e.preferences.tab_size)
+                });
+                for col in vel_render::guides::columns(columns, e.preferences.tab_size) {
+                    let active = active
+                        .as_ref()
+                        .is_some_and(|a| a.column == col && a.rows.contains(&row));
+                    if active || normal_guides {
+                        let guide = Rect {
+                            x: left + col as f64 * self.cell - self.scroll_x,
+                            y,
+                            width: 1.,
+                            height: self.line_height,
                         };
-                        fill(
+                        paint_guide(
                             &mut layer,
-                            Rect {
-                                x: left + col as f64 * self.cell - self.scroll_x,
-                                y,
-                                width: 1.,
-                                height: self.line_height,
-                            },
+                            guide,
                             clip,
-                            global(name),
+                            global(if active { "active_guide" } else { "guide" }),
+                            solid_guides,
                         );
                     }
+                }
+            }
+            if let Some(word) = &occurrence {
+                // Matches and display units advance together: repeated short words
+                // on a long physical line must not cause quadratic geometry scans.
+                let mut units = relevant.iter().copied().peekable();
+                let mut col = segment.indent;
+                let width = |u: &CachedUnit| {
+                    u.width
+                        + if inline_phantoms {
+                            layout.phantom_gap(start + u.bytes.start)
+                        } else {
+                            0
+                        }
+                };
+                for range in word_occurrences(&line, word) {
+                    let absolute = start + range.start..start + range.end;
+                    if absolute.end <= range_start {
+                        continue;
+                    }
+                    if absolute.start >= range_end {
+                        break;
+                    }
+                    while units.peek().is_some_and(|u| u.bytes.end <= range.start) {
+                        col += width(units.next().expect("peeked unit"));
+                    }
+                    let a = col;
+                    while units.peek().is_some_and(|u| u.bytes.start < range.end) {
+                        col += width(units.next().expect("peeked unit"));
+                    }
+                    let x = left + a as f64 * self.cell - self.scroll_x;
+                    if x >= right {
+                        break;
+                    }
+                    if x + (col - a) as f64 * self.cell < gutter {
+                        continue;
+                    }
+                    if regions
+                        .get(regions.partition_point(|r| r.end() < absolute.end))
+                        .is_some_and(|r| !r.empty() && r.to_range() == absolute)
+                        || layout
+                            .hidden(row)
+                            .iter()
+                            .any(|r| r.start < range.end && range.start < r.end)
+                    {
+                        continue;
+                    }
+                    outline(
+                        &mut layer,
+                        Rect {
+                            x,
+                            y,
+                            width: ((col - a) as f64 * self.cell).max(1.),
+                            height: self.line_height,
+                        },
+                        clip,
+                        global("selection_border"),
+                    );
                 }
             }
             let mut run = String::new();
@@ -1468,6 +1651,7 @@ impl View {
                 if visible
                     && matches!(text, " " | "\t")
                     && draw_whitespace
+                    && (!whitespace_selection_only || selected)
                     && whitespace(e, &line, unit.bytes.start, selected)
                 {
                     text_run(
@@ -1930,6 +2114,9 @@ pub fn fill(layer: &mut Layer, rect: Rect, clip: Rect, color: Color) {
         clip,
     });
 }
+fn outline(layer: &mut Layer, rect: Rect, clip: Rect, color: Color) {
+    layer.rects.push(SolidRect::outline(rect, clip, color));
+}
 fn border(layer: &mut Layer, rect: Rect, clip: Rect, color: Color) {
     for r in [
         Rect { height: 1., ..rect },
@@ -2167,3 +2354,78 @@ mod tests {
         assert!(!whitespace(&e, "x x", 1, false));
     }
 }
+
+// Public settings reference confirms match_selection defaults to true:
+// https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
+fn selected_word(e: &Editor, regions: &[vel_buffer::Region]) -> Option<String> {
+    if !e.settings.bool("match_selection", true) || e.marked.is_some() {
+        return None;
+    }
+    let r = regions.first()?;
+    if r.empty() || r.size() > crate::large::LONG_LINE {
+        return None;
+    }
+    let word = e.text.slice(r.to_range()).to_string();
+    if !word.chars().all(word_character)
+        || !word.chars().any(char::is_alphanumeric)
+        || (r.begin() > 0
+            && word_character(e.text.char_at(e.text.floor_char_boundary(r.begin() - 1))))
+        || (r.end() < e.text.len_bytes() && word_character(e.text.char_at(r.end())))
+        || regions
+            .iter()
+            .any(|r| r.empty() || e.text.slice(r.to_range()).to_string() != word)
+    {
+        return None;
+    }
+    Some(word)
+}
+fn word_character(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || unicode_width::UnicodeWidthChar::width(c) == Some(0)
+}
+fn word_occurrences<'a>(line: &'a str, word: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+    line.match_indices(word).filter_map(move |(at, _)| {
+        let end = at + word.len();
+        let before = line[..at].chars().next_back();
+        let after = line[end..].chars().next();
+        (!before.is_some_and(word_character) && !after.is_some_and(word_character))
+            .then_some(at..end)
+    })
+}
+fn paint_guide(layer: &mut Layer, rect: Rect, clip: Rect, color: Color, solid: bool) {
+    if solid {
+        fill(layer, rect, clip, color);
+    } else {
+        layer
+            .rects
+            .push(SolidRect::stippled_guide(rect, clip, color));
+    }
+}
+fn visible_bookmarks(e: &Editor, visible: Range<usize>) -> &[vel_buffer::Region] {
+    let regions = e.bookmarks();
+    // Toggle Bookmark retains disjoint regions; monotone edit mapping preserves
+    // their order, including collapsed carets. No per-frame region/row allocation.
+    let first = regions
+        .partition_point(|r| r.end() < visible.start || (r.end() == visible.start && !r.empty()));
+    let last = regions.partition_point(|r| r.begin() <= visible.end);
+    &regions[first.min(last)..last]
+}
+fn bookmarked_line(regions: &[vel_buffer::Region], line: Range<usize>) -> bool {
+    let at =
+        regions.partition_point(|r| r.end() < line.start || (r.end() == line.start && !r.empty()));
+    regions.get(at).is_some_and(|r| r.begin() < line.end)
+}
+
+#[cfg(test)]
+#[path = "round16_perf.rs"]
+mod round16_perf;
+#[cfg(test)]
+#[path = "round16_tests.rs"]
+mod round16_tests;
+
+#[cfg(test)]
+#[path = "round16_review_tests.rs"]
+mod round16_review_tests;
+
+#[cfg(test)]
+#[path = "round16_review_perf.rs"]
+mod round16_review_perf;

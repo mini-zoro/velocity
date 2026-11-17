@@ -179,3 +179,54 @@ fn switching_user_lexicons_invalidates_cached_results() {
         "speling"
     );
 }
+#[test]
+fn system_dictionary_discovery_loading_and_directory_boundary() {
+    let root = std::env::temp_dir().join(format!(
+        "velocity-r16-spelling-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("review.aff"), "SET UTF-8\n").unwrap();
+    std::fs::write(root.join("review.dic"), "1\nvelocity\n").unwrap();
+    std::fs::write(root.join("orphan.dic"), "1\norphan\n").unwrap();
+    assert_eq!(
+        SpellChecker::system_dictionaries(&root).unwrap(),
+        [root.join("review.dic")]
+    );
+    assert!(
+        SpellChecker::system_dictionaries(&root.join("absent"))
+            .unwrap()
+            .is_empty()
+    );
+    let checker = SpellChecker::from_system_directory(&root, &root.join("review.dic")).unwrap();
+    assert!(checker.check("velocity"));
+    assert!(!checker.check("mispelled"));
+    assert!(
+        SpellChecker::from_system_directory(&root.join("absent"), &root.join("review.dic"))
+            .is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn optional_system_directory_skips_missing_broken_and_non_directory_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Spelling");
+    assert!(SpellChecker::system_dictionaries(&root).unwrap().is_empty());
+    std::fs::write(&root, "not a directory").unwrap();
+    assert!(SpellChecker::system_dictionaries(&root).unwrap().is_empty());
+    std::fs::remove_file(&root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("broken.dic"), "1\nword\n").unwrap();
+    std::fs::create_dir(root.join("directory.dic")).unwrap();
+    std::fs::write(root.join("valid.aff"), "SET UTF-8\n").unwrap();
+    std::fs::write(root.join("valid.dic"), "1\nword\n").unwrap();
+    assert_eq!(
+        SpellChecker::system_dictionaries(&root).unwrap(),
+        [root.join("valid.dic")]
+    );
+}

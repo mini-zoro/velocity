@@ -3,10 +3,12 @@
 //! system fonts are gated to macOS; no renderer is instantiated by tests.
 pub mod atlas;
 pub mod cache;
+pub mod fold;
 #[cfg(target_os = "macos")]
 pub mod font;
 #[cfg(target_os = "macos")]
 mod gpu;
+pub mod guides;
 #[cfg(target_os = "macos")]
 mod native;
 pub mod nine_slice;

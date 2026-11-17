@@ -1,4 +1,4 @@
-// Velocity resources, authored from public behavior documentation.
+// Original Velocity captions, authored from public command behavior.
 [
   {
     "caption": "File: Save All",
@@ -220,21 +220,525 @@
     "caption": "Git: Blame File",
     "command": "git_blame_file"
   },
-  {"caption":"Theme & minihtml: Review Demo","command":"theme_demo"},
-  {"caption":"Theme: Light","command":"set_theme_appearance","args":{"dark":false}},
-  {"caption":"Theme: Dark","command":"set_theme_appearance","args":{"dark":true}},
-  {"caption": "Theme & minihtml: Popup flags 0", "command": "show_popup", "args": {"content": "<p title=\"Flags 0\"><b>Popup flags 0</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 0, "max_width": 320, "max_height": 100}},
-  {"caption": "Theme & minihtml: Popup flags 4", "command": "show_popup", "args": {"content": "<p title=\"Flags 4\"><b>Popup flags 4</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 4, "max_width": 320, "max_height": 100}},
-  {"caption": "Theme & minihtml: Popup flags 8", "command": "show_popup", "args": {"content": "<p title=\"Flags 8\"><b>Popup flags 8</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 8, "max_width": 320, "max_height": 100}},
-  {"caption": "Theme & minihtml: Popup flags 16", "command": "show_popup", "args": {"content": "<p title=\"Flags 16\"><b>Popup flags 16</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 16, "max_width": 320, "max_height": 100}},
-  {"caption": "Theme & minihtml: Popup flags 32", "command": "show_popup", "args": {"content": "<p title=\"Flags 32\"><b>Popup flags 32</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 32, "max_width": 320, "max_height": 100}},
-  {"caption": "Theme & minihtml: Popup flags 48", "command": "show_popup", "args": {"content": "<p title=\"Flags 48\"><b>Popup flags 48</b></p><p>Move, select, type or scroll to test dismissal.</p>", "flags": 48, "max_width": 320, "max_height": 100}},
-  {"caption":"Large File: Enable Full Highlighting for This View","command":"large_file_enable_feature","args":{"feature":"highlighting"}},
-  {"caption":"Large File: Enable Indexing for This View","command":"large_file_enable_feature","args":{"feature":"indexing"}},
-  {"caption":"Large File: Enable Word Wrap for This View","command":"large_file_enable_feature","args":{"feature":"word_wrap"}},
-  {"caption":"Large File: Enable Spelling for This View","command":"large_file_enable_feature","args":{"feature":"spell_check"}},
-  {"caption":"Large File: Enable Disk Diff for This View","command":"large_file_enable_feature","args":{"feature":"diff"}},
-  {"caption":"Large File: Enable Minimap for This View","command":"large_file_enable_feature","args":{"feature":"minimap"}},
-  {"caption":"Hex: Copy Hexadecimal Bytes","command":"copy_hex"},
-  {"caption":"Hex: Copy Text","command":"copy_hex_text"},
+  {
+    "caption": "Theme & minihtml: Review Demo",
+    "command": "theme_demo"
+  },
+  {
+    "caption": "Theme: Light",
+    "command": "set_theme_appearance",
+    "args": {
+      "dark": false
+    }
+  },
+  {
+    "caption": "Theme: Dark",
+    "command": "set_theme_appearance",
+    "args": {
+      "dark": true
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 0",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 0\"><b>Popup flags 0</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 0,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 4",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 4\"><b>Popup flags 4</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 4,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 8",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 8\"><b>Popup flags 8</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 8,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 16",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 16\"><b>Popup flags 16</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 16,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 32",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 32\"><b>Popup flags 32</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 32,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Theme & minihtml: Popup flags 48",
+    "command": "show_popup",
+    "args": {
+      "content": "<p title=\"Flags 48\"><b>Popup flags 48</b></p><p>Move, select, type or scroll to test dismissal.</p>",
+      "flags": 48,
+      "max_width": 320,
+      "max_height": 100
+    }
+  },
+  {
+    "caption": "Large File: Enable Full Highlighting for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "highlighting"
+    }
+  },
+  {
+    "caption": "Large File: Enable Indexing for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "indexing"
+    }
+  },
+  {
+    "caption": "Large File: Enable Word Wrap for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "word_wrap"
+    }
+  },
+  {
+    "caption": "Large File: Enable Spelling for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "spell_check"
+    }
+  },
+  {
+    "caption": "Large File: Enable Disk Diff for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "diff"
+    }
+  },
+  {
+    "caption": "Large File: Enable Minimap for This View",
+    "command": "large_file_enable_feature",
+    "args": {
+      "feature": "minimap"
+    }
+  },
+  {
+    "caption": "Hex: Copy Hexadecimal Bytes",
+    "command": "copy_hex"
+  },
+  {
+    "caption": "Hex: Copy Text",
+    "command": "copy_hex_text"
+  },
+  {
+    "caption": "Edit: Undo",
+    "command": "undo"
+  },
+  {
+    "caption": "Edit: Redo",
+    "command": "redo"
+  },
+  {
+    "caption": "Edit: Cut",
+    "command": "cut"
+  },
+  {
+    "caption": "Edit: Copy",
+    "command": "copy"
+  },
+  {
+    "caption": "Edit: Paste",
+    "command": "paste"
+  },
+  {
+    "caption": "Edit: Select All",
+    "command": "select_all"
+  },
+  {
+    "caption": "Edit: Select Next Match",
+    "command": "find_under_expand"
+  },
+  {
+    "caption": "Edit: Select All Matches",
+    "command": "find_all_under"
+  },
+  {
+    "caption": "Edit: Indent",
+    "command": "indent"
+  },
+  {
+    "caption": "Edit: Unindent",
+    "command": "unindent"
+  },
+  {
+    "caption": "Edit: Text: Transpose Characters or Selections",
+    "command": "transpose"
+  },
+  {
+    "caption": "Edit: Line: Join Selected Lines",
+    "command": "join_lines"
+  },
+  {
+    "caption": "Edit: Line: Copy Current Lines",
+    "command": "duplicate_line"
+  },
+  {
+    "caption": "Edit: Line: Move Lines Up",
+    "command": "swap_line_up"
+  },
+  {
+    "caption": "Edit: Line: Move Lines Down",
+    "command": "swap_line_down"
+  },
+  {
+    "caption": "Edit: Mark: Set Selection Mark",
+    "command": "set_mark"
+  },
+  {
+    "caption": "Edit: Mark: Select to Mark",
+    "command": "select_to_mark"
+  },
+  {
+    "caption": "Edit: Mark: Delete to Mark",
+    "command": "delete_to_mark"
+  },
+  {
+    "caption": "Edit: Mark: Exchange with Mark",
+    "command": "swap_with_mark"
+  },
+  {
+    "caption": "Edit: Mark: Insert Last Killed Text",
+    "command": "yank"
+  },
+  {
+    "caption": "Edit: Mark: Clear Selection Mark",
+    "command": "clear_bookmarks",
+    "args": {
+      "name": "mark"
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 2",
+    "command": "fold_by_level",
+    "args": {
+      "level": 2
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 3",
+    "command": "fold_by_level",
+    "args": {
+      "level": 3
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 4",
+    "command": "fold_by_level",
+    "args": {
+      "level": 4
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 5",
+    "command": "fold_by_level",
+    "args": {
+      "level": 5
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 6",
+    "command": "fold_by_level",
+    "args": {
+      "level": 6
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 7",
+    "command": "fold_by_level",
+    "args": {
+      "level": 7
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 8",
+    "command": "fold_by_level",
+    "args": {
+      "level": 8
+    }
+  },
+  {
+    "caption": "Edit: Code Folding: Collapse Depth 9",
+    "command": "fold_by_level",
+    "args": {
+      "level": 9
+    }
+  },
+  {
+    "caption": "Edit: Convert Case: To Uppercase",
+    "command": "upper_case"
+  },
+  {
+    "caption": "Edit: Convert Case: To Lowercase",
+    "command": "lower_case"
+  },
+  {
+    "caption": "Edit: Convert Case: To Title Case",
+    "command": "title_case"
+  },
+  {
+    "caption": "Edit: Convert Case: Swap Letter Case",
+    "command": "swap_case"
+  },
+  {
+    "caption": "Edit: Wrap: Wrap Selected Paragraphs",
+    "command": "wrap_lines"
+  },
+  {
+    "caption": "Edit: Permute Lines: Keep Unique Lines",
+    "command": "permute_lines",
+    "args": {
+      "operation": "unique"
+    }
+  },
+  {
+    "caption": "Edit: Permute Lines: Shuffle Lines",
+    "command": "permute_lines",
+    "args": {
+      "operation": "shuffle"
+    }
+  },
+  {
+    "caption": "Edit: Permute Lines: Reverse Line Order",
+    "command": "permute_lines",
+    "args": {
+      "operation": "reverse"
+    }
+  },
+  {
+    "caption": "Edit: Sort Lines: Sort without Case",
+    "command": "sort_lines",
+    "args": {
+      "case_sensitive": false
+    }
+  },
+  {
+    "caption": "Selection: Split Selection by Lines",
+    "command": "split_selection_into_lines"
+  },
+  {
+    "caption": "Selection: Add Selection on Previous Line",
+    "command": "select_lines",
+    "args": {
+      "forward": false
+    }
+  },
+  {
+    "caption": "Selection: Add Selection on Next Line",
+    "command": "select_lines",
+    "args": {
+      "forward": true
+    }
+  },
+  {
+    "caption": "Selection: Keep Primary Selection",
+    "command": "single_selection"
+  },
+  {
+    "caption": "Selection: Expand Selection: To Line",
+    "command": "expand_selection",
+    "args": {
+      "to": "line"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Word",
+    "command": "expand_selection",
+    "args": {
+      "to": "word"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Paragraph",
+    "command": "expand_selection",
+    "args": {
+      "to": "paragraph"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Scope",
+    "command": "expand_selection",
+    "args": {
+      "to": "scope"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Brackets",
+    "command": "expand_selection",
+    "args": {
+      "to": "brackets"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Indentation",
+    "command": "expand_selection",
+    "args": {
+      "to": "indentation"
+    }
+  },
+  {
+    "caption": "Selection: Expand Selection: To Tag",
+    "command": "expand_selection",
+    "args": {
+      "to": "tag"
+    }
+  },
+  {
+    "caption": "Find: Incremental Search",
+    "command": "show_panel",
+    "args": {
+      "panel": "incremental_find"
+    }
+  },
+  {
+    "caption": "Find: Next Search Result",
+    "command": "find_next"
+  },
+  {
+    "caption": "Find: Previous Search Result",
+    "command": "find_prev"
+  },
+  {
+    "caption": "Find: Select All Search Results",
+    "command": "find_all"
+  },
+  {
+    "caption": "Find: Next Selected Word",
+    "command": "find_under"
+  },
+  {
+    "caption": "Find: Previous Selected Word",
+    "command": "find_under_prev"
+  },
+  {
+    "caption": "Find: Skip Word Match",
+    "command": "find_under_expand_skip"
+  },
+  {
+    "caption": "Find: Use Selection for Search",
+    "command": "slurp_find_string"
+  },
+  {
+    "caption": "Find: Use Selection for Replacement",
+    "command": "slurp_replace_string"
+  },
+  {
+    "caption": "Find: Replace Next Result",
+    "command": "replace_next"
+  },
+  {
+    "caption": "Goto: Jump to Matching Bracket",
+    "command": "move_to",
+    "args": {
+      "to": "brackets"
+    }
+  },
+  {
+    "caption": "Goto: Jump to Line…",
+    "command": "show_overlay",
+    "args": {
+      "overlay": "goto",
+      "text": ":"
+    }
+  },
+  {
+    "caption": "Goto: Bookmarks: Toggle Selection Bookmark",
+    "command": "toggle_bookmark"
+  },
+  {
+    "caption": "Goto: Bookmarks: Next Bookmark",
+    "command": "next_bookmark"
+  },
+  {
+    "caption": "Goto: Bookmarks: Previous Bookmark",
+    "command": "prev_bookmark"
+  },
+  {
+    "caption": "Goto: Bookmarks: Select Every Bookmark",
+    "command": "select_all_bookmarks"
+  },
+  {
+    "caption": "Goto: Bookmarks: Clear Every Bookmark",
+    "command": "clear_bookmarks"
+  },
+  {
+    "caption": "Tools: Build System…",
+    "command": "show_build_systems"
+  },
+  {
+    "caption": "Tools: Build",
+    "command": "build"
+  },
+  {
+    "caption": "Tools: Build With…",
+    "command": "build",
+    "args": {
+      "select": true
+    }
+  },
+  {
+    "caption": "Tools: Cancel Build",
+    "command": "cancel_build"
+  },
+  {
+    "caption": "Tools: Next Result",
+    "command": "next_result"
+  },
+  {
+    "caption": "Tools: Previous Result",
+    "command": "prev_result"
+  },
+  {
+    "caption": "Tools: Start or Stop Macro Recording",
+    "command": "toggle_record_macro"
+  },
+  {
+    "caption": "Tools: Play Recorded Macro",
+    "command": "run_macro"
+  },
+  {
+    "caption": "Tools: Save Recorded Macro…",
+    "command": "save_macro"
+  },
+  {
+    "caption": "Tools: Macros: Insert Line after Current Line",
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Add Line.sublime-macro"
+    }
+  },
+  {
+    "caption": "Tools: Macros: Delete Current Line",
+    "command": "run_macro_file",
+    "args": {
+      "file": "res://Packages/Default/Delete Line.sublime-macro"
+    }
+  }
 ]

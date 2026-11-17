@@ -226,6 +226,8 @@ impl Tab {
         if self.loading.is_none() {
             if let Some(state) = self.pending_restore.take() {
                 state.apply(&mut self.editor.buffer, self.editor.id);
+                self.editor
+                    .restore_folded_view_state(&state, self.editor.id);
                 self.editor.sync();
             }
             self.editor.measure_document();
@@ -581,17 +583,8 @@ impl Configuration {
                     .collect();
             }
         }
-        if let Some(project) = &project
-            && let Ok(source) = std::fs::read_to_string(project)
-            && let Ok(doc) = Document::parse(&source)
-            && let Some(values) = doc.value["settings"]["ignored_packages"].as_array()
-        {
-            ignored = values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-        }
+        // Application-only: https://www.sublimetext.com/docs/settings.html
+        // Project files cannot enable/disable packages, including Vintage.
         resources.set_ignored(ignored);
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
@@ -705,13 +698,15 @@ impl Configuration {
         let mut folder_values = Vec::new();
         if let Some(path) = &project {
             let doc = Document::parse(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
-            settings.replace(
-                Layer::Project,
-                doc.value
-                    .get("settings")
-                    .cloned()
-                    .unwrap_or(serde_json::json!({})),
-            )?;
+            let mut project_settings = doc
+                .value
+                .get("settings")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            if let Some(values) = project_settings.as_object_mut() {
+                values.remove("ignored_packages");
+            }
+            settings.replace(Layer::Project, project_settings)?;
             config_stamp.push((path.clone(), stamp(path)));
             folder_values = doc
                 .value
@@ -1656,6 +1651,7 @@ impl Workspace {
                 tab.pending_restore = Some(state);
             } else {
                 state.apply(&mut tab.editor.buffer, tab.editor.id);
+                tab.editor.restore_folded_view_state(&state, tab.editor.id);
                 tab.editor.sync();
             }
             break;

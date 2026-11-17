@@ -473,6 +473,7 @@ pub struct Analysis {
     pub minimap: Arc<[MiniLine]>,
     pub index_symbols: Arc<SymbolList>,
     pub words: Arc<vel_complete::BufferWords>,
+    pub guides: Arc<vel_render::guides::GuideIndex>,
 }
 impl Analysis {
     /// Finds the innermost enabled pair in logarithmic time plus active nesting depth.
@@ -596,6 +597,8 @@ impl AnalysisTask {
     }
 }
 
+#[path = "guide_state.rs"]
+mod guide_state;
 /// One instance per Buffer; split views borrow its results through RefCell.
 #[derive(Debug)]
 pub struct Language {
@@ -610,6 +613,7 @@ pub struct Language {
     service: HighlightFrontend,
     task: AnalysisTask,
     pub analysis: Option<Arc<Analysis>>,
+    pub guides: guide_state::Guides,
     pub styled: BTreeMap<usize, StyledLine>,
     pub errors: Vec<String>,
     pub minimap: Arc<[MiniLine]>,
@@ -677,6 +681,7 @@ impl Language {
             service,
             task,
             analysis: None,
+            guides: Default::default(),
             styled: BTreeMap::new(),
             errors: Vec::new(),
             minimap: Arc::from([]),
@@ -688,7 +693,20 @@ impl Language {
             visible_views: BTreeMap::new(),
         })
     }
+    pub(crate) fn inherit_guides(
+        &mut self,
+        previous: &mut Self,
+        changes: Option<&[(ChangeId, ChangeSet)]>,
+    ) {
+        self.guides = std::mem::take(&mut previous.guides);
+        if previous.version != self.version
+            && let Some(changes) = changes
+        {
+            self.guides.rebase(&previous.text, &self.text, changes);
+        }
+    }
     pub fn change(&mut self, text: Text, version: ChangeId, changes: ChangeSet, tab: usize) {
+        self.guides.change(&self.text, &text, &changes);
         let viewport = self.requested.as_ref().map(|(_, _, r)| r.clone());
         if !self.minimap.is_empty() {
             let changed_rows: Vec<_> = changes
@@ -872,6 +890,7 @@ impl Language {
             match result {
                 Ok(a) if a.version == self.version && Arc::ptr_eq(&a.scheme, &self.scheme) => {
                     self.minimap = a.minimap.clone();
+                    self.guides.publish(Arc::clone(&a.guides));
                     if let Some(old) = self.analysis.replace(a) {
                         retire(old);
                     }
@@ -1015,6 +1034,31 @@ impl ScopeFacts {
             tag,
             blocks,
             style: resolver.style_for(&stack),
+        }
+    }
+}
+
+fn add_indent_fold(
+    text: &Text,
+    header: usize,
+    last: usize,
+    syntax_headers: &[usize],
+    folds: &mut Vec<Fold>,
+) {
+    if last > header {
+        let start = text.line_to_byte(header + 1).saturating_sub(1);
+        // Syntax and indentation formerly produced identical ranges here. Trimming
+        // only the indentation endpoint must not create a synthetic nested level.
+        if syntax_headers.binary_search(&start).is_ok() {
+            return;
+        }
+        let end = text.line_to_byte(last) + text.line_len_bytes(last);
+        if start < end {
+            folds.push(Fold {
+                range: start..end,
+                level: 1,
+                attributes: false,
+            });
         }
     }
 }
@@ -1207,22 +1251,48 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         }
     }
     // Indentation regions supplement brace/tag languages (notably Python).
+    // Build 4143: https://www.sublimetext.com/download — exclude the final
+    // newline and trailing blank lines from the collapsed block.
+    let mut syntax_headers: Vec<_> = folds
+        .iter()
+        .filter(|f| !f.attributes)
+        .map(|f| f.range.start)
+        .collect();
+    syntax_headers.sort_unstable();
+    syntax_headers.dedup();
     let mut indents: Vec<(usize, usize)> = Vec::new();
     let mut previous = None;
+    // Most minified/unindented files never need guide storage. Delay allocation
+    // until the first indented row; only the preceding blank run can inherit it.
+    let mut guide_rows = Vec::new();
+    let mut leading_blanks = 0;
     for row in 0..text.len_lines() {
         let line = text.line(row).to_string();
         if line.trim().is_empty() {
+            if guide_rows.is_empty() {
+                leading_blanks += 1;
+            } else {
+                guide_rows.push(None);
+            }
             continue;
         }
         let indent = vel_syntax::indent::indentation(&line, job.tab);
+        if !guide_rows.is_empty() {
+            guide_rows.push(Some(indent));
+        } else if indent > 0 {
+            guide_rows.reserve_exact(text.len_lines());
+            guide_rows.resize(row, Some(0));
+            for blank in &mut guide_rows[row - leading_blanks..] {
+                *blank = None;
+            }
+            guide_rows.push(Some(indent));
+        } else {
+            leading_blanks = 0;
+        }
         while indents.last().is_some_and(|(level, _)| *level >= indent) {
             let (_, header) = indents.pop().expect("indent");
-            if row > header + 1 {
-                folds.push(Fold {
-                    range: text.line_to_byte(header + 1) - 1..text.line_to_byte(row),
-                    level: 1,
-                    attributes: false,
-                });
+            if let Some((_, last)) = previous {
+                add_indent_fold(text, header, last, &syntax_headers, &mut folds);
             }
         }
         if let Some((old_indent, header)) = previous
@@ -1232,13 +1302,9 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         }
         previous = Some((indent, row));
     }
-    for (_, header) in indents {
-        if text.len_lines() > header + 1 {
-            folds.push(Fold {
-                range: text.line_to_byte(header + 1) - 1..text.len_bytes(),
-                level: 1,
-                attributes: false,
-            });
+    if let Some((_, last)) = previous {
+        for (_, header) in indents {
+            add_indent_fold(text, header, last, &syntax_headers, &mut folds);
         }
     }
     // Contiguous block meta scopes contribute regions even without literal braces.
@@ -1296,6 +1362,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         pairs,
         pair_tree,
         folds,
+        guides: Arc::new(vel_render::guides::GuideIndex::new(guide_rows)),
         minimap: minimap.into(),
         index_symbols: job.symbols.clone(),
         words: Arc::new(vel_complete::BufferWords::new(text)),

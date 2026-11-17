@@ -29,6 +29,16 @@ pub const ENGLISH_WORDS: &str = include_str!("../dictionaries/en_US/en_US.dic");
 /// Full upstream license, provenance, notices and source credits; ship with binary distributions.
 pub const ENGLISH_LICENSE: &str = include_str!("../dictionaries/en_US/LICENSE");
 
+/// macOS's documented user dictionary folder. Other platforms have no macOS folder.
+/// Source: <https://www.sublimetext.com/download>, build 4107, Spell Checking.
+pub fn system_spelling_directory() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|p| PathBuf::from(p).join("Library/Spelling"))
+    } else {
+        None
+    }
+}
+
 /// An unknown word and its absolute UTF-8 byte interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Misspelling {
@@ -137,6 +147,40 @@ impl SpellChecker {
         }
         result.sort();
         Ok(result)
+    }
+    /// Lists paired Hunspell dictionaries in a system spelling folder. A missing
+    /// folder is normal; no directory is created as a side effect.
+    pub fn system_dictionaries(root: &Path) -> Result<Vec<PathBuf>, Error> {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut result = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "dic")
+                && path.is_file()
+                && path.with_extension("aff").is_file()
+            {
+                result.push(path);
+            }
+        }
+        result.sort();
+        Ok(result)
+    }
+    /// Loads an explicitly selected system dictionary, enforcing its folder boundary
+    /// just like package dictionaries (including symlink destinations).
+    pub fn from_system_directory(root: &Path, path: &Path) -> Result<Self, Error> {
+        if path.extension().is_none_or(|e| e != "dic") {
+            return Err(Error::PackagePath);
+        }
+        let root = root.canonicalize()?;
+        let dic = path.canonicalize()?;
+        let aff = path.with_extension("aff").canonicalize()?;
+        if !dic.starts_with(&root) || !aff.starts_with(&root) {
+            return Err(Error::PackagePath);
+        }
+        Self::new(&fs::read_to_string(aff)?, &fs::read_to_string(dic)?)
     }
     /// Replaces `ignored_words`. Matching is Unicode lowercase, including capitalized forms.
     pub fn set_ignored_words(&mut self, words: impl IntoIterator<Item = impl AsRef<str>>) {
