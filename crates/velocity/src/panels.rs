@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use vel_buffer::{BufferId, Region, Selection};
 use vel_config::{
@@ -20,9 +20,13 @@ use vel_search::{
     project::{Entry, Folder, Index, Rules},
     text::{self, Search},
 };
+mod appearance_selection;
 mod details;
 #[path = "text_ops.rs"]
 mod macro_commands;
+#[cfg(test)]
+#[path = "panels_round19_tests.rs"]
+mod round19_tests;
 
 use vel_ui::{
     Focus, Item, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input, label,
@@ -55,6 +59,7 @@ pub enum Panel {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
+    Appearance,
     Goto,
     Palette,
     Syntax,
@@ -65,9 +70,14 @@ pub enum Overlay {
 #[derive(Debug)]
 struct Preview {
     sheet: u64,
+    sheets: BTreeSet<u64>,
+    buffer: BufferId,
+    version: vel_buffer::ChangeId,
     selection: Selection,
     scroll: (f64, f64),
     transient: bool,
+    path: Option<Arc<PathBuf>>,
+    position: vel_text::Point,
 }
 #[derive(Clone, Copy, Debug)]
 enum FindNavigation {
@@ -92,6 +102,7 @@ enum Local {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    appearance_selection: Option<appearance_selection::SelectionPanel>,
     macro_files: macro_commands::MacroFiles,
     vintage_prompt: Option<u64>,
     pub ui_scale: f64,
@@ -103,10 +114,17 @@ pub struct Panels {
     locations: Vec<vel_index::SymbolLocation>,
     navigation_origin: Option<crate::intelligence::Jump>,
     hover: Vec<vel_index::SymbolLocation>,
+    hover_definitions: usize,
+    hover_source: Option<(u64, BufferId, vel_buffer::ChangeId, usize)>,
+    hover_caret: usize,
+    navigation_options: crate::intelligence::OpenOptions,
+    navigation_selection: Option<(usize, BTreeSet<u64>)>,
+    navigation_preview_guard: Option<crate::editor::navigation::Guard>,
     hover_point: Point,
     hover_term: String,
     hover_since: Instant,
     hover_requested: bool,
+    hover_retry: Option<Instant>,
     hover_bounds: Rect,
     hover_html: Option<vel_ui::minihtml::Popup>,
     pub restore_scroll: Option<(f64, f64)>,
@@ -114,6 +132,7 @@ pub struct Panels {
     preserve_scroll: bool,
     incremental_origin: Option<(Preview, BufferId, vel_buffer::ChangeId)>,
     find_origin: Option<(BufferId, usize)>,
+    find_jump_origin: Option<crate::intelligence::Jump>,
     history_cursor: [Option<usize>; 2],
     history_draft: [String; 2],
     message_seen: String,
@@ -220,6 +239,7 @@ impl Default for Panels {
     fn default() -> Self {
         let (directory_tx, directories) = mpsc::channel();
         Self {
+            appearance_selection: None,
             macro_files: Default::default(),
             vintage_prompt: None,
             ui_scale: 1.,
@@ -231,10 +251,17 @@ impl Default for Panels {
             locations: Vec::new(),
             navigation_origin: None,
             hover: Vec::new(),
+            hover_definitions: 0,
+            hover_source: None,
+            hover_caret: 0,
+            navigation_options: Default::default(),
+            navigation_selection: None,
+            navigation_preview_guard: None,
             hover_point: Point::default(),
             hover_term: String::new(),
             hover_since: Instant::now(),
             hover_requested: false,
+            hover_retry: None,
             hover_bounds: Rect::default(),
             hover_html: None,
             restore_scroll: None,
@@ -242,6 +269,7 @@ impl Default for Panels {
             preserve_scroll: false,
             incremental_origin: None,
             find_origin: None,
+            find_jump_origin: None,
             history_cursor: [None, None],
             history_draft: Default::default(),
             message_seen: String::new(),
@@ -834,7 +862,7 @@ impl Panels {
                 tab.editor.key(&Key::parse("escape")?)?;
             }
             if self.panel == Some(Panel::Input) && self.overlay.is_none() {
-                self.close_panel();
+                self.close_panel(workspace);
             }
         }
         if self.vintage_prompt.is_none()
@@ -920,6 +948,14 @@ impl Panels {
         }
     }
     fn input_changed(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
+        if matches!(
+            self.panel,
+            Some(Panel::Find | Panel::Replace | Panel::Incremental)
+        ) && self.find_jump_origin.is_none()
+        {
+            self.find_jump_origin = Some(crate::intelligence::capture(workspace));
+        }
+
         if self.overlay.is_some() {
             if !self.quick_input.composing() {
                 self.query_quick(workspace);
@@ -960,7 +996,9 @@ impl Panels {
         self.review_busy()
             || self.overlay.is_some()
             || self.intel.busy()
-            || (!self.hover_term.is_empty() && !self.hover_requested)
+            || (!self.hover_term.is_empty()
+                && !self.hover_requested
+                && self.hover_since.elapsed() < Duration::from_millis(250))
             || self.file_task.is_some()
             || self.replace_rx.is_some()
             || self
@@ -1088,6 +1126,29 @@ impl Panels {
                 .collect(),
         );
     }
+    fn hover_eligible(editor: &crate::editor::Editor, byte: usize) -> Option<bool> {
+        let language = editor.language.borrow();
+        let snapshot = language.as_ref()?.scope_snapshot_at(byte)?;
+        use vel_highlight::ScopeProvider;
+        let scopes = snapshot.scopes_at(byte)?;
+        // Symbol hover: https://www.sublimetext.com/docs/indexing.html#goto-definition
+        // and https://www.sublimetext.com/download (Goto Definition Popup).
+        // The detail audit narrows this to code and HTML class/id attribute values.
+        let names: Vec<_> = scopes.iter().map(ToString::to_string).collect();
+        let is = |prefix: &str| {
+            names
+                .iter()
+                .any(|s| s == prefix || s.starts_with(&format!("{prefix}.")))
+        };
+        if is("comment") || is("text.plain") {
+            return Some(false);
+        }
+        let html_attribute = is("text.html") && (is("meta.class-name") || is("meta.toc-list"));
+        if html_attribute {
+            return Some(true);
+        }
+        Some(!is("string") && is("source"))
+    }
     pub fn hover_at(&mut self, workspace: &Workspace, point: Point, byte: usize) {
         if !workspace.editor().settings.bool("show_definitions", true) {
             self.hover.clear();
@@ -1106,20 +1167,42 @@ impl Panels {
         if contains(self.hover_bounds, point) && !self.hover.is_empty() {
             return;
         }
+        let editor = workspace.editor();
+        let byte = editor
+            .text
+            .floor_char_boundary(byte.min(editor.text.len_bytes()));
+        let source = (
+            workspace.tabs[workspace.active].sheet,
+            editor.buffer.id(),
+            editor.buffer.change_id(),
+            byte,
+        );
+        let character = (byte < editor.text.len_bytes())
+            .then(|| {
+                let end = editor.text.char_to_byte(editor.text.byte_to_char(byte) + 1);
+                editor.text.slice(byte..end).chars().next()
+            })
+            .flatten();
         let term = if workspace.editor().settings.bool("show_definitions", true)
             && self.overlay.is_none()
             && workspace.editor().marked.is_none()
+            && character.is_some_and(|c| c.is_alphanumeric() || c == '_')
         {
+            // Pointer moves only capture a bounded word. Display eligibility is checked
+            // after the hover delay, against published scopes, without synchronous parsing.
             crate::intelligence::word(workspace.editor(), byte)
         } else {
             String::new()
         };
-        if term != self.hover_term {
+        if term != self.hover_term || self.hover_source != Some(source) {
             self.hover.clear();
             self.hover_html = None;
             self.hover_term = term;
             self.hover_since = Instant::now();
             self.hover_requested = false;
+            self.hover_retry = None;
+            self.hover_source = Some(source);
+            self.hover_caret = editor.caret;
         }
         self.hover_point = point;
     }
@@ -1139,8 +1222,20 @@ impl Panels {
                 })
                 .unwrap_or(0);
             if let Some(location) = self.hover.get(i).cloned() {
-                self.intel.remember(crate::intelligence::capture(workspace));
-                crate::intelligence::jump(workspace, &location, false)?;
+                workspace
+                    .jump_history
+                    .borrow_mut()
+                    .remember(crate::intelligence::capture(workspace));
+                crate::intelligence::jump_with_options(
+                    workspace,
+                    &location,
+                    false,
+                    Default::default(),
+                )?;
+                workspace
+                    .jump_history
+                    .borrow_mut()
+                    .reset_current(crate::intelligence::capture(workspace));
             }
             self.hover.clear();
             self.hover_html = None;
@@ -1155,6 +1250,12 @@ impl Panels {
         args: &Value,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if self.overlay.is_none() {
+            workspace.observe_navigation();
+        }
+        let _navigation =
+            crate::editor::navigation::Guard::command_args(&workspace.jump_history, name, args);
+
         if name == "show_overlay" && args["overlay"] == "snippet_choices" {
             let items = args["names"]
                 .as_array()
@@ -1220,6 +1321,9 @@ impl Panels {
             return Ok(true);
         }
         match name {
+            "select_color_scheme" | "select_theme" => {
+                self.open_appearance(workspace, name == "select_theme");
+            }
             "goto_symbol_in_project" => {
                 self.action(workspace, "show_overlay", &json!({}), viewport)?;
                 self.overlay = Some(Overlay::ProjectSymbols);
@@ -1228,10 +1332,22 @@ impl Panels {
                 self.query_quick(workspace);
             }
             "goto_definition" | "goto_reference" => {
+                self.cancel_overlay(workspace);
                 self.hover.clear();
                 let term = crate::intelligence::word(workspace.editor(), workspace.editor().caret);
                 if !term.is_empty() {
                     self.navigation_origin = Some(crate::intelligence::capture(workspace));
+                    self.navigation_options = crate::intelligence::OpenOptions {
+                        side_by_side: args["side_by_side"].as_bool().unwrap_or(false),
+                        clear_to_right: args["clear_to_right"].as_bool().unwrap_or(false),
+                        origin: workspace.tabs[workspace.active].sheet,
+                    };
+                    self.navigation_selection = Some((
+                        workspace.workbench.active,
+                        workspace.workbench.groups[workspace.workbench.active]
+                            .selected
+                            .clone(),
+                    ));
                     self.intel.query(
                         if name == "goto_definition" {
                             crate::intelligence::Query::Definition(term)
@@ -1244,7 +1360,10 @@ impl Panels {
             }
             "jump_back" | "jump_forward" => {
                 self.cancel_overlay(workspace);
-                self.intel.history(workspace, name == "jump_forward")?;
+                workspace.jump_history(name == "jump_forward");
+                if let Some(message) = workspace.jump_history.borrow_mut().notice.take() {
+                    self.set_message(message);
+                }
                 self.restore_scroll = Some(workspace.tabs[workspace.active].scroll);
             }
             "show_indexing_status" => {
@@ -1286,8 +1405,16 @@ impl Panels {
                 });
                 self.preview = Some(Preview {
                     sheet: workspace.tabs[workspace.active].sheet,
+                    sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
+                    buffer: workspace.editor().buffer.id(),
+                    version: workspace.editor().buffer.change_id(),
                     scroll: workspace.tabs[workspace.active].scroll,
                     transient: workspace.tabs[workspace.active].transient,
+                    path: workspace.tabs[workspace.active].path.clone().map(Arc::new),
+                    position: crate::editor::navigation::position(
+                        &workspace.editor().text,
+                        workspace.editor().caret,
+                    ),
                     selection: workspace
                         .editor()
                         .buffer
@@ -1296,6 +1423,11 @@ impl Panels {
                         .clone(),
                 });
                 // Keep a pre-existing side-bar preview alive while Goto reuses its own transient tab.
+                if self.overlay == Some(Overlay::Goto) {
+                    self.navigation_preview_guard = Some(
+                        crate::editor::navigation::Guard::suppress(&workspace.jump_history),
+                    );
+                }
                 workspace.tabs[workspace.active].transient = false;
                 self.focus.show(Surface::Overlay, true);
                 self.focus.set(Surface::Overlay, 1);
@@ -1319,11 +1451,12 @@ impl Panels {
                     && self.panel
                         == Some(Self::panel_kind(args["panel"].as_str().unwrap_or("find")))
                 {
-                    self.close_panel();
+                    self.close_panel(workspace);
                     return Ok(true);
                 }
                 self.cancel_overlay(workspace);
                 let previous_panel = self.panel;
+                self.finish_find_navigation(workspace);
                 let panel = args["panel"]
                     .as_str()
                     .unwrap_or(if name == "find_in_files" {
@@ -1338,14 +1471,28 @@ impl Panels {
                 } else {
                     Self::panel_kind(panel)
                 });
+                if matches!(
+                    self.panel,
+                    Some(Panel::Find | Panel::Replace | Panel::Incremental)
+                ) {
+                    self.find_jump_origin = Some(crate::intelligence::capture(workspace));
+                }
                 if self.panel == Some(Panel::Incremental) && previous_panel != self.panel {
                     let editor = workspace.editor();
                     self.incremental_origin = Some((
                         Preview {
                             sheet: workspace.tabs[workspace.active].sheet,
+                            sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
+                            buffer: editor.buffer.id(),
+                            version: editor.buffer.change_id(),
                             selection: editor.buffer.view(editor.id).sel().clone(),
                             scroll: workspace.tabs[workspace.active].scroll,
                             transient: workspace.tabs[workspace.active].transient,
+                            path: workspace.tabs[workspace.active].path.clone().map(Arc::new),
+                            position: crate::editor::navigation::position(
+                                &editor.text,
+                                editor.caret,
+                            ),
                         },
                         editor.buffer.id(),
                         editor.buffer.change_id(),
@@ -1422,7 +1569,7 @@ impl Panels {
                 if args["cancel"].as_bool() == Some(true) {
                     self.cancel_incremental(workspace);
                 }
-                self.close_panel();
+                self.close_panel(workspace);
             }
             "toggle_side_bar" => {
                 self.side_visible = !self.side_visible;
@@ -1519,6 +1666,7 @@ impl Panels {
                     let editor = workspace.editor_mut();
                     text::select_all(&mut editor.buffer, editor.id, &hits);
                     editor.sync();
+                    self.finish_find_navigation(workspace);
                     // ST4 Find settings: https://www.sublimetext.com/download (Find).
                     if args["_close_panel"].as_bool().unwrap_or_else(|| {
                         workspace
@@ -1526,7 +1674,7 @@ impl Panels {
                             .settings
                             .bool("close_find_after_find_all", true)
                     }) {
-                        self.close_panel();
+                        self.close_panel(workspace);
                     }
                 }
             }
@@ -1541,7 +1689,7 @@ impl Panels {
                             .bool("close_find_after_replace_all", true)
                     })
                 {
-                    self.close_panel();
+                    self.close_panel(workspace);
                 }
             }
             "find_in_files_start" => {
@@ -1593,7 +1741,17 @@ impl Panels {
             &[]
         }
     }
-    fn close_panel(&mut self) {
+    fn finish_find_navigation(&mut self, workspace: &mut Workspace) {
+        if let Some(origin) = self.find_jump_origin.take() {
+            let current = crate::intelligence::capture(workspace);
+            if !origin.same_position(&current) {
+                workspace.jump_history.borrow_mut().remember(origin);
+            }
+            workspace.jump_history.borrow_mut().reset_current(current);
+        }
+    }
+    fn close_panel(&mut self, workspace: &mut Workspace) {
+        self.finish_find_navigation(workspace);
         if self.panel == Some(Panel::Results) && self.file_task.take().is_some() {
             self.file_complete = false;
             self.result_status = format!(
@@ -1716,6 +1874,10 @@ impl Panels {
         close: bool,
         report: bool,
     ) {
+        let _navigation = crate::editor::navigation::Guard::command(
+            &workspace.jump_history,
+            if backwards { "find_prev" } else { "find_next" },
+        );
         // One guard is the find interception itself; an outer guard denotes playback.
         // Playback must finish this find before its next text command can run.
         if workspace.editor().registry.playback_depth() > 1
@@ -1740,6 +1902,10 @@ impl Panels {
             });
             return;
         }
+        let _preview = self
+            .find_jump_origin
+            .as_ref()
+            .map(|_| crate::editor::navigation::Guard::suppress(&workspace.jump_history));
         if let Some(search) = &self.search {
             let current = workspace.editor().selection();
             let next = search.next(
@@ -1757,8 +1923,9 @@ impl Panels {
                 self.set_message(format!("Unable to find {}", search.query));
             }
         }
+        self.finish_find_navigation(workspace);
         if close {
-            self.close_panel();
+            self.close_panel(workspace);
         }
     }
     fn replace_document(
@@ -1807,6 +1974,11 @@ impl Panels {
         Ok(())
     }
     fn query_quick(&mut self, workspace: &mut Workspace) {
+        if self.overlay == Some(Overlay::Appearance) {
+            self.query_appearance(workspace, true);
+            return;
+        }
+        let _navigation = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
         let value = self.quick_input.value();
         let query = Query::parse(&value);
         let target = match self.overlay {
@@ -1822,6 +1994,7 @@ impl Panels {
             Some(Overlay::Choices) => "choices",
             Some(Overlay::Locations) => "locations",
             Some(Overlay::ProjectSymbols) => "project_symbols",
+            Some(Overlay::Appearance) => unreachable!("handled above"),
             None => return,
         };
         if self.quick_target != target {
@@ -2171,6 +2344,11 @@ impl Panels {
         self.fuzzy_worker.query(term, 100);
     }
     fn preview_current(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        if self.overlay == Some(Overlay::Appearance) {
+            self.preview_appearance(workspace);
+            return Ok(());
+        }
+        let _navigation = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
         if matches!(
             self.overlay,
             Some(Overlay::ProjectSymbols | Overlay::Locations)
@@ -2181,7 +2359,13 @@ impl Panels {
                 .and_then(|i| self.locations.get(i))
                 .cloned()
             {
-                crate::intelligence::jump(workspace, &location, true)?;
+                crate::intelligence::jump_with_options(
+                    workspace,
+                    &location,
+                    true,
+                    self.navigation_options,
+                )?;
+                self.cleanup_navigation_previews(workspace, true);
             }
             return Ok(());
         }
@@ -2249,21 +2433,56 @@ impl Panels {
         }
         Ok(())
     }
-    fn cancel_overlay(&mut self, workspace: &mut Workspace) {
-        self.palette_accept = None;
-        if self.overlay.take().is_none() {
+    fn cleanup_navigation_previews(&self, workspace: &mut Workspace, keep_active: bool) {
+        let Some(preview) = &self.preview else {
             return;
-        }
+        };
         for index in (0..open_file_count(workspace)).rev() {
-            if workspace.tabs[index].transient && !workspace.tabs[index].dirty() {
+            let tab = &workspace.tabs[index];
+            if (!keep_active || index != workspace.active)
+                && tab.transient
+                && !tab.dirty()
+                && !preview.sheets.contains(&tab.sheet)
+            {
                 let _ = workspace.close(index);
             }
         }
+    }
+    pub(crate) fn cancel_overlay(&mut self, workspace: &mut Workspace) {
+        self.intel.cancel_query();
+        if self.appearance_selection.take().is_some() {
+            workspace.cancel_appearance_preview();
+            self.overlay = None;
+            self.focus.show(Surface::Overlay, false);
+            self.fuzzy_worker.cancel();
+            return;
+        }
+        let _navigation = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
+        self.palette_accept = None;
+        if self.overlay.take().is_none() {
+            self.navigation_origin = None;
+            self.navigation_selection = None;
+            self.navigation_options = Default::default();
+            self.navigation_preview_guard = None;
+            return;
+        }
+        self.cleanup_navigation_previews(workspace, false);
         if let Some(preview) = self.preview.take()
             && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == preview.sheet)
         {
-            workspace.select(index);
-            workspace.editor_mut().set_selection(preview.selection);
+            crate::intelligence::restore(
+                workspace,
+                &crate::intelligence::Jump {
+                    sheet: preview.sheet,
+                    buffer: preview.buffer,
+                    version: preview.version,
+                    caret_count: preview.selection.len(),
+                    selection: preview.selection,
+                    scroll: preview.scroll,
+                    path: preview.path,
+                    position: preview.position,
+                },
+            );
             workspace.tabs[index].scroll = preview.scroll;
             workspace.tabs[index].transient = preview.transient;
             self.restore_scroll = Some(preview.scroll);
@@ -2274,6 +2493,23 @@ impl Panels {
         self.local = None;
         self.prepared.clear();
         self.navigation_origin = None;
+        if let Some((group, selected)) = self.navigation_selection.take()
+            && let Some(group) = workspace.workbench.groups.get_mut(group)
+        {
+            group.selected = selected
+                .into_iter()
+                .filter(|sheet| group.sheets.contains(sheet))
+                .collect();
+            if let Some(focused) = group.focused {
+                group.selected.insert(focused);
+            }
+        }
+        workspace
+            .jump_history
+            .borrow_mut()
+            .reset_current(crate::intelligence::capture(workspace));
+        self.navigation_preview_guard = None;
+        self.navigation_options = Default::default();
     }
     fn accept(
         &mut self,
@@ -2281,6 +2517,10 @@ impl Panels {
         side: bool,
         viewport: Range<usize>,
     ) -> Result<Option<Invocation>, String> {
+        if self.overlay == Some(Overlay::Appearance) {
+            self.accept_appearance(workspace)?;
+            return Ok(None);
+        }
         if self.overlay == Some(Overlay::Goto) {
             let query = Query::parse(&self.quick_input.value());
             if query.file.is_empty() && matches!(query.target, Target::Symbol(_) | Target::Word(_))
@@ -2374,21 +2614,24 @@ impl Panels {
             }
             if matches!(
                 self.overlay,
-                Some(Overlay::ProjectSymbols | Overlay::Locations)
+                Some(Overlay::Goto | Overlay::ProjectSymbols | Overlay::Locations)
             ) {
                 if let Some(origin) = self.navigation_origin.take() {
-                    self.intel.remember(origin);
+                    workspace.jump_history.borrow_mut().remember(origin);
                 } else if let Some(source) = &self.preview {
-                    self.intel.remember(crate::intelligence::Jump {
-                        sheet: source.sheet,
-                        path: workspace
-                            .tabs
-                            .iter()
-                            .find(|t| t.sheet == source.sheet)
-                            .and_then(|t| t.path.clone()),
-                        selection: source.selection.clone(),
-                        scroll: source.scroll,
-                    });
+                    workspace
+                        .jump_history
+                        .borrow_mut()
+                        .remember(crate::intelligence::Jump {
+                            sheet: source.sheet,
+                            buffer: source.buffer,
+                            version: source.version,
+                            caret_count: source.selection.len(),
+                            selection: source.selection.clone(),
+                            scroll: source.scroll,
+                            path: source.path.clone(),
+                            position: source.position,
+                        });
                 }
             }
             self.preview_current(workspace)?;
@@ -2414,12 +2657,19 @@ impl Panels {
                     .insert(preview.sheet);
             }
             workspace.tabs[workspace.active].transient = false;
+            workspace
+                .jump_history
+                .borrow_mut()
+                .reset_current(crate::intelligence::capture(workspace));
+            self.navigation_selection = None;
+            self.navigation_options = Default::default();
             if let Some(path) = &workspace.tabs[workspace.active].path {
                 self.uses += 1;
                 self.recency.insert(path.clone(), self.uses);
             }
             self.overlay = None;
             self.preview = None;
+            self.navigation_preview_guard = None;
             self.prepared.clear();
             self.focus.show(Surface::Overlay, false);
             return Ok(None);
@@ -2436,7 +2686,7 @@ impl Panels {
                     }
                     i.args["text"] = json!(self.query.value());
                 }
-                self.close_panel();
+                self.close_panel(workspace);
                 return Ok(invocation);
             }
             _ => {
@@ -2456,6 +2706,11 @@ impl Panels {
         key: &Key,
         viewport: Range<usize>,
     ) -> Result<(bool, Option<Invocation>), String> {
+        if self.overlay == Some(Overlay::Appearance) && key.name == "tab" && key.modifiers & 1 != 0
+        {
+            self.cancel_overlay(workspace);
+            return Ok((false, None));
+        }
         if let Some(invocation) = self.review_key(key) {
             return Ok((true, invocation));
         }
@@ -2475,7 +2730,7 @@ impl Panels {
                 self.side_focused = false;
             } else {
                 self.cancel_incremental(workspace);
-                self.close_panel();
+                self.close_panel(workspace);
             }
             return Ok((true, None));
         }
@@ -2809,6 +3064,9 @@ impl Panels {
         Ok(())
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        workspace.observe_navigation();
+        let _navigation =
+            crate::editor::navigation::Guard::command(&workspace.jump_history, "find_result");
         if let Some(files::Row::Line(line)) = self.result_view.rows.get(self.result_selected) {
             self.result_cursor = Some(self.result_selected);
             self.reveal = true;
@@ -2857,6 +3115,17 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
+        if let Some(message) = workspace.appearance_notice.take() {
+            self.set_message(message);
+        }
+        if self.appearance_selection.is_some()
+            && (self.overlay != Some(Overlay::Appearance) || self.appearance_stale(workspace))
+        {
+            self.cancel_overlay(workspace);
+        }
+        if self.overlay.is_none() {
+            workspace.observe_navigation();
+        }
         if self.vintage_prompt.is_some()
             && let Err(error) = self.sync_vintage_prompt(workspace, viewport.clone())
         {
@@ -2872,28 +3141,87 @@ impl Panels {
         {
             self.query_quick(workspace);
         }
+        if self
+            .hover_source
+            .is_some_and(|(sheet, buffer, version, _)| {
+                let editor = workspace.editor();
+                sheet != workspace.tabs[workspace.active].sheet
+                    || buffer != editor.buffer.id()
+                    || version != editor.buffer.change_id()
+                    || self.hover_caret != editor.caret
+                    || !editor.settings.bool("show_definitions", true)
+            })
+        {
+            self.hover.clear();
+            self.hover_html = None;
+            self.hover_term.clear();
+            self.hover_source = None;
+        }
+        if !self.hover_term.is_empty()
+            && !self.hover_requested
+            && self.hover_since.elapsed() >= Duration::from_secs(2)
+        {
+            self.hover_term.clear();
+            self.hover_retry = None;
+        }
         if !self.hover_requested
             && !self.hover_term.is_empty()
-            && self.hover_since.elapsed() >= std::time::Duration::from_millis(250)
+            && self.hover_since.elapsed() >= Duration::from_millis(250)
             && self.overlay.is_none()
             && !self.intel.pending
         {
-            self.intel.query(
-                crate::intelligence::Query::Hover(self.hover_term.clone()),
-                workspace,
-            );
-            self.hover_requested = true;
+            let eligible = self
+                .hover_source
+                .and_then(|source| Self::hover_eligible(workspace.editor(), source.3));
+            match eligible {
+                Some(true) => {
+                    self.intel.query_at(
+                        crate::intelligence::Query::Hover(self.hover_term.clone()),
+                        workspace,
+                        self.hover_source
+                            .map_or(workspace.editor().caret, |source| source.3),
+                    );
+                    self.hover_requested = true;
+                    self.hover_retry = None;
+                }
+                Some(false) => {
+                    self.hover_term.clear();
+                    self.hover_retry = None;
+                }
+                None if self.hover_retry.is_none_or(|at| Instant::now() >= at) => {
+                    self.hover_retry = Some(
+                        (Instant::now() + Duration::from_millis(100))
+                            .min(self.hover_since + Duration::from_secs(2)),
+                    );
+                }
+                None => {}
+            }
         }
         let mut query_changed = false;
         if let Some(result) = self.intel.result() {
             query_changed = true;
             use crate::intelligence::Query;
             let editor = workspace.editor();
-            let current =
-                result.source == (editor.buffer.id(), editor.buffer.change_id(), editor.caret);
+            let current = result.source
+                == (
+                    workspace.tabs[workspace.active].sheet,
+                    editor.buffer.id(),
+                    editor.buffer.change_id(),
+                    editor.caret,
+                );
             match result.query {
-                Query::Hover(term) if current && term == self.hover_term => {
-                    self.hover = result.locations
+                Query::Hover(term)
+                    if self.hover_source == Some(result.source) && term == self.hover_term =>
+                {
+                    let pointer = result.source.3;
+                    let path = workspace.tabs[workspace.active].path.as_deref();
+                    let other = |location: &vel_index::SymbolLocation| {
+                        path != Some(location.file.as_path()) || !location.range.contains(&pointer)
+                    };
+                    self.hover = result.locations.into_iter().filter(other).collect();
+                    self.hover_definitions = self.hover.len();
+                    self.hover
+                        .extend(result.references.into_iter().filter(other));
                 }
                 Query::Symbols(term)
                     if self.overlay == Some(Overlay::ProjectSymbols)
@@ -2907,17 +3235,34 @@ impl Panels {
                 Query::Definition(_) | Query::Reference(_) if current => {
                     if result.locations.len() == 1 {
                         if let Some(origin) = self.navigation_origin.take() {
-                            self.intel.remember(origin);
+                            workspace.jump_history.borrow_mut().remember(origin);
                         }
-                        let _ = crate::intelligence::jump(workspace, &result.locations[0], false);
+                        let _ = crate::intelligence::jump_with_options(
+                            workspace,
+                            &result.locations[0],
+                            false,
+                            self.navigation_options,
+                        );
+                        workspace
+                            .jump_history
+                            .borrow_mut()
+                            .reset_current(crate::intelligence::capture(workspace));
+                        self.navigation_selection = None;
+                        self.navigation_options = Default::default();
                     } else if result.locations.is_empty() {
                         self.message = "No indexed locations".into();
                         self.navigation_origin = None;
+                        self.navigation_selection = None;
+                        self.navigation_options = Default::default();
                     } else {
                         let origin = self.navigation_origin.take();
+                        let options = self.navigation_options;
+                        let selection = self.navigation_selection.take();
                         let _ =
                             self.action(workspace, "show_overlay", &json!({}), viewport.clone());
                         self.navigation_origin = origin;
+                        self.navigation_options = options;
+                        self.navigation_selection = selection;
                         self.overlay = Some(Overlay::Locations);
                         self.fuzzy_worker.cancel();
                         self.locations = result.locations;
@@ -4305,6 +4650,14 @@ impl Panels {
         extend: bool,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if down
+            && self.overlay.is_none()
+            && self.find_jump_origin.is_some()
+            && !contains(self.panel_bounds, point)
+        {
+            self.finish_find_navigation(workspace);
+        }
+
         if self.overlay.is_some() {
             if down && !contains(self.quick_bounds, point) {
                 self.cancel_overlay(workspace);
@@ -4971,10 +5324,10 @@ mod intelligence_tests {
         assert!(p.overlay.is_none());
         for _ in 0..140 {
             let mut jump = crate::intelligence::capture(&w);
-            jump.sheet += p.intel.back.len() as u64 + 1;
-            p.intel.remember(jump);
+            jump.sheet += w.jump_history.borrow().back.len() as u64 + 1;
+            w.jump_history.borrow_mut().remember(jump);
         }
-        assert!(p.intel.back.len() <= 128);
+        assert!(w.jump_history.borrow().back.len() <= 128);
     }
     #[test]
     fn unsaved_analysis_replaces_disk_and_close_restores_it() {
@@ -5256,7 +5609,18 @@ impl Panels {
             self.hover_bounds = Rect::default();
             return;
         }
-        let source=self.hover.iter().take(8).enumerate().map(|(i,location)|format!("<div><a href='definition:{i}' title='Open definition'><b>{}</b></a> <code>{}:{}</code></div>",escape_html(&location.name),escape_html(&location.file.file_name().unwrap_or_default().to_string_lossy()),location.row+1)).collect::<String>();
+        let mut source = String::new();
+        for (i, location) in self.hover.iter().take(16).enumerate() {
+            if i == 0 && self.hover_definitions > 0 {
+                source.push_str("<h3>Definitions</h3>");
+            }
+            if i == self.hover_definitions {
+                source.push_str("<h3>References</h3>");
+            }
+            source.push_str(&format!("<div><a href='definition:{i}' title='Open location'><b>{}</b></a> <code>{}:{}</code></div>",
+                escape_html(&location.name), escape_html(&location.file.file_name().unwrap_or_default().to_string_lossy()), location.row + 1));
+        }
+
         if self
             .hover_html
             .as_ref()

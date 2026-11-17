@@ -161,6 +161,20 @@ impl Editor {
         if vi.clipboard {
             vi.engine.set_clipboard(self.clipboard.clone());
         }
+        self.observe_navigation("vi_move");
+        let origin = self.navigation_snapshot();
+        let parsed = format!("{}{display}", vi.pending);
+        // Numeric Ex addresses record like G per the round-19 review requirement.
+        // Vim itself documents a different jumplist rule for :[range]:
+        // https://vimhelp.org/motion.txt.html#%3A%5Brange%5D
+        let prompt_jump = vi.engine.mode() == Mode::CommandLine
+            && matches!(key, vel_vintage::Key::Enter)
+            && vi.engine.command_line().is_some_and(|s| {
+                s.starts_with('/')
+                    || s.starts_with('?')
+                    || s.strip_prefix(':')
+                        .is_some_and(|line| line.trim().parse::<usize>().is_ok())
+            });
         let old = self.buffer.text().clone();
         let version = self.buffer.change_id();
         let motion_layout = crate::layout::MotionLayout {
@@ -224,6 +238,33 @@ impl Editor {
             Outcome::Handled => Resolution::Pending,
             Outcome::PassThrough => Resolution::Unbound,
         };
+        let complete = !vi.engine.context("vi_has_count")
+            && !vi.engine.context("vi_has_action")
+            && !vi.engine.context("vi_has_motion");
+        // Each completed parser motion has an identity. vi jump motions explicitly
+        // save their origin; non-jump motions (including counted j/k) never record.
+        let motion = parsed.trim_start_matches(|c: char| c.is_ascii_digit());
+        let jump = prompt_jump
+            || matches!(
+                motion,
+                "G" | "gg" | "n" | "N" | "*" | "#" | "%" | "(" | ")" | "{" | "}" | "H" | "M" | "L"
+            )
+            || motion.starts_with('\'')
+            || motion.starts_with('`');
+        if complete && let Some(observer) = &self.navigation {
+            let _guard =
+                crate::editor::navigation::Guard::command_kind(&observer.history, &parsed, !jump);
+            if jump
+                && self.buffer.change_id() == version
+                && let Some(origin) = origin
+                && self
+                    .navigation_snapshot()
+                    .is_some_and(|next| !origin.same_position(&next))
+            {
+                observer.history.borrow_mut().remember(origin);
+            }
+            self.observe_navigation("vi_move");
+        }
         self.vintage = Some(vi);
         self.sync();
         result

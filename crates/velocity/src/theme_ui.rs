@@ -13,7 +13,7 @@ pub fn default_ui() -> Rc<RefCell<ThemeUi>> {
 pub struct Themes {
     pub ui: Rc<RefCell<ThemeUi>>,
     sources: Sources,
-    compiled: BTreeMap<(String, bool, String), Compiled>,
+    compiled: BTreeMap<(String, bool, String), Result<Compiled, String>>,
     unconditional: Option<Sources>,
     guards: Vec<SettingsGuard>,
     palettes: BTreeMap<String, Palette>,
@@ -27,7 +27,7 @@ pub struct Themes {
 pub struct Prepared {
     ui: vel_ui::theme::PreparedUi,
     sources: Sources,
-    compiled: BTreeMap<(String, bool, String), Compiled>,
+    compiled: BTreeMap<(String, bool, String), Result<Compiled, String>>,
     unconditional: Option<Sources>,
     guards: Vec<SettingsGuard>,
     palettes: BTreeMap<String, Palette>,
@@ -318,48 +318,21 @@ impl Themes {
             }
         }
         self.icons = icons;
-        let mut error = None;
-        let theme = self
-            .compiled
-            .entry(key.clone())
-            .or_insert_with(|| {
-                let resources = self
-                    .sources
-                    .iter()
-                    .map(|(path, contents)| vel_theme::Resource { path, contents })
-                    .collect::<Vec<_>>();
-                let full = Arc::new(
-                    match vel_theme::load_resources(&resources, name, &palette) {
-                        Ok(theme) => theme,
-                        Err(e) => {
-                            error = Some(e.to_string());
-                            Theme::velocity(
-                                if dark {
-                                    Appearance::Dark
-                                } else {
-                                    Appearance::Light
-                                },
-                                &palette,
-                            )
-                        }
+        let compiled = self.compile_choice(name, dark, scheme, &palette);
+        let error = compiled.as_ref().err().cloned();
+        let theme = compiled.unwrap_or_else(|_| {
+            (
+                Arc::new(Theme::velocity(
+                    if dark {
+                        Appearance::Dark
+                    } else {
+                        Appearance::Light
                     },
-                );
-                let unconditional = self
-                    .unconditional
-                    .as_ref()
-                    .filter(|_| error.is_none())
-                    .and_then(|sources| {
-                        let resources = sources
-                            .iter()
-                            .map(|(path, contents)| vel_theme::Resource { path, contents })
-                            .collect::<Vec<_>>();
-                        vel_theme::load_resources(&resources, name, &palette)
-                            .ok()
-                            .map(Arc::new)
-                    });
-                (full, unconditional)
-            })
-            .clone();
+                    &palette,
+                )),
+                None,
+            )
+        });
         let mut ui = self.ui.borrow_mut();
         ui.replace(theme.0, palette);
         if let Some(unconditional) = theme.1 {
@@ -367,6 +340,59 @@ impl Themes {
         }
         self.selected = Some((key.0, key.1, key.2, global_icons.into()));
         error.map_or(Ok(()), Err)
+    }
+    /// Validates a picker entry without changing the selected UI theme.
+    pub(crate) fn validate_choice(
+        &mut self,
+        name: &str,
+        settings: &Settings,
+        dark: bool,
+    ) -> Result<(), String> {
+        if name == "auto" {
+            return Ok(());
+        }
+        let values = vel_config::Value::Object(settings.effective());
+        let scheme = vel_color_scheme::selected_scheme(&values, dark);
+        let palette = self
+            .palettes
+            .get(scheme.rsplit('/').next().unwrap_or(scheme))
+            .cloned()
+            .unwrap_or_default();
+        self.compile_choice(name, dark, scheme, &palette)
+            .map(|_| ())
+    }
+    fn compile_choice(
+        &mut self,
+        name: &str,
+        dark: bool,
+        scheme: &str,
+        palette: &Palette,
+    ) -> Result<Compiled, String> {
+        let key = (name.to_owned(), dark, scheme.to_owned());
+        if let Some(compiled) = self.compiled.get(&key) {
+            return compiled.clone();
+        }
+        let resources = self
+            .sources
+            .iter()
+            .map(|(path, contents)| vel_theme::Resource { path, contents })
+            .collect::<Vec<_>>();
+        let compiled = vel_theme::load_resources(&resources, name, palette)
+            .map(|full| {
+                let unconditional = self.unconditional.as_ref().and_then(|sources| {
+                    let resources = sources
+                        .iter()
+                        .map(|(path, contents)| vel_theme::Resource { path, contents })
+                        .collect::<Vec<_>>();
+                    vel_theme::load_resources(&resources, name, palette)
+                        .ok()
+                        .map(Arc::new)
+                });
+                (Arc::new(full), unconditional)
+            })
+            .map_err(|error| error.to_string());
+        self.compiled.insert(key, compiled.clone());
+        compiled
     }
     pub fn file_icon(&self, path: &Path) -> Option<&str> {
         self.icons

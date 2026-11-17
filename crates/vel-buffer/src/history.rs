@@ -603,6 +603,22 @@ impl Buffer {
         }
         Ok(b)
     }
+    /// Borrows retained maps after a revision, without copying their edit arrays.
+    /// Returns `None` if that revision has already been evicted.
+    pub fn retained_changes_since(
+        &self,
+        from: ChangeId,
+    ) -> Option<impl DoubleEndedIterator<Item = (ChangeId, &ChangeSet)> + ExactSizeIterator> {
+        self.retains(from).then(|| {
+            let first = self.log.partition_point(|c| c.id <= from);
+            self.log.range(first..).map(|c| (c.id, c.map.as_ref()))
+        })
+    }
+    /// Whether retained change maps are approaching either configured eviction limit.
+    /// Incremental clients can advance old anchors before the oldest maps are lost.
+    pub fn change_log_pressure(&self) -> bool {
+        self.log.len() >= self.limits.changes / 2 || self.log_bytes >= self.limits.bytes / 2
+    }
     /// Retained maps after an ID, in publication order, including individual undo/redo steps.
     /// `None` means the caller must reset its incremental service from the current snapshot.
     pub fn changes_since(&self, from: ChangeId) -> Option<Vec<(ChangeId, ChangeSet)>> {

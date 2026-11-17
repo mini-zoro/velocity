@@ -16,6 +16,9 @@ use vel_config::{
 use vel_platform::{Command, TextInput, Utf16Range};
 use vel_text::Text;
 
+#[path = "navigation.rs"]
+pub(crate) mod navigation;
+
 pub type ReindentResult = (
     vel_buffer::BufferId,
     vel_buffer::ChangeId,
@@ -44,6 +47,7 @@ pub struct SharedLayoutEdit {
 }
 #[derive(Debug)]
 pub struct Editor {
+    pub(crate) navigation: Option<navigation::Observer>,
     pub binary: Option<Arc<crate::binary::Snapshot>>,
     pub features: vel_largefile::FeaturePolicy,
     pub document_metrics: vel_largefile::DocumentMetrics,
@@ -193,6 +197,7 @@ impl Editor {
         let policy_config = crate::large::FeatureConfig::new(&settings);
         let features = policy_config.evaluate(document_metrics);
         Self {
+            navigation: None,
             binary: None,
             features,
             policy_config,
@@ -332,6 +337,7 @@ impl Editor {
             .set_policy(self.features.diff_against_disk, self.features.spell_check);
     }
     pub fn sync(&mut self) {
+        self.rebase_navigation(false);
         if self.binary.is_some() {
             return;
         }
@@ -548,6 +554,7 @@ impl Editor {
         }
     }
     pub fn set_selection(&mut self, selection: Selection) {
+        self.observe_navigation("selection");
         self.unmark();
         if self.buffer.view(self.id).sel() != &selection {
             self.completion.hide();
@@ -558,6 +565,7 @@ impl Editor {
         }
         self.buffer.set_selection(self.id, selection);
         self.sync();
+        self.observe_navigation("selection");
     }
     pub fn selection(&self) -> Range<usize> {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
@@ -574,6 +582,16 @@ impl Editor {
             .map(|r| Utf16Range::from_bytes(&self.text, r))
     }
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
+        self.observe_navigation("selection");
+        let _navigation = self
+            .navigation
+            .as_ref()
+            .map(|observer| navigation::Guard::command_args(&observer.history, name, args));
+        let result = self.run_inner(name, args);
+        self.observe_navigation(name);
+        result
+    }
+    fn run_inner(&mut self, name: &str, args: &Value) -> Result<(), String> {
         if (self.binary.is_some()
             || self.document_metrics.longest_line_bytes >= crate::large::LONG_LINE as u64
             || name == "large_file_enable_feature")

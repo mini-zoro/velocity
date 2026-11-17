@@ -1,3 +1,359 @@
+# Round 19 Lane A final verification fixes (native review pending)
+
+Start: clean `lane-a` at `71a516d`, following the user's two WIP commits and main
+`dad6e3d`. These fixes remain uncommitted; no reset or amendment was performed.
+Evidence and start-of-review backups: `/tmp/velocity-lane-a-r19-final-review/`.
+The only tracker change in Lane B's `workspace.rs` is the small
+`discard_settings_write` method. App changes share explicit `open_file` dispatch;
+the scroll/reveal, layout, rendering, build, platform, session and resource-menu areas
+are untouched. No GUI, packaging script, `cargo clean` or package target was used.
+
+| Finding | Fix | Headless user-path test |
+| --- | --- | --- |
+| 1: existing Finder tab | `open_requests.rs:open_path` marks duplicate-file selection as an explicit request before selecting, preserving unfocused origins; literal `open_file` dispatch shares the headless/native handler. | `r19_existing_tab_open_requests_preserve_unfocused_origin` (native open-path router, native socket accept, CLI socket accept and named `open_file`); existing new-file request test |
+| 2: bounded multi-carets | `navigation.rs:Jump::compact/same_position/advance` retains all selections through 64 regions, including direction/primary; larger selections retain the primary plus original count. Incremental mapping remains bounded independently of the live caret count. | `r19_bounded_multicaret_back_forward_maps_all_regions` (5, 64 and 65 regions, Back/Forward and eviction); corrected existing small-selection assertion; 10,000-caret gate |
+| 3: click jitter | `History::mouse_down` continues a native multi-click within a four-pixel radius on the same button. | `r19_multiclick_is_one_gesture` now jitters each press; existing distinct-click/drag test |
+| 4: typing sessions | `Guard::with_class` assigns one identity to insert, auto-pair/snippet, left/right delete and committed IME text, independent of arguments. `History::observe` branches Forward only when it actually records a new origin; distance splits remember the session start. | `r19_typing_arguments_merge_and_preserve_forward_history`, `r19_editing_distance_is_measured_from_session_start`, existing repeated-command/session tests |
+| 5: failed-write flash | `appearance.rs:poll_appearance_commits` revokes failed pairs before rollback; `workspace.rs:discard_settings_write` removes only matching overrides, preserving newer commits and unrelated zoom keys. | `r19_failed_appearance_write_revokes_reload_override_before_error_frame` (scheme/theme/variant, blocked writer, in-flight reload, one status, no modal queue, zoom interleaving) |
+| 6: numeric vi Ex address | `vintage.rs:feed_vintage` treats accepted numeric `:N` as an explicit jump per this review's requirement. | `r19_vintage_ex_line_number_is_a_jump` (focused vi input panel, Back/Forward) |
+| 7: timing robustness | Test-only probes time the observation/rebase hooks, counting nested calls once; compare 300 matching App insertions with history enabled/disabled, in alternating order. | `r19_multicaret_history_300_key_stall_gate` (history hooks ≤1 ms/key; paired full-run overhead ≤10%; 60 Back and 60 Forward recalls after eviction) |
+| 8: hover retry cadence | Document the observed native idle cadence as up to 200 ms. The 100 ms deadline remains a retry target; scopes still stop retrying after two seconds. No app scroll/reveal changes. | Existing `r19_hover_unpublished_scopes_use_slow_bounded_wakes` verifies suppression of 8 ms busy frames, deadline/timeout and publication without pointer movement; native cadence remains manual |
+
+No preference defaults changed. Existing menu/palette integration requirements are
+listed below. B17's `track_settings_write(rx, &pairs)` is already integrated at commit
+time by `71a516d`; this follow-up preserves that integration and adds failure revocation.
+
+The numeric vi address behavior is explicitly requested here. Current
+[Vim help for `:[range]`](https://vimhelp.org/motion.txt.html#%3A%5Brange%5D) says it
+does not modify Vim's jumplist, unlike `G`; the code comment records this discrepancy.
+The other navigation/appearance source citations remain in place.
+
+Correction to the previous **1.926 ms** claim: that historical experiment used
+`app_round18_tests::input`: panel interception, `Editor::text_input` and named-action
+draining. Its fixture was 10,000 carets on `"x\n".repeat(10_000)`, two shared-buffer
+sheets, 60 tab-switch origins, ten warm-up insertions and 300 measured insertions,
+with change-map retention reduced to 160. It **omitted `App::changed_state`**, thus
+omitting the native input route's shared-buffer synchronization and reveal work. It
+was not a full App-path latency measurement. The replacement explicitly calls that
+same shared post-input adapter in both paired runs; it makes no worst/median claim
+about `text_input`, which has a separately reported pre-existing growth cost.
+
+The failed-write regression was also checked with mutation testing: removing just
+`discard_settings_write(&failed)` makes the test fail because Amber replaces `auto`
+in the very frame that shows the save error. The call was restored before the full
+gate. Evidence: `failed-write-mutation.log` and `mutation.json`.
+
+Native reviewer checklist (all pending in this headless sandbox):
+
+- [ ] With one/two already open, leave one at line 30, unfocus, Finder-open two and
+  refocus. Back returns to one:30; Forward restores two's existing location. Repeat
+  CLI `two:50` and the `open_file` command, with both new and existing tabs.
+- [ ] Leave five carets (including directed selections) before/after jumps. Back and
+  Forward restore all five; 64 regions survive, 65+ restore the primary. Type through
+  change-map eviction and test 10,000 carets with many history entries for stalls.
+- [ ] Double/triple click with small trackpad jitter: one history origin. Distinct
+  clicks beyond the radius remain separate. A drag remains one gesture.
+- [ ] After Back, type 60 lines using varied text, auto-pairs, delete and IME. No
+  typing-origin flood, and Forward remains reachable. A new explicit jump branches it.
+- [ ] Delay a Preferences write, force its failure while a resource reload is in
+  flight, and check the very frame showing the error: original appearance already
+  restored, one non-modal status, no subsequent flash. Repeat with variants/themes
+  and an interleaved zoom or a later successful appearance commit.
+- [ ] In Vintage, submit `:30` then `:70` through the input panel; Back/Forward visit
+  both origins. Counted `j/k` remain absent from history. Hover an edited word without
+  moving; scope retry follows the native idle cadence (up to 200 ms), ending by 2 s.
+
+Final-review history timing (`history-timing-current.log`) passes the new gate:
+**0.278 ms worst aggregate history-hook time per key**, with 10,000 live carets and
+60 entries across 300 measured insertions (ten warm-ups). The full shared App input
+adapter measures **147.747 ms median with history / 147.177 ms disabled**, with totals
+**44.889 s / 45.049 s (−0.355%)**. Both runs keep identical shared-buffer selections,
+undo limits, retained-map pressure and input lengths, alternate execution order for
+each key, and include `changed_state`. Test-only nested probes surround history
+observation/rebase, including snapshot construction; production has no timing probes
+or history-disable flag. The test recalls all 60 entries in both directions after map
+eviction. This replaces the unstable full-input worst/median criterion.
+
+Final verification (`gate.json`) passes formatting, strict release/locked workspace
+clippy, `cargo test --workspace --locked --release` at default parallelism, and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`.
+The complete suite reports **1,016 passed, 0 failed, 20 ignored** across 114 test/doc-test
+suites. The ignored 10,000-caret timing is run separately as reported above. The
+3,000-step navigation sweep completes **117 real sheet switches** with bounded
+stacks, valid Unicode boundaries and workbench invariants (`navigation-sweep-final.log`).
+
+Nine alternating whole-child retired-instruction pairs against main `dad6e3d`
+pass the 5% gate (`instructions/report.json`):
+
+| Benchmark | Main median instructions | Candidate median instructions | Change |
+| --- | ---: | ---: | ---: |
+| `typing1` | 428,006,624 | 428,138,276 | +0.031% |
+| `typing1000` | 10,916,058,218 | 10,973,431,540 | +0.526% |
+
+The baseline is built from `git archive dad6e3d` plus the exact pinned permissive
+package fixtures, with build provenance in `baseline.json`. The counter report
+retains every sample, host load and binary SHA-256. It measures each entire headless
+child using Darwin `RUSAGE_INFO_V4` after exit before reaping; no GUI/window/drawing
+latency is claimed. The paired App/history test also excludes native presentation.
+No commit, reset or amendment was made; `HEAD` remains `71a516d`.
+
+Reproduce the focused timing and navigation checks:
+
+```sh
+cargo test -p velocity --release --locked r19_multicaret_history_300_key_stall_gate -- --ignored --nocapture
+cargo test -p velocity --release --locked r19_randomized_navigation_sweep -- --nocapture
+python3 /tmp/velocity-lane-a-r19-final-review/retired-instructions.py \
+  --base /tmp/velocity-lane-a-r19-final-review/main-dad6e3d.bin \
+  --candidate target/release/velocity --pairs 9 --output /tmp/velocity-r19-final-instructions-repeat
+```
+
+# Round 19 Lane A earlier verification follow-up (historical measurements below)
+
+The N1–N8 follow-up remains uncommitted on `lane-a`, base main `58fd98c`.
+Evidence and review-start backups: `/tmp/velocity-lane-a-r19-navigation-review/`.
+No GUI, packaging, `cargo clean` or `target/package-macos/` access. Lane B's settings
+write tracking and renderer/layout/platform/session/menu/palette areas are untouched.
+
+| Finding | Fix (`file:function`) | Headless user-path test |
+| --- | --- | --- |
+| N1 | `navigation.rs:push/Jump::advance/History::rebase`: retain only the primary region and original caret count; borrow change maps; round-robin at most four records / 256 maps per revision only under retention pressure. Restore lazily; finish anchors when closing their buffer. | `r19_multicaret_history_records_only_primary`, `r19_multicaret_history_300_key_stall_gate`, existing 10,050-edit test |
+| N2 | `navigation.rs:Workspace::navigation_request`, `workspace.rs:open`: explicit file requests capture the actual origin even before OS focus returns. | `r19_unfocused_cli_finder_and_open_preserve_origin` (CLI socket accept, native Finder request, direct open) |
+| N3 | `navigation.rs:Guard::command_args/History::observe`, `editor.rs:run`: stable name/argument identities, editing-session distance rule, explicit jump classification. | `r19_repeated_editing_commands_preserve_goto_origin` (all reported sequences, including 140 Cmd+D presses), `r19_nearby_bookmarks_and_marks_are_explicit_jumps` |
+| N4 | `panels/details.rs:preview_find/cancel_incremental`, `panels.rs:finish_find_navigation/navigate_find/close_panel`: suppress preview records; accept a single origin/final transition; cancel incremental find silently. | `r19_find_preview_is_one_session_and_cancel_is_silent` (one character at a time, Enter/ordinary close/incremental cancel, symmetric Forward), `r19_find_all_accepts_session_without_closing_panel` |
+| N5 | `app_mouse.rs:handle_mouse_event`, `navigation.rs:History::mouse_down`: click counts above one at the same point/button continue the gesture. | `r19_multiclick_is_one_gesture`, existing distinct-click/drag test |
+| N6 | `appearance.rs:commit_appearance/poll_appearance_commits`: promote preview directly to committed User settings before the queued write; roll back only on failure, once. | `r19_commit_keeps_preview_visible_until_write_completes` (scheme and theme, blocked serial writer), `r19_malformed_preferences_roll_back_once` |
+| N7 | `intelligence.rs:restore`, `panels.rs:action`: drop missing closed-file targets, show `<path> no longer exists`, create no tab/file. | `r19_deleted_closed_history_file_is_skipped` |
+| N8 | `panels.rs:busy/poll`, `panels/details.rs:message_deadline`: after the initial hover delay, retry unpublished scopes at 100 ms intervals for at most two seconds. | `r19_hover_unpublished_scopes_use_slow_bounded_wakes` (no 8 ms busy frames, publication without moving, timeout, zero parses) |
+| Tab-switch coverage | The 3,000-step randomized sweep and picker tests use actual `workspace.select` switches; the existing tab-click route also exercises activation. | `r19_randomized_navigation_sweep`, `r19_picker_dismisses_on_tab_commands_and_window_focus_loss`, `r19_history_tab_switch_edit_mapping_closed_view_and_primary` |
+| Counted Vintage motions | `vintage.rs:feed_vintage`, `navigation.rs:Guard::command_kind`: non-jump motions never record, independent of count/distance; explicit vi jumps retain origins. | `r19_counted_vintage_nonjump_motions_never_record`, corrected `r19_vintage_parsed_motions_and_jump_origins` |
+
+No preference defaults changed in this follow-up. Public documentation remains cited in
+the implementation. The requested primary-only history and non-jump vi behavior follow
+the verifier's observations; the public docs do not specify those storage details.
+
+**B17 integration is still required after rebase.** At the marked `// lane B API` site,
+register the real queued receiver at commit time with
+`track_settings_write(rx, &[(String, Option<Value>)])`, using the exact root/variant pairs
+already carried by the commit. No second stale-reload guard has been built. Until that
+generic API lands, this branch retains its existing old-reload limitation.
+
+Native follow-up checklist (unverified in this headless sandbox):
+
+- [ ] With 10,000 carets and many jump origins, type through 128/256 edits: no periodic
+  history pause; Back restores only the primary position. Continue past 10,000 edits.
+- [ ] In `one.txt` at line 30, unfocus, open `two.txt:50` via CLI; refocus and Back returns
+  to line 30. Repeat with Finder and an already-open file.
+- [ ] After Goto Line, run page/line/document-limit motions, repeated Cmd+D, selection
+  expansion, paste, swap line, word delete, comment, line delete and undo. Back reaches
+  the pre-Goto position. Check single/double/triple clicks and drag identities separately.
+- [ ] Type a long Find query slowly; Back visits only accepted find positions. Incremental
+  Find Escape restores its origin. In Vintage, `20j`/`20k` never record; `G`/`gg` still do.
+- [ ] Commit each picker while disk work is delayed: no flash to the old appearance.
+  An unwritable/malformed Preferences file rolls back once with one non-modal message.
+  After B17 rebase, repeat during an in-flight reload and verify external edits still apply.
+- [ ] Close a named file, delete it externally and Back: no empty tab opens; status names
+  the missing path. Hover an edited embedded-source word without moving: published scopes
+  reveal it within a slow retry; unpublished scopes cease wakes after two seconds.
+- [ ] Preview and actually switch tabs by Ctrl+Tab, `next_view` and tab click; every route
+  restores exactly. Repeat with Vintage and IME composition and on OS focus loss.
+
+Reproduce the dedicated timing gate separately from the parallel workspace suite:
+
+```sh
+cargo test -p velocity --release --locked r19_multicaret_history_300_key_stall_gate -- --ignored --nocapture
+cargo test -p velocity --release --locked r19_randomized_navigation_sweep -- --nocapture
+```
+
+Follow-up verification: strict release/locked clippy, fmt, default-parallel workspace
+tests and rustdoc with `RUSTDOCFLAGS="-D warnings"` pass. The workspace reports
+**955 passed, 0 failed, 15 ignored** across 114 test/doc-test suites; the dedicated
+timing test is ignored in the parallel suite and run explicitly in isolation.
+`gate.json`, `workspace-final.log`, `clippy-final.log`, `fmt-final.log` and
+`rustdoc-final.log` contain the final results. The randomized sweep completes 3,000
+steps with **117 real sheet switches**, maintaining Unicode boundaries, bounded
+Back/Forward stacks and workbench invariants (`navigation-sweep.log`).
+
+The isolated 10,000-caret timing creates 60 genuine origins by alternating shared-buffer
+sheets (line-limit command runs now merge). It reduces only change-map retention to
+160 so that maintenance and eviction occur within 300 keys, while keeping the default
+undo/memory limits. After ten warm-up keys, **300 keys measured 1.926 ms median,
+3.764 ms worst (1.954×)**. Key 128 took **1.884 ms**. Every one of the 60 Back and
+60 Forward recalls restores the correctly mapped primary caret after eviction.
+An earlier timing trial had one 4.008 ms spike (2.091× its 1.917 ms median); the
+diagnostic repeat measured 3.572/1.912 ms (1.868×). All trials remain in `stall.log`,
+`stall-diagnostic.log` and `stall-final.log`; no samples or bounds were removed.
+These are headless measurements, not native latency claims.
+
+Nine alternating whole-child retired-instruction pairs against main `58fd98c` pass
+the 5% regression gate (`instructions-final/report.json`):
+
+| Benchmark | Main median instructions | Candidate median instructions | Change |
+| --- | ---: | ---: | ---: |
+| `typing1` | 425,385,087 | 424,844,640 | −0.127% |
+| `typing1000` | 10,630,925,948 | 10,606,019,284 | −0.234% |
+
+The report retains all samples, host load and both binary hashes. Counters use Darwin
+`RUSAGE_INFO_V4` after each headless child exits, before reaping; they include setup,
+editing, background work and CPU scenes. No GUI or packaging action was performed.
+Reproduce with `/tmp/velocity-lane-a-r19/retired-instructions.py --pairs 9`, the base
+`/tmp/velocity-lane-a-r19/main-58fd98c` and candidate `target/release/velocity`.
+
+# Round 19 Lane A first review fixes (historical verification below)
+
+Base main `58fd98c`, branch `lane-a`, uncommitted. Review evidence and review-start
+backups: `/tmp/velocity-lane-a-r19-review/`. The clean main binary remains at
+`/tmp/velocity-lane-a-r19/main-58fd98c`. No GUI or packaging script was run.
+No layout, renderer, platform, session, menu or palette files were changed. The mouse
+adapter has only a mouse-down identity hook; app changes dismiss appearance pickers
+and gate history at the window focus boundary.
+
+| Finding | Implementation | Headless test through the user's path |
+| --- | --- | --- |
+| 1: synchronous hover parsing | `panels.rs:hover_at` captures only a bounded word; delayed `poll` uses published scopes and suppresses an unpublished result | `r19_hover_stale_embedded_pointer_moves_never_parse` (HTML/Markdown, 255 × ~960 bytes, 51 moves, <1 ms/move, zero parses) |
+| 2: background history | `navigation.rs:History::observe` checks active sheet/window; `Tab::install` suppresses programmatic reload/restoration | `r19_background_reload_preserves_history_and_forward`, `r19_lazy_background_load_never_records_selection` |
+| 3: clicks/Vintage | `app_mouse.rs:handle_mouse_event` gives every down its own identity; `vintage.rs:feed_vintage` identifies parsed motions and remembers vi jumps | `r19_mouse_clicks_are_distinct_and_drag_is_one_jump`, `r19_vintage_parsed_motions_and_jump_origins` |
+| 4: pending preference writes | `appearance.rs:commit_appearance` retains the exact root/variant pairs written atomically; `poll_appearance_commits` publishes only successful writes | `r19_appearance_commit_persists_exact_pairs_after_inflight_reload` (blocked writer, old reload, one write, subsequent external edit) |
+| 5: broken themes | `theme_ui.rs:validate_choice/compile_choice` caches validation without mutating UI; picker errors use status only, cannot accept | `r19_broken_theme_is_nonmodal_and_cannot_commit` |
+| 6: expired/closed jumps | `navigation.rs:rebase` now spreads primary-anchor mapping under retention pressure and before close; `intelligence.rs:restore` reopens paths at Unicode line/column, skips closed untitled views | `r19_history_survives_change_log_eviction_and_editing_sessions`, `r19_closed_file_reopens_at_saved_line_and_column`, corrected `r19_find_result_and_closed_view_history` |
+| 7: hover eligibility | `panels.rs:hover_eligible`: code, HTML class/id and embedded source; excludes comments, other strings and plain text | corrected `r19_hover_scope_table_and_stale_prefix_budget` |
+| 8: editing sessions | `History::observe` coalesces nearby typing and character/word motions; explicit jumps retain their origin and local edits add no typing origin | `r19_history_survives_change_log_eviction_and_editing_sessions`, corrected `r19_history_tab_switch_edit_mapping_closed_view_and_primary` |
+| 9: real overrides | preview uses the User layer's actual precedence, restores only its temporary key, preserves real View/Syntax values; masked commits report status | `r19_commit_preserves_view_and_syntax_overrides`, corrected `r19_picker_filters_input_preselects_fixed_and_survives_appearance_change` |
+| 10: mode variants | `appearance_selection.rs` previews `row.key`; inactive variants make no visible change, with mode annotations | `r19_variants_preview_the_committed_system_mode`, `r19_auto_variants_restore_exactly_and_commit_once` |
+| 11: malformed Preferences | failed write leaves file and committed memory unchanged, restores preview, emits one status delivery | `r19_malformed_preferences_roll_back_once` |
+| 12: duplicates | `appearance.rs:Catalog::load` deduplicates scheme filenames while retaining merged User overrides | `r19_scheme_rows_deduplicate_user_overrides` |
+| 13: dismissal | Ctrl+Tab interception, named tab commands, active-sheet change and window focus loss all dismiss through cancellation | `r19_picker_dismisses_on_tab_commands_and_window_focus_loss`, `r19_appearance_dismissal_and_window_view_overrides` |
+| 14: many tabs | preview recolors visible sheets only; committed changes mark background adapters stale and refresh on activation | `r19_preview_touches_only_visible_views_and_activation_is_lazy` (31 tabs; verifies untouched background settings/schemes) |
+
+Lane B integration: **the generic old-reload race guard is still supplied by B17**.
+No second pending-key override mechanism was added. At the marked `// lane B API`
+call, replace `track_settings_write(rx)` with
+`track_settings_write(rx, &[(String, Option<Value>)])` at commit time after rebasing onto B17. Every
+persisted key/value pair is available there, including `auto` plus the selected dark/light
+variant, while the file itself is written exactly once. The current test covers an old reload
+finishing before the blocked write and verifies that later external edits remain effective;
+the generic guard's after-drain race belongs to Lane B's tests/integration.
+
+Public sources are cited at the implementation sites:
+
+- [Indexing](https://www.sublimetext.com/docs/indexing.html#goto-definition) and
+  [ST4 changelog](https://www.sublimetext.com/download): indexed symbol hover, definitions,
+  references and jump records. The exact eligibility table follows section 5.2 and the
+  reviewer's detail-audit clarification. Hover never performs synchronous scope parsing.
+- [Settings precedence](https://www.sublimetext.com/docs/settings.html#settings-files):
+  User, Syntax and View layers; a syntax-specific scheme can mask a saved User choice.
+- [Color schemes](https://www.sublimetext.com/docs/color_schemes.html#customization) and
+  [themes](https://www.sublimetext.com/docs/themes.html): filename merging and resource formats.
+  Compiled choices are reused. No Sublime Default resources were read or copied.
+- [OpenFlags.CLEAR_TO_RIGHT](https://www.sublimetext.com/docs/api_reference.html#sublime.OpenFlags.CLEAR_TO_RIGHT)
+  deselects sheets to the right; existing side-by-side/clone/group behavior is unchanged.
+  Its headless tests remain `r19_goto_side_by_side_and_clear_to_right_sheet_outcomes`,
+  `r19_side_by_side_existing_other_group_clones_and_retains_group` and
+  `r19_reference_preview_arguments_cancel_and_commit`.
+
+No settings defaults were changed and no Preferences keys were added. `show_definitions`
+remains `true`, as documented in Indexing. The ten-line local-edit merge threshold is an
+internal conservative policy requested by this review, not a claimed Sublime default.
+
+Rows still needed from Lane B (menu/palette resources untouched):
+
+| Menu row | Command / args |
+| --- | --- |
+| Goto > Goto Anything… | `show_overlay {"overlay":"goto"}` |
+| Goto > Goto Symbol… | `show_overlay {"overlay":"goto","text":"@"}` |
+| Goto > Goto Symbol in Project… | `goto_symbol_in_project` |
+| Goto > Goto Definition / Goto Reference | `goto_definition` / `goto_reference` |
+| Goto > Goto Line… | `goto_line` |
+| Goto > Jump Back / Jump Forward | `jump_back` / `jump_forward` |
+| Goto > Switch File > Next / Previous | `next_view` / `prev_view` |
+| Preferences/Settings > Color Scheme… / Theme… | `select_color_scheme` / `select_theme` |
+
+Palette rows remain **UI: Select Color Scheme** (`select_color_scheme`) and
+**UI: Select Theme** (`select_theme`), with matching missing Goto commands. Public docs
+confirm the selection UI and command behavior; the exact palette wording is retained
+from the prior round (no Default package inspection).
+
+Native checklist (all unverified: there is no GUI in this sandbox):
+
+- [ ] Click lines 3, 8, 13, 18; each Ctrl+- returns one click. A drag makes one record.
+  Check multi-caret primary/direction and scroll restoration; mix typing/word/arrow keys
+  after a Goto jump, then return directly to its origin.
+- [ ] In Vintage, use `jjj`, `G`, `gg`, searches, `n/N`, `*/#`, `%`, sentence/paragraph,
+  viewport and mark motions. Ctrl+- returns to each jump origin, while local runs merge.
+- [ ] Modify a background tab using a formatter or git checkout, finish a lazy background
+  load and switch OS window focus. No history entry or forward-stack change appears.
+- [ ] Make two Goto jumps, type >10,000 characters, then return. Close a named target,
+  go back and verify reopen at the saved Unicode line/column; closed untitled views skip.
+- [ ] Hover code, comments, strings, plain text, HTML class/id/other attributes and embedded
+  script/style/Markdown source. Only eligible published scopes produce a popup; rapid edits
+  and pointer moves never stall. Self definitions are absent; reference links work.
+- [ ] Exercise F12/Shift+F12, both shortcut aliases and `side_by_side`/`clear_to_right`
+  across groups. Preview/cancel/commit keep transient sheets and selected groups consistent.
+- [ ] In both pickers, preview by arrow/mouse and filter/IME; no file writes occur. Enter
+  writes once. Escape/outside click/other panel/Ctrl+Tab/`next_view`/OS focus loss restore.
+  Test fixed choices, `auto`, both variants and OS mode changes during preview.
+- [ ] Test real View and Syntax overrides plus another window. Preview matches commit;
+  real overrides survive and masking is explained in status. Same-named User schemes
+  appear once. Broken schemes/themes cannot commit and never open a modal.
+- [ ] With 31 tabs and several visible groups, only visible views preview; background views
+  refresh on activation. Check redraw, title bar, popup colors, Retina and regular screens.
+- [ ] Break or make User Preferences unwritable immediately before Enter. The file and
+  committed appearance survive; exactly one non-modal "could not save Preferences: …"
+  status appears. After B17 rebase, repeat commits while a resource reload is in flight,
+  then externally edit Preferences to verify the generic pending-write reconciliation.
+
+Verification: fmt, strict release/locked workspace clippy and rustdoc with warnings
+denied pass. Full workspace tests at default parallelism report **944 passed, 0 failed,
+14 ignored** across 114 test/doc-test suites. The final repeat also covers excluded-hover
+idle termination and dismissing a picker after its source tab becomes hidden. Logs:
+`workspace-complete.log`, `clippy-final.log`, `rustdoc-final.log`, `fmt.log`.
+The deterministic navigation sweep uses 2,000 commands, edits and history recalls with
+Unicode boundary, bounded-stack and workbench invariants (`navigation-sweep.log`).
+
+Nine alternating retired-instruction pairs against clean main `58fd98c` pass the ≤5% gate:
+
+| Complete headless child | Main median instructions | Candidate median instructions | Change |
+| --- | ---: | ---: | ---: |
+| Typing, 1 caret | 426,740,627 | 427,071,554 | +0.078% |
+| Typing, 1,000 carets | 11,371,195,714 | 11,229,219,202 | −1.249% |
+
+`instructions-final/report.json` includes all samples, load, counter boundaries and binary
+SHA-256 hashes. The host was busy (one-minute load 16.25–19.27), so retired instructions
+were used as permitted. The measurement covers each entire child, including setup,
+editing, background services and CPU scenes, read after exit before reaping using Darwin
+`RUSAGE_INFO_V4`. It measures no GUI or presentation. The smoke benchmark instantiates
+`Editor` directly; the separate observer timing below attaches history to an app workspace.
+
+Explicit user-path timings on this host:
+
+- 255-line stale embedded HTML / Markdown, 51 pointer moves: worst **0.006 / 0.003 ms**,
+  **zero synchronous parses**, including the delayed eligibility poll (`hover-timing.log`).
+- 31 tabs, single visible view: arrow preview **0.138 ms median / 0.212 ms max**;
+  background settings and scheme identities stay untouched (`preview-timing.log`).
+- 10,000 carets: history observation **95.1 ns/hook** median over 21 × 1,000 hooks;
+  an insertion with history attached **0.929 ms**, retaining all carets (`history-timing.log`).
+
+These are headless observations, not native latency claims. The native checklist above
+remains unverified. Baseline SHA-256:
+`a646060381fa1119836256ede9369a96ee029cc41a0745c31c47c269e10a269b`;
+candidate SHA-256:
+`9d28d7679a452b566a508d7eebac199b0260c4e6d465efe210c88cf226c54e2f`.
+
+Reproduce headlessly without packaging:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test -p velocity --release --locked r19_randomized_navigation_sweep -- --nocapture
+cargo test -p velocity --release --locked r19_jump_history_10000_caret_timing -- --ignored --nocapture
+python3 /tmp/velocity-lane-a-r19/retired-instructions.py \
+  --base /tmp/velocity-lane-a-r19/main-58fd98c --candidate target/release/velocity \
+  --pairs 9 --output /tmp/velocity-r19-review-instructions-repeat
+```
+
+Root `Cargo.lock` is unchanged. No commit was created.
+
 # Round 17 Lane B: fonts, layout, scheme drawing and window controls
 
 Headless tests drive real settings/resource loaders and named/key/mouse dispatch. Native

@@ -118,6 +118,11 @@ impl From<Region> for Selection {
     }
 }
 impl Selection {
+    /// Whether two immutable snapshots share their regions and primary index, in O(1).
+    /// Useful for observers which must not compare every caret on each input event.
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        self.primary == other.primary && Arc::ptr_eq(&self.data, &other.data)
+    }
     pub(crate) fn snapshot_relative(&mut self, base: usize, decode: bool) {
         let data = Arc::make_mut(&mut self.data);
         for p in data.points.iter_mut().chain(&mut data.anchors) {
@@ -376,7 +381,8 @@ impl Selection {
             *d.goals.last_mut().expect("one region") = r.xpos;
         }
     }
-    pub(crate) fn map(&self, mut f: impl FnMut(Region) -> Region) -> Self {
+    /// Maps regions, normalizing overlaps while retaining the mapped primary region.
+    pub fn map(&self, mut f: impl FnMut(Region) -> Region) -> Self {
         let mut primary = Region::caret(0);
         let regions: Vec<_> = self
             .iter()

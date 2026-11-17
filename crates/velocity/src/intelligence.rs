@@ -1,7 +1,8 @@
 //! Per-window project services. All cache I/O, publication and queries run off the UI thread.
+pub(crate) use crate::editor::navigation::Jump;
 use crate::workspace::Workspace;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -10,7 +11,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use vel_buffer::{BufferId, ChangeId, Selection};
+use vel_buffer::{BufferId, ChangeId};
 use vel_complete::CompletionEngine;
 use vel_index::{IndexOptions, ProjectIndex, SymbolLocation};
 #[derive(Clone, Debug)]
@@ -29,15 +30,16 @@ pub enum Query {
 #[derive(Debug)]
 pub struct ResultSet {
     pub query: Query,
-    pub source: (BufferId, ChangeId, usize),
+    pub source: (u64, BufferId, ChangeId, usize),
     pub locations: Vec<SymbolLocation>,
+    pub references: Vec<SymbolLocation>,
 }
 #[derive(Debug)]
 enum Work {
     Query(
         u64,
         Query,
-        (BufferId, ChangeId, usize),
+        (u64, BufferId, ChangeId, usize),
         Vec<Arc<ProjectIndex>>,
     ),
 }
@@ -89,18 +91,9 @@ pub struct Intelligence {
     published: BTreeMap<PathBuf, (BufferId, ChangeId)>,
     words: BTreeMap<u64, ChangeId>,
     revision: u64,
-    pub back: VecDeque<Jump>,
-    pub forward: VecDeque<Jump>,
     pub pending: bool,
     last_status: Instant,
     pub percentage: Option<u32>,
-}
-#[derive(Clone, Debug)]
-pub struct Jump {
-    pub sheet: u64,
-    pub path: Option<PathBuf>,
-    pub selection: Selection,
-    pub scroll: (f64, f64),
 }
 impl Default for Intelligence {
     fn default() -> Self {
@@ -116,6 +109,7 @@ impl Default for Intelligence {
                         continue;
                     }
                     let mut locations = Vec::new();
+                    let mut references = Vec::new();
                     for index in projects {
                         if latest.load(Ordering::Acquire) != id {
                             break;
@@ -136,8 +130,12 @@ impl Default for Intelligence {
                             Query::Reference(name) => {
                                 locations.extend(index.lookup_references(name))
                             }
-                            Query::Definition(name) | Query::Hover(name) => {
+                            Query::Definition(name) => {
                                 locations.extend(index.lookup_definition(name))
+                            }
+                            Query::Hover(name) => {
+                                locations.extend(index.lookup_definition(name));
+                                references.extend(index.lookup_references(name));
                             }
                         }
                     }
@@ -151,6 +149,9 @@ impl Default for Intelligence {
                     }
                     let mut seen = BTreeSet::new();
                     locations.retain(|l| seen.insert((l.file.clone(), l.range.start, l.range.end)));
+                    seen.clear();
+                    references
+                        .retain(|l| seen.insert((l.file.clone(), l.range.start, l.range.end)));
                     if latest.load(Ordering::Acquire) == id {
                         let _ = results.send((
                             id,
@@ -158,6 +159,7 @@ impl Default for Intelligence {
                                 query,
                                 source,
                                 locations,
+                                references,
                             },
                         ));
                     }
@@ -220,8 +222,6 @@ impl Default for Intelligence {
             published: BTreeMap::new(),
             words: BTreeMap::new(),
             revision: 0,
-            back: VecDeque::new(),
-            forward: VecDeque::new(),
             pending: false,
             last_status: Instant::now(),
             percentage: None,
@@ -461,12 +461,24 @@ impl Intelligence {
         self.loading.is_some() || self.pending || self.percentage.is_some()
     }
     pub fn query(&mut self, query: Query, workspace: &Workspace) {
+        self.query_at(query, workspace, workspace.editor().caret);
+    }
+    pub fn cancel_query(&mut self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.pending = false;
+    }
+    pub fn query_at(&mut self, query: Query, workspace: &Workspace, point: usize) {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let e = workspace.editor();
         let _ = self.tx.send(Work::Query(
             generation,
             query,
-            (e.buffer.id(), e.buffer.change_id(), e.caret),
+            (
+                workspace.tabs[workspace.active].sheet,
+                e.buffer.id(),
+                e.buffer.change_id(),
+                point,
+            ),
             self.projects.iter().map(|p| p.index.clone()).collect(),
         ));
         self.pending = true;
@@ -482,40 +494,6 @@ impl Intelligence {
             self.pending = false;
         }
         result
-    }
-    pub fn remember(&mut self, jump: Jump) {
-        if self
-            .back
-            .back()
-            .is_none_or(|old| old.sheet != jump.sheet || old.selection != jump.selection)
-        {
-            self.back.push_back(jump);
-            while self.back.len() > 128 {
-                self.back.pop_front();
-            }
-        }
-        self.forward.clear();
-    }
-    pub fn history(&mut self, workspace: &mut Workspace, forward: bool) -> Result<(), String> {
-        let current = capture(workspace);
-        let target = if forward {
-            self.forward.pop_back()
-        } else {
-            self.back.pop_back()
-        };
-        if let Some(target) = target {
-            restore(workspace, &target)?;
-            let stack = if forward {
-                &mut self.back
-            } else {
-                &mut self.forward
-            };
-            stack.push_back(current);
-            while stack.len() > 128 {
-                stack.pop_front();
-            }
-        }
-        Ok(())
     }
 }
 fn patterns(settings: &vel_config::settings::Settings, key: &str) -> Vec<String> {
@@ -565,6 +543,9 @@ pub fn word(editor: &crate::editor::Editor, point: usize) -> String {
     let text = &editor.text;
     let point = text.floor_char_boundary(point.min(text.len_bytes()));
     let row = text.byte_to_line(point);
+    if text.line_len_bytes(row) > 8192 {
+        return String::new();
+    }
     let start = text.line_to_byte(row);
     let line = text.line(row).to_string();
     let col = point - start;
@@ -583,34 +564,96 @@ pub fn capture(workspace: &Workspace) -> Jump {
     let t = &workspace.tabs[workspace.active];
     Jump {
         sheet: t.sheet,
-        path: t.path.clone(),
+        buffer: t.editor.buffer.id(),
+        version: t.editor.buffer.change_id(),
         selection: t.editor.buffer.view(t.editor.id).sel().clone(),
+        caret_count: t.editor.buffer.view(t.editor.id).sel().len(),
         scroll: t.scroll,
+        path: t.path.clone().map(Arc::new),
+        position: crate::editor::navigation::position(&t.editor.text, t.editor.caret),
     }
 }
-pub fn restore(workspace: &mut Workspace, jump: &Jump) -> Result<(), String> {
-    if let Some(index) = workspace.tabs.iter().position(|t| t.sheet == jump.sheet) {
-        workspace.select(index);
-    } else if let Some(path) = &jump.path {
-        workspace.open(crate::cli::FileLocation {
-            path: path.clone(),
-            line: 1,
-            column: 1,
-        })?;
+pub(crate) fn restore(workspace: &mut Workspace, jump: &Jump) -> bool {
+    let index = workspace
+        .tabs
+        .iter()
+        .position(|t| t.sheet == jump.sheet)
+        .or_else(|| {
+            jump.path.as_deref().and_then(|path| {
+                workspace
+                    .tabs
+                    .iter()
+                    .position(|t| t.path.as_ref() == Some(path))
+            })
+        });
+    let index = if let Some(index) = index {
+        index
     } else {
-        return Ok(());
+        let Some(path) = jump.path.as_deref() else {
+            return false;
+        };
+        if !path.is_file() {
+            workspace.jump_history.borrow_mut().notice =
+                Some(format!("{} no longer exists", path.display()));
+            return false;
+        }
+        if workspace
+            .open(crate::cli::FileLocation {
+                path: path.clone(),
+                line: jump.position.row + 1,
+                column: jump.position.column + 1,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        workspace.active
+    };
+    if workspace.prepare_sheet(index).is_err() {
+        return false;
     }
-    let text = &workspace.editor().text;
-    let selection = vel_buffer::Selection::from_regions(jump.selection.iter().map(|r| {
+    if workspace.tabs[index].loading.is_some() {
+        workspace.select(index);
+        workspace.jump_history.borrow_mut().pending_restore = Some(workspace.tabs[index].sheet);
+        return true;
+    }
+    let editor = &workspace.tabs[index].editor;
+    let mut selection = if editor.buffer.id() == jump.buffer {
+        if let Some(changes) = editor.buffer.retained_changes_since(jump.version) {
+            let changes: Vec<_> = changes.collect();
+            jump.selection.map(|mut region| {
+                for (_, map) in &changes {
+                    region = vel_buffer::Region::new(
+                        map.transform_point(region.a, vel_buffer::Bias::Right),
+                        map.transform_point(region.b, vel_buffer::Bias::Right),
+                    );
+                }
+                region
+            })
+        } else {
+            vel_buffer::Selection::from_regions([vel_buffer::Region::caret(
+                crate::editor::navigation::position_byte(editor.buffer.text(), jump.position),
+            )])
+        }
+    } else {
+        // Closed/reloaded documents retain a path and a clipped line/column, never stale bytes.
+        vel_buffer::Selection::from_regions([vel_buffer::Region::caret(
+            crate::editor::navigation::position_byte(editor.buffer.text(), jump.position),
+        )])
+    };
+    let text = editor.buffer.text();
+    selection = selection.map(|r| {
         vel_buffer::Region::new(
             text.floor_char_boundary(r.a.min(text.len_bytes())),
             text.floor_char_boundary(r.b.min(text.len_bytes())),
         )
-    }));
+    });
+    workspace.select(index);
     workspace.editor_mut().set_selection(selection);
-    workspace.tabs[workspace.active].scroll = jump.scroll;
-    Ok(())
+    workspace.tabs[index].scroll = jump.scroll;
+    true
 }
+
 pub fn jump(
     workspace: &mut Workspace,
     location: &SymbolLocation,
@@ -626,12 +669,138 @@ pub fn jump(
     } else {
         workspace.open(target)?;
     }
+    select_symbol(workspace, location);
+    Ok(())
+}
+fn select_symbol(workspace: &mut Workspace, location: &SymbolLocation) {
     let text = &workspace.editor().text;
     let row = location.row.min(text.len_lines() - 1);
     let at = text.floor_char_boundary(
         text.line_to_byte(row) + location.column.min(text.line(row).len_bytes()),
     );
     workspace.editor_mut().set_caret(at, false);
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OpenOptions {
+    pub side_by_side: bool,
+    pub clear_to_right: bool,
+    pub origin: u64,
+}
+pub(crate) fn jump_with_options(
+    workspace: &mut Workspace,
+    location: &SymbolLocation,
+    preview: bool,
+    options: OpenOptions,
+) -> Result<(), String> {
+    let _history = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
+    let source = workspace.sheet_index(options.origin);
+    let group = source.and_then(|i| workspace.workbench.group_of(workspace.tabs[i].sheet));
+    let Some(group) = group.filter(|_| options.side_by_side) else {
+        return jump(workspace, location, preview);
+    };
+    let source = source.expect("source group");
+    let source_sheet = workspace.tabs[source].sheet;
+    workspace.prepare_sheet(source)?;
+    let source_tab = &workspace.tabs[source];
+    let source_jump = Jump {
+        sheet: source_sheet,
+        buffer: source_tab.editor.buffer.id(),
+        version: source_tab.editor.buffer.change_id(),
+        selection: source_tab
+            .editor
+            .buffer
+            .view(source_tab.editor.id)
+            .sel()
+            .clone(),
+        caret_count: source_tab
+            .editor
+            .buffer
+            .view(source_tab.editor.id)
+            .sel()
+            .len(),
+        scroll: source_tab.scroll,
+        path: source_tab.path.clone().map(Arc::new),
+        position: crate::editor::navigation::position(
+            &source_tab.editor.text,
+            source_tab.editor.caret,
+        ),
+    };
+    let previous_groups = workspace.workbench.groups.clone();
+    let mut selected = workspace.workbench.groups[group].selected.clone();
+    if options.clear_to_right {
+        // CLEAR_TO_RIGHT unselects sheets after the source, not groups and not files:
+        // https://www.sublimetext.com/docs/api_reference.html#sublime.OpenFlags.CLEAR_TO_RIGHT
+        let sheets = &workspace.workbench.groups[group].sheets;
+        let source_at = sheets
+            .iter()
+            .position(|&sheet| sheet == source_sheet)
+            .unwrap_or(0);
+        selected.retain(|sheet| sheets[..=source_at].contains(sheet));
+    }
+    selected.insert(source_sheet);
+    workspace.tabs[source].transient = false;
+    workspace.workbench.active = group;
+    let existing = workspace.tabs.iter().position(|tab| {
+        tab.sheet != source_sheet
+            && tab.path.as_deref() == Some(location.file.as_path())
+            && workspace.workbench.group_of(tab.sheet) == Some(group)
+    });
+    if let Some(index) = existing {
+        // Reuse a side preview of this document, including a clone of the source.
+        // Repeated arrow navigation must not accumulate hidden transient clones.
+        workspace.select(index);
+        if !preview {
+            workspace.tabs[index].transient = false;
+        }
+        select_symbol(workspace, location);
+    } else {
+        jump(workspace, location, preview)?;
+    }
+    let target = workspace.tabs[workspace.active].sheet;
+    if target == source_sheet || workspace.workbench.group_of(target) != Some(group) {
+        // Existing views elsewhere stay in their group. The existing clone primitive
+        // shares the buffer without moving or replacing the user's original view.
+        workspace.clone_file()?;
+        if workspace.workbench.active != group {
+            workspace.workbench.move_selected(group)?;
+        }
+        workspace.tabs[workspace.active].transient = preview;
+        let clone_sheet = workspace.tabs[workspace.active].sheet;
+        if target == source_sheet {
+            restore(workspace, &source_jump);
+            if let Some(index) = workspace.sheet_index(clone_sheet) {
+                workspace.select(index);
+            }
+        }
+        for (i, previous) in previous_groups
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != group)
+        {
+            let current = &mut workspace.workbench.groups[i];
+            current.selected.clone_from(&previous.selected);
+            current.focused = previous.focused;
+            current.anchor = previous.anchor;
+        }
+    }
+    let target = workspace.tabs[workspace.active].sheet;
+    let g = &mut workspace.workbench.groups[group];
+    g.sheets.retain(|&sheet| sheet != target);
+    let after = g
+        .sheets
+        .iter()
+        .position(|&sheet| sheet == source_sheet)
+        .map_or(g.sheets.len(), |i| i + 1);
+    g.sheets.insert(after, target);
+    g.selected = selected
+        .into_iter()
+        .filter(|s| g.sheets.contains(s))
+        .collect();
+    g.selected.insert(target);
+    g.focused = Some(target);
+    g.anchor = Some(target);
+    workspace.workbench.active = group;
+    workspace.observe_navigation();
     Ok(())
 }
 pub fn status_text(indices: &[Arc<ProjectIndex>]) -> String {

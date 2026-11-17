@@ -207,6 +207,8 @@ const TEXT: &[&str] = &[
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
+    "select_color_scheme",
+    "select_theme",
     "show_dictionary",
     "set_dictionary",
     "git_open_repository",

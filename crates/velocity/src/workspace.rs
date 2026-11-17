@@ -18,6 +18,8 @@ use vel_config::{
 };
 use vel_fileio::{self as fileio, ChangeTracker, Format, LoadTask, Loaded, Watcher};
 use vel_text::Text;
+#[path = "appearance.rs"]
+pub(crate) mod appearance;
 #[derive(Debug)]
 pub struct Tab {
     pub shared_dirty: bool,
@@ -33,6 +35,7 @@ pub struct Tab {
     pub shared_view: vel_buffer::ViewId,
     pub lazy: Option<(vel_session::Document, vel_session::ViewState)>,
     language_settings_revision: u64,
+    appearance_revision: u64,
     pub(crate) needs_detection: bool,
     pub(crate) indentation_initialized: bool,
     pub transient: bool,
@@ -106,6 +109,7 @@ impl Tab {
             shared_view: editor.id,
             lazy: None,
             language_settings_revision: u64::MAX,
+            appearance_revision: 0,
             needs_detection: true,
             indentation_initialized: false,
             transient: false,
@@ -212,6 +216,7 @@ impl Tab {
             .or_else(|| self.binary_loading.as_ref().map(|t| (0, t.total)))
     }
     fn install(&mut self, loaded: Loaded) {
+        let navigation = self.editor.navigation.take();
         self.editor.binary = None;
         self.editor.source_bytes = self.loading.as_ref().map_or(0, |t| t.total);
         self.editor.cancel_composition();
@@ -260,6 +265,12 @@ impl Tab {
         if let Some(location) = self.location.take() {
             self.goto(&location);
         }
+        self.editor.navigation = navigation;
+        if let Some(observer) = &self.editor.navigation
+            && let Some(jump) = self.editor.navigation_snapshot()
+        {
+            observer.history.borrow_mut().installed(jump);
+        }
     }
     pub fn goto(&mut self, location: &FileLocation) {
         let text = self.editor.buffer.text();
@@ -276,6 +287,14 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pub(crate) jump_history: crate::editor::navigation::Shared,
+    pub(crate) appearance: appearance::Catalog,
+    pub(crate) appearance_preview: Option<appearance::Preview>,
+    appearance_commits: Vec<appearance::PendingCommit>,
+    pub(crate) appearance_notice: Option<String>,
+    appearance_revision: u64,
+    #[cfg(test)]
+    pub(crate) appearance_writes: Arc<std::sync::atomic::AtomicUsize>,
     pub themes: crate::theme_ui::Themes,
     pub git: crate::git_ui::GitUi,
     pub catalog: Arc<crate::completion::Catalog>,
@@ -383,6 +402,7 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 }
 #[derive(Debug)]
 struct Configuration {
+    appearance: appearance::Catalog,
     themes: crate::theme_ui::Prepared,
     #[cfg(test)]
     resources: Resources,
@@ -951,6 +971,7 @@ impl Configuration {
             }
         }
         let mut schemes = BTreeMap::new();
+        let mut scheme_errors = BTreeMap::new();
         for (path, _) in &scheme_resources {
             let name = path.rsplit('/').next().expect("resource filename");
             if !schemes.contains_key(name) {
@@ -982,7 +1003,10 @@ impl Configuration {
                         );
                         schemes.insert(name.to_owned(), Arc::new(scheme));
                     }
-                    Err(e) => scheme_warnings.push((warning_path.clone(), e)),
+                    Err(e) => {
+                        scheme_errors.insert(name.to_owned(), e.clone());
+                        scheme_warnings.push((warning_path.clone(), e));
+                    }
                 }
             }
         }
@@ -1006,6 +1030,7 @@ impl Configuration {
                 schemes.insert(name.to_owned(), Arc::new(scheme));
             }
         }
+        let appearance = appearance::Catalog::load(&resources, &schemes, &scheme_errors);
         // Track resource files and containing directories, including absent User
         // locations, so creating a new override is observable on the next poll.
         for suffix in [
@@ -1096,6 +1121,7 @@ impl Configuration {
         }
         write_resource_log(data_dir.as_deref(), &resource_log, &mut resource_reports);
         Ok(Self {
+            appearance,
             resource_reports,
             themes,
             macro_paths,
@@ -1128,6 +1154,7 @@ impl Workspace {
         watch: bool,
     ) -> Result<Self, String> {
         let Configuration {
+            appearance,
             themes,
             #[cfg(test)]
                 resources: _,
@@ -1168,6 +1195,14 @@ impl Workspace {
             messages.push(e);
         }
         let mut workspace = Self {
+            jump_history: Default::default(),
+            appearance,
+            appearance_preview: None,
+            appearance_commits: Vec::new(),
+            appearance_notice: None,
+            appearance_revision: 0,
+            #[cfg(test)]
+            appearance_writes: Default::default(),
             themes,
             git: Default::default(),
             catalog,
@@ -1220,6 +1255,7 @@ impl Workspace {
         };
         workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
         workspace.configure_language(0, None, true)?;
+        workspace.observe_navigation();
         Ok(workspace)
     }
     /// Refreshes the resource-defined recent submenu only when its source changes.
@@ -1282,6 +1318,19 @@ impl Workspace {
             .extend(overrides.iter().cloned());
         self.settings_writes.push(rx);
     }
+    /// Stops a failed writer's values from surviving an in-flight resource load.
+    /// Matching values keep unrelated keys and later writes to the same key intact.
+    pub(crate) fn discard_settings_write(&mut self, pairs: &[(&str, Value)]) {
+        for (key, value) in pairs {
+            if self
+                .settings_write_overrides
+                .get(*key)
+                .is_some_and(|pending| pending.as_ref() == Some(value))
+            {
+                self.settings_write_overrides.remove(*key);
+            }
+        }
+    }
     #[cfg(test)]
     pub fn wait_resources(&mut self) {
         // Tests explicitly await a disk observation as well as any asynchronous worker.
@@ -1305,7 +1354,10 @@ impl Workspace {
         self.reload_requested = true;
     }
     pub fn resources_busy(&self) -> bool {
-        self.config_rx.is_some() || self.reload_requested || !self.settings_writes.is_empty()
+        self.config_rx.is_some()
+            || self.reload_requested
+            || !self.settings_writes.is_empty()
+            || !self.appearance_commits.is_empty()
     }
     pub fn ignored_packages(&self) -> std::collections::BTreeSet<String> {
         self.settings
@@ -1346,6 +1398,8 @@ impl Workspace {
         if let Err(e) = self.prepare_sheet(self.active) {
             self.messages.push(e);
         }
+        self.observe_navigation();
+        self.refresh_appearance(self.active);
         &mut self.tabs[self.active].editor
     }
     pub fn language_busy(&self) -> bool {
@@ -1391,6 +1445,7 @@ impl Workspace {
         Ok(())
     }
     pub fn select(&mut self, index: usize) {
+        self.observe_navigation();
         if !self.empty
             && index < self.tabs.len()
             && self.workbench.group_of(self.tabs[index].sheet).is_some()
@@ -1401,10 +1456,15 @@ impl Workspace {
             self.editor_mut().unmark();
             self.editor_mut().keymap.cancel();
             self.activate_sheet(index);
+            self.refresh_appearance(index);
+            self.observe_navigation();
         }
     }
     pub fn open(&mut self, location: FileLocation) -> Result<(), String> {
-        self.open_mode(location, false)
+        let _request = self.navigation_request();
+        let result = self.open_mode(location, false);
+        self.observe_navigation();
+        result
     }
     pub fn preview(&mut self, location: FileLocation) -> Result<(), String> {
         let target = absolute(&location.path)?;
@@ -1615,6 +1675,7 @@ impl Workspace {
             return Ok(());
         }
         self.prepare_close_sheet(index)?;
+        self.tabs[index].editor.rebase_navigation(true);
         let tab = &self.tabs[index];
         let sheet = tab.sheet;
         let active = self.tabs[self.active].sheet;
@@ -1742,7 +1803,8 @@ impl Workspace {
                 roots.push(parent.to_owned());
             }
         }
-        let mut changed = self.git.poll(enabled, roots);
+        let mut changed = self.poll_appearance_commits();
+        changed |= self.git.poll(enabled, roots);
         if changed {
             for tab in &mut self.tabs {
                 if !tab.editor.shared_shadow {
@@ -2053,6 +2115,7 @@ impl Workspace {
                     self.catalog = config.catalog;
                     self.syntax_settings = config.syntax_settings;
                     self.schemes = config.schemes;
+                    self.appearance = config.appearance;
                     self.folders = config.folders;
                     self.distraction_settings = config.distraction_settings;
                     self.build_systems = config.build_systems;
@@ -2168,6 +2231,9 @@ impl Workspace {
         }
         for index in 0..self.tabs.len() {
             self.configure_language(index, None, false)?;
+        }
+        if self.appearance_preview.is_some() {
+            self.recolor_appearance()?;
         }
         Ok(())
     }

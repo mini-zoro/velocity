@@ -49,7 +49,8 @@ impl Editor {
         } else {
             self.text.len_bytes()
         };
-        // Editing fallback only: display queries must use published/mapped scopes.
+        // Editing and pointer-hover fallback only. Other display queries use published
+        // scopes; hover suppresses its popup when this exact prefix exceeds the budget.
         // Bound both allocation and parser work, including a long line earlier in the prefix.
         if end > 256 * 1024
             || row >= 256

@@ -28,6 +28,12 @@ impl App {
                 || self.drag_select.is_some()
                 || self.drag_text.is_some());
         if event.kind == MouseKind::Down {
+            self.workspace.jump_history.borrow_mut().mouse_down(
+                event.position.x,
+                event.position.y,
+                event.button,
+                event.click_count,
+            );
             self.accessibility_focus = None;
         }
         if self.options.mode.automatic() {

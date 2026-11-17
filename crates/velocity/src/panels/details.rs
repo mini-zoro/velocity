@@ -35,9 +35,14 @@ impl Panels {
         self.message_seen.clone_from(&self.message);
         self.message_until = Some(Instant::now() + Duration::from_secs(5));
     }
-    /// Next time the native event loop must redraw to expire feedback.
+    /// Next native wake for feedback expiry or a bounded, slow hover-scope retry.
     pub fn message_deadline(&self) -> Option<Instant> {
-        self.message_until
+        let hover = (!self.hover_term.is_empty()
+            && !self.hover_requested
+            && self.hover_since.elapsed() < Duration::from_secs(2))
+        .then_some(self.hover_retry)
+        .flatten();
+        self.message_until.into_iter().chain(hover).min()
     }
     pub(super) fn expire_message(&mut self, now: Instant) -> bool {
         if self.message != self.message_seen {
@@ -56,6 +61,9 @@ impl Panels {
         let Some((origin, buffer, version)) = self.incremental_origin.take() else {
             return;
         };
+        let _navigation = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
+        self.find_jump_origin = None;
+
         if let Some(index) = workspace
             .tabs
             .iter()
@@ -78,8 +86,13 @@ impl Panels {
             self.preserve_scroll = true;
             self.reveal = false;
         }
+        workspace
+            .jump_history
+            .borrow_mut()
+            .reset_current(crate::intelligence::capture(workspace));
     }
     pub(super) fn preview_find(&mut self, workspace: &mut Workspace, origin: usize) {
+        let _navigation = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
         if self.in_selection {
             return;
         }
@@ -97,6 +110,10 @@ impl Panels {
         } else if !self.query.value().is_empty() {
             self.set_message(format!("Unable to find {}", self.query.value()));
         }
+        workspace
+            .jump_history
+            .borrow_mut()
+            .reset_current(crate::intelligence::capture(workspace));
     }
     /// A cancelled preview restores its exact viewport; skip the event's generic caret reveal.
     pub fn should_reveal(&mut self, requested: bool) -> bool {
@@ -184,6 +201,7 @@ impl Panels {
     pub(super) fn overlay_footer(&self) -> &'static str {
         match self.overlay {
             Some(Overlay::Palette) => "Enter run · Esc cancel",
+            Some(Overlay::Appearance) => "Arrows preview · Enter save · Esc cancel",
             Some(Overlay::Syntax | Overlay::Choices) => "Enter select · Esc cancel",
             Some(Overlay::ProjectSymbols | Overlay::Locations) => "Enter jump · Esc cancel",
             Some(Overlay::Goto) => "Enter open · Cmd/Ctrl+Enter split · Esc cancel",

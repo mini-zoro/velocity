@@ -310,6 +310,9 @@ fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Res
             .iter()
             .position(|tab| tab.path.as_ref() == Some(&path))
         {
+            // A Finder/Dock request is explicit navigation even before OS focus
+            // returns. Preserve this tab's current location when selecting duplicates.
+            let _request = workspace.navigation_request();
             workspace.select(index);
             workspace.tabs[index].transient = false;
             return Ok(());

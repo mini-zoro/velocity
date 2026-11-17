@@ -656,6 +656,20 @@ impl App {
         if depth >= 32 {
             return Err("command chain exceeds 32 levels".into());
         }
+        if self.panels.overlay == Some(crate::panels::Overlay::Appearance)
+            && matches!(
+                name,
+                "next_view"
+                    | "prev_view"
+                    | "select_by_index"
+                    | "next_sheet"
+                    | "prev_sheet"
+                    | "focus_group"
+                    | "focus_neighboring_group"
+            )
+        {
+            self.panels.cancel_overlay(&mut self.workspace);
+        }
         let palette_accept = self.panels.palette_accept_pending(name, args);
         if palette_accept && !self.accept_palette_command(name, args) {
             return Ok(());
@@ -950,6 +964,11 @@ impl App {
             "increase_font_size" | "decrease_font_size" | "reset_font_size"
         ) {
             return self.workspace.zoom_font(name);
+        }
+        if name == "open_file"
+            && let Some(file) = args["file"].as_str()
+        {
+            return self.workspace.open(crate::cli::FileLocation::parse(file));
         }
         if let Some(window) = window {
             return self.apply_action(window, name, args);
@@ -1437,6 +1456,13 @@ impl App {
             self.view.scroll_x = scroll.0;
             self.view.scroll_y = scroll.1;
         }
+    }
+    fn set_window_focused(&mut self, focused: bool) {
+        if !focused && self.panels.overlay == Some(crate::panels::Overlay::Appearance) {
+            self.panels.cancel_overlay(&mut self.workspace);
+        }
+        self.workspace.navigation_focus(focused);
+        self.window_focused = focused;
     }
     /// Shared by tab deactivation and the window focus transition; never opens a dialog.
     fn save_on_focus_lost(&mut self, sheet: Option<u64>) {
@@ -2767,7 +2793,7 @@ impl AppHandler for App {
         if focus_changed && !focused {
             self.save_on_focus_lost(None);
         }
-        self.window_focused = focused;
+        self.set_window_focused(focused);
         if focused && self.options.mode == Mode::Interactive {
             self.sessions.borrow_mut().active_window = Some(self.session_id);
         }

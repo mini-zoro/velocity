@@ -2076,5 +2076,8 @@
   { "keys": ["alt+enter"], "command": "find_all", "args": {"_close_panel":true},
     "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operator":"not_equal","operand":"find_in_files"}] },
   { "keys": ["ctrl+alt+enter"], "command": "replace_all", "args": {"_close_panel":true},
-    "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operand":"replace"}] }
+    "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operand":"replace"}] },
+  // Lane A round 19: Goto shortcuts use our existing commands (docs/indexing.html).
+  {"keys": ["super+alt+shift+down"], "command": "goto_reference"}
+
 ]
