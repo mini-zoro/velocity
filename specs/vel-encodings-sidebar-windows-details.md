@@ -5,7 +5,7 @@ Status: P3, round 20 (after `vel-settings-coverage.md` in round 18 and sections 
 reloads, text and status-column details). Lane B: sections C-G (side bar, file patterns and index, windows, macOS
 shell and menus, drawing invisible characters). **Exception: section H (settings entry points, color scheme and
 theme selection) is P2 and moves forward to round 19** — today a user cannot open the settings or switch the color
-scheme from inside the app. H1 goes to lane B (with layouts), H2/H3 to lane A (with navigation).
+scheme from inside the app. H1 and H3 go to lane B (with layouts), H2 to lane A (with navigation).
 
 Background: a reviewer audit (2026-11-17, main at 77c071c) covered areas that no earlier spec handles: side bar and
 folder operations, multiple windows, encodings and line endings, macOS integration and Unicode editing. Each item
@@ -318,7 +318,7 @@ Already planned elsewhere, do not redo:
      (cache compiled schemes by path).
    - Test: driving the panel through the real key path previews, commits and cancels correctly; the User file is
      written once on commit and never on cancel; `auto` variants.
-3. **Customize commands** (lane A) *(changelog: "Added commands to simplify customizing the active theme or color
+3. **Customize commands** (lane B, after H1) *(changelog: "Added commands to simplify customizing the active theme or color
    scheme")*
    - `customize_color_scheme` / `customize_theme`: open (through H1's `edit_settings`) the active scheme or theme
      read-only on the left and `Packages/User/<same file name>` on the right, created from a minimal template
@@ -356,9 +356,9 @@ Already planned elsewhere, do not redo:
     `vel-session`, `vel-platform`, `view.rs` / `vel-render` (G1), Preferences, menus, the palette and its own
     keymap block.
   - Lane B adds the menu rows for A5 (E5) and the status click menus for A6.
-  - Section H (round 19): lane B owns H1 (`edit_settings`, the app/Preferences menu, palette rows); lane A owns
-    H2/H3 (the selection quick panels, the preferences writer, the customize commands) and lists any menu rows it
-    needs for lane B.
+  - Section H (round 19): lane B owns H1 and H3 (`edit_settings`, the customize commands, the app/Preferences
+    menu, palette rows); lane A owns H2 (the selection quick panels and the preferences writer) and keeps the
+    command names `select_color_scheme` / `select_theme` for lane B's menu rows.
 - Headless tests for every item:
   - Temporary directories for files, projects, sessions and symlinks.
   - Encoding round-trip tables.
