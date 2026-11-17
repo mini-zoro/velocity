@@ -13,8 +13,8 @@ copy Sublime's Default package.
 
 ## 1. Snippets (lane A, round 18; `vel-snippet`, `crates/velocity/src/completion.rs`)
 
-1. **Environment variables:** `TM_LINE_INDEX` is the zero-based *column* of the caret (today the line number,
-   `vel-snippet/src/lib.rs` ~274); add `TM_FULLNAME` (the user's full name from the system) and `TM_SCOPE` (scope
+1. **Environment variables:** `TM_LINE_INDEX` stays the 0-based *line number* (corrected at review: completions.html
+   defines it as "The 0-based line number of the current line"; the TextMate column meaning does not apply); add `TM_FULLNAME` (the user's full name from the system) and `TM_SCOPE` (scope
    name at the caret). Check the rest of the documented list (TM_CURRENT_LINE, TM_CURRENT_WORD, TM_DIRECTORY,
    TM_FILENAME, TM_FILEPATH, TM_LINE_NUMBER, TM_SELECTED_TEXT, TM_SOFT_TABS, TM_TAB_SIZE) with one test each.
 2. **Tab triggers ending in punctuation** (`t.`, `if?`, `eac-`, `:`): match the trigger as a suffix of the text
@@ -24,8 +24,10 @@ copy Sublime's Default package.
 
 ## 2. Completions (lane A, round 18; `vel-complete`, `completion.rs`, Preferences)
 
-1. **Tab without a visible popup:** with several candidates open the popup (mini list) instead of committing the
-   first; commit directly only when exactly one candidate matches (`completion.rs` ~544, ~882).
+1. **Tab without a visible popup** *(corrected at review, 2026-11-17)*: completions.html documents `tab_completion`
+   as "pressing Tab will insert the best matching completion", so Tab commits the best candidate directly (today's
+   behaviour); a snippet whose tab trigger equals the typed prefix always wins. The earlier "several candidates open
+   the popup" rule came from memory and contradicts the documentation.
 2. **`auto_complete_triggers`:** support entries with only a `selector` and the `rhs_empty` flag; default triggers:
    `<` in HTML/XML (`text.html, text.xml`) and member access after `punctuation.accessor` with an empty right-hand
    side, so `.` / `::` open the popup in code (today `[]` and entries without `characters` are dropped,
