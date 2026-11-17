@@ -1,3 +1,146 @@
+# Round 18 Lane A review fixes (native review pending)
+
+Baseline: main `77c071c`; branch `lane-a`, uncommitted. Latest verification evidence is in
+`/tmp/velocity-lane-a-r18-verification/`. No GUI or packaging run was performed. All native boxes
+below remain unverified. Lane B's files and the merged keymap blocks are preserved.
+
+- [ ] Fresh startup with a disposable profile and bundled resources: launch twice, then reload.
+  No modal or warning status appears. Resource diagnostics remain reachable in `Velocity.log`.
+- [ ] Compare `indent_to_bracket` off/on and a live syntax override: `call(one,` aligns;
+  Python `result = compute(` and JSON `[\n    1,` keep normal hanging indentation;
+  `foo(|)` still expands a pair on Enter. Try comments, strings, tabs, Unicode and many carets.
+  On a stale 63 KB single-line JavaScript file, Enter must not synchronously parse scopes.
+- [ ] Compare `move_to_limit_on_up_down` off/on, Shift extension, wrapping and a focused input.
+- [ ] Find/Replace/Incremental Find: compare single-line, multiline and empty selections with
+  `find_selected_text` off/on. Select new text and invoke Find again while the panel is open.
+  Compare `auto_find_in_selection`, both close-after-all settings and explicit shortcuts.
+- [ ] HTML/XML `</`: nested/void/self-closing tags, case-sensitive XML, namespaces, quoted `>`,
+  comments, CDATA and script/style. Markdown inline/fenced code must not close tags.
+  In `<div><|>` type `/`: the caret finishes after `>`. Immediately edit the syntax/comment
+  context before `/`. Try a large stale file; completion may wait for exact scopes and must
+  cancel after another edit or caret move. Very long viewport lines without exact scopes
+  stay literal. PHP and user syntaxes embedding HTML also work before scope publication.
+  A focused input must not edit the document.
+- [ ] Auto-pair `(`, `[`, `{`, double/single quotes immediately after another keystroke and
+  during macro replay in a large file: no synchronous document parse or typing pause.
+- [ ] Snippets: verify the documented variable table, zero-based **line** `TM_LINE_INDEX`,
+  system full name and syntax-base `TM_SCOPE`. Tab-trigger variables for `sel` and `s.` have
+  empty selections and compute current word after removing the trigger. Real selections remain.
+  Test punctuation suffixes and longest trigger. `cat.`, `elif?` and `result.` must not match
+  interior word triggers. Duplicate triggers offer choices; stale choices do not insert.
+  At the blank line after `// comment`, the palette includes `source.rust - comment` snippets.
+  Go/Rails template variables and custom `.tmPreferences` shell variables expand correctly.
+  A scoped trigger in a large stale file uses an untouched published caret line, otherwise
+  inserts an ordinary tab until scopes arrive; it must not pause to parse the file.
+- [ ] Open the palette immediately after editing a 1.63 MB minified JS file: no pause.
+  Unavailable scopes initially leave snippets visible; current scopes refilter an unchanged
+  open query. Changing the query or closing the palette cancels that deferred filtering.
+- [ ] Tab with one or several candidates inserts the best match directly. With candidates
+  `vec`, `vector`, `vec_len`, the exact `vec` snippet wins. Type `fn` with the typing popup
+  visible and snippets excluded: Tab expands the exact snippet even with `tab_completion: false`;
+  Enter still commits the selected popup row. Preserve snippet fields, indentation and selected
+  text. Test popup commits after an intervening edit.
+- [ ] Completion triggers: selector-only, characters-only and combined entries, `rhs_empty`,
+  `.`, `::`, comments and embedded code. Typing in panels stays isolated.
+- [ ] Suffix/order defaults: inferred spaces **false**, preserve order **"some"**. When spaces
+  are enabled, one assignment is insufficient evidence; `foo(cou|)` completes to `foo(count)`.
+  Repeated evidence may add spaces at the immediate end of line, including EOF. Existing
+  whitespace remains single; `.`, `(`, `:`, quotes and `>` never gain an inferred space.
+  Compare punctuation inference,
+  existing suffixes and authored contents. Check `none`/`some`/`strict`, legacy booleans
+  (`true` → strict, `false` → some), proximity and history.
+- [ ] Popup rendering in both themes: kind containers/letters, match colors, selected row,
+  footer/details, custom Unicode kind and narrow panes.
+- [ ] Focus saves off/on: save only the file being left on tab/application changes. Other dirty
+  loaded tabs and lazy hot-exit drafts stay unsaved. Cloned views save once. Untitled, read-only,
+  loading, deleted, composing and externally changed files never save or show a save dialog.
+  I/O/encoding failures produce a status message without a modal loop.
+  Type `</` in a large stale HTML file and switch immediately: a valid pending completion
+  finishes within its scope budget or is canceled before saving. Later background publication
+  must not edit the document or make a just-saved buffer dirty. Check with focus saves off too.
+
+Public documentation does not establish new defaults for history, snippets while typing,
+the trigger list, inferred spaces or preserve order. Existing defaults remain `true`, `false`,
+`[]`, `false` and `"some"`. Empty-caret find seeding is unchanged. See `docs/settings.md` for
+sources, implementation links and headless coverage. No new menu rows are needed.
+
+The syntax cache schema is now `velocity-syntax-roots-v1-14`, retaining the load-time
+HTML/XML embedding flag without forcing lazy contexts to load on cached startup.
+
+Headless verification (this review): fmt, strict release/locked workspace clippy over all
+targets, `cargo test --workspace --locked --release` with default parallelism, and rustdoc
+with `RUSTDOCFLAGS="-D warnings"` all pass. The suite reports **914 passed, 0 failed,
+13 ignored** across 114 executables/doc-test suites. All four round-18 ignored timing
+tests were run explicitly and passed. Logs: `clippy.log`, `workspace.log`, `rustdoc.log`,
+`many-caret.log`, `large.log`, `suffix.log`, `scope-budget.log`.
+
+Six alternating pairs against main `77c071c` pass the ≤5% performance gate using the
+requested busy-host fallback, Darwin retired instructions (`instructions/report.json`):
+
+| Benchmark | Main instructions | Candidate instructions | Change |
+| --- | ---: | ---: | ---: |
+| Typing, 1 caret | 425,786,878.5 | 425,627,868 | −0.04% |
+| Typing, 1,000 carets | 10,710,958,721.5 | 10,763,835,596 | +0.49% |
+
+The report retains samples, loads, hashes and counter details, and its candidate hash matches
+the final release binary. These are complete headless child-process totals (including setup
+and background work), read through `proc_pid_rusage(RUSAGE_INFO_V4)` after exit before
+reaping; they do not measure native presentation. One-minute load ranged **14.42–15.50**
+during this check. Retired instructions are the accepted performance result for this pass;
+no native presentation or paired wall-time result is claimed.
+
+The ignored timings below are single observations, not statistical comparison claims.
+The large stale HTML case measures slash insertion; completion then waits for exact scopes.
+The minified viewport case remains literal when exact scopes cannot be provided.
+
+| One-caret input case | Scopes ready (ms) | Scopes stale (ms) |
+| --- | ---: | ---: |
+| 20,000-line JavaScript `</` | 0.062 | 0.018 |
+| 1.47 MB HTML `</` | 0.073 | 0.017 |
+| 20,000-line Rust Enter, bracket alignment on | 0.077 | 0.022 |
+| 1.73 MB minified HTML, viewport mode | — | 0.022 |
+| 63 KB single-line JavaScript Enter | — | 0.050 |
+| 1.63 MB minified JavaScript palette (seven-run median) | — | 0.240 |
+
+Both new stale-line/palette cases assert zero synchronous parses. The palette median is
+asserted below 10 ms; all seven samples were below 0.8 ms.
+
+| 10,000-caret input hook | Setting off (ms) | Setting on (ms) |
+| --- | ---: | ---: |
+| Ordinary typing | 0.979 | 0.945 |
+| Trigger character `.` | 0.915 | 0.916 |
+| HTML slash | 12.935 | 17.478 |
+| Enter / bracket alignment | 384.333 | 117.356 |
+| Typing with suffix inference | 1.125 | 1.085 |
+
+Suffix commits took 1.473 ms off / 13.275 ms on; the 2,000-word × 2,000-caret worker query
+took **43.630 ms off / 44.013 ms on**. Missing exact scopes retain normal indentation;
+these batch timings include that safe fallback and asynchronous worker scheduling. Individual
+wall times are sensitive to the busy host and do not establish an on/off speedup or regression.
+
+Reproduce without GUI or packaging:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test -p velocity --release --locked many_caret_input_hooks_timing -- --ignored --nocapture
+cargo test -p velocity --release --locked large_document_input_hooks_timing -- --ignored --nocapture
+cargo test -p velocity --release --locked palette_and_long_line_scope_budget_timing -- --ignored --nocapture
+cargo test -p vel-complete --release --locked many_word_many_caret_suffix_query_timing -- --ignored --nocapture
+python3 tools/scroll-gate/paired-headless.py \
+  --base /tmp/velocity-lane-a-r18-review/main-target/release/velocity \
+  --candidate target/release/velocity --bench typing1 --bench typing1000 --pairs 6 \
+  --output /tmp/velocity-r18-review-repeat
+python3 /tmp/velocity-lane-a-r18-verification/retired-instructions.py \
+  --base /tmp/velocity-lane-a-r18-review/main-target/release/velocity \
+  --candidate target/release/velocity --pairs 6 --output /tmp/velocity-r18-instructions-repeat
+```
+
+The baseline is an export of `77c071c` using the exact checked-in third-party submodule
+revision. No dependencies or menu rows changed; `Cargo.lock` is unchanged.
+
 # Round 17 Lane A final verification fixes (native review pending)
 
 The latest regressions use `App::run_named`, real key dispatch and the package/resource

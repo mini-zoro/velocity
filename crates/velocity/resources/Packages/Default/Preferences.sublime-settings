@@ -109,7 +109,6 @@
   "index_skip_unknown_extensions": true,
   "show_definitions": true,
   "auto_complete": true,
-  "auto_complete_selector": "source - comment - string, meta.tag",
   "auto_complete_delay": 50,
   "auto_complete_size_limit": 4194304,
   "auto_complete_commit_on_tab": false,
@@ -117,10 +116,37 @@
   "auto_complete_cycle": false,
   "auto_complete_when_likely": true,
   "auto_complete_use_index": true,
-  "auto_complete_use_history": true,
-  "auto_complete_preserve_order": false,
   "auto_complete_include_snippets": true,
+  // Lane A round 18: editing, find and completion preferences.
+  // Align a new line with the column just after an unmatched parenthesis or bracket.
+  "indent_to_bracket": false,
+  // Seed Find, Replace and Incremental Find from a single-line selection.
+  "find_selected_text": true,
+  // Restrict a newly opened find panel to a multi-line selection.
+  "auto_find_in_selection": false,
+  // Close Find after its Find All button runs.
+  "close_find_after_find_all": true,
+  // Close Replace after its Replace All button runs.
+  "close_find_after_replace_all": true,
+  // Let Up and Down reach document limits from the first and last visual rows.
+  "move_to_limit_on_up_down": false,
+  // Finish the innermost HTML or XML closing tag when a slash follows a less-than sign.
+  "auto_close_tags": true,
+  // Include punctuation inferred from other occurrences of a completed word.
+  "auto_complete_trailing_symbols": false,
+  // Infer a space at the immediate end of line from repeated, mostly consistent occurrences.
+  "auto_complete_trailing_spaces": false,
+  // Save changed files when their tab or window loses focus.
+  "save_on_focus_lost": false,
+  // Limit automatic suggestions to code and tags, excluding comments and multi-line strings.
+  "auto_complete_selector": "meta.tag, source - comment - string.quoted.double.block - string.quoted.single.block - string.unquoted.heredoc",
+  // Use prior completion choices when ordering candidates.
+  "auto_complete_use_history": true,
+  // Rank by match (none), match and likelihood (some), or source order (strict).
+  "auto_complete_preserve_order": "some",
+  // Include snippet candidates in suggestions opened by typing.
   "auto_complete_include_snippets_when_typing": false,
+  // Extra triggers accept a selector, optional characters and an optional rhs_empty flag.
   "auto_complete_triggers": [],
   "show_git_status": true,
   "show_git_status_in_status_bar": true,

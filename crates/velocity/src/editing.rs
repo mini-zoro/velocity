@@ -12,7 +12,107 @@ use std::{
 use vel_buffer::{Bias, Change, ChangeSet, Edit, EditKind, Region, Selection, VerticalLayout};
 use vel_config::Value;
 
+#[derive(Debug, Default)]
+pub(crate) struct ExactScopeCache {
+    identity: Option<(vel_buffer::BufferId, vel_buffer::ChangeId, String, usize)>,
+    pub(crate) through: usize,
+    spans: Vec<vel_syntax::ScopedSpan>,
+}
+
 impl Editor {
+    /// Exact scopes for a command; stale publications never authorize an edit.
+    pub(crate) fn exact_scopes(&self, points: &[usize]) -> Option<Vec<Vec<vel_scope::Scope>>> {
+        let language = self.language.borrow();
+        let language = language.as_ref()?;
+        if self.text.is_empty() {
+            return Some(vec![vec![language.root]; points.len()]);
+        }
+        if points
+            .iter()
+            .all(|&p| language.scopes_ready_at(&self.text, p))
+        {
+            return Some(
+                points
+                    .iter()
+                    .map(|&p| language.scopes(&self.text, p).as_slice().to_vec())
+                    .collect(),
+            );
+        }
+        let syntax = language
+            .assets
+            .syntaxes
+            .find_syntax_by_path(&language.syntax)?;
+        let point = *points.iter().max()?;
+        let row = self.text.byte_to_line(point.min(self.text.len_bytes()));
+        let end = if row + 1 < self.text.len_lines() {
+            self.text.line_to_byte(row + 1)
+        } else {
+            self.text.len_bytes()
+        };
+        // Editing fallback only: display queries must use published/mapped scopes.
+        // Bound both allocation and parser work, including a long line earlier in the prefix.
+        if end > 256 * 1024
+            || row >= 256
+            || self.features.highlighting == vel_largefile::HighlightMode::Viewport
+            || self.document_metrics.longest_line_bytes > 8192
+            || (0..=row).any(|line| self.text.line_len_bytes(line) > 8192)
+        {
+            return None;
+        }
+        let mut cache = self.exact_scope_cache.borrow_mut();
+        let identity = (
+            self.buffer.id(),
+            self.buffer.change_id(),
+            language.syntax.clone(),
+            std::sync::Arc::as_ptr(&language.assets) as usize,
+        );
+        if cache.identity.as_ref() != Some(&identity) || cache.through < end {
+            // Parse only through the caret line. An extra LF gives EOF/empty-line carets
+            // their own scopes, rather than borrowing the preceding comment's scopes.
+            let mut prefix = self.text.slice(0..end).to_string();
+            if end == self.text.len_bytes() {
+                prefix.push('\n');
+            }
+            #[cfg(test)]
+            self.exact_scope_parses
+                .set(self.exact_scope_parses.get() + 1);
+            cache.spans =
+                vel_syntax::indent::scoped_spans(&language.assets.syntaxes, syntax, &prefix)
+                    .ok()?;
+            cache.identity = Some(identity);
+            cache.through = end;
+        }
+        points
+            .iter()
+            .map(|&p| {
+                let at = p.min(self.text.len_bytes());
+                cache
+                    .spans
+                    .get(cache.spans.partition_point(|s| s.range.end <= at))
+                    .filter(|s| s.range.contains(&at))
+                    .map(|s| s.scopes.clone())
+            })
+            .collect()
+    }
+    /// Typing hooks may use ready scopes or a bounded exact prefix, never a guessed state.
+    fn bounded_scopes(&self, points: &[usize]) -> Option<Vec<Vec<vel_scope::Scope>>> {
+        let end = *points.iter().max()?;
+        let ready = self
+            .language
+            .borrow()
+            .as_ref()
+            .is_some_and(|l| points.iter().all(|&p| l.scopes_ready_at(&self.text, p)));
+        let row = self.text.byte_to_line(end);
+        let line_end = if row + 1 < self.text.len_lines() {
+            self.text.line_to_byte(row + 1)
+        } else {
+            self.text.len_bytes()
+        };
+        if !ready && (line_end > 64 * 1024 || row > 256) {
+            return None;
+        }
+        self.exact_scopes(points)
+    }
     pub fn apply_edits(
         &mut self,
         mut owned: Vec<(Range<usize>, String)>,
@@ -214,8 +314,20 @@ impl Editor {
                 let s = args["characters"]
                     .as_str()
                     .ok_or("insert needs characters")?;
+                if s == "/"
+                    && self.settings.bool("auto_close_tags", true)
+                    && let Some(values) = self.closing_tag_values(false)
+                {
+                    self.replace_selections(values, EditKind::InsertChars);
+                    return Ok(true);
+                }
+                let bracket_columns = if s == "\n" {
+                    self.bracket_indents()
+                } else {
+                    Vec::new()
+                };
                 if s == "\n" && self.settings.bool("trim_automatic_white_space", true) {
-                    self.newline_trimming_blank_lines();
+                    self.newline_trimming_blank_lines(&bracket_columns);
                     return Ok(true);
                 }
                 let values = self
@@ -223,15 +335,38 @@ impl Editor {
                     .view(self.id)
                     .sel()
                     .iter()
-                    .map(|r| {
+                    .enumerate()
+                    .map(|(i, r)| {
                         if s == "\n" {
-                            self.newline(r)
+                            self.newline(r, bracket_columns.get(i).copied().flatten())
                         } else {
                             (s.to_owned(), s.len()..s.len())
                         }
                     })
                     .collect();
                 self.replace_selections(values, EditKind::InsertChars);
+                if s == "/" && self.settings.bool("auto_close_tags", true) {
+                    let markup = self
+                        .language
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|l| l.closes_tags);
+                    if markup
+                        && self.regions().iter().any(|r| {
+                            r.b >= 2
+                                && self.buffer.text().is_char_boundary(r.b - 2)
+                                && self.buffer.text().slice(r.b - 2..r.b) == "</"
+                        })
+                        && let Some(language) = self.language.borrow().as_ref()
+                    {
+                        self.pending_closing_tag = Some((
+                            self.buffer.id(),
+                            self.buffer.change_id(),
+                            self.regions(),
+                            language.root,
+                        ));
+                    }
+                }
             }
             "paste_and_indent" => {
                 let clipboard = normalize_line_breaks(&self.clipboard);
@@ -447,6 +582,17 @@ impl Editor {
                     };
                     let visual = layout.editable_visual(visual, forward);
                     let b = layout.offset_at(&self.text, visual, x);
+                    // https://www.sublimetext.com/updates/2/stable/release_notes.html
+                    // Only Up/Down at a document boundary, not Page or select-lines.
+                    let b = if name == "move"
+                        && args["by"] == "lines"
+                        && row == visual
+                        && self.settings.bool("move_to_limit_on_up_down", false)
+                    {
+                        if forward { self.text.len_bytes() } else { 0 }
+                    } else {
+                        b
+                    };
                     let a = if name == "select_lines" && !r.empty() {
                         let row = layout.visual_at(&self.text, r.a).0;
                         let next = if forward {
@@ -483,13 +629,14 @@ impl Editor {
     /// Breaks the line at every selection like `insert "\n"`, but a caret alone on a line that
     /// holds only indentation (typically left by the previous auto-indent) leaves that line
     /// empty instead of keeping trailing white space (`trim_automatic_white_space`).
-    fn newline_trimming_blank_lines(&mut self) {
+    fn newline_trimming_blank_lines(&mut self, bracket_columns: &[Option<usize>]) {
         let selection = self.buffer.view(self.id).sel().clone();
         let mut delta = 0isize;
         let mut regions = Vec::new();
         let mut owned = Vec::new();
         for (i, r) in selection.iter().enumerate() {
-            let (text, relative, blank) = self.newline_with_blank(r);
+            let (text, relative, blank) =
+                self.newline_with_blank(r, bracket_columns.get(i).copied().flatten());
             let mut range = r.to_range();
             // Selections are sorted and disjoint, so only the neighbours can share the row.
             if let Some(line) = blank.filter(|_| r.empty()) {
@@ -515,13 +662,17 @@ impl Editor {
         let after = selection_primary(regions, selection.primary_index());
         self.apply_edits(owned, Some(after), EditKind::InsertChars);
     }
-    fn newline(&self, r: Region) -> (String, Range<usize>) {
-        let (text, caret, _) = self.newline_with_blank(r);
+    fn newline(&self, r: Region, bracket_column: Option<usize>) -> (String, Range<usize>) {
+        let (text, caret, _) = self.newline_with_blank(r, bracket_column);
         (text, caret)
     }
     /// [`Self::newline`] plus the byte range of the line holding `r.begin()` when that line is
     /// non-empty and holds only spaces and tabs.
-    fn newline_with_blank(&self, r: Region) -> (String, Range<usize>, Option<Range<usize>>) {
+    fn newline_with_blank(
+        &self,
+        r: Region,
+        bracket_column: Option<usize>,
+    ) -> (String, Range<usize>, Option<Range<usize>>) {
         let row = self.text.byte_to_line(r.begin());
         if self.text.line_len_bytes(row) >= crate::large::LONG_LINE {
             return ("\n".into(), 1..1, None);
@@ -604,6 +755,11 @@ impl Editor {
         } else if temporary_previous {
             indent = indent.saturating_sub(self.preferences.tab_size);
         }
+        // https://www.sublimetext.com/docs/indentation.html#automatic-indentation-settings
+        if !excluded && let Some(column) = bracket_column {
+            indent = column;
+            increase = false;
+        }
         let whitespace = |n: usize| {
             if self.preferences.translate_tabs_to_spaces {
                 " ".repeat(n)
@@ -624,6 +780,288 @@ impl Editor {
             ));
         }
         (text, caret..caret, blank)
+    }
+    /// Alignment inspects at most 64 lines / 8 KiB backwards per caret.
+    fn bracket_indents(&self) -> Vec<Option<usize>> {
+        if !self.settings.bool("auto_indent", true)
+            || !self.settings.bool("indent_to_bracket", false)
+        {
+            return Vec::new();
+        }
+        let regions = self.regions();
+        let eligible: Vec<_> = regions
+            .iter()
+            .map(|r| {
+                let row = self.text.byte_to_line(r.begin());
+                r.begin() - self.text.line_to_byte(row) <= 8192
+                    && self.text.line_len_bytes(row) <= 8192
+            })
+            .collect();
+        let Some(end) = regions
+            .iter()
+            .zip(&eligible)
+            .filter(|(_, ok)| **ok)
+            .map(|(r, _)| r.begin())
+            .max()
+        else {
+            return Vec::new();
+        };
+        // Warm a small stale prefix once for the whole batch, or keep ordinary indentation.
+        if self.bounded_scopes(&[end]).is_none() {
+            return Vec::new();
+        }
+        regions
+            .iter()
+            .zip(eligible)
+            .map(|(r, eligible)| {
+                if !eligible {
+                    return None;
+                }
+                let row = self.text.byte_to_line(r.begin());
+                let start = self
+                    .text
+                    .line_to_byte(row.saturating_sub(64))
+                    .max(self.text.ceil_char_boundary(r.begin().saturating_sub(8192)));
+                let mut close = Vec::new();
+                let mut at = r.begin();
+                for c in self.text.slice(start..r.begin()).chars().rev() {
+                    at -= c.len_utf8();
+                    if !matches!(c, '(' | ')' | '[' | ']') {
+                        continue;
+                    }
+                    let scopes = self.bounded_scopes(&[at])?;
+                    if scopes[0]
+                        .iter()
+                        .any(|s| scope_prefix("string", *s) || scope_prefix("comment", *s))
+                    {
+                        continue;
+                    }
+                    match c {
+                        ')' | ']' => close.push(c),
+                        '(' | '[' if !close.is_empty() => {
+                            if close.pop() != Some(if c == '(' { ')' } else { ']' }) {
+                                return None;
+                            }
+                        }
+                        _ => {
+                            let line = self.text.byte_to_line(at);
+                            let end = if line + 1 < self.text.len_lines() {
+                                self.text.line_to_byte(line + 1)
+                            } else {
+                                self.text.len_bytes()
+                            };
+                            // A bracket at EOL uses normal hanging indentation. Immediate pairs
+                            // retain the existing two-line Enter expansion.
+                            let after = self.text.slice(at + 1..end);
+                            let first = after.chars().find(|c| !c.is_whitespace())?;
+                            if first == if c == '(' { ')' } else { ']' } {
+                                return None;
+                            }
+                            let begin = self.text.line_to_byte(line);
+                            if at - begin > 8192 {
+                                return None;
+                            }
+                            return Some(cells_with_tab(
+                                &self.text.slice(begin..at + 1).to_string(),
+                                self.preferences.tab_size,
+                            ));
+                        }
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+    /// Only markup enters the bounded scan; cold large documents wait for exact scopes.
+    fn closing_tag_values(&self, slash_inserted: bool) -> Option<Vec<(String, Range<usize>)>> {
+        // HTML/XML only: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html
+        // Scope names: https://www.sublimetext.com/docs/scope_naming.html
+        let language = self.language.borrow();
+        let language = language.as_ref()?;
+        let caret = self.caret;
+        let published = language.scope_snapshot_at(caret);
+        let markup = |scopes: &[vel_scope::Scope]| {
+            scopes
+                .iter()
+                .any(|s| scope_prefix("text.html", *s) || scope_prefix("text.xml", *s))
+        };
+        use vel_highlight::ScopeProvider;
+        if !language.closes_tags
+            && !published
+                .as_ref()
+                .and_then(|s| s.scopes_at(caret))
+                .is_some_and(markup)
+        {
+            return None;
+        }
+        let regions = self.regions();
+        let width = if slash_inserted { 2 } else { 1 };
+        let last = regions
+            .iter()
+            .filter(|r| r.empty())
+            .filter_map(|r| {
+                let at = r.b.checked_sub(width)?;
+                (self.text.is_char_boundary(at)
+                    && self.text.slice(at..r.b) == if slash_inserted { "</" } else { "<" })
+                .then_some(at)
+            })
+            .max()?;
+        self.bounded_scopes(&[last])?;
+        let mut unavailable = false;
+        let values = regions
+            .iter()
+            .map(|r| {
+                let plain = || {
+                    let s: String = if slash_inserted { "" } else { "/" }.into();
+                    let end = s.len();
+                    (s, end..end)
+                };
+                let width = if slash_inserted { 2 } else { 1 };
+                let Some(lt) = r.b.checked_sub(width) else {
+                    return plain();
+                };
+                if !r.empty()
+                    || !self.text.is_char_boundary(lt)
+                    || self.text.slice(lt..r.b) != if slash_inserted { "</" } else { "<" }
+                {
+                    return plain();
+                }
+                let Some(scopes) = self.bounded_scopes(&[lt]) else {
+                    unavailable = true;
+                    return plain();
+                };
+                if !tag_scopes(&scopes[0]) {
+                    return plain();
+                }
+                let html = scopes[0].iter().any(|s| scope_prefix("text.html", *s));
+                let row = self.text.byte_to_line(lt);
+                let start = self
+                    .text
+                    .line_to_byte(row.saturating_sub(128))
+                    .max(self.text.ceil_char_boundary(lt.saturating_sub(16 * 1024)));
+                let mut closed: Vec<String> = Vec::new();
+                let mut at = lt;
+                for c in self.text.slice(start..lt).chars().rev() {
+                    at -= c.len_utf8();
+                    if c != '<' {
+                        continue;
+                    }
+                    let source = self.text.slice(at + 1..lt).to_string();
+                    let rest = source.as_str();
+                    let closing = rest.starts_with('/');
+                    let rest = rest.strip_prefix('/').unwrap_or(rest);
+                    let width = rest
+                        .find(|c: char| !c.is_alphanumeric() && !matches!(c, '_' | ':' | '-' | '.'))
+                        .unwrap_or(rest.len());
+                    if width == 0
+                        || !rest
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    {
+                        continue;
+                    }
+                    let name = &rest[..width];
+                    let name_at = at + 1 + usize::from(closing);
+                    let Some(scopes) = self.bounded_scopes(&[name_at]) else {
+                        unavailable = true;
+                        return plain();
+                    };
+                    // A lexical `<` inside code, raw markup, attributes or comments is not a tag.
+                    if !tag_scopes(&scopes[0])
+                        || !scopes[0].iter().any(|s| {
+                            scope_prefix("entity.name.tag", *s) || scope_prefix("meta.tag", *s)
+                        })
+                    {
+                        continue;
+                    }
+                    let mut quote = None;
+                    let mut end = None;
+                    for (i, c) in rest[width..].char_indices() {
+                        if quote == Some(c) {
+                            quote = None;
+                        } else if quote.is_none() {
+                            match c {
+                                '\'' | '"' => quote = Some(c),
+                                '>' => {
+                                    end = Some(width + i);
+                                    break;
+                                }
+                                '<' => break,
+                                _ => (),
+                            }
+                        }
+                    }
+                    let Some(end) = end else {
+                        continue;
+                    };
+                    if !closing
+                        && (rest[..end].trim_end().ends_with('/') || html && html_void_tag(name))
+                    {
+                        continue;
+                    }
+                    if closing {
+                        closed.push(name.into());
+                    } else if closed.last().is_some_and(|last| {
+                        if html {
+                            last.eq_ignore_ascii_case(name)
+                        } else {
+                            last == name
+                        }
+                    }) {
+                        closed.pop();
+                    } else if closed.is_empty() {
+                        let existing =
+                            self.text.slice(r.b..self.text.len_bytes()).chars().next() == Some('>');
+                        let value = format!(
+                            "{}{}{}",
+                            if slash_inserted { "" } else { "/" },
+                            name,
+                            if existing { "" } else { ">" }
+                        );
+                        let caret = value.len() + usize::from(existing);
+                        return (value, caret..caret);
+                    }
+                }
+                plain()
+            })
+            .collect();
+        if unavailable { None } else { Some(values) }
+    }
+    /// Complete a deferred slash only while its revision, selection and setting still agree.
+    pub(crate) fn poll_closing_tag(&mut self) -> bool {
+        let Some((buffer, version, selection, root)) = self.pending_closing_tag.take() else {
+            return false;
+        };
+        if buffer != self.buffer.id()
+            || version != self.buffer.change_id()
+            || selection != self.regions()
+            || self.read_only
+            || self.marked.is_some()
+            || !self.settings.bool("auto_close_tags", true)
+            || !self
+                .language
+                .borrow()
+                .as_ref()
+                .is_some_and(|language| language.root == root)
+        {
+            return false;
+        }
+        if let Some(values) = self.closing_tag_values(true) {
+            if values.iter().any(|(text, _)| !text.is_empty()) {
+                self.replace_selections(values, EditKind::InsertChars);
+                self.sync();
+                return true;
+            }
+        } else {
+            self.pending_closing_tag = Some((buffer, version, selection, root));
+        }
+        false
+    }
+    /// A leaving view may finish within the typing budget, but can never edit later.
+    pub(crate) fn finish_closing_tag_on_leave(&mut self) {
+        self.poll_closing_tag();
+        self.pending_closing_tag = None;
     }
     fn bracket_command(&mut self, expand: bool, args: &Value) {
         let language = self.language.borrow();
@@ -1462,3 +1900,33 @@ pub fn reindent_block(text: &str, dest: &str, inline: bool) -> String {
 #[cfg(test)]
 #[path = "editing_round16_tests.rs"]
 mod round16_tests;
+
+fn scope_prefix(name: &str, scope: vel_scope::Scope) -> bool {
+    // Scope construction interns nothing after the first use; compare atoms without strings.
+    vel_scope::Scope::new(name).is_ok_and(|prefix| prefix.is_prefix_of(scope))
+}
+fn tag_selector() -> &'static vel_scope::Selector {
+    static SELECTOR: std::sync::OnceLock<vel_scope::Selector> = std::sync::OnceLock::new();
+    SELECTOR.get_or_init(|| {
+        vel_scope::Selector::parse(
+            "text.html - comment - string - markup.raw, text.xml - comment - string - markup.raw",
+        )
+        .expect("markup selector")
+    })
+}
+fn tag_scopes(scopes: &[vel_scope::Scope]) -> bool {
+    let markup = scopes
+        .iter()
+        .rposition(|s| scope_prefix("text.html", *s) || scope_prefix("text.xml", *s));
+    let source = scopes.iter().rposition(|s| scope_prefix("source", *s));
+    tag_selector().matches(scopes)
+        && markup.is_some_and(|markup| source.is_none_or(|source| source < markup))
+}
+fn html_void_tag(name: &str) -> bool {
+    [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ]
+    .iter()
+    .any(|tag| name.eq_ignore_ascii_case(tag))
+}

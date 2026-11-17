@@ -163,6 +163,33 @@ impl Environment {
         self
     }
 }
+/// Matches a Tab suffix, preserving the leading word boundary even with punctuation suffixes.
+pub fn tab_trigger_range(text: &Text, caret: usize, trigger: &str) -> Option<Range<usize>> {
+    // ST4 fixes explicitly retain snippet word boundaries: https://www.sublimetext.com/dev
+    if trigger.is_empty() || caret > text.len_bytes() || !text.is_char_boundary(caret) {
+        return None;
+    }
+    let start = caret.checked_sub(trigger.len())?;
+    if !text.is_char_boundary(start) || text.slice(start..caret) != trigger {
+        return None;
+    }
+    if start > 0
+        && trigger
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        let before = text.floor_char_boundary(start - 1);
+        if text
+            .slice(before..start)
+            .chars()
+            .any(|c| c.is_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+    }
+    Some(start..caret)
+}
 /// Insertion indentation policy, independent of UI settings storage.
 #[derive(Debug, Clone, Copy)]
 pub struct ExpansionOptions {
@@ -235,6 +262,65 @@ impl Snippet {
             nodes: parse::parse(source)?,
         })
     }
+    /// Whether any variable needs scope-selected shell metadata, including nested defaults.
+    pub fn uses_metadata_variables(&self) -> bool {
+        fn uses(nodes: &[Node]) -> bool {
+            nodes.iter().any(|node| match node {
+                Node::Value(key, fallback, _) => {
+                    // Built-ins are computed without scopes; all other names may be shellVariables.
+                    // https://www.sublimetext.com/docs/completions.html#variables
+                    matches!(key, Key::Variable(name) if !matches!(name.as_str(),
+                        "SELECTION" | "TM_SELECTED_TEXT" | "TM_LINE_INDEX" | "TM_LINE_NUMBER"
+                        | "TM_DIRECTORY" | "TM_FILEPATH" | "TM_FILENAME" | "TM_FULLNAME"
+                        | "TM_CURRENT_WORD" | "TM_CURRENT_LINE" | "TM_TAB_SIZE" | "TM_SOFT_TABS" | "TM_SCOPE"))
+                        || fallback.as_deref().is_some_and(uses)
+                }
+                Node::Text(_) => false,
+            })
+        }
+        uses(&self.nodes)
+    }
+    /// Replaces Tab triggers without treating them as selections or current-word content.
+    pub fn expand_triggers(
+        &self,
+        text: &Text,
+        triggers: &[Range<usize>],
+        environment: &Environment,
+        options: ExpansionOptions,
+    ) -> Result<Expansion> {
+        let mut context = text.clone();
+        let mut delta = 0usize;
+        let mut last_end = 0;
+        let mut carets = Vec::with_capacity(triggers.len());
+        for range in triggers {
+            if range.start > range.end
+                || range.start < last_end
+                || range.end > text.len_bytes()
+                || !text.is_char_boundary(range.start)
+                || !text.is_char_boundary(range.end)
+            {
+                return Err(Error::Edit("invalid trigger range"));
+            }
+            let point = range.start - delta;
+            carets.push(point..point);
+            delta += range.len();
+            last_end = range.end;
+        }
+        context.apply_edits(
+            &triggers
+                .iter()
+                .map(|range| vel_text::Edit {
+                    range: range.clone(),
+                    text: "",
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut expansion = self.expand(&context, &carets, environment, options)?;
+        for (edit, range) in expansion.edits.iter_mut().zip(triggers) {
+            edit.range = range.clone();
+        }
+        Ok(expansion)
+    }
     /// Expands at sorted, nonoverlapping caret/selection ranges in an immutable buffer.
     pub fn expand(
         &self,
@@ -271,6 +357,8 @@ impl Snippet {
             let selected = text.slice(caret.clone()).to_string();
             env.0.insert("SELECTION".into(), selected.clone());
             env.0.insert("TM_SELECTED_TEXT".into(), selected);
+            // TM_LINE_INDEX is the zero-based line number (TM_LINE_NUMBER is one-based).
+            // https://www.sublimetext.com/docs/completions.html#variables
             env.0.insert("TM_LINE_INDEX".into(), row.to_string());
             env.0.insert("TM_LINE_NUMBER".into(), (row + 1).to_string());
             env.0.insert(

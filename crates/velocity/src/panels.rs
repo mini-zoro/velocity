@@ -208,6 +208,7 @@ pub struct Panels {
     quick_target: &'static str,
     quick_ready: bool,
     prepared: String,
+    palette_scope_request: Option<(BufferId, vel_buffer::ChangeId, usize, u64)>,
     pub quick_elapsed_ms: f64,
     pub quick_pending: bool,
     panel_bounds: Rect,
@@ -336,6 +337,7 @@ impl Default for Panels {
             quick_target: "",
             quick_ready: false,
             prepared: String::new(),
+            palette_scope_request: None,
             quick_elapsed_ms: 0.,
             panel_bounds: Rect::default(),
             quick_bounds: Rect::default(),
@@ -1139,6 +1141,32 @@ impl Panels {
         args: &Value,
         viewport: Range<usize>,
     ) -> Result<bool, String> {
+        if name == "show_overlay" && args["overlay"] == "snippet_choices" {
+            let items = args["names"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|name| {
+                    let name = name.as_str()?;
+                    let snippet = workspace.editor().snippets.get(name)?;
+                    let mut invocation_args = args.clone();
+                    invocation_args["name"] = json!(name);
+                    Some(vel_config::ui::PaletteItem {
+                        caption: if snippet.description.is_empty() {
+                            name.into()
+                        } else {
+                            snippet.description.clone()
+                        },
+                        invocation: Invocation {
+                            command: "insert_snippet".into(),
+                            args: invocation_args,
+                        },
+                    })
+                })
+                .collect();
+            self.choices(workspace, items);
+            return Ok(true);
+        }
         if name == "save_macro" || (name == "run_macro_file" && args.get("file").is_none()) {
             return self.macro_action(workspace, name, args, viewport);
         }
@@ -1347,15 +1375,16 @@ impl Panels {
                 } else {
                     if let Some(query) = args["text"].as_str() {
                         self.query.set(query);
-                    } else if previous_panel != self.panel
-                        && workspace.editor().settings.bool("find_selected_text", true)
+                    } else if workspace.editor().settings.bool("find_selected_text", true)
                         && !workspace.editor().selection().is_empty()
                     {
                         let selected = workspace
                             .editor()
                             .text
                             .slice(workspace.editor().selection());
-                        if !selected.chars().any(|c| c == '\n') {
+                        // https://docs.sublimetext.io/reference/settings.html#automatic-behavior
+                        // Public docs establish selection seeding, not empty-caret word seeding.
+                        if !selected.chars().any(|c| matches!(c, '\n' | '\r')) {
                             self.query.set(&selected.to_string());
                         }
                     }
@@ -1475,11 +1504,30 @@ impl Panels {
                     let editor = workspace.editor_mut();
                     text::select_all(&mut editor.buffer, editor.id, &hits);
                     editor.sync();
-                    self.close_panel();
+                    // ST4 Find settings: https://www.sublimetext.com/download (Find).
+                    if args["_close_panel"].as_bool().unwrap_or_else(|| {
+                        workspace
+                            .editor()
+                            .settings
+                            .bool("close_find_after_find_all", true)
+                    }) {
+                        self.close_panel();
+                    }
                 }
             }
             "replace_next" | "replace_all" => {
                 self.replace_document(workspace, name == "replace_all", viewport)?;
+                if name == "replace_all"
+                    && self.find_error.is_none()
+                    && args["_close_panel"].as_bool().unwrap_or_else(|| {
+                        workspace
+                            .editor()
+                            .settings
+                            .bool("close_find_after_replace_all", true)
+                    })
+                {
+                    self.close_panel();
+                }
             }
             "find_in_files_start" => {
                 self.start_files(workspace)?;
@@ -1832,12 +1880,46 @@ impl Panels {
             } else {
                 &workspace.palette
             };
+            // Display only: use current or mapped publications, never synchronously parse.
+            let has_snippets = self.overlay != Some(Overlay::Syntax)
+                && palette
+                    .iter()
+                    .any(|item| item.invocation.command == "insert_snippet");
+            let editor = workspace.editor();
+            let snippet_scopes = has_snippets
+                .then(|| editor.published_scopes(editor.caret, false))
+                .flatten();
+            self.palette_scope_request = (has_snippets
+                && self.overlay == Some(Overlay::Palette)
+                && !editor
+                    .language
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|l| l.scopes_ready_at(&editor.text, editor.caret)))
+            .then_some((
+                editor.buffer.id(),
+                editor.buffer.change_id(),
+                editor.caret,
+                self.quick_revision,
+            ));
             self.palette_indices = palette
                 .iter()
                 .enumerate()
                 .filter(|(i, p)| {
                     if self.overlay == Some(Overlay::Syntax)
                         && p.invocation.command != "set_file_type"
+                    {
+                        return false;
+                    }
+                    if p.invocation.command == "insert_snippet"
+                        && let Some(snippet) = p.invocation.args["name"]
+                            .as_str()
+                            .and_then(|name| workspace.editor().snippets.get(name))
+                        && !snippet.scope.is_empty()
+                        && snippet_scopes.as_ref().is_some_and(|stack| {
+                            !vel_scope::Selector::parse(&snippet.scope)
+                                .is_ok_and(|selector| selector.matches(stack.as_slice()))
+                        })
                     {
                         return false;
                     }
@@ -2474,7 +2556,12 @@ impl Panels {
                 self.panel,
                 Some(Panel::Find | Panel::Replace | Panel::Incremental)
             ) {
-                self.action(workspace, "find_all", &json!({}), viewport)?;
+                self.action(
+                    workspace,
+                    "find_all",
+                    &json!({"_close_panel":true}),
+                    viewport,
+                )?;
             }
             return Ok((true, None));
         }
@@ -2825,6 +2912,24 @@ impl Panels {
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Some((buffer, version, caret, query)) = self.palette_scope_request {
+            let editor = workspace.editor();
+            if self.overlay != Some(Overlay::Palette)
+                || query != self.quick_input.buffer.change_id().0
+                || (buffer, version, caret)
+                    != (editor.buffer.id(), editor.buffer.change_id(), editor.caret)
+            {
+                self.palette_scope_request = None;
+            } else if editor
+                .language
+                .borrow()
+                .as_ref()
+                .is_some_and(|l| l.scopes_ready_at(&editor.text, caret))
+            {
+                self.palette_scope_request = None;
+                self.prepared.clear();
             }
         }
         if self.overlay == Some(Overlay::Palette) && self.prepared.is_empty() {
@@ -4411,6 +4516,11 @@ mod tests {
     #[test]
     fn panel_input_focus_find_replace_and_cancel_restore_preview() {
         let mut workspace = workspace();
+        workspace.editor_mut().settings.set(
+            vel_config::settings::Layer::View,
+            "close_find_after_replace_all",
+            json!(false),
+        );
         let mut panels = Panels::new(&workspace, false);
         panels
             .action(

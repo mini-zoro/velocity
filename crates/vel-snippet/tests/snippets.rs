@@ -265,3 +265,53 @@ fn multiline_field_edits_do_not_double_indent_and_external_edits_rebase() {
         end..end
     );
 }
+
+#[test]
+fn documented_snippet_variable_table_at_a_unicode_column() {
+    // https://www.sublimetext.com/docs/completions.html#variables
+    let mut env = Environment::default().with_path(std::path::Path::new("/tmp/table.rs"));
+    env.0.insert("TM_FULLNAME".into(), "Ada Example".into());
+    env.0.insert("TM_SCOPE".into(), "source.rust".into());
+    let text = Text::from("first\n é word end");
+    let start = "first\n é ".len();
+    let end = start + 4;
+    for (variable, expected) in [
+        ("TM_CURRENT_LINE", " é word end"),
+        ("TM_CURRENT_WORD", "word"),
+        ("TM_DIRECTORY", "/tmp"),
+        ("TM_FILENAME", "table.rs"),
+        ("TM_FILEPATH", "/tmp/table.rs"),
+        ("TM_FULLNAME", "Ada Example"),
+        ("TM_SCOPE", "source.rust"),
+        ("TM_LINE_INDEX", "1"),
+        ("TM_LINE_NUMBER", "2"),
+        ("TM_SELECTED_TEXT", "word"),
+        ("SELECTION", "word"),
+        ("TM_TAB_SIZE", "4"),
+        ("TM_SOFT_TABS", "YES"),
+    ] {
+        let s = Snippet::parse(&format!("${variable}")).unwrap();
+        let expansion = s
+            .expand(
+                &text,
+                std::slice::from_ref(&(start..end)),
+                &env,
+                ExpansionOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(expansion.edits[0].text, expected, "{variable}");
+    }
+    let s = Snippet::parse("$TM_SOFT_TABS/$TM_TAB_SIZE").unwrap();
+    let expansion = s
+        .expand(
+            &text,
+            std::slice::from_ref(&(start..start)),
+            &env,
+            ExpansionOptions {
+                tab_size: 8,
+                translate_tabs_to_spaces: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(expansion.edits[0].text, "NO/8");
+}

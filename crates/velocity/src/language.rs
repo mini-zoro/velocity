@@ -608,6 +608,7 @@ pub struct Language {
     pub syntax: String,
     pub name: String,
     pub root: Scope,
+    pub closes_tags: bool,
     pub scheme: Arc<ColorScheme>,
     pub version: ChangeId,
     service: HighlightFrontend,
@@ -642,6 +643,7 @@ impl Language {
         let path = reference.path.clone();
         let name = reference.name.clone();
         let root = reference.scope;
+        let closes_tags = reference.embeds_markup;
         let task = AnalysisTask::new(version)?;
         let service = if policy.highlighting == vel_largefile::HighlightMode::Viewport {
             HighlightFrontend::viewport(
@@ -676,6 +678,7 @@ impl Language {
             syntax: path,
             name,
             root,
+            closes_tags,
             scheme,
             version,
             service,

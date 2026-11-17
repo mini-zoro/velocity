@@ -380,14 +380,65 @@ impl Completion {
             } else {
                 item.kind.letter.clone()
             };
+            // Public theme elements, authored layout: https://www.sublimetext.com/docs/themes.html
+            let kind_path = [
+                path[0],
+                path[1],
+                path[2],
+                path[3],
+                Element::new(kind_class(item.kind.category), &[]),
+            ];
+            let kind = theme.style(
+                editor.ui_id(0xC500_0000 + row as u32),
+                &ElementPath(&kind_path),
+                &editor.settings,
+            );
+            let badge_rect = Rect {
+                x: r.x + 5.,
+                y: r.y + 2.,
+                width: 22.,
+                height: 20.,
+            };
+            theme.surface(&mut layer, &kind, badge_rect, r);
+            let label_path = [
+                kind_path[0],
+                kind_path[1],
+                kind_path[2],
+                kind_path[3],
+                kind_path[4],
+                Element::new("kind_label", &[]),
+            ];
+            let kind_label = theme.style(
+                editor.ui_id(0xC600_0000 + row as u32),
+                &ElementPath(&label_path),
+                &editor.settings,
+            );
             theme.text(
                 &mut layer,
-                &text,
-                &format!("{badge}  {}", item.trigger),
-                r.x + 8.,
+                &kind_label,
+                &badge,
+                r.x + 10.,
                 r.y + 17.,
-                r,
+                badge_rect,
             );
+            theme.text(&mut layer, &text, &item.trigger, r.x + 34., r.y + 17., r);
+            let prefix = list
+                .replace_ranges
+                .first()
+                .filter(|range| {
+                    list.version == editor.buffer.change_id()
+                        && range.end <= editor.text.len_bytes()
+                        && editor.text.is_char_boundary(range.start)
+                        && editor.text.is_char_boundary(range.end)
+                })
+                .map(|range| editor.text.slice(range.clone()).to_string())
+                .unwrap_or_default();
+            let mut matched = text.clone();
+            matched.foreground = text.matched;
+            for range in matched_ranges(&item.trigger, &prefix) {
+                let x = r.x + 34. + theme.advance(&text, &item.trigger[..range.start]);
+                theme.text(&mut layer, &matched, &item.trigger[range], x, r.y + 17., r);
+            }
             if !item.annotation.is_empty() {
                 let hint_path = [
                     path[0],
@@ -412,11 +463,7 @@ impl Completion {
             }
         }
         scene.layers.push(layer);
-        if let Some(item) = list
-            .items
-            .get(self.selected)
-            .filter(|item| !item.details.is_empty())
-        {
+        if let Some(item) = list.items.get(self.selected) {
             let path = [
                 popup_path[0],
                 popup_path[1],
@@ -424,6 +471,19 @@ impl Completion {
                 Element::new("auto_complete_details", &[]),
             ];
             let detail = theme.style(editor.ui_id(0xC400), &ElementPath(&path), &editor.settings);
+            let mut footer = Layer::default();
+            theme.text(
+                &mut footer,
+                &detail,
+                &item.kind.name,
+                rect.x + 8.,
+                rect.y + n as f64 * 24. + 18.,
+                rect,
+            );
+            scene.layers.push(footer);
+            if item.details.is_empty() {
+                return;
+            }
             let mut palette = theme.palette.clone();
             palette.set(
                 "--foreground",
@@ -449,9 +509,9 @@ impl Completion {
                     scene,
                     Rect {
                         x: rect.x + 8.,
-                        y: rect.y + n as f64 * 24. + 4.,
+                        y: rect.y + n as f64 * 24. + 24.,
                         width: rect.width - 16.,
-                        height: 42.,
+                        height: 26.,
                     },
                 );
             }
@@ -472,6 +532,61 @@ impl Completion {
             false
         }
     }
+}
+fn kind_class(kind: vel_complete::KindId) -> &'static str {
+    use vel_complete::KindId::*;
+    match kind {
+        Ambiguous => "kind_container kind_ambiguous",
+        Function => "kind_container kind_function",
+        Keyword => "kind_container kind_keyword",
+        Markup => "kind_container kind_markup",
+        Namespace => "kind_container kind_namespace",
+        Navigation => "kind_container kind_navigation",
+        Snippet => "kind_container kind_snippet",
+        Type => "kind_container kind_type",
+        Variable => "kind_container kind_variable",
+    }
+}
+fn matched_ranges(trigger: &str, prefix: &str) -> Vec<Range<usize>> {
+    let mut prefix = prefix.chars().flat_map(char::to_lowercase).peekable();
+    let mut ranges = Vec::new();
+    for (at, c) in trigger.char_indices() {
+        if c.to_lowercase().next() == prefix.peek().copied() {
+            prefix.next();
+            ranges.push(at..at + c.len_utf8());
+        }
+    }
+    ranges
+}
+fn system_fullname() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut storage = vec![0u8; 16 * 1024];
+        // SAFETY: getpwuid_r writes into entry/storage, whose allocations remain alive
+        // until the NUL-terminated GECOS field has been copied to an owned String.
+        unsafe {
+            if libc::getpwuid_r(
+                libc::getuid(),
+                entry.as_mut_ptr(),
+                storage.as_mut_ptr().cast(),
+                storage.len(),
+                &mut result,
+            ) == 0
+                && !result.is_null()
+                && !(*result).pw_gecos.is_null()
+            {
+                return std::ffi::CStr::from_ptr((*result).pw_gecos)
+                    .to_string_lossy()
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+            }
+        }
+        std::env::var("USER").unwrap_or_default()
+    })
 }
 fn popup_rows(count: usize, height: f64) -> usize {
     count
@@ -508,9 +623,23 @@ fn settings(editor: &Editor) -> CompletionSettings {
             .map(|a| {
                 a.iter()
                     .filter_map(|v| {
+                        // Community trigger reference permits either field or both.
+                        // https://docs.sublimetext.io/guide/extensibility/completions.html#auto-completion-triggers-and-selector
+                        if v.get("selector").is_none() && v.get("characters").is_none() {
+                            return None;
+                        }
                         Some(CompletionTrigger {
-                            selector: v["selector"].as_str()?.into(),
-                            characters: v["characters"].as_str()?.into(),
+                            selector: v
+                                .get("selector")
+                                .map(Value::as_str)
+                                .unwrap_or(Some(""))?
+                                .into(),
+                            characters: v
+                                .get("characters")
+                                .map(Value::as_str)
+                                .unwrap_or(Some(""))?
+                                .into(),
+                            rhs_empty: v["rhs_empty"].as_bool().unwrap_or(false),
                         })
                     })
                     .collect()
@@ -524,7 +653,23 @@ fn settings(editor: &Editor) -> CompletionSettings {
         auto_complete_when_likely: s.bool("auto_complete_when_likely", true),
         auto_complete_use_index: s.bool("auto_complete_use_index", true),
         auto_complete_use_history: s.bool("auto_complete_use_history", true),
-        auto_complete_preserve_order: s.bool("auto_complete_preserve_order", false),
+        // Public docs list values, not a default: retain proximity ranking and the
+        // legacy boolean meanings. https://www.sublimetext.com/docs/completions.html
+        auto_complete_preserve_order: match s.get("auto_complete_preserve_order") {
+            Some(Value::Bool(true)) => vel_complete::PreserveOrder::Strict,
+            Some(Value::Bool(false)) => vel_complete::PreserveOrder::Some,
+            _ => vel_complete::PreserveOrder::from_setting(
+                s.string("auto_complete_preserve_order", "some"),
+            ),
+        },
+        auto_complete_trailing_symbols: s.bool(
+            "auto_complete_trailing_symbols",
+            d.auto_complete_trailing_symbols,
+        ),
+        auto_complete_trailing_spaces: s.bool(
+            "auto_complete_trailing_spaces",
+            d.auto_complete_trailing_spaces,
+        ),
         auto_complete_include_snippets: s.bool("auto_complete_include_snippets", true),
         auto_complete_include_snippets_when_typing: s
             .bool("auto_complete_include_snippets_when_typing", false),
@@ -542,41 +687,119 @@ impl Editor {
         };
         self.completion = completion;
         if let Some(fallback) = commit {
+            // Tab inserts the best match, including an exact snippet before longer words.
+            // https://www.sublimetext.com/docs/completions.html#settings
             if self.completion.visible() {
                 let _ = self.commit_completion();
-            } else {
+            } else if !self.completion.visible() {
                 match fallback {
                     CommitFallback::Newline => {
                         let _ = self.run("insert", &vel_config::json!({"characters":"\n"}));
                     }
-                    CommitFallback::Tab => {
-                        let size = self.preferences.tab_size.max(1);
-                        let edits = self
-                            .buffer
-                            .view(self.id)
-                            .sel()
-                            .iter()
-                            .map(|r| {
-                                let text = if self.preferences.translate_tabs_to_spaces {
-                                    let start =
-                                        self.text.line_to_byte(self.text.byte_to_line(r.begin()));
-                                    let prefix = self.text.slice(start..r.begin()).to_string();
-                                    " ".repeat(
-                                        size - crate::editor::cells_with_tab(&prefix, size) % size,
-                                    )
-                                } else {
-                                    "\t".into()
-                                };
-                                (r.to_range(), text)
-                            })
-                            .collect();
-                        self.apply_edits(edits, None, EditKind::InsertChars);
-                        self.sync();
-                    }
+                    CommitFallback::Tab => self.insert_literal_completion_tab(),
                 }
             }
         }
         result.unwrap_or(false) || commit.is_some()
+    }
+    /// Tab checks exact snippet triggers even when the typing popup excludes snippets.
+    fn insert_tab_trigger(&mut self) -> Result<Option<bool>, String> {
+        if self.fields.is_some() {
+            return Ok(None);
+        }
+        let regions = self.regions();
+        if regions.iter().any(|r| !r.empty()) {
+            return Ok(None);
+        }
+        let mut scopes = None;
+        let mut unavailable = false;
+        // Suffix triggers are checked only on Tab; longest eligible suffix wins.
+        // https://docs.sublimetext.io/guide/extensibility/snippets.html#snippets-file-format
+        let mut candidates = Vec::new();
+        let mut width = 0;
+        for (name, snippet) in self.snippets.iter() {
+            let trigger = &snippet.tab_trigger;
+            if trigger.is_empty()
+                || trigger.len() < width
+                || trigger.chars().all(char::is_whitespace)
+                || !regions
+                    .iter()
+                    .all(|r| vel_snippet::tab_trigger_range(&self.text, r.b, trigger).is_some())
+            {
+                continue;
+            }
+            if (!snippet.scope.is_empty() || snippet.snippet.uses_metadata_variables())
+                && scopes.is_none()
+            {
+                scopes =
+                    Some(self.snippet_scopes(&regions.iter().map(|r| r.b).collect::<Vec<_>>()));
+            }
+            if (!snippet.scope.is_empty() || snippet.snippet.uses_metadata_variables())
+                && scopes.as_ref().and_then(Option::as_ref).is_none()
+            {
+                unavailable = true;
+                continue;
+            }
+            if !snippet.scope.is_empty()
+                && !scopes
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|scopes| {
+                        vel_scope::Selector::parse(&snippet.scope)
+                            .is_ok_and(|selector| scopes.iter().all(|s| selector.matches(s)))
+                    })
+            {
+                continue;
+            }
+            if trigger.len() > width {
+                candidates.clear();
+                width = trigger.len();
+            }
+            candidates.push((name.clone(), snippet.content.clone()));
+        }
+        let ranges: Vec<_> = regions.iter().map(|r| r.b - width..r.b).collect();
+        if candidates.len() > 1 {
+            self.completion.hide();
+            self.actions.push(("show_overlay".into(), vel_config::json!({
+                            "overlay":"snippet_choices", "names":candidates.iter().map(|(n,_)| n).collect::<Vec<_>>(),
+                            "_snippet_trigger": self.text.slice(regions[0].b - width..regions[0].b).to_string(),
+                            "_snippet_version":self.buffer.change_id().0, "_snippet_buffer":self.buffer.id().0,
+                            "_snippet_carets": regions.iter().map(|r| r.b).collect::<Vec<_>>()
+                        })));
+            return Ok(Some(true));
+        }
+
+        if let Some((_, content)) = candidates.pop() {
+            if !self
+                .expand_snippet_with_context(&content, &ranges, true)?
+                .is_empty()
+            {
+                return Ok(Some(true));
+            }
+            return Ok(Some(false));
+        }
+        Ok(unavailable.then_some(false))
+    }
+    fn insert_literal_completion_tab(&mut self) {
+        let size = self.preferences.tab_size.max(1);
+        let edits = self
+            .buffer
+            .view(self.id)
+            .sel()
+            .iter()
+            .map(|r| {
+                let text = if self.preferences.translate_tabs_to_spaces {
+                    let start = self.text.line_to_byte(self.text.byte_to_line(r.begin()));
+                    let prefix = self.text.slice(start..r.begin()).to_string();
+                    " ".repeat(size - crate::editor::cells_with_tab(&prefix, size) % size)
+                } else {
+                    "\t".into()
+                };
+                (r.to_range(), text)
+            })
+            .collect();
+        self.apply_edits(edits, None, EditKind::InsertChars);
+        self.sync();
     }
     pub fn commit_completion(&mut self) -> Result<(), String> {
         self.commit_completion_with(Invocation::Manual)
@@ -667,7 +890,11 @@ impl Editor {
         ranges: &[Range<usize>],
     ) -> Result<Vec<Range<usize>>, String> {
         if item.completion_format == CompletionFormat::Snippet {
-            return self.expand_snippet(&item.completion, ranges);
+            return self.expand_snippet_with_context(
+                &item.completion,
+                ranges,
+                self.regions().iter().all(|r| r.empty()),
+            );
         }
         let mut delta = 0isize;
         let selection = Selection::from_regions(ranges.iter().map(|r| {
@@ -697,33 +924,52 @@ impl Editor {
         source: &str,
         ranges: &[Range<usize>],
     ) -> Result<Vec<Range<usize>>, String> {
+        self.expand_snippet_with_context(source, ranges, false)
+    }
+    fn expand_snippet_with_context(
+        &mut self,
+        source: &str,
+        ranges: &[Range<usize>],
+        triggers: bool,
+    ) -> Result<Vec<Range<usize>>, String> {
         self.completion.hide();
         self.completion.committed = None;
+        let snippet = Snippet::parse(source).map_err(|e| e.to_string())?;
         let mut env = Environment::default();
+        // Official variable table defines TM_SCOPE as the syntax's base scope.
+        // https://www.sublimetext.com/docs/completions.html#variables
+        env.0.insert("TM_FULLNAME".into(), system_fullname().into());
+        if let Some(language) = self.language.borrow().as_ref() {
+            env.0
+                .insert("TM_SCOPE".into(), language.root.build_string());
+        }
         if let Some(path) = &self.snippet_path {
             env = env.with_path(path);
         }
-        if let Some(language) = self.language.borrow().as_ref() {
-            env = env.with_metadata(
-                &language
-                    .assets
-                    .metadata
-                    .metadata_for(&language.scopes(&self.text, self.caret)),
-            );
+        if snippet.uses_metadata_variables() {
+            let Some(scopes) = self.snippet_scopes(&[self.caret]) else {
+                return Ok(Vec::new());
+            };
+            let language = self.language.borrow();
+            let Some(language) = language.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let mut stack = vel_scope::ScopeStack::new();
+            for scope in &scopes[0] {
+                stack.push(*scope);
+            }
+            env = env.with_metadata(&language.assets.metadata.metadata_for(&stack));
         }
-        let expansion = Snippet::parse(source)
-            .and_then(|s| {
-                s.expand(
-                    &self.text,
-                    ranges,
-                    &env,
-                    ExpansionOptions {
-                        tab_size: self.preferences.tab_size,
-                        translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
-                    },
-                )
-            })
-            .map_err(|e| e.to_string())?;
+        let options = ExpansionOptions {
+            tab_size: self.preferences.tab_size,
+            translate_tabs_to_spaces: self.preferences.translate_tabs_to_spaces,
+        };
+        let expansion = if triggers {
+            snippet.expand_triggers(&self.text, ranges, &env, options)
+        } else {
+            snippet.expand(&self.text, ranges, &env, options)
+        }
+        .map_err(|e| e.to_string())?;
         let mut delta = 0isize;
         let mut bounds: Vec<Range<usize>> = expansion
             .edits
@@ -813,6 +1059,17 @@ impl Editor {
                 }
             }
             "insert_snippet" => {
+                if let Some(version) = args["_snippet_version"].as_u64()
+                    && (version != self.buffer.change_id().0
+                        || args["_snippet_buffer"].as_u64() != Some(self.buffer.id().0)
+                        || self.regions().iter().any(|r| !r.empty())
+                        || args["_snippet_carets"]
+                            != vel_config::json!(
+                                self.regions().iter().map(|r| r.b).collect::<Vec<_>>()
+                            ))
+                {
+                    return Ok(true);
+                }
                 let source = args["contents"]
                     .as_str()
                     .map(str::to_owned)
@@ -823,62 +1080,44 @@ impl Editor {
                             .map(|s| s.content.clone())
                     })
                     .ok_or("snippet needs valid contents or name")?;
+                let width = args["_snippet_trigger"].as_str().map_or(0, str::len);
                 let ranges = self
-                    .buffer
-                    .view(self.id)
-                    .sel()
+                    .regions()
                     .iter()
-                    .map(|r| r.to_range())
+                    .map(|r| r.begin().saturating_sub(width)..r.end())
                     .collect::<Vec<_>>();
-                self.expand_snippet(&source, &ranges)?;
+                if width == 0 {
+                    self.expand_snippet(&source, &ranges)?;
+                } else {
+                    self.expand_snippet_with_context(&source, &ranges, true)?;
+                }
             }
             "insert_best_completion" => {
-                if self.completion.visible() {
+                if let Some(expanded) = self.insert_tab_trigger()? {
+                    if !expanded {
+                        self.completion.hide();
+                        self.insert_literal_completion_tab();
+                    }
+                } else if self.completion.visible() {
                     self.commit_completion_with(Invocation::Tab)?;
                 } else if self.fields.is_some() {
                     return self.intelligence_command("next_field", args);
                 } else {
-                    let mut ranges = Vec::new();
-                    let mut trigger = None;
-                    for r in self.buffer.view(self.id).sel().iter() {
-                        if !r.empty() {
-                            return Ok(false);
-                        }
-                        let start = self.text.line_to_byte(self.text.byte_to_line(r.b));
-                        let prefix = self.text.slice(start..r.b).to_string();
-                        let word = prefix
-                            .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-                            .next()
-                            .unwrap_or("");
-                        if word.is_empty() {
-                            return Ok(false);
-                        }
-                        if trigger.as_ref().is_some_and(|s: &String| s != word) {
-                            return Ok(false);
-                        }
-                        trigger = Some(word.to_owned());
-                        ranges.push(r.b - word.len()..r.b);
+                    if self.regions().iter().any(|r| !r.empty()) {
+                        return Ok(false);
                     }
-                    let content = self
-                        .snippets
-                        .values()
-                        .find(|s| {
-                            Some(&s.tab_trigger) == trigger.as_ref()
-                                && (s.scope.is_empty()
-                                    || self.language.borrow().as_ref().is_some_and(|l| {
-                                        l.scopes_ready_at(&self.text, self.caret)
-                                            && l.selector(&self.text, &s.scope, self.caret)
-                                    }))
-                        })
-                        .map(|s| s.content.clone());
-                    // `exact` (and `tab_completion: false`) limits Tab to exact snippet triggers.
                     let exact = args["exact"].as_bool().unwrap_or(false)
                         || !self.settings.bool("tab_completion", true);
-                    if let Some(content) = content {
-                        self.expand_snippet(&content, &ranges)?;
-                    } else if exact {
-                        return Ok(false);
-                    } else if self.language.borrow().is_some() {
+                    let before = self.text.floor_char_boundary(self.caret.saturating_sub(1));
+                    if !exact
+                        && self
+                            .text
+                            .slice(before..self.caret)
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                        && self.language.borrow().is_some()
+                    {
                         self.completion.request(Invocation::Tab, true);
                     } else {
                         return Ok(false);
@@ -1182,8 +1421,11 @@ mod tests {
         );
         let scene = view.scene(&e);
         let bounds = e.completion.bounds.get();
-        let popup = scene.layers.last().unwrap();
-        assert!(popup.text.iter().any(|run| run.text.contains(&chosen)));
+        let popup = scene
+            .layers
+            .iter()
+            .find(|layer| layer.text.iter().any(|run| run.text.contains(&chosen)))
+            .expect("selected completion row remains drawn");
         let selected = popup
             .surfaces
             .iter()

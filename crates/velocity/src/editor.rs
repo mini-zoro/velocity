@@ -78,6 +78,15 @@ pub struct Editor {
         )>,
     >,
     selector_points: RefCell<SelectorPoints>,
+    pub(crate) exact_scope_cache: RefCell<crate::editing::ExactScopeCache>,
+    pub(crate) pending_closing_tag: Option<(
+        vel_buffer::BufferId,
+        vel_buffer::ChangeId,
+        Vec<Region>,
+        vel_scope::Scope,
+    )>,
+    #[cfg(test)]
+    pub(crate) exact_scope_parses: std::cell::Cell<usize>,
     last_visual_boundary: Option<(bool, vel_buffer::ChangeId, Selection)>,
     language_buffer: Option<vel_buffer::BufferId>,
     pub reindent_job: Option<mpsc::Receiver<ReindentResult>>,
@@ -211,6 +220,10 @@ impl Editor {
             layout: RefCell::new(crate::layout::Layout::default()),
             selector_snapshots: RefCell::new(Vec::new()),
             selector_points: RefCell::default(),
+            exact_scope_cache: RefCell::default(),
+            pending_closing_tag: None,
+            #[cfg(test)]
+            exact_scope_parses: std::cell::Cell::new(0),
             last_visual_boundary: None,
             language_buffer: None,
             reindent_job: None,
@@ -475,6 +488,7 @@ impl Editor {
             .borrow_mut()
             .as_mut()
             .is_some_and(|l| l.poll());
+        changed |= self.poll_closing_tag();
         if let Some((buffer, version, edits)) =
             self.reindent_job.as_ref().and_then(|rx| rx.try_recv().ok())
         {
@@ -691,6 +705,14 @@ impl Editor {
         }
     }
     fn selector_scopes(&self, byte: usize) -> Option<vel_scope::ScopeStack> {
+        self.published_scopes(byte, false)
+    }
+    /// Published scopes only: display may map edits; edits require an untouched caret line.
+    pub(crate) fn published_scopes(
+        &self,
+        byte: usize,
+        unchanged_line: bool,
+    ) -> Option<vel_scope::ScopeStack> {
         use vel_highlight::ScopeProvider;
         let language = self.language.borrow();
         let language = language.as_ref()?;
@@ -719,7 +741,7 @@ impl Editor {
             points.version = Some(version);
             points.values.clear();
         }
-        if let Some(scopes) = points.values.get(&byte) {
+        if !unchanged_line && let Some(scopes) = points.values.get(&byte) {
             return scopes.clone();
         }
         let cache = self.selector_snapshots.borrow();
@@ -771,16 +793,49 @@ impl Editor {
             }
             let old_byte = snapshot.text.floor_char_boundary(lo);
             if let Some(scopes) = snapshot.scopes_at(old_byte) {
+                if unchanged_line {
+                    let row = snapshot.text.byte_to_line(old_byte);
+                    let mut line = snapshot.text.line_to_byte(row)
+                        ..(snapshot.text.line_to_byte(row) + snapshot.text.line_len_bytes(row));
+                    let Some(changes) = self.buffer.changes_since(snapshot.version) else {
+                        continue;
+                    };
+                    for (_, changes) in changes {
+                        if changes.changes().iter().any(|change| {
+                            change.old_range.start <= line.end && change.old_range.end >= line.start
+                        }) {
+                            continue 'snapshots;
+                        }
+                        line = changes.transform_point(line.start, vel_buffer::Bias::Right)
+                            ..changes.transform_point(line.end, vel_buffer::Bias::Left);
+                    }
+                }
                 let mut stack = vel_scope::ScopeStack::new();
                 for scope in scopes {
                     stack.push(*scope);
                 }
-                points.values.insert(byte, Some(stack.clone()));
+                if !unchanged_line {
+                    points.values.insert(byte, Some(stack.clone()));
+                }
                 return Some(stack);
             }
         }
-        points.values.insert(byte, None);
+        if !unchanged_line {
+            points.values.insert(byte, None);
+        }
         None
+    }
+    /// Budgeted exact scopes, then published scopes only when the caret line was untouched.
+    pub(crate) fn snippet_scopes(&self, points: &[usize]) -> Option<Vec<Vec<vel_scope::Scope>>> {
+        self.exact_scopes(points).or_else(|| {
+            points
+                .iter()
+                .map(|&point| {
+                    self.published_scopes(point, true)
+                        .map(|s| s.as_slice().to_vec())
+                })
+                .collect()
+        })
     }
     pub fn context_matches(&self, context: &[vel_config::keymap::Context]) -> bool {
         context.iter().all(|c| c.matches(&EditorContext(self)))

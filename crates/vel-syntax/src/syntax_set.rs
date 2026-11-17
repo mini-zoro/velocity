@@ -69,6 +69,8 @@ pub struct SyntaxReference {
     pub file_extensions: Vec<String>,
     /// Scope names applied to the match, or the top-level scope of a syntax.
     pub scope: Scope,
+    /// Root or embedded HTML/XML, computed while linking so input never traverses grammars.
+    pub embeds_markup: bool,
     /// Optional expanded pattern for detecting shebangs and mode lines.
     pub first_line_match: Option<String>,
     /// Whether syntax selection lists should hide this definition.
@@ -761,6 +763,7 @@ impl SyntaxSetBuilder {
                 name,
                 file_extensions,
                 scope,
+                embeds_markup: false,
                 first_line_match,
                 hidden,
                 variables,
@@ -855,6 +858,65 @@ impl SyntaxSetBuilder {
                     }
                 }
             }
+        }
+
+        // Embedding context references: https://www.sublimetext.com/docs/syntax.html
+        // Derive template eligibility once from linked contexts. Persist the bit with the
+        // syntax index so cached startup retains lazy context loading.
+        let html = Scope::new("text.html").expect("HTML scope");
+        let xml = Scope::new("text.xml").expect("XML scope");
+        let markup = |scope| html.is_prefix_of(scope) || xml.is_prefix_of(scope);
+        let mut enabled: Vec<_> = syntaxes.iter().map(|s| markup(s.scope)).collect();
+        let mut parents = vec![Vec::new(); syntaxes.len()];
+        for (index, contexts) in all_contexts.iter().enumerate() {
+            for context in contexts {
+                enabled[index] |= context
+                    .meta_scope
+                    .iter()
+                    .chain(&context.meta_content_scope)
+                    .copied()
+                    .any(markup);
+                for pattern in &context.patterns {
+                    let references: &[ContextReference] = match pattern {
+                        Pattern::Include(reference) | Pattern::IncludeWithPrototype(reference) => {
+                            std::slice::from_ref(reference)
+                        }
+                        Pattern::Match(pattern) => {
+                            enabled[index] |= pattern.scope.iter().copied().any(markup);
+                            match &pattern.operation {
+                                MatchOperation::Push { ctx_refs, .. }
+                                | MatchOperation::Set { ctx_refs, .. } => ctx_refs,
+                                MatchOperation::Embed { contexts, .. } => contexts,
+                                MatchOperation::Branch { alternatives, .. } => alternatives,
+                                _ => &[],
+                            }
+                        }
+                    };
+                    for reference in references {
+                        if let ContextReference::Direct(id) = reference
+                            && id.syntax_index != index
+                        {
+                            parents[id.syntax_index].push(index);
+                        }
+                    }
+                }
+            }
+        }
+        let mut pending: Vec<_> = enabled
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &on)| on.then_some(i))
+            .collect();
+        while let Some(child) = pending.pop() {
+            for &parent in &parents[child] {
+                if !enabled[parent] {
+                    enabled[parent] = true;
+                    pending.push(parent);
+                }
+            }
+        }
+        for (syntax, enabled) in syntaxes.iter_mut().zip(enabled) {
+            syntax.embeds_markup = enabled;
         }
 
         // The combination of

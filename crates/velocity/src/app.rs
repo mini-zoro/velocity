@@ -1328,6 +1328,7 @@ impl App {
         let current = self.workspace.tabs[self.workspace.active].sheet;
         if self.view_buffer != Some(current) {
             if let Some(old) = self.view_buffer {
+                self.save_on_focus_lost(Some(old));
                 if let Some(index) = self.workspace.sheet_index(old) {
                     self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
                 }
@@ -1357,6 +1358,48 @@ impl App {
         if let Some(scroll) = self.panels.restore_scroll.take() {
             self.view.scroll_x = scroll.0;
             self.view.scroll_y = scroll.1;
+        }
+    }
+    /// Shared by tab deactivation and the window focus transition; never opens a dialog.
+    fn save_on_focus_lost(&mut self, sheet: Option<u64>) {
+        // https://docs.sublimetext.io/reference/settings.html#automatic-behavior
+        // https://www.sublimetext.com/dev: respect read-only and reload conflicts.
+        let index = if let Some(sheet) = sheet {
+            let Some(index) = self.workspace.sheet_index(sheet) else {
+                return;
+            };
+            index
+        } else {
+            self.workspace.active
+        };
+        self.workspace.tabs[index]
+            .editor
+            .finish_closing_tag_on_leave();
+        let tab = &self.workspace.tabs[index];
+        if !tab.dirty()
+            || !tab.editor.settings.bool("save_on_focus_lost", false)
+            || tab.editor.read_only
+            || tab.editor.marked.is_some()
+            || tab.loading.is_some()
+            || tab.lazy.is_some()
+            || tab.binary_loading.is_some()
+            || tab.external.is_some()
+            || tab.deleted
+        {
+            return;
+        }
+        let Some(path) = tab.path.as_ref() else {
+            return;
+        };
+        let Some(disk) = vel_session::DiskStamp::read(path) else {
+            return;
+        };
+        // The watcher may not yet have published an external change. Compare disk now.
+        if tab.disk_saved.as_ref() != Some(&disk) {
+            return;
+        }
+        if let Err(error) = self.workspace.save(index, None) {
+            self.panels.message = format!("Automatic save failed: {error}");
         }
     }
     fn sync_palette_enabled(&mut self) {
@@ -2589,6 +2632,9 @@ impl AppHandler for App {
         }
         let focused = w.is_focused();
         let focus_changed = self.window_focused != focused;
+        if focus_changed && !focused {
+            self.save_on_focus_lost(None);
+        }
         self.window_focused = focused;
         if focused && self.options.mode == Mode::Interactive {
             self.sessions.borrow_mut().active_window = Some(self.session_id);
@@ -3374,6 +3420,9 @@ mod round16_tests;
 #[cfg(test)]
 #[path = "app_round17_tests.rs"]
 mod round17_tests;
+#[cfg(test)]
+#[path = "app_round18_tests.rs"]
+mod round18_tests;
 
 #[cfg(test)]
 mod round15_tests {

@@ -2071,5 +2071,10 @@
   {"keys": ["super+k", "super+8"], "command": "fold_by_level", "args": {"level": 8}},
   {"keys": ["super+k", "super+9"], "command": "fold_by_level", "args": {"level": 9}},
   {"keys": ["super+k", "super+j"], "command": "unfold_all"},
-  {"keys": ["super+k", "super+t"], "command": "fold_tag_attributes"}
+  {"keys": ["super+k", "super+t"], "command": "fold_tag_attributes"},
+  // Lane A round 18: explicit find shortcuts close the panel independently of button settings.
+  { "keys": ["alt+enter"], "command": "find_all", "args": {"_close_panel":true},
+    "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operator":"not_equal","operand":"find_in_files"}] },
+  { "keys": ["ctrl+alt+enter"], "command": "replace_all", "args": {"_close_panel":true},
+    "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operand":"replace"}] }
 ]

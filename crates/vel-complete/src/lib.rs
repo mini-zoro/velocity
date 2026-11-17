@@ -126,6 +126,30 @@ pub struct CompletionTrigger {
     pub selector: String,
     /// Characters immediately to the left of the caret that trigger completion.
     pub characters: String,
+    /// Require EOF or a whitespace character immediately after the caret.
+    pub rhs_empty: bool,
+}
+/// Reordering policies documented at <https://www.sublimetext.com/docs/completions.html#settings>.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PreserveOrder {
+    /// Rank by textual match.
+    None,
+    /// Also consider source likelihood and proximity.
+    #[default]
+    Some,
+    /// Keep source order.
+    Strict,
+}
+impl PreserveOrder {
+    /// Reads the documented string values; unknown/legacy values use normal ranking.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "some" => Self::Some,
+            "strict" => Self::Strict,
+            "none" => Self::None,
+            _ => Self::Some,
+        }
+    }
 }
 /// Editor settings consumed by the engine, with UI policies returned on CompletionList.
 #[derive(Debug, Clone)]
@@ -153,7 +177,11 @@ pub struct CompletionSettings {
     /// Use committed completion recency.
     pub auto_complete_use_history: bool,
     /// Keep stable source/resource order, retaining exact tab-trigger priority.
-    pub auto_complete_preserve_order: bool,
+    pub auto_complete_preserve_order: PreserveOrder,
+    /// Append punctuation inferred from indexed occurrences, never strip resource contents.
+    pub auto_complete_trailing_symbols: bool,
+    /// Append spaces supported by observed buffer occurrences.
+    pub auto_complete_trailing_spaces: bool,
     /// Include snippet resources.
     pub auto_complete_include_snippets: bool,
     /// Include snippet resources in automatic typing queries.
@@ -165,7 +193,8 @@ impl Default for CompletionSettings {
     fn default() -> Self {
         Self {
             auto_complete: true,
-            auto_complete_selector: "source - comment - string, meta.tag".into(),
+            // Public selector example: https://www.sublimetext.com/docs/completions.html#settings
+            auto_complete_selector: "meta.tag, source - comment - string.quoted.double.block - string.quoted.single.block - string.unquoted.heredoc".into(),
             auto_complete_triggers: Vec::new(),
             auto_complete_delay: Duration::from_millis(50),
             auto_complete_size_limit: 4 * 1024 * 1024,
@@ -174,8 +203,16 @@ impl Default for CompletionSettings {
             auto_complete_cycle: false,
             auto_complete_when_likely: true,
             auto_complete_use_index: true,
+            // The public completions/settings pages and ST4 changelog describe these
+            // switches, but do not establish different shipped defaults; retain ours.
+            // https://www.sublimetext.com/docs/completions.html#settings
             auto_complete_use_history: true,
-            auto_complete_preserve_order: false,
+            auto_complete_preserve_order: PreserveOrder::Some,
+            // The public docs define these as inferred suffixes, not edits to authored snippets.
+            // https://www.sublimetext.com/download (ST4 Auto Complete: symbols default off).
+            auto_complete_trailing_symbols: false,
+            // No default is specified by the public docs; preserve our no-space behavior.
+            auto_complete_trailing_spaces: false,
             auto_complete_include_snippets: true,
             auto_complete_include_snippets_when_typing: false,
             max_results: 64,
@@ -185,6 +222,7 @@ impl Default for CompletionSettings {
 #[derive(Debug, Clone, Default)]
 struct Word {
     positions: Vec<usize>,
+    followed_by_space: usize,
 }
 /// Prepared current/other-buffer word source. Build on a snapshot publisher/worker, then reuse
 /// it across queries. Position lists support logarithmic nearest-caret scoring.
@@ -207,11 +245,9 @@ impl BufferWords {
                 if c.is_alphanumeric() || c == '_' {
                     start.get_or_insert(at);
                 } else if let Some(start) = start.take() {
-                    words
-                        .entry(line[start..at].into())
-                        .or_default()
-                        .positions
-                        .push(offset + start);
+                    let word = words.entry(line[start..at].into()).or_default();
+                    word.positions.push(offset + start);
+                    word.followed_by_space += usize::from(line[at..].starts_with(' '));
                 }
             }
             offset += line.len() + 1;
@@ -421,11 +457,21 @@ impl CompletionEngine {
         }
         let mut prefixes = Vec::new();
         let mut stacks = Vec::new();
+        let mut rhs_empty = true;
+        let check_rhs = matches!(view.invocation, Invocation::Typing {character, ..} if settings.auto_complete_triggers.iter().any(|trigger| trigger.rhs_empty && (trigger.characters.is_empty() || trigger.characters.contains(character))));
         for &caret in carets {
             if caret > view.text.len_bytes() || !view.text.is_char_boundary(caret) {
                 return list;
             }
-            let Some(stack) = scopes.scopes_at(caret) else {
+            // Build 4072: automatic selectors use the just-typed character.
+            // https://www.sublimetext.com/dev (4072). Reuse the query's one scope
+            // lookup per caret: triggers add no scope lookups to ordinary typing.
+            let point = if matches!(view.invocation, Invocation::Typing { .. }) {
+                view.text.floor_char_boundary(caret.saturating_sub(1))
+            } else {
+                caret
+            };
+            let Some(stack) = scopes.scopes_at(point) else {
                 return list;
             };
             stacks.push(stack);
@@ -433,6 +479,13 @@ impl CompletionEngine {
             let offset = view.text.line_to_byte(row);
             let line = view.text.line(row).to_string();
             let column = caret - offset;
+            if check_rhs {
+                // https://docs.sublimetext.io/guide/extensibility/completions.html#auto-completion-triggers-and-selector
+                rhs_empty &= line[column..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace);
+            }
             let tab_trigger = matches!(view.invocation, Invocation::Tab)
                 .then(|| {
                     self.resources
@@ -443,11 +496,12 @@ impl CompletionEngine {
                         })
                         .filter(|resource| resource.selector.matches(stack))
                         .filter_map(|resource| {
-                            let start = caret.checked_sub(resource.item.trigger.len())?;
-                            (view.text.is_char_boundary(start)
-                                && view.text.slice(start..caret).to_string()
-                                    == resource.item.trigger)
-                                .then_some(start)
+                            vel_snippet::tab_trigger_range(
+                                &view.text,
+                                caret,
+                                &resource.item.trigger,
+                            )
+                            .map(|r| r.start)
                         })
                         .min()
                 })
@@ -474,7 +528,8 @@ impl CompletionEngine {
                 return list;
             }
             let trigger = settings.auto_complete_triggers.iter().any(|trigger| {
-                trigger.characters.contains(character)
+                (trigger.characters.is_empty() || trigger.characters.contains(character))
+                    && (!trigger.rhs_empty || rhs_empty)
                     && Selector::parse(&trigger.selector).is_ok_and(|selector| matches(&selector))
             });
             if !trigger
@@ -503,9 +558,20 @@ impl CompletionEngine {
                 0
             }
         };
-        let mut ranked: Vec<(bool, i64, usize, CompletionItem)> = Vec::new();
+        // Decide once per query, not once per candidate × caret.
+        // Only an immediate line ending permits a new space. Existing whitespace is kept
+        // without duplicating it; punctuation and word continuations never get a space.
+        let append_space = settings.auto_complete_trailing_spaces
+            && carets.iter().all(|&at| {
+                view.text
+                    .slice(at..view.text.len_bytes())
+                    .chars()
+                    .next()
+                    .is_none_or(|c| matches!(c, '\n' | '\r'))
+            });
+        let mut ranked: Vec<(bool, i64, usize, CompletionItem, bool)> = Vec::new();
         let mut order = 0usize;
-        let mut add = |item: CompletionItem, bonus: i64, exact_trigger: bool| {
+        let mut add = |item: CompletionItem, bonus: i64, exact_trigger: bool, space: bool| {
             let score = prefixes
                 .iter()
                 .map(|prefix| fuzzy_score(&item.trigger, prefix))
@@ -514,9 +580,16 @@ impl CompletionEngine {
             if let Some(score) = score {
                 ranked.push((
                     exact_trigger && prefixes.iter().all(|prefix| prefix == &item.trigger),
-                    score + bonus + history_score(&item.trigger),
+                    score
+                        + if settings.auto_complete_preserve_order == PreserveOrder::Some {
+                            bonus
+                        } else {
+                            0
+                        }
+                        + history_score(&item.trigger),
                     order,
                     item,
+                    space,
                 ));
             }
             order += 1;
@@ -539,6 +612,7 @@ impl CompletionEngine {
                     60,
                     resource.snippet_resource
                         || resource.item.completion_format == CompletionFormat::Snippet,
+                    false,
                 );
             }
         }
@@ -564,10 +638,15 @@ impl CompletionEngine {
                 } else {
                     0
                 };
+                // Original inference policy: at least three observations, and at least
+                // three quarters followed by spaces. One assignment is not evidence.
+                let space = info.followed_by_space >= 3
+                    && info.followed_by_space * 4 >= info.positions.len() * 3;
                 add(
                     word_item(word.clone()),
                     proximity + (info.positions.len().max(1).ilog2() as i64) * 3,
                     false,
+                    space,
                 );
             }
             true
@@ -605,13 +684,16 @@ impl CompletionEngine {
                     item.kind.letter = match word.kind {
                         SymbolKind::Function => "f",
                         SymbolKind::Type => "t",
-                        SymbolKind::Namespace => "n",
+                        SymbolKind::Namespace => "a",
                         SymbolKind::Markup => "m",
                         _ => "v",
                     }
                     .into();
                 }
-                if word.context_count > 0 && !word.trailing.is_empty() {
+                if settings.auto_complete_trailing_symbols
+                    && word.context_count > 0
+                    && !word.trailing.is_empty()
+                {
                     let mut prefix = word.trailing.len();
                     for &caret in carets {
                         let end = view.text.floor_char_boundary(
@@ -632,12 +714,12 @@ impl CompletionEngine {
                     item.annotation = "context".into();
                 }
                 let quality = fuzzy_score(&item.trigger, primary).unwrap_or(0);
-                add(item, word.score - quality + 10, false);
+                add(item, word.score - quality + 10, false, false);
             }
         }
         ranked.sort_unstable_by(|a, b| {
             b.0.cmp(&a.0).then_with(|| {
-                if settings.auto_complete_preserve_order {
+                if settings.auto_complete_preserve_order == PreserveOrder::Strict {
                     a.2.cmp(&b.2)
                 } else {
                     b.1.cmp(&a.1).then(a.2.cmp(&b.2))
@@ -647,7 +729,12 @@ impl CompletionEngine {
         let mut seen = std::collections::HashSet::new();
         list.items = ranked
             .into_iter()
-            .filter_map(|(_, _, _, item)| {
+            .filter_map(|(_, _, _, mut item, space)| {
+                // Only ranked rows considered for display reach this point; right-side
+                // eligibility was computed once above. Deduplicate the final contents.
+                if append_space && space {
+                    item.completion.push(' ');
+                }
                 seen.insert((
                     item.trigger.clone(),
                     item.completion.clone(),
@@ -721,7 +808,8 @@ fn parse_kind(value: Option<&serde_json::Value>) -> Result<Kind, Error> {
         "function" => (KindId::Function, "f"),
         "keyword" => (KindId::Keyword, "k"),
         "markup" => (KindId::Markup, "m"),
-        "namespace" => (KindId::Namespace, "n"),
+        // https://www.sublimetext.com/docs/completions.html#kind-info
+        "namespace" => (KindId::Namespace, "a"),
         "navigation" => (KindId::Navigation, "n"),
         "snippet" => (KindId::Snippet, "s"),
         "type" => (KindId::Type, "t"),

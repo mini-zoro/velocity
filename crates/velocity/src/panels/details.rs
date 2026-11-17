@@ -803,6 +803,11 @@ mod tests {
     #[test]
     fn histories_record_only_commits_and_arrows_restore_drafts() {
         let (mut w, mut p) = setup("cat cat");
+        w.editor_mut().settings.set(
+            vel_config::settings::Layer::View,
+            "close_find_after_replace_all",
+            json!(false),
+        );
         action(&mut p, &mut w, "show_panel", json!({"panel":"replace"}));
         for query in ["c", "ca"] {
             type_query(&mut p, &mut w, query, 0..7);
@@ -838,6 +843,11 @@ mod tests {
     #[test]
     fn feedback_survives_poll_and_expires_without_regex_modal_errors() {
         let (mut w, mut p) = setup("cat cat");
+        w.editor_mut().settings.set(
+            vel_config::settings::Layer::View,
+            "close_find_after_replace_all",
+            json!(false),
+        );
         action(
             &mut p,
             &mut w,
