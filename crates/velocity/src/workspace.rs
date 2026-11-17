@@ -39,8 +39,10 @@ pub struct Tab {
     pub(crate) needs_detection: bool,
     pub(crate) indentation_initialized: bool,
     pub transient: bool,
+    pub(crate) preview_recent_pending: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
+    pub(crate) suggested_name: Option<String>,
     pub format: Format,
     pub(crate) saved_format: Format,
     pub tracker: ChangeTracker,
@@ -82,6 +84,7 @@ impl Tab {
         editor.sync();
         editor.keymap = keymap.clone();
         for command in [
+            "new_build_system",
             "reopen_last_file",
             "reopen_encoding",
             "save_encoding",
@@ -113,8 +116,10 @@ impl Tab {
             needs_detection: true,
             indentation_initialized: false,
             transient: false,
+            preview_recent_pending: false,
             editor,
             path: None,
+            suggested_name: None,
             saved_format: format.clone(),
             format,
             tracker,
@@ -177,6 +182,11 @@ impl Tab {
         )
     }
     pub fn name(&self) -> String {
+        if self.path.is_none()
+            && let Some(name) = &self.suggested_name
+        {
+            return name.clone();
+        }
         if let Some(title) = self
             .editor
             .settings
@@ -890,6 +900,9 @@ impl Configuration {
                 item.command = None;
                 item.children = serde_json::from_value(serde_json::json!(choices))
                     .map_err(|e| e.to_string())?;
+                item.children.extend(ui::parse::<MenuItem>(
+                    r#"[{"caption":"New Build System…","command":"new_build_system"}]"#,
+                )?);
             }
         }
         crate::release::extend_commands(&mut palette, &mut menus, &settings);
@@ -1350,6 +1363,24 @@ impl Workspace {
             std::thread::park_timeout(std::time::Duration::from_millis(1));
         }
     }
+    /// Tests can observe one disk scan/publication while preferences IO remains blocked.
+    #[cfg(test)]
+    pub(crate) fn poll_resource_reload(&mut self) {
+        self.last_config_check = None;
+        self.poll();
+        if let Some(pending) = self.config_rx.take() {
+            // Synchronize with the resource worker, then let the real poll path
+            // publish its result with the original settings-write generation.
+            // The timeout guards a stuck worker, not an expected timing window.
+            let result = pending
+                .recv_timeout(Duration::from_secs(120))
+                .expect("resource worker did not complete");
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(result).expect("resource completion receiver");
+            self.config_rx = Some(rx);
+            self.poll();
+        }
+    }
     pub fn request_resource_reload(&mut self) {
         self.reload_requested = true;
     }
@@ -1368,24 +1399,6 @@ impl Workspace {
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect()
-    }
-    /// Active document title, including its dirty marker and optional project name.
-    pub fn window_title(&self) -> String {
-        let tab = &self.tabs[self.active];
-        let name = if self.is_empty() {
-            "Velocity".into()
-        } else {
-            tab.name()
-        };
-        let title = format!(
-            "{name}{}{}",
-            if tab.deleted { " [deleted]" } else { "" },
-            if tab.dirty() { " •" } else { "" }
-        );
-        match self.project.as_deref().and_then(Path::file_stem) {
-            Some(project) => format!("{title} — {}", project.to_string_lossy()),
-            None => title,
-        }
     }
     /// Consume only the active tab's explicit location-centering request.
     pub fn take_pending_center(&mut self) -> bool {
@@ -1489,7 +1502,7 @@ impl Workspace {
         {
             self.select(index);
             if !preview {
-                self.tabs[index].transient = false;
+                self.make_permanent(index);
             }
             // A duplicate open during background loading must retain the latest location
             // until the final text is installed, rather than clamp it to the empty prefix.
@@ -1502,6 +1515,7 @@ impl Workspace {
         let started = Instant::now();
         let mut tab = Tab::new(Text::new(), &self.settings, &self.keymap)?;
         tab.transient = preview;
+        tab.preview_recent_pending = preview;
         tab.path = Some(path.clone());
         tab.location = Some(location);
         let fallback = tab.editor.settings.editor().fallback_encoding;
@@ -1565,7 +1579,9 @@ impl Workspace {
         }
         self.empty = false;
         self.workbench.groups[self.workbench.active].add(self.tabs[self.active].sheet, false);
-        crate::workbench::remember(&mut self.recent_files, path);
+        if !preview {
+            crate::workbench::remember(&mut self.recent_files, path);
+        }
         self.configure_language(self.active, None, true)?;
         Ok(())
     }
@@ -1575,8 +1591,8 @@ impl Workspace {
             return Err("no file to save".into());
         }
         self.prepare_sheet(index)?;
+        self.make_permanent(index);
         let tab = &mut self.tabs[index];
-        tab.transient = false;
         if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.read_only {
             return Err("file is loading or its load failed".into());
         }
@@ -1832,9 +1848,7 @@ impl Workspace {
             if let Some(language) = tab.editor.language.borrow_mut().as_mut() {
                 self.messages.append(&mut language.errors);
             }
-            if tab.dirty() {
-                tab.transient = false;
-            }
+            // Promotion and recent-file bookkeeping are applied after shared buffers sync.
             if let Some(snapshot) = tab.loading.as_ref().and_then(LoadTask::try_snapshot)
                 && !tab.external_load
             {

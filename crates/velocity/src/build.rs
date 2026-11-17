@@ -3,17 +3,28 @@ use crate::{
     panels::{Panel, Panels},
     workspace::Workspace,
 };
-use vel_build::{BuildSystem, Diagnostic, Event, ResultParser, Task, Variables};
+use vel_build::{BuildSystem, Diagnostic, Event, Task, Variables};
 use vel_config::{Value, json};
+#[cfg(test)]
+thread_local! { pub(crate) static MATCHING_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+type BuildChoice = (String, Option<String>);
+type MatchingSet = Vec<(String, String)>;
 #[derive(Debug, Default)]
 pub struct Builds {
     pub task: Option<Task>,
     pub diagnostics: Vec<Diagnostic>,
     pub selected: Option<usize>,
-    parser: Option<ResultParser>,
-    pending: String,
+    received_lines: usize,
+    discarded_lines: usize,
+    retention_notice: bool,
+    discard_partial_line: bool,
+    error_count: usize,
     pub syntax: Option<String>,
     pub word_wrap: bool,
+    quiet: bool,
+    environment_warning: Option<String>,
+    pub choice: Option<BuildChoice>,
+    choices: std::collections::VecDeque<(MatchingSet, BuildChoice)>,
 }
 impl Builds {
     pub fn start(
@@ -22,42 +33,23 @@ impl Builds {
         panels: &mut Panels,
         args: &Value,
     ) -> Result<(), String> {
-        if self.task.is_some() {
-            return Err("A build is already running; cancel it before starting another".into());
-        }
         let direct = args.get("cmd").is_some() || args.get("shell_cmd").is_some();
         let build = if direct {
             BuildSystem::from_value("exec", args.clone())?
         } else {
+            // The app resolves Automatic exactly once per request. Explicit Tools
+            // choices intentionally apply across syntaxes (public build-system docs).
             let name = args["build_system"]
                 .as_str()
                 .or(workspace.build_system.as_deref());
-            let scope = workspace
-                .editor()
-                .language
-                .borrow()
-                .as_ref()
-                .map(|l| l.root.to_string())
-                .unwrap_or_default();
-            let roots: Vec<_> = workspace.folders.iter().map(|f| f.path.clone()).collect();
             let build = workspace
                 .build_systems
                 .iter()
-                .find(|b| {
-                    name.map_or_else(
-                        || {
-                            b.matches(
-                                &scope,
-                                workspace.tabs[workspace.active].path.as_deref(),
-                                &roots,
-                            )
-                        },
-                        |n| b.name == n,
-                    )
-                })
+                .find(|b| Some(b.name.as_str()) == name)
                 .ok_or("No matching build system; choose Tools > Build System")?;
-            if let Some(variant) = args["variant"].as_str() {
-                build.variant(variant)?
+            let variant = args["variant"].as_str().map(str::to_owned);
+            if let Some(variant) = variant {
+                build.variant(&variant)?
             } else {
                 build.clone()
             }
@@ -69,109 +61,185 @@ impl Builds {
             workspace.project_path(),
             packages.as_deref(),
         );
-        let exec = build.resolve(&variables)?;
-        let task = Task::spawn(&exec)?;
+        let exec = match build.resolve(&variables) {
+            Ok(exec) => exec,
+            Err(error) => {
+                panels.output = format!("[Build error: {error}]\n");
+                panels.message = error.clone();
+                return Err(error);
+            }
+        };
+        let task = Task::spawn_after(&exec, self.task.take())?;
         panels.configure_output(workspace, exec.syntax.as_deref(), exec.word_wrap);
         self.diagnostics.clear();
         self.selected = None;
-        self.pending.clear();
+        self.received_lines = 0;
+        self.discarded_lines = 0;
+        self.retention_notice = false;
+        self.discard_partial_line = false;
+        self.error_count = 0;
         self.syntax = exec.syntax;
         self.word_wrap = exec.word_wrap;
-        self.parser = Some(exec.parser);
         self.task = Some(task);
-        panels.output = if exec.quiet {
-            String::new()
-        } else {
-            format!("[{}]\n[dir: {}]\n", build.name, exec.working_dir.display())
-        };
-        // Parser output line indices exclude the optional banner.
-        panels.build_output_offset = panels.output.lines().count();
-        panels.panel = Some(Panel::Output);
+        self.quiet = exec.quiet;
+        self.environment_warning = None;
+        panels.output.clear();
+        panels.output_reset = true;
+        panels.build_output_offset = 0;
+        if workspace
+            .editor()
+            .settings
+            .bool("show_panel_on_build", true)
+        {
+            panels.panel = Some(Panel::Output);
+        }
         panels.result_scroll.offset = 0.;
         panels.build_results.clear();
         Ok(())
     }
     pub fn poll(&mut self, panels: &mut Panels) -> bool {
         let mut changed = false;
-        let mut finished = false;
+        let mut finish = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
         for _ in 0..128 {
+            if changed && std::time::Instant::now() >= deadline {
+                break;
+            }
             let event = self.task.as_ref().and_then(|t| t.events.try_recv().ok());
             let Some(event) = event else {
                 break;
             };
             changed = true;
             match event {
-                Event::Output { stream: _, text } => {
-                    self.pending.push_str(&text);
-                    if self.pending.len() > 1024 * 1024 {
-                        let at = self
-                            .pending
-                            .floor_char_boundary(self.pending.len() - 1024 * 1024);
-                        self.pending.drain(..at);
+                Event::Output { text, .. } => self.append_output(panels, &text),
+                Event::OutputBatch(chunks) => {
+                    for (_, text) in chunks {
+                        self.append_output(panels, &text);
                     }
-                    while let Some(end) = self.pending.find('\n') {
-                        let line = self.pending.drain(..=end).collect::<String>();
-                        self.result(&line, panels);
-                    }
-                    panels.output.push_str(&text);
+                }
+                Event::Truncated { bytes, first_line } => {
+                    panels.output = format!("[output truncated] ({bytes} bytes dropped)\n");
+                    panels.output_reset = true;
+                    panels.build_output_offset = 0;
+                    self.discarded_lines = first_line;
+                    self.received_lines = first_line;
+                    self.retention_notice = true;
+                    self.discard_partial_line = false;
+                    self.diagnostics.clear();
+                    panels.build_results.clear();
+                }
+                Event::Results(results) => {
+                    self.accept_results(panels, results);
+                }
+                Event::Warning(message) => {
+                    panels.message = message.clone();
+                    self.environment_warning = Some(message);
                 }
                 Event::Error(e) => panels.output.push_str(&format!("\n[Build error: {e}]\n")),
                 Event::Finished {
                     code,
+                    signal,
                     cancelled,
                     elapsed,
                 } => {
-                    let line = std::mem::take(&mut self.pending);
-                    if !line.is_empty() {
-                        self.result(&line, panels);
-                    }
-                    panels.output.push_str(&format!(
-                        "\n[{} in {:.3}s; exit code: {}]\n",
-                        if cancelled { "Cancelled" } else { "Finished" },
-                        elapsed.as_secs_f64(),
-                        code.map_or_else(|| "signal".into(), |n| n.to_string())
-                    ));
-                    finished = true;
+                    finish = Some((code, signal, cancelled, elapsed));
+                    break;
                 }
             }
         }
-        // UI retention is bounded; process pipes continue to drain after the panel limit.
+        // UI retention is bounded too when the consumer keeps up with the producer.
         const LIMIT: usize = 8 * 1024 * 1024;
+        const NOTICE: &str = "[output truncated]\n";
         if panels.output.len() > LIMIT {
-            let at = panels
-                .output
-                .floor_char_boundary(panels.output.len() - LIMIT);
+            let cut = panels.output.len() - (6 * 1024 * 1024 - NOTICE.len());
+            let at = panels.output.as_bytes()[cut..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(panels.output.len(), |n| cut + n + 1);
+            self.discard_partial_line = at == panels.output.len() && !panels.output.ends_with('\n');
             let lines = panels.output[..at].bytes().filter(|b| *b == b'\n').count();
-            panels.output.drain(..at);
+            panels.output.replace_range(..at, NOTICE);
+            self.discarded_lines += lines.saturating_sub(usize::from(self.retention_notice));
+            self.retention_notice = true;
             panels.output_reset = true;
-            for d in &mut self.diagnostics {
-                d.output_line = d.output_line.saturating_sub(lines);
-            }
             panels.build_output_offset = panels.build_output_offset.saturating_sub(lines);
+            self.diagnostics.retain(|d| d.output_line >= lines);
+            for d in &mut self.diagnostics {
+                d.output_line = d.output_line - lines + 1;
+            }
+            panels.build_results.retain(|(row, _)| *row >= lines);
+            for (row, _) in &mut panels.build_results {
+                *row = *row - lines + 1;
+            }
         }
-        panels.build_results = self
-            .diagnostics
-            .iter()
-            .map(|d| {
-                (
-                    d.output_line + panels.build_output_offset,
-                    crate::cli::FileLocation {
-                        path: d.path.clone(),
-                        line: d.line,
-                        column: d.column,
-                    },
-                )
-            })
-            .collect();
-        if finished {
+        // Parsing/counting happens before transport retention. Skipping 400 MB of
+        // replay therefore preserves the total count and the retained result rows.
+        if let Some(results) = self
+            .task
+            .as_ref()
+            .and_then(|t| t.events.results(self.received_lines))
+        {
+            self.accept_results(panels, results);
+            changed = true;
+        }
+        if let Some((code, signal, cancelled, elapsed)) = finish {
+            panels.output.push_str(&finish_line_with_signal(
+                code, signal, cancelled, elapsed, self.quiet,
+            ));
+            panels.message = format!(
+                "Build: {} error{}",
+                self.error_count,
+                if self.error_count == 1 { "" } else { "s" }
+            );
+            if let Some(warning) = &self.environment_warning {
+                panels.message.push_str(&format!(" · {warning}"));
+            }
             self.task = None;
         }
         changed
     }
-    fn result(&mut self, line: &str, _panels: &mut Panels) {
-        if let Some(diagnostic) = self.parser.as_mut().and_then(|p| p.parse(line)) {
-            self.diagnostics.push(diagnostic);
+    fn accept_results(&mut self, panels: &mut Panels, results: vel_build::Results) {
+        self.error_count = results.errors;
+        if results.reset {
+            self.diagnostics.clear();
+            panels.build_results.clear();
         }
+        for mut d in results.diagnostics {
+            if d.output_line < self.discarded_lines || d.output_line > self.received_lines {
+                continue;
+            }
+            d.output_line =
+                d.output_line - self.discarded_lines + usize::from(self.retention_notice);
+            panels.build_results.push((
+                d.output_line,
+                crate::cli::FileLocation {
+                    path: d.path.clone(),
+                    line: d.line,
+                    column: d.column,
+                },
+            ));
+            self.diagnostics.push(d);
+        }
+        if self.diagnostics.len() > 32_768 {
+            let n = self.diagnostics.len() - 32_768;
+            self.diagnostics.drain(..n);
+            panels.build_results.drain(..n);
+        }
+    }
+    fn append_output(&mut self, panels: &mut Panels, text: &str) {
+        self.received_lines += text.matches('\n').count();
+        let displayed = if self.discard_partial_line {
+            if let Some(end) = text.find('\n') {
+                self.discard_partial_line = false;
+                self.discarded_lines += 1;
+                &text[end + 1..]
+            } else {
+                ""
+            }
+        } else {
+            text
+        };
+        panels.output.push_str(displayed);
     }
     pub fn navigate(&mut self, workspace: &mut Workspace, forward: bool) -> Result<(), String> {
         if self.diagnostics.is_empty() {
@@ -191,45 +259,222 @@ impl Builds {
             column: d.column,
         })
     }
-    pub fn choices(workspace: &Workspace, run: bool) -> Vec<vel_config::ui::PaletteItem> {
-        let mut out = Vec::new();
-        if !run {
-            out.push(vel_config::ui::PaletteItem {
-                caption: "Build System: Automatic".into(),
-                invocation: vel_config::keymap::Invocation {
-                    command: "set_build_system".into(),
-                    args: json!({"name":"Automatic"}),
-                },
-            });
+    /// Uses a bounded synchronous parse when a build needs unpublished embedded scopes.
+    pub fn caret_scopes(workspace: &Workspace) -> Vec<vel_scope::Scope> {
+        use vel_highlight::ScopeProvider;
+        let editor = workspace.editor();
+        let language = editor.language.borrow();
+        let Some(language) = language.as_ref() else {
+            return vec![];
+        };
+        if let Some(snapshot) = language.scope_snapshot_at(editor.caret) {
+            return snapshot.scopes_at(editor.caret).unwrap_or(&[]).to_vec();
         }
-        for build in &workspace.build_systems {
-            let variants = if run {
-                std::iter::once(None)
-                    .chain(build.variants().into_iter().map(Some))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![None]
-            };
-            for variant in variants {
-                out.push(vel_config::ui::PaletteItem {
-                    caption: format!(
-                        "{}{}",
-                        build.name,
-                        variant
-                            .as_ref()
-                            .map_or(String::new(), |v| format!(" — {v}"))
-                    ),
-                    invocation: vel_config::keymap::Invocation {
-                        command: if run { "build" } else { "set_build_system" }.into(),
-                        args: if run {
-                            json!({"build_system":build.name,"variant":variant})
-                        } else {
-                            json!({"name":build.name})
-                        },
-                    },
-                });
-            }
-        }
-        out
+        let Some(syntax) = language
+            .assets
+            .syntaxes
+            .find_syntax_by_path(&language.syntax)
+        else {
+            return vec![language.root];
+        };
+        let mut engine = vel_highlight::DocumentHighlighter::new(
+            editor.text.clone(),
+            editor.buffer.change_id(),
+            language.assets.syntaxes.clone(),
+            syntax,
+            language.scheme.clone(),
+        );
+        let row = editor.text.byte_to_line(editor.caret);
+        let _ = engine.request_lines(
+            editor.buffer.change_id(),
+            row..row + 1,
+            std::time::Duration::from_millis(5),
+        );
+        engine
+            .scope_snapshot(row..row + 1)
+            .scopes_at(editor.caret)
+            .unwrap_or(&[language.root])
+            .to_vec()
     }
+    pub fn matching(workspace: &Workspace) -> Vec<&BuildSystem> {
+        #[cfg(test)]
+        MATCHING_REQUESTS.with(|n| n.set(n.get() + 1));
+        let root = workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .map(|l| l.root)
+            .unwrap_or_else(|| vel_scope::Scope::new("text.plain").unwrap());
+        // Root-only selectors need no parsing. Other selectors can distinguish an
+        // embedded scope or an exclusion; stale parsing gets a five-millisecond budget.
+        let needs_caret = workspace
+            .build_systems
+            .iter()
+            .filter_map(|b| b.options.get("selector").and_then(Value::as_str))
+            .any(|selector| {
+                vel_scope::Scope::new(selector).map_or(true, |s| !s.is_prefix_of(root))
+            });
+        let scopes = if needs_caret {
+            Self::caret_scopes(workspace)
+        } else {
+            vec![root]
+        };
+        let roots = workspace
+            .folders
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<Vec<_>>();
+        let mut builds = workspace
+            .build_systems
+            .iter()
+            .filter_map(|b| {
+                b.match_score(
+                    &scopes,
+                    workspace.tabs[workspace.active].path.as_deref(),
+                    &roots,
+                )
+                .map(|score| (score, b))
+            })
+            .collect::<Vec<_>>();
+        builds.sort_by_key(|a| std::cmp::Reverse(a.0));
+        builds.into_iter().map(|(_, b)| b).collect()
+    }
+    pub fn choices(workspace: &Workspace, run: bool) -> Vec<vel_config::ui::PaletteItem> {
+        if run {
+            return Self::matching_choices(&Self::matching(workspace));
+        }
+        std::iter::once(vel_config::ui::PaletteItem {
+            caption: "Build System: Automatic".into(),
+            invocation: vel_config::keymap::Invocation {
+                command: "set_build_system".into(),
+                args: json!({"name":"Automatic"}),
+            },
+        })
+        .chain(
+            workspace
+                .build_systems
+                .iter()
+                .map(|build| vel_config::ui::PaletteItem {
+                    caption: build.name.clone(),
+                    invocation: vel_config::keymap::Invocation {
+                        command: "set_build_system".into(),
+                        args: json!({"name":build.name}),
+                    },
+                }),
+        )
+        .collect()
+    }
+    fn matching_key(matching: &[&BuildSystem]) -> MatchingSet {
+        let mut key = matching
+            .iter()
+            .map(|b| {
+                (
+                    b.name.clone(),
+                    b.options
+                        .get("selector")
+                        .map_or(String::new(), Value::to_string),
+                )
+            })
+            .collect::<Vec<_>>();
+        key.sort();
+        key
+    }
+    pub fn remembered(&self, matching: &[&BuildSystem]) -> Option<&BuildChoice> {
+        let key = Self::matching_key(matching);
+        self.choices
+            .iter()
+            .find(|(stored, (name, _))| *stored == key && matching.iter().any(|b| &b.name == name))
+            .map(|(_, choice)| choice)
+    }
+    pub fn clear_choices(&mut self) {
+        self.choice = None;
+        self.choices.clear();
+    }
+    pub fn remember(&mut self, matching: &[&BuildSystem], name: &str, variant: Option<String>) {
+        if matching.iter().any(|b| b.name == name) {
+            let key = Self::matching_key(matching);
+            self.choices.retain(|(stored, _)| *stored != key);
+            let choice = (name.to_owned(), variant);
+            self.choice = Some(choice.clone());
+            self.choices.push_front((key, choice));
+            self.choices.truncate(16);
+        }
+    }
+    pub fn matching_choices(matching: &[&BuildSystem]) -> Vec<vel_config::ui::PaletteItem> {
+        matching.iter().flat_map(|build| std::iter::once(None).chain(build.variants().into_iter().map(Some))
+            .map(|variant| vel_config::ui::PaletteItem {
+                caption: format!("{}{}", build.name, variant.as_ref().map_or(String::new(), |v| format!(" — {v}"))),
+                invocation: vel_config::keymap::Invocation { command: "build".into(),
+                    args: json!({"build_system":build.name,"variant":variant,"_build_picker":true}) }
+            })).collect()
+    }
+}
+
+/// Original formatting following the public build UI contract; quiet suppresses completion summaries.
+// https://www.sublimetext.com/docs/build_systems.html#quiet
+#[cfg(test)]
+pub(crate) fn finish_line(
+    code: Option<i32>,
+    cancelled: bool,
+    elapsed: std::time::Duration,
+    quiet: bool,
+) -> String {
+    finish_line_with_signal(code, None, cancelled, elapsed, quiet)
+}
+fn finish_line_with_signal(
+    code: Option<i32>,
+    signal: Option<i32>,
+    cancelled: bool,
+    elapsed: std::time::Duration,
+    quiet: bool,
+) -> String {
+    if cancelled {
+        return "\n[Cancelled]\n".into();
+    }
+    if quiet {
+        return String::new();
+    }
+    let duration = if elapsed.as_secs() == 0 {
+        format!("{}ms", elapsed.as_millis())
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    };
+    let suffix = match code {
+        Some(0) => String::new(),
+        Some(code) => format!(" with exit code {code}"),
+        None => signal.map_or_else(
+            || " without an exit status".into(),
+            |signal| {
+                #[cfg(unix)]
+                let name = {
+                    // SAFETY: strsignal accepts any signal number and returns a
+                    // process-owned NUL-terminated string (or null); copy it now.
+                    let ptr = unsafe { libc::strsignal(signal) };
+                    if ptr.is_null() {
+                        "Unknown signal".to_owned()
+                    } else {
+                        // SAFETY: nonnull strsignal result is a valid C string.
+                        unsafe { std::ffi::CStr::from_ptr(ptr) }
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                };
+                #[cfg(not(unix))]
+                let name = "Terminated";
+                let suffix = format!(": {signal}");
+                let name = name.strip_suffix(&suffix).unwrap_or(&name);
+                #[cfg(unix)]
+                let name = if signal == libc::SIGUSR1 {
+                    "SIGUSR1"
+                } else if signal == libc::SIGUSR2 {
+                    "SIGUSR2"
+                } else {
+                    name
+                };
+                format!(" with signal {signal} ({name})")
+            },
+        ),
+    };
+    format!("\n[Finished in {duration}{suffix}]\n")
 }

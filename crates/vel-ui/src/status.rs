@@ -33,7 +33,28 @@ pub fn position(
     encoding: Option<&str>,
     endings: Option<&str>,
 ) -> String {
-    let mut fields = vec![format!("Ln {line}, Col {column}")];
+    position_mode(
+        "compact", line, column, regions, characters, encoding, endings,
+    )
+}
+/// Formats the documented enabled/compact/disabled position field without hiding other fields.
+#[allow(clippy::too_many_arguments)]
+pub fn position_mode(
+    mode: &str,
+    line: usize,
+    column: usize,
+    regions: usize,
+    characters: usize,
+    encoding: Option<&str>,
+    endings: Option<&str>,
+) -> String {
+    // Name added in ST4: https://www.sublimetext.com/download (build 4121).
+    // The public changelog gives no default; Velocity retains its compact formatting.
+    let mut fields = match mode {
+        "disabled" => vec![],
+        "enabled" => vec![format!("Line {line}, Column {column}")],
+        _ => vec![format!("Ln {line}, Col {column}")],
+    };
     let selected = selection(regions, characters);
     if !selected.is_empty() {
         fields.push(selected);

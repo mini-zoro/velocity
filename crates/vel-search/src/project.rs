@@ -1032,3 +1032,124 @@ mod review15_tests {
         assert_eq!(tree.files.len(), 2);
     }
 }
+
+#[cfg(test)]
+mod lane_b_round18_tests {
+    use super::*;
+    fn folder(root: &Path, binary: &[&str]) -> Folder {
+        Folder {
+            path: root.into(),
+            name: "fixture".into(),
+            rules: Rules::new(
+                &[],
+                &[],
+                &binary.iter().map(|s| (*s).into()).collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            follow_links: true,
+        }
+    }
+    const DOCUMENTED: &[&str] = &[
+        "*.jpg", "*.jpeg", "*.png", "*.gif", "*.ttf", "*.tga", "*.dds", "*.ico", "*.eot", "*.pdf",
+        "*.swf", "*.jar", "*.zip",
+    ];
+    #[test]
+    fn round18_binary_patterns_cover_file_lists_but_leave_sidebar_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for extension in DOCUMENTED {
+            std::fs::write(
+                dir.path().join(format!("file.{}", &extension[2..])),
+                "searchable bytes",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("text.rs"), "source").unwrap();
+        for (patterns, expected) in [(DOCUMENTED, 1), (&[][..], DOCUMENTED.len() + 1)] {
+            let f = folder(dir.path(), patterns);
+            let tree = Tree::scan(std::slice::from_ref(&f), &AtomicBool::new(false));
+            assert_eq!(tree.files.len(), expected);
+            assert_eq!(f.children(dir.path()).unwrap().len(), DOCUMENTED.len() + 1);
+        }
+    }
+    #[test]
+    fn round18_file_events_are_local_and_ignore_rules_do_not_hide_target_from_search() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("target/a.rs"), "first").unwrap();
+        let f = folder(dir.path(), DOCUMENTED);
+        let stop = AtomicBool::new(false);
+        let mut tree = Tree::scan(std::slice::from_ref(&f), &stop);
+        assert!(tree.files.iter().any(|p| p.ends_with("target/a.rs")));
+        let unreported = dir.path().join("unreported.rs");
+        std::fs::write(&unreported, "second").unwrap();
+        assert_eq!(
+            tree.apply(vec![dir.path().join("target/a.rs")], &stop),
+            Some(false)
+        );
+        assert!(
+            !tree.files.contains(&unreported),
+            "one file event must not trigger a full rewalk"
+        );
+        tree.apply(vec![unreported.clone()], &stop).unwrap();
+        assert!(tree.files.contains(&unreported));
+        std::fs::remove_file(dir.path().join("target/a.rs")).unwrap();
+        tree.apply(vec![dir.path().join("target/a.rs")], &stop)
+            .unwrap();
+        assert_eq!(tree.files, Tree::scan(&[f], &stop).files);
+    }
+    #[test]
+    #[ignore = "paired cold project walk on 60,000 files; run explicitly"]
+    fn round18_project_walk_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        for directory in 0..300 {
+            let path = dir.path().join(format!("target/d{directory}"));
+            std::fs::create_dir_all(&path).unwrap();
+            for file in 0..200 {
+                std::fs::write(
+                    path.join(format!("ragged_{file}_{}.rs", directory % 17)),
+                    "fn item() {}\n",
+                )
+                .unwrap();
+            }
+        }
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        let base = folder(
+            dir.path(),
+            &[
+                "*.png", "*.jpg", "*.gif", "*.pdf", "*.zip", "*.exe", "*.dylib",
+            ],
+        );
+        let candidate = folder(dir.path(), DOCUMENTED);
+        let stop = AtomicBool::new(false);
+        let mut samples = [vec![], vec![]];
+        for pair in 0..9 {
+            for index in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+                let f = if index == 0 { &base } else { &candidate };
+                let at = Instant::now();
+                let mut tree = Tree::scan(std::slice::from_ref(f), &stop);
+                let elapsed = at.elapsed().as_secs_f64() * 1000.;
+                assert_eq!(tree.files.len(), 60_001);
+                samples[index].push(elapsed);
+                let new = dir.path().join(format!("new_{pair}_{index}.rs"));
+                std::fs::write(&new, "new").unwrap();
+                let update = Instant::now();
+                tree.apply(vec![new.clone()], &stop).unwrap();
+                eprintln!(
+                    "round18 walk pair={pair} variant={index} walk_ms={elapsed:.3} one_file_ms={:.3}",
+                    update.elapsed().as_secs_f64() * 1000.
+                );
+                std::fs::remove_file(new).unwrap();
+            }
+        }
+        for sample in &mut samples {
+            sample.sort_by(f64::total_cmp);
+        }
+        eprintln!(
+            "round18 project walk cold-index OS-cache-warm files=60001 baseline_median_ms={:.3} candidate_median_ms={:.3} delta_pct={:.3}",
+            samples[0][4],
+            samples[1][4],
+            (samples[1][4] / samples[0][4] - 1.) * 100.
+        );
+    }
+}

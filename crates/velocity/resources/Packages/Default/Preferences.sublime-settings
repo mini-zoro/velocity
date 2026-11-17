@@ -48,15 +48,6 @@
     "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store",
     "*.class", "*.psd", "*.db", "*.sublime-workspace"
   ],
-  "binary_file_patterns": [
-    "*.png",
-    "*.jpg",
-    "*.gif",
-    "*.pdf",
-    "*.zip",
-    "*.exe",
-    "*.dylib"
-  ],
   "show_side_bar": true,
   "color_scheme": "auto",
   "dark_color_scheme": "Velocity Dark.sublime-color-scheme",
@@ -101,6 +92,46 @@
   // https://docs.sublimetext.io/reference/settings.html#visual-settings
   "always_show_minimap_viewport": false,
   "use_simple_full_screen": false,
+  // Lane B round 18: display, tabs, window chrome and builds.
+  // Current reference: https://docs.sublimetext.io/reference/settings.html
+  // Detailed reference (same documentation project, archived):
+  // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html
+  // Unspecified ST4 defaults retain Velocity's existing behavior.
+  // A filled insertion caret, independent of the blink style.
+  "block_caret": false,
+  // Extra caret height above and below the text line.
+  "caret_extra_top": 0,
+  "caret_extra_bottom": 0,
+  // Reverse the caret's visible blink phase.
+  "inverse_caret_state": false,
+  // Highlight caret-line numbers with the scheme's highlighted gutter color.
+  "highlight_line_number": false,
+  // Keep clicked minimap text under the pointer instead of centering it.
+  "minimap_scroll_to_clicked_text": false,
+  // Use the theme's dirty-tab label color.
+  "highlight_modified_tabs": false,
+  // Scroll overflowing tabs; false fits all tabs into the strip.
+  "enable_tab_scrolling": true,
+  // Hide theme-provided tab-strip controls.
+  "hide_new_tab_button": false,
+  "hide_tab_scrolling_buttons": false,
+  // macOS keeps basename titles unless a path option is enabled.
+  "show_full_path": false,
+  "show_rel_path": false,
+  // Preview a sidebar file on one click; false selects it, and "only_left" restricts previews to left clicks.
+  "preview_on_click": true,
+  // Reveal output when a build starts.
+  "show_panel_on_build": true,
+  // Save dirty named files before invoking a build.
+  "save_all_on_build": true,
+  // "enabled" spells out the position; "compact" retains today's abbreviated item; "disabled" hides it.
+  "show_line_column": "compact",
+  // Animate folder rows unless Reduce Motion is enabled.
+  "tree_animation_enabled": true,
+  // Keyboard scroll animation speed; zero jumps immediately. Pointer scrolling stays direct.
+  "scroll_speed": 1.0,
+  // Search omits these binary names while the sidebar continues to list them.
+  "binary_file_patterns": ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.ttf", "*.tga", "*.dds", "*.ico", "*.eot", "*.pdf", "*.swf", "*.jar", "*.zip"],
   "hot_exit": "always",
   "remember_open_files": true,
   "close_windows_when_empty": false,

@@ -164,6 +164,8 @@ fn every_menu_and_palette_command_resolves_through_app_dispatch() {
         // Plain Text with no configured build system is a real context; no child
         // processes or native windows are needed to resolve these resource rows.
         a.workspace.build_systems.clear();
+        // Appearance commands resolve from the merged registry.
+
         assert!(
             a.workspace.editor().registry.kind(&name).is_some(),
             "unregistered: {name} {args}"

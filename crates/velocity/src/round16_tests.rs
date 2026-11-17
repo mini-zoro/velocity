@@ -444,7 +444,9 @@ fn menus_and_palette_have_registered_commands_and_matching_arguments() {
     ))
     .unwrap();
     let e = Editor::new(Text::from("abc"));
-    let registry = vel_commands::Registry::standard();
+    let mut registry = vel_commands::Registry::standard();
+    // The template command is hosted by the application, like its tab lifecycle commands.
+    registry.register("new_build_system", vel_commands::Kind::WindowCommand, None);
     let resolved = ui::resolve_menu(&menu, "OSX", &json!({}), |i| CommandState {
         enabled: registry.is_enabled(&i.command, &i.args, &e),
         ..Default::default()

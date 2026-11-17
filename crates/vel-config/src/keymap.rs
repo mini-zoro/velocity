@@ -281,8 +281,15 @@ pub struct Keymap {
     bindings: Arc<Vec<Binding>>,
     nodes: Arc<Vec<Node>>,
     pending: usize,
+    app_context: HashMap<String, Value>,
 }
 impl Keymap {
+    /// Supplies an app-owned context without changing any preference revision.
+    pub fn set_app_context(&mut self, key: &str, value: Value) {
+        if self.app_context.get(key) != Some(&value) {
+            self.app_context.insert(key.into(), value);
+        }
+    }
     /// Most recent unconditional binding hint for an invocation (including arguments).
     pub fn hint(&self, invocation: &Invocation) -> Option<String> {
         self.bindings
@@ -369,6 +376,27 @@ impl Keymap {
     }
     /// Resolves a key using the latest matching entry, preserving valid prefixes.
     pub fn resolve(&mut self, key: &Key, context: &dyn ContextProvider) -> Resolution {
+        struct AppContext<'a> {
+            app: &'a HashMap<String, Value>,
+            editor: &'a dyn ContextProvider,
+        }
+        impl ContextProvider for AppContext<'_> {
+            fn scopes_ready(&self) -> bool {
+                self.editor.scopes_ready()
+            }
+            fn values(&self, key: &str) -> Vec<Value> {
+                self.app
+                    .get(key)
+                    .map_or_else(|| self.editor.values(key), |v| vec![v.clone()])
+            }
+            fn selector_matches(&self, selector: &str) -> Vec<bool> {
+                self.editor.selector_matches(selector)
+            }
+        }
+        let context = &AppContext {
+            app: &self.app_context,
+            editor: context,
+        };
         if self.nodes.is_empty() {
             return Resolution::Unbound;
         }

@@ -29,6 +29,7 @@ use vel_platform::*;
 use vel_render::scene::Layer as SceneLayer;
 use vel_render::{FrameTimes, Renderer, font::Fonts};
 
+type CommandStates = Vec<(u64, vel_buffer::ChangeId, vel_buffer::Selection)>;
 #[derive(Clone, Debug, Serialize)]
 struct Sample {
     index: usize,
@@ -65,6 +66,8 @@ pub struct App {
     /// Tab bar of each group and its largest scroll offset, for clicks on its empty part and
     /// for clamping wheel scrolling.
     tab_bars: Vec<(usize, Rect, f64)>,
+    tab_button_hits: Vec<(usize, &'static str, Rect)>,
+    keyboard_center: Option<u64>,
     tab_close_hits: Vec<(u64, Rect)>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
     /// Text selection gesture between a press in the text area and its release.
@@ -215,6 +218,8 @@ impl App {
             workbench_bounds: Rect::default(),
             tab_hits: Vec::new(),
             tab_bars: Vec::new(),
+            tab_button_hits: Vec::new(),
+            keyboard_center: None,
             tab_close_hits: Vec::new(),
             dragging_splitter: None,
             drag_select: None,
@@ -556,6 +561,48 @@ impl App {
             self.panels.message = std::mem::take(&mut self.workspace.resource_reports).join("; ");
         }
     }
+    fn sync_workspace_after_panels(&mut self) {
+        // Panels temporarily protect a sidebar preview by clearing transient.
+        // Only promote that pending open once a panel has actually committed it.
+        if self.panels.overlay.is_none() {
+            let promote = self
+                .workspace
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.preview_recent_pending && !t.transient)
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            for index in promote {
+                self.workspace.make_permanent(index);
+            }
+        }
+        self.workspace.sync_shared();
+    }
+    fn command_states(&self) -> CommandStates {
+        self.workspace
+            .tabs
+            .iter()
+            .map(|tab| {
+                (
+                    tab.sheet,
+                    tab.editor.buffer.change_id(),
+                    tab.editor.buffer.view(tab.editor.id).sel().clone(),
+                )
+            })
+            .collect()
+    }
+    fn target_changed(&self, before: &CommandStates) -> bool {
+        let tab = &self.workspace.tabs[self.workspace.active];
+        before
+            .iter()
+            .find(|(sheet, _, _)| *sheet == tab.sheet)
+            .is_some_and(|(_, change, selection)| {
+                let current = tab.editor.buffer.view(tab.editor.id).sel();
+                *change != tab.editor.buffer.change_id()
+                    || (!selection.same_snapshot(current) && selection != current)
+            })
+    }
     fn dispatch_key_binding(
         &mut self,
         window: Option<&WindowHandle>,
@@ -563,6 +610,24 @@ impl App {
         received: Instant,
         viewport: std::ops::Range<usize>,
     ) -> bool {
+        if key.name == "escape" {
+            self.keyboard_center = None;
+        }
+        self.workspace
+            .editor_mut()
+            .keymap
+            .set_app_context("build_running", json!(self.builds.task.is_some()));
+        let intercepted_before = self.command_states();
+        let find_reveal = self.panels.overlay.is_none()
+            && key.name == "enter"
+            && matches!(
+                self.panels.panel,
+                Some(
+                    crate::panels::Panel::Find
+                        | crate::panels::Panel::Replace
+                        | crate::panels::Panel::Incremental
+                )
+            );
         let resolution = match self.panels.resolve_key(&mut self.workspace, key, viewport) {
             Ok(resolution) => resolution,
             Err(error) => {
@@ -573,10 +638,11 @@ impl App {
         match resolution {
             vel_config::keymap::Resolution::Unbound => false,
             vel_config::keymap::Resolution::Pending => {
+                let moved = self.target_changed(&intercepted_before) || find_reveal;
                 if let Some(window) = window {
-                    self.changed(window, received, true);
+                    self.changed(window, received, moved);
                 } else {
-                    self.changed_state(received, true);
+                    self.changed_state(received, moved);
                 }
                 true
             }
@@ -670,6 +736,11 @@ impl App {
         {
             self.panels.cancel_overlay(&mut self.workspace);
         }
+        if name == "goto_line"
+            || (name == "show_overlay" && args["overlay"].as_str() == Some("goto"))
+        {
+            self.keyboard_center = Some(self.workspace.tabs[self.workspace.active].sheet);
+        }
         let palette_accept = self.panels.palette_accept_pending(name, args);
         if palette_accept && !self.accept_palette_command(name, args) {
             return Ok(());
@@ -759,6 +830,14 @@ impl App {
             self.workspace.editor_mut().clipboard = window.clipboard_text().unwrap_or_default();
         }
         let before = self.workspace.editor().clipboard.clone();
+        let document_before = self.command_states();
+        let animate = (name == "move" && args["by"].as_str() == Some("pages"))
+            || matches!(name, "show_at_center" | "goto_line" | "scroll_to");
+        let now = Instant::now();
+        let scroll_from = animate.then(|| {
+            self.view
+                .prepare_keyboard_scroll(self.workspace.editor(), now)
+        });
         let result = self.workspace.editor_mut().run(name, args);
         if self.workspace.editor().clipboard != before
             && let Some(window) = window
@@ -766,13 +845,37 @@ impl App {
             window.set_clipboard_text(&self.workspace.editor().clipboard);
         }
         let actions = self.handle_named_actions(window);
-        self.named_changed(
-            window,
-            !matches!(
+        let changed = self.target_changed(&document_before);
+        let explicit = name.starts_with("goto_")
+            || matches!(
                 name,
-                "scroll_lines" | "increase_font_size" | "decrease_font_size" | "reset_font_size"
-            ),
-        );
+                "jump_back"
+                    | "jump_forward"
+                    | "next_bookmark"
+                    | "prev_bookmark"
+                    | "jump_to_mark"
+                    | "select_to_mark"
+                    | "swap_with_mark"
+                    | "open_file"
+                    | "show_at_center"
+                    | "scroll_to"
+                    | "find_next"
+                    | "find_prev"
+                    | "next_result"
+                    | "prev_result"
+            );
+        if scroll_from.is_none() && (changed || explicit) {
+            self.view.cancel_scroll_animation();
+        }
+        self.named_changed(window, changed || explicit);
+        if let Some(from) = scroll_from {
+            self.view.animate_scroll_from(
+                self.workspace.editor(),
+                from,
+                now,
+                self.accessibility_preferences.reduce_motion,
+            );
+        }
         result.and(actions)
     }
     fn save_tab(&mut self, w: &WindowHandle, index: usize, save_as: bool) -> bool {
@@ -812,7 +915,7 @@ impl App {
         self.can_close_document(w, index)
     }
     fn can_close_many(&mut self, w: &WindowHandle, indices: &[usize]) -> bool {
-        self.workspace.sync_shared();
+        self.sync_workspace_after_panels();
         let mut seen = std::collections::BTreeSet::new();
         for index in indices {
             let doc = self.workspace.tabs[*index].document;
@@ -888,6 +991,13 @@ impl App {
         args: &Value,
     ) -> Result<(), String> {
         if self.apply_view_action(name, args)? {
+            return Ok(());
+        }
+        if self.apply_build_action(window, name, args)? {
+            return Ok(());
+        }
+        if name == "show_at_center" {
+            self.view.center_caret(self.workspace.editor());
             return Ok(());
         }
         let viewport = self.viewport();
@@ -969,6 +1079,9 @@ impl App {
             && let Some(file) = args["file"].as_str()
         {
             return self.workspace.open(crate::cli::FileLocation::parse(file));
+        }
+        if self.select_tab_action(name, args) {
+            return Ok(());
         }
         if let Some(window) = window {
             return self.apply_action(window, name, args);
@@ -1087,31 +1200,6 @@ impl App {
                     for index in selected.into_iter().rev() {
                         self.workspace.close(index)?;
                     }
-                }
-                return Ok(());
-            }
-            "show_build_systems" => {
-                let items = crate::build::Builds::choices(&self.workspace, false);
-                self.panels.choices(&mut self.workspace, items);
-                return Ok(());
-            }
-            "build" | "exec" => {
-                if args["cancel"].as_bool() == Some(true) || args["kill"].as_bool() == Some(true) {
-                    if let Some(task) = &self.builds.task {
-                        task.cancel();
-                    }
-                } else if args["select"].as_bool() == Some(true) {
-                    let items = crate::build::Builds::choices(&self.workspace, true);
-                    self.panels.choices(&mut self.workspace, items);
-                } else {
-                    self.builds.start(&self.workspace, &mut self.panels, args)?;
-                    self.panels.select_build_results();
-                }
-                return Ok(());
-            }
-            "cancel_build" => {
-                if let Some(task) = &self.builds.task {
-                    task.cancel();
                 }
                 return Ok(());
             }
@@ -1332,31 +1420,8 @@ impl App {
                     self.show_error(w, &errors.join("\n"));
                 }
             }
-            "next_view" | "prev_view" => {
-                let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
-                if !group.sheets.is_empty() {
-                    let current = group
-                        .sheets
-                        .iter()
-                        .position(|s| *s == self.workspace.tabs[active].sheet)
-                        .unwrap_or(0);
-                    let next = (current as isize + if name == "next_view" { 1 } else { -1 })
-                        .rem_euclid(group.sheets.len() as isize)
-                        as usize;
-                    if let Some(index) = self.workspace.sheet_index(group.sheets[next]) {
-                        self.workspace.select(index);
-                    }
-                }
-            }
-            "select_by_index" => {
-                let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
-                if let Some(sheet) = args["index"]
-                    .as_u64()
-                    .and_then(|i| group.sheets.get(i as usize))
-                    && let Some(index) = self.workspace.sheet_index(*sheet)
-                {
-                    self.workspace.select(index);
-                }
+            "next_view" | "prev_view" | "select_by_index" => {
+                self.select_tab_action(name, args);
             }
             "new_window" => {
                 self.open_native_window(w, None, None)?;
@@ -1395,6 +1460,50 @@ impl App {
         }
         Ok(())
     }
+    fn select_tab_action(&mut self, name: &str, args: &Value) -> bool {
+        let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
+        let sheet = match name {
+            "next_view" | "prev_view" => {
+                let current = group
+                    .sheets
+                    .iter()
+                    .position(|id| *id == self.workspace.tabs[self.workspace.active].sheet)
+                    .unwrap_or(0);
+                if group.sheets.is_empty() {
+                    None
+                } else {
+                    let next = (current as isize + if name == "next_view" { 1 } else { -1 })
+                        .rem_euclid(group.sheets.len() as isize)
+                        as usize;
+                    group.sheets.get(next).copied()
+                }
+            }
+            "select_by_index" => args["index"]
+                .as_u64()
+                .and_then(|i| group.sheets.get(i as usize))
+                .copied(),
+            _ => return false,
+        };
+        if let Some(index) = sheet.and_then(|id| self.workspace.sheet_index(id)) {
+            self.workspace.select(index);
+        }
+        true
+    }
+    fn resize_views(&mut self, size: Size, scale: f64) {
+        self.workspace.themes.ui.borrow_mut().density = scale as f32;
+        self.window_size = size;
+        // Pane widths are assigned by scene; apply_style anchors each view there.
+        // Applying full-window width to the focused pane here causes a second reflow.
+    }
+    fn reload_font_views(&mut self, fonts: Fonts, scale: f64) {
+        for view in std::iter::once(&mut self.view).chain(self.sheet_views.values_mut()) {
+            view.set_font_grid(fonts.cell as f64, fonts.ascent as f64);
+            view.set_font_metrics(fonts.metrics, scale);
+            view.ligatures = fonts.has_ligatures();
+        }
+        self.fonts = Some(fonts);
+        self.initialize_view_metrics();
+    }
     fn initialize_view_metrics(&mut self) {
         if let Some(fonts) = &self.fonts {
             let scale = self.workspace.themes.ui.borrow().density as f64;
@@ -1422,7 +1531,9 @@ impl App {
                 self.sheet_views
                     .insert(old, std::mem::replace(&mut self.view, replacement));
             }
-            if let Some(view) = self.sheet_views.remove(&current) {
+            let existing = self.sheet_views.remove(&current);
+            let reused = existing.is_some();
+            if let Some(view) = existing {
                 self.view = view;
             }
             self.initialize_view_metrics();
@@ -1442,7 +1553,7 @@ impl App {
             };
             if tab.loading.is_some() || tab.binary_loading.is_some() {
                 self.view.defer_scroll_restore(&tab.editor, position);
-            } else {
+            } else if !reused {
                 self.view.restore_scroll_position(&tab.editor, position);
             }
         }
@@ -1584,14 +1695,27 @@ impl App {
             };
             self.view.size = self.window_size;
             if self.workspace.take_pending_center() {
-                self.view.center_caret(self.workspace.editor());
+                let e = self.workspace.editor();
+                let from = self
+                    .keyboard_center
+                    .take()
+                    .map(|_| self.view.prepare_keyboard_scroll(e, Instant::now()));
+                self.view.center_caret(e);
+                if let Some(from) = from {
+                    self.view.animate_scroll_from(
+                        e,
+                        from,
+                        Instant::now(),
+                        self.accessibility_preferences.reduce_motion,
+                    );
+                }
             }
             let scene = self.view.scene(self.workspace.editor());
             self.exact_scene = self.view.exact(self.workspace.editor())
                 && self.workspace.tabs[self.workspace.active].loading.is_none();
             return scene;
         }
-        self.workspace.sync_shared();
+        self.sync_workspace_after_panels();
         let mut visible = std::collections::BTreeMap::<
             vel_buffer::BufferId,
             std::collections::BTreeSet<vel_buffer::ViewId>,
@@ -1624,6 +1748,7 @@ impl App {
         self.group_bounds.clear();
         self.tab_hits.clear();
         self.tab_bars.clear();
+        self.tab_button_hits.clear();
         self.tab_close_hits.clear();
         self.workspace
             .themes
@@ -1676,6 +1801,7 @@ impl App {
                     continue;
                 }
                 let mut other;
+                let reused = *sheet == focused || self.sheet_views.contains_key(sheet);
                 let view = if *sheet == focused {
                     self.content = rect;
                     &mut self.view
@@ -1719,7 +1845,7 @@ impl App {
                         self.workspace.themes.ui.borrow().density as f64,
                     );
                 }
-                if *sheet == focused {
+                if reused {
                     view.apply_style(&self.workspace.tabs[index].editor);
                 } else {
                     let tab = &self.workspace.tabs[index];
@@ -1734,7 +1860,21 @@ impl App {
                     }
                 }
                 if std::mem::take(&mut self.workspace.tabs[index].pending_center) {
-                    view.center_caret(&self.workspace.tabs[index].editor);
+                    let e = &self.workspace.tabs[index].editor;
+                    let animate = self.keyboard_center == Some(*sheet);
+                    let from = animate.then(|| view.prepare_keyboard_scroll(e, Instant::now()));
+                    view.center_caret(e);
+                    if let Some(from) = from {
+                        view.animate_scroll_from(
+                            e,
+                            from,
+                            Instant::now(),
+                            self.accessibility_preferences.reduce_motion,
+                        );
+                    }
+                    if self.panels.overlay != Some(crate::panels::Overlay::Goto) {
+                        self.keyboard_center = None;
+                    }
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
                 }
@@ -1789,6 +1929,24 @@ impl App {
                 );
                 theme.surface(&mut chrome, &bar_style, bar, bar);
                 drop(theme);
+                let bar = self.paint_tab_buttons(
+                    &mut chrome,
+                    group_index,
+                    bar,
+                    group.sheets.len(),
+                    tab_width,
+                );
+                // https://www.sublimetext.com/docs/themes.html#settings
+                let tab_width = if self
+                    .workspace
+                    .editor()
+                    .settings
+                    .bool("enable_tab_scrolling", true)
+                {
+                    tab_width
+                } else {
+                    tab_width.min(bar.width / group.sheets.len().max(1) as f64)
+                };
                 let max_scroll = (group.sheets.len() as f64 * tab_width - bar.width).max(0.);
                 self.tab_bars.push((group_index, bar, max_scroll));
                 let scroll = group.tab_scroll.clamp(0., max_scroll);
@@ -1800,7 +1958,7 @@ impl App {
                     let rect = Rect {
                         x: bar.x + position as f64 * tab_width - scroll,
                         y: bar.y,
-                        width: tab_width - 1.,
+                        width: (tab_width - 1.).max(tab_width * 0.5),
                         height: bar.height,
                     };
                     if rect.x + rect.width <= bar.x || rect.x >= bar.x + bar.width {
@@ -1854,7 +2012,14 @@ impl App {
                         path[0],
                         path[1],
                         path[2],
-                        vel_theme::Element::new("tab_label", &[]),
+                        vel_theme::Element::new(
+                            "tab_label",
+                            if tab.dirty() && settings.bool("highlight_modified_tabs", false) {
+                                &["dirty"]
+                            } else {
+                                &[]
+                            },
+                        ),
                     ];
                     let label = theme.style(
                         0xD100 + *sheet,
@@ -1888,14 +2053,23 @@ impl App {
                     } else {
                         tab.label()
                     };
+                    let label_offset = if rect.width < 48. {
+                        4.
+                    } else if tab_style.close_left {
+                        46.
+                    } else {
+                        28.
+                    };
                     theme.text(
                         &mut chrome,
                         &label,
                         &caption,
-                        rect.x + if tab_style.close_left { 46. } else { 28. },
+                        rect.x + label_offset,
                         rect.y + f64::from(label.size) + 8. * self.panels.ui_scale,
                         Rect {
-                            width: (rect.width - 30.).min(bar.x + bar.width - rect.x),
+                            width: (rect.width - if rect.width < 48. { 2. } else { 30. })
+                                .max(0.)
+                                .min(bar.x + bar.width - rect.x),
                             ..rect
                         },
                     );
@@ -1920,8 +2094,11 @@ impl App {
                         width: 12.,
                         height: 12.,
                     };
-                    self.tab_close_hits.push((*sheet, close_rect));
-                    theme.surface(&mut chrome, &close, close_rect, bar);
+                    // Narrow fitted tabs keep their entire target for selecting the tab.
+                    if rect.width >= 28. {
+                        self.tab_close_hits.push((*sheet, close_rect));
+                        theme.surface(&mut chrome, &close, close_rect, hit);
+                    }
                     drop(theme);
                     let id = 100 + *sheet;
                     let node = self
@@ -1984,7 +2161,7 @@ impl App {
             vel_ui::fill(&mut chrome, divider, bounds, [0.28, 0.3, 0.35, 1.]);
         }
         let _ = self.workspace.prepare_sheet(active);
-        self.workspace.sync_shared();
+        self.sync_workspace_after_panels();
         self.exact_scene = exact;
         scene.layers.push(chrome);
         self.panels.paint(&self.workspace, &mut scene);
@@ -2038,7 +2215,7 @@ impl App {
         if reveal {
             self.view.reset_caret();
         }
-        self.workspace.sync_shared();
+        self.sync_workspace_after_panels();
         if self.options.mode == Mode::Interactive {
             self.session_due = Some(Instant::now() + Duration::from_millis(300));
         }
@@ -2377,6 +2554,10 @@ impl AppHandler for App {
         preferences: accessibility::Preferences,
     ) {
         self.accessibility_preferences(preferences);
+        if preferences.reduce_motion {
+            self.view
+                .prepare_keyboard_scroll(self.workspace.editor(), Instant::now());
+        }
         w.request_frame();
     }
     fn on_key(&mut self, w: &WindowHandle, event: KeyEvent) -> bool {
@@ -2630,6 +2811,13 @@ impl AppHandler for App {
             .unwrap_or(self.workspace.active);
         let editor = &self.workspace.tabs[target].editor;
         match name {
+            "set_build_system" => {
+                self.workspace
+                    .build_system
+                    .as_deref()
+                    .unwrap_or("Automatic")
+                    == args["name"].as_str().unwrap_or("Automatic")
+            }
             "toggle_setting" => args["setting"]
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),
@@ -2663,11 +2851,22 @@ impl AppHandler for App {
             return;
         }
         let viewport = self.viewport();
+        let panel_before = (
+            self.workspace.tabs[self.workspace.active].sheet,
+            self.workspace.editor().buffer.change_id(),
+            self.workspace.editor().regions(),
+        );
         if self
             .panels
             .text_input(&mut self.workspace, event.clone(), viewport)
         {
-            self.changed(w, Instant::now(), true);
+            let moved = panel_before
+                != (
+                    self.workspace.tabs[self.workspace.active].sheet,
+                    self.workspace.editor().buffer.change_id(),
+                    self.workspace.editor().regions(),
+                );
+            self.changed(w, Instant::now(), moved);
             w.request_frame_at(Instant::now() + Duration::from_millis(8));
             return;
         }
@@ -2723,10 +2922,7 @@ impl AppHandler for App {
         if self.options.mode == Mode::Interactive {
             self.workspace.fullscreen = w.is_full_screen();
         }
-        self.workspace.themes.ui.borrow_mut().density = scale as f32;
-        self.window_size = size;
-        self.view.size = size;
-        self.view.clamp_scroll(self.workspace.editor());
+        self.resize_views(size, scale);
         if let Some(r) = self.renderer.as_mut() {
             r.resize(
                 (size.width * scale).round() as u32,
@@ -2835,6 +3031,9 @@ impl AppHandler for App {
                 w.request_frame_at(deadline);
             }
             self.sync_active_view();
+            changed |= self
+                .view
+                .advance_scroll(self.workspace.editor(), Instant::now());
             if std::mem::take(&mut self.panels.reveal) {
                 self.view.reveal(self.workspace.editor());
             }
@@ -2911,7 +3110,10 @@ impl AppHandler for App {
             w.request_frame_at(
                 Instant::now()
                     + Duration::from_millis(
-                        if caret_animation || self.workspace.themes.ui.borrow().animating() {
+                        if caret_animation
+                            || self.view.scrolling()
+                            || self.workspace.themes.ui.borrow().animating()
+                        {
                             16
                         } else if self.workspace.language_busy()
                             || self.panels.busy()
@@ -2927,6 +3129,7 @@ impl AppHandler for App {
                 && !changed
                 && !loading_before
                 && !caret_animation
+                && !self.view.scrolling()
                 && !self.workspace.themes.ui.borrow().animating()
             {
                 return Ok(());
@@ -2936,15 +3139,7 @@ impl AppHandler for App {
             let name = self.workspace.editor().preferences.font_face.clone();
             match Fonts::load_named(&name) {
                 Ok(fonts) => {
-                    let scroll = self.view.scroll_position();
-                    self.view = View::new(self.view.size, fonts.cell as f64, fonts.ascent as f64);
-                    self.view.set_font_metrics(fonts.metrics, w.scale_factor());
-                    self.sheet_views.clear();
-                    self.fonts = Some(fonts);
-                    self.initialize_view_metrics();
-                    self.view.apply_style(self.workspace.editor());
-                    self.view
-                        .restore_scroll_position(self.workspace.editor(), scroll);
+                    self.reload_font_views(fonts, w.scale_factor());
                     self.renderer
                         .as_mut()
                         .ok_or("renderer missing")?
@@ -3736,3 +3931,13 @@ mod round16_review_tests;
 #[cfg(test)]
 #[path = "app_lane_b_round17_tests.rs"]
 mod lane_b_round17_tests;
+
+#[path = "app_build.rs"]
+mod app_build;
+
+#[path = "app_chrome.rs"]
+mod app_chrome;
+
+#[cfg(test)]
+#[path = "app_lane_b_round18_tests.rs"]
+mod lane_b_round18_tests;

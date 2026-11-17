@@ -142,28 +142,22 @@ impl Variables {
             };
         }
         if let Some(substitution) = tail.strip_prefix('/') {
-            let mut fields = Vec::new();
-            let mut field = String::new();
-            let mut chars = substitution.chars();
-            while let Some(c) = chars.next() {
-                if c == '\\' {
-                    if let Some(n) = chars.next() {
-                        if n != '/' {
-                            field.push('\\');
-                        }
-                        field.push(n);
-                    }
-                } else if c == '/' {
-                    fields.push(std::mem::take(&mut field));
-                } else {
-                    field.push(c);
-                }
-            }
-            if fields.len() < 2 {
-                return Err("regex substitution needs /pattern/format/".into());
-            }
-            let regex = regex::Regex::new(&fields[0]).map_err(|e| e.to_string())?;
-            return Ok(regex.replace_all(value, fields[1].as_str()).into_owned());
+            // Build substitutions use snippet formats, including first-only and g.
+            // https://www.sublimetext.com/docs/build_systems.html#variables
+            let source = format!("${{BUILD_VALUE/{substitution}}}");
+            let mut environment = vel_snippet::Environment::default();
+            environment.0.insert("BUILD_VALUE".into(), value.into());
+            let expansion = vel_snippet::Snippet::parse(&source)
+                .and_then(|s| {
+                    s.expand(
+                        &vel_text::Text::new(),
+                        std::slice::from_ref(&(0..0)),
+                        &environment,
+                        vel_snippet::ExpansionOptions::default(),
+                    )
+                })
+                .map_err(|e| e.to_string())?;
+            return Ok(expansion.edits[0].text.clone());
         }
         Ok(value.into())
     }

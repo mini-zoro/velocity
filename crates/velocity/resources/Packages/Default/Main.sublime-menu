@@ -614,41 +614,19 @@
     "caption": "Goto",
     "id": "goto",
     "children": [
-      {
-        "caption": "Jump to Matching Bracket",
-        "command": "move_to",
-        "args": {
-          "to": "brackets"
-        }
-      },
-      {
-        "caption": "Jump to Line…",
-        "command": "show_overlay",
-        "args": {
-          "overlay": "goto",
-          "text": ":"
-        }
-      },
-      {
-        "caption": "Jump to Symbol…",
-        "command": "show_overlay",
-        "args": {
-          "overlay": "goto",
-          "text": "@"
-        }
-      },
-      {
-        "caption": "Jump to Definition",
-        "command": "goto_definition"
-      },
-      {
-        "caption": "Jump Back",
-        "command": "jump_back"
-      },
-      {
-        "caption": "Jump Forward",
-        "command": "jump_forward"
-      },
+      {"caption":"Goto Anything…","command":"show_overlay","args":{"overlay":"goto"}},
+      {"caption":"Goto Symbol…","command":"show_overlay","args":{"overlay":"goto","text":"@"}},
+      {"caption":"Goto Symbol in Project…","command":"goto_symbol_in_project"},
+      {"caption":"Goto Definition","command":"goto_definition"},
+      {"caption":"Goto Reference","command":"goto_reference"},
+      {"caption":"Goto Line…","command":"goto_line"},
+      {"caption":"Jump Back","command":"jump_back"},
+      {"caption":"Jump Forward","command":"jump_forward"},
+      {"caption":"Switch File","children":[
+        {"caption":"Next File","command":"next_view"},
+        {"caption":"Previous File","command":"prev_view"}
+      ]},
+      {"caption":"Jump to Matching Bracket","command":"move_to","args":{"to":"brackets"}},
       {
         "caption": "Bookmarks",
         "children": [
@@ -680,6 +658,10 @@
     "caption": "View",
     "id": "view",
     "children": [
+      {"caption":"Preferences","children":[
+        {"caption":"Color Scheme…","command":"select_color_scheme"},
+        {"caption":"Theme…","command":"select_theme"}
+      ]},
       // Public command arguments: https://www.sublimetext.com/docs/indentation.html
       { "caption": "Indentation", "children": [
         { "caption": "Convert Indentation to Spaces", "command": "expand_tabs", "args": {"set_translate_tabs": true} },
@@ -938,6 +920,12 @@
         "caption": "Build",
         "command": "build"
       },
+      {"caption":"Save All on Build","command":"toggle_setting","args":{"setting":"save_all_on_build"}},
+      {"caption":"Build Results","children":[
+        {"caption":"Show","command":"show_panel","args":{"panel":"output.exec"}},
+        {"caption":"Next Result","command":"next_result"},
+        {"caption":"Previous Result","command":"prev_result"}
+      ]},
       {
         "caption": "Build With…",
         "command": "build",

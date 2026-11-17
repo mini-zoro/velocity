@@ -93,6 +93,10 @@ fn streams_both_pipes_and_preserves_split_utf8() {
                 break;
             }
             Event::Error(e) => panic!("{e}"),
+            Event::Warning(_)
+            | Event::Truncated { .. }
+            | Event::OutputBatch(_)
+            | Event::Results(_) => {}
         }
     }
     assert!(stderr);
@@ -105,10 +109,29 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
         BuildSystem::parse("fixture", r#"{"shell_cmd":"sleep 30 & echo ready; wait"}"#).unwrap();
     let exec = build.resolve(&Variables::default()).unwrap();
     let task = Task::spawn(&exec).unwrap();
-    assert!(matches!(
-        task.events.recv_timeout(Duration::from_secs(3)).unwrap(),
-        Event::Output { .. }
-    ));
+    // Login fallback may report a warning before the process produces output.
+    // Cancel only once the real child has started, not after an environment event.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut output = String::new();
+    loop {
+        match task
+            .events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap()
+        {
+            Event::Warning(_)
+            | Event::Truncated { .. }
+            | Event::OutputBatch(_)
+            | Event::Results(_) => {}
+            Event::Output { text, .. } => {
+                output.push_str(&text);
+                if output.contains("ready") {
+                    break;
+                }
+            }
+            event => panic!("child did not become ready: {event:?}"),
+        }
+    }
     let at = Instant::now();
     task.cancel();
     loop {
@@ -141,4 +164,315 @@ fn dropping_a_build_with_full_output_queue_reaps_its_tree_without_a_consumer() {
         .expect("Drop must reap even while its output queue is full");
     thread.join().unwrap();
     assert!(at.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn round18_environment_path_working_directory_and_wrap_table() {
+    let variables = Variables::new(Some(Path::new("/tmp/project/main.rs")), None, None, None);
+    for (options, path_suffix, name) in [
+        (
+            r#"{"cmd":["true"],"env":{"NAME":"$file_base_name"}}"#,
+            None,
+            "main",
+        ),
+        (
+            r#"{"cmd":["true"],"path":"/opt/bin:$PATH","env":{"NAME":"${file_name}","PATH":"ignored"}}"#,
+            Some("/opt/bin:"),
+            "main.rs",
+        ),
+    ] {
+        let exec = BuildSystem::parse("env", options)
+            .unwrap()
+            .resolve(&variables)
+            .unwrap();
+        assert_eq!(exec.working_dir, Path::new("/tmp/project"));
+        assert_eq!(exec.env["NAME"], name);
+        if let Some(prefix) = path_suffix {
+            assert_eq!(
+                exec.env["PATH"],
+                format!("{prefix}{}", std::env::var("PATH").unwrap_or_default())
+            );
+        }
+        assert!(
+            exec.word_wrap,
+            "round-18 build output contract defaults to wrapping"
+        );
+    }
+    for wrap in [false, true] {
+        let build = BuildSystem::from_value(
+            "wrap",
+            serde_json::json!({"cmd":["true"],"word_wrap":wrap,"working_dir":"${file_path}/src"}),
+        )
+        .unwrap();
+        let exec = build.resolve(&variables).unwrap();
+        assert_eq!(exec.word_wrap, wrap);
+        assert_eq!(exec.working_dir, Path::new("/tmp/project/src"));
+    }
+}
+#[test]
+fn round18_snippet_transform_first_global_captures_case_and_empty_matches() {
+    let variables = Variables([(String::from("value"), String::from("aba"))].into());
+    for (source, expected) in [
+        ("${value/a/x/}", "xba"),
+        ("${value/a/x/g}", "xbx"),
+        (r"${value/(a)/\U$1/}", "Aba"),
+        (r"${value/(a)/\U$1/g}", "AbA"),
+        ("${value/(?=a)/x/g}", "xabxa"),
+    ] {
+        assert_eq!(variables.expand(source).unwrap(), expected, "{source}");
+    }
+}
+#[test]
+fn round18_selector_scoring_table_including_embedded_and_excluded_scopes() {
+    let scopes = [
+        "text.html.basic",
+        "meta.tag",
+        "source.js",
+        "string.quoted.double.js",
+    ]
+    .map(|s| vel_scope::Scope::new(s).unwrap());
+    let score = |selector: &str| {
+        BuildSystem::from_value(
+            "selector",
+            serde_json::json!({"cmd":["true"],"selector":selector}),
+        )
+        .unwrap()
+        .match_score(&scopes, None, &[])
+    };
+    for (selector, matched) in [
+        ("source.js", true),
+        ("source.python | source.js", true),
+        ("source.js - comment", true),
+        ("source.js - string", false),
+        ("text.html source.js string", true),
+        ("text.html > source.js", false),
+        ("source.python", false),
+    ] {
+        assert_eq!(score(selector).is_some(), matched, "{selector}");
+    }
+    assert!(score("source.js string.quoted.double.js") > score("source.js"));
+}
+#[cfg(unix)]
+#[test]
+fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_path = dir.path().join("child");
+    let grandchild_path = dir.path().join("grandchild");
+    let source = format!(
+        "/bin/sh -c 'sleep 30 & echo $! > {}; wait' & echo $! > {}; echo ready; wait",
+        grandchild_path.display(),
+        child_path.display()
+    );
+    let exec = BuildSystem::from_value("old", serde_json::json!({"cmd":["/bin/bash","-c",source]}))
+        .unwrap()
+        .resolve(&Variables::default())
+        .unwrap();
+    let old = Task::spawn(&exec).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !grandchild_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let child: i32 = std::fs::read_to_string(&child_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let grandchild: i32 = std::fs::read_to_string(&grandchild_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let next = BuildSystem::parse("next", r#"{"cmd":["/bin/echo","replacement"]}"#)
+        .unwrap()
+        .resolve(&Variables::default())
+        .unwrap();
+    let at = Instant::now();
+    let task = Task::spawn_after(&next, Some(old)).unwrap();
+    assert!(
+        at.elapsed() < Duration::from_millis(100),
+        "restart must not wait on the caller"
+    );
+    let mut output = String::new();
+    loop {
+        match task.events.recv_timeout(Duration::from_secs(3)).unwrap() {
+            Event::Output { text, .. } => output.push_str(&text),
+            Event::Finished {
+                code, cancelled, ..
+            } => {
+                assert_eq!(code, Some(0));
+                assert!(!cancelled);
+                break;
+            }
+            Event::Error(error) => panic!("{error}"),
+            Event::Warning(_)
+            | Event::Truncated { .. }
+            | Event::OutputBatch(_)
+            | Event::Results(_) => {}
+        }
+    }
+    assert_eq!(output, "replacement\n");
+    for pid in [child, grandchild] {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal zero probes only this fixture's known child PID.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            let status = std::process::Command::new("/bin/ps")
+                .args(["-p", &pid.to_string(), "-o", "stat="])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&status.stdout)
+                .trim()
+                .starts_with('Z')
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant {pid} is still running"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[test]
+fn round18_variant_overrides_effective_platform_base_and_can_clear_shell_cmd() {
+    let build=BuildSystem::parse("variant",r#"{"cmd":["base"],"shell_cmd":"base shell","osx":{"cmd":["platform"]},"linux":{"cmd":["platform"]},"windows":{"cmd":["platform"]},"variants":[{"name":"Run","cmd":["variant"],"shell_cmd":null}]}"#).unwrap();
+    let exec = build
+        .variant("Run")
+        .unwrap()
+        .resolve(&Variables::default())
+        .unwrap();
+    assert_eq!(exec.cmd, vec!["variant"]);
+    assert!(exec.shell_cmd.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() {
+    for cancel in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("detached");
+        let script = format!(
+            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(F,\">{}\"); print F $$; close F; sleep 8' & sleep .1; echo started",
+            pid_file.display()
+        );
+        let exec = BuildSystem::from_value(
+            "detached",
+            serde_json::json!({"cmd":["/bin/sh","-c",script]}),
+        )
+        .unwrap()
+        .resolve(&Variables::default())
+        .unwrap();
+        let old = Task::spawn(&exec).unwrap();
+        loop {
+            if matches!(
+                old.events.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Event::Output { .. }
+            ) {
+                break;
+            }
+        }
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let at = Instant::now();
+        if cancel {
+            old.cancel();
+        }
+        loop {
+            if let Event::Finished { cancelled, .. } =
+                old.events.recv_timeout(Duration::from_secs(1)).unwrap()
+            {
+                assert_eq!(cancelled, cancel);
+                break;
+            }
+        }
+        assert!(at.elapsed() < Duration::from_secs(1));
+        let replacement =
+            BuildSystem::from_value("new", serde_json::json!({"cmd":["/bin/echo","NEW"]}))
+                .unwrap()
+                .resolve(&Variables::default())
+                .unwrap();
+        let at = Instant::now();
+        let new = Task::spawn_after(&replacement, Some(old)).unwrap();
+        let mut output = String::new();
+        loop {
+            match new.events.recv_timeout(Duration::from_secs(1)).unwrap() {
+                Event::Output { text, .. } => output.push_str(&text),
+                Event::Finished { .. } => break,
+                _ => {}
+            }
+        }
+        // SAFETY: only the detached PID created and recorded by this fixture is killed.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        assert_eq!(output, "NEW\n");
+        assert!(at.elapsed() < Duration::from_secs(1));
+    }
+    // Restart while the first worker is still in its pipe grace period.
+    let old_exec = BuildSystem::from_value(
+        "old",
+        serde_json::json!({"cmd":["/bin/sh","-c","sleep 30 & echo OLD; wait"]}),
+    )
+    .unwrap()
+    .resolve(&Variables::default())
+    .unwrap();
+    let old = Task::spawn(&old_exec).unwrap();
+    loop {
+        if matches!(
+            old.events.recv_timeout(Duration::from_secs(3)).unwrap(),
+            Event::Output { .. }
+        ) {
+            break;
+        }
+    }
+    let new_exec =
+        BuildSystem::from_value("new", serde_json::json!({"cmd":["/bin/echo","RESTART"]}))
+            .unwrap()
+            .resolve(&Variables::default())
+            .unwrap();
+    let at = Instant::now();
+    let new = Task::spawn_after(&new_exec, Some(old)).unwrap();
+    loop {
+        if let Event::Output { text, .. } = new.events.recv_timeout(Duration::from_secs(1)).unwrap()
+        {
+            assert_eq!(text, "RESTART\n");
+            break;
+        }
+    }
+    assert!(at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
+    let exec = BuildSystem::from_value("fixture", serde_json::json!({"cmd":["/usr/bin/env"]}))
+        .unwrap()
+        .resolve(&Variables::default())
+        .unwrap();
+    let task = Task::spawn(&exec).unwrap();
+    let mut output = String::new();
+    loop {
+        match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
+            Event::Output { text, .. } => output.push_str(&text),
+            Event::Finished { .. } => break,
+            Event::Error(e) => panic!("{e}"),
+            _ => {}
+        }
+    }
+    let env = output
+        .lines()
+        .filter_map(|s| s.split_once('='))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let home = Path::new(env["HOME"]);
+    let shell = Path::new(env["SHELL"]);
+    assert_eq!(shell.parent(), Some(home));
+    assert!(shell.is_file());
+    assert_ne!(home, Path::new(&std::env::var("HOME").unwrap()));
+    assert!(
+        std::fs::read_to_string(shell)
+            .unwrap()
+            .contains("exec /bin/sh -c")
+    );
 }

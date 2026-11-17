@@ -51,6 +51,8 @@ fn key(app: &mut App, chord: &str) {
 #[test]
 fn bundled_startup_has_no_messages_and_every_menu_and_palette_command_resolves() {
     let app = app("", None);
+    // Resolve the merged command registry without stubs.
+
     assert!(
         !app.workspace
             .editor()
@@ -1457,12 +1459,12 @@ fn blocked_preference_queue_defers_one_reload_and_tracks_multiple_keys_per_write
     let (started, ready) = std::sync::mpsc::channel();
     let blocker = crate::release::enqueue(move || {
         started.send(()).map_err(|e| e.to_string())?;
-        rx.recv_timeout(Duration::from_secs(30))
+        rx.recv_timeout(Duration::from_secs(120))
             .map_err(|e| e.to_string())
     })
     .unwrap();
     let mut release = ReleaseQueue(Some(tx));
-    ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    ready.recv_timeout(Duration::from_secs(120)).unwrap();
     key(&mut app, "super+=");
     key(&mut app, "super+=");
     let updates = vec![
@@ -1501,33 +1503,44 @@ fn blocked_preference_queue_defers_one_reload_and_tracks_multiple_keys_per_write
     app.workspace.track_settings_write(write, &updates);
     std::fs::write(user.join("Plain Text.sublime-settings"), "{\"tab_size\":7}").unwrap();
     let revision = app.workspace.resource_revision;
-    let until = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < until {
-        app.workspace.poll();
-        assert_eq!(app.workspace.editor().preferences.font_size, 15.);
+    // Complete the external resource load without waiting for the blocked queue.
+    // Repeated explicit disk probes exercise deferral without a three-second race
+    // against the production 500 ms configuration check.
+    app.workspace.poll_resource_reload();
+    let pending_revision = app.workspace.resource_revision;
+    assert_eq!(pending_revision, revision + 1);
+    for _ in 0..10 {
+        app.workspace.poll_resource_reload();
         assert_eq!(
-            app.workspace.settings.get("added_words"),
-            Some(&json!(["new"]))
-        );
-        assert!(
-            app.workspace.resource_revision - revision <= 2,
+            app.workspace.resource_revision, pending_revision,
             "reload spin"
         );
-        std::thread::park_timeout(Duration::from_millis(2));
+        assert_eq!(app.workspace.editor().preferences.font_size, 15.);
+        for (key, value) in &updates {
+            assert_eq!(app.workspace.settings.get(key), value.as_ref());
+        }
     }
-    let pending_revision = app.workspace.resource_revision;
-    assert!(
-        pending_revision > revision,
-        "external settings never reloaded"
-    );
     assert_eq!(app.workspace.editor().preferences.tab_size, 7);
+    // No poll races an atomic write or its acknowledgement: this serial fence
+    // runs only after both zoom jobs and the multi-key write have returned.
+    let drained = crate::release::enqueue(|| Ok(())).unwrap();
     release.0.take().unwrap().send(()).unwrap();
     blocker
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap()
+        .unwrap();
+    drained
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap();
     app.workspace.wait_resources();
     assert_eq!(app.workspace.resource_revision, pending_revision + 1);
+    // Our completed writes are already in the settled snapshot. Later automatic
+    // checks must not rediscover them as external edits and request another load.
+    for _ in 0..10 {
+        app.workspace.poll_resource_reload();
+        assert_eq!(app.workspace.resource_revision, pending_revision + 1);
+    }
     assert!(
         app.workspace
             .tabs

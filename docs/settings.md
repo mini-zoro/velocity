@@ -126,3 +126,63 @@ Verification regressions: `palette_maps_scopes_and_refilters_only_the_unchanged_
 `html_template_roots_close_tags_with_cold_and_stale_scopes`.
 Run `palette_and_long_line_scope_budget_timing` explicitly for the 1.63 MB stale JavaScript
 palette (<10 ms median, zero parses) and 63 KB stale-line Enter checks.
+
+## Round 18 Lane B: display, tabs, chrome, sidebar and builds
+
+All drawing controls resolve through the active editor's layered settings, including live
+syntax overrides. Symbol-index controls remain application-global as described by the
+[settings documentation](https://www.sublimetext.com/docs/settings.html).
+
+Sources checked on 2026-11-17: [current settings reference](https://docs.sublimetext.io/reference/settings.html),
+[the detailed reference from the same documentation project](https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html),
+[ST4 release notes](https://www.sublimetext.com/download), [theme settings](https://www.sublimetext.com/docs/themes.html#settings),
+[build systems](https://www.sublimetext.com/docs/build_systems.html), and
+[environment expansion](https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/build_systems/exec.html).
+The current community build-system URL fails to load; its reference navigation points to the
+official build documentation. No application package or proprietary resource was consulted.
+
+| Setting | Default / values | Behavior and evidence |
+| --- | --- | --- |
+| `block_caret` | `false`; boolean | Block drawing combines with existing caret styles. The current reference does not specify its default; false preserves current insertion carets. |
+| `caret_extra_top`, `caret_extra_bottom` | `0`; nonnegative pixels | Extend the drawn caret; detailed reference documents zero. |
+| `inverse_caret_state` | `false`; boolean | Inverts blink opacity, including solid carets. Public references do not establish its default; retained false. |
+| `highlight_line_number` | `false`; boolean | Uses `gutter_foreground_highlight` for all caret lines, falling back to foreground. Name confirmed by ST4 notes; default is unlisted, so prior unhighlighted numbers remain. |
+| `draw_minimap_border` | `false`; boolean | Round 17's reviewed four-edge viewport outline remains; reference confirms false. |
+| `minimap_scroll_to_clicked_text` | `false`; boolean | False centers clicked text; true places it at the pointer's y coordinate. Both use the reviewed map and anchored drag. The round-18 specification supplies the geometry; public notes only name the option. |
+| `highlight_modified_tabs` | `false`; boolean | A dirty `tab_label` attribute enables the theme's setting-guarded dirty-label color. Theme docs confirm the setting and attribute; default retained. |
+| `enable_tab_scrolling` | `true`; boolean | False fits all tab hit rectangles into the available strip. Detailed reference confirms true. |
+| `hide_new_tab_button`, `hide_tab_scrolling_buttons` | `false`; boolean | Hide theme-provided controls and remove their hit targets/width reservation. Theme docs confirm names; false retains theme visibility. |
+| `show_full_path` | `false` on this macOS implementation; boolean | Explicit true displays the absolute path. Detailed reference establishes false on macOS. |
+| `show_rel_path` | `false`; boolean | Prefer a containing project's relative path, with full-path/basename fallback. ST4 notes establish the name; no new default is inferred. |
+| `preview_on_click` | `true`; boolean or `"only_left"` | False selects a sidebar file without opening; double click always opens it. Previews replace only clean transient tabs. Edit/save/double click promote and record recency. Transient sheets are omitted from session order. Reference confirms preview/promotion; the persistence rule follows this round's requested contract, which the public page does not explicitly describe. |
+| `show_panel_on_build` | `true`; boolean | False preserves the current panel; diagnostics and status updates continue. Detailed reference establishes true. |
+| `save_all_on_build` | `true`; boolean | Tools toggle saves dirty named tabs before starting. Untitled tabs are not build input files. This round requests the setting and enabled default; the public build page does not specify a preference default. |
+| `show_line_column` | `"compact"`; `"enabled"`, `"compact"`, `"disabled"` | Full/abbreviated/hidden position item; selection and encoding items remain. ST4 confirms the name but does not state a default. Existing abbreviated presentation is retained. |
+| `tree_animation_enabled` | `true`; boolean | Interpolate folder-row positions on expand/collapse, restart from current positions, and hit-test the drawn rows. False, disabled global animations, or native Reduce Motion make changes immediate. Detailed reference establishes true. |
+| `scroll_speed` | `1.0`; nonnegative number | Keyboard page/recenter/Goto line animation only; zero jumps immediately. Wheel/trackpad and Reduce Motion remain immediate. Endpoints use visual rows to survive zoom/scale changes. Both references establish the speed range; detailed reference establishes 1.0. |
+| `binary_file_patterns` | documented array of 13 globs | `*.jpg`, `*.jpeg`, `*.png`, `*.gif`, `*.ttf`, `*.tga`, `*.dds`, `*.ico`, `*.eot`, `*.pdf`, `*.swf`, `*.jar`, `*.zip`. Search/Goto omit them; sidebar retains them. Detailed reference establishes the array. |
+| `index_exclude_gitignore` | `true`; boolean | Symbol indexing only. File lists still include gitignored paths. ST4 notes confirm the enabled default. |
+| `index_files` | `true`; boolean | Application-global off cancels symbol indexing without changing file lists. Both indexing/reference documentation establish true. |
+
+Build environment resolution expands environment variables and file/project variables without
+re-expanding substituted contents. `path` overrides `env.PATH`; omitted `working_dir` uses the
+current file's directory. All builds capture the user's `$SHELL -l -c` environment on a worker, cache successes until
+`path`/`env` change, and execute commands with that environment. Startup failure/timeout falls
+back to inherited values with a status message. Snippet transformations use `vel-snippet`,
+including first-only replacement and `g`. Selectors use `vel_scope::Selector` and exact caret
+scopes. Automatic matching is computed once per request. Root-only selectors avoid parsing;
+stale scopes needed for embedded selectors use a five-millisecond synchronous budget.
+An explicit Tools build-system choice bypasses matching.
+
+The build output `word_wrap` option supports false/true. The public build documentation does
+not establish a default, so Velocity follows the round-18 specification: true. `interactive: true` produces an explicit
+unsupported message instead of waiting on stdin. Output queues, retained output and diagnostics
+are bounded; cancellation/restart kills the old process group before the replacement starts;
+reaping remains asynchronous and pipe drain has a short deadline.
+The requested finish/cancel/quiet formatting and matching-set Build With memory have headless tests.
+
+Opening or accepting settings/syntax/palette commands preserves parked scroll positions unless
+selection or text changes. Explicit recenter/find/result navigation keeps its reveal behavior.
+The appearance menu/palette entries reference Lane A's `select_color_scheme` and `select_theme`;
+those implementations are not yet present at baseline `dad6e3d`. Menu contract tests register
+those declared WindowCommand names only, without implementing the pickers in this lane.

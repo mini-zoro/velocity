@@ -224,7 +224,11 @@ fn streamed_build_output_result_navigation_and_output_double_click() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(builds.diagnostics.len(), 1);
-    assert!(panels.output.contains("exit code: 0"));
+    assert_eq!(panels.output, "error.txt:2:2: fixture error\n");
+    assert!(
+        !panels.output.contains("[Finished"),
+        "quiet suppresses the finish summary"
+    );
     builds.navigate(&mut w, true).unwrap();
     assert_eq!(
         w.tabs[w.active].path.as_ref(),

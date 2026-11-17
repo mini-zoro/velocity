@@ -49,6 +49,7 @@ impl App {
                 return;
             }
             let viewport = self.viewport();
+            let before = self.command_states();
             if let Err(error) = self.panels.mouse(
                 &mut self.workspace,
                 event.position,
@@ -62,7 +63,8 @@ impl App {
             if let Some(invocation) = self.panels.pending_command.take() {
                 self.run_named(w, &invocation.command, &invocation.args);
             }
-            self.named_changed(w, event.kind == MouseKind::Down);
+            let moved = self.target_changed(&before);
+            self.named_changed(w, moved);
             return;
         }
         if event.is_context_click()
@@ -177,6 +179,11 @@ impl App {
         }
         let viewport = self.viewport();
         self.panels.primary_click = event.modifiers.command();
+        // Picker previews restore the tab's stored scroll; capture the live viewport first.
+        let active = self.workspace.active;
+        self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
+        self.workspace.tabs[active].scroll_line_height = self.view.line_height;
+        let panel_before = self.command_states();
         match if captured {
             Ok(false)
         } else {
@@ -214,8 +221,9 @@ impl App {
                 {
                     self.named_error(Some(w), &error);
                 }
-                // Opening a status-bar picker does not navigate the editor.
-                self.named_changed(w, self.panels.overlay.is_none());
+                // Opening or accepting a settings/syntax picker does not navigate.
+                let moved = self.target_changed(&panel_before);
+                self.named_changed(w, moved);
                 return;
             }
             Ok(false) => {}
@@ -223,6 +231,9 @@ impl App {
                 self.named_error(w, &error);
                 return;
             }
+        }
+        if self.tab_button_mouse(w, &event) {
+            return;
         }
         if event.kind == MouseKind::Down
             && let Some((sheet, _)) = self
@@ -272,7 +283,7 @@ impl App {
                     );
                     self.panels.dragging_tab = Some(index);
                     if event.click_count >= 2 {
-                        self.workspace.tabs[index].transient = false;
+                        self.workspace.make_permanent(index);
                     }
                 }
                 self.named_changed(w, false);
@@ -698,10 +709,14 @@ impl App {
                     .as_str()
                     .ok_or("toggle_setting needs setting")?;
                 let value = self.workspace.editor().settings.bool(key, false);
-                self.workspace
-                    .editor_mut()
-                    .settings
-                    .set(Layer::View, key, json!(!value));
+                if key == "save_all_on_build" {
+                    self.workspace.set_user_preference(key, json!(!value))?;
+                } else {
+                    self.workspace
+                        .editor_mut()
+                        .settings
+                        .set(Layer::View, key, json!(!value));
+                }
             }
             "set_setting" => {
                 // https://www.sublimetext.com/docs/settings.html: per-view settings
@@ -710,10 +725,14 @@ impl App {
                     .as_str()
                     .ok_or("set_setting needs setting")?;
                 let value = args.get("value").ok_or("set_setting needs value")?;
-                self.workspace
-                    .editor_mut()
-                    .settings
-                    .set(Layer::View, key, value.clone());
+                if key == "save_all_on_build" {
+                    self.workspace.set_user_preference(key, value.clone())?;
+                } else {
+                    self.workspace
+                        .editor_mut()
+                        .settings
+                        .set(Layer::View, key, value.clone());
+                }
             }
             "drag_select" => self.begin_bound_drag(args)?,
             "scroll_lines" => {

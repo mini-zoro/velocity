@@ -79,6 +79,99 @@ pub(crate) fn apply_window_layers(
     Ok(())
 }
 impl Workspace {
+    /// Commits a window preference through the one shared, atomic preferences writer.
+    pub fn set_user_preference(&mut self, key: &str, value: Value) -> Result<(), String> {
+        self.settings.set(Layer::User, key, value.clone());
+        for tab in &mut self.tabs {
+            tab.editor.settings.set(Layer::User, key, value.clone());
+            let mut view = tab.editor.settings.layer(Layer::View).clone();
+            view.remove(key);
+            tab.editor
+                .settings
+                .replace(Layer::View, Value::Object(view))?;
+            tab.editor.sync();
+        }
+        if let Some(data) = &self.data_dir {
+            let path = data.join("Packages/User/Preferences.sublime-settings");
+            let key = key.to_owned();
+            let pending = value.clone();
+            let tracked = key.clone();
+            let rx = crate::release::enqueue(move || {
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(source) => source,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+                    Err(e) => return Err(e.to_string()),
+                };
+                let source = vel_config::json::Document::parse(&source)?.set(&key, &value)?;
+                vel_session::atomic_write(&path, |file| {
+                    use std::io::Write;
+                    file.write_all(source.as_bytes()).map_err(|e| e.to_string())
+                })
+            })?;
+            self.track_settings_write(rx, &[(tracked, Some(pending))]);
+        }
+        Ok(())
+    }
+    /// Converts a preview to an ordinary tab and records it in recent files once.
+    pub fn make_permanent(&mut self, index: usize) {
+        if self.tabs[index].transient || self.tabs[index].preview_recent_pending {
+            self.tabs[index].transient = false;
+            self.tabs[index].preview_recent_pending = false;
+            if let Some(path) = self.tabs[index].path.clone() {
+                remember(&mut self.recent_files, path);
+            }
+        }
+    }
+    /// Active title with explicit full-path/project-relative preferences.
+    pub fn window_title(&self) -> String {
+        // The reference describes show_full_path; the ST4 changelog adds show_rel_path.
+        // The detailed reference establishes false on macOS (true on other platforms).
+        // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#global-settings
+        // https://docs.sublimetext.io/reference/settings.html#global-settings
+        // https://www.sublimetext.com/download
+        let tab = &self.tabs[self.active];
+        let settings = &tab.editor.settings;
+        let name = if self.is_empty() {
+            "Velocity".into()
+        } else if settings.bool("show_rel_path", false) {
+            tab.path
+                .as_deref()
+                .and_then(|path| {
+                    self.folders
+                        .iter()
+                        .filter_map(|f| path.strip_prefix(&f.path).ok())
+                        .min_by_key(|p| p.components().count())
+                })
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| {
+                    if settings.bool("show_full_path", false) {
+                        tab.path
+                            .as_ref()
+                            .map_or_else(|| tab.name(), |p| p.to_string_lossy().into_owned())
+                    } else {
+                        tab.name()
+                    }
+                })
+        } else if settings.bool("show_full_path", false) {
+            tab.path
+                .as_ref()
+                .map_or_else(|| tab.name(), |p| p.to_string_lossy().into_owned())
+        } else {
+            tab.name()
+        };
+        let title = format!(
+            "{name}{}{}",
+            if tab.deleted { " [deleted]" } else { "" },
+            if tab.dirty() { " •" } else { "" }
+        );
+        self.project
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or_else(
+                || title.clone(),
+                |project| format!("{title} — {}", project.to_string_lossy()),
+            )
+    }
     /// Zoom is a user Preference shared by every tab, rather than a view override.
     pub fn zoom_font(&mut self, command: &str) -> Result<(), String> {
         // Zoom changes the user size. An explicit distraction-free override remains
@@ -413,6 +506,16 @@ impl Workspace {
     /// Refreshes inactive clone snapshots after commands without copying document bytes.
     pub fn sync_shared(&mut self) {
         self.materialize_input();
+        let promote = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| (t.transient || t.preview_recent_pending) && t.dirty())
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        for index in promote {
+            self.make_permanent(index);
+        }
         let owners: Vec<_> = self
             .tabs
             .iter()
@@ -723,7 +826,9 @@ impl Workspace {
             .collect();
         for index in 0..if self.empty { 0 } else { self.tabs.len() } {
             let tab = &self.tabs[index];
-            if !assigned.contains(&tab.sheet) {
+            // A preview has no committed tab order until editing/save/double click.
+            // https://docs.sublimetext.io/reference/settings.html#global-settings
+            if tab.transient || tab.preview_recent_pending || !assigned.contains(&tab.sheet) {
                 continue;
             }
             let doc = tab.document;
@@ -842,11 +947,24 @@ impl Workspace {
             }
         }
         self.prepare_sheet(active)?;
+        let mut workbench = self.workbench.clone();
+        let retained: BTreeSet<_> = sheets.iter().map(|s| s.id).collect();
+        for group in &mut workbench.groups {
+            let omitted = group
+                .sheets
+                .iter()
+                .filter(|id| !retained.contains(id))
+                .copied()
+                .collect::<Vec<_>>();
+            for id in omitted {
+                group.remove(id);
+            }
+        }
         Ok((
             Window {
                 project: self.project.clone(),
                 folders: self.folders.iter().map(|f| f.path.clone()).collect(),
-                workbench: self.workbench.clone(),
+                workbench,
                 sheets,
                 distraction_free: self.distraction_free,
                 normal_ui: self.window_layers.normal.clone(),
@@ -1130,7 +1248,7 @@ impl Workspace {
         if self.workbench.active == group {
             self.workbench.groups[group].selected.extend(selected);
         }
-        self.tabs[self.active].transient = false;
+        self.make_permanent(self.active);
         Ok(())
     }
 }

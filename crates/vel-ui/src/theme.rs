@@ -436,6 +436,10 @@ impl ThemeUi {
         self.active = false;
         self.revision += 1;
     }
+    /// Whether the native accessibility preference disables motion.
+    pub fn reduce_motion(&self) -> bool {
+        self.accessibility.reduce_motion
+    }
     /// Sets the monotonic frame clock. Reading a cached style never restarts a transition.
     pub fn begin_frame(&mut self, now: Instant) {
         self.now = now;

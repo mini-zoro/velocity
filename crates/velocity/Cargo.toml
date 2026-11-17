@@ -48,4 +48,5 @@ vel-theme = { path = "../vel-theme" }
 vel-minihtml = { path = "../vel-minihtml" }
 
 [dev-dependencies]
+vel-build = { path = "../vel-build", features = ["test-login"] }
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }

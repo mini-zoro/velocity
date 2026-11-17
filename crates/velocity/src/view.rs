@@ -14,6 +14,7 @@ use std::{
 use vel_color_scheme::{ColorScheme, DecorationOptions, FontStyle as Decoration};
 use vel_platform::{Appearance, Point, Rect, Size, Utf16Range};
 use vel_render::scene::*;
+use vel_text::Text;
 /// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
 /// Hard line commands bypass this function and retain the buffer's logical behavior.
 pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: bool) -> usize {
@@ -115,6 +116,45 @@ struct CachedLine {
     units: Arc<[CachedUnit]>,
 }
 
+/// A reading position survives changes in wrapping and text metrics.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextScrollAnchor {
+    pub byte: usize,
+    fraction: f64,
+    x: f64,
+    line_start: bool,
+    collapsed: bool,
+}
+#[derive(Debug)]
+struct DeletedAnchor {
+    before: Text,
+    after: Text,
+    anchor: TextScrollAnchor,
+    caret_visible: bool,
+    caret: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReflowGeometry {
+    options: Options,
+    width: f64,
+    height: f64,
+    cell: f64,
+    line_height: f64,
+    tab_height: f64,
+    gutter: f64,
+    margin: f64,
+    right: f64,
+}
+#[derive(Debug)]
+struct ReflowAnchor {
+    identity: (vel_buffer::BufferId, u64),
+    geometry: ReflowGeometry,
+    anchor: Option<TextScrollAnchor>,
+    mark: Option<TextScrollAnchor>,
+    pixels: (f64, f64),
+    folds: Vec<vel_buffer::Region>,
+    caret: usize,
+}
 /// Optional aggregate CPU phases for the headless review profiler.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct SceneProfile {
@@ -148,6 +188,11 @@ pub struct View {
     pub scroll_x: f64,
     pub scroll_y: f64,
     pending_scroll_clamp: bool,
+    reflow_anchor: Option<ReflowAnchor>,
+    deleted_anchors: Vec<DeletedAnchor>,
+    follow_caret: bool,
+    #[cfg(test)]
+    pub(crate) anchor_queries: std::cell::Cell<usize>,
     pub appearance: Appearance,
     pub focused: bool,
     pub minimap_hover: bool,
@@ -175,6 +220,16 @@ pub struct View {
     line_padding: (f64, f64),
     pub ligatures: bool,
     started: Instant,
+    scroll_animation: Option<ScrollAnimation>,
+    caret_lines: std::collections::BTreeSet<usize>,
+}
+#[derive(Clone, Copy, Debug)]
+struct ScrollAnimation {
+    from: ScrollPosition,
+    to: ScrollPosition,
+    target: TextScrollAnchor,
+    started: Instant,
+    duration: f64,
 }
 /// A font- and display-scale-independent viewport location for navigation history.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,10 +249,10 @@ impl View {
     /// Resolves a saved row using current metrics/layout and clamps changed documents.
     pub(crate) fn restore_scroll_position(&mut self, e: &Editor, position: ScrollPosition) {
         self.pending_scroll_clamp = false;
+        self.apply_style(e);
         self.scroll_x = position.x.max(0.);
         self.scroll_y = position.visual_row.max(0.) * self.line_height;
-        // clamp_scroll applies current metrics and scales this old-height row before
-        // clamping. A single style/layout synchronization covers both operations.
+        // Clamp only after converting with the synchronized metrics.
         self.clamp_scroll(e);
     }
     /// Keeps the saved row while a file's complete layout is still unavailable.
@@ -265,7 +320,7 @@ impl View {
                 self.gutter(e) - 12. - number.len() as f64 * self.cell,
                 baseline,
                 e.preferences.font_size,
-                color(scheme, "gutter_foreground"),
+                self.line_number_color(e, scheme, row),
                 FontStyle::default(),
                 Rect {
                     x: 0.,
@@ -409,7 +464,7 @@ impl View {
             width: self.size.width,
             height: (self.size.height - self.tab_height).max(0.),
         };
-        let first = (self.scroll_y / self.line_height).floor().max(0.) as u64;
+        let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as u64;
         let end = (first + self.rows() as u64 + 2).min(snapshot.view.len_rows());
         let mut layer = Layer::default();
         for row in first..end {
@@ -491,19 +546,28 @@ impl View {
         self.font_metrics = Some(metrics);
         self.base_ascent = metrics.ascent;
         self.device_scale = device_scale.max(1.);
-        let height = metrics
-            .line(
-                13. * self.cell / self.base_cell.max(0.001),
-                self.device_scale,
-                self.line_padding.0,
-                self.line_padding.1,
-            )
-            .0
-            .max(1.);
-        if height != self.line_height {
+        if self.reflow_anchor.is_none() {
+            // New/output/binary views have no text layout to reproject yet. Their
+            // first reveal and output geometry still need valid metrics immediately.
+            let height = metrics
+                .line(
+                    13. * self.cell / self.base_cell.max(0.001),
+                    self.device_scale,
+                    self.line_padding.0,
+                    self.line_padding.1,
+                )
+                .0
+                .max(1.);
             self.scroll_y = self.scroll_y / self.line_height * height;
             self.line_height = height;
         }
+    }
+    /// Reconfigure a font without discarding a sheet's text anchor or gestures.
+    pub(crate) fn set_font_grid(&mut self, cell: f64, ascent: f64) {
+        self.base_cell = cell;
+        self.base_ascent = ascent;
+        self.units.clear();
+        self.selection_cache = None;
     }
     fn baseline(&self, e: &Editor, y: f64) -> f64 {
         y + self.ascent
@@ -531,6 +595,11 @@ impl View {
             minimap_drag: false,
             minimap_gesture: None,
             pending_scroll_clamp: false,
+            reflow_anchor: None,
+            deleted_anchors: Vec::new(),
+            follow_caret: false,
+            #[cfg(test)]
+            anchor_queries: Default::default(),
             mouse_preferences: Default::default(),
             widest: (None, Some(0)),
             drop_caret: None,
@@ -550,6 +619,8 @@ impl View {
             line_padding: (0., 0.),
             ligatures: false,
             started: Instant::now(),
+            scroll_animation: None,
+            caret_lines: Default::default(),
         }
     }
     fn line_units(&mut self, line: &str, hidden: &[Range<usize>], tab: usize) -> Arc<[CachedUnit]> {
@@ -646,6 +717,13 @@ impl View {
             .max(1.) as usize
     }
     pub fn apply_style(&mut self, e: &Editor) {
+        let old = self.reflow_anchor.take().filter(|state| {
+            let same_document = state.identity.0 == e.buffer.id();
+            if !same_document {
+                self.deleted_anchors.clear();
+            }
+            same_document
+        });
         self.bar_overlay = e
             .theme
             .borrow_mut()
@@ -672,10 +750,8 @@ impl View {
                     .0
             })
             .max(1.);
-        if self.line_height != old_height {
-            self.scroll_y = self.scroll_y / old_height * self.line_height;
-        }
         if e.binary.is_some() {
+            self.scroll_y = self.scroll_y / old_height * self.line_height;
             e.layout.borrow_mut().page = self.rows();
             return;
         }
@@ -685,6 +761,66 @@ impl View {
         e.layout.borrow_mut().viewport_width = width;
         let folds = e.folded();
         let options = motion_layout_options(e);
+        let geometry = ReflowGeometry {
+            options,
+            width: self.size.width,
+            height: self.size.height,
+            cell: self.cell,
+            line_height: self.line_height,
+            tab_height: self.tab_height,
+            gutter: self.gutter(e),
+            margin: self.margin(e),
+            right: self.right(e),
+        };
+        let text_changed = old
+            .as_ref()
+            .is_some_and(|state| state.identity.1 != e.revision);
+        let reflow = old.as_ref().is_some_and(|state| {
+            state.geometry != geometry || (!text_changed && state.folds != folds)
+        });
+        let parked = !self.follow_caret
+            || !self.focused
+            || (text_changed
+                && old
+                    .as_ref()
+                    .is_some_and(|state| !Self::edit_touched_caret(e, state)));
+        // Capture in one coordinate system. Editor::sync may already have advanced
+        // its layout, so an edit + geometry change must use the edit's old snapshot.
+        let mut anchor = None;
+        let mut was_visible = false;
+        if let Some(state) = &old {
+            if reflow {
+                if let Some(animation) = self.scroll_animation.take() {
+                    self.scroll_x = animation.to.x;
+                    self.scroll_y = animation.to.visual_row * state.geometry.line_height;
+                    anchor = Some(animation.target);
+                } else if state.pixels == (self.scroll_x, self.scroll_y) {
+                    anchor = if text_changed {
+                        state.mark.or(state.anchor)
+                    } else {
+                        state.anchor.or_else(|| {
+                            (state.folds != folds || state.geometry.options.width > 0)
+                                .then_some(state.mark)
+                                .flatten()
+                        })
+                    };
+                }
+                if text_changed {
+                    if let Some((point, visible)) = self.capture_before_edit(e, state) {
+                        anchor = anchor.or(Some(point));
+                        was_visible = visible;
+                    }
+                } else {
+                    anchor = anchor.or_else(|| Some(self.capture_text_anchor(e, state.geometry)));
+                    was_visible = self.anchor_caret_visible(e, state.geometry);
+                }
+            } else if text_changed && parked {
+                anchor = state.mark.or(state.anchor);
+            }
+            if text_changed && let Some(point) = &mut anchor {
+                self.transform_text_anchor(e, state, point, &mut was_visible);
+            }
+        }
         e.layout.borrow_mut().configure(
             &e.text,
             (e.buffer.id(), vel_buffer::ChangeId(e.revision)),
@@ -714,9 +850,252 @@ impl View {
         e.layout.borrow_mut().set_phantom_inline(&e.text, inline);
         e.layout.borrow_mut().set_inline(blocks);
         e.layout.borrow_mut().page = self.rows();
-        if options.width > 0 && options.width <= width {
+        let moved = (reflow || (text_changed && parked)) && anchor.is_some();
+        if moved {
+            if self.project_text_anchor(e, anchor.unwrap(), reflow) {
+                // Canonical positions must describe the clamped viewport, not an
+                // unreachable point later preferred over the painted reading mark.
+                let mut clamped = self.capture_text_anchor(e, geometry);
+                clamped.collapsed = anchor.is_some_and(|point| point.collapsed);
+                anchor = Some(clamped);
+            }
+        } else if options.width > 0 && options.width <= width {
             self.scroll_x = 0.;
         }
+        if reflow && was_visible {
+            // Visibility is computed once before configure, and enforced once after.
+            let rect = self.rect_at(e, e.caret);
+            let top = self.tab_height + 4.;
+            let bottom = self.size.height - 4.;
+            let before = (self.scroll_x, self.scroll_y);
+            if rect.y < top {
+                self.scroll_y += rect.y - top;
+            } else if rect.y + rect.height > bottom {
+                self.scroll_y += rect.y + rect.height - bottom;
+            }
+            self.scroll_y = self.scroll_y.clamp(0., self.max_scroll_y(e));
+            let left = self.gutter(e) + self.margin(e);
+            let right = self.right(e) - self.margin(e);
+            if rect.x < left {
+                self.scroll_x += rect.x - left;
+            } else if rect.x + rect.width > right {
+                self.scroll_x += rect.x + rect.width - right;
+            }
+            self.scroll_x = self.scroll_x.clamp(0., self.max_scroll_x(e));
+            if before != (self.scroll_x, self.scroll_y) {
+                anchor = None;
+            }
+        }
+        let pixels = (self.scroll_x, self.scroll_y);
+        let unchanged = old
+            .as_ref()
+            .is_some_and(|state| state.pixels == pixels && !text_changed);
+        let canonical = if moved {
+            anchor
+        } else if unchanged {
+            old.as_ref().and_then(|s| s.anchor)
+        } else {
+            None
+        };
+        let mark = if moved {
+            anchor
+        } else if unchanged {
+            old.as_ref().and_then(|s| s.mark)
+        } else {
+            None
+        };
+        self.reflow_anchor = Some(ReflowAnchor {
+            identity: (e.buffer.id(), e.revision),
+            geometry,
+            anchor: canonical,
+            mark,
+            pixels,
+            folds,
+            caret: e.caret,
+        });
+        // User scrolling records only a row/segment boundary; no caret or line
+        // shaping. Painted rows below also supply this bookmark at no extra query.
+        if self.reflow_anchor.as_ref().unwrap().mark.is_none() && parked {
+            self.record_reading_mark(e);
+        }
+    }
+    // Only geometry + text changes reconstruct an old layout. Ordinary typing and
+    // scrolling retain the cheap painted bookmark and never shape a caret here.
+    fn capture_before_edit(
+        &self,
+        e: &Editor,
+        state: &ReflowAnchor,
+    ) -> Option<(TextScrollAnchor, bool)> {
+        let edits = e.layout_edits.borrow();
+        let text = &edits
+            .iter()
+            .find(|edit| edit.buffer == state.identity.0 && edit.from.0 == state.identity.1)?
+            .before;
+        // Without folds every physical line contributes at least one visual row.
+        // The painted bookmark can prove an old caret is outside the viewport
+        // without reconstructing an entire document merely to measure visibility.
+        if state.folds.is_empty()
+            && state.pixels == (self.scroll_x, self.scroll_y)
+            && let Some(mark) = state.mark
+        {
+            let top = text.byte_to_line(mark.byte);
+            let caret = text.byte_to_line(state.caret);
+            let rows = ((state.geometry.height - state.geometry.tab_height - 8.)
+                / state.geometry.line_height)
+                .ceil()
+                .max(1.) as usize;
+            if state.caret < mark.byte || caret > top.saturating_add(rows + 1) {
+                return Some((mark, false));
+            }
+        }
+        let mut layout = crate::layout::Layout::default();
+        layout.configure(
+            text,
+            (state.identity.0, vel_buffer::ChangeId(state.identity.1)),
+            state.geometry.options,
+            &state.folds,
+        );
+        Some((
+            self.capture_anchor_in(text, &layout, state.geometry),
+            self.caret_visible_in(text, &layout, state.caret, state.geometry),
+        ))
+    }
+    fn transform_text_anchor(
+        &mut self,
+        e: &Editor,
+        state: &ReflowAnchor,
+        point: &mut TextScrollAnchor,
+        was_visible: &mut bool,
+    ) {
+        // Buffer undo/redo publishes point transforms without a SharedLayoutEdit.
+        // Match our bounded persistent snapshot before consulting the incremental log.
+        if let Some(saved) =
+            self.deleted_anchors.iter().rev().find(|saved| {
+                saved.before.len_bytes() == e.text.len_bytes() && saved.before == e.text
+            })
+        {
+            *point = saved.anchor;
+            *was_visible = saved.caret_visible && e.caret == saved.caret;
+            return;
+        }
+        let edits = e.layout_edits.borrow();
+        let mut version = state.identity.1;
+        let first = if edits
+            .back()
+            .is_some_and(|edit| edit.buffer == state.identity.0 && edit.from.0 == version)
+        {
+            edits.len() - 1
+        } else {
+            0
+        };
+        for edit in edits
+            .range(first..)
+            .filter(|edit| edit.buffer == state.identity.0 && edit.to.0 > state.identity.1)
+        {
+            if edit.from.0 != version {
+                continue;
+            }
+            // View-local undo metadata: exact restoration stays independent of the
+            // buffer's undo implementation. Bound retained persistent snapshots.
+            let undo = self.deleted_anchors.iter().rposition(|saved| {
+                saved.before.len_bytes() == edit.after.len_bytes()
+                    && saved.after.len_bytes() == edit.before.len_bytes()
+                    && saved.before == edit.after
+                    && saved.after == edit.before
+            });
+            if let Some(index) = undo {
+                let saved = self.deleted_anchors.remove(index);
+                *point = saved.anchor;
+                *was_visible = saved.caret_visible && e.caret == saved.caret;
+            } else {
+                let changes = edit.changes.changes();
+                let at = changes.partition_point(|change| change.old_range.end <= point.byte);
+                let collapsed = changes.get(at).is_some_and(|change| {
+                    change.old_range.start <= point.byte && point.byte < change.old_range.end
+                });
+                // A boundary point can stick left without retaining any text.
+                // Only an interior point needs an exact undo bookmark.
+                if collapsed && changes[at].old_range.start < point.byte {
+                    // Visibility is captured only for a reflow. Saving an undo
+                    // bookmark must not shape the old layout on ordinary deletes.
+                    let visible = *was_visible;
+                    if self.deleted_anchors.len() == 8 {
+                        self.deleted_anchors.remove(0);
+                    }
+                    self.deleted_anchors.push(DeletedAnchor {
+                        before: edit.before.clone(),
+                        after: edit.after.clone(),
+                        anchor: *point,
+                        caret_visible: visible,
+                        caret: state.caret,
+                    });
+                }
+                point.byte = edit.changes.transform_point(
+                    point.byte,
+                    if point.collapsed || collapsed {
+                        vel_buffer::Bias::Left
+                    } else {
+                        vel_buffer::Bias::Right
+                    },
+                );
+                point.collapsed |= collapsed;
+            }
+            version = edit.to.0;
+        }
+        if version != e.revision {
+            point.byte = e
+                .buffer
+                .transform_point_from(
+                    point.byte,
+                    vel_buffer::ChangeId(version),
+                    if point.collapsed {
+                        vel_buffer::Bias::Left
+                    } else {
+                        vel_buffer::Bias::Right
+                    },
+                )
+                .unwrap_or(point.byte);
+            point.collapsed |= self.deleted_anchors.iter().any(|saved| {
+                saved.after.len_bytes() == e.text.len_bytes() && saved.after == e.text
+            });
+        }
+        point.byte = point.byte.min(e.text.len_bytes());
+        if point.line_start {
+            point.byte = e.text.line_to_byte(e.text.byte_to_line(point.byte));
+        }
+    }
+    fn edit_touched_caret(e: &Editor, state: &ReflowAnchor) -> bool {
+        let edits = e.layout_edits.borrow();
+        let touches = |changes: &vel_buffer::ChangeSet, point: usize| {
+            let changes = changes.changes();
+            let at = changes.partition_point(|change| change.old_range.end < point);
+            changes
+                .get(at)
+                .is_some_and(|change| change.old_range.start <= point)
+        };
+        // The common typing path inspects only the newest edit, without cloning
+        // a change set or visiting the retained history.
+        if let Some(edit) = edits.back()
+            && edit.buffer == e.buffer.id()
+            && edit.from.0 == state.identity.1
+        {
+            return touches(&edit.changes, state.caret);
+        }
+        let mut point = state.caret;
+        let mut version = state.identity.1;
+        let mut touched = false;
+        for edit in edits
+            .iter()
+            .filter(|edit| edit.buffer == e.buffer.id() && edit.to.0 > state.identity.1)
+        {
+            if edit.from.0 != version {
+                continue;
+            }
+            touched |= touches(&edit.changes, point);
+            point = edit.changes.transform_point(point, vel_buffer::Bias::Right);
+            version = edit.to.0;
+        }
+        touched || version != e.revision
     }
     /// Records the width of a drawn line for the horizontal scroll bound.
     fn note_width(&mut self, e: &Editor, width: Option<usize>) {
@@ -760,12 +1139,252 @@ impl View {
         self.scroll_y = self.scroll_y.clamp(0., self.max_scroll_y(e));
         let max_x = self.max_scroll_x(e);
         self.scroll_x = self.scroll_x.min(max_x).max(0.);
+        self.remember_scroll(e);
     }
     pub fn scroll(&mut self, e: &Editor, x: f64, y: f64) {
+        self.follow_caret = false;
+        self.deleted_anchors.clear();
+        self.scroll_animation = None;
         self.scrolled = Some(Instant::now());
         self.scroll_x += x;
         self.scroll_y += y;
         self.clamp_scroll(e);
+    }
+    fn anchor_caret_visible(&self, e: &Editor, g: ReflowGeometry) -> bool {
+        self.caret_visible_in(&e.text, &e.layout.borrow(), e.caret, g)
+    }
+    fn caret_visible_in(
+        &self,
+        text: &Text,
+        layout: &crate::layout::Layout,
+        caret: usize,
+        g: ReflowGeometry,
+    ) -> bool {
+        #[cfg(test)]
+        self.anchor_queries.set(self.anchor_queries.get() + 1);
+        let y = g.tab_height + 4. + layout.visual_at(text, caret).0 as f64 * g.line_height
+            - self.scroll_y;
+        if y < g.tab_height + 4. - 1e-7 || y + g.line_height > g.height - 4. + 1e-7 {
+            return false;
+        }
+        let x = g.gutter + g.margin + layout.column(text, caret) as f64 * g.cell - self.scroll_x;
+        x >= g.gutter + g.margin - 1e-7 && x + 1. <= g.right - g.margin + 1e-7
+    }
+    fn capture_text_anchor(&self, e: &Editor, g: ReflowGeometry) -> TextScrollAnchor {
+        self.capture_anchor_in(&e.text, &e.layout.borrow(), g)
+    }
+    fn capture_anchor_in(
+        &self,
+        text: &Text,
+        layout: &crate::layout::Layout,
+        g: ReflowGeometry,
+    ) -> TextScrollAnchor {
+        #[cfg(test)]
+        self.anchor_queries.set(self.anchor_queries.get() + 1);
+        let y = self.scroll_y / g.line_height.max(1.);
+        let y = if (y - y.round()).abs() < 1e-8 {
+            y.round()
+        } else {
+            y
+        };
+        let visual = y.floor().max(0.) as usize;
+        let byte = layout.offset(text, visual, self.scroll_x / g.cell.max(0.001));
+        let x = if layout.wrapped() {
+            0.
+        } else {
+            self.scroll_x / g.cell.max(0.001) - layout.column(text, byte) as f64
+        };
+        TextScrollAnchor {
+            byte,
+            fraction: y - visual as f64,
+            x,
+            line_start: false,
+            collapsed: false,
+        }
+    }
+    fn reading_mark(&self, e: &Editor) -> TextScrollAnchor {
+        let y = self.scroll_y / self.line_height.max(1.);
+        let visual = (y + 1e-8).floor().max(0.) as usize;
+        let layout = e.layout.borrow();
+        let (row, subrow) = layout.locate(visual);
+        let row = row.min(e.text.len_lines().saturating_sub(1));
+        let byte = e.text.line_to_byte(row)
+            + if layout.wrapped() || layout.has_folds() {
+                layout.segment(&e.text, row, subrow).bytes.start
+            } else {
+                0
+            };
+        TextScrollAnchor {
+            byte,
+            fraction: (y - visual as f64).max(0.),
+            x: self.scroll_x / self.cell.max(0.001),
+            line_start: !layout.wrapped(),
+            collapsed: false,
+        }
+    }
+    fn record_reading_mark(&mut self, e: &Editor) {
+        let mut mark = self.reading_mark(e);
+        if let Some(state) = &mut self.reflow_anchor {
+            mark.collapsed = state.anchor.is_some_and(|anchor| anchor.collapsed);
+            state.mark = Some(mark);
+        }
+    }
+    fn project_text_anchor(&mut self, e: &Editor, anchor: TextScrollAnchor, clamp_x: bool) -> bool {
+        let layout = e.layout.borrow();
+        let byte = anchor.byte.min(e.text.len_bytes());
+        self.scroll_y =
+            (layout.visual_at(&e.text, byte).0 as f64 + anchor.fraction) * self.line_height;
+        self.scroll_x = if layout.wrapped() {
+            0.
+        } else if anchor.line_start {
+            anchor.x * self.cell
+        } else {
+            (layout.column(&e.text, byte) as f64 + anchor.x) * self.cell
+        };
+        drop(layout);
+        let before = (self.scroll_x, self.scroll_y);
+        self.scroll_y = self.scroll_y.clamp(0., self.max_scroll_y(e));
+        if clamp_x {
+            let max_x = self.max_scroll_x(e);
+            self.scroll_x = self.scroll_x.clamp(0., max_x);
+        }
+        before != (self.scroll_x, self.scroll_y)
+    }
+    #[cfg(test)]
+    pub(crate) fn text_scroll_anchor(&mut self, e: &Editor) -> TextScrollAnchor {
+        self.apply_style(e);
+        self.capture_text_anchor(e, self.reflow_anchor.as_ref().unwrap().geometry)
+    }
+    fn remember_scroll(&mut self, e: &Editor) {
+        let pixels = (self.scroll_x, self.scroll_y);
+        let changed = self
+            .reflow_anchor
+            .as_ref()
+            .is_some_and(|s| s.pixels != pixels);
+        if changed {
+            if let Some(state) = &mut self.reflow_anchor {
+                state.pixels = pixels;
+                state.anchor = None;
+                state.mark = None;
+            }
+            if !self.follow_caret || !self.focused {
+                self.record_reading_mark(e);
+            }
+        }
+    }
+    fn finish_scroll_animation(&mut self, e: &Editor) {
+        if self.scroll_animation.is_some() {
+            self.apply_style(e);
+        }
+        if let Some(animation) = self.scroll_animation.take() {
+            self.restore_scroll_position(e, animation.to);
+        }
+    }
+    /// Advance keyboard scrolling in visual rows; a text endpoint survives reflow.
+    pub(crate) fn advance_scroll(&mut self, e: &Editor, now: Instant) -> bool {
+        if self.scroll_animation.is_some() {
+            self.apply_style(e);
+        }
+        let Some(animation) = self.scroll_animation else {
+            return false;
+        };
+        let speed = e.settings.number("scroll_speed", 1.);
+        if !speed.is_finite() || speed <= 0. {
+            self.scroll_animation = None;
+            self.restore_scroll_position(e, animation.to);
+            return true;
+        }
+        let t = (now
+            .saturating_duration_since(animation.started)
+            .as_secs_f64()
+            / animation.duration)
+            .clamp(0., 1.);
+        let f = 1. - (1. - t).powi(3);
+        self.restore_scroll_position(
+            e,
+            ScrollPosition {
+                x: animation.from.x + (animation.to.x - animation.from.x) * f,
+                visual_row: animation.from.visual_row
+                    + (animation.to.visual_row - animation.from.visual_row) * f,
+            },
+        );
+        if t >= 1. {
+            self.scroll_animation = None;
+        }
+        true
+    }
+    pub(crate) fn cancel_scroll_animation(&mut self) {
+        self.scroll_animation = None;
+    }
+    pub(crate) fn scrolling(&self) -> bool {
+        self.scroll_animation.is_some()
+    }
+    /// Repeated page commands accumulate from the previous destination.
+    pub(crate) fn prepare_keyboard_scroll(&mut self, e: &Editor, now: Instant) -> ScrollPosition {
+        self.advance_scroll(e, now);
+        let from = self.scroll_position();
+        if let Some(animation) = self.scroll_animation.take() {
+            self.restore_scroll_position(e, animation.to);
+        }
+        from
+    }
+    pub(crate) fn animate_scroll_from(
+        &mut self,
+        e: &Editor,
+        from: ScrollPosition,
+        now: Instant,
+        reduce_motion: bool,
+    ) {
+        // https://docs.sublimetext.io/reference/settings.html#global-settings:
+        // zero disables smoothing; values below/above one slow/speed it up.
+        let speed = e.settings.number("scroll_speed", 1.);
+        let to = self.scroll_position();
+        self.scroll_animation = None;
+        if !reduce_motion && speed.is_finite() && speed > 0. && from != to {
+            self.scroll_animation = Some(ScrollAnimation {
+                from,
+                to,
+                target: self.capture_text_anchor(e, self.reflow_anchor.as_ref().unwrap().geometry),
+                started: now,
+                duration: (0.18 / speed).clamp(0.01, 2.),
+            });
+            self.restore_scroll_position(e, from);
+        }
+    }
+    /// Documented caret extensions combine with block/underline drawing and blink style.
+    fn drawn_caret(&self, e: &Editor, byte: usize) -> Rect {
+        // Public setting names: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html
+        // The detailed reference gives zero for caret_extra_top/caret_extra_bottom.
+        // block_caret/inverse_caret_state defaults are unlisted; retain false.
+        let mut caret = self.rect_at(e, byte);
+        let block = e.command_mode()
+            || e.settings.bool("block_caret", false)
+            || e.preferences.caret_style == "block";
+        caret.width += e.settings.number("caret_extra_width", 0.).max(0.);
+        if block {
+            caret.width = self.cell;
+        } else if e.preferences.caret_style == "underline" {
+            caret.y += caret.height - 2.;
+            caret.height = 2.;
+            caret.width = self.cell;
+        }
+        let top = e.settings.number("caret_extra_top", 0.).max(0.);
+        caret.y -= top;
+        caret.height += top + e.settings.number("caret_extra_bottom", 0.).max(0.);
+        caret
+    }
+    fn line_number_color(&self, e: &Editor, scheme: &ColorScheme, row: usize) -> Color {
+        // ST4 added highlight_line_number: https://www.sublimetext.com/download
+        // No documented default: retain unhighlighted line numbers unless opted in.
+        if e.settings.bool("highlight_line_number", false) && self.caret_lines.contains(&row) {
+            scheme
+                .globals
+                .color("gutter_foreground_highlight")
+                .map(rgba)
+                .unwrap_or_else(|| color(scheme, "foreground"))
+        } else {
+            color(scheme, "gutter_foreground")
+        }
     }
     pub fn total(&self, e: &Editor) -> usize {
         e.binary
@@ -795,6 +1414,8 @@ impl View {
     }
     /// Centers a requested file location after the final pane geometry and layout are known.
     pub fn center_caret(&mut self, e: &Editor) {
+        self.follow_caret = true;
+        self.finish_scroll_animation(e);
         self.apply_style(e);
         let r = self.rect_at(e, e.caret);
         let top = self.tab_height + 4.;
@@ -805,6 +1426,10 @@ impl View {
         self.reveal(e);
     }
     pub fn reveal(&mut self, e: &Editor) {
+        self.follow_caret = true;
+        // Typing and IME reveals own the final viewport; a stale animation must
+        // never write its old destination over the newly revealed caret.
+        self.finish_scroll_animation(e);
         self.apply_style(e);
         let r = self.rect_at(e, e.caret);
         let context = e
@@ -826,6 +1451,7 @@ impl View {
             self.scroll_x += r.x + self.cell - self.right(e) + self.margin(e);
         }
         self.clamp_scroll(e);
+        self.deleted_anchors.clear();
     }
     pub fn hit_test(&self, e: &Editor, p: Point) -> usize {
         if let Some(binary) = &e.binary {
@@ -840,7 +1466,7 @@ impl View {
             };
             return (row.saturating_mul(16) + cell).min(binary.view.len_bytes() as usize);
         }
-        let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
+        let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height + 1e-8)
             .floor()
             .max(0.) as usize;
         if let Some((boundary, _)) = e.layout.borrow().inline_at(row)
@@ -892,7 +1518,7 @@ impl View {
         }
         e.layout.borrow().visible_bytes(
             &e.text,
-            (self.scroll_y / self.line_height).floor().max(0.) as usize,
+            (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as usize,
             self.rows() + 2,
         )
     }
@@ -907,7 +1533,7 @@ impl View {
         let Some(language) = language.as_ref() else {
             return false;
         };
-        let first = (self.scroll_y / self.line_height).floor().max(0.) as usize;
+        let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as usize;
         let layout = e.layout.borrow();
         (first..(first + self.rows() + 1).min(layout.total())).all(|v| {
             language
@@ -937,6 +1563,9 @@ impl View {
         up: bool,
         option: bool,
     ) -> Result<bool, String> {
+        if down || dragging {
+            self.scroll_animation = None;
+        }
         if up && self.scroll_bar_drag {
             self.scroll_bar_drag = false;
             return Ok(true);
@@ -992,7 +1621,9 @@ impl View {
             if down {
                 let map = self.minimap_geometry(e);
                 let viewport = map.viewport(self.scroll_y, self.line_height);
-                let gesture = if vel_ui::contains(viewport, point) {
+                let gesture = if vel_ui::contains(viewport, point)
+                    && !e.settings.bool("minimap_scroll_to_clicked_text", false)
+                {
                     MinimapDrag::Viewport {
                         grab: point.y - viewport.y,
                     }
@@ -1000,9 +1631,16 @@ impl View {
                     // A click targets the row actually painted beneath the pointer.
                     // Its new viewport may be far from the pointer in a panned map.
                     // Anchor subsequent movement here, with both control ends reachable.
+                    // The public changelog names this option; the round-18 contract
+                    // specifies pointer-relative placement. https://www.sublimetext.com/3
                     let row = map.visual_at(point.y);
                     let visible = (self.size.height - self.tab_height - 8.).max(0.);
-                    self.scroll_y = row * self.line_height - visible / 2.;
+                    let target_y = if e.settings.bool("minimap_scroll_to_clicked_text", false) {
+                        point.y - self.tab_height - 4.
+                    } else {
+                        visible / 2.
+                    };
+                    self.scroll_y = row * self.line_height - target_y;
                     self.clamp_scroll(e);
                     MinimapDrag::Click {
                         press_y: point.y,
@@ -1103,7 +1741,7 @@ impl View {
         e.annotations.borrow_mut().poll();
         self.apply_style(e);
         self.profile_step(&mut phase, 0);
-        let first = (self.scroll_y / self.line_height).floor().max(0.) as usize;
+        let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as usize;
         let last = (first + self.rows() + 2).min(e.layout.borrow().total());
         if e.marked.is_none() {
             let layout = e.layout.borrow();
@@ -1205,6 +1843,28 @@ impl View {
             global("gutter"),
         );
         let regions = e.regions();
+        self.caret_lines.clear();
+        if e.settings.bool("highlight_line_number", false) {
+            let layout = e.layout.borrow();
+            let first_row = layout
+                .locate(first)
+                .0
+                .min(e.text.len_lines().saturating_sub(1));
+            let last_row = (layout.locate(last.saturating_sub(1)).0 + 1).min(e.text.len_lines());
+            let start = e.text.line_to_byte(first_row);
+            let end = if last_row < e.text.len_lines() {
+                e.text.line_to_byte(last_row)
+            } else {
+                e.text.len_bytes() + 1
+            };
+            self.caret_lines.extend(
+                regions
+                    .iter()
+                    .filter(|r| r.b >= start && r.b < end)
+                    .map(|r| e.text.byte_to_line(r.b)),
+            );
+        }
+
         let bracket_glyphs = self.bracket_glyph_styles(e, language, scheme);
         let mut selection_border = scheme
             .globals
@@ -1411,6 +2071,19 @@ impl View {
             }
             let (row, subrow) = layout.locate(visual);
             let segment = layout.segment(&e.text, row, subrow);
+            let start = e.text.line_to_byte(row);
+            if visual == first
+                && let Some(state) = &mut self.reflow_anchor
+            {
+                state.mark = Some(TextScrollAnchor {
+                    byte: start + segment.bytes.start,
+                    fraction: (self.scroll_y / self.line_height - first as f64).max(0.),
+                    x: self.scroll_x / self.cell.max(0.001),
+                    line_start: !layout.wrapped(),
+                    collapsed: state.anchor.is_some_and(|anchor| anchor.collapsed),
+                });
+            }
+
             if !layout.wrapped() && e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
                 self.note_width(e, None);
                 self.paint_long_line(
@@ -1428,7 +2101,7 @@ impl View {
                 continue;
             }
             let line = e.text.line(row).to_string();
-            let start = e.text.line_to_byte(row);
+
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
             let baseline = self.baseline(e, y);
             if (e.preferences.highlight_line || e.command_mode()) && caret_visuals.contains(&visual)
@@ -1519,7 +2192,7 @@ impl View {
                         gutter - 12. - number.len() as f64 * self.cell,
                         baseline,
                         e.preferences.font_size,
-                        global("gutter_foreground"),
+                        self.line_number_color(e, scheme, row),
                         FontStyle::default(),
                         Rect {
                             width: gutter,
@@ -2035,40 +2708,64 @@ impl View {
         drop(layout);
         self.profile_step(&mut phase, 3);
         self.paint_brackets(e, language, scheme, clip, &mut layer);
-        let alpha = caret_alpha(
+        let mut alpha = caret_alpha(
             e.settings.string("caret_style", "solid"),
             self.started.elapsed().as_secs_f64(),
         );
+        if e.settings.bool("inverse_caret_state", false)
+            && matches!(
+                e.preferences.caret_style.as_str(),
+                "blink" | "smooth" | "phase"
+            )
+        {
+            alpha = 1. - alpha;
+        }
         for r in regions {
             let visual = e.layout.borrow().visual_at(&e.text, r.b).0;
             if !(first..last).contains(&visual) {
                 continue;
             }
-            let mut caret = self.rect_at(e, r.b);
-            caret.width += e.settings.number("caret_extra_width", 0.).max(0.);
-            if e.command_mode() || e.preferences.caret_style == "block" {
-                caret.width = self.cell;
-            } else if e.preferences.caret_style == "underline" {
-                caret.y += caret.height - 2.;
-                caret.height = 2.;
-                caret.width = self.cell;
-            }
+            let caret = self.drawn_caret(e, r.b);
             let mut color = global("caret");
             color[3] *= alpha * if e.command_mode() { 0.45 } else { 1. };
             if self.focused {
-                if (e.command_mode() || e.preferences.caret_style == "block")
+                // Block fills share the text background pass, below glyphs. Thin
+                // insertion carets retain their existing foreground layer.
+                let block = e.command_mode()
+                    || e.settings.bool("block_caret", false)
+                    || e.preferences.caret_style == "block";
+                if block && !e.command_mode() && alpha > 0. {
+                    for run in layer.text.iter().filter(|run| {
+                        run.baseline as f64 >= caret.y
+                            && run.baseline as f64 <= caret.y + caret.height
+                    }) {
+                        let mut glyph = run.clone();
+                        glyph.color = global("background");
+                        glyph.color[3] *= alpha;
+                        glyph.clip = vel_ui::minihtml::intersection(glyph.clip, caret);
+                        carets.text.push(glyph);
+                    }
+                }
+                let target = if block && !e.command_mode() {
+                    &mut layer
+                } else {
+                    &mut carets
+                };
+                if (e.command_mode()
+                    || e.settings.bool("block_caret", false)
+                    || e.preferences.caret_style == "block")
                     && scheme.block_caret_corner_radius() > 0.
                     && scheme.block_caret_corner_style() != vel_color_scheme::CornerStyle::Square
                 {
                     if scheme.block_caret_corner_style() == vel_color_scheme::CornerStyle::Round {
-                        carets.rects.push(SolidRect {
+                        target.rects.push(SolidRect {
                             rect: caret,
                             clip,
                             color,
                             radius: scheme.block_caret_corner_radius() as f32,
                         });
                     } else {
-                        carets.contours.push(vel_render::selection::Contour::new(
+                        target.contours.push(vel_render::selection::Contour::new(
                             &vel_render::selection::outlines(&[caret])[0],
                             corner_style(scheme.block_caret_corner_style()),
                             scheme.block_caret_corner_radius(),
@@ -2078,7 +2775,7 @@ impl View {
                         ));
                     }
                 } else {
-                    fill(&mut carets, caret, clip, color);
+                    fill(target, caret, clip, color);
                 }
             }
         }
@@ -3533,5 +4230,293 @@ mod minimap_drag_paint_regression {
         }
         assert!((view.scroll_y - view.max_scroll_y(&editor)).abs() < 1e-6);
         view.end_pointer_gesture();
+    }
+}
+
+#[cfg(test)]
+mod lane_b_round18_tests {
+    use super::*;
+    use vel_config::{json, settings::Layer as SettingLayer};
+    use vel_text::Text;
+    fn fixture() -> (Editor, View) {
+        let editor = Editor::new(Text::from("line text\n".repeat(6000).as_str()));
+        let view = View::new(
+            Size {
+                width: 600.,
+                height: 400.,
+            },
+            8.,
+            12.,
+        );
+        (editor, view)
+    }
+    #[test]
+    fn round18_caret_block_extensions_and_inverse_phase_render_both_values() {
+        let (mut e, mut v) = fixture();
+        for (block, top, bottom, inverse) in [
+            (false, 0., 0., false),
+            (true, 3., 5., false),
+            (false, 2., 4., true),
+        ] {
+            e.settings.replace(SettingLayer::View, json!({"block_caret":block,"caret_extra_top":top,"caret_extra_bottom":bottom,"inverse_caret_state":inverse,"caret_style":"solid"})).unwrap();
+            e.sync();
+            v.apply_style(&e);
+            let rect = v.drawn_caret(&e, 0);
+            assert_eq!(rect.width, if block { v.cell } else { 1. });
+            assert_eq!(rect.y, v.tab_height + 4. - top);
+            assert_eq!(rect.height, v.line_height + top + bottom);
+            let scene = v.scene(&e);
+            let caret_layer = &scene.layers[usize::from(!block)];
+            assert!(
+                caret_layer
+                    .rects
+                    .iter()
+                    .any(|r| r.rect == rect && r.color[3] > 0.)
+            );
+            assert!(!block || scene.layers[1].rects.iter().all(|r| r.rect != rect));
+        }
+    }
+    #[test]
+    fn round18_gutter_uses_every_caret_line_and_long_line_numbers() {
+        let (mut e, mut v) = fixture();
+        e.set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::caret(0),
+            vel_buffer::Region::caret(e.text.line_to_byte(2)),
+        ]));
+        let scheme = ColorScheme::velocity_dark();
+        // Scheme defaults need not provide the highlight field; foreground is the fallback.
+        for enabled in [false, true] {
+            e.settings
+                .set(SettingLayer::View, "highlight_line_number", json!(enabled));
+            v.scene(&e);
+            let expected = color(
+                &scheme,
+                if enabled {
+                    "foreground"
+                } else {
+                    "gutter_foreground"
+                },
+            );
+            assert_eq!(v.line_number_color(&e, &scheme, 0), expected);
+            assert_eq!(v.line_number_color(&e, &scheme, 2), expected);
+            assert_eq!(
+                v.line_number_color(&e, &scheme, 1),
+                color(&scheme, "gutter_foreground")
+            );
+            v.scene(&e);
+        }
+        // Cross the actual long-line threshold and render the unwrapped fast path.
+        let mut long = Editor::new(Text::from("x".repeat(crate::large::LONG_LINE + 1).as_str()));
+        long.settings
+            .set(SettingLayer::View, "word_wrap", json!(false));
+        for enabled in [false, true] {
+            long.settings
+                .set(SettingLayer::View, "highlight_line_number", json!(enabled));
+            long.sync();
+            let scene = v.scene(&long);
+            assert!(!long.layout.borrow().wrapped());
+            assert!(long.text.line_len_bytes(0) >= crate::large::LONG_LINE);
+            let number = scene.layers[0]
+                .text
+                .iter()
+                .find(|t| t.text == "1")
+                .expect("long-line gutter number");
+            assert_eq!(number.color, v.line_number_color(&long, &scheme, 0));
+        }
+    }
+    #[test]
+    fn round18_keyboard_scroll_speed_repetition_units_pointer_and_settled_hit_testing() {
+        for (speed, reduce_motion) in [
+            (0., false),
+            (0.5, false),
+            (1., false),
+            (2., false),
+            (1., true),
+        ] {
+            let (mut e, mut v) = fixture();
+            e.settings
+                .set(SettingLayer::View, "scroll_speed", json!(speed));
+            e.sync();
+            v.apply_style(&e);
+            let start = Instant::now();
+            let original_caret = e.caret;
+            for press in 0..5 {
+                let now = start + std::time::Duration::from_millis(press * 10);
+                let from = v.prepare_keyboard_scroll(&e, now);
+                v.scroll(&e, 0., 200.);
+                v.animate_scroll_from(&e, from, now, reduce_motion);
+            }
+            assert_eq!(v.scrolling(), speed > 0. && !reduce_motion);
+            v.advance_scroll(&e, start + std::time::Duration::from_secs(4));
+            assert!(!v.scrolling());
+            assert_eq!(v.scroll_y, 1000.);
+            assert_eq!(e.caret, original_caret);
+            let at = v.hit_test(
+                &e,
+                Point {
+                    x: v.gutter(&e) + v.margin(&e),
+                    y: v.tab_height + 4.,
+                },
+            );
+            assert_eq!(e.text.byte_to_line(at), 50);
+            let from = v.prepare_keyboard_scroll(&e, start);
+            v.scroll(&e, 0., 200.);
+            v.animate_scroll_from(&e, from, start, reduce_motion);
+            v.scroll(&e, 0., 17.);
+            let wheel_y = v.scroll_y;
+            assert!(!v.scrolling());
+            v.advance_scroll(&e, start + std::time::Duration::from_secs(4));
+            assert_eq!(v.scroll_y, wheel_y);
+        }
+    }
+    #[test]
+    fn round18_scroll_speed_changes_duration_without_changing_target_across_zoom() {
+        let mut positions = Vec::new();
+        for speed in [0.5, 1., 2.] {
+            let (mut e, mut v) = fixture();
+            e.settings
+                .set(SettingLayer::View, "scroll_speed", json!(speed));
+            e.sync();
+            v.apply_style(&e);
+            let now = Instant::now();
+            let from = v.prepare_keyboard_scroll(&e, now);
+            v.scroll(&e, 0., 2000.);
+            v.animate_scroll_from(&e, from, now, false);
+            v.advance_scroll(&e, now + std::time::Duration::from_millis(40));
+            positions.push(v.scroll_y);
+            e.settings.set(SettingLayer::View, "font_size", json!(26.));
+            e.sync();
+            v.apply_style(&e);
+            v.advance_scroll(&e, now + std::time::Duration::from_secs(2));
+            assert_eq!(v.scroll_y / v.line_height, 100.);
+        }
+        assert!(
+            positions[0] < positions[1] && positions[1] < positions[2],
+            "{positions:?}"
+        );
+    }
+    #[test]
+    fn round18_minimap_switch_places_clicked_text_and_preserves_drag_geometry() {
+        let mut positions = vec![];
+        for enabled in [false, true] {
+            let (mut e, mut v) = fixture();
+            e.settings
+                .set(SettingLayer::View, "show_minimap", json!(true));
+            e.settings.set(
+                SettingLayer::View,
+                "minimap_scroll_to_clicked_text",
+                json!(enabled),
+            );
+            e.sync();
+            v.apply_style(&e);
+            let x = v.right(&e) + 5.;
+            let press = Point { x, y: 200. };
+            let row = v.minimap_geometry(&e).visual_at(press.y);
+            v.pointer(&mut e, press, true, false, false).unwrap();
+            let clicked = v.scroll_y;
+            let expected_y = if enabled {
+                press.y
+            } else {
+                v.tab_height + 4. + (v.size.height - v.tab_height - 8.) / 2.
+            };
+            assert!((v.tab_height + 4. + row * v.line_height - clicked - expected_y).abs() < 1e-6);
+            for _ in 0..10 {
+                v.pointer(&mut e, press, false, true, false).unwrap();
+                assert_eq!(v.scroll_y, clicked);
+            }
+            v.pointer(&mut e, Point { x, y: 10000. }, false, true, false)
+                .unwrap();
+            positions.push(v.scroll_y);
+            v.pointer(&mut e, press, false, false, true).unwrap();
+            assert!(!v.minimap_drag);
+        }
+        assert_eq!(positions[0], positions[1]);
+    }
+    #[test]
+    fn round18_review_gutter_precomputes_only_visible_caret_lines() {
+        let mut e = Editor::new(Text::from("line\n".repeat(50000).as_str()));
+        e.set_selection(vel_buffer::Selection::from_regions(
+            (0..40000).map(|row| vel_buffer::Region::caret(e.text.line_to_byte(row))),
+        ));
+        let (_, mut v) = fixture();
+        v.scroll_y = 20000. * v.line_height;
+        for enabled in [false, true] {
+            e.settings
+                .set(SettingLayer::View, "highlight_line_number", json!(enabled));
+            let scene = v.scene(&e);
+            if enabled {
+                assert!(!v.caret_lines.is_empty());
+                assert!(v.caret_lines.len() <= v.rows() + 2);
+            } else {
+                assert!(v.caret_lines.is_empty());
+            }
+            assert!(scene.layers[0].text.iter().any(|r| r.text == "20001"));
+        }
+    }
+    #[test]
+    #[ignore = "headless 40,000-caret frame comparison"]
+    fn round18_review_gutter_40000_carets_timing() {
+        let mut e = Editor::new(Text::from("line\n".repeat(50000).as_str()));
+        e.set_selection(vel_buffer::Selection::from_regions(
+            (0..40000).map(|row| vel_buffer::Region::caret(e.text.line_to_byte(row))),
+        ));
+        let (_, mut v) = fixture();
+        v.scroll_y = 20000. * v.line_height;
+        let mut times = vec![];
+        for enabled in [false, true] {
+            e.settings
+                .set(SettingLayer::View, "highlight_line_number", json!(enabled));
+            v.scene(&e);
+            let at = Instant::now();
+            for _ in 0..50 {
+                std::hint::black_box(v.scene(&e));
+            }
+            times.push(at.elapsed().as_secs_f64() * 1000. / 50.);
+        }
+        println!("GUTTER_40000 off_ms={} on_ms={}", times[0], times[1]);
+    }
+    #[test]
+    fn round18_review_minimap_switch_clicks_inside_the_drawn_viewport() {
+        for enabled in [false, true] {
+            let (mut e, mut v) = fixture();
+            e.settings
+                .set(SettingLayer::View, "show_minimap", json!(true));
+            e.settings.set(
+                SettingLayer::View,
+                "minimap_scroll_to_clicked_text",
+                json!(enabled),
+            );
+            v.apply_style(&e);
+            v.scroll_y = 3000. * v.line_height;
+            let map = v.minimap_geometry(&e);
+            let viewport = map.viewport(v.scroll_y, v.line_height);
+            let press = Point {
+                x: map.bounds.x + 5.,
+                y: viewport.y + viewport.height * 0.25,
+            };
+            let clicked = map.visual_at(press.y);
+            let before = v.scroll_y;
+            v.pointer(&mut e, press, true, false, false).unwrap();
+            if enabled {
+                assert!(
+                    (v.tab_height + 4. + clicked * v.line_height - v.scroll_y - press.y).abs()
+                        < 1e-6
+                );
+            } else {
+                assert!((v.scroll_y - before).abs() < 1e-6);
+            }
+            let after = v.scroll_y;
+            for _ in 0..20 {
+                v.pointer(&mut e, press, false, true, false).unwrap();
+                assert!((v.scroll_y - after).abs() < 1e-6);
+            }
+            for (y, expected) in [(10000., v.max_scroll_y(&e)), (-10000., 0.)] {
+                v.pointer(&mut e, Point { y, ..press }, false, true, false)
+                    .unwrap();
+                assert_eq!(v.scroll_y, expected);
+            }
+            v.pointer(&mut e, press, false, false, true).unwrap();
+            assert!(!v.minimap_drag);
+        }
     }
 }

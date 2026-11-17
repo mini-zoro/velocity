@@ -10,10 +10,19 @@ publish.workspace = true
 workspace = true
 [dependencies]
 vel-config = { path = "../vel-config" }
+vel-scope = { path = "../vel-scope" }
+vel-snippet = { path = "../vel-snippet" }
+vel-text = { path = "../vel-text" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 regex = "=1.13.1"
 globset = "0.4"
 libc = "=0.2.191"
-[dev-dependencies]
 tempfile = "=3.27.0"
+
+[features]
+# Enables a private HOME/login shell for all unit and downstream app tests.
+test-login = []
+
+[dev-dependencies]
+vel-build = { path = ".", features = ["test-login"] }

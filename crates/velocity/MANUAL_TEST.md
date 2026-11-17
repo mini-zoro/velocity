@@ -1,3 +1,133 @@
+# Round 18 Lane B third verification (native review pending)
+
+Continued uncommitted on `ac6f530`, keeping the pre-merge preference-test fix.
+No GUI or packaging was run. Headless evidence is in `ROUND18_LANE_B.md` and
+`/tmp/velocity-lane-b-r18-third/`; all native boxes remain unchecked.
+
+- [ ] In two groups, park the receiver around row 5000 in a 9,990-line file. Insert
+  100 lines at BOF from its clone; verify gutter widening preserves the same text.
+  Repeat with wrapping, a hidden caret, and sidebar/resize/font changes before
+  the next frame. Verify the hidden caret does not pull the parked pane into view.
+- [ ] Delete line 10 through EOF, or select-all/delete, from the other clone.
+  Undo restores the receiver's original top line; repeat redo/undo, with resize
+  before and after undo, in both wrap modes. Ordinary typing/deleting and wheel
+  scrolling remain responsive.
+- [ ] Run a large-output build. The panel shows a retained tail, a visible byte-count
+  truncation notice when transport data was dropped, correct error totals, and
+  navigable retained diagnostics. Finished follows the tail promptly. Cancel while
+  output is queued, including just after producer exit: Cancelled appears promptly
+  and the backlog stops. Verify progress/results while the build is still running.
+
+Headless: **1,096 release tests**, **22 debug build-crate tests**, **62 debug round-18 App tests**, the debug workbench build test, and **24 ignored timings** pass. Fmt, strict clippy and rustdoc pass. Nine-pair retired instructions: features **+0.27%**, typing1 **+0.36%**, typing1000 **-0.78%**. Native presentation remains unobserved.
+
+The preceding native checklist and verification record follow unchanged.
+
+---
+
+# Round 18 Lane B pre-merge test synchronization
+
+Follow-up to `ac6f530`: the blocked-preferences test now awaits the resource worker
+and fences the existing serial write queue. Its extra publication was a pending-write
+stamp scan counted by a timing-sensitive assertion; exactly one settled reload is
+still required. Runtime code and native behavior are unchanged.
+
+**50/50 isolated runs** and **10/10 simultaneous full-module runs** pass (290 module
+cases, default test parallelism). Full gate: **1,086 passed, zero failed** (114 suites,
+25 existing ignored tests); fmt, strict release clippy, and strict rustdoc pass.
+Root-cause trace, synchronization details and logs: `ROUND18_LANE_B.md` and
+`/tmp/velocity-lane-b-r18-reload/`. The existing unchecked native checklist follows.
+
+---
+
+# Round 18 Lane B verification fixes (native review pending)
+
+Started clean at `c8260ac`, based on main `385dcdd`; follow-up is uncommitted.
+No GUI is available. Leave these boxes unchecked until observed on a macOS desktop.
+Finding/function/test mapping and measured evidence are in `ROUND18_LANE_B.md`.
+Do not run packaging for this review.
+
+Headless gate: **1,086 passed, zero failed**; fmt, strict clippy and rustdoc pass.
+All **24 ignored headless timings** pass. Login stress: **30/30 parallel trials**, 270
+passed cases (four concurrent processes; default Rust test parallelism within each).
+Nine-pair retired instructions versus main `385dcdd`: **+0.20% / +0.38% /
++0.13%** for features/typing1/typing1000. Single caret passes **+0.5%**;
+others pass +5%. Busy host load 3.00–19.53; no native performance claim.
+Quiet build: **15.182 ms CPU / 3 s**. Project walk: **110.117 → 109.909 ms**.
+40,000-caret gutter off/on: **10.528 → 10.698 ms/frame**.
+
+- [ ] **Reading position:** on 5,000 long wrapped lines, park at line 3000 and toggle
+  word wrap, width 40/80, centered text, gutter/line numbers, rulers, font size and line
+  padding. Top text stays anchored; a previously visible caret stays visible. Repeat with
+  caret parked away and with syntax-specific font/wrap settings, zoom and display scaling.
+  Toggle the sidebar, resize narrow/wide, enter/exit distraction-free full screen, and reload
+  Menlo/Monaco. Repeat with the same document cloned into two groups at lines 4000/5000;
+  both visible panes keep their own top text and visible carets through repeated zoom in/out.
+  Unwrap a very long single line while reading its middle: retain horizontal reading position.
+  Insert 1,000 lines above a parked pane from its clone: preserve the visible text, while the
+  typing pane follows its caret. Repeat with the recipient focused and the edit away from
+  its caret. Unfold a large region above the viewport; visible text stays anchored.
+- [ ] **Commands and focus:** settings, syntax, palette, theme, toggles and copying preserve
+  a parked unwrapped view. Motion, edit, undo/redo, Find and Goto reveal. Switch tabs/groups
+  using commands, tabs and sidebar Open Files: each restores its own parked viewport.
+  Jump f0:3000, scroll f0 to top, jump f1:100 then f1:5000 and press Ctrl+- three times:
+  f0:3000 must be visible. Repeat Forward, bookmarks and marks with an unchanged selection.
+  In Find with one match, scroll away and press Enter/Shift+Enter repeatedly; match reappears.
+- [ ] **Keyboard animation:** compare 0/0.5/1/2, repeated Page Up/Down, center and Goto.
+  Type newlines or commit IME text during motion; the caret remains visible after settling.
+  Wheel/trackpad/minimap interruptions and Reduce Motion remain immediate. Verify final
+  hit testing and changing zoom/scale or speed to zero during motion. Resize, toggle the
+  sidebar/wrapping, zoom or unfold during Page Down: settle at the same text destination
+  with the caret visible; later animation frames must not overwrite the reflow.
+- [ ] **Caret and gutter:** solid plus inverse stays visible. Compare block false/true,
+  blinking styles, top/bottom extensions, rounded corners, glyph contrast, ligatures,
+  CJK/emoji, selections, multiple carets and Vintage. Compare highlighted line numbers
+  on wrapped and unwrapped long lines, with a syntax override and many carets.
+- [ ] **Minimap:** false centers an outside click; true keeps the drawn clicked text at
+  pointer y, including a click inside the viewport. Repeated stationary drags remain
+  stationary; both ends are reachable. Round-17 border and release-over-status behavior stay.
+- [ ] **Tabs/title:** compare dirty-tab colors, scrolling versus fitting, new/scroll buttons,
+  resizing and repeated toggles; hidden buttons have no hit target. Compare basename/full/
+  project-relative title paths, untitled/deleted/dirty files and paths outside project roots.
+- [ ] **Preview tabs:** true/false/only_left, single/double click, replace clean previews,
+  edit/save/double-click/Goto promotion, and dirty/pinned protection. Open and cancel palette
+  or appearance pickers while previewing: no recents entry or persisted session tab/order.
+  Restart with a preview active; only permanent tabs return.
+- [ ] **Tree motion:** expand/collapse repeatedly and click moving rows. Compare animation
+  off, global animations off, Reduce Motion, and toggling Reduce Motion during transition.
+- [ ] **Build choices:** Automatic Rust → Python → several Rust matches prompts correctly.
+  Pick RustB, then PyA, return to Rust and Python: both choices persist without another picker.
+  A picker variant is remembered only for its matching systems; removing it falls back.
+  Explicit Tools choices apply to all file types. Build With lists matching systems only.
+- [ ] **Login environment:** launch from Dock with Homebrew/nvm/conda PATH in the user's
+  login shell; verify argv and shell builds. Repeat without another successful capture;
+  alternate systems with different path/env overrides: all share one captured base, with
+  each override applied separately. Touch a login profile to invalidate. A hanging profile
+  costs one 2 s wait; switching systems still falls back promptly. A healthy 3 s profile
+  serves later builds in either system. Press Cmd+B twice during the initial capture: the
+  replacement uses its eventual result; cancelling the build does not kill shared capture.
+  Selecting a build system starts background capture. Unsupported shells fall back to bash.
+  Profiles with stdout banners, EXIT/.zlogout assignments or detached jobs cannot inject
+  variables or hang build completion; only bytes between start/end markers count.
+- [ ] **Build flow/output:** start/cancel/restart children and grandchildren; no group child
+  remains, old output never reaches the next run, and detached pipes cannot delay Finished.
+  Pause polling for 0.6–2 s near the end of a 1.08 MiB output stream: the tail marker precedes
+  Finished without silent loss. Repeat with 3 s stalls and 22 MB. A detached daemon printing
+  every 50 ms must finish within about 700 ms after the main process exits and cancel within
+  100 ms. Any discarded daemon output is visibly marked. Over 8 MiB, the panel marks its
+  6 MiB retained tail; the first line after the notice must be a complete line.
+  Default output wraps; explicit false disables it. Check incremental large output,
+  diagnostics/results after trimming, SIGUSR1/SIGKILL names, exit code, quiet and Cancelled.
+  F7/Ctrl+C work with document/find/output focus and cancel binds only while running.
+- [ ] **Save All on Build:** toggle via Tools in tab A, check same state in tab B and after
+  restart. False skips saving everywhere; true saves named dirty tabs and skips untitled.
+  Direct exec never saves. New Build System opens the untitled JSON template; interactive
+  builds report unsupported. Check show-panel off/on and build/search result navigation.
+- [ ] **Project events/status:** create/rename/delete below gitignored target with indexing
+  off/on; search/Goto file lists stay current. Check native FSEvents load during builds.
+  Compare compact/enabled/disabled line-column status without hiding other status items.
+- [ ] **Merged menus:** exercise all Goto rows and Preferences color-scheme/theme rows,
+  plus UI: Select Color Scheme / UI: Select Theme palette entries against the real pickers.
+
 # Round 19 Lane A final verification fixes (native review pending)
 
 Start: clean `lane-a` at `71a516d`, following the user's two WIP commits and main

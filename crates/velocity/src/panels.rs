@@ -163,6 +163,7 @@ pub struct Panels {
     side_open: Option<usize>,
     pub side_scroll: Scroll,
     pub side_rows: Vec<SideRow>,
+    tree_motion: Option<(Instant, BTreeMap<PathBuf, f64>)>,
     pub primary_click: bool,
     pub build_results: Vec<(usize, FileLocation)>,
     pub build_output_offset: usize,
@@ -300,6 +301,7 @@ impl Default for Panels {
             side_open: None,
             side_scroll: Scroll::default(),
             side_rows: vec![],
+            tree_motion: None,
             primary_click: false,
             build_results: Vec::new(),
             build_output_offset: 0,
@@ -593,6 +595,25 @@ impl Panels {
             let _ = tx.send((path, children));
         });
     }
+    fn tree_row_position(&self, index: usize, now: Instant) -> f64 {
+        let target = index as f64;
+        let Some((started, positions)) = &self.tree_motion else {
+            return target;
+        };
+        let row = &self.side_rows[index];
+        let from = positions
+            .get(&row.path)
+            .copied()
+            .or_else(|| {
+                row.path
+                    .ancestors()
+                    .skip(1)
+                    .find_map(|p| positions.get(p).copied())
+            })
+            .unwrap_or(target);
+        let t = (now.saturating_duration_since(*started).as_secs_f64() / 0.14).clamp(0., 1.);
+        from + (target - from) * (1. - (1. - t).powi(3))
+    }
     fn rebuild_side(&mut self, workspace: &Workspace) {
         fn visit(
             rows: &mut Vec<SideRow>,
@@ -625,6 +646,13 @@ impl Panels {
                 }
             }
         }
+        let now = Instant::now();
+        let old_rows = self
+            .side_rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| (row.path.clone(), self.tree_row_position(i, now)))
+            .collect::<BTreeMap<_, _>>();
         self.side_rows.clear();
         for (i, folder) in workspace.folders.iter().enumerate() {
             visit(
@@ -637,7 +665,30 @@ impl Panels {
                 true,
             );
         }
-        self.expire_message(Instant::now());
+        // A new event starts from the current drawn positions, so repeated expand/collapse
+        // gestures converge without jumping or accumulating offsets.
+        // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
+        let changed_rows = old_rows.len() != self.side_rows.len()
+            || self
+                .side_rows
+                .iter()
+                .enumerate()
+                .any(|(i, row)| old_rows.get(&row.path) != Some(&(i as f64)));
+        if !old_rows.is_empty()
+            && changed_rows
+            && workspace
+                .editor()
+                .settings
+                .bool("tree_animation_enabled", true)
+            && workspace.editor().settings.bool("animation_enabled", true)
+            && !workspace.themes.ui.borrow().reduce_motion()
+        {
+            self.tree_motion = Some((now, old_rows));
+        } else if !changed_rows { /* retain an active transition */
+        } else {
+            self.tree_motion = None;
+        }
+        self.expire_message(now);
         self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
         self.side_scroll.row_height = 24. * self.ui_scale;
         self.side_selected = self
@@ -2753,7 +2804,7 @@ impl Panels {
                     }
                     "enter" | "right" => {
                         workspace.select(index.min(open_file_count(workspace).saturating_sub(1)));
-                        workspace.tabs[workspace.active].transient = false;
+                        workspace.make_permanent(workspace.active);
                     }
                     _ if key.modifiers & 9 != 0 => return Ok((false, None)),
                     _ => {}
@@ -3834,7 +3885,9 @@ impl Panels {
                 let row = &self.side_rows[i];
                 let expanded = self.expanded.contains(&row.path);
                 let rect = Rect {
-                    y: self.side_bounds.y + (base + i) as f64 * (24. * self.ui_scale)
+                    y: self.side_bounds.y
+                        + (base as f64 + self.tree_row_position(i, Instant::now()))
+                            * (24. * self.ui_scale)
                         - self.side_scroll.offset,
                     height: (24. * self.ui_scale),
                     ..self.side_bounds
@@ -3898,6 +3951,21 @@ impl Panels {
     }
     pub fn paint(&mut self, workspace: &Workspace, scene: &mut Scene) {
         self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
+        if !workspace
+            .editor()
+            .settings
+            .bool("tree_animation_enabled", true)
+            || workspace.themes.ui.borrow().reduce_motion()
+            || self
+                .tree_motion
+                .as_ref()
+                .is_some_and(|(at, _)| at.elapsed().as_secs_f64() >= 0.14)
+        {
+            self.tree_motion = None;
+        }
+        if self.tree_motion.is_some() {
+            workspace.themes.ui.borrow_mut().request_animation();
+        }
         self.sync_widgets(workspace);
         let mut theme = workspace.themes.ui.borrow_mut();
 
@@ -4341,7 +4409,8 @@ impl Panels {
                         } else {
                             String::new()
                         },
-                        vel_ui::status::position(
+                        vel_ui::status::position_mode(
+                            editor.settings.string("show_line_column", "compact"),
                             row + 1,
                             col,
                             editor.regions().len(),
@@ -4799,12 +4868,24 @@ impl Panels {
                     workspace.click_sheet(row - 1, self.primary_click, extend);
                     self.side_open = Some(row - 1);
                     if double {
-                        workspace.tabs[workspace.active].transient = false;
+                        workspace.make_permanent(workspace.active);
                     }
                 } else if row >= open_file_count(workspace) + 2 {
                     self.side_open = None;
-                    self.side_selected = (row - open_file_count(workspace) - 2)
-                        .min(self.side_rows.len().saturating_sub(1));
+                    let at = (point.y - self.side_bounds.y + self.side_scroll.offset)
+                        / (24. * self.ui_scale)
+                        - (open_file_count(workspace) + 2) as f64;
+                    let now = Instant::now();
+                    self.side_selected = (0..self.side_rows.len())
+                        .rev()
+                        .find(|&i| {
+                            let y = self.tree_row_position(i, now);
+                            at >= y && at < y + 1.
+                        })
+                        .unwrap_or_else(|| {
+                            (row - open_file_count(workspace) - 2)
+                                .min(self.side_rows.len().saturating_sub(1))
+                        });
                     if extend && let Some(anchor) = self.side_anchor {
                         for index in anchor.min(self.side_selected)..=anchor.max(self.side_selected)
                         {
@@ -4840,7 +4921,22 @@ impl Panels {
                         }
                         self.side_anchor = Some(self.side_selected);
                     } else {
-                        self.activate_side(workspace, double)?;
+                        // Single clicks select only when preview is disabled. Double click
+                        // always opens permanently, including with preview_on_click=false.
+                        // https://docs.sublimetext.io/reference/settings.html#global-settings
+                        // "only_left": https://www.sublimetext.com/download (ST4 Files and Folders).
+                        let preview = workspace.editor().settings.get("preview_on_click");
+                        let enabled = preview.and_then(Value::as_bool).unwrap_or(true)
+                            || preview.and_then(Value::as_str) == Some("only_left");
+                        if double
+                            || enabled
+                            || self
+                                .side_rows
+                                .get(self.side_selected)
+                                .is_some_and(|r| r.directory)
+                        {
+                            self.activate_side(workspace, double)?;
+                        }
                         self.side_anchor = Some(self.side_selected);
                     }
                 }
@@ -5694,3 +5790,7 @@ fn escape_html(text: &str) -> String {
 #[path = "panels_a11y.rs"]
 mod accessibility;
 pub(crate) use accessibility::ax_id;
+
+#[cfg(test)]
+#[path = "panels_lane_b_round18_tests.rs"]
+mod lane_b_round18_tests;

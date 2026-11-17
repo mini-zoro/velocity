@@ -2078,6 +2078,8 @@
   { "keys": ["ctrl+alt+enter"], "command": "replace_all", "args": {"_close_panel":true},
     "context": [{"key":"panel_has_focus","operand":true}, {"key":"panel","operand":"replace"}] },
   // Lane A round 19: Goto shortcuts use our existing commands (docs/indexing.html).
-  {"keys": ["super+alt+shift+down"], "command": "goto_reference"}
-
+  {"keys": ["super+alt+shift+down"], "command": "goto_reference"},
+  // Lane B round 18 builds: Ctrl+C only takes over while this window has a build.
+  {"keys":["f7"],"command":"build"},
+  {"keys":["ctrl+c"],"command":"cancel_build","context":[{"key":"build_running","operand":true}]}
 ]

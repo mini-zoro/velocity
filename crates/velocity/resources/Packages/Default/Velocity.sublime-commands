@@ -746,5 +746,13 @@
     "args": {
       "file": "res://Packages/Default/Delete Line.sublime-macro"
     }
-  }
+  },
+  {"caption":"UI: Select Color Scheme","command":"select_color_scheme"},
+  {"caption":"UI: Select Theme","command":"select_theme"},
+  {"caption": "Goto: Goto Line…", "command": "goto_line"},
+  {"caption": "Goto: Next File", "command": "next_view"},
+  {"caption": "Goto: Previous File", "command": "prev_view"},
+  {"caption": "Build: Save All on Build", "command": "toggle_setting", "args": {"setting": "save_all_on_build"}},
+  {"caption": "Build: Show Results", "command": "show_panel", "args": {"panel": "output.exec"}},
+  {"caption": "Build: New Build System", "command": "new_build_system"}
 ]
