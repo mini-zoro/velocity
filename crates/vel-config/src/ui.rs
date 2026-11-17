@@ -70,7 +70,8 @@ pub fn extend_palette(palette: &mut Vec<PaletteItem>, menu: &[MenuItem]) {
 /// Mouse binding; button numbering follows Sublime (1 = primary).
 #[derive(Clone, Debug, Deserialize)]
 pub struct MouseBinding {
-    /// Primary=1, secondary=2, middle=3.
+    /// Primary=1, secondary=2, middle=3; wheel directions use the constants below.
+    #[serde(deserialize_with = "mouse_button")]
     pub button: usize,
     /// Modifier names.
     #[serde(default)]
@@ -94,6 +95,32 @@ pub struct MouseBinding {
 }
 fn one() -> usize {
     1
+}
+/// Wheel-up binding identity (outside the physical button range).
+pub const SCROLL_UP: usize = 17;
+/// Wheel-down binding identity (outside the physical button range).
+pub const SCROLL_DOWN: usize = 18;
+fn mouse_button<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let button = value
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .or_else(|| {
+            let text = value.as_str()?;
+            match text {
+                "scroll_up" => Some(SCROLL_UP),
+                "scroll_down" => Some(SCROLL_DOWN),
+                _ => text
+                    .strip_prefix("button")?
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=16).contains(n)),
+            }
+        })
+        .filter(|n| (1..=SCROLL_DOWN).contains(n));
+    button.ok_or_else(|| {
+        serde::de::Error::custom("expected button1..button16, scroll_up/down or a button number")
+    })
 }
 /// Parses a resource using the shared lenient syntax.
 pub fn parse<T: DeserializeOwned>(source: &str) -> Result<Vec<T>, String> {
@@ -290,18 +317,82 @@ pub fn resolve_menu(
 
 /// Parses mouse bindings and compiles optional context regular expressions.
 pub fn parse_mousemap(source: &str) -> Result<Vec<MouseBinding>, String> {
-    let mut bindings: Vec<MouseBinding> = parse(source)?;
-    for binding in &mut bindings {
-        for context in &mut binding.context {
-            context.prepare()?;
-        }
+    let (bindings, warnings) = parse_mousemap_with_warnings(source)?;
+    for warning in warnings {
+        eprintln!("mousemap: {warning}");
     }
     Ok(bindings)
+}
+/// Parses entries independently so one malformed user binding cannot hide its neighbors.
+pub fn parse_mousemap_with_warnings(
+    source: &str,
+) -> Result<(Vec<MouseBinding>, Vec<String>), String> {
+    let document = Document::parse(source)?;
+    let array = document
+        .value
+        .as_array()
+        .ok_or("mousemap must be an array")?;
+    let mut bindings = Vec::new();
+    let mut warnings = Vec::new();
+    for (index, value) in array.iter().enumerate() {
+        let result = serde_json::from_value::<MouseBinding>(value.clone())
+            .map_err(|e| e.to_string())
+            .and_then(|mut binding| {
+                if binding.count == 0 {
+                    return Err("count must be positive".into());
+                }
+                if binding
+                    .modifiers
+                    .iter()
+                    .any(|m| !matches!(m.as_str(), "ctrl" | "alt" | "shift" | "super"))
+                {
+                    return Err("unknown modifier".into());
+                }
+                for context in &mut binding.context {
+                    context.prepare()?;
+                }
+                Ok(binding)
+            });
+        match result {
+            Ok(binding) => bindings.push(binding),
+            Err(error) => warnings.push(format!("binding {index}: {error}")),
+        }
+    }
+    Ok((bindings, warnings))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mousemap_buttons_and_malformed_neighbors_are_independent() {
+        let mut entries = Vec::new();
+        for number in 1..=16 {
+            entries.push(serde_json::json!({"button":format!("button{number}"),"command":"noop"}));
+            entries.push(serde_json::json!({"button":number,"command":"noop"}));
+        }
+        entries.extend([
+            serde_json::json!({"button":"scroll_up","command":"noop"}),
+            serde_json::json!({"button":"scroll_down","command":"noop"}),
+        ]);
+        for bad in [
+            serde_json::json!({"button":"button0"}),
+            serde_json::json!({"button":"button17"}),
+            serde_json::json!({"button":0}),
+            serde_json::json!({"button":false}),
+            serde_json::json!({"button":1,"count":0}),
+            serde_json::json!({"button":1,"modifiers":["unknown"]}),
+            serde_json::json!({"button":1,"context":[{"key":"setting.x","operator":"regex_match","operand":"("}]}),
+        ] {
+            entries.insert(1, bad);
+        }
+        let (bindings, warnings) =
+            parse_mousemap_with_warnings(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(bindings.len(), 34);
+        assert_eq!(warnings.len(), 7);
+        assert_eq!(bindings.last().unwrap().button, SCROLL_DOWN);
+        assert!(parse_mousemap("[").is_err());
+    }
     #[test]
     fn palette_menu_deduplication_platform_filter_and_binding_hints() {
         let mut palette: Vec<PaletteItem> =

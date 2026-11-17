@@ -365,7 +365,7 @@ fn documentation_style_golden_display_lists() {
     for (name, html, width) in [
         (
             "hover",
-            r#"<style>.sig{background-color:color(var(--background) blend(white 8%));padding:4px;border-radius:3px} code{color:var(--greenish)}</style><div class="sig"><b>fn</b> <code>read(path)</code></div><p>Reads a <a href="https://example.com" title="API">file</a>.</p>"#,
+            r#"<style>.sig{background-color:color(var(--background) blend(white 92%));padding:4px;border-radius:3px} code{color:var(--greenish)}</style><div class="sig"><b>fn</b> <code>read(path)</code></div><p>Reads a <a href="https://example.com" title="API">file</a>.</p>"#,
             150.,
         ),
         (

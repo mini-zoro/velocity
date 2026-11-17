@@ -1,4 +1,4 @@
-# Command coverage — round 13
+# Command coverage — rounds 13–17
 
 Audit date: 2026-11-16. Sources are public documentation only; no installed Default
 package, bundled Python, private assets or editor binaries were inspected.
@@ -21,7 +21,7 @@ Each name counts once, even if it appears in multiple sources. Generic host forw
 is deliberately counted as partial, not implemented. Application hosts may implement
 more than this crate's standalone guarantee.
 
-**Counts: 61 implemented, 118 partially, 13 missing, 3 out of scope; 195 total.**
+**Counts: 61 implemented, 123 partially, 12 missing, 3 out of scope; 199 total.**
 
 Public sources:
 
@@ -73,13 +73,16 @@ and lane A wires browser/clipboard menus in the next round.
 | `cut` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `decrease_font_size` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `delete_word` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
+| `detect_indentation` | partially | indentation | Registered host hook; Velocity reuses file-load detection and updates the view settings. |
 | `diff_changes` | missing | key_bindings | No registration or executable adapter in vel-commands; window/application integration remains. |
+| `drag_select` | partially | round-17 spec | Registered host hook; Velocity maps mouse coordinates and arguments to its selection gesture. |
 | `duplicate_line` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `edit_project` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `exec` | partially | changelog | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `exit_insert_mode` | out of scope | vintage | Vintage command; owned by vel-vintage, not this registry. |
 | `expand_selection` | partially | spec | Word, line, indentation and paragraph work; syntax scope/brackets require a host hook. |
 | `expand_selection_to_paragraph` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
+| `expand_tabs` | partially | indentation | Registered host hook; Velocity converts leading whitespace in one transaction; set_translate_tabs updates this view. |
 | `find_all` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `find_all_under` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `find_in_files` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
@@ -193,7 +196,7 @@ and lane A wires browser/clipboard menus in the next round.
 | `set_layout` | partially | key_bindings, menus | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `set_line_endings` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `set_mark` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
-| `set_setting` | missing | settings | No registration or executable adapter in vel-commands; window/application integration remains. |
+| `set_setting` | partially | settings | Registered view-setting action; Velocity applies arbitrary JSON through its named dispatcher. |
 | `show_at_center` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `show_build_systems` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `show_dictionary` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
@@ -232,6 +235,7 @@ and lane A wires browser/clipboard menus in the next round.
 | `trim_trailing_white_space` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `trim_trailing_whitespace` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `undo` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
+| `unexpand_tabs` | partially | indentation | Registered host hook; Velocity converts leading whitespace in one transaction; set_translate_tabs updates this view. |
 | `unfold` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `unfold_all` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `unindent` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |

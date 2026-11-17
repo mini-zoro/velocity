@@ -2051,5 +2051,13 @@
   {"keys": ["super+k", "super+y"], "command": "yank"},
   {"keys": ["super+k", "super+g"], "command": "clear_bookmarks", "args": {"name": "mark"}},
   {"keys": ["ctrl+q"], "command": "toggle_record_macro"},
-  {"keys": ["ctrl+shift+q"], "command": "run_macro"}
+  {"keys": ["ctrl+shift+q"], "command": "run_macro"},
+  // Lane A round 17. Verified from the public macOS shortcut reference:
+  // https://docs.sublimetext.io/reference/keyboard_shortcuts_osx.html
+  {"keys": ["ctrl+super+shift+f"], "command": "toggle_distraction_free"},
+  {"keys": ["ctrl+alt+up"], "command": "scroll_lines", "args": {"amount": 1}},
+  {"keys": ["ctrl+alt+down"], "command": "scroll_lines", "args": {"amount": -1}}
+  // That reference does not document Cmd+plus. Retain the current Cmd+= zoom
+  // binding until its requested alias can be confirmed from a documentation source.
+
 ]

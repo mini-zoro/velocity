@@ -1,0 +1,7 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>meta.jsx.js</string>
+<key>settings</key><dict>
+<key>velocityIndentUseLeadingScope</key><true/>
+<key>velocityIndentIgnoreScope</key><string>meta.interpolation</string>
+</dict></dict></plist>

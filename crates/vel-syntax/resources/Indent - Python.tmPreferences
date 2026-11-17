@@ -1,0 +1,6 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>source.python</string>
+<key>settings</key><dict>
+<key>velocityIndentationBlocks</key><true/>
+</dict></dict></plist>

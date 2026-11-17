@@ -7,6 +7,8 @@
 mod palette;
 mod properties;
 mod registry;
+#[cfg(test)]
+mod resource_colors;
 mod textures;
 use fnv::{FnvHashMap, FnvHasher};
 pub use palette::Palette;

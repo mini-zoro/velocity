@@ -286,6 +286,8 @@ pub struct Workspace {
     /// Macro filenames from the background resource overlay; contents are loaded on demand.
     pub(crate) macro_paths: std::collections::BTreeSet<String>,
     pub messages: Vec<String>,
+    /// Consolidated authoring diagnostics; consumed by the status bar, never alerts.
+    pub(crate) resource_reports: Vec<String>,
     pub telemetry: Vec<Value>,
     pub(crate) settings: Settings,
     pub(crate) keymap: Keymap,
@@ -371,6 +373,87 @@ struct Configuration {
     project_model: vel_session::project::Project,
     config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
     messages: Vec<String>,
+    resource_reports: Vec<String>,
+}
+// Diagnostics retain their resource paths; display names never establish provenance.
+fn user_resource(resource: &vel_config::resources::Resource, data: Option<&Path>) -> bool {
+    data.is_some_and(|data| {
+        resource.origin.starts_with(data.join("Packages"))
+            || resource.origin.starts_with(data.join("Installed Packages"))
+    })
+}
+fn warning_from_path(warning: &str, path: &str) -> bool {
+    warning
+        .strip_prefix(path)
+        .is_some_and(|rest| rest.starts_with(':'))
+        || warning.starts_with(&format!("skipping {path:?}:"))
+}
+fn collect_resource_warnings<'a, S: AsRef<str>>(
+    kind: &str,
+    warnings: impl IntoIterator<Item = (Option<&'a str>, S)>,
+    reports: &mut Vec<String>,
+    log: &mut Vec<String>,
+) {
+    let mut count = 0;
+    let mut first = None;
+    for (path, warning) in warnings {
+        eprintln!("{}", warning.as_ref());
+        log.push(warning.as_ref().to_owned());
+        if let Some(path) = path {
+            first.get_or_insert(path);
+            count += 1;
+        }
+    }
+    if let Some(first) = first {
+        reports.push(format!(
+            "{count} {kind} warnings ({first}), see Velocity.log"
+        ));
+    }
+}
+/// Size after which `Velocity.log` is rotated to `Velocity.log.1`.
+const RESOURCE_LOG_LIMIT: u64 = 1 << 20;
+fn write_resource_log(data: Option<&Path>, warnings: &[String], reports: &mut Vec<String>) {
+    use std::io::Write;
+    if warnings.is_empty() {
+        return;
+    }
+    if let Some(data) = data {
+        let path = data.join("Velocity.log");
+        let result = (|| {
+            std::fs::create_dir_all(data)?;
+            // The same warnings are logged on every configuration load, so keep the file bounded:
+            // past the limit the current log becomes `Velocity.log.1` (replacing an older one).
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > RESOURCE_LOG_LIMIT) {
+                std::fs::rename(&path, data.join("Velocity.log.1"))?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            file.write_all(
+                format!(
+                    "[{seconds}] {} resource warning(s)\n{}\n",
+                    warnings.len(),
+                    warnings.join("\n")
+                )
+                .as_bytes(),
+            )
+        })();
+        if let Err(error) = result {
+            eprintln!("{}: {error}", path.display());
+            if !reports.is_empty() {
+                // Even an unwritable profile must not send these through the alert queue.
+                reports.push(format!(
+                    "Could not write {}: {error}; {}",
+                    path.display(),
+                    warnings.join("; ")
+                ));
+            }
+        }
+    }
 }
 impl Configuration {
     fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
@@ -449,12 +532,34 @@ impl Configuration {
             );
         }
         let mut resource_messages = Vec::new();
+        let mut resource_reports = Vec::new();
+        let mut mouse_warnings = Vec::new();
+        let mut scheme_warnings = Vec::new();
+        let mut resource_log = Vec::new();
         resources.load_syntaxes(&crate::language::packages_root())?;
         if let Some(bundle) = crate::release::bundle_resources() {
-            resource_messages.extend(resources.load_with_warnings(&bundle));
+            collect_resource_warnings(
+                "package",
+                resources
+                    .load_with_warnings(&bundle)
+                    .iter()
+                    .map(|warning| (None, warning)),
+                &mut resource_reports,
+                &mut resource_log,
+            );
         }
         if let Some(data) = &data_dir {
-            resource_messages.extend(resources.load_with_warnings(data));
+            let warnings = resources.load_with_warnings(data);
+            let paths: Vec<_> = warnings
+                .iter()
+                .map(|w| w.split_once(": ").map_or(w.as_str(), |(p, _)| p))
+                .collect();
+            collect_resource_warnings(
+                "package",
+                warnings.iter().zip(paths).map(|(w, p)| (Some(p), w)),
+                &mut resource_reports,
+                &mut resource_log,
+            );
         }
         // Resolve ignored_packages before loading any resource category. Reading
         // the preferences first is necessary to allow re-enabling a package.
@@ -715,9 +820,12 @@ impl Configuration {
             }
         }
         for resource in resources.matching(".sublime-mousemap") {
-            match resource.text().and_then(ui::parse_mousemap) {
-                Ok(items) => mousemap.extend(items),
-                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
+            match resource.text().and_then(ui::parse_mousemap_with_warnings) {
+                Ok((items, warnings)) => {
+                    mousemap.extend(items);
+                    mouse_warnings.extend(warnings.into_iter().map(|w| (resource.path.clone(), w)));
+                }
+                Err(e) => mouse_warnings.push((resource.path.clone(), e)),
             }
         }
         for resource in resources.matching(".sublime-commands") {
@@ -744,7 +852,29 @@ impl Configuration {
         let bundled = crate::language::Assets::bundled()?;
         let assets =
             crate::language::Assets::with_user_packages(&bundled, data_dir.as_deref(), &resources)?;
-        resource_messages.extend(assets.syntaxes.warnings().iter().cloned());
+        let user_syntaxes: Vec<_> = resources
+            .matching("")
+            .into_iter()
+            .filter(|r| {
+                user_resource(r, data_dir.as_deref())
+                    && [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
+                        .iter()
+                        .any(|suffix| r.path.ends_with(suffix))
+            })
+            .collect();
+        let syntax_warnings = assets.syntaxes.warnings().iter().map(|warning| {
+            let path = user_syntaxes
+                .iter()
+                .find(|r| warning_from_path(warning, &r.path))
+                .map(|r| r.path.as_str());
+            (path, warning.as_str())
+        });
+        collect_resource_warnings(
+            "syntax",
+            syntax_warnings,
+            &mut resource_reports,
+            &mut resource_log,
+        );
         for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
             palette.push(PaletteItem {
                 caption: format!("Set Syntax: {}", syntax.name),
@@ -779,14 +909,19 @@ impl Configuration {
             });
         }
         let mut scheme_resources = Vec::new();
-        for suffix in [".sublime-color-scheme", ".hidden-color-scheme", ".tmTheme"] {
+        for suffix in [
+            ".sublime-color-scheme",
+            ".hidden-color-scheme",
+            ".tmTheme",
+            ".hidden-tmTheme",
+        ] {
             for resource in resources.matching(suffix) {
                 if resource.origin.exists() {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
                 }
                 match resource.text() {
                     Ok(source) => scheme_resources.push((resource.path.clone(), source.to_owned())),
-                    Err(e) => resource_messages.push(e),
+                    Err(e) => scheme_warnings.push((resource.path.clone(), e)),
                 }
             }
         }
@@ -794,6 +929,17 @@ impl Configuration {
         for (path, _) in &scheme_resources {
             let name = path.rsplit('/').next().expect("resource filename");
             if !schemes.contains_key(name) {
+                // A User override can contribute warnings to a bundled scheme filename.
+                let warning_path = scheme_resources
+                    .iter()
+                    .rev()
+                    .find(|(p, _)| {
+                        p.rsplit('/').next() == Some(name)
+                            && resources
+                                .get(p)
+                                .is_some_and(|r| user_resource(r, data_dir.as_deref()))
+                    })
+                    .map_or(path, |(p, _)| p);
                 let scheme = vel_color_scheme::load_resources(
                     scheme_resources
                         .iter()
@@ -803,9 +949,15 @@ impl Configuration {
                 .map_err(|e| e.to_string());
                 match scheme {
                     Ok(scheme) => {
+                        scheme_warnings.extend(
+                            scheme
+                                .warnings()
+                                .iter()
+                                .map(|warning| (warning_path.clone(), warning.clone())),
+                        );
                         schemes.insert(name.to_owned(), Arc::new(scheme));
                     }
-                    Err(e) => resource_messages.push(format!("{name}: {e}")),
+                    Err(e) => scheme_warnings.push((warning_path.clone(), e)),
                 }
             }
         }
@@ -901,7 +1053,25 @@ impl Configuration {
             .into_iter()
             .map(|r| r.path.clone())
             .collect();
+        for (kind, warnings) in [
+            ("mousemap", &mouse_warnings),
+            ("color-scheme", &scheme_warnings),
+        ] {
+            collect_resource_warnings(
+                kind,
+                warnings.iter().map(|(path, warning)| {
+                    let user = resources
+                        .get(path)
+                        .is_some_and(|r| user_resource(r, data_dir.as_deref()));
+                    (user.then_some(path.as_str()), format!("{path}: {warning}"))
+                }),
+                &mut resource_reports,
+                &mut resource_log,
+            );
+        }
+        write_resource_log(data_dir.as_deref(), &resource_log, &mut resource_reports);
         Ok(Self {
+            resource_reports,
             themes,
             macro_paths,
             #[cfg(test)]
@@ -953,6 +1123,7 @@ impl Workspace {
             project_model,
             config_stamp,
             messages: resource_messages,
+            resource_reports,
         } = Configuration::load(data_dir.clone(), project.clone())?;
         let tab = Tab::new(text, &settings, &keymap)?;
         let mut messages = resource_messages;
@@ -1003,6 +1174,7 @@ impl Workspace {
             palette,
             macro_paths,
             messages,
+            resource_reports,
             telemetry: Vec::new(),
             settings,
             keymap,
@@ -1784,6 +1956,7 @@ impl Workspace {
             match result {
                 Ok(mut config) => {
                     self.messages.append(&mut config.messages);
+                    self.resource_reports.append(&mut config.resource_reports);
                     self.themes = crate::theme_ui::Themes::publish(config.themes);
                     if let Err(e) = self.themes.select(&config.settings, self.dark) {
                         self.messages.push(e);
@@ -3215,5 +3388,30 @@ mod review15_indentation_tests {
             w.poll();
             assert_eq!(w.editor().settings.usize("tab_size", 0), 8);
         }
+    }
+}
+
+#[cfg(test)]
+mod resource_log_tests {
+    use super::*;
+    #[test]
+    fn resource_log_is_timestamped_and_rotates_past_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("Velocity.log");
+        let mut reports = Vec::new();
+        write_resource_log(Some(dir.path()), &["first warning".into()], &mut reports);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with('[') && text.contains("1 resource warning(s)\nfirst warning\n"));
+        std::fs::write(&log, vec![b'x'; RESOURCE_LOG_LIMIT as usize + 1]).unwrap();
+        write_resource_log(Some(dir.path()), &["second warning".into()], &mut reports);
+        assert_eq!(
+            std::fs::metadata(dir.path().join("Velocity.log.1"))
+                .unwrap()
+                .len(),
+            RESOURCE_LOG_LIMIT + 1
+        );
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("second warning") && !text.contains('x'));
+        assert!(reports.is_empty());
     }
 }

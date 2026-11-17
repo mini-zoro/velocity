@@ -17,7 +17,27 @@ fn official_assertions_never_regress() {
         203,
         "includes the public Plain Text.tmLanguage"
     );
-    assert!(set.warnings().is_empty(), "{:?}", set.warnings());
+    // These optional references are absent from the pinned public package tree.
+    // Round 17 diagnoses them at link time; missing embedded languages retain
+    // their Plain Text fallback. These internal diagnostics are console-only.
+    // Permit only these known missing targets, never regex/type/other warnings.
+    assert_eq!(set.warnings().len(), 16, "{:?}", set.warnings());
+    assert!(
+        set.warnings().iter().all(|warning| {
+            warning.contains("unresolved context reference ByScope")
+                && [
+                    "scope: source.html,",
+                    "scope: text.html,",
+                    "scope: source.tex.latex,",
+                    "scope: text.tex.latex, sub_context: Some(\"plain-tex\")",
+                    "scope: text.tex.latex, sub_context: Some(\"begin-end-commands\")",
+                ]
+                .iter()
+                .any(|target| warning.contains(target))
+        }),
+        "{:?}",
+        set.warnings()
+    );
     let actual = syntest::run(&set, &root, None);
     let baseline: SuiteResult = serde_json::from_str(include_str!("baseline.json")).unwrap();
     assert_eq!(actual.test_files, 242);

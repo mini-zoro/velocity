@@ -613,7 +613,8 @@ fn parse_color(
                     "color({} blend({} {}))",
                     crate::palette::css(c),
                     crate::palette::css(tint),
-                    f32::from(tint.a) / 255.
+                    // Array tints weight the tint by alpha; blend() weights the base.
+                    1. - f32::from(tint.a) / 255.
                 )
             }
             _ => return Err(invalid("derived color")),

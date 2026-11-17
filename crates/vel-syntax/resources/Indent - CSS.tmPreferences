@@ -1,0 +1,5 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity policy for comment-led CSS lines. -->
+<key>scope</key><string>source.css</string><key>settings</key><dict>
+<key>velocityPreserveLeadingComments</key><true/>
+</dict></dict></plist>

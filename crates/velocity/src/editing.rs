@@ -3,6 +3,7 @@ use crate::{
     editor::{Editor, cells_with_tab},
     layout::FOLDS,
 };
+use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -385,6 +386,21 @@ impl Editor {
             }
             "toggle_comment" => self.toggle_comment(args["block"].as_bool().unwrap_or(false))?,
             "reindent" => self.start_reindent()?,
+            "expand_tabs" | "unexpand_tabs" => {
+                self.convert_leading_tabs(name == "expand_tabs", args)?
+            }
+            "detect_indentation" => {
+                if let Some((size, spaces)) = crate::language::detect_indentation(&self.text) {
+                    self.settings
+                        .set(vel_config::settings::Layer::View, "tab_size", json!(size));
+                    self.settings.set(
+                        vel_config::settings::Layer::View,
+                        "translate_tabs_to_spaces",
+                        json!(spaces),
+                    );
+                    self.sync();
+                }
+            }
             "fold" | "unfold" | "fold_by_level" | "unfold_all" | "fold_tag_attributes" => {
                 self.fold_command(name, args)?
             }
@@ -915,6 +931,103 @@ impl Editor {
             after,
             EditKind::Other,
         );
+        Ok(())
+    }
+    /// Convert only leading whitespace in one old-coordinate transaction. Tabs advance
+    /// to visual tab stops; spaces after code and inside strings remain byte-identical.
+    fn convert_leading_tabs(&mut self, spaces: bool, args: &Value) -> Result<(), String> {
+        let size = self.preferences.tab_size.max(1);
+        let language = self.language.borrow();
+        if language.is_none() {
+            return Err("Syntax scopes are unavailable; indentation was not changed".into());
+        }
+        // Commands can precede the first highlight publication or follow an edit in
+        // the same event turn. Parse this exact document version, as reindent does,
+        // rather than treating unavailable scopes as permission to change content.
+        let parsed = language
+            .as_ref()
+            .filter(|l| !l.scopes_ready())
+            .map(|l| {
+                let syntax = l
+                    .assets
+                    .syntaxes
+                    .find_syntax_by_path(&l.syntax)
+                    .ok_or("No syntax metadata for this document")?;
+                vel_syntax::indent::scoped_spans(&l.assets.syntaxes, syntax, &self.text.to_string())
+            })
+            .transpose()?;
+        let mut edits = Vec::new();
+        for row in 0..self.text.len_lines() {
+            let prefix: String = self
+                .text
+                .line(row)
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .collect();
+            let width = vel_syntax::indent::indentation(&prefix, size);
+            let replacement = if spaces {
+                " ".repeat(width)
+            } else {
+                "\t".repeat(width / size) + &" ".repeat(width % size)
+            };
+            if prefix != replacement {
+                let start = self.text.line_to_byte(row);
+                // Leading whitespace in strings/heredocs is document content (notably
+                // <<-EOF's tab stripping). Unknown scopes never authorize conversion.
+                let protected = if let Some(spans) = &parsed {
+                    let first = spans.partition_point(|span| span.range.end <= start);
+                    let leading_spans = &spans[first..];
+                    if !leading_spans
+                        .first()
+                        .is_some_and(|span| span.range.start <= start)
+                        || !leading_spans
+                            .iter()
+                            .take_while(|span| span.range.start < start + prefix.len())
+                            .any(|span| span.range.end >= start + prefix.len())
+                    {
+                        true
+                    } else {
+                        leading_spans
+                            .iter()
+                            .take_while(|span| span.range.start < start + prefix.len())
+                            .any(|span| vel_syntax::indent::is_string_or_heredoc(&span.scopes))
+                    }
+                } else {
+                    language
+                        .as_ref()
+                        .and_then(|l| l.scope_snapshot_at(start))
+                        .is_none_or(|snapshot| {
+                            snapshot
+                                .lines
+                                .get(row - snapshot.range.start)
+                                .is_none_or(|line| {
+                                    line.runs
+                                        .iter()
+                                        .take_while(|run| (run.start as usize) < prefix.len())
+                                        .any(|run| {
+                                            snapshot.stacks.get(run.stack).is_none_or(
+                                                vel_syntax::indent::is_string_or_heredoc,
+                                            )
+                                        })
+                                })
+                        })
+                };
+                if protected {
+                    continue;
+                }
+                edits.push((start..start + prefix.len(), replacement));
+            }
+        }
+        drop(language);
+        self.apply_edits(edits, None, EditKind::Other);
+        if args["set_translate_tabs"].as_bool().unwrap_or(false) {
+            self.settings.set(
+                vel_config::settings::Layer::View,
+                "translate_tabs_to_spaces",
+                json!(spaces),
+            );
+        }
+        self.sync();
         Ok(())
     }
     fn start_reindent(&mut self) -> Result<(), String> {

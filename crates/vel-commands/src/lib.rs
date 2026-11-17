@@ -152,6 +152,9 @@ const TEXT: &[&str] = &[
     "clear_fields",
     "toggle_comment",
     "reindent",
+    "expand_tabs",
+    "unexpand_tabs",
+    "detect_indentation",
     "fold",
     "unfold",
     "fold_by_level",
@@ -292,6 +295,8 @@ const WINDOW: &[&str] = &[
     "set_line_endings",
     "set_encoding",
     "toggle_setting",
+    "set_setting",
+    "drag_select",
 ];
 impl Registry {
     /// Moves the registry into a host dispatch without allocating a replacement recorder.

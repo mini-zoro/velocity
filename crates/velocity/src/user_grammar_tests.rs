@@ -215,7 +215,18 @@ fn corrupt_grammar_and_cache_keep_valid_grammars_with_readonly_cache_fallback() 
     // A file at Cache makes cache writes fail on every platform, independent of UID.
     write(&data.join("Cache"), "cache writes unavailable");
     let mut w = Workspace::new(Text::new(), Some(data.clone()), None, false).unwrap();
-    assert!(w.messages.iter().any(|m| m.contains("bad.tmLanguage.json")));
+    assert!(w.messages.is_empty(), "{:?}", w.messages);
+    assert_eq!(
+        w.resource_reports,
+        ["1 syntax warnings (Packages/User/bad.tmLanguage.json), see Velocity.log"]
+    );
+    assert!(
+        w.assets
+            .syntaxes
+            .warnings()
+            .iter()
+            .any(|m| m.contains("bad.tmLanguage.json"))
+    );
     let file = temp.path().join("sample.vnote");
     write(&file, "TODO\n");
     open(&mut w, &file);

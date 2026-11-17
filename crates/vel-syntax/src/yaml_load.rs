@@ -45,6 +45,9 @@ pub enum ParseSyntaxError {
     /// Maybe use Sublime Text to figure it out.
     #[error("Type mismatch")]
     TypeMismatch,
+    /// Invalid optional field, including its authoring location.
+    #[error("{0}")]
+    InvalidValue(String),
 }
 
 fn get_key<'a, R, F: FnOnce(&'a Yaml) -> Option<R>>(
@@ -70,6 +73,7 @@ pub(crate) struct ParserState<'a> {
     pub(crate) backref_regex: Regex,
     pub(crate) lines_include_newline: bool,
     pub(crate) version: u32,
+    pub(crate) context_depth: usize,
 }
 
 // `__start` must not include prototypes from the actual syntax definition,
@@ -96,21 +100,24 @@ impl SyntaxDefinition {
         lines_include_newline: bool,
         fallback_name: Option<&str>,
     ) -> Result<SyntaxDefinition, ParseSyntaxError> {
-        let docs = match YamlLoader::load_from_str(s) {
+        let mut docs = match YamlLoader::load_from_str(s) {
             Ok(x) => x,
             Err(e) => return Err(ParseSyntaxError::InvalidYaml(Box::new(e))),
         };
         if docs.is_empty() {
             return Err(ParseSyntaxError::EmptyFile);
         }
+        let warnings = normalize_authoring_types(&mut docs[0]);
         let doc = &docs[0];
         let mut scope_repo = lock_global_scope_repo();
-        SyntaxDefinition::parse_top_level(
+        let mut syntax = SyntaxDefinition::parse_top_level(
             doc,
             scope_repo.deref_mut(),
             lines_include_newline,
             fallback_name,
-        )
+        )?;
+        syntax.authoring_warnings = warnings;
+        Ok(syntax)
     }
 
     fn parse_top_level(
@@ -151,6 +158,7 @@ impl SyntaxDefinition {
             backref_regex: Regex::new(r"\\\d".into()),
             lines_include_newline,
             version,
+            context_depth: 0,
         };
 
         let mut contexts = SyntaxDefinition::parse_contexts(contexts_hash, &mut state)?;
@@ -185,6 +193,7 @@ impl SyntaxDefinition {
             .unwrap_or_default();
 
         let defn = SyntaxDefinition {
+            authoring_warnings: Vec::new(),
             raw_first_line_match: get_key(h, "first_line_match", |x| x.as_str())
                 .ok()
                 .map(str::to_owned),
@@ -235,6 +244,12 @@ impl SyntaxDefinition {
         // self-attachment is suppressed by the `no_prototype` set in
         // `SyntaxSetBuilder::link_syntaxes`, so we don't need a distinct
         // initial value for prototype vs. non-prototype contexts.
+        if state.context_depth >= 256 {
+            return Err(ParseSyntaxError::InvalidValue(
+                "anonymous context nesting exceeds 256".into(),
+            ));
+        }
+        state.context_depth += 1;
         let mut context = Context::new(None);
         let name = namer.next();
 
@@ -294,6 +309,7 @@ impl SyntaxDefinition {
             }
         }
 
+        state.context_depth -= 1;
         contexts.insert(name.clone(), context);
         Ok(name)
     }
@@ -552,7 +568,10 @@ impl SyntaxDefinition {
         if y.as_vec().is_some_and(|v| {
             !v.is_empty()
                 && (v[0].as_str().is_some()
-                    || (v[0].as_vec().is_some() && v[0].as_vec().unwrap()[0].as_hash().is_some()))
+                    || v[0]
+                        .as_vec()
+                        .and_then(|v| v.first())
+                        .is_some_and(|v| v.as_hash().is_some()))
         }) {
             // this works because Result implements FromIterator to handle the errors
             y.as_vec()
@@ -710,16 +729,17 @@ impl SyntaxDefinition {
 }
 
 /// Re-resolve a raw regex string with the given variables and newline mode.
-/// Applies the full pipeline: resolve_variables → replace_posix → newlines → try_compile.
+/// Expands variables and normalizes character classes/newlines; regex machines remain lazy.
 pub(crate) fn re_resolve_regex(
     raw: &str,
     variables: &HashMap<String, String>,
     lines_include_newline: bool,
 ) -> Result<String, ParseSyntaxError> {
-    let variable_regex = Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}".into());
+    static VARIABLE_REGEX: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}".into()));
     let state = ReResolveState {
         variables,
-        variable_regex: &variable_regex,
+        variable_regex: &VARIABLE_REGEX,
     };
     let regex = re_resolve_variables(raw, &state);
     let regex = replace_posix_char_classes(regex);
@@ -1200,4 +1220,337 @@ fn validate_variables(variables: &HashMap<String, String>) -> Result<(), ParseSy
         visit(name, variables, &mut marks, 0)?;
     }
     Ok(())
+}
+
+/// Normalize legacy scalar forms and discard only mistyped optional keys/rules.
+/// Diagnostics are retained on the definition, then attributed to its package by the linker.
+fn normalize_authoring_types(doc: &mut Yaml) -> Vec<String> {
+    fn mapping(map: &mut Hash, path: &str, kind: &str, warnings: &mut Vec<String>) {
+        for (key, mut value) in std::mem::take(map) {
+            let Some(name) = key.as_str() else {
+                warnings.push(format!("{path}: ignored non-string key"));
+                continue;
+            };
+            // YAML empty scopes mean no scopes; quoted capture indices and numeric
+            // extensions are compatible scalar spellings, not discarded authoring data.
+            if name == "scope" && value == Yaml::Null {
+                value = Yaml::String(String::new());
+            }
+            if kind == "top"
+                && matches!(name, "file_extensions" | "hidden_file_extensions")
+                && let Yaml::Array(items) = &mut value
+            {
+                items.retain_mut(|item| {
+                    if let Yaml::Integer(n) = item {
+                        *item = Yaml::String(n.to_string());
+                    }
+                    if item.as_str().is_some() {
+                        true
+                    } else {
+                        warnings.push(format!("{path}.{name}: ignored invalid extension"));
+                        false
+                    }
+                });
+            }
+            if kind == "rule"
+                && matches!(name, "captures" | "escape_captures")
+                && let Yaml::Hash(captures) = &mut value
+            {
+                for (index, scope) in std::mem::take(captures) {
+                    let number = index.as_i64().or_else(|| index.as_str()?.parse().ok());
+                    if let Some(number) = number.filter(|n| *n >= 0)
+                        && scope.as_str().is_some()
+                    {
+                        captures.insert(Yaml::Integer(number), scope);
+                    } else {
+                        warnings.push(format!("{path}.{name}: ignored invalid capture {index:?}"));
+                    }
+                }
+            }
+            let valid = match (kind, name) {
+                ("top", "name" | "scope" | "first_line_match") => value.as_str().is_some(),
+                ("top", "version") => matches!(value.as_i64(), Some(1 | 2)),
+                ("top", "hidden") => value.as_bool().is_some(),
+                ("top", "variables" | "contexts") => value.as_hash().is_some(),
+                ("top", "file_extensions" | "hidden_file_extensions") => value.as_vec().is_some(),
+                ("top", "extends") => {
+                    value.as_str().is_some()
+                        || value
+                            .as_vec()
+                            .is_some_and(|v| v.iter().all(|x| x.as_str().is_some()))
+                }
+                ("variables", _) => value.as_str().is_some(),
+                (
+                    "rule",
+                    "match" | "scope" | "meta_scope" | "meta_content_scope" | "embed_scope"
+                    | "escape" | "branch_point" | "fail" | "include" | "embed",
+                ) => value.as_str().is_some(),
+                (
+                    "rule",
+                    "meta_include_prototype" | "meta_prepend" | "meta_append" | "apply_prototype",
+                ) => value.as_bool().is_some(),
+                ("rule", "pop" | "clear_scopes") => {
+                    value.as_bool().is_some() || value.as_i64().is_some_and(|n| n >= 0)
+                }
+                ("rule", "captures" | "escape_captures") => value.as_hash().is_some(),
+                ("rule", "branch" | "with_prototype") => value.as_vec().is_some(),
+                ("rule", "push" | "set") => value.as_str().is_some() || value.as_vec().is_some(),
+                _ => true,
+            };
+            if valid {
+                map.insert(key, value);
+            } else {
+                warnings.push(format!("{path}.{name}: ignored wrong value type or range"));
+            }
+        }
+    }
+    fn context(value: &mut Yaml, path: &str, depth: usize, warnings: &mut Vec<String>) {
+        if depth > 256 {
+            return;
+        } // The parser reports its bounded nesting error.
+        let Yaml::Array(rules) = value else {
+            warnings.push(format!("{path}: ignored non-array context"));
+            *value = Yaml::Array(Vec::new());
+            return;
+        };
+        rules.retain_mut(|value| {
+            let Yaml::Hash(map) = value else {
+                warnings.push(format!("{path}: ignored non-mapping rule"));
+                return false;
+            };
+            mapping(map, path, "rule", warnings);
+            for name in ["push", "set", "with_prototype", "branch"] {
+                if let Some(value) = map.get_mut(&Yaml::String(name.into()))
+                    && let Yaml::Array(items) = value
+                {
+                    if items.first().is_some_and(|x| x.as_hash().is_some())
+                        || name == "with_prototype"
+                    {
+                        context(value, &format!("{path}.{name}"), depth + 1, warnings);
+                    } else {
+                        for item in items {
+                            if item.as_vec().is_some() {
+                                context(item, &format!("{path}.{name}"), depth + 1, warnings);
+                            }
+                        }
+                    }
+                }
+            }
+            // A dropped match/include cannot turn a malformed rule into a fatal file error.
+            map.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    Some(
+                        "match"
+                            | "include"
+                            | "meta_scope"
+                            | "meta_content_scope"
+                            | "meta_include_prototype"
+                            | "meta_prepend"
+                            | "meta_append"
+                            | "clear_scopes"
+                    )
+                )
+            })
+        });
+    }
+    let mut warnings = Vec::new();
+    if let Yaml::Hash(top) = doc {
+        mapping(top, "syntax", "top", &mut warnings);
+        if let Some(Yaml::Hash(vars)) = top.get_mut(&Yaml::String("variables".into())) {
+            mapping(vars, "variables", "variables", &mut warnings);
+        }
+        if let Some(Yaml::Hash(contexts)) = top.get_mut(&Yaml::String("contexts".into())) {
+            for (name, value) in contexts {
+                context(
+                    value,
+                    &format!("contexts.{}", name.as_str().unwrap_or("<invalid name>")),
+                    0,
+                    &mut warnings,
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Inspect final inherited regex text without building a regex machine. Oniguruma-only
+/// features are left to its lazy compiler; only unambiguous structural errors are diagnosed.
+pub(crate) fn regex_authoring_warnings(syntax: &SyntaxDefinition) -> Vec<String> {
+    fn inspect(raw: &str, vars: &HashMap<String, String>, path: &str, warnings: &mut Vec<String>) {
+        static VARIABLES: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}").unwrap());
+        for capture in VARIABLES.captures_iter(raw) {
+            if !vars.contains_key(&capture[1]) {
+                warnings.push(format!("{path}: unknown variable {{{{{}}}}}", &capture[1]));
+            }
+        }
+        let Ok(expanded) = re_resolve_regex(raw, vars, true) else {
+            return;
+        };
+        if let Some(error) = regex_structure_error(&expanded) {
+            warnings.push(format!("{path}: invalid regex {raw:?}: {error}"));
+        }
+    }
+    let mut warnings = Vec::new();
+    for (name, value) in &syntax.variables {
+        // Variables are regex fragments, and need not balance until assembled in a rule.
+        static VARIABLES: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}").unwrap());
+        for capture in VARIABLES.captures_iter(value) {
+            if !syntax.variables.contains_key(&capture[1]) {
+                warnings.push(format!(
+                    "variables.{name}: unknown variable {{{{{}}}}}",
+                    &capture[1]
+                ));
+            }
+        }
+    }
+    if let Some(raw) = &syntax.raw_first_line_match {
+        inspect(raw, &syntax.variables, "first_line_match", &mut warnings);
+    }
+    for (name, context) in &syntax.contexts {
+        for (index, pattern) in context.patterns.iter().enumerate() {
+            if let Pattern::Match(pattern) = pattern {
+                let path = format!("contexts.{name}[{index}]");
+                if let Some(raw) = &pattern.raw_regex_str {
+                    inspect(raw, &syntax.variables, &path, &mut warnings);
+                }
+                if let MatchOperation::Embed { escape, .. } = &pattern.operation
+                    && let Some(raw) = &escape.raw_escape_regex_str
+                {
+                    inspect(
+                        raw,
+                        &syntax.variables,
+                        &format!("{path}.escape"),
+                        &mut warnings,
+                    );
+                }
+            }
+        }
+    }
+    warnings.sort();
+    warnings.dedup();
+    warnings
+}
+
+/// Structural validation for the Oniguruma dialect. In particular, literal `{` is
+/// legal and x-mode whitespace/comments differ from Rust regex syntax. This scans
+/// delimiters only; it does not compile machines or reject dialect-specific escapes.
+fn regex_structure_error(regex: &str) -> Option<&'static str> {
+    // The AST parser is machine-free too. Diagnose only errors shared with Onig;
+    // e.g. Rust rejects a literal `{`, Onig accepts it, so that is not an error here.
+    if let Err(error) = regex_syntax::ast::parse::Parser::new().parse(regex) {
+        use regex_syntax::ast::ErrorKind;
+        match error.kind() {
+            ErrorKind::ClassRangeInvalid => return Some("reversed character-class range"),
+            ErrorKind::RepetitionCountInvalid => return Some("reversed repetition range"),
+            ErrorKind::RepetitionMissing
+                if matches!(
+                    regex.as_bytes().get(error.span().start.offset),
+                    Some(b'*' | b'+' | b'?')
+                ) =>
+            {
+                return Some("repetition without a target");
+            }
+            _ => {}
+        }
+    }
+    let bytes = regex.as_bytes();
+    let mut groups = Vec::new();
+    let mut extended = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => {
+                at += 1;
+                if at == bytes.len() {
+                    return Some("unfinished escape");
+                }
+            }
+            b'#' if extended => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            b'[' => {
+                let mut depth = 1usize;
+                at += 1;
+                if bytes.get(at) == Some(&b'^') {
+                    at += 1;
+                }
+                if bytes.get(at) == Some(&b']') {
+                    at += 1;
+                }
+                while at < bytes.len() && depth > 0 {
+                    match bytes[at] {
+                        b'\\' => {
+                            at += 1;
+                        }
+                        b'[' if bytes.get(at + 1) != Some(&b']') => {
+                            depth += 1;
+                        }
+                        b']' => {
+                            depth -= 1;
+                        }
+                        _ => {}
+                    }
+                    at += 1;
+                }
+                if depth > 0 {
+                    return Some("unclosed character class");
+                }
+                continue;
+            }
+            b'(' if bytes.get(at + 1) == Some(&b'?') && bytes.get(at + 2) == Some(&b'#') => {
+                at += 3;
+                while at < bytes.len() && bytes[at] != b')' {
+                    if bytes[at] == b'\\' {
+                        at += 1;
+                    }
+                    at += 1;
+                }
+                if at == bytes.len() {
+                    return Some("unclosed comment group");
+                }
+            }
+            b'(' => {
+                let old = extended;
+                if bytes.get(at + 1) == Some(&b'?') {
+                    let mut flag = at + 2;
+                    let mut enable = true;
+                    while let Some(byte) = bytes.get(flag) {
+                        match byte {
+                            b'-' => enable = false,
+                            b'x' => extended = enable,
+                            b'i' | b'm' | b's' | b'a' | b'u' | b'D' | b'S' | b'W' | b'P' | b'y' => {
+                            }
+                            _ => break,
+                        }
+                        flag += 1;
+                    }
+                    if flag > at + 2 && bytes.get(flag) == Some(&b')') {
+                        at = flag + 1;
+                        continue;
+                    }
+                }
+                groups.push(old);
+            }
+            b')' => {
+                if let Some(old) = groups.pop() {
+                    extended = old;
+                } else {
+                    return Some("unopened group");
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    if groups.is_empty() {
+        None
+    } else {
+        Some("unclosed group")
+    }
 }

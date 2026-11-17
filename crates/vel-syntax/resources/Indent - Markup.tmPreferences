@@ -1,0 +1,6 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity policy: embedded expressions do not choose the host tag's indent rule. -->
+<key>scope</key><string>text.html.embedded.js</string><key>settings</key><dict>
+<key>velocityIndentUseLeadingScope</key><true/>
+<key>velocityIndentIgnoreScope</key><string>meta.interpolation</string>
+</dict></dict></plist>

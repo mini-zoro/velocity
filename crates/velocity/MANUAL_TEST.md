@@ -1,3 +1,290 @@
+# Round 17 Lane A final verification fixes (native review pending)
+
+The latest regressions use `App::run_named`, real key dispatch and the package/resource
+loader. Evidence for this pass is in `/tmp/velocity-lane-a-r17-final-review/`; earlier
+measurements below are historical. Syntax cache schema `velocity-syntax-roots-v1-13`
+invalidates cached diagnostics that lack an originating resource path. Native checks
+remain unobserved in this sandbox.
+
+The final gate passes: fmt, strict release/locked workspace clippy over all targets,
+`cargo test --workspace --locked --release` at default parallelism (**807 passed, 0 failed,
+4 ignored**, 114 test executables), and rustdoc with `-D warnings`. The standalone syntax
+runner reports **126,600 passed / 0 failed / 0 skipped**, including **35/35 reindent
+variants** (203 syntaxes, 242 files), unchanged from the incoming verified candidate. The
+first gate attempt hit the existing TLS fixture's empty port-file publication race in
+`vel-packages/tests/https.rs:74`; the unchanged full rerun passes. Both logs are retained.
+No golden content, insert-session code or Lane B drawing/platform files changed in this pass.
+
+Fresh five-run medians against frozen main `99d1bb4` (headless CPU only):
+
+| Metric | Main | Final candidate | Change |
+| --- | ---: | ---: | ---: |
+| syntax parse MB/s | 5.043145 | 5.000526 | -0.85% throughput |
+| full highlight MB/s | 3.753227 | 3.772233 | +0.51% throughput |
+| highlight edit p95 ms | 0.002459 | 0.002459 | unchanged |
+| completeness query ns (nine pairs) | 0.954861 | 0.954861 | unchanged |
+| cached syntax load ms, including content hashes | 11.383291 | 11.288042 | -0.84% time |
+| YAML load ms | 871.061333 | 866.217666 | -0.56% time |
+| 100-line syntax window ms | 0.010500 | 0.010375 | -1.19% time |
+| convergence ns | 125 | 167 | +42 ns (+33.6%), one clock tick |
+
+Throughput remains within 3%, and cached loading does not slow down. The convergence
+sample spans three versus four clock ticks; the measured Mach timebase is 125/3 ns per
+tick. Two alternating complete syntax-benchmark pairs use **207,762,213,832 →
+204,935,798,129 retired instructions (-1.36%)**, within 3%, counted with Darwin
+`proc_pid_rusage(RUSAGE_INFO_V4)` after exit and before reaping. These are whole-process
+totals, including YAML/cache loading, warmup, five 10 MB parse passes, windows and convergence;
+they do not isolate the convergence case. Raw wall-clock samples and the one-tick increase
+remain in the evidence. No throughput measurement was discarded or rerun.
+
+Twenty-one alternating typing pairs all pass the 5% gate, milliseconds:
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.200020 → 0.200230 (+0.10%) | 0.347796 → 0.345809 (-0.57%) | 7.117584 → 7.104674 (-0.18%) |
+| typing1000 | 5.244021 → 5.251167 (+0.14%) | 14.574602 → 14.527039 (-0.33%) | 27.041032 → 26.992232 (-0.18%) |
+
+Logs, samples, load conditions, timer resolution, binary identities and the focused patch
+are in `/tmp/velocity-lane-a-r17-final-review/`. The candidate SHA-256 is
+`3be783265c86a85682db88c9775bcf938ef4822dae5b5b251c03395261a1a7f5`; the typing baseline is
+the frozen `/tmp/velocity-lane-a-r17/velocity-main-99d1bb4` binary. Benchmark-generated tracked
+timing files were restored after measurement. All changes remain uncommitted; no GUI,
+packaging script or `cargo clean` was used.
+
+- [ ] **Cold/stale tab conversion:** select Bash and immediately run Expand Tabs. Repeat
+  after highlighting finishes, insert `#`, and immediately run it again. Test Unexpand Tabs
+  too. In a `<<-EOF` heredoc, content and tab-prefixed terminator bytes remain unchanged;
+  code indentation converts in one undo step. Include a Ruby embedded heredoc whose target
+  falls back to Plain Text. Repeat with Find focused.
+- [ ] **Literal reindent:** enable spaces and reindent a function containing a case branch
+  with `cat <<-EOF`. Mixed tab/space content and `\tEOF` remain byte-identical. Try Python
+  triple strings and C++ raw strings too; ordinary following code still reindents. A bare
+  multiline JavaScript template must not shift the following function.
+- [ ] **Reachable, non-modal diagnostics:** launch from Finder with two missing references
+  in a User syntax, malformed mousemap/scheme entries and a corrupt installed package.
+  Status summaries name the first offending file and `Velocity.log`; no warning opens an
+  alert. Open `<data-dir>/Velocity.log` with File > Open and check every filename and reason.
+  The default macOS path is `~/Library/Application Support/Velocity/Velocity.log` (unless
+  `--data-dir` or `VELOCITY_DATA_DIR` overrides it). Restart and reload resources: details
+  append to the same log, and healthy neighboring resources still work. A bundled-only
+  profile produces no warning status or alerts.
+- [ ] **Warning provenance:** install a healthy User syntax named like a bundled syntax
+  with a missing optional target. Bundled diagnostics must not become User status warnings.
+  Add a bad reference to the User syntax: only its own warning is counted. Repeat using
+  loose packages and Installed Packages, then restart from the cache.
+- [ ] **Empty Vintage repeat:** after `dd`, try `i<Esc>.`, `A<Esc>.` and `R<Esc>.`.
+  Dot repeats the empty insertion; it must not delete another line. Undo restores `dd`
+  without a phantom step. The fix is at the command boundary; insert-session code is untouched.
+- [ ] **Shell lexical cases:** reindent Bash and Zsh branches containing `${#a[@]}`,
+  `${x:-y}` and nested parameter substitutions. Subsequent `;;` and patterns stay at the
+  correct level. A one-line `case $x in a) echo a;; esac` inside a function must not deindent
+  the next statement or the function's closing brace.
+
+# Round 17 Lane A earlier review fixes (historical headless evidence)
+
+All eight reviewer findings have dedicated headless regressions. The implementation remains
+uncommitted. The original round-17 evidence below is retained; validation and measurements
+for this earlier review pass are in `/tmp/velocity-lane-a-r17-review/`.
+
+Headless validation for the review fixes: fmt, strict release/locked workspace clippy over all
+targets, `cargo test --workspace --locked --release` at default parallelism (**800 passed,
+0 failed, 4 ignored**) and rustdoc with `-D warnings` pass. The syntax suite remains
+**126,600/126,600**, including **35/35 reindent variants** (203 syntaxes, 242 files).
+The three legacy scalar forms load and highlight through both fresh and cached real package
+loading, beside a corrupt neighboring archive. Warnings are retained in `SyntaxSet::warnings()`;
+only the presentation channel changes. The cache schema for that pass was `velocity-syntax-roots-v1-12`
+so older linked references cannot survive this fallback repair.
+
+Fresh five-run medians against frozen main `99d1bb4` (headless CPU only):
+
+| Metric | Main | Review candidate | Change |
+| --- | ---: | ---: | ---: |
+| syntax parse MB/s | 4.732084 | 4.754804 | +0.48% throughput |
+| full highlight MB/s | 3.533281 | 3.513311 | -0.57% throughput |
+| completeness query ns (nine pairs) | 1.041667 | 0.984028 | -5.53% time |
+| cached syntax load ms, including content hashes | 11.769500 | 11.712000 | -0.49% time |
+| YAML load ms | 921.537791 | 923.119083 | +0.17% time |
+| 100-line syntax window ms | 0.011042 | 0.010666 | -3.41% time |
+| convergence ms | 0.000125 | 0.000125 | unchanged |
+| highlight edit p95 ms | 0.002542 | 0.002625 | +3.27% (+83 ns) |
+
+The machine's one-minute load was 6–12 on eight cores during these wall-clock measurements;
+the near-threshold edit sample is supplemented with retired-instruction measurements below.
+Throughput stays within 3%; cached loading does not slow down. Raw logs, binary identities,
+and every sample are in `before/`, `after/`, `bench-conditions.json` and `bench-summary.json`
+under the review evidence directory.
+
+Two alternating complete highlight-benchmark pairs, counted with Darwin
+`proc_pid_rusage(RUSAGE_INFO_V4).ri_instructions` after exit and before reaping, give
+**199,998,475,736.5 → 200,637,924,495 instructions (+0.32%)**, within 3%. The process includes
+five full 10 MB passes, edit samples and syntax loading; these are process totals, not isolated
+edit counters. `highlight-instructions.json` records all samples and binary hashes. The 83 ns
+wall-clock edit-p95 increase above remains visible rather than being omitted from the evidence.
+The unchanged structural golden also passes **12 additional runs in four parallel processes**;
+`golden-repeats.json` and individual logs retain those results.
+
+Twenty-one alternating typing pairs all pass the 5% gate, milliseconds:
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.215126 → 0.215521 (+0.18%) | 0.369756 → 0.373337 (+0.97%) | 7.012600 → 7.035121 (+0.32%) |
+| typing1000 | 5.420146 → 5.427042 (+0.13%) | 15.010235 → 14.985519 (-0.16%) | 27.744109 → 27.756192 (+0.04%) |
+
+The reviewer can reproduce the gate with the commands retained in the original round-17
+section below. For these measurements use `/tmp/velocity-lane-a-r17-review/paired` as the output
+for `paired-headless.py` and compare against `/tmp/velocity-lane-a-r17/velocity-main-99d1bb4`.
+The candidate hash is `5d88d22062e2020fa2ad6b1f7e691b265be7e0a4aad6b8fd3f584b6eb338a506`.
+Direct native `--bench-open` remains unchecked in this sandbox; its message-queue prerequisite
+is covered by fresh `App`/`Workspace` loading, cache reuse and resource reload tests. No GUI,
+packaging script or `cargo clean` was used. The previously unverified implicit Shift+multi-click
+and Cmd+plus defaults remain unchanged; explicit mousemap mappings are covered headlessly.
+
+- [ ] **Launch diagnostics:** launch a fresh profile twice; no syntax alerts or warning status.
+  Install a User syntax with two missing references: one status naming its file and
+  `Velocity.log`, with both details in that log. Repeat with bad scheme globals, a User
+  override of a bundled scheme filename and two malformed mousemap entries; healthy values
+  and bindings work, with one non-modal summary per resource kind. Reload and restart from cache.
+- [ ] **Shell reindent:** inside a function, reindent `case "${1}" in`, `${x:-y}` and `${#a[@]}`.
+  Clauses remain at column 4, bodies at 8. Put a function inside a case branch: its brace stays
+  at 4 and `esac` at 0. Try brace-style Zsh cases, including a single-line case followed by another.
+- [ ] **Compatible user grammars:** load quoted capture indices, an empty `scope:` and numeric
+  extensions `[man, 1, 2, 3]`, next to a broken package. Select each syntax, check highlighting
+  and reopen a `.1` file. Only discarded malformed data should produce warnings.
+- [ ] **Fold ink:** use a foreground/background-only scheme or legacy tmTheme, fold a selection
+  and move the caret away. The ellipsis remains visible. Missing borders remain optional.
+- [ ] **Vintage repeat:** `dd`, then `rb` on `b`, `~` on a digit or `guu` on lowercase text,
+  then `.`. Dot repeats the attempted no-op; Undo restores the deletion without a phantom step.
+- [ ] **Missing embeds:** open a Ruby `<<~'HTML'` heredoc without its embedded HTML syntax.
+  Inspect `text.plain` inside it; highlighting resumes after the terminator. A missing context
+  within an installed syntax stays empty and its escape still works.
+- [ ] **Indentation focus/content:** leave Find focused while invoking all three indentation
+  commands. They act on the document and retain the query/focus. With cold, current or stale
+  scopes, convert a shell `<<-EOF` heredoc in either direction: content and terminator tabs remain byte-identical.
+  Also try a multiline string, Undo/Redo and read-only documents.
+- [ ] **Theme fixture:** compare native light/dark phantom, popup and annotation scenes. The
+  headless golden now explicitly snapshots the cold dark frame and waits for the matching
+  diff publication before the light frame; its frozen JSON content is unchanged.
+
+# Round 17 Lane A: mousemaps, schemes, syntax and indentation (native review pending)
+
+Run a reviewer-built release binary on an unlocked macOS desktop with a disposable profile.
+No GUI, AppKit input, Metal, packaging script or `cargo clean` is used in this lane. Keep
+these boxes unchecked until observed. Lane B owns native selection corners, bracket glyph
+styles/glow, drag delay, scrollbar paging, fonts, minimap and window-state drawing.
+
+- [ ] **A1 mousemaps:** install an original User mousemap with `button1`, numeric buttons,
+  `button2`, `button16`, `scroll_up`/`scroll_down`, press/release commands and contexts. Add
+  one malformed entry and an unrelated corrupt installed archive. Healthy entries still
+  work. Try `drag_select` with `by: words/lines`, `extend`, `additive`, `subtractive`, drag
+  past the viewport and release. Secondary/Control-click overrides take precedence when
+  configured; an empty mousemap keeps the existing native/context/column-selection behavior.
+- [ ] **A1 focus / A2 verification limit:** click/scroll Find and the command palette with
+  document-editing mouse bindings installed: document text stays unchanged. Click back into
+  the document: its binding runs. Explicit Shift+double/triple-click mappings using
+  `extend: true` retain the anchor and extend by word/line in either direction. The implicit
+  Shift+multi-click default remains unchanged because the allowed docs do not establish its
+  anchor rule; compare it with the reviewer's current editor before proposing that change.
+- [ ] **D1/D2/D6 schemes:** select a minimal legacy tmTheme and an explicitly assigned
+  `.hidden-tmTheme`. The latter stays out of the picker. Gutter/line numbers, caret line,
+  whitespace, guides, rulers, find matches and diffs remain legible. Missing borders are transparent; folded ellipses retain foreground ink. Add bad colors/variables/rules alongside valid ones and change
+  numeric-string radii/widths and corner enums; healthy properties survive with diagnostics.
+- [ ] **D3 palette:** compare our light/dark schemes and theme with main, including dimmed
+  inactive sheets. Colors must look unchanged. User expressions follow the corrected base
+  percentage: black `blend(white 25%)` is RGB 191; the inverse is RGB 64. Compare alpha blends.
+- [ ] **E1–E6 syntax:** install original parent/child grammars with anonymous contexts,
+  embed wrappers and prototypes. Add one malformed grammar and an unrelated corrupt archive.
+  Healthy grammars still load on the first launch and on cache reuse. Highlight deeply nested
+  JSON/JavaScript, including closing delimiters after the resource limit. Missing references
+  warn at load time and cannot abort the highlighting worker. Check diagnostics for unknown
+  variables, malformed regexes and wrong value types, then fix/reload the individual file.
+- [ ] **E7 reindent:** reindent C/C++ strings/comments containing bracket/comment characters,
+  CSS comment-led lines, JS switch cases/templates, JSX attributes with quoted/interpolated
+  `>`, shell cases, PHP transitions and Python dedents. Include embedded languages and User
+  indentation preference overrides. Undo once; async completion must not overwrite later edits.
+- [ ] **F1/F2 commands:** use View > Indentation (Lane B's rows) for `expand_tabs`,
+  `unexpand_tabs`, `detect_indentation`. Try mixed leading whitespace, interior tabs, multiple
+  directed selections, clones, read-only files and a large buffer. Conversion is one undo
+  step; repeat conversion is a no-op. `set_translate_tabs: true` updates only this view's
+  typing style. `set_setting {setting, value}` accepts arbitrary JSON on the view layer.
+- [ ] **F3 keys:** Ctrl+Cmd+Shift+F toggles distraction free and its existing alias still
+  works. Ctrl+Option+Up/Down scroll by a line; Ctrl+Shift+Up/Down still add selection rows.
+  Repeat with Find focused. Cmd+= keeps zooming; Cmd+plus is unchanged because its alias
+  was not confirmed in the allowed documentation. Test physical keys/layouts after Lane B's
+  window/zoom changes are integrated.
+
+- [ ] **Validation-found Vintage regression:** enable Vintage, delete and put back a
+  combining grapheme plus Han text, apply `~` to the uncased Han character, then Undo/Redo.
+  Undo targets the put rather than a phantom case-change transaction; Unicode carets stay valid.
+
+Headless evidence and frozen main binaries: `/tmp/velocity-lane-a-r17/`.
+The compiled-color goldens were captured from main 99d1bb4 before the expression change;
+all explicit scheme globals, rule/gradient colors and compiled theme color properties,
+including evaluated sheet modifiers in both appearances, are compared exactly.
+The syntax corpus now reports the pinned tree's 16 genuine optional missing references;
+its test permits only those targets, while rejecting other authoring/linking warnings. Bundled
+syntax diagnostics stay in the console. User syntax, scheme and mousemap warnings each produce
+one non-modal status summary, including when the syntax cache is reused.
+
+Round-17 validation: fmt, strict locked release clippy (workspace/all targets), the full
+locked release workspace tests at default parallelism (**790 passed, 0 failed, 4 intentionally
+ignored**) and rustdoc with warnings denied all pass. Syntax tests improve from **126,595 passed /
+5 failed / 0 skipped** to **126,600 passed / 0 failed / 0 skipped** (203 syntaxes, 242 files;
+35/35 reindent variants). The checked-in corpus baseline now locks in those five fixes.
+
+The workspace property test also found an existing Vintage no-op history bug. The new seed
+and `kk2xP~u` reproduce against the frozen main sources (`vintage-main-repro.log`); `Vintage::apply`
+now counts only real buffer transactions. Its deterministic Unicode regression and the saved
+property-test seed pass. The scope of that small compatibility fix is limited to Vintage's
+history adapter; the buffer's accepted no-op filtering remains in effect.
+
+All 112 explicit compiled scheme colors and 882 compiled theme color properties match their
+frozen pre-change values. Our minihtml fixture percentages and the theme's legacy array-tint
+adapter were migrated too; their existing display-list goldens retain their original colors.
+
+Five-run benchmark medians, main → candidate (10,000,000 bytes, 297,030 lines):
+
+| Benchmark / metric | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| syntax-bench parse MB/s | 4.965831 | 5.062297 | +1.94% throughput |
+| highlight_bench full MB/s | 3.555764 | 3.751701 | +5.51% throughput |
+| highlight_bench edit p95 ms | 0.002625 | 0.002459 | -6.32% time |
+| completeness_bench optimized query ns (nine pairs) | 0.984028 | 0.954861 | -2.96% time |
+| syntax-bench cached load ms, including content hashes | 11.065500 | 11.299375 | +2.11% (+0.234 ms) |
+| syntax-bench YAML load ms | 865.052625 | 854.753042 | -1.19% time |
+| syntax-bench 100-line window ms | 0.010375 | 0.010541 | +1.60% time |
+| syntax-bench convergence ms | 0.000125 | 0.000125 | unchanged |
+
+Syntax/highlight regressions remain within 3%; cached loading has no noticeable increase.
+The bench binaries were run without concurrent compilation in this lane. These are headless
+CPU measurements and do not establish native drawing/scanout performance.
+
+Twenty-one alternating typing pairs against the frozen main binary, milliseconds:
+
+| Bench | p50 main → candidate | p95 main → candidate | p99 main → candidate |
+| --- | --- | --- | --- |
+| typing1 | 0.200042 → 0.200417 (+0.19%) | 0.345681 → 0.344500 (-0.34%) | 7.057019 → 7.062445 (+0.08%) |
+| typing1000 | 5.263500 → 5.266334 (+0.05%) | 14.604685 → 14.572817 (-0.22%) | 27.088861 → 27.054803 (-0.13%) |
+
+All six typing metrics pass the 5% gate. `paired/report.json` preserves every sample and binary
+identity: main `12bae0fbc43a0f23f1944d73976b3448cdd24ec5a73f8796bbaf5014ed9ed3f5`,
+candidate `53fa9e79b2101506cdf1b2a4169cfab9fb4da8224c9eddfdaf48e4f71627344a`.
+The complete syntax/highlight JSON and command logs are in `before/` and `after/`, with a combined
+`bench-summary.json`, under `/tmp/velocity-lane-a-r17/`.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo run --release --locked -p vel-syntax --bin syntax-tests
+cargo run --release --locked -p vel-highlight --example highlight_bench
+cargo run --release --locked -p vel-highlight --example completeness_bench
+cargo run --release --locked -p vel-syntax --bin syntax-bench
+python3 tools/scroll-gate/paired-headless.py \
+  --base /tmp/velocity-lane-a-r17/velocity-main-99d1bb4 --candidate target/release/velocity \
+  --bench typing1 --bench typing1000 --pairs 21 --output /tmp/velocity-r17-review-paired
+```
+
 # Round 16 Lane A: editing, bookmarks/marks and macros (native review pending)
 
 Use a reviewer-built binary with an isolated profile. The sandbox runs headless tests only;

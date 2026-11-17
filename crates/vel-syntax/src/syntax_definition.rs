@@ -56,6 +56,8 @@ pub struct ContextId {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyntaxDefinition {
     #[serde(skip)]
+    pub(crate) authoring_warnings: Vec<String>,
+    #[serde(skip)]
     pub(crate) raw_first_line_match: Option<String>,
     /// Human-readable syntax name or the identifier carried by this reference.
     pub name: String,

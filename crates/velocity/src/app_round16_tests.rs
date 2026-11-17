@@ -594,11 +594,11 @@ fn macro_keys_ignore_broken_packages_and_keep_the_user_catalog() {
     .unwrap();
     let mut a = app("call()\nsecond", Some(dir.path()));
     assert!(
-        a.workspace
-            .messages
-            .iter()
-            .any(|m| m.contains("Broken.sublime-package"))
+        a.workspace.messages.is_empty(),
+        "{:?}",
+        a.workspace.messages
     );
+    assert!(a.panels.message.contains("Broken.sublime-package"));
     assert!(
         a.panels
             .macro_file_items(&a.workspace)

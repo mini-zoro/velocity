@@ -1,6 +1,10 @@
 //! Clean-room Sublime color schemes, overrides, and cached scope style resolution.
 #![forbid(unsafe_code)]
 mod color;
+mod globals;
+pub use globals::{CornerStyle, DecorationOptions};
+#[cfg(test)]
+mod resource_colors;
 pub use color::Color;
 use serde_json::{Value, json};
 use std::{
@@ -83,11 +87,26 @@ pub struct Style {
 pub struct Globals {
     colors: BTreeMap<String, Color>,
     values: BTreeMap<String, Value>,
+    numbers: BTreeMap<String, f64>,
+    corners: BTreeMap<String, CornerStyle>,
+    options: BTreeMap<String, DecorationOptions>,
 }
 impl Globals {
     /// A resolved color global (caret, gutter, selection, guides, diffs, brackets, etc.).
     pub fn color(&self, key: &str) -> Option<Color> {
         self.colors.get(key).copied()
+    }
+    /// Parsed nonnegative finite width or radius, accepting numeric strings.
+    pub fn number(&self, key: &str) -> Option<f64> {
+        self.numbers.get(key).copied()
+    }
+    /// Parsed corner style.
+    pub fn corner_style(&self, key: &str) -> Option<CornerStyle> {
+        self.corners.get(key).copied()
+    }
+    /// Parsed bracket/tag drawing options.
+    pub fn decoration_options(&self, key: &str) -> Option<DecorationOptions> {
+        self.options.get(key).copied()
     }
     /// Original scalar, CSS, or options value, including future global keys.
     pub fn value(&self, key: &str) -> Option<&Value> {
@@ -121,10 +140,11 @@ pub struct ColorScheme {
     gradients: Vec<[Color; 256]>,
     adjustments: Vec<String>,
     variables: BTreeMap<String, String>,
+    warnings: Vec<String>,
 }
 /// Unresolved scheme. Merge overrides before evaluating variables or compiling selectors.
 #[derive(Debug, Clone)]
-pub struct SchemeSource(Value);
+pub struct SchemeSource(Value, Vec<String>);
 impl SchemeSource {
     /// Lenient JSON accepts comments, BOM, and trailing commas.
     pub fn parse(text: &str) -> Result<Self, Error> {
@@ -132,9 +152,9 @@ impl SchemeSource {
             .map_err(Error::Format)?
             .value;
         if !value.is_object() {
-            return Err(Error::Format("root must be an object".into()));
+            return Ok(Self(json!({}), vec!["root must be an object".into()]));
         }
-        Ok(Self(value))
+        Ok(Self(value, Vec::new()))
     }
     /// Parses a legacy plist theme into the same unresolved model.
     pub fn from_tm_theme(xml: &str) -> Result<Self, Error> {
@@ -165,9 +185,11 @@ impl SchemeSource {
             .get("settings")
             .and_then(plist::Value::as_array)
             .ok_or_else(|| Error::Format("theme settings missing".into()))?;
+        let mut warnings = Vec::new();
         for entry in settings {
             let Some(d) = entry.as_dictionary() else {
-                return Err(Error::Format("invalid theme entry".into()));
+                warnings.push("invalid theme entry".into());
+                continue;
             };
             let Some(s) = d.get("settings").and_then(plist::Value::as_dictionary) else {
                 continue;
@@ -207,38 +229,38 @@ impl SchemeSource {
                 root["globals"].as_object_mut().unwrap().extend(obj);
             }
         }
-        Ok(Self(root))
+        Ok(Self(root, warnings))
     }
     /// Variables/globals overwrite by key, rules append, and scalar metadata overwrites.
     pub fn merge(&mut self, overlay: &Self) -> Result<(), Error> {
+        self.1.extend(overlay.1.iter().cloned());
         for (key, value) in overlay.0.as_object().unwrap() {
             match key.as_str() {
                 "variables" | "globals" => {
-                    let map = value
-                        .as_object()
-                        .ok_or_else(|| Error::Format(format!("{key} must be an object")))?;
-                    let dst = self
-                        .0
-                        .as_object_mut()
-                        .unwrap()
-                        .entry(key)
-                        .or_insert_with(|| json!({}))
-                        .as_object_mut()
-                        .ok_or_else(|| Error::Format(format!("{key} must be an object")))?;
-                    dst.extend(map.clone());
+                    let Some(map) = value.as_object() else {
+                        self.1.push(format!("{key} must be an object"));
+                        continue;
+                    };
+                    if !self.0[key].is_object() {
+                        if !self.0[key].is_null() {
+                            self.1.push(format!("{key} must be an object"));
+                        }
+                        self.0[key] = json!({});
+                    }
+                    self.0[key].as_object_mut().unwrap().extend(map.clone());
                 }
                 "rules" => {
-                    let rules = value
-                        .as_array()
-                        .ok_or_else(|| Error::Format("rules must be an array".into()))?;
-                    self.0
-                        .as_object_mut()
-                        .unwrap()
-                        .entry(key)
-                        .or_insert_with(|| json!([]))
-                        .as_array_mut()
-                        .ok_or_else(|| Error::Format("rules must be an array".into()))?
-                        .extend(rules.clone());
+                    let Some(rules) = value.as_array() else {
+                        self.1.push("rules must be an array".into());
+                        continue;
+                    };
+                    if !self.0[key].is_array() {
+                        if !self.0[key].is_null() {
+                            self.1.push(format!("{key} must be an array"));
+                        }
+                        self.0[key] = json!([]);
+                    }
+                    self.0[key].as_array_mut().unwrap().extend(rules.clone());
                 }
                 _ => {
                     self.0[key] = value.clone();
@@ -249,7 +271,9 @@ impl SchemeSource {
     }
     /// Resolves variables after all package/User overrides have been merged.
     pub fn compile(&self) -> Result<ColorScheme, Error> {
-        ColorScheme::compile(&self.0)
+        let mut scheme = ColorScheme::compile(&self.0)?;
+        scheme.warnings.extend(self.1.iter().cloned());
+        Ok(scheme)
     }
 }
 fn string<'a>(v: &'a Value, key: &str) -> Result<Option<&'a str>, Error> {
@@ -265,13 +289,18 @@ impl ColorScheme {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)?;
-        let source = if path.extension().is_some_and(|s| s == "tmTheme") {
+        let source = if path
+            .extension()
+            .is_some_and(|s| s == "tmTheme" || s == "hidden-tmTheme")
+        {
             SchemeSource::from_tm_theme(&text)?
         } else {
             SchemeSource::parse(&text)?
         };
         let mut scheme = source.compile()?;
-        scheme.hidden |= path.extension().is_some_and(|s| s == "hidden-color-scheme");
+        scheme.hidden |= path
+            .extension()
+            .is_some_and(|s| s == "hidden-color-scheme" || s == "hidden-tmTheme");
         Ok(scheme)
     }
     /// Compiles one lenient JSON scheme.
@@ -288,121 +317,197 @@ impl ColorScheme {
     }
     fn compile(root: &Value) -> Result<Self, Error> {
         let mut out = Self {
-            name: string(root, "name")?.unwrap_or("Untitled").into(),
+            name: root
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled")
+                .into(),
             hidden: root.get("hidden").and_then(Value::as_bool).unwrap_or(false),
             globals: Globals::default(),
             rules: Vec::new(),
             gradients: Vec::new(),
             adjustments: Vec::new(),
             variables: BTreeMap::new(),
+            warnings: Vec::new(),
         };
-        if let Some(vars) = root.get("variables") {
-            for (k, v) in vars
-                .as_object()
-                .ok_or_else(|| Error::Format("variables must be an object".into()))?
+        for key in ["name", "author"] {
+            if let Some(value) = root.get(key)
+                && !value.is_string()
             {
-                out.variables.insert(
-                    k.clone(),
-                    v.as_str()
-                        .ok_or_else(|| Error::Format("variable must be a string".into()))?
-                        .into(),
-                );
+                out.warnings.push(format!("{key} must be a string"));
             }
         }
-        for value in out.variables.values() {
-            Color::parse(value, &out.variables)?;
+        if let Some(vars) = root.get("variables") {
+            if let Some(vars) = vars.as_object() {
+                for (key, value) in vars {
+                    if let Some(value) = value.as_str() {
+                        // Variables may contain CSS or other non-color text. Validate only uses.
+                        out.variables.insert(key.clone(), value.into());
+                    } else {
+                        out.warnings
+                            .push(format!("variables.{key}: expected a string"));
+                    }
+                }
+            } else {
+                out.warnings.push("variables must be an object".into());
+            }
         }
         if let Some(globals) = root.get("globals") {
-            for (k, v) in globals
-                .as_object()
-                .ok_or_else(|| Error::Format("globals must be an object".into()))?
-            {
-                out.globals.values.insert(k.clone(), v.clone());
-                if let Some(s) = v.as_str()
-                    && !k.ends_with("_options")
-                    && !k.ends_with("_css")
-                    && !["font_face", "font_style"].contains(&k.as_str())
-                {
+            if let Some(globals) = globals.as_object() {
+                for (key, value) in globals {
                     out.globals
-                        .colors
-                        .insert(k.clone(), Color::parse(s, &out.variables)?);
+                        .compile_value(key, value, &out.variables, &mut out.warnings);
                 }
+            } else {
+                out.warnings.push("globals must be an object".into());
             }
         }
         if let Some(rules) = root.get("rules") {
-            for rule in rules
-                .as_array()
-                .ok_or_else(|| Error::Format("rules must be an array".into()))?
-            {
-                let color = |key: &str| -> Result<Option<Color>, Error> {
-                    string(rule, key)?
-                        .map(|s| Color::parse(s, &out.variables))
-                        .transpose()
-                };
-                let background = color("background")?;
-                let selection_foreground = color("selection_foreground")?;
-                let gradient_value = rule
-                    .get("hashed_foreground")
-                    .or_else(|| rule.get("foreground").filter(|v| v.is_array()));
-                let (foreground, gradient) = if let Some(g) = gradient_value {
-                    let a = g
-                        .as_array()
-                        .ok_or_else(|| Error::Format("gradient must be an array".into()))?;
-                    if a.len() < 2 {
-                        return Err(Error::Format("gradient needs two colors".into()));
+            if let Some(rules) = rules.as_array() {
+                for (index, rule) in rules.iter().enumerate() {
+                    if let Some(rule) = out.compile_rule(rule, index) {
+                        out.rules.push(rule);
                     }
-                    let colors: Vec<_> = a
-                        .iter()
-                        .map(|v| {
-                            Color::parse(
-                                v.as_str().ok_or_else(|| {
-                                    Error::Format("gradient colors must be strings".into())
-                                })?,
-                                &out.variables,
-                            )
-                        })
-                        .collect::<Result<_, Error>>()?;
-                    let table = std::array::from_fn(|i| {
-                        let at = i as f64 / 255. * (colors.len() - 1) as f64;
-                        let index = (at as usize).min(colors.len() - 2);
-                        colors[index].lerp(colors[index + 1], at - index as f64, true, true)
-                    });
-                    let id = out.gradients.len();
-                    out.gradients.push(table);
-                    (Some(colors[0]), Some(id))
-                } else {
-                    (color("foreground")?, None)
-                };
-                let adjustment = if let Some(text) = string(rule, "foreground_adjust")? {
-                    if background.is_none() {
-                        return Err(Error::Format(
-                            "foreground_adjust requires background".into(),
-                        ));
-                    }
-                    Color::parse(&format!("color(white {text})"), &out.variables)?;
-                    let i = out.adjustments.len();
-                    out.adjustments.push(text.into());
-                    Some(i)
-                } else {
-                    None
-                };
-                out.rules.push(Rule {
-                    selector: Selector::parse(
-                        string(rule, "scope")?
-                            .ok_or_else(|| Error::Format("rule requires scope".into()))?,
-                    )?,
-                    foreground,
-                    background,
-                    selection_foreground,
-                    font_style: string(rule, "font_style")?
-                        .map(FontStyle::parse)
-                        .transpose()?,
-                    gradient,
-                    adjustment,
-                });
+                }
+            } else {
+                out.warnings.push("rules must be an array".into());
             }
         }
+        out.globals.derive_defaults();
         Ok(out)
+    }
+    fn compile_rule(&mut self, rule: &Value, index: usize) -> Option<Rule> {
+        let prefix = format!("rules[{index}]");
+        let selector = recover(
+            &mut self.warnings,
+            &format!("{prefix}.scope"),
+            string(rule, "scope").and_then(|s| {
+                Selector::parse(s.ok_or_else(|| Error::Format("missing scope".into()))?)
+                    .map_err(Error::from)
+            }),
+        )?;
+        let mut color = |key: &str| {
+            recover(
+                &mut self.warnings,
+                &format!("{prefix}.{key}"),
+                string(rule, key)
+                    .and_then(|s| s.map(|s| Color::parse(s, &self.variables)).transpose()),
+            )
+            .flatten()
+        };
+        let background = color("background");
+        let selection_foreground = color("selection_foreground");
+        let gradient_value = rule
+            .get("hashed_foreground")
+            .or_else(|| rule.get("foreground").filter(|v| v.is_array()));
+        let (foreground, gradient) = if let Some(value) = gradient_value {
+            let colors = (|| {
+                let array = value
+                    .as_array()
+                    .filter(|a| a.len() >= 2)
+                    .ok_or_else(|| Error::Format("gradient needs at least two colors".into()))?;
+                array
+                    .iter()
+                    .map(|v| {
+                        Color::parse(
+                            v.as_str().ok_or_else(|| {
+                                Error::Format("gradient colors must be strings".into())
+                            })?,
+                            &self.variables,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, Error>>()
+            })();
+            if let Some(colors) =
+                recover(&mut self.warnings, &format!("{prefix}.foreground"), colors)
+            {
+                let table = std::array::from_fn(|i| {
+                    let at = i as f64 / 255. * (colors.len() - 1) as f64;
+                    let index = (at as usize).min(colors.len() - 2);
+                    colors[index].lerp(colors[index + 1], at - index as f64, true, true)
+                });
+                let id = self.gradients.len();
+                self.gradients.push(table);
+                (Some(colors[0]), Some(id))
+            } else {
+                (None, None)
+            }
+        } else {
+            (color("foreground"), None)
+        };
+        let adjustment = (|| -> Result<Option<usize>, Error> {
+            let Some(text) = string(rule, "foreground_adjust")? else {
+                return Ok(None);
+            };
+            if background.is_none() {
+                return Err(Error::Format(
+                    "foreground_adjust requires background".into(),
+                ));
+            }
+            Color::parse(&format!("color(white {text})"), &self.variables)?;
+            let id = self.adjustments.len();
+            self.adjustments.push(text.into());
+            Ok(Some(id))
+        })();
+        let adjustment = recover(
+            &mut self.warnings,
+            &format!("{prefix}.foreground_adjust"),
+            adjustment,
+        )
+        .flatten();
+        let font_style = recover(
+            &mut self.warnings,
+            &format!("{prefix}.font_style"),
+            string(rule, "font_style").and_then(|s| s.map(FontStyle::parse).transpose()),
+        )
+        .flatten();
+        Some(Rule {
+            selector,
+            foreground,
+            background,
+            selection_foreground,
+            font_style,
+            gradient,
+            adjustment,
+        })
+    }
+    /// Recoverable per-key/per-rule diagnostics. Valid neighboring items remain usable.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+    /// Selection corner geometry, defaulting to the documented round style.
+    pub fn selection_corner_style(&self) -> CornerStyle {
+        self.globals
+            .corner_style("selection_corner_style")
+            .unwrap_or_default()
+    }
+    /// Selection radius in pixels (Velocity's fallback is 2).
+    pub fn selection_corner_radius(&self) -> f64 {
+        self.globals.number("selection_corner_radius").unwrap_or(2.)
+    }
+    /// Block caret corner geometry.
+    pub fn block_caret_corner_style(&self) -> CornerStyle {
+        self.globals
+            .corner_style("block_caret_corner_style")
+            .unwrap_or_default()
+    }
+    /// Block caret radius in pixels (Velocity's fallback is 2).
+    pub fn block_caret_corner_radius(&self) -> f64 {
+        self.globals
+            .number("block_caret_corner_radius")
+            .unwrap_or(2.)
+    }
+    /// Explicit bracket decorations; absence lets the renderer retain its default.
+    pub fn brackets_options(&self) -> Option<DecorationOptions> {
+        self.globals.decoration_options("brackets_options")
+    }
+    /// Explicit bracket-content decorations.
+    pub fn bracket_contents_options(&self) -> Option<DecorationOptions> {
+        self.globals.decoration_options("bracket_contents_options")
+    }
+    /// Explicit matching-tag decorations.
+    pub fn tags_options(&self) -> Option<DecorationOptions> {
+        self.globals.decoration_options("tags_options")
     }
     /// Base document style used for unstyled/approximate lines.
     pub fn default_style(&self) -> Style {
@@ -548,7 +653,7 @@ pub fn load_resources<'a>(
         if Path::new(path).file_name().and_then(|s| s.to_str()) != Some(basename) {
             continue;
         }
-        let overlay = if path.ends_with(".tmTheme") {
+        let overlay = if path.ends_with(".tmTheme") || path.ends_with(".hidden-tmTheme") {
             SchemeSource::from_tm_theme(text)?
         } else {
             SchemeSource::parse(text)?
@@ -558,11 +663,21 @@ pub fn load_resources<'a>(
         } else {
             source = Some(overlay);
         }
-        hidden |= path.ends_with(".hidden-color-scheme");
+        hidden |= path.ends_with(".hidden-color-scheme") || path.ends_with(".hidden-tmTheme");
     }
     let mut scheme = source
         .ok_or_else(|| Error::Format(format!("scheme resource not found: {filename}")))?
         .compile()?;
     scheme.hidden |= hidden;
     Ok(scheme)
+}
+
+fn recover<T>(warnings: &mut Vec<String>, key: &str, result: Result<T, Error>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            warnings.push(format!("{key}: {error}"));
+            None
+        }
+    }
 }

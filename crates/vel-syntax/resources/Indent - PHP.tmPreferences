@@ -1,0 +1,7 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>text.html, embedding.php, source.php</string>
+<key>settings</key><dict>
+<key>velocityKeepIndentPattern</key><string>^\s*\?&gt;\s*$</string>
+<key>velocityResetIndentPattern</key><string>^\s*&lt;\?(?:php)?\s*$</string>
+</dict></dict></plist>

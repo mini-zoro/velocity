@@ -294,6 +294,13 @@ proptest! {
 
 #[test]
 fn unicode_multicursor_undo_macro_marks_and_failed_motions() {
+    // Regression from the property test: ~ on uncased Han creates no buffer edit.
+    // Undo must undo the put, whose old caret is valid in the shorter Unicode text.
+    run(
+        "|e\u{301}界👩‍💻 x\nabc () <>\n\nline",
+        "kk2xP~u",
+        "|👩‍💻 x\nabc () <>\n\nline",
+    );
     run("|one |two", "cwi界!<Esc>u", "|one |two");
     run("|abc", "Rxy<BS><Esc>", "|xbc");
     run("|abc", "dfz", "|abc");
@@ -375,4 +382,17 @@ fn insert_backspace_deletes_external_selection() {
     vi.handle_key(Key::Escape, &mut buffer, view, &layout);
     vi.handle_key('u', &mut buffer, view, &layout);
     assert_eq!(buffer.text().to_string(), "abc");
+}
+
+#[test]
+fn dot_remembers_noop_change_without_adding_an_undo_group() {
+    for (initial, command, expected) in [
+        ("|first\nb\nlast\n", "ddrb.", "|b\nlast\n"),
+        ("|first\n123\nlast\n", "dd~.", "12|3\nlast\n"),
+        ("|first\nlower\nlast\n", "ddguu.", "|lower\nlast\n"),
+    ] {
+        run(initial, command, expected);
+        // The no-op dot target creates no undo step; undo still restores dd.
+        run(initial, &(command.to_owned() + "u"), initial);
+    }
 }

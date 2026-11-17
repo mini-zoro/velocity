@@ -358,6 +358,31 @@ fn snapshot(scene: &Scene) -> serde_json::Value {
 }
 #[test]
 fn key_screens_match_structural_goldens() {
+    fn settled_scene(view: &mut View, editor: &Editor) -> Scene {
+        // scene() stages annotation jobs. Wait for their version-bound publication,
+        // rather than letting worker scheduling decide whether the diff gutter is drawn.
+        view.scene(editor);
+        editor.annotations.borrow_mut().flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut annotations = editor.annotations.borrow_mut();
+            annotations.poll();
+            if annotations.pending == 0
+                && annotations
+                    .exact(editor.buffer.id(), editor.buffer.change_id())
+                    .is_some()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "annotation publication did not arrive"
+            );
+            drop(annotations);
+            std::thread::yield_now();
+        }
+        view.scene(editor)
+    }
     let mut w = workspace();
     crate::theme_bench::demo(&mut w).unwrap();
     w.editor_mut()
@@ -381,7 +406,14 @@ fn key_screens_match_structural_goldens() {
             width: content.width,
             height: content.height,
         };
-        let scene = view.scene(w.editor());
+        // The frozen dark scene is the first paint, before scene() starts the worker.
+        // The light scene includes published diffs. Model both lifecycle points explicitly.
+        let scene = if dark {
+            assert!(w.editor().annotations.borrow().current.is_none());
+            view.scene(w.editor())
+        } else {
+            settled_scene(&mut view, w.editor())
+        };
         scenes.insert(
             format!("{appearance}_phantoms_popup_annotations"),
             snapshot(&scene),

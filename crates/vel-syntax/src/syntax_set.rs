@@ -8,7 +8,6 @@ use crate::LoadingError;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::mem;
 use std::ops::DerefMut;
 use std::path::Path;
 
@@ -407,6 +406,7 @@ impl SyntaxSet {
             }
 
             let syntax_definition = SyntaxDefinition {
+                authoring_warnings: Vec::new(),
                 raw_first_line_match: None,
                 name,
                 file_extensions,
@@ -670,12 +670,17 @@ impl SyntaxSetBuilder {
     /// [`SyntaxSet`]: struct.SyntaxSet.html
     pub fn build(self) -> SyntaxSet {
         let SyntaxSetBuilder {
-            syntaxes: syntax_definitions,
+            syntaxes: mut syntax_definitions,
             path_syntaxes,
             mut warnings,
             lines_include_newline,
         } = self;
 
+        // Anonymous names are local implementation details, never override slots.
+        // Namespace every file before inheriting (including embed and prototype wrappers).
+        for (index, syntax) in syntax_definitions.iter_mut().enumerate() {
+            namespace_anonymous_contexts(syntax, index);
+        }
         // Extends resolution phase: merge parent contexts/variables into children
         let (mut syntax_definitions, extends_warnings) =
             Self::resolve_extends(syntax_definitions, &path_syntaxes, lines_include_newline);
@@ -685,7 +690,23 @@ impl SyntaxSetBuilder {
         // a `captures:` mapping be narrowed to the groups that consume. Doing
         // it while reading the YAML measures a child's regex before its
         // parent's variables exist — see `parse_captures`.
-        for syntax in &mut syntax_definitions {
+        for (index, syntax) in syntax_definitions.iter_mut().enumerate() {
+            let path = path_syntaxes
+                .iter()
+                .find(|(_, i)| *i == index)
+                .map_or(syntax.name.as_str(), |(path, _)| path.as_str());
+            warnings.extend(
+                syntax
+                    .authoring_warnings
+                    .iter()
+                    .cloned()
+                    .chain(crate::yaml_load::regex_authoring_warnings(syntax))
+                    .map(|w| format!("{path}: {w}")),
+            );
+            // One sentinel per syntax keeps missing references cheap and isolated.
+            syntax
+                .contexts
+                .insert("#velocity_missing".into(), Context::new(Some(false)));
             crate::yaml_load::filter_captures_to_consuming_groups(syntax);
         }
 
@@ -695,6 +716,7 @@ impl SyntaxSetBuilder {
 
         for (syntax_index, syntax_definition) in syntax_definitions.into_iter().enumerate() {
             let SyntaxDefinition {
+                authoring_warnings: _,
                 name,
                 file_extensions,
                 scope,
@@ -772,7 +794,13 @@ impl SyntaxSetBuilder {
                 {
                     context.prototype = Some(*prototype_id);
                 }
-                Self::link_context(context, syntax_index, &all_context_ids, &syntaxes);
+                Self::link_context(
+                    context,
+                    syntax_index,
+                    &all_context_ids,
+                    &syntaxes,
+                    &mut warnings,
+                );
 
                 if context.uses_backrefs {
                     found_more_backref_includes = true;
@@ -863,6 +891,12 @@ impl SyntaxSetBuilder {
         lines_include_newline: bool,
     ) -> (Vec<SyntaxDefinition>, Vec<String>) {
         let mut warnings = Vec::new();
+        let origin = |index: usize| {
+            path_syntaxes
+                .iter()
+                .find(|(_, i)| *i == index)
+                .map_or("<memory>", |(path, _)| path.as_str())
+        };
 
         // Build lookup maps: name -> index and path-suffix -> index
         let mut name_to_index: HashMap<String, usize> = HashMap::new();
@@ -950,8 +984,9 @@ impl SyntaxSetBuilder {
                     .all(|&pi| syntax_definitions[pi].version == child_version);
                 if !version_ok {
                     warnings.push(format!(
-                        "syntax '{}' has a version mismatch with one or more parents; \
+                        "{}: syntax '{}' has a version mismatch with one or more parents; \
                          extends will not be applied",
+                        origin(child_idx),
                         syntax_definitions[child_idx].name
                     ));
                     // A refused `extends` leaves a
@@ -972,8 +1007,9 @@ impl SyntaxSetBuilder {
                 let common_root = parent_roots[0];
                 if !parent_roots.iter().all(|&r| r == common_root) {
                     warnings.push(format!(
-                        "syntax '{}' extends parents that derive from different base syntaxes; \
+                        "{}: syntax '{}' extends parents that derive from different base syntaxes; \
                          extends will not be applied",
+                        origin(child_idx),
                         syntax_definitions[child_idx].name
                     ));
                     // The other refusal.
@@ -1191,6 +1227,7 @@ impl SyntaxSetBuilder {
                             backref_regex: Regex::new(r"\\\d".into()),
                             lines_include_newline,
                             version: child.version,
+                            context_depth: 0,
                         },
                         top_level_scope,
                     );
@@ -1200,8 +1237,10 @@ impl SyntaxSetBuilder {
                     crate::yaml_load::re_resolve_all_regexes(child, lines_include_newline)
                 {
                     warnings.push(format!(
-                        "failed to re-resolve regexes for '{}' after extends: {}",
-                        child.name, e
+                        "{}: failed to re-resolve regexes for '{}' after extends: {}",
+                        origin(child_idx),
+                        child.name,
+                        e
                     ));
                 }
 
@@ -1240,8 +1279,8 @@ impl SyntaxSetBuilder {
                 };
                 if unresolved.contains(idx) {
                     warnings.push(format!(
-                        "syntax '{}' extends '{}' but parent was not found or has circular dependency",
-                        syntax.name, extends_str,
+                        "{}: syntax '{}' extends '{}' but parent was not found or has circular dependency",
+                        origin(*idx), syntax.name, extends_str,
                     ));
                 }
                 // Mark broken syntaxes as hidden so they won't be found by
@@ -1267,6 +1306,7 @@ impl SyntaxSetBuilder {
                             backref_regex: Regex::new(r"\\\d".into()),
                             lines_include_newline,
                             version: syntax.version,
+                            context_depth: 0,
                         },
                         top_level_scope,
                     );
@@ -1447,16 +1487,25 @@ impl SyntaxSetBuilder {
         syntax_index: usize,
         all_context_ids: &[HashMap<String, ContextId>],
         syntaxes: &[SyntaxReference],
+        warnings: &mut Vec<String>,
     ) {
         for pattern in &mut context.patterns {
             match *pattern {
-                Pattern::Match(ref mut match_pat) => {
-                    Self::link_match_pat(match_pat, syntax_index, all_context_ids, syntaxes)
-                }
+                Pattern::Match(ref mut match_pat) => Self::link_match_pat(
+                    match_pat,
+                    syntax_index,
+                    all_context_ids,
+                    syntaxes,
+                    warnings,
+                ),
                 Pattern::Include(ref mut context_ref)
-                | Pattern::IncludeWithPrototype(ref mut context_ref) => {
-                    Self::link_ref(context_ref, syntax_index, all_context_ids, syntaxes)
-                }
+                | Pattern::IncludeWithPrototype(ref mut context_ref) => Self::link_ref(
+                    context_ref,
+                    syntax_index,
+                    all_context_ids,
+                    syntaxes,
+                    warnings,
+                ),
             }
         }
     }
@@ -1466,6 +1515,7 @@ impl SyntaxSetBuilder {
         syntax_index: usize,
         all_context_ids: &[HashMap<String, ContextId>],
         syntaxes: &[SyntaxReference],
+        warnings: &mut Vec<String>,
     ) {
         // println!("{:?}", context_ref);
         use super::syntax_definition::ContextReference::*;
@@ -1483,56 +1533,52 @@ impl SyntaxSetBuilder {
             ByScope {
                 scope,
                 ref sub_context,
-                with_escape,
-            } => Self::with_plain_text_fallback(
-                all_context_ids,
-                syntaxes,
-                with_escape,
-                Self::find_id(sub_context, all_context_ids, syntaxes, |index_and_syntax| {
-                    index_and_syntax.1.scope == scope
-                }),
-            ),
+                with_escape: _,
+            } => Self::find_id(sub_context, all_context_ids, syntaxes, |index_and_syntax| {
+                index_and_syntax.1.scope == scope
+            }),
             File {
                 ref name,
                 ref sub_context,
-                with_escape,
-            } => Self::with_plain_text_fallback(
-                all_context_ids,
-                syntaxes,
-                with_escape,
-                Self::find_id(sub_context, all_context_ids, syntaxes, |index_and_syntax| {
-                    file_reference_matches(name, index_and_syntax.1)
-                }),
-            ),
+                with_escape: _,
+            } => Self::find_id(sub_context, all_context_ids, syntaxes, |index_and_syntax| {
+                file_reference_matches(name, index_and_syntax.1)
+            }),
             Direct(_) | Base => None,
         };
         if let Some(context_id) = linked_context_id {
-            let mut new_ref = Direct(*context_id);
-            mem::swap(context_ref, &mut new_ref);
-        }
-    }
-
-    fn with_plain_text_fallback<'a>(
-        all_context_ids: &'a [HashMap<String, ContextId>],
-        syntaxes: &'a [SyntaxReference],
-        with_escape: bool,
-        context_id: Option<&'a ContextId>,
-    ) -> Option<&'a ContextId> {
-        context_id.or_else(|| {
-            if with_escape {
-                // If we keep this reference unresolved, syntect will crash
-                // when it encounters the reference. Rather than crashing,
-                // we instead fall back to "Plain Text". This seems to be
-                // how Sublime Text behaves. It should be a safe thing to do
-                // since `embed`s always includes an `escape` to get out of
-                // the `embed`.
-                Self::find_id(&None, all_context_ids, syntaxes, |index_and_syntax| {
-                    index_and_syntax.1.name == "Plain Text"
+            *context_ref = Direct(*context_id);
+        } else if !matches!(context_ref, Direct(_) | Base) {
+            warnings.push(format!(
+                "{}: unresolved context reference {context_ref:?}",
+                syntaxes[syntax_index].path
+            ));
+            // Missing embedded languages retain the legacy Plain Text scope. A typo in
+            // an existing language's context must stay empty, rather than change language.
+            let missing_syntax = match context_ref {
+                ByScope {
+                    scope,
+                    with_escape: true,
+                    ..
+                } => !syntaxes.iter().any(|s| s.scope == *scope),
+                File {
+                    name,
+                    with_escape: true,
+                    ..
+                } => !syntaxes.iter().any(|s| file_reference_matches(name, s)),
+                _ => false,
+            };
+            let fallback = missing_syntax
+                .then(|| {
+                    Self::find_id(&None, all_context_ids, syntaxes, |(_, s)| {
+                        s.scope.build_string() == "text.plain"
+                    })
                 })
-            } else {
-                None
-            }
-        })
+                .flatten()
+                .copied();
+            *context_ref =
+                Direct(fallback.unwrap_or(all_context_ids[syntax_index]["#velocity_missing"]));
+        }
     }
 
     fn find_id<'a>(
@@ -1555,6 +1601,7 @@ impl SyntaxSetBuilder {
         syntax_index: usize,
         all_context_ids: &[HashMap<String, ContextId>],
         syntaxes: &[SyntaxReference],
+        warnings: &mut Vec<String>,
     ) {
         let maybe_context_refs = match match_pat.operation {
             MatchOperation::Push {
@@ -1577,18 +1624,23 @@ impl SyntaxSetBuilder {
         };
         if let Some(context_refs) = maybe_context_refs {
             for context_ref in context_refs.iter_mut() {
-                if matches!(
+                Self::link_ref(
                     context_ref,
-                    ContextReference::Named(_)
-                        | ContextReference::Inline(_)
-                        | ContextReference::Direct(_)
-                ) {
-                    Self::link_ref(context_ref, syntax_index, all_context_ids, syntaxes);
-                }
+                    syntax_index,
+                    all_context_ids,
+                    syntaxes,
+                    warnings,
+                );
             }
         }
         if let Some(ref mut context_ref) = match_pat.with_prototype {
-            Self::link_ref(context_ref, syntax_index, all_context_ids, syntaxes);
+            Self::link_ref(
+                context_ref,
+                syntax_index,
+                all_context_ids,
+                syntaxes,
+                warnings,
+            );
         }
     }
 }
@@ -1761,5 +1813,55 @@ impl SyntaxSet {
             .and_then(|s| s.context_ids().get(sub.as_deref().unwrap_or("main")))
             .copied()
             .ok_or_else(|| ParsingError::UnresolvedContextReference(reference.clone()))
+    }
+}
+
+/// Give compiler-created contexts file-local identities before `extends` merges names.
+fn namespace_anonymous_contexts(syntax: &mut SyntaxDefinition, file: usize) {
+    let names: HashMap<_, _> = syntax
+        .contexts
+        .keys()
+        .filter(|n| n.starts_with("#anon_"))
+        .map(|name| (name.clone(), format!("#anon_file{file}_{name}")))
+        .collect();
+    let rename = |reference: &mut ContextReference| {
+        if let ContextReference::Inline(name) | ContextReference::Named(name) = reference
+            && let Some(new) = names.get(name)
+        {
+            *name = new.clone();
+        }
+    };
+    for context in syntax.contexts.values_mut() {
+        for pattern in &mut context.patterns {
+            match pattern {
+                Pattern::Include(reference) | Pattern::IncludeWithPrototype(reference) => {
+                    rename(reference)
+                }
+                Pattern::Match(pattern) => {
+                    let references = match &mut pattern.operation {
+                        MatchOperation::Push { ctx_refs, .. }
+                        | MatchOperation::Set { ctx_refs, .. } => Some(ctx_refs),
+                        MatchOperation::Branch { alternatives, .. } => Some(alternatives),
+                        MatchOperation::Embed { contexts, .. } => Some(contexts),
+                        _ => None,
+                    };
+                    if let Some(references) = references {
+                        for reference in references {
+                            rename(reference);
+                        }
+                    }
+                    if let Some(reference) = &mut pattern.with_prototype {
+                        rename(reference);
+                    }
+                }
+            }
+        }
+    }
+    for (old, new) in names {
+        let context = syntax
+            .contexts
+            .remove(&old)
+            .expect("collected context name");
+        syntax.contexts.insert(new, context);
     }
 }

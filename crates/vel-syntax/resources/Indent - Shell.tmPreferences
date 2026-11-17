@@ -1,0 +1,9 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>source.shell</string>
+<key>settings</key><dict>
+<key>velocityIndentBlockStartPattern</key><string>^\s*case\b</string>
+<key>velocityIndentBlockEndPattern</key><string>^\s*(?:esac\b|\})</string>
+<key>velocityIndentBlockInlineEndPattern</key><string>\besac\b</string>
+<key>velocityIndentAtomicScope</key><string>meta.interpolation.parameter.shell</string>
+</dict></dict></plist>

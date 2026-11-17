@@ -14,22 +14,22 @@
     "failed_cells": 0
   },
   "reindent_counts": {
-    "passed": 30,
-    "failed": 5,
+    "passed": 35,
+    "failed": 0,
     "skipped": 0,
     "passed_cells": 0,
     "failed_cells": 0
   },
   "regex_metrics": {
-    "compilations": 18444,
+    "compilations": 6478,
     "compile_errors": 0,
-    "search_errors": 499
+    "search_errors": 403
   },
-  "loaded": 202,
+  "loaded": 203,
   "test_files": 242,
   "overall": {
-    "passed": 126595,
-    "failed": 5,
+    "passed": 126600,
+    "failed": 0,
     "skipped": 0,
     "passed_cells": 590758,
     "failed_cells": 0
@@ -113,15 +113,15 @@
       "failed_cells": 0
     },
     "C++": {
-      "passed": 1757,
-      "failed": 1,
+      "passed": 1758,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 6005,
       "failed_cells": 0
     },
     "CSS": {
-      "passed": 3514,
-      "failed": 1,
+      "passed": 3515,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 18306,
       "failed_cells": 0
@@ -680,8 +680,8 @@
       "failed_cells": 0
     },
     "JSX": {
-      "passed": 619,
-      "failed": 1,
+      "passed": 620,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 2941,
       "failed_cells": 0
@@ -729,8 +729,8 @@
       "failed_cells": 0
     },
     "JavaScript": {
-      "passed": 3013,
-      "failed": 1,
+      "passed": 3014,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 16158,
       "failed_cells": 0
@@ -992,6 +992,13 @@
       "failed": 0,
       "skipped": 0,
       "passed_cells": 16537,
+      "failed_cells": 0
+    },
+    "Plain Text": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "passed_cells": 0,
       "failed_cells": 0
     },
     "PostgreSQL": {
@@ -1422,8 +1429,8 @@
       "failed_cells": 0
     },
     "Zsh": {
-      "passed": 8075,
-      "failed": 1,
+      "passed": 8076,
+      "failed": 0,
       "skipped": 0,
       "passed_cells": 28463,
       "failed_cells": 0
@@ -2622,8 +2629,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -2631,21 +2638,13 @@
       "file": "C++/tests/syntax_test_indent_common.c++",
       "syntax": "Packages/C++/C++.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 770,
-          "source_line": 770,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"        v++ /*(*/ // ; \\\"comment\\\" ()\", got \"    v++ /*(*/ // ; \\\"comment\\\" ()\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -2770,8 +2769,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -2779,21 +2778,13 @@
       "file": "CSS/tests/syntax_test_indentation.css",
       "syntax": "Packages/CSS/CSS.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 77,
-          "source_line": 77,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"} /**/ .foo /**/ {              /*\", got \"    } /**/ .foo /**/ {              /*\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -4738,8 +4729,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -4747,21 +4738,13 @@
       "file": "JavaScript/tests/syntax_test_js_indent_common.js",
       "syntax": "Packages/JavaScript/JavaScript.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 682,
-          "source_line": 682,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"    case                         // comments\", got \"        case                         // comments\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -5201,8 +5184,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -5210,21 +5193,13 @@
       "file": "JavaScript/tests/syntax_test_jsx_indent.jsx",
       "syntax": "Packages/JavaScript/JSX.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 34,
-          "source_line": 34,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"                indented=\\\"attribute\\\"\", got \"            indented=\\\"attribute\\\"\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -8989,8 +8964,8 @@
         "failed_cells": 0
       },
       "reindent_counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
@@ -8998,21 +8973,13 @@
       "file": "ShellScript/Zsh/tests/syntax_test_reindent_case.zsh",
       "syntax": "Packages/ShellScript/Zsh.sublime-syntax",
       "counts": {
-        "passed": 0,
-        "failed": 1,
+        "passed": 1,
+        "failed": 0,
         "skipped": 0,
         "passed_cells": 0,
         "failed_cells": 0
       },
-      "examples": [
-        {
-          "line": 107,
-          "source_line": 107,
-          "column": 0,
-          "selector": "reindent-unchanged",
-          "actual": "expected \"case $var {\", got \"    case $var {\""
-        }
-      ],
+      "examples": [],
       "error": null,
       "skip_reason": null
     },
@@ -9962,5 +9929,22 @@
       "skip_reason": null
     }
   ],
-  "warnings": []
+  "warnings": [
+    "Packages/Haskell/Literate Haskell.sublime-syntax: unresolved context reference ByScope { scope: source.html, sub_context: None, with_escape: true }",
+    "Packages/Haskell/Literate Haskell.sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Haskell/Literate Haskell.sublime-syntax: unresolved context reference ByScope { scope: source.tex.latex, sub_context: None, with_escape: true }",
+    "Packages/Haskell/Literate Haskell.sublime-syntax: unresolved context reference ByScope { scope: source.tex.latex, sub_context: None, with_escape: true }",
+    "Packages/LaTeX/LaTeX.sublime-syntax: unresolved context reference ByScope { scope: source.html, sub_context: None, with_escape: true }",
+    "Packages/LaTeX/LaTeX.sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/LaTeX/LaTeX.sublime-syntax: unresolved context reference ByScope { scope: source.tex.latex, sub_context: None, with_escape: true }",
+    "Packages/LaTeX/LaTeX.sublime-syntax: unresolved context reference ByScope { scope: source.tex.latex, sub_context: None, with_escape: true }",
+    "Packages/R/Rd (R Documentation).sublime-syntax: unresolved context reference ByScope { scope: text.tex.latex, sub_context: Some(\"plain-tex\"), with_escape: false }",
+    "Packages/R/Rd (R Documentation).sublime-syntax: unresolved context reference ByScope { scope: text.tex.latex, sub_context: Some(\"begin-end-commands\"), with_escape: false }",
+    "Packages/Rails/Embeddings/Ruby (for HAML).sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Rails/Embeddings/Ruby (for HAML).sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Rails/Ruby (Rails).sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Rails/Ruby (Rails).sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Ruby/Ruby.sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }",
+    "Packages/Ruby/Ruby.sublime-syntax: unresolved context reference ByScope { scope: text.html, sub_context: None, with_escape: true }"
+  ]
 }

@@ -132,6 +132,7 @@ pub struct Vintage {
     registers: BTreeMap<char, Register>,
     command_keys: Vec<Key>,
     last_change: Vec<Key>,
+    change_ran: bool,
     steps: usize,
     before: Option<Selection>,
     host_action: Option<(Selection, Vec<Key>)>,
@@ -185,6 +186,7 @@ impl Vintage {
             registers: BTreeMap::new(),
             command_keys: Vec::new(),
             last_change: Vec::new(),
+            change_ran: false,
             steps: 0,
             before: None,
             host_action: None,
@@ -309,6 +311,7 @@ impl Vintage {
             self.undo.clear();
             self.redo.clear();
             self.steps = 0;
+            self.change_ran = false;
             self.before = None;
             self.host_action = None;
             self.replace_restore.clear();
@@ -354,7 +357,13 @@ impl Vintage {
         }
         self.command_keys.push(key.clone());
         let register_prefix = self.pending == "\"";
+        let was_inserting = matches!(self.mode, Mode::Insert | Mode::Replace);
         let outcome = self.process(key, buffer, view, layout);
+        // Entering insertion is a dot target even if Escape follows without text.
+        // Keep this at the command boundary, independent of insert-session history.
+        if !was_inserting && matches!(self.mode, Mode::Insert | Mode::Replace) {
+            self.change_ran = true;
+        }
         if !register_prefix
             && self.mode == Mode::Normal
             && self.pending.is_empty()
@@ -369,10 +378,11 @@ impl Vintage {
                 };
                 self.undo.push(group);
                 self.redo.clear();
-                if !self.repeating {
-                    self.last_change = self.command_keys.clone();
-                }
             }
+            if self.change_ran && !self.repeating {
+                self.last_change = self.command_keys.clone();
+            }
+            self.change_ran = false;
             self.steps = 0;
             self.before = None;
             self.command_keys.clear();
@@ -1295,6 +1305,9 @@ impl Vintage {
         self.count = 0;
     }
     fn apply(&mut self, buffer: &mut Buffer, view: ViewId, mut reps: Vec<Replacement>) {
+        // Dot remembers the attempted change even when the buffer filters identical edits.
+        // Undo groups below still count only actual transactions.
+        self.change_ran = true;
         if reps.iter().all(|r| r.range.is_empty() && r.text.is_empty()) {
             return;
         }
@@ -1342,13 +1355,16 @@ impl Vintage {
             })
             .collect::<Vec<_>>();
         buffer.break_undo_group();
+        let before = buffer.change_id();
         buffer.transact(
             view,
             EditKind::Other,
             &edits,
             Self::selection(carets, primary),
         );
-        self.steps += 1;
+        // The buffer filters identical replacements. Count actual transactions so
+        // undo never consumes a preceding edit using this no-op's saved selection.
+        self.steps += usize::from(buffer.change_id() != before);
         if !matches!(self.mode, Mode::Insert | Mode::Replace) {
             self.normalize(buffer, view);
         }

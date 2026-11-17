@@ -159,7 +159,7 @@ rule("tab_label", attributes=["dirty"], settings=["highlight_modified_tabs"], fg
 rule("tabset_control", settings=["mouse_wheel_switches_tabs", "!enable_tab_scrolling"], platforms=["linux"], mouse_wheel_switch=True)
 rule("tab_close_button", settings=["!show_tab_close_buttons"], **{"layer0.opacity": 0.0, "content_margin": 0})
 rule("tab_control", settings=["show_tab_close_buttons_on_left"], close_button_side="left")
-rule("sheet_contents", attributes=["!highlighted"], settings=["inactive_sheet_dimming"], background_modifier="blend(black 8%)")
+rule("sheet_contents", attributes=["!highlighted"], settings=["inactive_sheet_dimming"], background_modifier="blend(black 92%)")
 for cls in ("scroll_tabs_left_button", "scroll_tabs_right_button"):
     rule(cls, settings=["hide_tab_scrolling_buttons"], **{"layer0.opacity": 0.0, "content_margin": 0})
 rule("new_tab_button", settings=["hide_new_tab_button"], **{"layer0.opacity": 0.0, "content_margin": 0})

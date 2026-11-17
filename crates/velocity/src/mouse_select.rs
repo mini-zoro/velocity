@@ -102,7 +102,7 @@ impl DragSelect {
         column: bool,
     ) -> Self {
         let base = Selection::from_regions(editor.regions());
-        let origin = if extend && combine == Combine::Replace && unit == Unit::Char {
+        let origin = if extend && combine == Combine::Replace {
             Region::caret(editor.anchor)
         } else if unit == Unit::Word {
             let at = under_pointer(view, editor, point, at);

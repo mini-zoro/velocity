@@ -421,8 +421,8 @@ mod tests {
             counts,
             std::collections::BTreeMap::from([
                 ("implemented", 61),
-                ("partially", 118),
-                ("missing", 13),
+                ("partially", 123),
+                ("missing", 12),
                 ("out of scope", 3)
             ])
         );

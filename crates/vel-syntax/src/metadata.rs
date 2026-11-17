@@ -128,6 +128,22 @@ impl MetadataSet {
                 metadata,
             });
         }
+        // Original reindent policies; package/User data may override each independently.
+        for source in [
+            include_bytes!("../resources/Indent - SQL.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - CSS.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - Python.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - PHP.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - Shell.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - C family.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - JS cases.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - JSX.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - Markup.tmPreferences").as_slice(),
+            include_bytes!("../resources/Indent - Template.tmPreferences").as_slice(),
+        ] {
+            set.add_plist(source)
+                .expect("validated original indentation preferences");
+        }
         set
     }
     /// Loads public preferences in deterministic resource order; pass User directories last.

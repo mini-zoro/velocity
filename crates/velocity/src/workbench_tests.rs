@@ -162,6 +162,7 @@ fn launch_with_nonexistent_readonly_and_corrupt_data_roots() {
     let missing = dir.path().join("brand-new/profile");
     assert!(!missing.exists());
     let w = Workspace::new(Text::new(), Some(missing.clone()), None, false).unwrap();
+    // Optional bundled references are console diagnostics, not launch errors.
     assert!(w.messages.is_empty(), "{:?}", w.messages);
     assert!(missing.join("Packages/User").is_dir());
     let corrupt = dir.path().join("data-is-file");
@@ -170,7 +171,13 @@ fn launch_with_nonexistent_readonly_and_corrupt_data_roots() {
     let bad = missing.join("Packages/User/Preferences.sublime-settings");
     std::fs::write(&bad, "{ corrupt").unwrap();
     let w = Workspace::new(Text::new(), Some(missing), None, false).unwrap();
-    assert!(!w.messages.is_empty());
+    assert!(
+        w.messages
+            .iter()
+            .any(|message| message.contains("Preferences.sublime-settings")),
+        "{:?}",
+        w.messages
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

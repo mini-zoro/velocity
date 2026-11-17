@@ -1,0 +1,6 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>source.c, source.c++, source.objc, source.objc++</string>
+<key>settings</key><dict>
+<key>velocityNoBracketIndentPattern</key><string>^\s*extern\b</string>
+</dict></dict></plist>

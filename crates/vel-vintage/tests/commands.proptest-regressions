@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc b8d846d0bdc4a502236740fa5c20d243c3c8500aa8427a986b406942c30bf99a # shrinks to actions = [3, 87, 0, 53, 79, 51, 0, 69]
+cc 9c2bf1efb9a04f8dbb982a433fe0d0d839a1ee9ee55c0fc7cfcca168f94a7143 # shrinks to actions = [2, 2, 135, 36, 117, 106, 107]

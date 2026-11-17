@@ -101,6 +101,8 @@ pub struct ParseLineOutput {
 /// Markdown's `$$ … $$` maths blocks do under an embedded-LaTeX branch fail —
 /// never reaches it.
 const ZERO_WIDTH_ESCAPE_FIRE_LIMIT: u32 = 100;
+/// Velocity resource bound; normal documents may nest well beyond 100 frames.
+const CONTEXT_STACK_LIMIT: usize = 1024;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct InterpreterState {
@@ -1226,7 +1228,7 @@ impl InterpreterState {
     }
 
     fn find_best_match<'a>(
-        &self,
+        &mut self,
         line: &str,
         start: usize,
         syntax_set: &'a SyntaxSet,
@@ -1336,18 +1338,39 @@ impl InterpreterState {
                 }
                 let looping = hit.end == start
                     && matches!((armed_pre,&match_pat.operation),(Some(pre),MatchOperation::Pop(n)) if self.stack.len().saturating_sub(*n)==pre);
+                let target_depth = match &match_pat.operation {
+                    MatchOperation::Push {
+                        ctx_refs,
+                        pop_count,
+                    } => self.stack.len().saturating_sub(*pop_count) + ctx_refs.len(),
+                    MatchOperation::Set {
+                        ctx_refs,
+                        pop_count,
+                    } => self.stack.len().saturating_sub((*pop_count).max(1)) + ctx_refs.len(),
+                    MatchOperation::Embed {
+                        contexts,
+                        pop_count,
+                        ..
+                    } => self.stack.len().saturating_sub(*pop_count) + contexts.len(),
+                    MatchOperation::Branch { pop_count, .. } => {
+                        self.stack.len().saturating_sub(*pop_count) + 1
+                    }
+                    _ => 0,
+                };
+                if target_depth > CONTEXT_STACK_LIMIT {
+                    // Refuse this rule only. Closing/escape/ordinary rules still compete,
+                    // including later rules in this same context. This replaces the old
+                    // return-None that discarded the rest of the line at 100 frames.
+                    const WARNING: &str = "context stack limit (1024) reached; refused push";
+                    if !self.warnings.iter().any(|w| w == WARNING) {
+                        self.warnings.push(WARNING.into());
+                    }
+                    excluded.push(hit.pattern);
+                    continue;
+                }
                 if hit.start < min_start || (hit.start == min_start && pop_would_loop) {
                     min_start = hit.start;
                     pop_would_loop = looping;
-                    let push_too_deep = matches!(
-                        match_pat.operation,
-                        MatchOperation::Push { .. }
-                            | MatchOperation::Branch { .. }
-                            | MatchOperation::Embed { .. }
-                    ) && self.stack.len() >= 100;
-                    if push_too_deep {
-                        return Ok(None);
-                    }
                     best_match = Some(RegexMatch {
                         regions: hit.captures,
                         context: pat_context,
@@ -1795,7 +1818,7 @@ impl InterpreterState {
 
         // For pop + branch: re-pop the contexts (snapshot was taken pre-pop).
         if pop_count > 0 {
-            for _ in 0..pop_count {
+            for _ in 0..pop_count.min(self.stack.len()) {
                 self.stack.pop();
             }
         }
@@ -2653,49 +2676,9 @@ impl InterpreterState {
                             // there.
                         }
 
-                        // for `pop: N + set:` with N > 1, the
-                        // Restore comes *before* the Pop.
-                        //
-                        // Sublime documents the order: `clear_scopes` "is applied
-                        // before `meta_scope` and `meta_content_scope`". So by the
-                        // time the meta scopes of the frames being unwound are
-                        // accounted for, the atoms `clear_scopes` took must be
-                        // back where they were. With a `clear_scopes:` on the
-                        // leaving context, part of what is about to be popped is
-                        // sitting in `clear_stack` rather than on the live
-                        // stack, so a Pop that counted it eats that many *live*
-                        // atoms and takes them from frames below the ones being
-                        // popped. (The frames *under* the replaced one are
-                        // unwound one at a time further down, for the same
-                        // reason taken one step further.)
-                        //
-                        // Batch File is where it shows: `cmd-set-quoted-value-
-                        // inner-end` has `clear_scopes: 1` and fires
-                        // `pop: 2, set: ignored-tail-outer`, and every
-                        // `set "var"=...` line lost `meta.command.set.dosbatch`
-                        // over its trailing content — 231 failing assertions in
-                        // one file, the whole of that language's failures.
-                        //
-                        // Plain `set:` keeps Pop-then-Restore. There is nothing
-                        // below its single frame for an over-Pop to reach, and the
-                        // order there is load-bearing the other way: the restored
-                        // atoms are meant to land *below* the target's upcoming
-                        // meta_scope push, which is what
-                        // `v2_set_to_target_with_clear_scopes_clears_parent_meta_content_scope`
-                        // (the Lisp `defun` shape) pins.
-                        //
-                        // This is upstream's #646, taken alone.
-                        // a target's `clear_scopes` emitted
-                        // in the initial phase (see `early_set_clear`) has
-                        // already eaten atoms, and when it sits past the first
-                        // target those atoms are `meta_scope`s that
-                        // `num_to_pop` above counts — so a Pop of the full
-                        // count would take that many *live* atoms from frames
-                        // below. Undo it first and let the re-push below emit
-                        // it again in its place: one Clear is live either way,
-                        // and the clear stack balances. `Some(0)` needs none of
-                        // this, because a Clear before any of this set's own
-                        // pushes ate nothing that `num_to_pop` is about.
+                        // A target's early Clear may have hidden temporary target
+                        // meta scopes. Undo it before removing those scopes; the
+                        // target's Clear is reissued when its final scopes are pushed.
                         let early_clear = if version >= 2 {
                             early_set_clear(is_set, cur_context, context_refs, syntax_set)?
                         } else {
@@ -2725,13 +2708,15 @@ impl InterpreterState {
                         // this one before the trigger — .
                         let restore = is_set && cur_context.clear_scopes.is_some() && !early_unwind;
                         let restore_first = restore && set_pop_count > 1;
-                        if restore_first {
-                            ops.push((index, ScopeStackOp::Restore));
-                        }
-
-                        // do all the popping as one operation
+                        // First remove the leaving frame and the targets' temporary
+                        // meta scopes. Only then restore what that frame cleared;
+                        // the restored atoms belong to lower frames, unwound next.
+                        // https://www.sublimetext.com/docs/syntax.html#meta-patterns
                         if num_to_pop > 0 {
                             ops.push((index, ScopeStackOp::Pop(num_to_pop)));
+                        }
+                        if restore_first {
+                            ops.push((index, ScopeStackOp::Restore));
                         }
 
                         // then the frames a `pop: N + set:`
@@ -2931,7 +2916,7 @@ impl InterpreterState {
                 // *not* carried forward the way `Set` carries them: a `push` is
                 // entering a new context, not replacing the one being left.
                 if pop_count > 0 {
-                    for _ in 0..pop_count {
+                    for _ in 0..pop_count.min(self.stack.len()) {
                         self.stack.pop();
                     }
                     let final_len = self.stack.len() + ctx_refs.len();
@@ -2957,7 +2942,7 @@ impl InterpreterState {
                     // scopes are on the escape, and nothing on the stack will
                     // be able to say so by then.
                     embed_holder = self.stack.last().map(|l| (l.context, l.mcs_skipped));
-                    for _ in 0..pop_count {
+                    for _ in 0..pop_count.min(self.stack.len()) {
                         self.stack.pop();
                     }
                     // see `branch_point_is_live`. Against the

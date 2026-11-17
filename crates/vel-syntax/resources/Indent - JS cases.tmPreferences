@@ -1,0 +1,7 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity reindent policies, overridable by packages and User. -->
+<key>scope</key><string>keyword.control.conditional.case.js, keyword.control.conditional.default.js</string>
+<key>settings</key><dict>
+<key>velocityDecreaseIndentPattern</key><string>^\s*(?:case|default)\b</string>
+<key>velocityIncreaseIndentPattern</key><string>^\s*(?:case|default)\b</string>
+</dict></dict></plist>

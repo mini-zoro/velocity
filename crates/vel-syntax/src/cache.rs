@@ -44,7 +44,7 @@ impl SyntaxSet {
         extra: &[(&str, &str)],
         cache_dir: &Path,
     ) -> Result<(Self, CacheStatus), LoadingError> {
-        let sources = Resources::collect(roots, extra, b"velocity-syntax-roots-v1-10", is_syntax)?;
+        let sources = Resources::collect(roots, extra, b"velocity-syntax-roots-v1-13", is_syntax)?;
         let path = cache_dir.join(format!("{}.bin", sources.digest.to_hex()));
         if let Some(mut set) = read_cache::<Self>(&path) {
             set.bind_physical_paths(&sources);

@@ -1,0 +1,7 @@
+<plist version="1.0"><dict>
+<!-- Original Velocity rule: a closing template delimiter ends its indentation level. -->
+<key>scope</key><string>string.quoted.other.js punctuation.definition.string.end.js</string>
+<key>settings</key><dict>
+<key>velocityDecreaseIndentPattern</key><string>^\s*`</string>
+<key>velocityDisableIncreaseIndentPattern</key><string>^\s*`</string>
+</dict></dict></plist>

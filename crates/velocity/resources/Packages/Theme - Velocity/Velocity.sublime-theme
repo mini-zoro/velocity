@@ -2719,7 +2719,7 @@
       "settings": [
         "inactive_sheet_dimming"
       ],
-      "background_modifier": "blend(black 8%)"
+      "background_modifier": "blend(black 92%)"
     },
     {
       "class": "scroll_tabs_left_button",

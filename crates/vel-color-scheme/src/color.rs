@@ -247,7 +247,10 @@ pub(crate) fn adjust(
             }
             c = c.lerp(
                 parse(p[0], vars, depth + 1)?,
-                scalar(p[1])?.clamp(0., 1.),
+                // minihtml follows the July 2016 CSS draft: the percentage weights
+                // the base color, with 0% producing the specified color.
+                // https://www.w3.org/TR/2016/WD-css-color-4-20160705/#blending
+                1. - scalar(p[1])?.clamp(0., 1.),
                 p.get(2) == Some(&"hsl"),
                 name == "blenda",
             );
