@@ -37,6 +37,15 @@ impl SolidRect {
             radius: -1.,
         }
     }
+    /// A ruler sharing the existing stippled-guide primitive; no extra draw batch.
+    pub fn patterned_ruler(rect: Rect, clip: Rect, color: Color, dashed: bool) -> Self {
+        Self {
+            rect,
+            clip,
+            color,
+            radius: if dashed { -3. } else { -1. },
+        }
+    }
     /// A one-point outline carried by a single rectangle instance.
     pub fn outline(rect: Rect, clip: Rect, color: Color) -> Self {
         Self {
@@ -52,7 +61,7 @@ impl SolidRect {
     }
     /// Whether this rectangle carries the reserved vertical-guide style tag.
     pub fn is_stippled_guide(&self) -> bool {
-        self.radius == -1.
+        self.radius == -1. || self.radius == -3.
     }
 }
 /// A single-baseline text run; tab expansion belongs to the UI layout.
@@ -111,6 +120,12 @@ pub struct Shadow {
 pub struct Layer {
     /// Ordered theme fills/textures, behind selections and text.
     pub surfaces: Vec<Surface>,
+    /// Editor shaping/raster switches, absent for UI text.
+    pub font_options: crate::typography::FontOptions,
+    /// Text runs with glow, painted beneath normal glyphs only when present.
+    pub glow: Vec<TextRun>,
+    /// Connected selection fill and border; empty on the normal caret-only path.
+    pub contours: Vec<crate::selection::Contour>,
     /// Marks the overview layer for isolated GPU timestamp measurements.
     pub minimap: bool,
     /// Shadows behind other primitives.

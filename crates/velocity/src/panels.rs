@@ -350,6 +350,7 @@ impl Panels {
     pub fn new(workspace: &Workspace, workers: bool) -> Self {
         let mut ui = Self {
             ui_scale: vel_ui::theme::ui_scale(&workspace.editor().settings),
+            chrome: workspace.window_visible("show_status_bar"),
             side_visible: workspace.editor().settings.bool("show_side_bar", true),
             ..Self::default()
         };
@@ -467,6 +468,15 @@ impl Panels {
     }
     pub fn capture_session(&mut self, window: &mut vel_session::Window) {
         window.sidebar_visible = self.side_visible;
+        if window.distraction_free {
+            window
+                .distraction_ui
+                .insert("show_side_bar".into(), self.side_visible);
+        } else {
+            window
+                .normal_ui
+                .insert("show_side_bar".into(), self.side_visible);
+        }
         window.sidebar_expanded = self.expanded.iter().cloned().collect();
         window.sidebar_scroll = self.side_scroll.offset;
         window.find_history = self.find_history.clone();
@@ -487,7 +497,8 @@ impl Panels {
         for path in &window.sidebar_expanded {
             self.load_directory(workspace, path);
         }
-        self.chrome = !window.distraction_free;
+        self.chrome = workspace.window_visible("show_status_bar");
+        self.side_visible = workspace.window_visible("show_side_bar");
     }
     pub fn add_folder(&mut self, workspace: &mut Workspace, path: PathBuf) -> Result<(), String> {
         let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
@@ -529,6 +540,7 @@ impl Panels {
         }
         crate::workbench::remember(&mut workspace.recent_folders, path);
         self.side_visible = true;
+        workspace.set_window_toggle("show_side_bar", true)?;
         Ok(())
     }
     fn load_directory(&mut self, workspace: &Workspace, path: &Path) {
@@ -663,6 +675,7 @@ impl Panels {
         }
         self.sidebar_reveal = Some(path);
         self.side_visible = true;
+        workspace.set_window_toggle("show_side_bar", true)?;
         self.rebuild_side(workspace);
         Ok(())
     }
@@ -682,6 +695,7 @@ impl Panels {
         self.expanded.insert(path.clone());
         self.request_directory(workspace, &path, false);
         self.side_visible = true;
+        workspace.set_window_toggle("show_side_bar", true)?;
         self.rebuild_side(workspace);
         Ok(())
     }
@@ -1252,15 +1266,14 @@ impl Panels {
                         .ok_or("set_file_type needs syntax")?,
                 )?;
             }
-            "toggle_minimap" => {
-                let editor = workspace.editor_mut();
-                let value = editor.settings.bool("show_minimap", true);
-                editor.settings.set(
-                    vel_config::settings::Layer::View,
-                    "show_minimap",
-                    json!(!value),
-                );
-                editor.sync();
+            "toggle_minimap" | "toggle_tabs" | "toggle_status_bar" => {
+                let key = match name {
+                    "toggle_minimap" => "show_minimap",
+                    "toggle_tabs" => "show_tabs",
+                    _ => "show_status_bar",
+                };
+                workspace.set_window_toggle(key, !workspace.window_visible(key))?;
+                self.chrome = workspace.window_visible("show_status_bar");
             }
             "show_overlay" | "goto_line" => {
                 self.cancel_overlay(workspace);
@@ -1413,12 +1426,14 @@ impl Panels {
             }
             "toggle_side_bar" => {
                 self.side_visible = !self.side_visible;
+                workspace.set_window_toggle("show_side_bar", self.side_visible)?;
                 self.side_focused = false;
             }
             "focus_side_bar" => {
                 self.panel_focused = false;
                 self.focus.show(Surface::Panel, false);
                 self.side_visible = true;
+                workspace.set_window_toggle("show_side_bar", true)?;
                 self.side_focused = true;
                 self.side_open = Some(workspace.active);
                 self.rebuild_side(workspace);

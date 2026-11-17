@@ -143,6 +143,10 @@ pub struct Window {
     pub replace_history: Vec<String>,
     /// Distraction-free state.
     pub distraction_free: bool,
+    /// Per-window chrome visibility outside distraction-free mode.
+    pub normal_ui: std::collections::BTreeMap<String, bool>,
+    /// Per-window chrome visibility within distraction-free mode.
+    pub distraction_ui: std::collections::BTreeMap<String, bool>,
     /// Sidebar visibility remembered outside distraction-free mode.
     pub normal_sidebar: Option<bool>,
     /// Sidebar visibility remembered within distraction-free mode.

@@ -18,24 +18,16 @@ use swash::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use vel_platform::fonts::cluster_characters;
+
+#[path = "emoji_presentation.rs"]
+mod emoji;
 
 #[derive(Debug)]
-enum FontBytes {
-    System(memmap2::Mmap),
-    Owned(Vec<u8>),
-}
-impl std::ops::Deref for FontBytes {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            Self::System(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-#[derive(Debug)]
 struct Face {
-    bytes: FontBytes,
+    bytes: std::sync::Arc<vel_platform::fonts::FontData>,
+    ligatures: bool,
+    color_glyphs: bool,
     offset: u32,
     key: CacheKey,
     path: PathBuf,
@@ -43,17 +35,13 @@ struct Face {
     native: Option<native::NativeFont>,
 }
 impl Face {
-    fn load(path: &Path, name: &str, native: Option<native::NativeFont>) -> Result<Self, String> {
-        let bytes = if path.starts_with("/System/Library/Fonts") {
-            let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            // SAFETY: only fonts on macOS's sealed system volume use a file mapping. Other
-            // CoreText-resolved fonts are copied, so later user font edits cannot invalidate data.
-            FontBytes::System(
-                unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|e| e.to_string())?,
-            )
-        } else {
-            FontBytes::Owned(std::fs::read(path).map_err(|e| e.to_string())?)
-        };
+    fn load(
+        path: &Path,
+        name: &str,
+        native: Option<native::NativeFont>,
+        files: &mut HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
+    ) -> Result<Self, String> {
+        let bytes = vel_platform::fonts::map_font_file(path, files)?;
         let collection = FontDataRef::new(&bytes)
             .ok_or_else(|| format!("{} is not a supported font", path.display()))?;
         let font = collection
@@ -62,16 +50,48 @@ impl Face {
                 f.localized_strings()
                     .any(|s| s.id() == StringId::PostScript && s.to_string() == name)
             })
-            .or_else(|| collection.get(0))
-            .ok_or("empty font collection")?;
+            .or_else(|| {
+                // Private cascade names need not appear in the file's name table.
+                // Match immutable SFNT tables to identify the exact collection member;
+                // selecting the first member can silently use a different language face.
+                let native = native.as_ref()?;
+                let mut tables = Vec::new();
+                for tag in [
+                    swash::tag_from_bytes(b"name"),
+                    swash::tag_from_bytes(b"cmap"),
+                    swash::tag_from_bytes(b"head"),
+                ] {
+                    // SAFETY: immutable table copied from a retained CTFont.
+                    let table =
+                        unsafe { native.table(tag, objc2_core_text::CTFontTableOptions::empty()) }?;
+                    tables.push((tag, table.to_vec()));
+                }
+                let mut matches = collection.fonts().filter(|f| {
+                    tables
+                        .iter()
+                        .all(|(tag, bytes)| f.table(*tag) == Some(bytes.as_slice()))
+                });
+                let face = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                Some(face)
+            })
+            .ok_or_else(|| format!("{}: exact face {name} unavailable", path.display()))?;
         let actual = font
             .localized_strings()
             .find(|s| s.id() == StringId::PostScript)
             .map(|s| s.to_string())
             .unwrap_or_else(|| name.into());
+        let ligatures = font.table(swash::tag_from_bytes(b"GSUB")).is_some() && font.features().any(|f| matches!(f.tag(), t if t == swash::tag_from_bytes(b"liga") || t == swash::tag_from_bytes(b"clig") || t == swash::tag_from_bytes(b"calt")));
         let (offset, key) = (font.offset, font.key);
+        let color_glyphs = [b"sbix", b"COLR", b"CBDT"]
+            .iter()
+            .any(|tag| font.table(swash::tag_from_bytes(tag)).is_some());
         Ok(Self {
             bytes,
+            ligatures,
+            color_glyphs,
             offset,
             key,
             path: path.into(),
@@ -117,15 +137,32 @@ pub struct Fonts {
     families: HashMap<String, u16>,
     variants: HashMap<(u16, crate::scene::FontStyle), u16>,
     faces: Vec<Face>,
-    fallbacks_loaded: bool,
+    files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
+    face_files: HashMap<(PathBuf, String), u16>,
+    fallback: vel_platform::fonts::AsyncFontFallback,
+    choices: HashMap<(u16, char), u16>,
+    emoji_choices: HashMap<(u16, String), u16>,
+    text_choices: HashMap<(u16, String), u16>,
+    options: crate::typography::FontOptions,
+    /// Primary metrics; no fallback face changes the editor grid.
+    pub metrics: crate::typography::FontMetrics,
     /// Missing-face/glyph diagnostics.
     pub warnings: Vec<String>,
     coretext_rasters: usize,
     coretext_faces: std::collections::HashSet<u16>,
     scaler: ScaleContext,
     shaper: ShapeContext,
-    shaped: HashMap<(String, u32, crate::scene::FontStyle), Vec<ShapedGlyph>>,
+    shaped: HashMap<
+        (
+            String,
+            u32,
+            crate::scene::FontStyle,
+            crate::typography::FontOptions,
+        ),
+        Vec<ShapedGlyph>,
+    >,
     ascii: [u16; 128],
+    ascii_complete: bool,
     /// Primary font advance at 13 points.
     pub cell: f32,
     /// Primary ascent at 13 points.
@@ -139,12 +176,29 @@ impl Fonts {
     /// Loads a requested primary face through CoreText, retaining lazy fallbacks.
     pub fn load_named(requested: &str) -> Result<Self, String> {
         let primary = Path::new("/System/Library/Fonts/Menlo.ttc");
+        let mut files = HashMap::new();
         let face = if requested == "Menlo" && primary.exists() {
-            Face::load(primary, "Menlo-Regular", None)?
+            Face::load(primary, "Menlo-Regular", None, &mut files)?
         } else {
             let (path, name, font) = native::font_location(requested)?;
-            Face::load(&path, &name, Some(font))?
+            Face::load(&path, &name, Some(font), &mut files)?
         };
+        Self::from_face(face, files)
+    }
+    /// Loads a fixture or explicitly selected file without consulting the system service.
+    pub fn load_file(path: &Path, name: &str) -> Result<Self, String> {
+        let mut files = HashMap::new();
+        let face = Face::load(path, name, None, &mut files)?;
+        Self::from_face(face, files)
+    }
+    /// Whether the primary face has a supported default substitution feature.
+    pub fn has_ligatures(&self) -> bool {
+        self.faces[0].ligatures
+    }
+    fn from_face(
+        face: Face,
+        files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
+    ) -> Result<Self, String> {
         let font = face.reference();
         let metrics = font.metrics(&[]).scale(13.);
         let ascii = std::array::from_fn(|i| font.charmap().map(char::from(i as u8)));
@@ -155,35 +209,168 @@ impl Fonts {
         Ok(Self {
             families: HashMap::new(),
             variants: HashMap::new(),
-            faces: vec![face],
-            fallbacks_loaded: false,
+
+            files,
+            face_files: HashMap::from([((face.path.clone(), face.name.clone()), 0)]),
+            fallback: Default::default(),
+            choices: HashMap::new(),
+            emoji_choices: HashMap::new(),
+            text_choices: HashMap::new(),
+            options: Default::default(),
+            metrics: crate::typography::FontMetrics {
+                ascent: metrics.ascent as f64,
+                descent: metrics.descent.abs() as f64,
+                leading: metrics.leading as f64,
+            },
             warnings: Vec::new(),
             coretext_rasters: 0,
             coretext_faces: std::collections::HashSet::new(),
             scaler: ScaleContext::new(),
             shaper: ShapeContext::new(),
             shaped: HashMap::new(),
+            ascii_complete: ascii[32..127].iter().all(|g| *g != 0),
             ascii,
             cell,
             ascent: metrics.ascent,
+            faces: vec![face],
         })
     }
-    fn load_fallbacks(&mut self) {
-        if self.fallbacks_loaded {
-            return;
+    fn load_face(
+        &mut self,
+        path: &Path,
+        name: &str,
+        native: Option<native::NativeFont>,
+    ) -> Result<u16, String> {
+        if let Some(face) = self.face_files.get(&(path.to_owned(), name.to_owned())) {
+            return Ok(*face);
         }
-        self.fallbacks_loaded = true;
-        for requested in ["PingFangSC-Regular", "AppleColorEmoji"] {
-            match native::font_location(requested).and_then(|(p, n, f)| Face::load(&p, &n, Some(f)))
-            {
-                Ok(face) => self.faces.push(face),
-                Err(e) => self.warnings.push(e),
+        if self.faces.len() >= u16::MAX as usize {
+            return Err("font face limit".into());
+        }
+        let face = Face::load(path, name, native, &mut self.files)?;
+        let id = self.faces.len() as u16;
+        self.face_files
+            .insert((path.to_owned(), name.to_owned()), id);
+        self.faces.push(face);
+        Ok(id)
+    }
+    /// Installs completed cascade choices without blocking. True invalidates cached .notdef runs.
+    pub fn poll_fallbacks(&mut self) -> bool {
+        let results = self.fallback.poll();
+        let changed = !results.is_empty();
+        for (base, key, descriptor) in results {
+            use vel_platform::fonts::FallbackKey;
+            let face = descriptor
+                .and_then(|d| {
+                    match self.load_face(
+                        &d.path,
+                        &d.postscript_name,
+                        d.native.map(vel_platform::fonts::CascadeFont::into_native),
+                    ) {
+                        Ok(face)
+                            if match &key {
+                                FallbackKey::Scalar(c) => {
+                                    self.faces[face as usize].reference().charmap().map(*c) != 0
+                                }
+                                FallbackKey::Emoji(cluster) | FallbackKey::Text(cluster) => {
+                                    cluster_characters(cluster).all(|c| {
+                                        self.faces[face as usize].reference().charmap().map(c) != 0
+                                    })
+                                }
+                            } =>
+                        {
+                            Some(face)
+                        }
+                        Ok(_) => None,
+                        Err(e) => {
+                            if self.warnings.len() < 32 {
+                                self.warnings.push(e);
+                            }
+                            None
+                        }
+                    }
+                })
+                .unwrap_or(base);
+            match key {
+                FallbackKey::Scalar(c) => {
+                    self.choices.insert((base, c), face);
+                }
+                FallbackKey::Emoji(cluster) => {
+                    self.emoji_choices.insert((base, cluster), face);
+                }
+                FallbackKey::Text(cluster) => {
+                    // Both a color-only answer and no coverage are settled results.
+                    self.text_choices.insert((base, cluster), face);
+                }
             }
         }
+        if changed {
+            self.shaped.clear();
+        }
+        changed
+    }
+    /// Whether another display-linked frame should poll the cascade worker.
+    pub fn fallback_pending(&self) -> bool {
+        self.fallback.pending()
+    }
+    /// Changes shaping features without changing face/raster identities.
+    pub fn set_options(&mut self, options: crate::typography::FontOptions) {
+        self.options = options;
+    }
+    fn fallback_face(&mut self, base: u16, cluster: &str) -> u16 {
+        if emoji_presentation(cluster) {
+            if let Some(face) = self.emoji_choices.get(&(base, cluster.to_owned())) {
+                return *face;
+            }
+            self.fallback
+                .request_cluster(base, &self.faces[base as usize].name, cluster);
+            return base; // Pending presentation never blocks the first frame.
+        }
+        if cluster.contains('\u{fe0e}') {
+            let key = (base, cluster.to_owned());
+            if let Some(face) = self.text_choices.get(&key) {
+                return *face;
+            }
+            if let Some(face) = self.faces.iter().position(|face| {
+                !face.color_glyphs
+                    && cluster_characters(cluster).all(|c| face.reference().charmap().map(c) != 0)
+            }) {
+                self.text_choices.insert(key, face as u16);
+                return face as u16;
+            }
+            self.fallback
+                .request_text_cluster(base, &self.faces[base as usize].name, cluster);
+            return base;
+        }
+        let mut chosen = base;
+        for scalar in cluster_characters(cluster) {
+            if self.faces[chosen as usize]
+                .reference()
+                .charmap()
+                .map(scalar)
+                != 0
+            {
+                continue;
+            }
+            if let Some(face) = self.choices.get(&(base, scalar)) {
+                chosen = *face;
+                continue;
+            }
+            if let Some(face) = self.faces.iter().position(|f| {
+                cluster_characters(cluster).all(|c| f.reference().charmap().map(c) != 0)
+            }) {
+                chosen = face as u16;
+                self.choices.insert((base, scalar), chosen);
+                continue;
+            }
+            self.fallback
+                .request(base, &self.faces[base as usize].name, scalar);
+        }
+        chosen
     }
     /// Font identities, raster fallback counts and diagnostics.
     pub fn metadata(&self) -> Value {
-        json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"mapped_font_file_bytes":f.bytes.len()})).collect::<Vec<_>>(),"warnings":self.warnings})
+        json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_))})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
     /// ASCII skips shaping; non-ASCII graphemes use a cached swash shaping path.
     pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
@@ -197,14 +384,16 @@ impl Fonts {
             return *face;
         }
         let name = self.faces[base as usize].name.clone();
-        let face = match native::font_variant(&name, style)
-            .and_then(|(p, n, f)| Face::load(&p, &n, Some(f)))
+        let original = self.faces[base as usize]
+            .native
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| native::font_location(&name).map(|(_, _, f)| f));
+        let face = match original
+            .and_then(|font| native::font_variant(&font, style))
+            .and_then(|(p, n, f)| self.load_face(&p, &n, Some(f)))
         {
-            Ok(face) => {
-                let index = self.faces.len() as u16;
-                self.faces.push(face);
-                index
-            }
+            Ok(face) => face,
             Err(e) => {
                 self.warnings.push(format!("{name}: {e}"));
                 base
@@ -220,8 +409,19 @@ impl Fonts {
         px: f32,
         style: crate::scene::FontStyle,
     ) -> Vec<ShapedGlyph> {
-        if text.is_ascii() {
-            let face = self.variant(0, style);
+        let primary = self.variant(0, style);
+        let shape_ascii = self.options.stylistic_sets != 0
+            || ((self.faces[primary as usize].ligatures && self.options.disabled != 7
+                || self.options.discretionary)
+                && text
+                    .as_bytes()
+                    .windows(2)
+                    .any(|pair| pair.iter().all(u8::is_ascii_punctuation)));
+        if text.is_ascii()
+            && !shape_ascii
+            && (self.ascii_complete || text.bytes().all(|b| self.ascii[b as usize] != 0))
+        {
+            let face = primary;
             return text
                 .bytes()
                 .enumerate()
@@ -240,52 +440,75 @@ impl Fonts {
                 })
                 .collect();
         }
-        let key = (text.to_owned(), (px * 64.).round() as u32, style);
+        let key = (
+            text.to_owned(),
+            (px * 64.).round() as u32,
+            style,
+            self.options,
+        );
         if let Some(g) = self.shaped.get(&key) {
             return g.clone();
         }
-        self.load_fallbacks();
+
         // Keep each grapheme intact during fallback, then shape adjacent
         // graphemes of the same face as a run (Kana/Arabic/Indic contextual forms).
         let mut runs: Vec<(usize, usize, u16)> = Vec::new();
+        let mut previous_kind = None;
         for (start, cluster) in text.grapheme_indices(true) {
-            let covers = |face: &Face| {
-                cluster
-                    .chars()
-                    .filter(|c| !matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}'))
-                    .all(|c| face.reference().charmap().map(c) != 0)
-            };
-            let emoji = cluster
-                .chars()
-                .any(|c| c as u32 >= 0x1f000 || c == '\u{fe0f}');
-            let face = if emoji {
-                self.faces
-                    .iter()
-                    .enumerate()
-                    .find(|(_, f)| f.name.contains("Emoji") && covers(f))
-                    .map(|(i, _)| i)
+            let kind = if cluster.is_ascii() {
+                u8::from(cluster.bytes().all(|b| b.is_ascii_punctuation()))
             } else {
-                None
-            }
-            .or_else(|| self.faces.iter().position(covers))
-            .unwrap_or(0) as u16;
+                2
+            };
+            let face = self.fallback_face(0, cluster);
             let face = self.variant(face, style);
             let end = start + cluster.len();
             if let Some(previous) = runs.last_mut()
                 && previous.2 == face
+                && previous_kind == Some(kind)
             {
                 previous.1 = end;
             } else {
                 runs.push((start, end, face));
             }
+            previous_kind = Some(kind);
         }
         let cell = self.cell * px / 13.;
-        let columns = |s: &str| s.graphemes(true).map(|g| g.width().max(1)).sum::<usize>() as f32;
+        let mut offsets = vec![0.; text.len() + 1];
+        let mut column = 0;
+        for (at, g) in text.grapheme_indices(true) {
+            let x = crate::typography::grid_x(column, cell as f64) as f32;
+            offsets[at..at + g.len()].fill(x);
+            column += g.width().max(1);
+            offsets[at + g.len()] = crate::typography::grid_x(column, cell as f64) as f32;
+        }
         let mut glyphs = Vec::new();
         for (start, end, face) in runs {
             let run = &text[start..end];
             let reference = self.faces[face as usize].reference();
-            let mut builder = self.shaper.builder(reference).size(px);
+            // ASCII letter runs cannot form programming ligatures. Stylistic sets
+            // remain enabled; non-ASCII keeps its script shaping and joining.
+            let defaults = if run.is_ascii() && !run.bytes().all(|b| b.is_ascii_punctuation()) {
+                7
+            } else {
+                self.options.disabled
+            };
+            let mut features = vec![
+                (swash::tag_from_bytes(b"liga"), u16::from(defaults & 1 == 0)),
+                (swash::tag_from_bytes(b"clig"), u16::from(defaults & 2 == 0)),
+                (swash::tag_from_bytes(b"calt"), u16::from(defaults & 4 == 0)),
+                (
+                    swash::tag_from_bytes(b"dlig"),
+                    u16::from(self.options.discretionary),
+                ),
+            ];
+            for set in 1..=20 {
+                if self.options.stylistic_sets & (1 << (set - 1)) != 0 {
+                    let tag = [b's', b's', b'0' + set / 10, b'0' + set % 10];
+                    features.push((swash::tag_from_bytes(&tag), 1));
+                }
+            }
+            let mut builder = self.shaper.builder(reference).size(px).features(features);
             if let Some(c) = run
                 .chars()
                 .find(|c| !c.is_ascii_punctuation() && !c.is_whitespace())
@@ -294,13 +517,12 @@ impl Fonts {
             }
             let mut shaper = builder.build();
             shaper.add_str(run);
-            let run_x = columns(&text[..start]) * cell;
             shaper.shape_with(|cluster| {
                 let from = cluster.source.start as usize;
                 let to = cluster.source.end as usize;
-                let x = run_x + columns(&run[..from]) * cell;
+                let x = offsets[start + from];
                 let advance = cluster.advance();
-                let target = columns(&run[from..to]) * cell;
+                let target = offsets[start + to] - offsets[start + from];
                 let factor = if advance > 0. { target / advance } else { 1. };
                 let mut pen = 0.;
                 for g in cluster.glyphs {
@@ -350,10 +572,9 @@ impl Fonts {
                     s => s,
                 };
                 if let Ok((path, name, native)) = native::font_location(name)
-                    && let Ok(face) = Face::load(&path, &name, Some(native))
+                    && let Ok(face) = self.load_face(&path, &name, Some(native))
                 {
-                    index = self.faces.len() as u16;
-                    self.faces.push(face);
+                    index = face;
                     break;
                 }
             }
@@ -362,20 +583,10 @@ impl Fonts {
             }
             index
         };
-        self.load_fallbacks();
+
         let mut runs: Vec<(usize, usize, u16)> = Vec::new();
         for (start, cluster) in text.grapheme_indices(true) {
-            let covers = |f: &Face| {
-                cluster
-                    .chars()
-                    .filter(|c| !matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}'))
-                    .all(|c| f.reference().charmap().map(c) != 0)
-            };
-            let base = if covers(&self.faces[base as usize]) {
-                base
-            } else {
-                self.faces.iter().position(covers).unwrap_or(base as usize) as u16
-            };
+            let base = self.fallback_face(base, cluster);
             let face = self.variant(base, style);
             if let Some(last) = runs.last_mut()
                 && last.2 == face
@@ -422,6 +633,8 @@ impl Fonts {
     }
     /// Rasterizes one glyph at a quarter-pixel physical phase.
     pub fn rasterize(&mut self, face: u16, id: u16, px: f32, bucket: u8) -> Option<Image> {
+        let no_antialias = bucket & 4 != 0;
+        let bucket = bucket & 3;
         let font = self.faces[face as usize].reference();
         if id != 0 && id == font.charmap().map(' ') {
             return None;
@@ -436,6 +649,13 @@ impl Fonts {
         .offset(Vector::new(bucket as f32 * 0.25, 0.))
         .render(&mut scaler, id);
         if let Some(image) = image.filter(|i| i.placement.width > 0 && i.placement.height > 0) {
+            let mut image = image;
+            if no_antialias && image.content == Content::Mask {
+                image
+                    .data
+                    .iter_mut()
+                    .for_each(|a| *a = if *a >= 128 { 255 } else { 0 });
+            }
             return Some(image);
         }
         let native_font = match &self.faces[face as usize].native {
@@ -452,7 +672,13 @@ impl Fonts {
             },
         };
         match native::raster_glyph(&native_font, id, px, bucket) {
-            Ok(image) => {
+            Ok(mut image) => {
+                if no_antialias && image.content == Content::Mask {
+                    image
+                        .data
+                        .iter_mut()
+                        .for_each(|a| *a = if *a >= 128 { 255 } else { 0 });
+                }
                 self.coretext_rasters += 1;
                 if self.coretext_faces.insert(face) {
                     self.warnings.push(format!(
@@ -505,6 +731,10 @@ mod tests {
     #[test]
     fn bold_italic_use_distinct_real_faces_without_changing_grid_advance() {
         let mut fonts = super::Fonts::load().unwrap();
+        assert!(
+            !fonts.has_ligatures(),
+            "Menlo's AAT features must not route ASCII through the OpenType shaper"
+        );
         let mut faces = std::collections::BTreeSet::new();
         for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
             let glyphs = fonts.shape_styled("Mono", 13., crate::scene::FontStyle { bold, italic });
@@ -526,8 +756,19 @@ mod tests {
         let ascii = fonts.shape("ABC", 26.);
         assert_eq!(ascii.len(), 3);
         assert!((ascii[1].x - fonts.cell * 2.).abs() < 0.001);
+        let _ = fonts.shape("a你好🦀é", 26.);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while fonts.fallback_pending() {
+            assert!(std::time::Instant::now() < deadline);
+            fonts.poll_fallbacks();
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
         let mixed = fonts.shape("a你好🦀é", 26.);
-        assert!(mixed.iter().all(|g| g.id != 0));
+        assert!(
+            mixed.iter().all(|g| g.id != 0),
+            "mixed={mixed:?} metadata={}",
+            fonts.metadata()
+        );
         assert!(mixed.iter().any(|g| g.face != 0));
         for text in ["你", "😀"] {
             for glyph in fonts.shape(text, 26.) {
@@ -553,5 +794,645 @@ mod tests {
             .sum();
         assert!(upper > lower, "CoreText F must be top-down");
         assert_eq!(rgba(&image).len(), width * height * 4);
+    }
+}
+
+#[cfg(test)]
+mod round17_tests {
+    use super::*;
+    fn fixture() -> Fonts {
+        Fonts::load_file(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ligature-fixture.ttf"),
+            "VelocityFixture-Regular",
+        )
+        .unwrap()
+    }
+    #[test]
+    fn features_shape_ascii_cache_runs_and_split_ligature_width_on_the_caret_grid() {
+        let mut fonts = fixture();
+        assert!(fonts.has_ligatures());
+        let glyphs = fonts.shape("->x", 13.);
+        assert_eq!(glyphs.len(), 2);
+        assert!(
+            (glyphs[1].x as f64 - crate::typography::grid_x(2, fonts.cell as f64)).abs() < 0.001
+        );
+        // The caret between '-' and '>' splits the two-cell cluster in half.
+        assert!(
+            (crate::typography::grid_x(1, fonts.cell as f64) - glyphs[1].x as f64 / 2.).abs()
+                < 0.001
+        );
+        let count = fonts.shaped.len();
+        fonts.shape("->x", 13.);
+        assert_eq!(fonts.shaped.len(), count);
+        fonts.set_options(crate::typography::FontOptions::parse(["no_liga"]));
+        assert_eq!(fonts.shape("->x", 13.).len(), 3);
+        fonts.set_options(crate::typography::FontOptions::default());
+        assert_eq!(fonts.shape("!=", 13.).len(), 1);
+        fonts.set_options(crate::typography::FontOptions::parse(["no_calt"]));
+        assert_eq!(fonts.shape("!=", 13.).len(), 2);
+        let regular = fonts.shape("x", 13.)[0].id;
+        fonts.set_options(crate::typography::FontOptions::parse(["ss01"]));
+        assert_ne!(fonts.shape("x", 13.)[0].id, regular);
+        assert_eq!(fonts.files.len(), 1);
+        assert_eq!(fonts.faces.len(), 1);
+        assert!(!fonts.fallback_pending());
+    }
+    #[test]
+    fn font_file_snapshots_are_deduplicated_without_loading_fallbacks() {
+        let mut fonts = fixture();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ligature-fixture.ttf");
+        assert_eq!(
+            fonts
+                .load_face(&path, "VelocityFixture-Regular", None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(fonts.files.len(), 1);
+        assert!(std::sync::Arc::strong_count(&fonts.faces[0].bytes) >= 2);
+        assert!(fonts.choices.is_empty());
+        assert!(!fonts.fallback_pending());
+    }
+    #[test]
+    #[ignore = "explicit font timing, RSS and native cascade measurement"]
+    fn round17_font_timing_rss_and_ligature_cost() {
+        use std::{
+            hint::black_box,
+            time::{Duration, Instant},
+        };
+        let rss_before = vel_platform::metrics::rss_bytes().unwrap();
+        let mut fonts = Fonts::load().unwrap();
+        let rss_primary = vel_platform::metrics::rss_bytes().unwrap();
+        let start = Instant::now();
+        black_box(fonts.shape("你", 26.));
+        let first = start.elapsed();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while fonts.fallback_pending() {
+            assert!(Instant::now() < deadline);
+            fonts.poll_fallbacks();
+            std::thread::park_timeout(Duration::from_micros(100));
+        }
+        let ready = start.elapsed();
+        black_box(fonts.shape("你", 26.));
+        let rss_after = vel_platform::metrics::rss_bytes().unwrap();
+        println!(
+            "FONT_TIMING {}",
+            json!({"first_non_ascii_ms":first.as_secs_f64()*1000.,"fallback_ready_ms":ready.as_secs_f64()*1000.,"rss_before":rss_before,"rss_primary":rss_primary,"rss_after":rss_after,"default_metrics":format!("{:?}",fonts.metrics),"line_height_1x":fonts.metrics.line(13.,1.,0.,0.).0,"line_height_2x":fonts.metrics.line(13.,2.,0.,0.).0,"metadata":fonts.metadata()})
+        );
+        let path = std::env::var_os("VELOCITY_LIGATURE_FONT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ligature-fixture.ttf")
+            });
+        let name = if path
+            .file_name()
+            .is_some_and(|n| n == "FiraCode-Regular.ttf")
+        {
+            "FiraCode-Regular"
+        } else {
+            "VelocityFixture-Regular"
+        };
+        let mut ligatures = Fonts::load_file(&path, name).unwrap();
+        assert!(ligatures.has_ligatures());
+        for (label, font) in [("Menlo", &mut fonts), (name, &mut ligatures)] {
+            let cold = Instant::now();
+            for i in 0..4000 {
+                black_box(font.shape(&format!("-> != === => ++ -- /* */ {i}"), 26.));
+            }
+            let cold = cold.elapsed();
+            black_box(font.shape("-> != === => ++ -- /* */", 26.));
+            let warm = Instant::now();
+            for _ in 0..20_000 {
+                black_box(font.shape("-> != === => ++ -- /* */", 26.));
+            }
+            println!(
+                "SHAPING_TIMING {}",
+                json!({"font":label,"cold_run_us":cold.as_secs_f64()*1e6/4000.,"warm_run_us":warm.elapsed().as_secs_f64()*1e6/20_000.,"file":path,"mapped_files":font.files.len()})
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod fallback_mock_tests {
+    use super::*;
+    #[test]
+    fn missing_scripts_resolve_lazily_once_per_scalar_and_load_one_mapped_file() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Resolver {
+            calls: Arc<AtomicUsize>,
+            path: PathBuf,
+        }
+        impl vel_platform::fonts::FontFallback for Resolver {
+            fn resolve(&mut self, _: &str, _: char) -> Option<vel_platform::fonts::FontDescriptor> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Some(vel_platform::fonts::FontDescriptor::file(
+                    self.path.clone(),
+                    "VelocityFallback-Regular".into(),
+                ))
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut fonts = Fonts::load_file(
+            &root.join("ligature-fixture.ttf"),
+            "VelocityFixture-Regular",
+        )
+        .unwrap();
+        fonts.fallback = vel_platform::fonts::AsyncFontFallback::with_resolver(Resolver {
+            calls: calls.clone(),
+            path: root.join("fallback-fixture.ttf"),
+        });
+        fonts.shape("->x", 13.);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(fonts.faces.len(), 1);
+        let scripts = "한ไअאع𝒜⠿\u{e000}";
+        fonts.shape(scripts, 13.);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while fonts.fallback_pending() {
+            assert!(std::time::Instant::now() < deadline);
+            fonts.poll_fallbacks();
+            std::thread::yield_now();
+        }
+        for c in scripts.chars() {
+            let glyphs = fonts.shape(&c.to_string(), 13.);
+            assert!(
+                glyphs.iter().all(|g| g.id != 0 && g.face == 1),
+                "{c}: {glyphs:?}"
+            );
+        }
+        fonts.shape(scripts, 13.);
+        assert_eq!(calls.load(Ordering::Relaxed), 8);
+        assert_eq!(fonts.faces.len(), 2);
+        assert_eq!(fonts.files.len(), 2);
+    }
+}
+
+// Unicode presentation sequences are resolved as a unit, before primary coverage.
+// https://www.unicode.org/reports/tr51/#Emoji_Sequences
+fn emoji_presentation(cluster: &str) -> bool {
+    if cluster.contains('\u{fe0e}') {
+        return false;
+    }
+    // A joiner alone is also used by Indic/Arabic shaping. Only pictographic
+    // ZWJ sequences request emoji presentation; text-script clusters keep their face.
+    (cluster.contains('\u{fe0f}')
+        && cluster
+            .chars()
+            .any(|c| c.is_emoji() || c.is_extended_pictographic()))
+        || (cluster.contains('\u{200d}')
+            && cluster.chars().any(Codepoint::is_extended_pictographic))
+        || cluster.chars().any(emoji::default_presentation)
+        || (cluster.contains('\u{20e3}')
+            && cluster
+                .chars()
+                .next()
+                .is_some_and(|c| matches!(c, '#' | '*' | '0'..='9')))
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn replacing_user_font_in_place_keeps_shaping_the_loaded_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "velocity-font-replace-{}-{}.ttf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/ligature-fixture.ttf");
+        std::fs::copy(source, &path).unwrap();
+        let mut fonts = Fonts::load_file(&path, "VelocityFixture-Regular").unwrap();
+        let before = fonts.shape("->x", 13.);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        fonts.shaped.clear();
+        let after = fonts.shape("->x", 13.);
+        assert_eq!(
+            before.iter().map(|g| g.id).collect::<Vec<_>>(),
+            after.iter().map(|g| g.id).collect::<Vec<_>>()
+        );
+        assert!(after.iter().all(|g| g.id != 0));
+        assert!(matches!(
+            &*fonts.faces[0].bytes,
+            vel_platform::fonts::FontData::Owned(_)
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn emoji_presentation_cluster_table_precedes_primary_text_coverage() {
+        use vel_platform::fonts::{AsyncFontFallback, FontDescriptor, FontFallback};
+        struct Resolver(PathBuf);
+        impl FontFallback for Resolver {
+            fn resolve(&mut self, _: &str, _: char) -> Option<FontDescriptor> {
+                panic!("text covered by primary must not cascade")
+            }
+            fn resolve_cluster(&mut self, _: &str, _: &str) -> Option<FontDescriptor> {
+                Some(FontDescriptor::file(
+                    self.0.clone(),
+                    "VelocityEmoji-Regular".into(),
+                ))
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let mut fonts = Fonts::load_file(
+            &root.join("ligature-fixture.ttf"),
+            "VelocityFixture-Regular",
+        )
+        .unwrap();
+        fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.join("emoji-fixture.ttf")));
+        let cases = [
+            ("❤️", true),
+            ("☺️", true),
+            ("✔️", true),
+            ("⚠️", true),
+            ("©️", true),
+            ("↔️", true),
+            ("☀️", true),
+            ("♥️", true),
+            ("✌️", true),
+            ("1️⃣", true),
+            ("#️⃣", true),
+            ("*️⃣", true),
+            ("👩‍💻", true),
+            ("🇨🇳", true),
+            ("👍🏽", true),
+            ("❤", false),
+            ("❤︎", false),
+            ("☺︎", false),
+            ("x\u{fe0f}", false),
+            ("क्\u{200d}ष", false),
+        ];
+        for (cluster, emoji) in cases {
+            assert_eq!(emoji_presentation(cluster), emoji, "{cluster}");
+            fonts.shape(cluster, 13.);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while fonts.fallback_pending() {
+            assert!(std::time::Instant::now() < deadline);
+            fonts.poll_fallbacks();
+            std::thread::yield_now();
+        }
+        for (cluster, emoji) in cases {
+            let glyphs = fonts.shape(cluster, 13.);
+            assert!(!glyphs.is_empty(), "{cluster}");
+            assert!(
+                glyphs.iter().all(|g| g.face == u16::from(emoji)),
+                "{cluster}: {glyphs:?}"
+            );
+        }
+        assert_eq!(fonts.faces.len(), 2);
+        assert_eq!(fonts.files.len(), 2);
+        assert!(!fonts.fallback_pending());
+    }
+    #[test]
+    fn text_presentation_ignores_loaded_and_cached_emoji_faces_in_either_order() {
+        use vel_platform::fonts::{AsyncFontFallback, FontDescriptor, FontFallback};
+        struct Resolver(PathBuf);
+        impl FontFallback for Resolver {
+            fn resolve(&mut self, _: &str, scalar: char) -> Option<FontDescriptor> {
+                assert_eq!(scalar, '⛑');
+                Some(FontDescriptor::file(
+                    self.0.join("fallback-fixture.ttf"),
+                    "VelocityFallback-Regular".into(),
+                ))
+            }
+            fn resolve_cluster(&mut self, _: &str, _: &str) -> Option<FontDescriptor> {
+                Some(FontDescriptor::file(
+                    self.0.join("emoji-fixture.ttf"),
+                    "VelocityEmoji-Regular".into(),
+                ))
+            }
+        }
+        fn drain(fonts: &mut Fonts) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fonts.fallback_pending() {
+                assert!(std::time::Instant::now() < deadline);
+                fonts.poll_fallbacks();
+                std::thread::yield_now();
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for emoji_first in [false, true] {
+            let mut fonts = Fonts::load_file(
+                &root.join("ligature-fixture.ttf"),
+                "VelocityFixture-Regular",
+            )
+            .unwrap();
+            fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.clone()));
+            if emoji_first {
+                fonts.shape("😀", 13.);
+                drain(&mut fonts);
+                assert!(fonts.faces[1].color_glyphs);
+                // Exercise both the already-loaded-face shortcut and a cached scalar.
+                fonts.shape("⛑", 13.);
+            }
+            fonts.shape("⛑\u{fe0e}", 13.);
+            drain(&mut fonts);
+            if !emoji_first {
+                fonts.shape("😀", 13.);
+                drain(&mut fonts);
+            }
+            fonts.shaped.clear();
+            let glyphs = fonts.shape("⛑\u{fe0e}", 13.);
+            assert!(!glyphs.is_empty());
+            assert!(
+                glyphs.iter().all(|glyph| {
+                    let face = &fonts.faces[glyph.face as usize];
+                    glyph.id != 0 && !face.color_glyphs && face.name == "VelocityFallback-Regular"
+                }),
+                "emoji_first={emoji_first}: {glyphs:?}"
+            );
+            assert!(!fonts.fallback_pending());
+        }
+    }
+    #[test]
+    fn presentation_fallback_converges_for_color_only_text_missing_and_combining_clusters() {
+        use std::sync::{Arc, Mutex};
+        use vel_platform::fonts::{AsyncFontFallback, FontDescriptor, FontFallback};
+        struct Resolver {
+            root: PathBuf,
+            calls: Arc<Mutex<HashMap<String, usize>>>,
+        }
+        impl Resolver {
+            fn result(&self, key: String, emoji: bool, missing: bool) -> Option<FontDescriptor> {
+                *self.calls.lock().unwrap().entry(key).or_default() += 1;
+                if missing {
+                    return None;
+                }
+                Some(FontDescriptor::file(
+                    self.root.join(if emoji {
+                        "emoji-fixture.ttf"
+                    } else {
+                        "fallback-fixture.ttf"
+                    }),
+                    if emoji {
+                        "VelocityEmoji-Regular"
+                    } else {
+                        "VelocityFallback-Regular"
+                    }
+                    .into(),
+                ))
+            }
+        }
+        impl FontFallback for Resolver {
+            fn resolve(&mut self, _: &str, scalar: char) -> Option<FontDescriptor> {
+                self.result(
+                    format!("scalar:{scalar}"),
+                    matches!(scalar, '⌚' | '🌡' | '🖥'),
+                    matches!(scalar, '\u{0378}' | '\u{10ffff}'),
+                )
+            }
+            fn resolve_cluster(&mut self, _: &str, cluster: &str) -> Option<FontDescriptor> {
+                self.result(format!("emoji:{cluster}"), true, false)
+            }
+            fn resolve_text_cluster(&mut self, _: &str, cluster: &str) -> Option<FontDescriptor> {
+                self.result(
+                    format!("text:{cluster}"),
+                    cluster.chars().any(|c| matches!(c, '⌚' | '🌡' | '🖥')),
+                    cluster.contains('\u{0378}'),
+                )
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let mut fonts = Fonts::load_file(
+            &root.join("ligature-fixture.ttf"),
+            "VelocityFixture-Regular",
+        )
+        .unwrap();
+        fonts.fallback = AsyncFontFallback::with_resolver(Resolver {
+            root,
+            calls: calls.clone(),
+        });
+        let cases = [
+            ("⌚\u{fe0e}", true),
+            ("🌡\u{fe0e}", true),
+            ("🖥\u{fe0e}", true),
+            ("a⌚\u{fe0e}b", true),
+            ("⛑\u{fe0e}", true),
+            ("❤\u{fe0e}", true),
+            ("☺\u{fe0e}", true),
+            ("❤️", true),
+            ("⌚️", true),
+            ("🖥️", true),
+            ("⛑️", true),
+            ("😀", true),
+            ("1️⃣", true),
+            ("1\u{fe0e}\u{20e3}", true),
+            ("#\u{fe0e}\u{20e3}", true),
+            ("*\u{fe0e}\u{20e3}", true),
+            ("#\u{fe0f}\u{20e3}", true),
+            ("*\u{fe0f}\u{20e3}", true),
+            ("1\u{20e3}", true),
+            ("#\u{20e3}", true),
+            ("*\u{20e3}", true),
+            ("👩‍💻", true),
+            ("🇨🇳", true),
+            ("👍🏽", true),
+            ("\u{e000}", true),
+            ("\u{0301}", true),
+            ("\u{0378}", false),
+            ("\u{0378}\u{fe0e}", false),
+            ("\u{0378}\u{fe0f}", false),
+            ("\u{10ffff}", false),
+        ];
+        for (text, covered) in cases {
+            fonts.shape(text, 13.);
+            // Match the user's shape/wait/poll path. Fixture resolution performs no
+            // native IO; at most two worker publications may change this frame.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut invalidations = 0;
+            while fonts.fallback_pending() {
+                assert!(std::time::Instant::now() < deadline, "{text}");
+                std::thread::park_timeout(std::time::Duration::from_millis(8));
+                invalidations += usize::from(fonts.poll_fallbacks());
+                fonts.shape(text, 13.);
+            }
+            assert!(invalidations <= 2, "{text}: {invalidations}");
+            let glyphs = fonts.shape(text, 13.);
+            assert!(!glyphs.is_empty(), "{text}");
+            assert_eq!(
+                glyphs.iter().all(|glyph| glyph.id != 0),
+                covered,
+                "{text}: {glyphs:?}"
+            );
+            for _ in 0..32 {
+                fonts.shape(text, 13.);
+                assert!(!fonts.poll_fallbacks(), "{text} invalidated again");
+                assert!(!fonts.fallback_pending(), "{text} requested again");
+            }
+        }
+        assert!(calls.lock().unwrap().values().all(|count| *count == 1));
+    }
+    fn settled_glyphs(fonts: &mut Fonts, text: &str) -> Vec<ShapedGlyph> {
+        fonts.shape(text, 13.);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut invalidations = 0;
+        while fonts.fallback_pending() {
+            assert!(std::time::Instant::now() < deadline, "{text}");
+            std::thread::park_timeout(std::time::Duration::from_millis(8));
+            invalidations += usize::from(fonts.poll_fallbacks());
+            fonts.shape(text, 13.);
+        }
+        assert!(invalidations <= 2, "{text}: {invalidations} invalidations");
+        let glyphs = fonts.shape(text, 13.);
+        assert!(!glyphs.is_empty(), "{text}");
+        assert!(
+            glyphs.iter().all(|g| g.id != 0),
+            "{text}: {glyphs:?}: {:?}",
+            fonts.metadata()
+        );
+        for _ in 0..32 {
+            fonts.shape(text, 13.);
+            assert!(
+                !fonts.poll_fallbacks(),
+                "{text}: invalidated after resolving"
+            );
+            assert!(
+                !fonts.fallback_pending(),
+                "{text}: requested after resolving"
+            );
+        }
+        glyphs
+    }
+
+    #[test]
+    fn default_emoji_presentation_is_independent_of_text_face_load_order() {
+        use vel_platform::fonts::{AsyncFontFallback, FontDescriptor, FontFallback};
+        struct Resolver(PathBuf);
+        impl FontFallback for Resolver {
+            fn resolve(&mut self, _: &str, _: char) -> Option<FontDescriptor> {
+                Some(FontDescriptor::file(
+                    self.0.join("fallback-fixture.ttf"),
+                    "VelocityFallback-Regular".into(),
+                ))
+            }
+            fn resolve_cluster(&mut self, _: &str, _: &str) -> Option<FontDescriptor> {
+                Some(FontDescriptor::file(
+                    self.0.join("emoji-fixture.ttf"),
+                    "VelocityEmoji-Regular".into(),
+                ))
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for (scalar, default_emoji) in [
+            ('⌚', true),
+            ('⌛', true),
+            ('⏰', true),
+            ('☕', true),
+            ('⚡', true),
+            ('❤', false),
+        ] {
+            for text_first in [false, true] {
+                let mut fonts = Fonts::load_file(
+                    &root.join("ligature-fixture.ttf"),
+                    "VelocityFixture-Regular",
+                )
+                .unwrap();
+                fonts.fallback = AsyncFontFallback::with_resolver(Resolver(root.clone()));
+                let bare = scalar.to_string();
+                let text = format!("{scalar}\u{fe0e}");
+                let emoji = format!("{scalar}\u{fe0f}");
+                let order = if text_first {
+                    [&text, &bare, &emoji]
+                } else {
+                    [&bare, &emoji, &text]
+                };
+                for _ in 0..2 {
+                    for cluster in order {
+                        let expected_emoji =
+                            cluster == &emoji || (cluster == &bare && default_emoji);
+                        let glyphs = settled_glyphs(&mut fonts, cluster);
+                        assert!(
+                            glyphs.iter().all(
+                                |g| fonts.faces[g.face as usize].color_glyphs == expected_emoji
+                            ),
+                            "{cluster} text_first={text_first}: {glyphs:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // These lie inside the former blanket 1F000..1FAFF test but default to text.
+        for c in ['🀀', '🌡', '🖥', '❤'] {
+            assert!(!emoji_presentation(&c.to_string()));
+        }
+    }
+
+    #[test]
+    fn native_keycaps_cover_combining_marks_and_converge_with_every_selector() {
+        for reversed in [false, true] {
+            let mut fonts = Fonts::load().unwrap();
+            for base in ['1', '#', '*'] {
+                let selectors = if reversed {
+                    ["\u{fe0f}", "\u{fe0e}", ""]
+                } else {
+                    ["\u{fe0e}", "", "\u{fe0f}"]
+                };
+                for selector in selectors {
+                    let text = format!("{base}{selector}\u{20e3}");
+                    let glyphs = settled_glyphs(&mut fonts, &text);
+                    if selector == "\u{fe0e}" {
+                        assert!(
+                            glyphs
+                                .iter()
+                                .all(|g| !fonts.faces[g.face as usize].color_glyphs),
+                            "{text}: text keycap lost its available text face"
+                        );
+                    }
+                    assert!(
+                        glyphs.iter().all(|g| {
+                            let face = &fonts.faces[g.face as usize];
+                            cluster_characters(&text)
+                                .all(|c| face.reference().charmap().map(c) != 0)
+                        }),
+                        "{text}: fallback did not cover the whole cluster"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_vs15_color_only_fallbacks_stop_requesting_frames_after_resolution() {
+        let mut fonts = Fonts::load().unwrap();
+        for text in ["⌚\u{fe0e}", "🌡\u{fe0e}", "🖥\u{fe0e}", "a⌚\u{fe0e}b"] {
+            fonts.shape(text, 13.);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut publications = 0;
+            while fonts.fallback_pending() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{text}: {:?}",
+                    fonts.metadata()
+                );
+                std::thread::park_timeout(std::time::Duration::from_millis(8));
+                publications += usize::from(fonts.poll_fallbacks());
+                fonts.shape(text, 13.);
+            }
+            assert!(publications <= 2, "{text}: {publications}");
+            let glyphs = fonts.shape(text, 13.);
+            assert!(!glyphs.is_empty(), "{text}");
+            assert!(
+                glyphs.iter().all(|glyph| glyph.id != 0),
+                "{text}: {:?}",
+                fonts.metadata()
+            );
+            for _ in 0..64 {
+                fonts.shape(text, 13.);
+                std::thread::park_timeout(std::time::Duration::from_millis(8));
+                assert!(!fonts.poll_fallbacks(), "{text} invalidated again");
+                assert!(!fonts.fallback_pending(), "{text} requested again");
+            }
+        }
     }
 }

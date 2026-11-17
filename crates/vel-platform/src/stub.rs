@@ -31,6 +31,8 @@ impl WindowHandle {
     }
     /// No native full screen on unsupported platforms.
     pub fn toggle_full_screen(&self) {}
+    /// No-op outside the native platform.
+    pub fn toggle_full_screen_with_mode(&self, _: bool) {}
 
     /// Unsupported platforms do not acquire native drawables.
     pub fn last_acquired_drawable(&self) -> Option<u64> {

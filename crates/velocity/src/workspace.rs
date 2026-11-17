@@ -42,6 +42,7 @@ pub struct Tab {
     pub(crate) saved_format: Format,
     pub tracker: ChangeTracker,
     pub scroll: (f64, f64),
+    pub scroll_line_height: f64,
     pub loading: Option<LoadTask>,
     pub binary_loading: Option<crate::binary::Task>,
     pub pending_restore: Option<vel_session::ViewState>,
@@ -54,6 +55,23 @@ pub struct Tab {
     pub external: Option<Loaded>,
 }
 impl Tab {
+    pub(crate) fn restore_scroll(&mut self, state: &vel_session::ViewState) {
+        // Before font metrics, main used this scaled 20 px grid plus logical padding.
+        let settings = &self.editor.settings;
+        let legacy_height = 20. * settings.number("font_size", 13.).clamp(6., 96.) / 13.
+            + settings.number("line_padding_top", 0.).max(0.)
+            + settings.number("line_padding_bottom", 0.).max(0.);
+        let row = state.top_visual_line(legacy_height);
+        self.scroll = (state.scroll.0, row * 20.);
+        self.scroll_line_height = 20.;
+        if let Some((_, saved)) = &mut self.lazy {
+            // A lazy sheet can be saved again after zoom, before materialization.
+            // Finish the wire migration now so its old pixels are never reinterpreted
+            // using that later font size on the next startup.
+            saved.scroll = self.scroll;
+            saved.scroll_line = Some(row);
+        }
+    }
     pub(crate) fn new(text: Text, settings: &Settings, keymap: &Keymap) -> Result<Self, String> {
         let mut editor = Editor::new(text);
         let tracker = ChangeTracker::new(&editor.buffer);
@@ -67,13 +85,15 @@ impl Tab {
             "open_recent_file",
             "open_recent_folder",
             "clear_recent_items",
+            "toggle_tabs",
+            "toggle_status_bar",
         ] {
             editor
                 .registry
                 .register(command, vel_commands::Kind::WindowCommand, None);
         }
         let format = fileio::default_format(&settings.editor()).unwrap_or_default();
-        Ok(Self {
+        let mut tab = Self {
             shared_dirty: false,
             deleted: false,
             restored_format_dirty: false,
@@ -95,6 +115,7 @@ impl Tab {
             format,
             tracker,
             scroll: (0., 0.),
+            scroll_line_height: 20.,
             loading: None,
             binary_loading: None,
             pending_restore: None,
@@ -104,7 +125,9 @@ impl Tab {
             load_started: None,
             disk_stamp: None,
             external: None,
-        })
+        };
+        crate::workbench::apply_window_layers(&mut tab, settings)?;
+        Ok(tab)
     }
     pub fn install_restored(&mut self, loaded: Loaded) {
         self.install(loaded);
@@ -257,11 +280,12 @@ pub struct Workspace {
     pub git: crate::git_ui::GitUi,
     pub catalog: Arc<crate::completion::Catalog>,
     pub assets: Arc<crate::language::Assets>,
-    syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
+    pub(crate) syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
     schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
     pub dark: bool,
     pub workbench: vel_ui::workbench::Workbench,
     pub distraction_free: bool,
+    pub(crate) window_layers: crate::workbench::WindowLayers,
     pub fullscreen: bool,
     pub build_systems: Vec<vel_build::BuildSystem>,
     pub build_system: Option<String>,
@@ -301,6 +325,10 @@ pub struct Workspace {
     last_config_check: Option<Instant>,
     reload_requested: bool,
     settings_writes: Vec<std::sync::mpsc::Receiver<Result<(), String>>>,
+    settings_write_generation: u64,
+    config_write_generation: (u64, bool),
+    settings_write_overrides: BTreeMap<String, Option<Value>>,
+    settings_reload_deferred: bool,
     pub resource_revision: u64,
 }
 pub(crate) fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
@@ -593,6 +621,11 @@ impl Configuration {
         let mut config_stamp = Vec::new();
         for resource in resources.matching(".sublime-settings") {
             let file = resource.path.rsplit('/').next().unwrap_or("");
+            // Invalid settings must remain watched: an in-place repair does not
+            // change the containing directory's timestamp.
+            if resource.origin.exists() {
+                config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
+            }
             let doc = match resource.text().and_then(Document::parse) {
                 Ok(doc) => doc,
                 Err(e) => {
@@ -603,9 +636,6 @@ impl Configuration {
             if !doc.value.is_object() {
                 resource_messages.push(format!("{}: settings must be an object", resource.path));
                 continue;
-            }
-            if resource.origin.exists() {
-                config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
             }
             match resource.path.as_str() {
                 "Packages/Default/Preferences.sublime-settings" => {
@@ -1147,6 +1177,7 @@ impl Workspace {
             dark: true,
             workbench: vel_ui::workbench::Workbench::default(),
             distraction_free: false,
+            window_layers: Default::default(),
             fullscreen: false,
             build_systems,
             build_system: None,
@@ -1181,6 +1212,10 @@ impl Workspace {
             last_config_check: None,
             reload_requested: false,
             settings_writes: Vec::new(),
+            settings_write_generation: 0,
+            config_write_generation: (0, false),
+            settings_write_overrides: BTreeMap::new(),
+            settings_reload_deferred: false,
             resource_revision: 0,
         };
         workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
@@ -1237,7 +1272,14 @@ impl Workspace {
         ));
         true
     }
-    pub fn track_settings_write(&mut self, rx: std::sync::mpsc::Receiver<Result<(), String>>) {
+    pub fn track_settings_write(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<Result<(), String>>,
+        overrides: &[(String, Option<Value>)],
+    ) {
+        self.settings_write_generation = self.settings_write_generation.wrapping_add(1);
+        self.settings_write_overrides
+            .extend(overrides.iter().cloned());
         self.settings_writes.push(rx);
     }
     #[cfg(test)]
@@ -1591,7 +1633,8 @@ impl Workspace {
         {
             self.closed_files.push((
                 path.clone(),
-                vel_session::ViewState::capture(&tab.editor.buffer, tab.editor.id, tab.scroll),
+                vel_session::ViewState::capture(&tab.editor.buffer, tab.editor.id, tab.scroll)
+                    .with_line_height(tab.scroll_line_height),
             ));
             if self.closed_files.len() > 100 {
                 self.closed_files.remove(0);
@@ -1646,7 +1689,7 @@ impl Workspace {
             })?;
             let tab = &mut self.tabs[self.active];
             tab.pending_center = false;
-            tab.scroll = state.scroll;
+            tab.restore_scroll(&state);
             if tab.loading.is_some() || tab.binary_loading.is_some() {
                 tab.pending_restore = Some(state);
             } else {
@@ -1903,9 +1946,11 @@ impl Workspace {
             }
         }
         self.reconcile_installs();
+        let had_pending_writes = !self.settings_writes.is_empty();
+        let mut wrote_settings = false;
         self.settings_writes.retain(|rx| match rx.try_recv() {
             Ok(Ok(())) => {
-                self.reload_requested = true;
+                wrote_settings = true;
                 false
             }
             Ok(Err(error)) => {
@@ -1918,8 +1963,26 @@ impl Workspace {
                 false
             }
         });
+        if wrote_settings {
+            // Publish one settled load for a batch, not each intermediate file.
+            if self.settings_writes.is_empty() {
+                self.reload_requested = true;
+            } else {
+                self.settings_reload_deferred = true;
+            }
+        }
+        if had_pending_writes
+            && self.settings_writes.is_empty()
+            && std::mem::take(&mut self.settings_reload_deferred)
+        {
+            self.reload_requested = true;
+        }
         if self.config_rx.is_none() && self.configuration_changed(Instant::now()) {
             self.reload_requested = false;
+            self.config_write_generation = (
+                self.settings_write_generation,
+                !self.settings_writes.is_empty(),
+            );
             let (tx, rx) = std::sync::mpsc::channel();
             let data = self.data_dir.clone();
             let project = self.project.clone();
@@ -1951,6 +2014,34 @@ impl Workspace {
             };
             match result {
                 Ok(mut config) => {
+                    // A resource worker may have read an intermediate result from our
+                    // serial preferences queue. Preserve only our newer keys until a
+                    // load started after that generation drained; unrelated/external
+                    // edits still publish, and the next settled load is authoritative.
+                    let (generation, pending_at_start) = self.config_write_generation;
+                    if generation != self.settings_write_generation
+                        || pending_at_start
+                        || !self.settings_writes.is_empty()
+                    {
+                        let mut values = config.settings.layer(Layer::User).clone();
+                        for (key, value) in &self.settings_write_overrides {
+                            if let Some(value) = value {
+                                values.insert(key.clone(), value.clone());
+                            } else {
+                                values.remove(key);
+                            }
+                        }
+                        let _ = config.settings.replace(Layer::User, Value::Object(values));
+                        if self.settings_writes.is_empty() {
+                            self.reload_requested = true;
+                        } else {
+                            // The global queue can be blocked by installs. Keep the
+                            // overlay, allow external changes, and retry once at drain.
+                            self.settings_reload_deferred = true;
+                        }
+                    } else {
+                        self.settings_write_overrides.clear();
+                    }
                     self.messages.append(&mut config.messages);
                     self.resource_reports.append(&mut config.resource_reports);
                     self.themes = crate::theme_ui::Themes::publish(config.themes);
@@ -1967,6 +2058,9 @@ impl Workspace {
                     self.build_systems = config.build_systems;
                     self.project_model = config.project_model;
                     self.settings = config.settings;
+                    if let Err(error) = self.refresh_window_layers() {
+                        self.messages.push(error);
+                    }
                     // User resource changes must preserve folders added at runtime. An
                     // actual project-file edit still replaces its configured folder list.
                     for mut folder in folders {

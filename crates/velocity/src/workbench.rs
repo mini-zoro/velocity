@@ -34,7 +34,153 @@ fn direction(args: &Value) -> Direction {
         _ => Direction::Right,
     }
 }
+/// Per-window UI overrides, remembered separately for distraction-free mode.
+#[derive(Debug, Default, Clone)]
+pub struct WindowLayers {
+    pub normal: BTreeMap<String, bool>,
+    pub distraction: BTreeMap<String, bool>,
+}
+/// The sole tab-layer installation path, also called by `Tab::new`.
+/// The window's effective layer is published in its Settings, before tab creation.
+pub(crate) fn apply_window_layers(
+    tab: &mut Tab,
+    window: &vel_config::settings::Settings,
+) -> Result<(), String> {
+    let mut changed = false;
+    let mut view = tab.editor.settings.layer(Layer::View).clone();
+    let before = view.len();
+    for key in [
+        "show_minimap",
+        "show_side_bar",
+        "show_tabs",
+        "show_status_bar",
+    ] {
+        view.remove(key);
+    }
+    if view.len() != before {
+        tab.editor
+            .settings
+            .replace(Layer::View, Value::Object(view))?;
+        changed = true;
+    }
+    let values = window.layer(Layer::DistractionFree);
+    if tab.editor.settings.layer(Layer::DistractionFree) != values {
+        tab.editor
+            .settings
+            .replace(Layer::DistractionFree, Value::Object(values.clone()))?;
+        changed = true;
+    }
+    // Identical layers must preserve Settings' cache identity across clones: changing
+    // it here repeatedly invalidates their shared spelling/highlighting publications.
+    if changed {
+        tab.editor.sync();
+    }
+
+    Ok(())
+}
 impl Workspace {
+    /// Zoom is a user Preference shared by every tab, rather than a view override.
+    pub fn zoom_font(&mut self, command: &str) -> Result<(), String> {
+        // Zoom changes the user size. An explicit distraction-free override remains
+        // authoritative in that mode; leaving the mode reveals the adjusted user size.
+        let mut user_settings = self.settings.clone();
+        user_settings.replace(Layer::DistractionFree, json!({}))?;
+        user_settings.replace(Layer::View, json!({}))?;
+        user_settings.replace(Layer::Project, json!({}))?;
+        user_settings.replace(Layer::Syntax, json!({}))?;
+        let size = user_settings.number("font_size", 13.);
+        // Reset removes the user key unless default_font_size is supplied (build 4200).
+        // https://docs.sublimetext.io/reference/commands.html#reset-font-size
+        // https://www.sublimetext.com/download
+        let value = match command {
+            "reset_font_size" => user_settings
+                .get("default_font_size")
+                .and_then(Value::as_f64)
+                .filter(|s| s.is_finite())
+                .map(|s| json!(s.clamp(6., 96.))),
+            "increase_font_size" => Some(json!((size + 1.).clamp(6., 96.))),
+            _ => Some(json!((size - 1.).clamp(6., 96.))),
+        };
+        let mut values = self.settings.layer(Layer::User).clone();
+        if let Some(value) = &value {
+            values.insert("font_size".into(), value.clone());
+        } else {
+            values.remove("font_size");
+        }
+        self.settings
+            .replace(Layer::User, Value::Object(values.clone()))?;
+        for tab in &mut self.tabs {
+            tab.editor
+                .settings
+                .replace(Layer::User, Value::Object(values.clone()))?;
+            tab.editor.sync();
+        }
+        if let Some(data) = &self.data_dir {
+            let path = data.join("Packages/User/Preferences.sublime-settings");
+            let pending_value = value.clone();
+            // Settings IO runs away from input/scroll; serialize zoom writes in enqueue order.
+            let rx = crate::release::enqueue(move || {
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+                    Err(e) => return Err(e.to_string()),
+                };
+                let document = vel_config::json::Document::parse(&source)?;
+                let source = if let Some(value) = value {
+                    document.set("font_size", &value)?
+                } else {
+                    remove_font_size(&document)?
+                };
+                vel_session::atomic_write(&path, |file| {
+                    use std::io::Write;
+                    file.write_all(source.as_bytes()).map_err(|e| e.to_string())
+                })
+            })?;
+            self.track_settings_write(rx, &[("font_size".into(), pending_value)]);
+        }
+        Ok(())
+    }
+    pub fn refresh_window_layers(&mut self) -> Result<(), String> {
+        let mut values = if self.distraction_free {
+            let mut values = self.distraction_settings.clone();
+            for key in [
+                "show_minimap",
+                "show_side_bar",
+                "show_tabs",
+                "show_status_bar",
+            ] {
+                values.entry(key.to_owned()).or_insert(json!(false));
+            }
+            values
+        } else {
+            serde_json::Map::new()
+        };
+        // UI state survives mode switches: https://www.sublimetext.com/docs/distraction_free.html
+        let overrides = if self.distraction_free {
+            &self.window_layers.distraction
+        } else {
+            &self.window_layers.normal
+        };
+        values.extend(overrides.iter().map(|(k, v)| (k.clone(), json!(v))));
+        self.settings
+            .replace(Layer::DistractionFree, Value::Object(values))?;
+        for tab in &mut self.tabs {
+            apply_window_layers(tab, &self.settings)?;
+        }
+        Ok(())
+    }
+    pub fn set_window_toggle(&mut self, key: &str, value: bool) -> Result<(), String> {
+        let values = if self.distraction_free {
+            &mut self.window_layers.distraction
+        } else {
+            &mut self.window_layers.normal
+        };
+        values.insert(key.into(), value);
+        self.refresh_window_layers()
+    }
+    pub fn window_visible(&self, key: &str) -> bool {
+        self.settings.bool(key, true)
+    }
     pub fn sheet_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.sheet == id)
     }
@@ -382,6 +528,7 @@ impl Workspace {
             &self.tabs[index].editor.settings,
             &self.keymap,
         )?;
+        apply_window_layers(&mut clone, &self.settings)?;
         clone.session_document = self.tabs[index].session_document;
         clone.deleted = self.tabs[index].deleted;
         clone.document = self.tabs[index].document;
@@ -404,6 +551,7 @@ impl Workspace {
         clone.saved_format = self.tabs[index].saved_format.clone();
         clone.tracker = self.tabs[index].tracker.clone();
         clone.scroll = self.tabs[index].scroll;
+        clone.scroll_line_height = self.tabs[index].scroll_line_height;
         let sheet = clone.sheet;
         self.tabs.push(clone);
         self.workbench.groups[self.workbench.active].add(sheet, false);
@@ -548,17 +696,7 @@ impl Workspace {
             }
             "toggle_distraction_free" => {
                 self.distraction_free = !self.distraction_free;
-                let values = if self.distraction_free {
-                    self.distraction_settings.clone()
-                } else {
-                    serde_json::Map::new()
-                };
-                for tab in &mut self.tabs {
-                    tab.editor
-                        .settings
-                        .replace(Layer::DistractionFree, Value::Object(values.clone()))?;
-                    tab.editor.sync();
-                }
+                self.refresh_window_layers()?;
             }
             "set_build_system" => {
                 self.build_system = args["name"]
@@ -619,7 +757,12 @@ impl Workspace {
                     id: tab.sheet,
                     document: identity,
                     view: loaded
-                        .map(|owner| owner.editor.folded_view_state(tab.shared_view, tab.scroll))
+                        .map(|owner| {
+                            owner
+                                .editor
+                                .folded_view_state(tab.shared_view, tab.scroll)
+                                .with_line_height(tab.scroll_line_height)
+                        })
                         .unwrap_or_else(|| view.clone()),
                     syntax: tab
                         .editor
@@ -638,7 +781,8 @@ impl Workspace {
                 .unwrap_or(index);
             let view = self.tabs[owner]
                 .editor
-                .folded_view_state(tab.shared_view, tab.scroll);
+                .folded_view_state(tab.shared_view, tab.scroll)
+                .with_line_height(tab.scroll_line_height);
             sheets.push(Sheet {
                 html: tab
                     .editor
@@ -705,6 +849,8 @@ impl Workspace {
                 workbench: self.workbench.clone(),
                 sheets,
                 distraction_free: self.distraction_free,
+                normal_ui: self.window_layers.normal.clone(),
+                distraction_ui: self.window_layers.distraction.clone(),
                 fullscreen: self.fullscreen,
                 build_system: self.build_system.clone(),
                 ..Window::default()
@@ -750,6 +896,26 @@ impl Workspace {
                 });
             }
         }
+        self.window_layers.normal = window.normal_ui.clone();
+        self.window_layers.distraction = window.distraction_ui.clone();
+        self.window_layers
+            .normal
+            .entry("show_side_bar".into())
+            .or_insert(window.normal_sidebar.unwrap_or(window.sidebar_visible));
+        self.window_layers
+            .distraction
+            .entry("show_side_bar".into())
+            .or_insert(
+                window
+                    .distraction_sidebar
+                    .unwrap_or(if window.distraction_free {
+                        window.sidebar_visible
+                    } else {
+                        false
+                    }),
+            );
+        self.distraction_free = window.distraction_free;
+        self.refresh_window_layers()?;
         let docs: BTreeMap<_, _> = documents.iter().map(|d| (d.id, d)).collect();
         let mut tabs = Vec::new();
         let mut remap = BTreeMap::new();
@@ -783,7 +949,6 @@ impl Workspace {
             };
             tab.saved_format = tab.format.clone();
             tab.disk_saved = document.disk.clone();
-            tab.scroll = sheet.view.scroll;
             tab.transient = sheet.transient;
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
             if let Some(html) = &sheet.html {
@@ -799,7 +964,26 @@ impl Workspace {
                 tab.editor
                     .settings
                     .set(Layer::View, "syntax", json!(syntax));
+                // Lazy tabs still need their syntax settings for legacy pixel migration;
+                // resolving the reference does not materialize the file or font service.
+                if let Some(reference) = vel_highlight::detect_syntax(
+                    &self.assets.syntaxes,
+                    &crate::language::syntax_path(tab.path.as_deref()),
+                    "",
+                    Some(syntax),
+                ) {
+                    tab.editor.settings.replace(
+                        Layer::Syntax,
+                        Value::Object(
+                            self.syntax_settings
+                                .get(&reference.name)
+                                .cloned()
+                                .unwrap_or_default(),
+                        ),
+                    )?;
+                }
             }
+            tab.restore_scroll(&sheet.view);
             tabs.push(tab);
         }
         self.empty = tabs.is_empty();
@@ -969,4 +1153,91 @@ pub fn configure_groups(workspace: &mut Workspace, count: usize) -> Result<(), S
     workspace.workbench.active = 0;
     workspace.focus_current_group()?;
     Ok(())
+}
+
+fn remove_font_size(document: &vel_config::json::Document) -> Result<String, String> {
+    let Some(span) = document.spans.get("/font_size") else {
+        return Ok(document.source().into());
+    };
+    let source = document.source();
+    // Scan strings/comments rather than searching for a key-like substring inside
+    // unrelated user text. Value spans let removal preserve every neighboring byte.
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    let mut key = None;
+    let mut commas = Vec::new();
+    while i < span.end {
+        match bytes[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i <= span.start
+                    && serde_json::from_str::<String>(&source[start..i])
+                        .is_ok_and(|s| s == "font_size")
+                {
+                    key = Some(start);
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b',' => {
+                commas.push(i);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let start = key.ok_or("font_size key span unavailable")?;
+    let mut end = span.end;
+    let mut after = end;
+    loop {
+        while bytes.get(after).is_some_and(u8::is_ascii_whitespace) {
+            after += 1;
+        }
+        if bytes.get(after..after + 2) == Some(b"//") {
+            while after < bytes.len() && bytes[after] != b'\n' {
+                after += 1;
+            }
+        } else if bytes.get(after..after + 2) == Some(b"/*") {
+            after += 2;
+            while after + 1 < bytes.len() && &bytes[after..after + 2] != b"*/" {
+                after += 1;
+            }
+            after += 2;
+        } else {
+            break;
+        }
+    }
+    let mut source = source.to_owned();
+    if bytes.get(after) == Some(&b',') {
+        end = after + 1;
+        source.replace_range(start..end, "");
+    } else {
+        source.replace_range(start..end, "");
+        if let Some(comma) = commas.into_iter().rfind(|&c| c < start) {
+            source.remove(comma);
+        }
+    }
+    vel_config::json::Document::parse(&source)?;
+    Ok(source)
 }

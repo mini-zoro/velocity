@@ -183,6 +183,7 @@ impl Settings {
         }
         let mut result: EditorSettings =
             serde_json::from_value(Value::Object(values)).unwrap_or_default();
+        result.ruler_entries = self.get("rulers").map(parse_rulers).unwrap_or_default();
         result.tab_size = result.tab_size.clamp(1, 32);
         result.font_size = result.font_size.clamp(6., 96.);
         result
@@ -209,7 +210,11 @@ pub struct EditorSettings {
     /// Whitespace rendering mode.
     pub draw_white_space: String,
     /// Vertical column guides.
+    #[serde(deserialize_with = "deserialize_rulers")]
     pub rulers: Vec<usize>,
+    /// Parsed drawing metadata, sharing the validated columns above.
+    #[serde(skip)]
+    pub ruler_entries: Vec<Ruler>,
     /// Add final LF when saving.
     pub ensure_newline_at_eof_on_save: bool,
     /// False, true, or "not_on_caret".
@@ -223,7 +228,8 @@ pub struct EditorSettings {
     /// Decoder for non-UTF-8 input.
     pub fallback_encoding: String,
     /// Allow scrolling beyond the last line.
-    pub scroll_past_end: bool,
+    #[serde(deserialize_with = "deserialize_scroll_past_end")]
+    pub scroll_past_end: f64,
     /// Caret rendering style.
     pub caret_style: String,
     /// Highlight each caret line.
@@ -249,19 +255,109 @@ impl Default for EditorSettings {
             gutter: true,
             draw_white_space: "none".into(),
             rulers: vec![],
+            ruler_entries: vec![],
             ensure_newline_at_eof_on_save: false,
             trim_trailing_white_space_on_save: Value::Bool(false),
             trim_only_modified_white_space: false,
             default_line_ending: "system".into(),
             default_encoding: "UTF-8".into(),
             fallback_encoding: "Western (Windows 1252)".into(),
-            scroll_past_end: false,
+            scroll_past_end: 0.,
             caret_style: "solid".into(),
             highlight_line: true,
             auto_match_enabled: true,
             atomic_save: false,
             use_tab_stops: true,
             copy_with_empty_selection: true,
+        }
+    }
+}
+
+/// Stroke pattern for column rulers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RulerStyle {
+    /// Continuous stroke.
+    Solid,
+    /// Short dots.
+    Dotted,
+    /// Spaced dashes.
+    Stippled,
+}
+/// Independently validated ruler entry; absent style inherits `ruler_style`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Ruler {
+    /// Column measured in editor cells.
+    pub column: usize,
+    /// Optional per-entry stroke pattern.
+    pub style: Option<RulerStyle>,
+}
+fn deserialize_rulers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<usize>, D::Error> {
+    let value = Value::deserialize(d)?;
+    Ok(parse_rulers(&value).into_iter().map(|r| r.column).collect())
+}
+fn parse_rulers(value: &Value) -> Vec<Ruler> {
+    // A single column is also documented; malformed list entries remain isolated.
+    // https://docs.sublimetext.io/reference/settings.html#visual-settings
+    let entries = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    // Build 4142: https://www.sublimetext.com/download (ruler_style).
+    // Invalid entries are isolated, just as independent setting fields are above.
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let (column, style) = if let Some(parts) = entry.as_array() {
+                if parts.len() != 2 {
+                    return None;
+                }
+                (
+                    parts[0].as_u64()?,
+                    Some(serde_json::from_value::<RulerStyle>(parts[1].clone()).ok()?),
+                )
+            } else {
+                (entry.as_u64()?, None)
+            };
+            Some(Ruler {
+                column: usize::try_from(column).ok()?,
+                style,
+            })
+        })
+        .collect()
+}
+fn deserialize_scroll_past_end<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let value = Value::deserialize(d)?;
+    // Build 4107: https://www.sublimetext.com/download documents 0.0 through 1.0.
+    Ok(match value {
+        Value::Bool(on) => f64::from(u8::from(on)),
+        _ => value
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| serde::de::Error::custom("expected boolean or finite number"))?
+            .clamp(0., 1.),
+    })
+}
+#[cfg(test)]
+mod round17_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn scroll_distance_and_rulers_load_independently() {
+        for (value, expected) in [
+            (json!(true), 1.),
+            (json!(false), 0.),
+            (json!(0.5), 0.5),
+            (json!(-4.), 0.),
+            (json!(2.), 1.),
+        ] {
+            let mut settings = Settings::default();
+            settings.replace(Layer::User, json!({"scroll_past_end":value,"rulers":[80,[90,"dotted"],"bad",[1,"invalid"],-2,[100,"stippled"],120],"font_size":15})).unwrap();
+            let prefs = settings.editor();
+            assert_eq!(prefs.scroll_past_end, expected);
+            assert_eq!(prefs.rulers, [80, 90, 100, 120]);
+            assert_eq!(prefs.ruler_entries[1].style, Some(RulerStyle::Dotted));
+            assert_eq!(prefs.font_size, 15.);
         }
     }
 }

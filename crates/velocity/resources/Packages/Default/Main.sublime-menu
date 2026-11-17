@@ -680,6 +680,17 @@
     "caption": "View",
     "id": "view",
     "children": [
+      // Public command arguments: https://www.sublimetext.com/docs/indentation.html
+      { "caption": "Indentation", "children": [
+        { "caption": "Convert Indentation to Spaces", "command": "expand_tabs", "args": {"set_translate_tabs": true} },
+        { "caption": "Convert Indentation to Tabs", "command": "unexpand_tabs", "args": {"set_translate_tabs": true} },
+        { "caption": "Guess Settings from Buffer", "command": "detect_indentation" }
+      ] },
+      { "caption": "Minimap", "command": "toggle_minimap" },
+      { "caption": "Side Bar", "command": "toggle_side_bar" },
+      { "caption": "Tabs", "command": "toggle_tabs" },
+      { "caption": "Status Bar", "command": "toggle_status_bar" },
+
       {
         "caption": "Next Tab",
         "command": "next_view"

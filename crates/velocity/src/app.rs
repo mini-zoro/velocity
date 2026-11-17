@@ -71,6 +71,9 @@ pub struct App {
     drag_select: Option<crate::mouse_select::DragSelect>,
     /// Selected text being dragged to a new position.
     drag_text: Option<crate::mouse_select::DragText>,
+    text_drag_pressed: Option<Instant>,
+    text_drag_origin: Option<(Point, usize)>,
+    mouse_preferences: vel_platform::mouse::MousePreferences,
     builds: crate::build::Builds,
     normal_sidebar: bool,
     distraction_sidebar: Option<bool>,
@@ -216,6 +219,9 @@ impl App {
             dragging_splitter: None,
             drag_select: None,
             drag_text: None,
+            text_drag_pressed: None,
+            text_drag_origin: None,
+            mouse_preferences: vel_platform::mouse::MousePreferences::read(),
             builds: crate::build::Builds::default(),
             normal_sidebar: true,
             distraction_sidebar: None,
@@ -281,6 +287,7 @@ impl App {
             .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let active = self.workspace.active;
         self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
+        self.workspace.tabs[active].scroll_line_height = self.view.line_height;
         let (mut window, documents) = self.workspace.snapshot()?;
         self.panels.capture_session(&mut window);
         window.normal_sidebar = Some(self.normal_sidebar);
@@ -587,6 +594,34 @@ impl App {
             .unwrap_or_default();
         native_menu(&self.workspace.menus, &macros)
     }
+    // Early movement starts an ordinary selection and commits that gesture type.
+    // https://macromates.com/manual/en/expert_preferences#nsdraganddroptextdelay
+    fn select_before_text_drag_delay(&mut self, point: Point, now: Instant) {
+        if self.drag_text.is_some()
+            && !self.text_drag_delay_elapsed(now)
+            && let Some((origin, at)) = self.text_drag_origin.take()
+            && (point.x != origin.x || point.y != origin.y)
+        {
+            self.drag_text = None;
+            self.text_drag_pressed = None;
+            self.drag_select = Some(crate::mouse_select::DragSelect::begin(
+                &self.view,
+                self.workspace.editor_mut(),
+                origin,
+                at,
+                crate::mouse_select::Unit::Char,
+                crate::mouse_select::Combine::Replace,
+                false,
+                false,
+            ));
+        }
+    }
+    fn text_drag_delay_elapsed(&self, now: Instant) -> bool {
+        self.text_drag_pressed.is_none_or(|pressed| {
+            self.mouse_preferences
+                .drag_ready(now.saturating_duration_since(pressed))
+        })
+    }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
             self.named_error(window, &error);
@@ -717,7 +752,13 @@ impl App {
             window.set_clipboard_text(&self.workspace.editor().clipboard);
         }
         let actions = self.handle_named_actions(window);
-        self.named_changed(window, name != "scroll_lines");
+        self.named_changed(
+            window,
+            !matches!(
+                name,
+                "scroll_lines" | "increase_font_size" | "decrease_font_size" | "reset_font_size"
+            ),
+        );
         result.and(actions)
     }
     fn save_tab(&mut self, w: &WindowHandle, index: usize, save_as: bool) -> bool {
@@ -802,6 +843,7 @@ impl App {
             }
             let previous = self.workspace.active;
             self.workspace.tabs[previous].scroll = (self.view.scroll_x, self.view.scroll_y);
+            self.workspace.tabs[previous].scroll_line_height = self.view.line_height;
             if let Err(error) = self.apply_named_action(window, &name, &args) {
                 // Keep draining actions already produced by one command, as before.
                 result = Err(error);
@@ -903,13 +945,23 @@ impl App {
             }
             return Ok(());
         }
+        if matches!(
+            name,
+            "increase_font_size" | "decrease_font_size" | "reset_font_size"
+        ) {
+            return self.workspace.zoom_font(name);
+        }
         if let Some(window) = window {
             return self.apply_action(window, name, args);
         }
-        if self.workspace.workbench_action(name, args)?
-            || self
-                .panels
-                .action(&mut self.workspace, name, args, viewport)?
+        if self.workspace.workbench_action(name, args)? {
+            self.panels.chrome = self.workspace.window_visible("show_status_bar");
+            self.panels.side_visible = self.workspace.window_visible("show_side_bar");
+            return Ok(());
+        }
+        if self
+            .panels
+            .action(&mut self.workspace, name, args, viewport)?
         {
             return Ok(());
         }
@@ -939,21 +991,31 @@ impl App {
         }
         if self.workspace.workbench_action(name, args)? {
             if name == "toggle_distraction_free" {
-                self.panels.chrome = !self.workspace.distraction_free;
+                self.panels.chrome = self.workspace.window_visible("show_status_bar");
                 if self.workspace.distraction_free {
                     self.normal_sidebar = self.panels.side_visible;
                     self.fullscreen_before_distraction = self.workspace.fullscreen;
-                    self.panels.side_visible = self.distraction_sidebar.unwrap_or(false);
+                    self.panels.side_visible = self.workspace.window_visible("show_side_bar");
                     if !self.workspace.fullscreen {
                         self.workspace.fullscreen = true;
-                        w.toggle_full_screen();
+                        w.toggle_full_screen_with_mode(
+                            self.workspace
+                                .editor()
+                                .settings
+                                .bool("use_simple_full_screen", false),
+                        );
                     }
                 } else {
                     self.distraction_sidebar = Some(self.panels.side_visible);
-                    self.panels.side_visible = self.normal_sidebar;
+                    self.panels.side_visible = self.workspace.window_visible("show_side_bar");
                     if !self.fullscreen_before_distraction && self.workspace.fullscreen {
                         self.workspace.fullscreen = false;
-                        w.toggle_full_screen();
+                        w.toggle_full_screen_with_mode(
+                            self.workspace
+                                .editor()
+                                .settings
+                                .bool("use_simple_full_screen", false),
+                        );
                     }
                 }
             }
@@ -991,7 +1053,12 @@ impl App {
             }
             "toggle_full_screen" => {
                 self.workspace.fullscreen = !self.workspace.fullscreen;
-                w.toggle_full_screen();
+                w.toggle_full_screen_with_mode(
+                    self.workspace
+                        .editor()
+                        .settings
+                        .bool("use_simple_full_screen", false),
+                );
                 return Ok(());
             }
             "close_selected_tabs" => {
@@ -1279,22 +1346,7 @@ impl App {
                 w.request_close();
             }
             "increase_font_size" | "decrease_font_size" | "reset_font_size" => {
-                let size = self.workspace.editor().settings.editor().font_size;
-                let size = if name == "reset_font_size" {
-                    13.
-                } else {
-                    (size
-                        + if name == "increase_font_size" {
-                            1.
-                        } else {
-                            -1.
-                        })
-                    .clamp(6., 96.)
-                };
-                self.workspace
-                    .editor_mut()
-                    .settings
-                    .set(Layer::View, "font_size", json!(size));
+                self.workspace.zoom_font(name)?;
             }
             "set_line_endings" => {
                 self.workspace.tabs[active].format.line_ending = vel_fileio::LineEnding::parse(
@@ -1324,6 +1376,16 @@ impl App {
         }
         Ok(())
     }
+    fn initialize_view_metrics(&mut self) {
+        if let Some(fonts) = &self.fonts {
+            let scale = self.workspace.themes.ui.borrow().density as f64;
+            self.view.set_font_metrics(fonts.metrics, scale);
+            self.view.ligatures = fonts.has_ligatures();
+            self.panels
+                .output_view
+                .set_font_metrics(fonts.metrics, scale);
+        }
+    }
     fn sync_active_view(&mut self) {
         let current = self.workspace.tabs[self.workspace.active].sheet;
         if self.view_buffer != Some(current) {
@@ -1331,6 +1393,7 @@ impl App {
                 self.save_on_focus_lost(Some(old));
                 if let Some(index) = self.workspace.sheet_index(old) {
                     self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
+                    self.workspace.tabs[index].scroll_line_height = self.view.line_height;
                 }
                 let replacement = View::new(
                     self.view.size,
@@ -1343,9 +1406,8 @@ impl App {
             if let Some(view) = self.sheet_views.remove(&current) {
                 self.view = view;
             }
-            let scroll = self.workspace.tabs[self.workspace.active].scroll;
-            self.view.scroll_x = scroll.0;
-            self.view.scroll_y = scroll.1;
+            self.initialize_view_metrics();
+            self.view.apply_style(self.workspace.editor());
             self.view_buffer = Some(current);
             if let Some(bounds) = self.sheet_bounds.get(&current) {
                 self.content = *bounds;
@@ -1354,6 +1416,22 @@ impl App {
                     height: bounds.height,
                 };
             }
+            let tab = &self.workspace.tabs[self.workspace.active];
+            let position = crate::view::ScrollPosition {
+                x: tab.scroll.0,
+                visual_row: tab.scroll.1 / tab.scroll_line_height,
+            };
+            if tab.loading.is_some() || tab.binary_loading.is_some() {
+                self.view.defer_scroll_restore(&tab.editor, position);
+            } else {
+                self.view.restore_scroll_position(&tab.editor, position);
+            }
+        }
+        self.initialize_view_metrics();
+        self.view.apply_style(self.workspace.editor());
+        let tab = &self.workspace.tabs[self.workspace.active];
+        if tab.loading.is_none() && tab.binary_loading.is_none() {
+            self.view.finish_scroll_restore(&tab.editor);
         }
         if let Some(scroll) = self.panels.restore_scroll.take() {
             self.view.scroll_x = scroll.0;
@@ -1465,6 +1543,13 @@ impl App {
             Mode::Interactive | Mode::Panels | Mode::ThemeUi
         ) || self.options.groups > 1;
         if !interactive {
+            if let Some(fonts) = &self.fonts {
+                self.view.ligatures = fonts.has_ligatures();
+                self.view.set_font_metrics(
+                    fonts.metrics,
+                    self.workspace.themes.ui.borrow().density as f64,
+                );
+            }
             self.content = Rect {
                 x: 0.,
                 y: 0.,
@@ -1533,7 +1618,12 @@ impl App {
             ]),
             &self.workspace.editor().settings,
         );
-        let tab_height = f64::from(tabset_style.tab_height).max(16.);
+        let show_tabs = self.workspace.window_visible("show_tabs");
+        let tab_height = if show_tabs {
+            f64::from(tabset_style.tab_height).max(16.)
+        } else {
+            0.
+        };
         let tab_width = f64::from(tabset_style.tab_width).max(72.);
         let groups = self.workspace.workbench.groups.clone();
         for (group_index, group) in groups.iter().enumerate() {
@@ -1574,10 +1664,9 @@ impl App {
                             self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
                         )
                     });
-                    other.scroll_x = self.workspace.tabs[index].scroll.0;
-                    other.scroll_y = self.workspace.tabs[index].scroll.1;
                     &mut other
                 };
+                view.mouse_preferences = self.mouse_preferences;
                 view.size = Size {
                     width: rect.width,
                     height: rect.height,
@@ -1587,7 +1676,7 @@ impl App {
                 } else {
                     Appearance::Light
                 };
-                view.tab_height = if self.workspace.distraction_free {
+                view.tab_height = if !self.workspace.window_visible("show_tabs") {
                     0.
                 } else {
                     tab_height
@@ -1597,10 +1686,31 @@ impl App {
                     && self.panels.input().is_none()
                     && !self.panels.side_focused;
                 view.find_matches.clear();
-                view.apply_style(&self.workspace.tabs[index].editor);
+                if let Some(fonts) = &self.fonts {
+                    view.ligatures = fonts.has_ligatures();
+                    view.set_font_metrics(
+                        fonts.metrics,
+                        self.workspace.themes.ui.borrow().density as f64,
+                    );
+                }
+                if *sheet == focused {
+                    view.apply_style(&self.workspace.tabs[index].editor);
+                } else {
+                    let tab = &self.workspace.tabs[index];
+                    let position = crate::view::ScrollPosition {
+                        x: tab.scroll.0,
+                        visual_row: tab.scroll.1 / tab.scroll_line_height,
+                    };
+                    if tab.loading.is_some() || tab.binary_loading.is_some() {
+                        view.defer_scroll_restore(&tab.editor, position);
+                    } else {
+                        view.restore_scroll_position(&tab.editor, position);
+                    }
+                }
                 if std::mem::take(&mut self.workspace.tabs[index].pending_center) {
                     view.center_caret(&self.workspace.tabs[index].editor);
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+                    self.workspace.tabs[index].scroll_line_height = view.line_height;
                 }
                 if *sheet == focused {
                     let viewport = view.viewport(&self.workspace.tabs[index].editor);
@@ -1629,13 +1739,14 @@ impl App {
                 );
                 if *sheet != focused {
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+                    self.workspace.tabs[index].scroll_line_height = view.line_height;
                     let view = std::mem::replace(view, View::new(Size::default(), 8., 12.));
                     self.sheet_views.insert(*sheet, view);
                 }
                 translate_scene(&mut part, rect.x, rect.y);
                 scene.layers.extend(part.layers);
             }
-            if !self.workspace.distraction_free {
+            if show_tabs {
                 let bar = Rect {
                     height: tab_height,
                     ..group_bounds
@@ -2178,6 +2289,7 @@ impl AppHandler for App {
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
+        self.view.set_font_metrics(fonts.metrics, w.scale_factor());
         self.window_size = w.content_size();
         self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
         self.view.appearance = w.appearance();
@@ -2206,10 +2318,16 @@ impl AppHandler for App {
         }
         self.font_face = self.workspace.editor().preferences.font_face.clone();
         self.fonts = Some(fonts);
+        self.initialize_view_metrics();
         if self.options.mode == Mode::Interactive
             && (self.workspace.fullscreen || self.workspace.distraction_free)
         {
-            w.toggle_full_screen();
+            w.toggle_full_screen_with_mode(
+                self.workspace
+                    .editor()
+                    .settings
+                    .bool("use_simple_full_screen", false),
+            );
         }
         Ok(())
     }
@@ -2490,6 +2608,9 @@ impl AppHandler for App {
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),
             "toggle_side_bar" => self.panels.side_visible,
+            "toggle_minimap" => self.workspace.window_visible("show_minimap"),
+            "toggle_tabs" => self.workspace.window_visible("show_tabs"),
+            "toggle_status_bar" => self.workspace.window_visible("show_status_bar"),
             "toggle_inline_diff" => {
                 let byte = args["_context_byte"]
                     .as_u64()
@@ -2612,6 +2733,17 @@ impl AppHandler for App {
             return Ok(());
         }
         let w = ctx.window;
+        if let Some(fonts) = self.fonts.as_mut() {
+            if fonts.poll_fallbacks() {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.invalidate_layouts();
+                }
+                w.request_frame();
+            }
+            if fonts.fallback_pending() {
+                w.request_frame();
+            }
+        }
         if !w.is_focused() && (self.drag_select.is_some() || self.drag_text.is_some()) {
             // No button release arrives after focus moves away mid-gesture.
             self.drag_select = None;
@@ -2778,8 +2910,15 @@ impl AppHandler for App {
             let name = self.workspace.editor().preferences.font_face.clone();
             match Fonts::load_named(&name) {
                 Ok(fonts) => {
+                    let scroll = self.view.scroll_position();
                     self.view = View::new(self.view.size, fonts.cell as f64, fonts.ascent as f64);
+                    self.view.set_font_metrics(fonts.metrics, w.scale_factor());
+                    self.sheet_views.clear();
                     self.fonts = Some(fonts);
+                    self.initialize_view_metrics();
+                    self.view.apply_style(self.workspace.editor());
+                    self.view
+                        .restore_scroll_position(self.workspace.editor(), scroll);
                     self.renderer
                         .as_mut()
                         .ok_or("renderer missing")?
@@ -3567,3 +3706,7 @@ mod round15_tests {
 #[cfg(test)]
 #[path = "round16_review_app_tests.rs"]
 mod round16_review_tests;
+
+#[cfg(test)]
+#[path = "app_lane_b_round17_tests.rs"]
+mod lane_b_round17_tests;

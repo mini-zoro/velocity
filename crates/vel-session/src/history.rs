@@ -35,6 +35,9 @@ pub struct ViewState {
     pub primary: usize,
     /// Horizontal and vertical logical scroll offsets.
     pub scroll: (f64, f64),
+    /// Top visual row plus fractional row offset. Absent in legacy pixel sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_line: Option<f64>,
     /// Folded regions.
     pub folds: Vec<Position>,
     /// Bookmark and mark regions, retained even when native undo history is discarded.
@@ -48,12 +51,29 @@ impl Default for ViewState {
             selections: vec![Position::default()],
             primary: 0,
             scroll: (0., 0.),
+            scroll_line: None,
             folds: vec![],
             named_regions: BTreeMap::new(),
         }
     }
 }
 impl ViewState {
+    /// Converts a captured view to font-independent vertical coordinates. The legacy
+    /// field stays in its historical 20 px grid for compatibility with older readers.
+    pub fn with_line_height(mut self, height: f64) -> Self {
+        let line = self.scroll.1 / height.max(1.);
+        self.scroll_line = Some(line);
+        self.scroll.1 = line * 20.;
+        self
+    }
+    /// Migrates pixel sessions with the old line height computed from the view's
+    /// effective font size and padding. Current row coordinates are already normalized.
+    pub fn top_visual_line(&self, legacy_line_height: f64) -> f64 {
+        self.scroll_line
+            .unwrap_or(self.scroll.1 / legacy_line_height.max(1.))
+            .max(0.)
+    }
+
     /// Copies selections, folds, bookmarks and marks, retaining no document contents.
     pub fn capture(buffer: &Buffer, id: ViewId, scroll: (f64, f64)) -> Self {
         let sel = buffer.view(id).sel();
@@ -85,6 +105,7 @@ impl ViewState {
             selections: sel.iter().map(Position::from).collect(),
             primary: sel.primary_index(),
             scroll,
+            scroll_line: None,
             folds: buffer
                 .view(id)
                 .get_regions("velocity.folds")
@@ -103,6 +124,7 @@ impl ViewState {
             || [self.scroll.0, self.scroll.1]
                 .iter()
                 .any(|n| !n.is_finite() || *n < 0.)
+            || self.scroll_line.is_some_and(|n| !n.is_finite() || n < 0.)
             || self
                 .selections
                 .iter()

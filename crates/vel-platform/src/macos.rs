@@ -53,7 +53,23 @@ impl fmt::Debug for WindowHandle {
     }
 }
 thread_local! {
+    static SIMPLE_PRESENTATION: RefCell<Option<NSApplicationPresentationOptions>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<Vec<Retained<Delegate>>> = const { RefCell::new(Vec::new()) };
+}
+fn restore_simple_presentation(mtm: MainThreadMarker) {
+    let any = WINDOWS.with(|windows| {
+        windows
+            .borrow()
+            .iter()
+            .any(|d| d.ivars().host.simple_fullscreen.borrow().is_some())
+    });
+    if !any {
+        SIMPLE_PRESENTATION.with(|saved| {
+            if let Some(options) = saved.take() {
+                NSApplication::sharedApplication(mtm).setPresentationOptions(options);
+            }
+        });
+    }
 }
 impl WindowHandle {
     /// Registers a process-wide factory independent of any one window's lifetime.
@@ -88,6 +104,9 @@ impl WindowHandle {
         if let Some(timer) = self.0.timer.take() {
             timer.invalidate();
         }
+        if self.0.simple_fullscreen.take().is_some() {
+            restore_simple_presentation(self.0.mtm);
+        }
         if let Some(window) = self.0.window.get() {
             window.orderOut(None);
         }
@@ -114,14 +133,59 @@ impl WindowHandle {
     }
     /// Reads native full-screen state, including changes from the green window control.
     pub fn is_full_screen(&self) -> bool {
-        self.0
-            .window
-            .get()
-            .is_some_and(|w| w.styleMask().contains(NSWindowStyleMask::FullScreen))
+        self.0.simple_fullscreen.borrow().is_some()
+            || self
+                .0
+                .window
+                .get()
+                .is_some_and(|w| w.styleMask().contains(NSWindowStyleMask::FullScreen))
     }
     /// Enters/exits native full screen without enabling macOS window tabs.
     pub fn toggle_full_screen(&self) {
-        if let Some(window) = self.0.window.get() {
+        self.toggle_full_screen_with_mode(false);
+    }
+    /// Uses the current Space for simple full screen, restoring the exact frame/style on exit.
+    /// Public behavior: <https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#use-simple-full-screen>
+    /// Current native support: <https://forum.sublimetext.com/t/build-4180-cannot-type-in-full-screen-mode/73072/17>
+    pub fn toggle_full_screen_with_mode(&self, simple: bool) {
+        let Some(window) = self.0.window.get() else {
+            return;
+        };
+        let action = crate::fullscreen::transition(
+            simple,
+            window.styleMask().contains(NSWindowStyleMask::FullScreen),
+            self.0.simple_fullscreen.borrow().is_some(),
+        );
+        if let Some((frame, style, _presentation)) = self.0.simple_fullscreen.take() {
+            window.setStyleMask(style);
+            window.setFrame_display(frame, true);
+            restore_simple_presentation(self.0.mtm);
+            window.makeKeyAndOrderFront(None);
+        } else if action == crate::fullscreen::Transition::EnterSimple {
+            let Some(screen) = window.screen() else {
+                return;
+            };
+            let application = NSApplication::sharedApplication(self.0.mtm);
+            SIMPLE_PRESENTATION.with(|saved| {
+                saved
+                    .borrow_mut()
+                    .get_or_insert(application.presentationOptions());
+            });
+            let saved = (
+                window.frame(),
+                window.styleMask(),
+                application.presentationOptions(),
+            );
+            *self.0.simple_fullscreen.borrow_mut() = Some(saved);
+            // AutoHideMenuBar requires AutoHideDock; both flags are valid together.
+            application.setPresentationOptions(
+                NSApplicationPresentationOptions::AutoHideMenuBar
+                    | NSApplicationPresentationOptions::AutoHideDock,
+            );
+            window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::Resizable);
+            window.setFrame_display(screen.frame(), true);
+            window.makeKeyAndOrderFront(None);
+        } else {
             window.toggleFullScreen(None);
         }
     }
@@ -502,6 +566,8 @@ struct Host {
     animating: Cell<bool>,
     size: Cell<Size>,
     scale: Cell<f64>,
+    simple_fullscreen:
+        RefCell<Option<(NSRect, NSWindowStyleMask, NSApplicationPresentationOptions)>>,
     window: OnceCell<Retained<NSWindow>>,
     view: OnceCell<Retained<EditorView>>,
     layer: OnceCell<Retained<ObservedLayer>>,
@@ -778,6 +844,20 @@ impl Host {
         self.render(FrameReason::Resize, false);
     }
 }
+define_class!(
+    // SAFETY: NSWindow remains main-thread-only; key eligibility is independent of
+    // the titled/borderless style, so simple full screen retains keyboard focus.
+    #[unsafe(super = NSWindow)]
+    struct EditorWindow;
+    // SAFETY: NSObjectProtocol has no additional requirements.
+    unsafe impl NSObjectProtocol for EditorWindow {}
+    impl EditorWindow {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key(&self) -> bool { true }
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main(&self) -> bool { true }
+    }
+);
 struct LayerIvars {
     sequence: AtomicU64,
     observations: Arc<Mutex<VecDeque<Presentation>>>,
@@ -1298,25 +1378,24 @@ impl Delegate {
         let h = &self.ivars().host;
         let mtm = h.mtm;
         h.phase("application_did_finish_launching");
-        // SAFETY: main-thread allocation; releasedWhenClosed is disabled immediately.
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                NSRect::new(
-                    NSPoint::new(160., 160.),
-                    NSSize::new(
-                        self.ivars().options.size.width,
-                        self.ivars().options.size.height,
-                    ),
-                ),
-                NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Miniaturizable
-                    | NSWindowStyleMask::Resizable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
+        let frame = NSRect::new(
+            NSPoint::new(160., 160.),
+            NSSize::new(
+                self.ivars().options.size.width,
+                self.ivars().options.size.height,
+            ),
+        );
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
+        let allocated = EditorWindow::alloc(mtm).set_ivars(());
+        // SAFETY: NSWindow's designated initializer, with main-thread allocation and
+        // exact argument/return types. The subclass adds no state or initializer work.
+        let window: Retained<EditorWindow> = unsafe {
+            msg_send![super(allocated), initWithContentRect: frame, styleMask: style, backing: NSBackingStoreType::Buffered, defer: false]
         };
+        let window = window.into_super();
         // SAFETY: the host retains the window until explicit teardown after run returns.
         unsafe {
             window.setReleasedWhenClosed(false);
@@ -1618,6 +1697,7 @@ fn create_host(
         animating: Cell::new(false),
         size: Cell::new(options.size),
         scale: Cell::new(1.),
+        simple_fullscreen: RefCell::new(None),
         window: OnceCell::new(),
         view: OnceCell::new(),
         layer: OnceCell::new(),

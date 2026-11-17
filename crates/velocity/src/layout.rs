@@ -17,6 +17,10 @@ pub struct Options {
 pub struct Segment {
     pub bytes: Range<usize>,
     pub indent: usize,
+    /// Physical display column before this segment; computed during wrapping.
+    pub source_column: usize,
+    /// Projected cells in the segment, excluding continuation indentation.
+    pub columns: usize,
 }
 #[derive(Debug)]
 pub struct Unit<'a> {
@@ -79,6 +83,7 @@ impl Heights {
 }
 #[derive(Debug, Default)]
 pub struct Layout {
+    pub geometry_revision: u64,
     identity: Option<(BufferId, ChangeId)>,
     pub long: crate::large::LongLines,
     options: Options,
@@ -119,6 +124,7 @@ impl Layout {
         {
             return;
         }
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         if self.identity != Some(identity) {
             self.long.reset();
         }
@@ -140,6 +146,8 @@ impl Layout {
             let single: Arc<[Segment]> = Arc::from([Segment {
                 bytes: 0..usize::MAX,
                 indent: 0,
+                source_column: 0,
+                columns: usize::MAX,
             }]);
             self.lines = vec![
                 Line {
@@ -164,6 +172,8 @@ impl Layout {
                 line.segments = Arc::from([Segment {
                     bytes: visible_start..len.max(hidden_end),
                     indent: 0,
+                    source_column: 0,
+                    columns: usize::MAX,
                 }]);
                 line.hidden.push(fold.begin() - start..hidden_end);
                 for row in first + 1..last {
@@ -179,6 +189,8 @@ impl Layout {
                                 segments: Arc::from([Segment {
                                     bytes: end..usize::MAX,
                                     indent: 0,
+                                    source_column: 0,
+                                    columns: usize::MAX,
                                 }]),
                                 hidden: vec![],
                             }
@@ -315,8 +327,11 @@ impl Layout {
             segments.push(Segment {
                 bytes: visible_start..len,
                 indent: 0,
+                source_column: 0,
+                columns: 0,
             });
         }
+        let mut source_column = 0;
         while from < units.len() {
             let left = if from == 0 { 0 } else { indent };
             let mut col = left;
@@ -332,6 +347,10 @@ impl Layout {
                 }
                 col += units[end].width + self.phantom_gap(start + units[end].bytes.start);
                 end += 1;
+                // The public settings reference explicitly excludes word wrapping from
+                // word_separators. No current documentation confirms the proposed CJK
+                // boundary change, so preserve today's whitespace/fallback rule.
+                // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#automatic-behavior
                 if units[end - 1].text.chars().all(char::is_whitespace) {
                     word = Some(end);
                 }
@@ -342,10 +361,14 @@ impl Layout {
             {
                 end = boundary;
             }
+            let columns = units[from..end].iter().map(|u| u.width).sum::<usize>();
             segments.push(Segment {
                 bytes: units[from].bytes.start..units[end - 1].bytes.end,
                 indent: left,
+                source_column,
+                columns,
             });
+            source_column += columns;
             from = end;
         }
         Line {
@@ -357,6 +380,7 @@ impl Layout {
         if self.phantom_inline == inline {
             return;
         }
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.phantom_inline = inline;
         if !self.lines.is_empty() {
             self.lines = (0..text.len_lines())
@@ -380,7 +404,10 @@ impl Layout {
     /// Inserts read-only original lines before physical row boundaries.
     pub fn set_inline(&mut self, mut blocks: Vec<(usize, usize)>) {
         blocks.sort_unstable();
-        self.inline = blocks;
+        if self.inline != blocks {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+            self.inline = blocks;
+        }
     }
     fn raw_before(&self, row: usize) -> usize {
         if self.lines.is_empty() {
@@ -495,6 +522,8 @@ impl Layout {
             Segment {
                 bytes: 0..body_len(text, row),
                 indent: 0,
+                source_column: 0,
+                columns: usize::MAX,
             }
         }
     }

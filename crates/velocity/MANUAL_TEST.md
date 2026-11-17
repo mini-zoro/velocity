@@ -1,3 +1,110 @@
+# Round 17 Lane B: fonts, layout, scheme drawing and window controls
+
+Headless tests drive real settings/resource loaders and named/key/mouse dispatch. Native
+appearance, AppKit window transitions and GPU costs remain unobserved in this sandbox.
+Detailed item/test mapping and retained measurement commands are in `ROUND17_LANE_B.md`.
+The fourth verification starts at WIP `7925499` on main `58fd98c`; it stays uncommitted.
+The full gate passes: **969 tests, 0 failures**, fmt, strict clippy and rustdoc.
+The Lane B module passes **10/10 runs at four test threads** (29 passed each). All 14
+application and 2 renderer/font ignored timing tests pass explicitly. Nine paired runs
+pass the retired-instruction gate (features -0.37%, typing1 +0.42%, typing1000 -0.13%).
+The wall gate also passes every percentile. Nine fresh font processes measure a median
+first-non-ASCII call of **0.087 ms** and RSS **7.203 / 7.578 / 20.000 MiB** before primary,
+after primary and after fallback. The asynchronous face is ready in 66.726 ms (median).
+Details, raw boundaries, ligature costs and ragged-selection measurements are in
+`ROUND17_LANE_B.md`; this pass's evidence is in `/tmp/velocity-lane-b-fourth/`.
+Sealed read-only system fonts, including the private PingFangUI font, are mapped after
+canonical-path/mount/firmlink checks; AssetsV2 and user fonts use retained copies. Actual
+host paths, mapping choices and refreshed RSS measurements are in the review record.
+The current docs do not establish B6's proposed punctuation/CJK wrapping rule; the settings
+reference explicitly excludes word wrapping from `word_separators`. That behavior stays as
+before. `always_show_minimap_viewport` changes from true to the documented false; hover or
+minimap dragging reveals the viewport. New ruler preferences retain the existing solid stroke.
+
+Run an unbundled reviewer-built release binary with an expendable profile; no packaging step
+is needed. Leave these boxes unchecked until observed on an unlocked macOS desktop.
+
+- [ ] **Font fallback (native font service):** start with Menlo and an ASCII file. Insert
+  Hangul `한`, Thai `ไ`, Devanagari `अ`, Hebrew `א`, Arabic `ع`, math `𝒜`, Braille `⠿`,
+  Chinese `你好` and emoji `🦀 ❤️ ☺️ ✔️ ⚠️ ©️ ↔️ ☀️ ♥️ ✌️ 1️⃣ 👩‍💻 🇨🇳 👍🏽`. The first frame stays
+  responsive while the font cascade resolves, then missing glyphs repaint without another input event. Private-use glyphs
+  require an installed font that actually covers them. Try a Nerd Font private-use glyph.
+  Compare bare `❤` and text-presentation `❤︎` with emoji `❤️`. Compare `⛑︎` before and
+  after loading an emoji: it must retain its text face. Also try `⌚︎ 🌡︎ 🖥︎ a⌚︎b`: where
+  the system provides only color glyphs, they remain visible and stop requesting frames
+  after the cascade resolves. Compare bare `⌚ ⌛ ⏰ ☕ ⚡` before and after their VS15 text
+  forms: the bare forms stay emoji, while bare `❤` stays text. Try `1︎⃣ #︎⃣ *︎⃣` plus
+  VS16 and selector-free keycaps: no enclosing mark or selector produces a box; VS15
+  retains an available text face. Check bold/italic fallback and
+  emoji bitmap orientation. Replace/truncate a disposable user-installed font while it is
+  loaded; the loaded snapshot stays usable. RTL ordering is outside this round.
+- [ ] **Ligatures and antialiasing:** use Fira Code (external, not bundled). Compare `-> != ===`
+  with `no_liga`, `no_clig`, `no_calt`, `dlig` and `ss01` enabled individually. A syntax token
+  boundary stops the ligature. Move/click every caret position within a ligature and select
+  half of it: each occupied monospace cell has its own input position. Compare `no_antialias`
+  and `gray_antialias`; macOS keeps grayscale for `subpixel_antialias` (no RGB subpixel pipeline).
+- [ ] **Font metrics and zoom:** compare the recorded Menlo 13pt line height with main at
+  both 1x and Retina density, including gutter, minimap, wrapped rows, scrolling and drag
+  autoscroll. Zoom with Cmd+= / Cmd+- in several tabs, create another tab, restart, then reset.
+  The top visual row/fraction stays fixed in active/background tabs and across a 1x/2x screen
+  move. Restore old pixel sessions at line 1000 with default settings, font size 16 and
+  4px top padding. Save an old-format lazy tab after zooming, restart and visit it: its row
+  stays fixed. Restore a file shortened from 3000 to 101 lines; it stays visible. Repeat with
+  background loading. Hold zoom for ten repeats while frames run: every press persists;
+  subsequent external User edits still apply. Block a package download, zoom and edit a
+  syntax preference: the resource loader stays idle after publishing that external change,
+  then reloads once the queued writes complete. An in-place repair of broken User JSON
+  reloads. Opening the syntax picker in the status bar keeps the current scroll.
+  All tabs use the persisted User size;
+  an explicit distraction-free size keeps its precedence while zoom updates the normal User
+  size. Reset removes that key or uses `default_font_size`.
+  User comments and unrelated preferences survive. Switch font family and split panes too.
+- [ ] **Minimap:** compare 10-line, long and wrapped files, including folds. Short files stay
+  near the top; each visual row keeps its fixed pitch. Scroll to top/middle/end and click the
+  corresponding minimap row. Hold a press and send stationary drag events: scrolling stays
+  still. Small moves scroll proportionally; drag the viewport from top to bottom within the
+  control on long/wrapped/folded files: the final line is reached, and the box stays beneath
+  the pointer during and after release. Release over the status bar, wheel-scroll, click the
+  minimap again, then drag text: no stale capture or caret jump. With a long file at the
+  top, middle and end, click outside the viewport box: the line drawn beneath the pointer
+  becomes the editor centre. Drag immediately afterward: no initial jump. Repeat outside
+  presses near the top, middle and bottom, dragging in each direction to the control's end:
+  both document ends are reachable, with no movement from stationary events. Toggle
+  `minimap_horizontal_scrolling`; only that setting pans
+  token positions horizontally. Hover/drag reveals the viewport; `draw_minimap_border` alone
+  enables its outline. Hidden minimaps do no sampling work.
+- [ ] **Window state:** toggle minimap, tabs, status bar and side bar in two windows. Enter
+  distraction-free mode, choose different visibility there, create/open/clone/move tabs and
+  restore a session. Every tab follows its window; both modes remember their separate choices.
+- [ ] **Simple full screen:** test normal and distraction-free entry with
+  `use_simple_full_screen: true`. The window fills its current screen without a new Space,
+  retains keyboard focus, and auto-hides menu bar/Dock. Exit restores the exact frame/style.
+  Repeat on another screen and with two windows; close one while the other is full screen.
+  Also verify ordinary native full screen and entering distraction-free mode from it.
+- [ ] **Scroller paging (native preferences):** choose each macOS “Click in the scroll bar to”
+  behavior. Track clicks page or jump accordingly; Option reverses it; dragging the puck stays
+  continuous. Repeat with `scroll_past_end` false, true and 0.5, at the final page. The last
+  line stays visible after scrolling or dragging the thumb all the way to the end.
+- [ ] **Text drag delay (native preferences):** explicitly set `NSDragAndDropTextDelay`,
+  restart and drag existing selected text before/after that delay and beyond 4px. Early
+  movement starts a normal selection and never becomes text dragging later in that gesture;
+  a quick release places the caret. Positive values are milliseconds (try 300); zero removes
+  the delay and negative disables text dragging. A permitted drag moves/copies as before.
+  Unset retains the prior distance-only behavior. Release, focus loss and cancellation clear the gesture.
+- [ ] **Scheme drawing:** use an original scheme with bracket/tag `foreground`, bracket
+  `bold italic` and each underline type. Foreground alone recolors glyphs without underlining.
+  Put `font_style: glow` on one token: the soft glyph-shaped pass affects only that run.
+  Compare disabled glow costs with the recorded CPU evidence and measure native GPU cost.
+- [ ] **Selection/block caret corners:** compare `round`, `cut` and `square`, radius 0/2/large,
+  transparent borders, jagged multiline selections, wrapped/folded lines, horizontal scrolling,
+  very long lines and split panes. Test borderless fills too, and Select All on ragged code at
+  50/200/1000 visible rows. Connected selections have no internal per-row border seams;
+  empty carets retain the cheap rectangular path. Inspect concave as well as convex joins.
+- [ ] **Rulers and indentation menus:** try `[80,[90,"dotted"],"bad",[100,"stippled"]]`, global
+  `ruler_style` and fractional `ruler_width`; the bad entry affects only itself. Check clipping
+  during horizontal scrolling. Run all View > Indentation rows and palette equivalents, then
+  undo conversions once. Each conversion updates the tab typing preference.
+
 # Round 18 Lane A review fixes (native review pending)
 
 Baseline: main `77c071c`; branch `lane-a`, uncommitted. Latest verification evidence is in

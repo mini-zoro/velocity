@@ -75,6 +75,8 @@ impl Panels {
                 if let Some(root) = workspace.data_path() {
                     let root = root.to_owned();
                     let key = key.to_owned();
+                    let pending_key = key.clone();
+                    let pending_value = value.clone();
                     let result = crate::release::enqueue(move || {
                         let path = root.join("Packages/User/Preferences.sublime-settings");
                         let source = match std::fs::read_to_string(&path) {
@@ -91,7 +93,7 @@ impl Panels {
                         })?;
                         Ok(())
                     })?;
-                    workspace.track_settings_write(result);
+                    workspace.track_settings_write(result, &[(pending_key, Some(pending_value))]);
                 }
             }
             "show_dictionary" => {

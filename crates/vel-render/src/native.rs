@@ -36,12 +36,11 @@ pub fn font_location(name: &str) -> Result<(std::path::PathBuf, String, NativeFo
 /// Resolves real bold/italic faces within the fallback family, retaining CoreText's face.
 #[cfg(target_os = "macos")]
 pub fn font_variant(
-    name: &str,
+    original: &NativeFont,
     style: crate::scene::FontStyle,
 ) -> Result<(std::path::PathBuf, String, NativeFont), String> {
     use objc2_core_foundation::CFURL;
     use objc2_core_text::{CTFontSymbolicTraits, kCTFontURLAttribute};
-    let (_, _, original) = font_location(name)?;
     let mut traits = CTFontSymbolicTraits::empty();
     if style.bold {
         traits |= CTFontSymbolicTraits::TraitBold;
@@ -76,7 +75,7 @@ pub fn font_variant(
 /// Font variants require CoreText on the native platform.
 #[cfg(not(target_os = "macos"))]
 pub fn font_variant(
-    _: &str,
+    _: &NativeFont,
     _: crate::scene::FontStyle,
 ) -> Result<(std::path::PathBuf, String, NativeFont), String> {
     Err("CoreText unavailable".into())

@@ -639,6 +639,11 @@ fn app_scene_translate(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
             shift(rect);
             shift(clip);
         }
+        for contour in &mut layer.contours {
+            shift(&mut contour.clip);
+            contour.offset.x += x;
+            contour.offset.y += y;
+        }
         for rect in &mut layer.rects {
             shift(&mut rect.rect);
             shift(&mut rect.clip);
@@ -651,7 +656,7 @@ fn app_scene_translate(scene: &mut vel_render::scene::Scene, x: f64, y: f64) {
             shift(&mut underline.rect);
             shift(&mut underline.clip);
         }
-        for text in &mut layer.text {
+        for text in layer.text.iter_mut().chain(layer.glow.iter_mut()) {
             text.x += x as f32;
             text.baseline += y as f32;
             shift(&mut text.clip);

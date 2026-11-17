@@ -1,5 +1,11 @@
 // Original Velocity captions, authored from public command behavior.
 [
+  { "caption": "Indentation: Convert to Spaces", "command": "expand_tabs", "args": {"set_translate_tabs": true} },
+  { "caption": "Indentation: Convert to Tabs", "command": "unexpand_tabs", "args": {"set_translate_tabs": true} },
+  { "caption": "Indentation: Guess Settings from Buffer", "command": "detect_indentation" },
+  { "caption": "View: Toggle Tabs", "command": "toggle_tabs" },
+  { "caption": "View: Toggle Status Bar", "command": "toggle_status_bar" },
+
   {
     "caption": "File: Save All",
     "command": "save_all"

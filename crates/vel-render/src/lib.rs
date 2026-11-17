@@ -13,8 +13,10 @@ pub mod guides;
 mod native;
 pub mod nine_slice;
 pub mod scene;
+pub mod selection;
 #[cfg(target_os = "macos")]
 mod timing;
+pub mod typography;
 #[cfg(target_os = "macos")]
 pub use gpu::{FrameTimes, Renderer};
 #[cfg(not(target_os = "macos"))]

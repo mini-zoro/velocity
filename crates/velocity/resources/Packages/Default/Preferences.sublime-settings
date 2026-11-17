@@ -26,7 +26,6 @@
   "copy_with_empty_selection": true,
   // Characters that end a word for double click, word motions and super+d.
   "word_separators": "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?",
-  "rulers": [],
   "ensure_newline_at_eof_on_save": false,
   "trim_trailing_white_space_on_save": false,
   "trim_only_modified_white_space": false,
@@ -34,7 +33,6 @@
   "default_line_ending": "system",
   "default_encoding": "UTF-8",
   "fallback_encoding": "Western (Windows 1252)",
-  "scroll_past_end": false,
   "caret_style": "solid",
   // Public settings reference: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
   "highlight_line": false,
@@ -63,7 +61,6 @@
   "color_scheme": "auto",
   "dark_color_scheme": "Velocity Dark.sublime-color-scheme",
   "light_color_scheme": "Velocity Light.sublime-color-scheme",
-  "font_options": [],
   "detect_indentation": true,
   "word_wrap": "auto",
   "wrap_width": 0,
@@ -88,8 +85,22 @@
   "match_tags": true,
   "fold_buttons": true,
   "fade_fold_buttons": true,
+  // Lane B: drawing, font and window preferences.
+  "font_options": [],
+  "rulers": [],
+  "ruler_style": "solid",
+  "ruler_width": 1.0,
+  // Build 4107: https://www.sublimetext.com/download
+  "scroll_past_end": false,
   "show_minimap": true,
-  "always_show_minimap_viewport": true,
+  "show_tabs": true,
+  "show_status_bar": true,
+  "minimap_horizontal_scrolling": false,
+  "draw_minimap_border": false,
+  // Visible default change; Visual Settings documents false (hover reveals it).
+  // https://docs.sublimetext.io/reference/settings.html#visual-settings
+  "always_show_minimap_viewport": false,
+  "use_simple_full_screen": false,
   "hot_exit": "always",
   "remember_open_files": true,
   "close_windows_when_empty": false,

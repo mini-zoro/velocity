@@ -19,7 +19,11 @@ struct Out {
     @location(4) params: vec4<f32>, @location(5) primitive: vec4<f32>) -> Out {
     let corners = array<vec2<f32>,6>(vec2(0.,0.),vec2(1.,0.),vec2(0.,1.),vec2(0.,1.),vec2(1.,0.),vec2(1.,1.));
     let corner = corners[vertex];
-    let pixel = rect.xy + corner * rect.zw;
+    var pixel = rect.xy + corner * rect.zw;
+    if u32(primitive.x) == 8u { // one filled triangle, then a degenerate triangle
+        let vertices = array<vec2<f32>,6>(rect.xy,params.xy,params.zw,params.zw,params.xy,params.zw);
+        pixel = vertices[vertex];
+    }
     var out: Out;
     out.position = vec4(pixel / screen.size * vec2(2.,-2.) + vec2(-1.,1.),0.,1.);
     out.uv = uv_rect.xy + corner * uv_rect.zw;
@@ -38,9 +42,30 @@ fn corner_distance(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -> f32 {
     let radius = select(select(radii.z,radii.w,left),select(radii.y,radii.x,left),top);
     return rounded_distance(p - size * 0.5,size * 0.5,radius);
 }
+fn glow_sample(uv: vec2<f32>, page: i32, bounds: vec4<f32>) -> f32 {
+    if any(uv < bounds.xy) || any(uv > bounds.zw) { return 0.; }
+    return textureSampleLevel(atlas,atlas_sampler,uv,page,0.).a;
+}
 @fragment fn fs_main(input: Out) -> @location(0) vec4<f32> {
     if input.position.x < input.clip.x || input.position.y < input.clip.y || input.position.x >= input.clip.z || input.position.y >= input.clip.w { discard; }
     let kind = u32(input.primitive.x);
+    if kind == 8u { return input.color; }
+    if kind == 7u {
+        let a=input.params.xy; let b=input.params.zw;
+        let delta=b-a;
+        let t=clamp(dot(input.local-a,delta)/max(dot(delta,delta),0.0001),0.,1.);
+        let distance=length(input.local-a-t*delta);
+        let coverage=1.-smoothstep(max(0.,input.primitive.z-0.5),input.primitive.z+0.5,distance);
+        return vec4(input.color.rgb,input.color.a*coverage);
+    }
+    if kind == 9u {
+        var alpha = 0.;
+        for (var y = -2; y <= 2; y++) { for (var x = -2; x <= 2; x++) {
+            let weight = exp(-f32(x*x+y*y)*0.35);
+            alpha += glow_sample(input.uv + vec2(f32(x),f32(y))*input.primitive.z,i32(input.primitive.y),input.params)*weight/8.7;
+        } }
+        return vec4(input.color.rgb,input.color.a*alpha);
+    }
     if kind == 6u {
         let edge = min(min(input.local.x, input.size.x-input.local.x), min(input.local.y, input.size.y-input.local.y));
         if edge >= input.params.x { discard; }

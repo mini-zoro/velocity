@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
-use vel_color_scheme::{ColorScheme, FontStyle as Decoration};
+use vel_color_scheme::{ColorScheme, DecorationOptions, FontStyle as Decoration};
 use vel_platform::{Appearance, Point, Rect, Size, Utf16Range};
 use vel_render::scene::*;
 /// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
@@ -69,13 +69,11 @@ pub(crate) fn motion_layout_options(e: &Editor) -> Options {
         width => width,
     };
     let configured = e.settings.usize("wrap_width", 0);
-    let width = if configured == 0 {
-        viewport
-    } else if e.settings.string("wrap_width_style", "auto") == "fixed" {
-        configured
-    } else {
-        configured.min(viewport)
-    };
+    let width = effective_wrap_columns(
+        configured,
+        viewport,
+        e.settings.string("wrap_width_style", "auto") == "fixed",
+    );
     Options {
         width: if wrap { width.max(1) } else { 0 },
         tab: e.preferences.tab_size,
@@ -123,10 +121,25 @@ pub struct SceneProfile {
     frames: usize,
     total_ms: [f64; 9],
 }
+#[derive(Debug, PartialEq)]
+struct SelectionKey {
+    document: (vel_buffer::BufferId, u64, u64),
+    regions: Vec<vel_buffer::Region>,
+    geometry: [f64; 10],
+    style: vel_color_scheme::CornerStyle,
+    fill: Color,
+    border: Color,
+}
+#[derive(Debug)]
+struct SelectionCache {
+    key: SelectionKey,
+    contours: Vec<vel_render::selection::Contour>,
+}
 #[derive(Debug)]
 pub struct View {
     pub profile: Option<SceneProfile>,
     units: HashMap<u64, CachedLine>,
+    selection_cache: Option<SelectionCache>,
     pub find_matches: Vec<Range<usize>>,
     pub size: Size,
     pub cell: f64,
@@ -134,10 +147,13 @@ pub struct View {
     pub line_height: f64,
     pub scroll_x: f64,
     pub scroll_y: f64,
+    pending_scroll_clamp: bool,
     pub appearance: Appearance,
     pub focused: bool,
     pub minimap_hover: bool,
     pub minimap_drag: bool,
+    minimap_gesture: Option<MinimapDrag>,
+    pub mouse_preferences: vel_platform::mouse::MousePreferences,
     pub gutter_hover: bool,
     pub tab_height: f64,
     /// Drop position while dragging selected text (`drag_text`).
@@ -154,9 +170,57 @@ pub struct View {
     scrolled: Option<Instant>,
     base_cell: f64,
     base_ascent: f64,
+    font_metrics: Option<vel_render::typography::FontMetrics>,
+    device_scale: f64,
+    line_padding: (f64, f64),
+    pub ligatures: bool,
     started: Instant,
 }
+/// A font- and display-scale-independent viewport location for navigation history.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollPosition {
+    pub x: f64,
+    /// Top visual row, including the fraction of that row above the viewport.
+    pub visual_row: f64,
+}
 impl View {
+    /// Saves the top visual row and its fractional offset, rather than pixel y.
+    pub(crate) fn scroll_position(&self) -> ScrollPosition {
+        ScrollPosition {
+            x: self.scroll_x,
+            visual_row: self.scroll_y / self.line_height.max(1.),
+        }
+    }
+    /// Resolves a saved row using current metrics/layout and clamps changed documents.
+    pub(crate) fn restore_scroll_position(&mut self, e: &Editor, position: ScrollPosition) {
+        self.pending_scroll_clamp = false;
+        self.scroll_x = position.x.max(0.);
+        self.scroll_y = position.visual_row.max(0.) * self.line_height;
+        // clamp_scroll applies current metrics and scales this old-height row before
+        // clamping. A single style/layout synchronization covers both operations.
+        self.clamp_scroll(e);
+    }
+    /// Keeps the saved row while a file's complete layout is still unavailable.
+    pub(crate) fn defer_scroll_restore(&mut self, e: &Editor, position: ScrollPosition) {
+        self.scroll_x = position.x.max(0.);
+        self.scroll_y = position.visual_row.max(0.) * self.line_height;
+        self.pending_scroll_clamp = true;
+        self.apply_style(e);
+    }
+    pub(crate) fn finish_scroll_restore(&mut self, e: &Editor) {
+        if std::mem::take(&mut self.pending_scroll_clamp) {
+            self.clamp_scroll(e);
+        }
+    }
+    pub(crate) fn pointer_gesture_active(&self) -> bool {
+        self.minimap_drag || self.scroll_bar_drag
+    }
+    pub(crate) fn end_pointer_gesture(&mut self) {
+        self.minimap_drag = false;
+        self.minimap_gesture = None;
+        self.scroll_bar_drag = false;
+        self.drop_caret = None;
+    }
     #[allow(clippy::too_many_arguments)]
     fn paint_long_line(
         &self,
@@ -167,6 +231,9 @@ impl View {
         clip: Rect,
         layer: &mut Layer,
         occurrence: Option<&str>,
+        selection_bands: &mut HashMap<usize, Vec<Rect>>,
+        shaped_selection: bool,
+        collect_selection: bool,
     ) {
         use unicode_segmentation::UnicodeSegmentation;
         use unicode_width::UnicodeWidthStr;
@@ -176,7 +243,7 @@ impl View {
         let window = e.layout.borrow().long_window(&e.text, row, first, columns);
         let start = e.text.line_to_byte(row);
         let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
-        let baseline = y + self.ascent + 3. + e.settings.number("line_padding_top", 0.).max(0.);
+        let baseline = self.baseline(e, y);
         if e.preferences.highlight_line && e.text.byte_to_line(e.caret) == row {
             fill(
                 layer,
@@ -208,6 +275,39 @@ impl View {
             );
         }
         let regions = e.regions();
+        let body_end = start + e.text.line_len_bytes(row);
+        for (index, selection) in regions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.empty() && r.begin() <= body_end && r.end() > start)
+        {
+            let a = self.rect_at(e, selection.begin().max(start));
+            let b = self.rect_at(e, selection.end().min(body_end));
+            let rect = Rect {
+                x: a.x,
+                y,
+                width: (b.x - a.x).max(1.),
+                height: self.line_height,
+            };
+            if !shaped_selection {
+                fill(
+                    layer,
+                    rect,
+                    clip,
+                    color(
+                        scheme,
+                        if self.focused {
+                            "selection"
+                        } else {
+                            "inactive_selection"
+                        },
+                    ),
+                );
+            }
+            if collect_selection {
+                selection_bands.entry(index).or_default().push(rect);
+            }
+        }
         let occurrences: Vec<_> = occurrence
             .map(|word| word_occurrences(&window.text, word).collect())
             .unwrap_or_default();
@@ -253,22 +353,6 @@ impl View {
                     );
                 }
                 occurrence_index += 1;
-            }
-            let selected = regions
-                .iter()
-                .any(|r| !r.empty() && r.begin() < at + grapheme.len() && r.end() > at);
-            if selected {
-                fill(
-                    layer,
-                    Rect {
-                        x,
-                        y,
-                        width: (width as f64 * self.cell).max(1.),
-                        height: self.line_height,
-                    },
-                    clip,
-                    color(scheme, "selection"),
-                );
             }
             if e.marked
                 .as_ref()
@@ -331,7 +415,7 @@ impl View {
         for row in first..end {
             let r = snapshot.view.row(row).expect("bounded row");
             let y = self.tab_height + 4. + row as f64 * self.line_height - self.scroll_y;
-            let baseline = y + self.ascent + 3.;
+            let baseline = self.baseline(e, y);
             text_run(
                 &mut layer,
                 &format!("{:016x}", r.offset),
@@ -398,6 +482,34 @@ impl View {
         self.paint_scrollbar(e, &mut scene);
         scene
     }
+    /// Installs known primary metrics; absent/pending font state retains the last valid grid.
+    pub fn set_font_metrics(
+        &mut self,
+        metrics: vel_render::typography::FontMetrics,
+        device_scale: f64,
+    ) {
+        self.font_metrics = Some(metrics);
+        self.base_ascent = metrics.ascent;
+        self.device_scale = device_scale.max(1.);
+        let height = metrics
+            .line(
+                13. * self.cell / self.base_cell.max(0.001),
+                self.device_scale,
+                self.line_padding.0,
+                self.line_padding.1,
+            )
+            .0
+            .max(1.);
+        if height != self.line_height {
+            self.scroll_y = self.scroll_y / self.line_height * height;
+            self.line_height = height;
+        }
+    }
+    fn baseline(&self, e: &Editor, y: f64) -> f64 {
+        y + self.ascent
+            + e.settings.number("line_padding_top", 0.).max(0.)
+            + if self.font_metrics.is_none() { 3. } else { 0. }
+    }
     pub fn reset_caret(&mut self) {
         self.started = Instant::now();
     }
@@ -405,6 +517,7 @@ impl View {
         Self {
             profile: std::env::var_os("VELOCITY_REVIEW_PROFILE").map(|_| SceneProfile::default()),
             units: HashMap::new(),
+            selection_cache: None,
             find_matches: Vec::new(),
             size,
             cell,
@@ -416,6 +529,9 @@ impl View {
             focused: true,
             minimap_hover: false,
             minimap_drag: false,
+            minimap_gesture: None,
+            pending_scroll_clamp: false,
+            mouse_preferences: Default::default(),
             widest: (None, Some(0)),
             drop_caret: None,
             gutter_hover: false,
@@ -429,6 +545,10 @@ impl View {
             scrolled: None,
             base_cell: cell,
             base_ascent: ascent,
+            font_metrics: None,
+            device_scale: 1.,
+            line_padding: (0., 0.),
+            ligatures: false,
             started: Instant::now(),
         }
     }
@@ -490,13 +610,24 @@ impl View {
     }
     fn margin(&self, e: &Editor) -> f64 {
         let margin = e.settings.number("margin", 8.).max(0.);
-        if e.settings.bool("draw_centered", false) {
-            let columns = e.settings.usize("wrap_width", 80).max(1);
-            margin.max((self.right(e) - self.gutter(e) - columns as f64 * self.cell) / 2.)
-        } else {
-            margin
+        if !e.settings.bool("draw_centered", false) {
+            return margin;
         }
+        let configured = e.settings.usize("wrap_width", 0);
+        // 0 wraps to the window: https://www.sublimetext.com/docs/distraction_free.html
+        if configured == 0 {
+            return margin;
+        }
+        let viewport = ((self.right(e) - self.gutter(e) - margin * 2.).max(self.cell) / self.cell)
+            .floor() as usize;
+        let columns = effective_wrap_columns(
+            configured,
+            viewport,
+            e.settings.string("wrap_width_style", "auto") == "fixed",
+        );
+        margin.max((self.right(e) - self.gutter(e) - columns as f64 * self.cell) / 2.)
     }
+
     pub fn gutter(&self, e: &Editor) -> f64 {
         if e.binary.is_some() {
             return 16.;
@@ -530,10 +661,20 @@ impl View {
         let scale = e.preferences.font_size / 13.;
         self.cell = self.base_cell * scale;
         self.ascent = self.base_ascent * scale;
-        self.line_height = (20. * scale
-            + e.settings.number("line_padding_top", 0.).max(0.)
-            + e.settings.number("line_padding_bottom", 0.).max(0.))
-        .max(1.);
+        let top = e.settings.number("line_padding_top", 0.).max(0.);
+        let bottom = e.settings.number("line_padding_bottom", 0.).max(0.);
+        self.line_padding = (top, bottom);
+        let old_height = self.line_height;
+        self.line_height = self
+            .font_metrics
+            .map_or(20. * scale + top + bottom, |m| {
+                m.line(e.preferences.font_size, self.device_scale, top, bottom)
+                    .0
+            })
+            .max(1.);
+        if self.line_height != old_height {
+            self.scroll_y = self.scroll_y / old_height * self.line_height;
+        }
         if e.binary.is_some() {
             e.layout.borrow_mut().page = self.rows();
             return;
@@ -606,21 +747,17 @@ impl View {
         let visible = self.right(e) - self.gutter(e) - self.margin(e) * 2.;
         (widest as f64 * self.cell + self.cell - visible).max(0.)
     }
+    fn max_scroll_y(&self, e: &Editor) -> f64 {
+        // The empty margin leaves the last line visible, including at fraction 1.
+        // https://docs.sublimetext.io/reference/settings.html#visual-settings
+        let viewport = (self.size.height - self.tab_height - 8.).max(0.);
+        (self.total(e) as f64 * self.line_height - viewport
+            + e.preferences.scroll_past_end * (viewport - self.line_height).max(0.))
+        .max(0.)
+    }
     pub fn clamp_scroll(&mut self, e: &Editor) {
         self.apply_style(e);
-        let past = if e.preferences.scroll_past_end {
-            (self.size.height - self.tab_height - self.line_height).max(0.)
-        } else {
-            0.
-        };
-        self.scroll_y = self.scroll_y.clamp(
-            0.,
-            (self.total(e) as f64 * self.line_height - self.size.height
-                + self.tab_height
-                + 8.
-                + past)
-                .max(0.),
-        );
+        self.scroll_y = self.scroll_y.clamp(0., self.max_scroll_y(e));
         let max_x = self.max_scroll_x(e);
         self.scroll_x = self.scroll_x.min(max_x).max(0.);
     }
@@ -647,7 +784,9 @@ impl View {
         let layout = e.layout.borrow();
         let (visual, _) = layout.visual_at(&e.text, byte);
         Rect {
-            x: self.gutter(e) + self.margin(e) + layout.column(&e.text, byte) as f64 * self.cell
+            x: self.gutter(e)
+                + self.margin(e)
+                + vel_render::typography::grid_x(layout.column(&e.text, byte), self.cell)
                 - self.scroll_x,
             y: self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y,
             width: 1.,
@@ -786,12 +925,40 @@ impl View {
         dragging: bool,
         up: bool,
     ) -> Result<bool, String> {
+        self.pointer_with_option(e, point, down, dragging, up, false)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn pointer_with_option(
+        &mut self,
+        e: &mut Editor,
+        point: Point,
+        down: bool,
+        dragging: bool,
+        up: bool,
+        option: bool,
+    ) -> Result<bool, String> {
         if up && self.scroll_bar_drag {
             self.scroll_bar_drag = false;
             return Ok(true);
         }
         if (down && vel_ui::contains(self.scroll_bar, point)) || (dragging && self.scroll_bar_drag)
         {
+            if down
+                && !vel_ui::contains(self.scroll_puck, point)
+                && !self.mouse_preferences.jumps(option)
+            {
+                let page = self.scroll_bar.height;
+                self.scroll(
+                    e,
+                    0.,
+                    if point.y < self.scroll_puck.y {
+                        -page
+                    } else {
+                        page
+                    },
+                );
+                return Ok(true);
+            }
             if down {
                 self.scroll_bar_drag = true;
                 self.scroll_drag_offset = if vel_ui::contains(self.scroll_puck, point) {
@@ -803,8 +970,7 @@ impl View {
             let track = (self.scroll_bar.height - self.scroll_puck.height).max(1.);
             let fraction =
                 ((point.y - self.scroll_bar.y - self.scroll_drag_offset) / track).clamp(0., 1.);
-            let height = self.total(e) as f64 * self.line_height;
-            self.scroll_y = fraction * (height - self.scroll_bar.height).max(0.);
+            self.scroll_y = fraction * self.max_scroll_y(e);
             self.scrolled = Some(Instant::now());
             self.clamp_scroll(e);
             return Ok(true);
@@ -817,21 +983,38 @@ impl View {
         if up {
             let consumed = self.minimap_drag;
             self.minimap_drag = false;
+            self.minimap_gesture = None;
             if consumed {
                 return Ok(true);
             }
         }
         if (down && self.minimap_hover) || (dragging && self.minimap_drag) {
-            self.minimap_drag = true;
-            let fraction = ((point.y - self.tab_height)
-                / (self.size.height - self.tab_height).max(1.))
-            .clamp(0., 1.);
-            let row = (fraction * e.text.len_lines() as f64) as usize;
-            let byte = e.text.line_to_byte(row.min(e.text.len_lines() - 1));
-            self.scroll_y = (e.layout.borrow().visual_at(&e.text, byte).0 as f64
-                * self.line_height
-                - self.size.height / 2.)
-                .max(0.);
+            if down {
+                let map = self.minimap_geometry(e);
+                let viewport = map.viewport(self.scroll_y, self.line_height);
+                let gesture = if vel_ui::contains(viewport, point) {
+                    MinimapDrag::Viewport {
+                        grab: point.y - viewport.y,
+                    }
+                } else {
+                    // A click targets the row actually painted beneath the pointer.
+                    // Its new viewport may be far from the pointer in a panned map.
+                    // Anchor subsequent movement here, with both control ends reachable.
+                    let row = map.visual_at(point.y);
+                    let visible = (self.size.height - self.tab_height - 8.).max(0.);
+                    self.scroll_y = row * self.line_height - visible / 2.;
+                    self.clamp_scroll(e);
+                    MinimapDrag::Click {
+                        press_y: point.y,
+                        scroll: self.scroll_y,
+                    }
+                };
+                self.minimap_gesture = Some(gesture);
+                self.minimap_drag = true;
+            }
+            if let Some(gesture) = self.minimap_gesture {
+                self.scroll_y = self.minimap_geometry(e).drag_scroll(gesture, point.y);
+            }
             self.clamp_scroll(e);
             return Ok(true);
         }
@@ -973,7 +1156,17 @@ impl View {
             width: (right - gutter).max(0.),
             height: (self.size.height - self.tab_height).max(0.),
         };
-        let mut layer = Layer::default();
+        let mut layer = Layer {
+            font_options: vel_render::typography::FontOptions::parse(
+                e.settings
+                    .get("font_options")
+                    .and_then(vel_config::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(vel_config::Value::as_str),
+            ),
+            ..Layer::default()
+        };
         {
             let mut theme = e.theme.borrow_mut();
             let path = [
@@ -1012,6 +1205,62 @@ impl View {
             global("gutter"),
         );
         let regions = e.regions();
+        let bracket_glyphs = self.bracket_glyph_styles(e, language, scheme);
+        let mut selection_border = scheme
+            .globals
+            .color("selection_border")
+            .map(rgba)
+            .unwrap_or([0.; 4]);
+        let selection_fill = global(if self.focused {
+            "selection"
+        } else {
+            "inactive_selection"
+        });
+        let selection_style = scheme.selection_corner_style();
+        let selection_radius = scheme.selection_corner_radius();
+        // Corner treatment applies to the fill independently of a selection border.
+        // https://www.sublimetext.com/docs/color_schemes.html#selection
+        let shaped_selection =
+            selection_radius > 0. && selection_style != vel_color_scheme::CornerStyle::Square;
+        let selection_width = scheme
+            .globals
+            .number("selection_border_width")
+            .unwrap_or(1.)
+            .max(0.);
+        if selection_width == 0. {
+            selection_border[3] = 0.;
+        }
+        let selection_key =
+            (shaped_selection && regions.iter().any(|r| !r.empty())).then(|| SelectionKey {
+                document: (
+                    e.buffer.id(),
+                    e.revision,
+                    e.layout.borrow().geometry_revision,
+                ),
+                regions: regions.clone(),
+                geometry: [
+                    self.scroll_x,
+                    self.scroll_y,
+                    self.cell,
+                    self.line_height,
+                    left,
+                    clip.width,
+                    clip.height,
+                    clip.y,
+                    selection_radius,
+                    selection_width,
+                ],
+                style: selection_style,
+                fill: selection_fill,
+                border: selection_border,
+            });
+        let selection_cached = selection_key.as_ref().is_some_and(|key| {
+            self.selection_cache
+                .as_ref()
+                .is_some_and(|cache| cache.key == *key)
+        });
+        let collect_selection = !selection_cached && (shaped_selection || selection_border[3] > 0.);
+        let mut selection_bands: HashMap<usize, Vec<Rect>> = HashMap::new();
         let caret_row = e.text.byte_to_line(e.caret);
         let folded = e.folded();
         let layout = e.layout.borrow();
@@ -1019,18 +1268,33 @@ impl View {
             .iter()
             .map(|r| layout.visual_at(&e.text, r.b).0)
             .collect();
-        for column in &e.preferences.rulers {
-            fill(
-                &mut layer,
-                Rect {
-                    x: left + *column as f64 * self.cell - self.scroll_x,
-                    y: self.tab_height,
-                    width: 1.,
-                    height: clip.height,
-                },
-                clip,
-                global("rulers"),
-            );
+        for ruler in &e.preferences.ruler_entries {
+            use vel_config::settings::RulerStyle;
+            let rect = Rect {
+                x: left + ruler.column as f64 * self.cell - self.scroll_x,
+                y: self.tab_height,
+                width: e.settings.number("ruler_width", 1.).clamp(0.1, 16.),
+                height: clip.height,
+            };
+            let style =
+                ruler
+                    .style
+                    .unwrap_or_else(|| match e.settings.string("ruler_style", "solid") {
+                        "dotted" => RulerStyle::Dotted,
+                        "stippled" => RulerStyle::Stippled,
+                        _ => RulerStyle::Solid,
+                    });
+            match style {
+                RulerStyle::Solid => fill(&mut layer, rect, clip, global("rulers")),
+                RulerStyle::Dotted | RulerStyle::Stippled => {
+                    layer.rects.push(SolidRect::patterned_ruler(
+                        rect,
+                        clip,
+                        global("rulers"),
+                        style == RulerStyle::Stippled,
+                    ))
+                }
+            }
         }
         let whitespace_selection_only = e.settings.get("draw_white_space").is_some_and(|v| {
             v == "selection"
@@ -1047,7 +1311,6 @@ impl View {
             .and_then(vel_config::Value::as_array);
         let no_bold = font_options.is_some_and(|a| a.iter().any(|s| s == "no_bold"));
         let no_italic = font_options.is_some_and(|a| a.iter().any(|s| s == "no_italic"));
-        let line_padding_top = e.settings.number("line_padding_top", 0.).max(0.);
         let indent_guides = e.settings.bool("draw_indent_guides", true);
         let guide_options = e
             .settings
@@ -1137,7 +1400,7 @@ impl View {
                         &mut layer,
                         &format!("− {}", original.trim_end_matches('\n')),
                         left - self.scroll_x,
-                        y + self.ascent + 3.,
+                        self.baseline(e, y),
                         e.preferences.font_size,
                         global("line_diff_deleted"),
                         FontStyle::default(),
@@ -1158,13 +1421,16 @@ impl View {
                     clip,
                     &mut layer,
                     occurrence.as_deref(),
+                    &mut selection_bands,
+                    shaped_selection,
+                    collect_selection,
                 );
                 continue;
             }
             let line = e.text.line(row).to_string();
             let start = e.text.line_to_byte(row);
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
-            let baseline = y + self.ascent + 3. + line_padding_top;
+            let baseline = self.baseline(e, y);
             if (e.preferences.highlight_line || e.command_mode()) && caret_visuals.contains(&visual)
             {
                 fill(
@@ -1199,8 +1465,7 @@ impl View {
                         };
                         let width = scheme
                             .globals
-                            .value("line_diff_width")
-                            .and_then(vel_config::Value::as_f64)
+                            .number("line_diff_width")
                             .unwrap_or(3.)
                             .clamp(1., 8.);
                         let deleted = h.kind() == vel_diff::HunkKind::Deleted;
@@ -1394,9 +1659,10 @@ impl View {
             let mut column = segment.indent;
             let range_start = start + segment.bytes.start;
             let range_end = start + segment.bytes.end;
-            for selection in regions
+            for (selection_index, selection) in regions
                 .iter()
-                .filter(|r| !r.empty() && r.begin() <= range_end && r.end() > range_start)
+                .enumerate()
+                .filter(|(_, r)| !r.empty() && r.begin() <= range_end && r.end() > range_start)
             {
                 let a = relevant
                     .iter()
@@ -1414,17 +1680,15 @@ impl View {
                     width: ((b - a) as f64 * self.cell).max(1.),
                     height: self.line_height,
                 };
-                fill(
-                    &mut layer,
-                    rect,
-                    clip,
-                    global(if self.focused {
-                        "selection"
-                    } else {
-                        "inactive_selection"
-                    }),
-                );
-                border(&mut layer, rect, clip, global("selection_border"));
+                if !shaped_selection {
+                    fill(&mut layer, rect, clip, selection_fill);
+                }
+                if collect_selection {
+                    selection_bands
+                        .entry(selection_index)
+                        .or_default()
+                        .push(rect);
+                }
             }
             if let Some(fields) = &e.fields {
                 for field in fields
@@ -1561,6 +1825,7 @@ impl View {
                     .windows(2)
                     .all(|pair| pair[0].range.end <= pair[1].range.start)
             );
+            let mut previous_span = None;
             let mut span = spans.partition_point(|s| s.range.end <= segment.bytes.start);
             for unit in relevant {
                 let gap = if inline_phantoms {
@@ -1596,6 +1861,13 @@ impl View {
                     .get(span)
                     .filter(|s| s.range.contains(&unit.bytes.start))
                     .map_or(default, |s| s.style);
+                let bracket = if bracket_glyphs.is_empty() {
+                    None
+                } else {
+                    bracket_glyphs
+                        .iter()
+                        .find(|(range, _, _)| range.contains(&at))
+                };
                 let fg = if selected {
                     style.selection_foreground.map(rgba).unwrap_or_else(|| {
                         global(if self.focused {
@@ -1604,6 +1876,11 @@ impl View {
                             "inactive_selection_foreground"
                         })
                     })
+                } else if let Some((_, fg, options)) =
+                    bracket.filter(|(_, _, o)| o.contains(DecorationOptions::FOREGROUND))
+                {
+                    let _ = options;
+                    *fg
                 } else if found {
                     global("find_highlight_foreground")
                 } else if text == "…" {
@@ -1612,18 +1889,26 @@ impl View {
                     rgba(style.foreground)
                 };
                 let font = FontStyle {
-                    bold: style.font_style.contains(Decoration::BOLD) && !no_bold,
-                    italic: style.font_style.contains(Decoration::ITALIC) && !no_italic,
+                    bold: (style.font_style.contains(Decoration::BOLD)
+                        || bracket.is_some_and(|(_, _, o)| o.contains(DecorationOptions::BOLD)))
+                        && !no_bold,
+                    italic: (style.font_style.contains(Decoration::ITALIC)
+                        || bracket.is_some_and(|(_, _, o)| o.contains(DecorationOptions::ITALIC)))
+                        && !no_italic,
                 };
                 let signature = (fg, font, style.font_style);
                 let visible = x + unit.width as f64 * self.cell >= gutter && x < right;
-                if (run_style != Some(signature) || text == "\t" || !visible)
+                if (run_style != Some(signature)
+                    || (self.ligatures && previous_span != Some(span))
+                    || text == "\t"
+                    || !visible)
                     && let Some((fg, font, decoration)) = run_style.take()
                 {
                     self.flush(
                         &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
                     );
                 }
+                previous_span = Some(span);
                 if visible && text != "\t" {
                     if run.is_empty() {
                         run_x = x;
@@ -1694,6 +1979,59 @@ impl View {
                 }
             }
         }
+        let contour_start = layer.contours.len();
+        if selection_cached {
+            layer.contours.extend(
+                self.selection_cache
+                    .as_ref()
+                    .unwrap()
+                    .contours
+                    .iter()
+                    .cloned(),
+            );
+        }
+        for bands in selection_bands.into_values() {
+            for points in vel_render::selection::outlines(&bands) {
+                if shaped_selection {
+                    let mut contour = vel_render::selection::Contour::new(
+                        &points,
+                        corner_style(selection_style),
+                        selection_radius,
+                        selection_fill,
+                        selection_border,
+                        clip,
+                    );
+                    contour.border_width = selection_width;
+                    layer.contours.push(contour);
+                } else {
+                    // Square/zero-radius borders need only the exposed union edges; no
+                    // rounded geometry or extra primitives at internal line boundaries.
+                    for (a, b) in points
+                        .iter()
+                        .zip(points.iter().cycle().skip(1))
+                        .take(points.len())
+                    {
+                        fill(
+                            &mut layer,
+                            Rect {
+                                x: a.x.min(b.x),
+                                y: a.y.min(b.y),
+                                width: (b.x - a.x).abs().max(selection_width),
+                                height: (b.y - a.y).abs().max(selection_width),
+                            },
+                            clip,
+                            selection_border,
+                        );
+                    }
+                }
+            }
+        }
+        if !selection_cached {
+            self.selection_cache = selection_key.map(|key| SelectionCache {
+                key,
+                contours: layer.contours[contour_start..].to_vec(),
+            });
+        }
         drop(layout);
         self.profile_step(&mut phase, 3);
         self.paint_brackets(e, language, scheme, clip, &mut layer);
@@ -1718,7 +2056,30 @@ impl View {
             let mut color = global("caret");
             color[3] *= alpha * if e.command_mode() { 0.45 } else { 1. };
             if self.focused {
-                fill(&mut carets, caret, clip, color);
+                if (e.command_mode() || e.preferences.caret_style == "block")
+                    && scheme.block_caret_corner_radius() > 0.
+                    && scheme.block_caret_corner_style() != vel_color_scheme::CornerStyle::Square
+                {
+                    if scheme.block_caret_corner_style() == vel_color_scheme::CornerStyle::Round {
+                        carets.rects.push(SolidRect {
+                            rect: caret,
+                            clip,
+                            color,
+                            radius: scheme.block_caret_corner_radius() as f32,
+                        });
+                    } else {
+                        carets.contours.push(vel_render::selection::Contour::new(
+                            &vel_render::selection::outlines(&[caret])[0],
+                            corner_style(scheme.block_caret_corner_style()),
+                            scheme.block_caret_corner_radius(),
+                            color,
+                            [0.; 4],
+                            clip,
+                        ));
+                    }
+                } else {
+                    fill(&mut carets, caret, clip, color);
+                }
             }
         }
         if let Some(at) = self.drop_caret {
@@ -1759,10 +2120,23 @@ impl View {
             *at = now;
         }
     }
+    #[cfg(test)]
+    pub(crate) fn scrollbar_rects(&self) -> (Rect, Rect) {
+        (self.scroll_bar, self.scroll_puck)
+    }
+    #[cfg(test)]
+    pub(crate) fn minimap_rects(&self, e: &Editor) -> (Rect, Rect) {
+        let map = self.minimap_geometry(e);
+        (map.bounds, map.viewport(self.scroll_y, self.line_height))
+    }
+    #[cfg(test)]
+    pub(crate) fn minimap_visual_at(&self, e: &Editor, y: f64) -> f64 {
+        self.minimap_geometry(e).visual_at(y)
+    }
     fn paint_scrollbar(&mut self, e: &Editor, scene: &mut Scene) {
         let ui_scale = vel_ui::theme::ui_scale(&e.settings);
         let height = (self.size.height - self.tab_height).max(1.);
-        let content = self.total(e) as f64 * self.line_height;
+        let content = height + self.max_scroll_y(e);
         if content <= height {
             self.scroll_bar = Rect::default();
             return;
@@ -1879,7 +2253,7 @@ impl View {
                 clip,
             );
         }
-        layer.text.push(TextRun {
+        let text = TextRun {
             family: None,
             text: std::mem::take(run),
             x: x as f32,
@@ -1888,7 +2262,68 @@ impl View {
             color,
             style: font,
             clip,
-        });
+        };
+        // https://www.sublimetext.com/docs/color_schemes.html#style-rules
+        if decoration.contains(Decoration::GLOW) {
+            layer.glow.push(text.clone());
+        }
+        layer.text.push(text);
+    }
+    fn bracket_glyph_styles(
+        &self,
+        e: &Editor,
+        language: Option<&Language>,
+        scheme: &ColorScheme,
+    ) -> Vec<(Range<usize>, Color, DecorationOptions)> {
+        let mut result = Vec::new();
+        if ![
+            scheme.brackets_options(),
+            scheme.bracket_contents_options(),
+            scheme.tags_options(),
+        ]
+        .iter()
+        .flatten()
+        .any(|o| {
+            o.contains(DecorationOptions::FOREGROUND)
+                || o.contains(DecorationOptions::BOLD)
+                || o.contains(DecorationOptions::ITALIC)
+        }) {
+            return result;
+        }
+        let Some(analysis) = language.and_then(|l| l.analysis.as_ref()) else {
+            return result;
+        };
+        for region in e.regions() {
+            if let Some(pair) = analysis.pair_at(
+                region.b,
+                e.settings.bool("match_brackets_content", true),
+                |kind| match kind {
+                    't' => e.settings.bool("match_tags", true),
+                    _ if !e.settings.bool("match_brackets", true) => false,
+                    '[' => e.settings.bool("match_brackets_square", true),
+                    '{' => e.settings.bool("match_brackets_braces", true),
+                    '<' => e.settings.bool("match_brackets_angle", false),
+                    _ => true,
+                },
+            ) {
+                let (key, options) = if pair.kind == 't' {
+                    ("tags_foreground", scheme.tags_options())
+                } else if pair.open.end < region.b && region.b < pair.close.start {
+                    (
+                        "bracket_contents_foreground",
+                        scheme.bracket_contents_options(),
+                    )
+                } else {
+                    ("brackets_foreground", scheme.brackets_options())
+                };
+                if let Some(options) = options {
+                    for range in [&pair.open, &pair.close] {
+                        result.push((range.clone(), color(scheme, key), options));
+                    }
+                }
+            }
+        }
+        result
     }
     fn paint_brackets(
         &self,
@@ -1923,11 +2358,15 @@ impl View {
                     "brackets"
                 };
                 let fg = color(scheme, &format!("{key}_foreground"));
-                let options = scheme
-                    .globals
-                    .value(&format!("{key}_options"))
-                    .and_then(vel_config::Value::as_str)
-                    .unwrap_or("underline");
+                let options = match key {
+                    "tags" => scheme.tags_options(),
+                    "bracket_contents" => scheme.bracket_contents_options(),
+                    _ => scheme.brackets_options(),
+                }
+                .unwrap_or(DecorationOptions::UNDERLINE);
+                let Some(options) = decoration_underline(options) else {
+                    continue;
+                };
                 for range in [&pair.open, &pair.close] {
                     let a = self.rect_at(e, range.start);
                     let b = self.rect_at(e, range.end);
@@ -1949,6 +2388,20 @@ impl View {
             }
         }
     }
+    fn minimap_geometry(&self, e: &Editor) -> MinimapGeometry {
+        MinimapGeometry::new(
+            Rect {
+                x: self.size.width - self.minimap_width(e),
+                y: self.tab_height,
+                width: self.minimap_width(e),
+                height: (self.size.height - self.tab_height).max(0.),
+            },
+            self.total(e),
+            self.line_height,
+            self.scroll_y,
+            self.max_scroll_y(e),
+        )
+    }
     fn paint_minimap(
         &self,
         e: &Editor,
@@ -1960,12 +2413,8 @@ impl View {
         if width == 0. {
             return;
         }
-        let bounds = Rect {
-            x: self.size.width - width,
-            y: self.tab_height,
-            width,
-            height: (self.size.height - self.tab_height).max(1.),
-        };
+        let map = self.minimap_geometry(e);
+        let bounds = map.bounds;
         fill(
             layer,
             bounds,
@@ -1984,82 +2433,99 @@ impl View {
             let style = theme.style(e.ui_id(0xE200), &vel_theme::ElementPath(&path), &e.settings);
             theme.surface(layer, &style, bounds, bounds);
         }
-        if (e.features.highlighting == vel_largefile::HighlightMode::Viewport
+        let layout = e.layout.borrow();
+        // Build 4142: https://www.sublimetext.com/download. Horizontal panning is opt-in.
+        let horizontal = if e.settings.bool("minimap_horizontal_scrolling", false) {
+            self.scroll_x / self.cell * 0.65
+        } else {
+            0.
+        };
+        // Bound all work by visible minimap rows, including wrapped/folded projections.
+        let fallback = (e.features.highlighting == vel_largefile::HighlightMode::Viewport
             || !e.features.indexing)
-            && language.is_none_or(|l| l.minimap.is_empty())
-            && e.text.len_bytes() > 0
-        {
-            let step = (e.features.minimap_stride as usize)
-                .max(e.text.len_lines().div_ceil(bounds.height as usize + 1))
-                .max(1);
-            for row in (0..e.text.len_lines()).step_by(step) {
-                let start = e.text.line_to_byte(row);
-                let end = e
-                    .text
-                    .floor_char_boundary((start + 128).min(start + e.text.line_len_bytes(row)));
-                let sample = e.text.slice(start..end).to_string();
-                let cells = crate::editor::cells_with_tab(
-                    sample.trim_end_matches('\n'),
-                    e.preferences.tab_size,
-                );
-                fill(
-                    layer,
-                    Rect {
-                        x: bounds.x,
-                        y: bounds.y + row as f64 / e.text.len_lines() as f64 * bounds.height,
-                        width: (cells as f64 * 0.65).min(width),
-                        height: 1.,
-                    },
-                    bounds,
-                    rgba(scheme.default_style().foreground),
-                );
-            }
-        }
-        if let Some(language) = language {
-            let existing_stride = language
-                .minimap
-                .get(1)
-                .map_or(1, |b| b.row.saturating_sub(language.minimap[0].row).max(1));
-            let sample_step = (e.features.minimap_stride as usize)
-                .div_ceil(existing_stride)
-                .max(1);
-            for line in language.minimap.iter().step_by(sample_step) {
-                let y =
-                    bounds.y + line.row as f64 / e.text.len_lines().max(1) as f64 * bounds.height;
-                for token in &line.tokens {
-                    if token.column as f64 * 0.65 >= width {
-                        break;
+            && language.is_none_or(|l| l.minimap.is_empty());
+        let samples = language.is_some_and(|l| !l.minimap.is_empty());
+        if fallback || samples {
+            let stride = if fallback {
+                usize::try_from(e.features.minimap_stride)
+                    .unwrap_or(usize::MAX)
+                    .max(1)
+            } else {
+                1
+            };
+            for visual in map.visible_rows().step_by(stride) {
+                if layout.inline_at(visual).is_some() {
+                    continue;
+                }
+                let (row, subrow) = layout.locate(visual);
+                let y = map.y(visual as f64);
+                let styled = language
+                    .and_then(|l| l.minimap.get(l.minimap.partition_point(|l| l.row < row)))
+                    .filter(|l| l.row == row);
+                if styled.is_none() && !fallback {
+                    continue;
+                }
+                let segment = layout.segment(&e.text, row, subrow);
+                let segment_column = segment.source_column;
+                let segment_columns = segment.columns;
+                if let Some(line) = styled {
+                    for token in &line.tokens {
+                        let from = token.column.max(segment_column);
+                        let to = (token.column + token.width)
+                            .min(segment_column.saturating_add(segment_columns));
+                        if to <= from {
+                            continue;
+                        }
+                        let x = bounds.x + (segment.indent + from - segment_column) as f64 * 0.65
+                            - horizontal;
+                        if x >= bounds.x + width {
+                            break;
+                        }
+                        if x + (to - from) as f64 * 0.65 < bounds.x {
+                            continue;
+                        }
+                        fill(
+                            layer,
+                            Rect {
+                                x,
+                                y,
+                                width: (to - from) as f64 * 0.65,
+                                height: map.pitch.min(1.5),
+                            },
+                            bounds,
+                            token.color,
+                        );
                     }
+                } else {
+                    let start = e.text.line_to_byte(row) + segment.bytes.start;
+                    let end = e.text.floor_char_boundary(
+                        (start + 160).min(e.text.line_to_byte(row) + segment.bytes.end),
+                    );
+                    let sample = e.text.slice(start..end).to_string();
+                    let cells = crate::editor::cells_with_tab(
+                        sample.trim_end_matches('\n'),
+                        e.preferences.tab_size,
+                    );
                     fill(
                         layer,
                         Rect {
-                            x: bounds.x + token.column as f64 * 0.65,
+                            x: bounds.x + segment.indent as f64 * 0.65 - horizontal,
                             y,
-                            width: (token.width as f64 * 0.65).max(0.65),
-                            height: 1.,
+                            width: (cells as f64 * 0.65).min(width + horizontal),
+                            height: map.pitch.min(1.5),
                         },
                         bounds,
-                        token.color,
+                        rgba(scheme.default_style().foreground),
                     );
                 }
             }
         }
-        if e.settings.bool("always_show_minimap_viewport", true)
+        // Documented default: https://docs.sublimetext.io/reference/settings.html#visual-settings
+        if e.settings.bool("always_show_minimap_viewport", false)
             || self.minimap_hover
             || self.minimap_drag
         {
-            let first = (self.scroll_y / self.line_height).max(0.) as usize;
-            let layout = e.layout.borrow();
-            let (row, _) = layout.locate(first);
-            let (last, _) = layout.locate(first + self.rows());
-            let rect = Rect {
-                x: bounds.x,
-                y: bounds.y + row as f64 / e.text.len_lines().max(1) as f64 * bounds.height,
-                width,
-                height: ((last + 1 - row) as f64 / e.text.len_lines().max(1) as f64
-                    * bounds.height)
-                    .max(3.),
-            };
+            let rect = map.viewport(self.scroll_y, self.line_height);
             let mut theme = e.theme.borrow_mut();
             let path = [
                 vel_theme::Element::new("window", &[]),
@@ -2074,19 +2540,17 @@ impl View {
                 .unwrap_or_else(|| color(scheme, "minimap_border"));
             shade[3] *= style.viewport_opacity;
             fill(layer, rect, bounds, shade);
-            border(layer, rect, bounds, color(scheme, "minimap_border"));
         }
-        fill(
-            layer,
-            Rect {
-                x: bounds.x,
-                y: bounds.y,
-                width: 1.,
-                height: bounds.height,
-            },
-            bounds,
-            color(scheme, "minimap_border"),
-        );
+        // This setting borders the visible-text region independently of hover:
+        // https://docs.sublimetext.io/reference/settings.html#visual-settings
+        if e.settings.bool("draw_minimap_border", false) {
+            border(
+                layer,
+                map.viewport(self.scroll_y, self.line_height),
+                bounds,
+                color(scheme, "minimap_border"),
+            );
+        }
     }
 }
 fn fallback_scheme(appearance: Appearance) -> &'static ColorScheme {
@@ -2294,7 +2758,13 @@ mod tests {
             8.,
             12.,
         );
-        assert!(v.scene(&e).layers[0].rects.len() >= 4);
+        let scene = v.scene(&e);
+        assert!(
+            scene.layers[0]
+                .contours
+                .iter()
+                .any(|c| !c.triangles.is_empty() && c.fill[3] > 0.)
+        );
         v.reveal(&e);
         let caret = v.rect_at(&e, e.caret).clamped(v.size);
         assert!(caret.y >= 0. && caret.y + caret.height <= v.size.height);
@@ -2429,3 +2899,639 @@ mod round16_review_tests;
 #[cfg(test)]
 #[path = "round16_review_perf.rs"]
 mod round16_review_perf;
+
+/// Shared by centred margins, frame layout and motion between frames.
+fn effective_wrap_columns(configured: usize, viewport: usize, fixed: bool) -> usize {
+    if configured == 0 {
+        viewport.max(1)
+    } else if fixed {
+        configured
+    } else {
+        configured.min(viewport.max(1))
+    }
+}
+#[derive(Clone, Copy, Debug)]
+enum MinimapDrag {
+    Viewport { grab: f64 },
+    Click { press_y: f64, scroll: f64 },
+}
+#[derive(Clone, Copy, Debug)]
+struct MinimapGeometry {
+    bounds: Rect,
+    pitch: f64,
+    offset: f64,
+    total: usize,
+    travel: f64,
+    max_scroll: f64,
+}
+impl MinimapGeometry {
+    fn new(bounds: Rect, total: usize, line_height: f64, scroll: f64, max_scroll: f64) -> Self {
+        let pitch = (line_height / 8.).max(1.);
+        let viewport_lines = bounds.height / line_height.max(1.);
+        let box_height = (viewport_lines * pitch).min(bounds.height);
+        let travel = (bounds.height - box_height)
+            .min(max_scroll / line_height.max(1.) * pitch)
+            .max(0.);
+        let fraction = if max_scroll > 0. {
+            (scroll / max_scroll).clamp(0., 1.)
+        } else {
+            0.
+        };
+        // Short documents retain their fixed pitch at the top. Long documents pan
+        // so that the viewport travels over the whole control, including past-end space.
+        let offset = (scroll / line_height.max(1.) * pitch - fraction * travel).max(0.);
+        Self {
+            bounds,
+            pitch,
+            offset,
+            total,
+            travel,
+            max_scroll,
+        }
+    }
+    fn scroll_at(self, viewport_y: f64) -> f64 {
+        if self.travel > 0. {
+            ((viewport_y - self.bounds.y) / self.travel).clamp(0., 1.) * self.max_scroll
+        } else {
+            0.
+        }
+    }
+    fn drag_scroll(self, gesture: MinimapDrag, y: f64) -> f64 {
+        match gesture {
+            MinimapDrag::Viewport { grab } => self.scroll_at(y - grab),
+            MinimapDrag::Click { press_y, scroll } => {
+                let anchor = scroll.clamp(0., self.max_scroll);
+                if y == press_y {
+                    anchor
+                } else if y < press_y {
+                    let travel = (press_y - self.bounds.y).max(0.);
+                    if travel > 0. {
+                        anchor * (1. - ((press_y - y) / travel).clamp(0., 1.))
+                    } else {
+                        0.
+                    }
+                } else {
+                    let travel = (self.bounds.y + self.bounds.height - press_y).max(0.);
+                    if travel > 0. {
+                        anchor + (self.max_scroll - anchor) * ((y - press_y) / travel).clamp(0., 1.)
+                    } else {
+                        self.max_scroll
+                    }
+                }
+            }
+        }
+    }
+    fn y(self, visual: f64) -> f64 {
+        self.bounds.y + visual * self.pitch - self.offset
+    }
+    fn visual_at(self, y: f64) -> f64 {
+        ((y - self.bounds.y + self.offset) / self.pitch)
+            .clamp(0., self.total.saturating_sub(1) as f64)
+    }
+    fn visible_rows(self) -> Range<usize> {
+        let first = (self.offset / self.pitch).floor() as usize;
+        first.min(self.total)
+            ..((self.offset + self.bounds.height) / self.pitch)
+                .ceil()
+                .min(self.total as f64) as usize
+    }
+    fn viewport(self, scroll: f64, line_height: f64) -> Rect {
+        Rect {
+            y: self.y(scroll / line_height.max(1.)),
+            height: (self.bounds.height / line_height.max(1.) * self.pitch).min(self.bounds.height),
+            ..self.bounds
+        }
+    }
+}
+
+fn decoration_underline(options: DecorationOptions) -> Option<&'static str> {
+    if options.contains(DecorationOptions::SQUIGGLY_UNDERLINE) {
+        Some("squiggly_underline")
+    } else if options.contains(DecorationOptions::STIPPLED_UNDERLINE) {
+        Some("stippled_underline")
+    } else if options.contains(DecorationOptions::UNDERLINE) {
+        Some("underline")
+    } else {
+        None
+    }
+}
+
+fn corner_style(style: vel_color_scheme::CornerStyle) -> vel_render::selection::Corners {
+    match style {
+        vel_color_scheme::CornerStyle::Round => vel_render::selection::Corners::Round,
+        vel_color_scheme::CornerStyle::Cut => vel_render::selection::Corners::Cut,
+        vel_color_scheme::CornerStyle::Square => vel_render::selection::Corners::Square,
+    }
+}
+
+#[cfg(test)]
+mod lane_b_round17_tests {
+    use super::*;
+    use vel_config::{json, settings::Layer as SettingLayer};
+    use vel_text::Text;
+    #[test]
+    fn minimap_viewport_default_and_borders_are_independent() {
+        let mut editor = Editor::new(Text::from("line\n".repeat(50).as_str()));
+        let mut view = View::new(
+            Size {
+                width: 400.,
+                height: 300.,
+            },
+            8.,
+            12.,
+        );
+        editor
+            .settings
+            .replace(SettingLayer::View, json!({"show_minimap":true}))
+            .unwrap();
+        editor.sync();
+        view.apply_style(&editor);
+        let map = view.minimap_geometry(&editor);
+        for (hover, border_enabled) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            view.minimap_hover = hover;
+            editor.settings.set(
+                SettingLayer::View,
+                "draw_minimap_border",
+                json!(border_enabled),
+            );
+            editor.sync();
+            let mut layer = Layer::default();
+            view.paint_minimap(&editor, None, &ColorScheme::velocity_dark(), &mut layer);
+            let viewport = map.viewport(view.scroll_y, view.line_height);
+            let border = layer.rects.iter().any(|r| {
+                r.rect
+                    == Rect {
+                        height: 1.,
+                        ..viewport
+                    }
+            });
+            assert_eq!(border, border_enabled);
+            assert_eq!(layer.rects.iter().any(|r| r.rect == viewport), hover);
+            if !hover && !border_enabled {
+                assert_eq!(layer.rects.len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn minimap_mapping_table_short_long_wrapped_and_scrolled() {
+        let bounds = Rect {
+            x: 300.,
+            y: 30.,
+            width: 100.,
+            height: 400.,
+        };
+        for (total, scroll, first, last) in [
+            (10, 0., 0, 10),
+            (10_000, 0., 0, 160),
+            (10_000, 98_000., 4831, 4992),
+            (10_000, 199_600., 9840, 10_000),
+        ] {
+            let map = MinimapGeometry::new(
+                bounds,
+                total,
+                20.,
+                scroll,
+                (total as f64 * 20. - bounds.height).max(0.),
+            );
+            let visible = map.visible_rows();
+            assert_eq!(visible.start, first, "{total} {scroll}");
+            assert_eq!(visible.end, last, "{total} {scroll}");
+            for row in visible {
+                assert!((map.visual_at(map.y(row as f64)) - row as f64).abs() < 0.00001);
+            }
+            assert_eq!(map.pitch, 2.5);
+        }
+        let mut editor = Editor::new(Text::from("a long line wraps into several rows\nshort"));
+        editor
+            .settings
+            .set(SettingLayer::View, "word_wrap", json!(true));
+        editor
+            .settings
+            .set(SettingLayer::View, "wrap_width", json!(5));
+        editor.sync();
+        let mut view = View::new(
+            Size {
+                width: 400.,
+                height: 120.,
+            },
+            8.,
+            12.,
+        );
+        view.apply_style(&editor);
+        let total = editor.layout.borrow().total();
+        assert!(total > editor.text.len_lines());
+        let map = view.minimap_geometry(&editor);
+        assert_eq!(map.total, total);
+        let row = 4.min(total - 1);
+        assert!((map.visual_at(map.y(row as f64)) - row as f64).abs() < 0.00001);
+        view.pointer(
+            &mut editor,
+            Point {
+                x: map.bounds.x + 4.,
+                y: map.y(row as f64),
+            },
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        // Pressing inside the viewport grabs it without jumping; an outside click
+        // centres the row drawn beneath it (the long-file table exercises that case).
+        let point = Point {
+            x: map.bounds.x + 4.,
+            y: map.y(row as f64),
+        };
+        let viewport = map.viewport(0., view.line_height);
+        let expected = if vel_ui::contains(viewport, point) {
+            0.
+        } else {
+            (map.visual_at(point.y) * view.line_height
+                - (view.size.height - view.tab_height - 8.).max(0.) / 2.)
+                .clamp(0., view.max_scroll_y(&editor))
+        };
+        assert!((view.scroll_y - expected).abs() < 0.001);
+    }
+    #[test]
+    fn zero_wrap_width_and_centered_geometry_share_columns_with_hit_testing() {
+        let mut editor = Editor::new(Text::from("a ".repeat(150).as_str()));
+        let mut view = View::new(
+            Size {
+                width: 900.,
+                height: 500.,
+            },
+            8.,
+            12.,
+        );
+        for fixed in [false, true] {
+            for configured in [0, 1, 40, 200] {
+                editor.settings.replace(SettingLayer::View,json!({"word_wrap":true,"wrap_width":configured,"wrap_width_style":if fixed {"fixed"} else {"auto"},"draw_centered":true})).unwrap();
+                editor.sync();
+                view.apply_style(&editor);
+                if configured == 0 {
+                    assert_eq!(view.margin(&editor), 8.);
+                }
+                let options = motion_layout_options(&editor);
+                assert_eq!(
+                    options.width,
+                    effective_wrap_columns(
+                        configured,
+                        editor.layout.borrow().viewport_width,
+                        fixed
+                    )
+                );
+                for at in [0, 2, 20, 80, editor.text.len_bytes()] {
+                    let rect = view.rect_at(&editor, at);
+                    assert_eq!(
+                        view.hit_test(
+                            &editor,
+                            Point {
+                                x: rect.x,
+                                y: rect.y + rect.height / 2.
+                            }
+                        ),
+                        at
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn font_metrics_drive_baseline_carets_gutter_scroll_and_minimap() {
+        let mut editor = Editor::new(Text::from("alpha\n".repeat(200).as_str()));
+        editor
+            .settings
+            .replace(
+                SettingLayer::View,
+                json!({"line_padding_top":2.,"line_padding_bottom":3.,"show_minimap":true}),
+            )
+            .unwrap();
+        editor.sync();
+        let mut view = View::new(
+            Size {
+                width: 400.,
+                height: 220.,
+            },
+            8.,
+            12.,
+        );
+        let metrics = vel_render::typography::FontMetrics {
+            ascent: 12.1,
+            descent: 3.2,
+            leading: 0.6,
+        };
+        view.set_font_metrics(metrics, 2.);
+        let scene = view.scene(&editor);
+        assert_eq!(view.line_height, 21.);
+        let rect = view.rect_at(&editor, 6);
+        assert_eq!(rect.height, 21.);
+        assert_eq!(
+            view.hit_test(
+                &editor,
+                Point {
+                    x: rect.x,
+                    y: rect.y + 10.
+                }
+            ),
+            6
+        );
+        let run = scene.layers[0]
+            .text
+            .iter()
+            .find(|r| r.text == "alpha")
+            .unwrap();
+        assert!((run.baseline as f64 - view.tab_height - 4. - 14.1).abs() < 0.00001);
+        let number = scene.layers[0].text.iter().find(|r| r.text == "1").unwrap();
+        assert_eq!(number.baseline, run.baseline);
+        assert_eq!(view.minimap_geometry(&editor).pitch, 21. / 8.);
+        view.scroll_y = 1e9;
+        view.clamp_scroll(&editor);
+        assert_eq!(
+            view.scroll_y,
+            (editor.layout.borrow().total() as f64 * 21. - view.size.height + view.tab_height + 8.)
+                .max(0.)
+        );
+    }
+    #[test]
+    fn randomized_wrap_fold_wide_and_tiny_geometry_stays_in_bounds() {
+        let mut seed = 0x12543_u64;
+        for iteration in 0..300 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let text = [
+                "a你🦀 é\t/end-one.\n",
+                "\n",
+                "  中文한글 !!= ->\n",
+                "🙂wide\n",
+            ]
+            .repeat(1 + (seed as usize % 12))
+            .concat();
+            let mut editor = Editor::new(Text::from(text.as_str()));
+            let boundaries: Vec<_> = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([text.len()])
+                .collect();
+            editor.settings.replace(SettingLayer::View,json!({"word_wrap":true,"wrap_width":seed as usize%20,"draw_centered":iteration%2==0,"gutter":iteration%3!=0})).unwrap();
+            editor.sync();
+            if boundaries.len() > 5 {
+                let a = boundaries[2];
+                let b = boundaries[boundaries.len() / 2];
+                editor.set_folded(vec![vel_buffer::Region::new(a, b)]);
+            }
+            let mut view = View::new(
+                Size {
+                    width: (seed % 200) as f64,
+                    height: (seed % 160) as f64,
+                },
+                8.,
+                12.,
+            );
+            view.scene(&editor);
+            view.scroll_y = 1e6;
+            view.clamp_scroll(&editor);
+            for at in boundaries.iter().step_by(3) {
+                let rect = view.rect_at(&editor, *at);
+                assert!(rect.x.is_finite() && rect.y.is_finite());
+                let hit = view.hit_test(
+                    &editor,
+                    Point {
+                        x: rect.x,
+                        y: rect.y + rect.height / 2.,
+                    },
+                );
+                assert!(hit <= editor.text.len_bytes() && text.is_char_boundary(hit));
+                let map = view.minimap_geometry(&editor);
+                assert!(map.visible_rows().end <= editor.layout.borrow().total());
+            }
+        }
+    }
+    #[test]
+    fn typed_bracket_options_never_turn_foreground_or_unknown_into_underlines() {
+        for (value, expected) in [
+            ("foreground", None),
+            ("bold italic foreground", None),
+            ("unknown", None),
+            ("", None),
+            ("underline", Some("underline")),
+            ("foreground stippled_underline", Some("stippled_underline")),
+            ("squiggly_underline bold", Some("squiggly_underline")),
+        ] {
+            let scheme = vel_color_scheme::SchemeSource::parse(
+                &json!({"globals":{"brackets_options":value}}).to_string(),
+            )
+            .unwrap()
+            .compile()
+            .unwrap();
+            assert_eq!(
+                decoration_underline(scheme.brackets_options().unwrap()),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn fractional_scroll_distance_and_paging_use_the_real_viewport() {
+        let mut editor = Editor::new(Text::from("line\n".repeat(500).as_str()));
+        let mut view = View::new(
+            Size {
+                width: 400.,
+                height: 240.,
+            },
+            8.,
+            12.,
+        );
+        for (value, fraction) in [(json!(false), 0.), (json!(true), 1.), (json!(0.5), 0.5)] {
+            editor
+                .settings
+                .set(SettingLayer::View, "scroll_past_end", value);
+            editor.sync();
+            view.scroll_y = 1e9;
+            view.clamp_scroll(&editor);
+            let viewport = view.size.height - view.tab_height - 8.;
+            assert!(
+                (view.scroll_y
+                    - (view.total(&editor) as f64 * view.line_height - viewport
+                        + fraction * (viewport - view.line_height).max(0.)))
+                .abs()
+                    < 0.001
+            );
+        }
+        editor
+            .settings
+            .set(SettingLayer::View, "overlay_scroll_bars", json!("disabled"));
+        editor.sync();
+        for jump in [false, true] {
+            for option in [false, true] {
+                view.mouse_preferences.jump_to_click = jump;
+                view.scroll_y = 0.;
+                view.scrolled = Some(Instant::now());
+                view.scene(&editor);
+                let point = Point {
+                    x: view.scroll_bar.x + 2.,
+                    y: view.scroll_bar.y + view.scroll_bar.height - 2.,
+                };
+                view.pointer_with_option(&mut editor, point, true, false, false, option)
+                    .unwrap();
+                if jump ^ option {
+                    assert!(view.scroll_y > 1000.);
+                } else {
+                    assert_eq!(view.scroll_y, view.scroll_bar.height);
+                }
+                view.pointer(&mut editor, point, false, false, true)
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod round17_scene_timing {
+    use super::*;
+    #[test]
+    #[ignore = "explicit glyph-run glow staging timing; GPU pass requires native review"]
+    fn round17_glow_staging_cost() {
+        let editor = Editor::new(vel_text::Text::new());
+        let view = View::new(
+            Size {
+                width: 1200.,
+                height: 800.,
+            },
+            8.,
+            12.,
+        );
+        let clip = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1200.,
+            height: 800.,
+        };
+        for glow in [false, true] {
+            let decoration = if glow {
+                Decoration::GLOW
+            } else {
+                Decoration::default()
+            };
+            let start = Instant::now();
+            for _ in 0..20_000 {
+                let mut layer = Layer::default();
+                let mut run = "keyword -> selected glyphs".to_owned();
+                view.flush(
+                    &mut layer,
+                    &mut run,
+                    100.,
+                    100.,
+                    [1.; 4],
+                    FontStyle::default(),
+                    decoration,
+                    clip,
+                    &editor,
+                );
+                assert_eq!(layer.glow.len(), usize::from(glow));
+                std::hint::black_box(layer);
+            }
+            println!(
+                "GLOW_STAGING glow={glow} us_per_run={}",
+                start.elapsed().as_secs_f64() * 1e6 / 20_000.
+            );
+        }
+    }
+    #[test]
+    #[ignore = "explicit visible-scene corner/glow timing, no concurrent builds"]
+    fn round17_disabled_features_and_corner_scene_cost() {
+        let mut editor = Editor::new(vel_text::Text::from(
+            "text and symbols -> !=\n".repeat(1000).as_str(),
+        ));
+        let mut view = View::new(
+            Size {
+                width: 1200.,
+                height: 800.,
+            },
+            8.,
+            12.,
+        );
+        editor.settings.set(
+            vel_config::settings::Layer::View,
+            "show_minimap",
+            vel_config::json!(false),
+        );
+        editor.sync();
+        for selected in [false, true] {
+            if selected {
+                editor.set_selection(vel_buffer::Selection::from_regions([
+                    vel_buffer::Region::new(0, editor.text.len_bytes()),
+                ]));
+            }
+            let start = Instant::now();
+            let mut rects = 0;
+            let mut contours = 0;
+            for _ in 0..2000 {
+                let scene = std::hint::black_box(view.scene(&editor));
+                rects = scene.layers[0].rects.len();
+                contours = scene.layers[0].contours.len();
+            }
+            println!(
+                "SCENE_TIMING selected={selected} us={} rects={rects} contours={contours}",
+                start.elapsed().as_secs_f64() * 1e6 / 2000.
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod minimap_drag_paint_regression {
+    use super::*;
+    #[test]
+    fn minimap_drag_paint_and_hit_testing_share_the_live_inverse() {
+        let mut editor = Editor::new(vel_text::Text::from("line\n".repeat(10_000).as_str()));
+        editor
+            .settings
+            .replace(
+                vel_config::settings::Layer::View,
+                vel_config::json!({
+                    "word_wrap":false,"show_minimap":true,"always_show_minimap_viewport":true
+                }),
+            )
+            .unwrap();
+        editor.sync();
+        let mut view = View::new(
+            Size {
+                width: 800.,
+                height: 600.,
+            },
+            8.,
+            12.,
+        );
+        view.apply_style(&editor);
+        let map = view.minimap_geometry(&editor);
+        let before = map.viewport(view.scroll_y, view.line_height);
+        let grab = before.height / 2.;
+        let press = Point {
+            x: map.bounds.x + 20.,
+            y: before.y + grab,
+        };
+        view.pointer(&mut editor, press, true, false, false)
+            .unwrap();
+        for y in [press.y + 20., map.bounds.y + map.bounds.height - grab] {
+            let point = Point { y, ..press };
+            view.pointer(&mut editor, point, false, true, false)
+                .unwrap();
+            let drawing = view.minimap_geometry(&editor);
+            let viewport = drawing.viewport(view.scroll_y, view.line_height);
+            assert!((viewport.y + grab - y).abs() < 1e-6);
+            assert!((drawing.scroll_at(viewport.y) - view.scroll_y).abs() < 1e-6);
+            let mut layer = Layer::default();
+            view.paint_minimap(&editor, None, &ColorScheme::velocity_dark(), &mut layer);
+            assert!(layer.rects.iter().any(|r| r.rect == viewport));
+            view.pointer(&mut editor, point, false, false, true)
+                .unwrap();
+            assert_eq!(
+                view.minimap_geometry(&editor)
+                    .viewport(view.scroll_y, view.line_height),
+                viewport
+            );
+            view.pointer(&mut editor, point, true, false, false)
+                .unwrap();
+        }
+        assert!((view.scroll_y - view.max_scroll_y(&editor)).abs() < 1e-6);
+        view.end_pointer_gesture();
+    }
+}

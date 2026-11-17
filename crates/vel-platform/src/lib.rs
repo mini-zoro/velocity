@@ -6,7 +6,10 @@
 
 pub mod accessibility;
 mod display;
+pub mod fonts;
+pub mod fullscreen;
 mod input;
+pub mod mouse;
 #[cfg(any(target_os = "macos", test))]
 mod requests;
 mod services;

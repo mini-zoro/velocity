@@ -3,6 +3,30 @@ use super::*;
 
 impl App {
     pub(super) fn handle_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent) {
+        // Every exit path releases capture, including overlays/status controls and
+        // mouse bindings. Finishing a text move still happens in the normal route.
+        let up = event.kind == MouseKind::Up;
+        if event.kind == MouseKind::Down {
+            self.end_mouse_gesture();
+        }
+        self.route_mouse_event(w, event);
+        if up {
+            self.end_mouse_gesture();
+        }
+    }
+    fn end_mouse_gesture(&mut self) {
+        self.view.end_pointer_gesture();
+        self.drag_select = None;
+        self.drag_text = None;
+        self.text_drag_origin = None;
+        self.text_drag_pressed = None;
+        self.dragging_splitter = None;
+    }
+    fn route_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent) {
+        let captured = matches!(event.kind, MouseKind::Drag | MouseKind::Up)
+            && (self.view.pointer_gesture_active()
+                || self.drag_select.is_some()
+                || self.drag_text.is_some());
         if event.kind == MouseKind::Down {
             self.accessibility_focus = None;
         }
@@ -10,7 +34,7 @@ impl App {
             self.external_input += 1;
             return;
         }
-        if self.panels.overlay.is_some() {
+        if self.panels.overlay.is_some() && !captured {
             if event.kind == MouseKind::Move {
                 self.panels.tree.pointer(event.position, None);
                 if let Some(w) = w {
@@ -32,7 +56,7 @@ impl App {
             if let Some(invocation) = self.panels.pending_command.take() {
                 self.run_named(w, &invocation.command, &invocation.args);
             }
-            self.named_changed(w, true);
+            self.named_changed(w, event.kind == MouseKind::Down);
             return;
         }
         if event.is_context_click()
@@ -147,14 +171,18 @@ impl App {
         }
         let viewport = self.viewport();
         self.panels.primary_click = event.modifiers.command();
-        match self.panels.mouse(
-            &mut self.workspace,
-            event.position,
-            event.kind == MouseKind::Down,
-            event.click_count >= 2,
-            event.modifiers.shift(),
-            viewport,
-        ) {
+        match if captured {
+            Ok(false)
+        } else {
+            self.panels.mouse(
+                &mut self.workspace,
+                event.position,
+                event.kind == MouseKind::Down,
+                event.click_count >= 2,
+                event.modifiers.shift(),
+                viewport,
+            )
+        } {
             Ok(true) => {
                 if !self.panels.review.items.is_empty() {
                     // The Git status control uses the same native tracking path.
@@ -180,7 +208,8 @@ impl App {
                 {
                     self.named_error(Some(w), &error);
                 }
-                self.named_changed(w, true);
+                // Opening a status-bar picker does not navigate the editor.
+                self.named_changed(w, self.panels.overlay.is_none());
                 return;
             }
             Ok(false) => {}
@@ -228,6 +257,8 @@ impl App {
                 } else {
                     self.workspace.tabs[self.workspace.active].scroll =
                         (self.view.scroll_x, self.view.scroll_y);
+                    self.workspace.tabs[self.workspace.active].scroll_line_height =
+                        self.view.line_height;
                     self.workspace.click_sheet(
                         index,
                         event.modifiers.command(),
@@ -344,12 +375,13 @@ impl App {
             y: event.position.y - self.content.y,
         };
         if !middle {
-            match self.view.pointer(
+            match self.view.pointer_with_option(
                 self.workspace.editor_mut(),
                 local,
                 event.kind == MouseKind::Down,
                 event.kind == MouseKind::Drag,
                 event.kind == MouseKind::Up,
+                event.modifiers.option(),
             ) {
                 Ok(true) => {
                     self.named_changed(w, false);
@@ -401,6 +433,8 @@ impl App {
                     && !middle
                     && !(m.command() || m.shift() || m.option() || m.control())
                 {
+                    self.text_drag_pressed = Some(Instant::now());
+                    self.text_drag_origin = Some((local, at));
                     self.drag_text =
                         crate::mouse_select::DragText::begin(self.workspace.editor(), local, at);
                     if self.drag_text.is_some() {
@@ -424,6 +458,7 @@ impl App {
                 ));
             }
             MouseKind::Drag => {
+                self.select_before_text_drag_delay(local, Instant::now());
                 if let Some(drag) = self.drag_text.as_mut() {
                     drag.update(&mut self.view, self.workspace.editor(), local);
                 } else if let Some(drag) = self.drag_select.as_mut() {
@@ -434,6 +469,8 @@ impl App {
             }
             MouseKind::Up => {
                 self.drag_select = None;
+                self.text_drag_origin = None;
+                self.text_drag_pressed = None;
                 if let Some(drag) = self.drag_text.take() {
                     drag.finish(
                         &mut self.view,

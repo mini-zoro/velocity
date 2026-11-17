@@ -339,6 +339,11 @@ impl Renderer {
         self.blanks.clear();
         self.offscreen = None;
     }
+    /// Drops pending-glyph layout results after asynchronous fallback completion.
+    pub fn invalidate_layouts(&mut self) {
+        self.layouts = LineLayoutCache::new(2048);
+        self.offscreen = None;
+    }
     /// Physical framebuffer dimensions.
     pub fn physical_size(&self) -> [u32; 2] {
         [self.config.width, self.config.height]
@@ -504,6 +509,9 @@ impl Renderer {
         Ok(entry)
     }
     fn prepare(&mut self, scene: &Scene, fonts: &mut Fonts, scale: f32) -> Result<(), String> {
+        if fonts.poll_fallbacks() {
+            self.layouts = LineLayoutCache::new(2048);
+        }
         self.atlas.begin_frame();
         self.data.clear();
         self.batches.clear();
@@ -641,26 +649,103 @@ impl Renderer {
                 );
                 if r.is_stippled_guide() {
                     q.meta[0] = 5.;
-                    q.params = [4. * scale, scale, 0., 0.];
+                    q.params = if r.radius == -3. {
+                        [6. * scale, 3. * scale, 0., 0.]
+                    } else {
+                        [4. * scale, scale, 0., 0.]
+                    };
                 } else if r.is_outline() {
                     q.meta[0] = 6.;
                     q.params = [scale, 0., 0., 0.];
                 }
                 self.data.push(q);
             }
+            for contour in &layer.contours {
+                let translate = |p: vel_platform::Point| vel_platform::Point {
+                    x: p.x + contour.offset.x,
+                    y: p.y + contour.offset.y,
+                };
+                if contour.fill[3] > 0. {
+                    for [a, b, c] in contour.triangles.iter() {
+                        let a = translate(contour.points[*a]);
+                        let b = translate(contour.points[*b]);
+                        let c = translate(contour.points[*c]);
+                        let mut q = quad(
+                            Rect {
+                                x: a.x,
+                                y: a.y,
+                                width: 1.,
+                                height: 1.,
+                            },
+                            contour.clip,
+                            contour.fill,
+                            scale,
+                            [
+                                b.x as f32 * scale,
+                                b.y as f32 * scale,
+                                c.x as f32 * scale,
+                                c.y as f32 * scale,
+                            ],
+                            PrimitiveKind::Rect,
+                        );
+                        q.meta[0] = 8.;
+                        self.data.push(q);
+                    }
+                }
+                if contour.border[3] > 0. {
+                    for (a, b) in contour
+                        .points
+                        .iter()
+                        .zip(contour.points.iter().cycle().skip(1))
+                        .take(contour.points.len())
+                    {
+                        let (a, b) = (translate(*a), translate(*b));
+                        let padding = contour.border_width / 2. + 1.;
+                        let bounds = Rect {
+                            x: a.x.min(b.x) - padding,
+                            y: a.y.min(b.y) - padding,
+                            width: (b.x - a.x).abs() + 2. * padding,
+                            height: (b.y - a.y).abs() + 2. * padding,
+                        };
+                        let mut q = quad(
+                            bounds,
+                            contour.clip,
+                            contour.border,
+                            scale,
+                            [
+                                (a.x - bounds.x) as f32 * scale,
+                                (a.y - bounds.y) as f32 * scale,
+                                (b.x - bounds.x) as f32 * scale,
+                                (b.y - bounds.y) as f32 * scale,
+                            ],
+                            PrimitiveKind::Rect,
+                        );
+                        q.meta[0] = 7.;
+                        q.meta[2] = contour.border_width as f32 * scale * 0.5;
+                        self.data.push(q);
+                    }
+                }
+            }
             self.batch(layer_index, PrimitiveKind::Rect, first);
             let first = self.data.len() as u32;
-            for run in &layer.text {
+            fonts.set_options(layer.font_options);
+            for (run, glow) in layer
+                .glow
+                .iter()
+                .map(|r| (r, true))
+                .chain(layer.text.iter().map(|r| (r, false)))
+            {
                 let px64 = (run.size * scale * 64.).round() as u32;
                 let style = LayoutStyle {
                     font_style: run.style,
                     px64,
-                    font_epoch: run.family.as_ref().map_or(0, |family| {
-                        use std::hash::{Hash, Hasher};
-                        let mut h = std::collections::hash_map::DefaultHasher::new();
-                        family.hash(&mut h);
-                        h.finish()
-                    }),
+                    font_epoch: layer.font_options.identity()
+                        ^ run.family.as_ref().map_or(0, |family| {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            family.hash(&mut h);
+                            h.finish()
+                        }),
                 };
                 let glyphs = if let Some(g) = self.layouts.get(&run.text, style) {
                     g
@@ -684,7 +769,12 @@ impl Renderer {
                         face: g.face,
                         id: g.id,
                         px64,
-                        bucket,
+                        bucket: bucket
+                            | if layer.font_options.no_antialias {
+                                4
+                            } else {
+                                0
+                            },
                     };
                     if let Some((entry, raster)) = self.glyph(fonts, key)? {
                         let s = entry.slot;
@@ -714,6 +804,21 @@ impl Renderer {
                             s.width as f32 / side,
                             s.height as f32 / side,
                         ];
+                        if glow {
+                            let pad = 3. * scale;
+                            q.params = [q.uv[0], q.uv[1], q.uv[0] + q.uv[2], q.uv[1] + q.uv[3]];
+                            q.rect[0] -= pad;
+                            q.rect[1] -= pad;
+                            q.rect[2] += 2. * pad;
+                            q.rect[3] += 2. * pad;
+                            q.uv[0] -= pad / side;
+                            q.uv[1] -= pad / side;
+                            q.uv[2] += 2. * pad / side;
+                            q.uv[3] += 2. * pad / side;
+                            q.meta[0] = 9.;
+                            q.meta[2] = scale / side;
+                            q.color[3] *= 0.65;
+                        }
                         q.meta[1] = entry.page as f32;
                         self.data.push(q);
                     }
@@ -757,6 +862,10 @@ impl Renderer {
         if required > 0 {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
+        }
+        if fonts.fallback_pending() {
+            self.window
+                .request_frame_at(Instant::now() + Duration::from_millis(8));
         }
         Ok(())
     }

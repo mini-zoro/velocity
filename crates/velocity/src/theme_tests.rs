@@ -354,8 +354,26 @@ fn rect(r: Rect) -> serde_json::Value {
     json!([r.x, r.y, r.width, r.height])
 }
 fn snapshot(scene: &Scene) -> serde_json::Value {
-    json!({"background":scene.background,"layers":scene.layers.iter().filter(|l|!l.surfaces.is_empty()||!l.rects.is_empty()||!l.text.is_empty()||!l.underlines.is_empty()).map(|l|json!({"surfaces":l.surfaces.iter().map(|s|match s{Surface::CssBox(r)=>json!({"css_box":rect(r.rect),"clip":rect(r.clip),"background":r.background,"radii":r.radii,"borders":r.borders.map(|b|json!({"width":b.width,"color":b.color}))}),Surface::Fill(r)=>json!({"fill":rect(r.rect),"clip":rect(r.clip),"color":r.color,"radius":r.radius}),Surface::Image(q)=>json!({"image":[q.image.width,q.image.height],"source":q.source,"rect":rect(q.rect),"clip":rect(q.clip),"tint":q.color})}).collect::<Vec<_>>(),"rects":l.rects.iter().map(|r|json!({"rect":rect(r.rect),"clip":rect(r.clip),"color":r.color,"radius":r.radius})).collect::<Vec<_>>(),"glyph_runs":l.text.iter().map(|r|json!({"text":r.text,"x":r.x,"baseline":r.baseline,"size":r.size,"family":r.family,"bold":r.style.bold,"italic":r.style.italic,"color":r.color,"clip":rect(r.clip)})).collect::<Vec<_>>(),"underlines":l.underlines.iter().map(|r|json!({"rect":rect(r.rect),"clip":rect(r.clip),"color":r.color})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+    let mut snapshot = json!({"background":scene.background,"layers":scene.layers.iter().filter(|l|!l.surfaces.is_empty()||!l.rects.is_empty()||!l.text.is_empty()||!l.underlines.is_empty()||!l.contours.is_empty()).map(|l|json!({"surfaces":l.surfaces.iter().map(|s|match s{Surface::CssBox(r)=>json!({"css_box":rect(r.rect),"clip":rect(r.clip),"background":r.background,"radii":r.radii,"borders":r.borders.map(|b|json!({"width":b.width,"color":b.color}))}),Surface::Fill(r)=>json!({"fill":rect(r.rect),"clip":rect(r.clip),"color":r.color,"radius":r.radius}),Surface::Image(q)=>json!({"image":[q.image.width,q.image.height],"source":q.source,"rect":rect(q.rect),"clip":rect(q.clip),"tint":q.color})}).collect::<Vec<_>>(),"rects":l.rects.iter().map(|r|json!({"rect":rect(r.rect),"clip":rect(r.clip),"color":r.color,"radius":r.radius})).collect::<Vec<_>>(),"glyph_runs":l.text.iter().map(|r|json!({"text":r.text,"x":r.x,"baseline":r.baseline,"size":r.size,"family":r.family,"bold":r.style.bold,"italic":r.style.italic,"color":r.color,"clip":rect(r.clip)})).collect::<Vec<_>>(),"underlines":l.underlines.iter().map(|r|json!({"rect":rect(r.rect),"clip":rect(r.clip),"color":r.color})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
+    for (i, layer) in scene
+        .layers
+        .iter()
+        .filter(|l| {
+            !l.surfaces.is_empty()
+                || !l.rects.is_empty()
+                || !l.text.is_empty()
+                || !l.underlines.is_empty()
+                || !l.contours.is_empty()
+        })
+        .enumerate()
+    {
+        if !layer.contours.is_empty() {
+            snapshot["layers"][i]["selection_contours"] = json!(layer.contours.iter().map(|c|json!({"points":c.points.iter().map(|p|[p.x+c.offset.x,p.y+c.offset.y]).collect::<Vec<_>>(),"triangles":c.triangles.as_ref(),"fill":c.fill,"border":c.border,"clip":rect(c.clip)})).collect::<Vec<_>>());
+        }
+    }
+    snapshot
 }
+
 #[test]
 fn key_screens_match_structural_goldens() {
     fn settled_scene(view: &mut View, editor: &Editor) -> Scene {
