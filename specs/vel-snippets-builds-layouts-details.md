@@ -1,7 +1,8 @@
 # Spec: snippets, completions, build systems, layouts and navigation details
 
 Status: P4. Round 18 together with `vel-settings-coverage.md` (lane A: sections 1-2, lane B: section 3); round 19
-(lane B: section 4, lane A: section 5). Round 17 is `vel-render-scheme-syntax-details.md`.
+(lane B: section 4, lane A: section 5), together with section H of `vel-encodings-sidebar-windows-details.md`
+(settings entry points and color scheme/theme selection). Round 17 is `vel-render-scheme-syntax-details.md`.
 
 Background: a reviewer detail audit (2026-11-16) compared these areas with Sublime Text 4. Each item was confirmed
 against the code (line numbers approximate) and, where marked, with a throwaway probe program. Sources:
