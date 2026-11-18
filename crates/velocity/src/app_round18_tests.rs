@@ -1,4 +1,8 @@
 //! Round 18 follows the shared native/headless command, input and resource paths.
+#[path = "panels/find_differential_tests.rs"]
+mod find_differential_tests;
+#[path = "panels/find_tests.rs"]
+mod find_tests;
 #[path = "app_round19_tests.rs"]
 mod round19;
 #[path = "app_round20_tests.rs"]

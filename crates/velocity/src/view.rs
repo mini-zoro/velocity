@@ -2599,7 +2599,7 @@ impl View {
                 let found = self
                     .find_matches
                     .get(self.find_matches.partition_point(|r| r.end <= at))
-                    .is_some_and(|r| r.contains(&at));
+                    .is_some_and(|r| !r.is_empty() && r.start < start + unit.bytes.end);
                 while spans
                     .get(span)
                     .is_some_and(|s| s.range.end <= unit.bytes.start)

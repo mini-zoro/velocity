@@ -143,15 +143,15 @@ impl Selection {
         {
             return false;
         }
-        let mut last = None;
+        let mut last: Option<Region> = None;
         for r in self.iter() {
             if r.xpos.is_some_and(|x| !x.is_finite())
                 || text.is_some_and(|t| !t.is_char_boundary(r.a) || !t.is_char_boundary(r.b))
-                || last.is_some_and(|p| p >= r.begin())
+                || last.is_some_and(|p| !precedes(p, r))
             {
                 return false;
             }
-            last = Some(r.end());
+            last = Some(r);
         }
         true
     }
@@ -165,12 +165,24 @@ impl Selection {
     }
     /// Normalizes regions, with the last input region primary.
     pub fn from_regions(regions: impl IntoIterator<Item = Region>) -> Self {
+        Self::from_regions_impl(regions, false)
+    }
+    /// Builds a selection from search results, retaining each nonempty match as
+    /// a separate editing target even when two matches share an endpoint.
+    pub fn from_match_regions(regions: impl IntoIterator<Item = Region>) -> Self {
+        Self::from_regions_impl(regions, true)
+    }
+    fn from_regions_impl(regions: impl IntoIterator<Item = Region>, keep_adjacent: bool) -> Self {
         let mut items: Vec<_> = regions.into_iter().enumerate().collect();
         items.sort_by_key(|(_, r)| r.begin());
         let mut result: Vec<(usize, Region)> = Vec::with_capacity(items.len());
         for (rank, r) in items {
             if let Some((prev_rank, prev)) = result.last_mut()
-                && mergeable(*prev, r)
+                && if keep_adjacent {
+                    prev.intersects(r)
+                } else {
+                    mergeable(*prev, r)
+                }
             {
                 let last = if rank >= *prev_rank { r } else { *prev };
                 *prev = last.directed(prev.begin().min(r.begin()), prev.end().max(r.end()));
@@ -438,7 +450,10 @@ impl Selection {
         self
     }
 }
+fn precedes(a: Region, b: Region) -> bool {
+    // Two nonempty ranges can share an endpoint without an intersection.
+    a.end() < b.begin() || (a.end() == b.begin() && !a.empty() && !b.empty())
+}
 fn mergeable(a: Region, b: Region) -> bool {
-    // ST-BEHAVIOR: unverified [S1]: touching nonempty ranges and boundary carets merge.
     a.begin() <= b.end() && b.begin() <= a.end()
 }

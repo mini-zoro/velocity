@@ -59,19 +59,24 @@ impl Search {
         } else {
             source
         };
-        let re = Regex::new(&format!(
-            "(?m){}(?:{source})",
-            if options.case_sensitive { "" } else { "(?i)" }
-        ))
-        .map_err(|_| {
-            // Report the user's expression, never the internal flag/boundary wrapper.
-            regex::RegexBuilder::new(query)
-                .multi_line(true)
-                .case_insensitive(!options.case_sensitive)
-                .build()
-                .err()
-                .map_or_else(|| "Invalid regular expression".into(), |e| e.to_string())
-        })?;
+        // regex-cursor 0.1.5 can skip or shorten matches at chunk boundaries
+        // when its prefilter has unequal-length candidates (e.g. k/K/K or t ?).
+        // Both find and captures must use the full rope matcher.
+        let re = Regex::builder()
+            .configure(Regex::config().auto_prefilter(false))
+            .build(&format!(
+                "(?m){}(?:{source})",
+                if options.case_sensitive { "" } else { "(?i)" }
+            ))
+            .map_err(|_| {
+                // Report the user's expression, never the internal flag/boundary wrapper.
+                regex::RegexBuilder::new(query)
+                    .multi_line(true)
+                    .case_insensitive(!options.case_sensitive)
+                    .build()
+                    .err()
+                    .map_or_else(|| "Invalid regular expression".into(), |e| e.to_string())
+            })?;
         Ok(Self {
             query: query.into(),
             options,
@@ -444,14 +449,43 @@ pub fn select_all(buffer: &mut Buffer, view: ViewId, matches: &[Range<usize>]) {
     if !matches.is_empty() {
         buffer.set_selection(
             view,
-            Selection::from_regions(matches.iter().cloned().map(Region::from)),
+            Selection::from_match_regions(matches.iter().cloned().map(Region::from)),
         );
     }
 }
 
 #[cfg(test)]
+#[path = "text_boundary_tests.rs"]
+mod boundary_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_find_and_replace_cross_edited_and_unedited_chunk_boundaries() {
+        let mut edited = Text::from("bookkeeper\n".repeat(20).as_str());
+        edited.insert(4, "k");
+        let unedited = Text::from("bookkeeper\n".repeat(2000).as_str());
+        let query = Search::new("k", Options::default()).unwrap();
+        for text in [edited, unedited] {
+            let want: Vec<_> = text
+                .to_string()
+                .match_indices('k')
+                .map(|(i, _)| i..i + 1)
+                .collect();
+            assert_eq!(query.find(&text, &[]), want);
+            assert_eq!(
+                query
+                    .replacements(&text, "x", &[])
+                    .into_iter()
+                    .map(|r| r.range)
+                    .collect::<Vec<_>>(),
+                want,
+            );
+        }
+    }
+
     #[test]
     fn regex_groups_case_selection_wrap_and_undo() {
         let mut buffer = Buffer::new("cat CAT Cat cAt cats\n你好42");

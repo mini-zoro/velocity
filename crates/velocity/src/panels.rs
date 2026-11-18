@@ -1,13 +1,13 @@
 //! Headless UI controller: navigation, panel focus, workers and project tree state.
 use crate::{cli::FileLocation, workspace::Workspace};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
-use vel_buffer::{BufferId, Region, Selection};
+use vel_buffer::{Bias, BufferId, Region, Selection};
 use vel_config::{
     Value, json,
     keymap::{Invocation, Key},
@@ -153,6 +153,42 @@ enum FindNavigation {
         close: bool,
         report: bool,
     },
+    All {
+        close: bool,
+    },
+}
+impl FindNavigation {
+    fn closes(self) -> bool {
+        matches!(
+            self,
+            Self::Next { close: true, .. } | Self::All { close: true }
+        )
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FindSnapshot {
+    sheet: u64,
+    buffer: BufferId,
+    revision: u64,
+    loading: bool,
+}
+impl FindSnapshot {
+    fn current(workspace: &Workspace) -> Self {
+        let tab = &workspace.tabs[workspace.active];
+        Self {
+            sheet: tab.sheet,
+            buffer: tab.editor.buffer.id(),
+            revision: tab.editor.revision,
+            loading: tab.loading.is_some() || tab.binary_loading.is_some(),
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+struct FindIdentity {
+    snapshot: FindSnapshot,
+    query: String,
+    options: text::Options,
+    in_selection: bool,
 }
 #[derive(Clone, Debug)]
 pub struct SideRow {
@@ -262,12 +298,15 @@ pub struct Panels {
     focus_input: usize,
     selection_scope: Vec<Range<usize>>,
     scope_revision: Option<(BufferId, vel_buffer::ChangeId)>,
+    scope_selection: Option<(u64, Selection)>,
+    scope_manual: bool,
     search: Option<Search>,
     find_error: Option<String>,
+    find_status: String,
     search_worker: text::Worker,
-    search_identity: Option<(BufferId, u64, String, text::Options, bool)>,
+    search_identity: Option<FindIdentity>,
     all_matches_ready: bool,
-    pending_navigation: Option<FindNavigation>,
+    pending_navigation: VecDeque<FindNavigation>,
     fuzzy_worker: fuzzy::Worker,
     candidates: Arc<Vec<fuzzy::Candidate>>,
     palette_indices: Vec<usize>,
@@ -401,12 +440,15 @@ impl Default for Panels {
             focus_input: 0,
             selection_scope: vec![],
             scope_revision: None,
+            scope_selection: None,
+            scope_manual: false,
             search: None,
             find_error: None,
+            find_status: String::new(),
             search_worker: text::Worker::default(),
             search_identity: None,
             all_matches_ready: false,
-            pending_navigation: None,
+            pending_navigation: VecDeque::new(),
             fuzzy_worker: fuzzy::Worker::new(),
             candidates: Arc::new(vec![]),
             palette_indices: Vec::new(),
@@ -1087,8 +1129,14 @@ impl Panels {
         }
     }
     fn refresh_find_input(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
+        if self.panel == Some(Panel::Files) {
+            self.history_cursor[0] = None;
+            return;
+        }
         let changed = self.search_identity.as_ref().is_none_or(|key| {
-            key.2 != self.query.value() || key.3 != self.options || key.4 != self.in_selection
+            key.query != self.query.value()
+                || key.options != self.options
+                || key.in_selection != self.in_selection
         });
         if !changed {
             return;
@@ -1103,7 +1151,7 @@ impl Panels {
                 .find_origin
                 .filter(|(id, _)| *id == workspace.editor().buffer.id())
                 .map_or(workspace.editor().caret, |(_, at)| at);
-            self.pending_navigation = Some(FindNavigation::Preview(origin));
+            self.queue_find(workspace, FindNavigation::Preview(origin));
         }
     }
     pub fn edited(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
@@ -1627,17 +1675,25 @@ impl Panels {
                 self.focus_input = 0;
                 self.focus.show(Surface::Panel, true);
                 self.focus.set(Surface::Panel, 2);
-                self.selection_scope = workspace
-                    .editor()
-                    .regions()
-                    .iter()
-                    .filter(|r| !r.empty())
-                    .map(|r| r.to_range())
-                    .collect();
-                self.scope_revision = Some((
-                    workspace.editor().buffer.id(),
-                    workspace.editor().buffer.change_id(),
-                ));
+                if !self.document_find_visible() || previous_panel != self.panel {
+                    self.scope_manual = false;
+                    self.in_selection = false;
+                    self.scope_selection = None;
+                    self.cancel_pending_find();
+                }
+                if self.document_find_visible() && self.scope_selection.is_none() {
+                    self.capture_find_scope(workspace);
+                    let enabled = match workspace.editor().settings.get("auto_find_in_selection") {
+                        Some(Value::Bool(enabled)) => *enabled,
+                        Some(Value::String(enabled)) => match enabled.as_str() {
+                            "find_only" => self.panel != Some(Panel::Replace),
+                            "replace_only" => self.panel == Some(Panel::Replace),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    self.in_selection = enabled && self.multiline_scope(workspace);
+                }
                 if name == "show_input_panel" {
                     self.input_caption = args["caption"].as_str().unwrap_or("Input").into();
                     self.query.set(args["initial_text"].as_str().unwrap_or(""));
@@ -1665,21 +1721,13 @@ impl Panels {
                             self.query.set(&selected.to_string());
                         }
                     }
-                    if workspace
-                        .editor()
-                        .settings
-                        .bool("auto_find_in_selection", false)
-                    {
-                        self.in_selection = self.selection_scope.iter().any(|r| {
-                            workspace.editor().text.byte_to_line(r.start)
-                                != workspace.editor().text.byte_to_line(r.end)
-                        });
-                    }
                     self.query.run("select_all", &json!({}))?;
                     if self.panel == Some(Panel::Replace) {
                         self.replace.run("select_all", &json!({}))?;
                     }
-                    self.refresh_find(workspace, viewport);
+                    if self.document_find_visible() {
+                        self.refresh_find(workspace, viewport);
+                    }
                 }
             }
             "hide_panel" => {
@@ -1723,7 +1771,11 @@ impl Panels {
                     "whole_word" => self.options.whole_word = !self.options.whole_word,
                     "wrap" => self.options.wrap = !self.options.wrap,
                     "preserve_case" => self.options.preserve_case = !self.options.preserve_case,
-                    "in_selection" => self.in_selection = !self.in_selection,
+                    "in_selection" => {
+                        self.sync_find_scope(workspace);
+                        self.scope_manual = true;
+                        self.in_selection = !self.in_selection;
+                    }
                     _ => return Err("unknown find option".into()),
                 }
                 self.refresh_find_input(workspace, viewport);
@@ -1774,26 +1826,14 @@ impl Panels {
                     return Ok(true);
                 }
                 self.remember_search(false);
-                if self.in_selection && self.selection_scope.is_empty() {
-                    return Ok(true);
-                }
                 self.ensure_find(workspace, viewport);
-                if let Some(search) = &self.search {
-                    let hits = search.find(&workspace.editor().text, &self.scope());
-                    let editor = workspace.editor_mut();
-                    text::select_all(&mut editor.buffer, editor.id, &hits);
-                    editor.sync();
-                    self.finish_find_navigation(workspace);
-                    // ST4 Find settings: https://www.sublimetext.com/download (Find).
-                    if args["_close_panel"].as_bool().unwrap_or_else(|| {
-                        workspace
-                            .editor()
-                            .settings
-                            .bool("close_find_after_find_all", true)
-                    }) {
-                        self.close_panel(workspace);
-                    }
-                }
+                let close = args["_close_panel"].as_bool().unwrap_or_else(|| {
+                    workspace
+                        .editor()
+                        .settings
+                        .bool("close_find_after_find_all", true)
+                });
+                self.queue_find(workspace, FindNavigation::All { close });
             }
             "replace_next" | "replace_all" => {
                 self.replace_document(workspace, name == "replace_all", viewport)?;
@@ -1829,6 +1869,12 @@ impl Panels {
             Some(Panel::Find | Panel::Replace | Panel::Incremental | Panel::Files)
         )
     }
+    fn document_find_visible(&self) -> bool {
+        matches!(
+            self.panel,
+            Some(Panel::Find | Panel::Replace | Panel::Incremental)
+        )
+    }
     fn close_button_rect(&self) -> Rect {
         Rect {
             x: self.panel_bounds.x + self.panel_bounds.width
@@ -1852,8 +1898,20 @@ impl Panels {
     /// `find_next`/`find_prev` keep working, but like Sublime they are only drawn while a find
     /// panel is visible.
     pub fn visible_highlights(&self) -> &[Range<usize>] {
-        if self.find_panel_visible() {
+        if self.document_find_visible() {
             &self.highlights
+        } else {
+            &[]
+        }
+    }
+    /// Refuse to paint an older snapshot even before the next worker poll.
+    pub fn current_highlights(&self, workspace: &Workspace) -> &[Range<usize>] {
+        if self
+            .search_identity
+            .as_ref()
+            .is_some_and(|key| key.snapshot == FindSnapshot::current(workspace))
+        {
+            self.visible_highlights()
         } else {
             &[]
         }
@@ -1878,106 +1936,294 @@ impl Panels {
             );
             self.set_message(self.result_status.clone());
         }
-        self.pending_navigation = None;
+        self.cancel_pending_find();
+        self.in_selection = false;
+        self.scope_manual = false;
+        self.scope_selection = None;
+        self.selection_scope.clear();
+        self.scope_revision = None;
         self.incremental_origin = None;
+        self.hide_panel_input();
+    }
+    fn hide_panel_input(&mut self) {
         self.panel = None;
         self.panel_focused = false;
         self.focus.show(Surface::Panel, false);
         self.focus_input = 0;
     }
+    fn committed_find_pending(&self) -> bool {
+        self.panel.is_none() && self.pending_navigation.iter().any(|action| action.closes())
+    }
+    fn cancel_pending_find(&mut self) {
+        self.pending_navigation.clear();
+        if !self.all_matches_ready {
+            self.search_worker.cancel();
+            self.search_identity = None;
+            self.all_matches_ready = true;
+        }
+    }
     fn scope(&self) -> Vec<Range<usize>> {
         if self.in_selection {
-            if self.selection_scope.is_empty() {
-                std::iter::once(0..0).collect()
-            } else {
-                self.selection_scope.clone()
-            }
+            self.selection_scope.clone()
         } else {
             vec![]
         }
     }
-    fn ensure_find(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
-        let key = (
-            workspace.editor().buffer.id(),
-            workspace.editor().revision,
-            self.query.value(),
-            self.options,
-            self.in_selection,
-        );
-        if self.search_identity.as_ref() != Some(&key) {
-            self.refresh_find(workspace, viewport);
-        } else if let Some(error) = self.find_error.clone() {
-            self.set_message(error);
+    fn capture_find_scope(&mut self, workspace: &Workspace) {
+        let editor = workspace.editor();
+        self.selection_scope = editor
+            .regions()
+            .iter()
+            .filter(|r| !r.empty())
+            .map(|r| r.to_range())
+            .collect();
+        self.scope_revision = Some((editor.buffer.id(), editor.buffer.change_id()));
+        self.remember_find_selection(workspace);
+    }
+    fn remember_find_selection(&mut self, workspace: &Workspace) {
+        if self.document_find_visible() || self.committed_find_pending() {
+            let tab = &workspace.tabs[workspace.active];
+            self.scope_selection = Some((
+                tab.sheet,
+                tab.editor.buffer.view(tab.editor.id).sel().clone(),
+            ));
         }
     }
-    fn refresh_find(&mut self, workspace: &mut Workspace, viewport: Range<usize>) {
-        let viewport = workspace.editor().text.floor_char_boundary(viewport.start)
-            ..workspace.editor().text.floor_char_boundary(viewport.end);
-        let buffer = &workspace.editor().buffer;
-        if let Some((id, revision)) = self.scope_revision {
-            if id == buffer.id() {
-                self.selection_scope = self
-                    .selection_scope
-                    .iter()
-                    .filter_map(|r| {
-                        buffer
-                            .transform_region_from(Region::from(r.clone()), revision)
-                            .map(|r| r.to_range())
-                    })
-                    .collect();
-            } else {
-                self.selection_scope.clear();
-            }
+    fn multiline_scope(&self, workspace: &Workspace) -> bool {
+        let text = &workspace.editor().text;
+        self.selection_scope
+            .iter()
+            .any(|r| text.byte_to_line(r.start) != text.byte_to_line(r.end))
+    }
+    /// External changes to the selection refresh the scope; a search's own
+    /// selection is remembered and never becomes the new scope.
+    fn sync_find_scope(&mut self, workspace: &Workspace) -> bool {
+        let committed = self.committed_find_pending();
+        if !self.document_find_visible() && !committed {
+            return false;
         }
-        self.scope_revision = Some((buffer.id(), buffer.change_id()));
-        self.search_identity = Some((
-            workspace.editor().buffer.id(),
-            workspace.editor().revision,
-            self.query.value(),
-            self.options,
-            self.in_selection,
-        ));
+        let tab = &workspace.tabs[workspace.active];
+        let buffer = &tab.editor.buffer;
+        let Some((sheet, selection)) = self.scope_selection.as_ref() else {
+            self.capture_find_scope(workspace);
+            return self.in_selection;
+        };
+        let active = self.in_selection;
+        if *sheet != tab.sheet || self.scope_revision.is_none_or(|(id, _)| id != buffer.id()) {
+            self.in_selection = false;
+            self.scope_manual = false;
+            self.capture_find_scope(workspace);
+            self.find_origin = Some((buffer.id(), tab.editor.selection().start));
+            return active;
+        }
+        let (_, revision) = self.scope_revision.expect("scope revision");
+        let current = buffer.view(tab.editor.id).sel();
+        if revision != buffer.change_id() {
+            // Buffer edits already move the live selection. Rebase the original
+            // scope separately: the current selection can be a Find match.
+            self.selection_scope = self
+                .selection_scope
+                .iter()
+                .filter_map(|r| {
+                    // A replacement starting at the scope's first byte belongs
+                    // to the scope, unlike edits at a named region's boundary.
+                    let start = buffer.transform_point_from(r.start, revision, Bias::Left)?;
+                    let end = buffer.transform_point_from(r.end, revision, Bias::Left)?;
+                    (start < end).then_some(start..end)
+                })
+                .collect();
+            if let Some((id, at)) = self.find_origin
+                && id == buffer.id()
+            {
+                self.find_origin = buffer
+                    .transform_region_from(Region::new(at, at), revision)
+                    .map(|r| (id, r.b));
+            }
+            self.scope_revision = Some((buffer.id(), buffer.change_id()));
+            self.remember_find_selection(workspace);
+        } else if !committed && !selection.same_snapshot(current) && selection != current {
+            self.capture_find_scope(workspace);
+            self.find_origin = Some((buffer.id(), tab.editor.selection().start));
+        } else {
+            return false;
+        }
+        if !committed && !self.scope_manual && !self.multiline_scope(workspace) {
+            self.in_selection = false;
+        }
+        active
+    }
+    fn find_identity(&self, workspace: &Workspace) -> FindIdentity {
+        FindIdentity {
+            snapshot: FindSnapshot::current(workspace),
+            query: self.query.value(),
+            options: self.options,
+            in_selection: self.in_selection,
+        }
+    }
+    fn ensure_find(&mut self, workspace: &Workspace, _viewport: Range<usize>) -> bool {
+        let scope_changed = self.sync_find_scope(workspace);
+        let key = self.find_identity(workspace);
+        if scope_changed || self.search_identity.as_ref() != Some(&key) {
+            self.start_find(workspace, key);
+            true
+        } else {
+            false
+        }
+    }
+    fn refresh_find(&mut self, workspace: &Workspace, _viewport: Range<usize>) {
+        self.sync_find_scope(workspace);
+        self.start_find(workspace, self.find_identity(workspace));
+    }
+    fn start_find(&mut self, workspace: &Workspace, key: FindIdentity) {
+        if self.search_identity.as_ref().is_none_or(|old| {
+            old.snapshot.sheet != key.snapshot.sheet
+                || old.query != key.query
+                || old.options != key.options
+                || old.in_selection != key.in_selection
+        }) {
+            self.pending_navigation.clear();
+        } else if let Some(FindNavigation::Preview(origin)) = self.pending_navigation.front_mut() {
+            *origin = self
+                .find_origin
+                .map_or(workspace.editor().caret, |(_, at)| at);
+        }
+        let result = Search::new(&key.query, key.options);
+        let loading = key.snapshot.loading;
+        self.search_identity = Some(key);
+        if self.find_error.take().as_ref() == Some(&self.message)
+            || (!self.find_status.is_empty() && self.find_status == self.message)
+        {
+            self.set_message(String::new());
+        }
         self.search_worker.cancel();
         self.highlights.clear();
         self.all_matches_ready = false;
-        self.pending_navigation = None;
-        match Search::new(&self.query.value(), self.options) {
+        self.find_status.clear();
+        match result {
             Ok(search) => {
-                if self.find_error.take().as_ref() == Some(&self.message) {
-                    self.set_message(String::new());
-                }
-                if self.in_selection && self.selection_scope.is_empty() {
-                    self.message = "No selection".into();
+                let editor = workspace.editor();
+                if search.query.is_empty() || (self.in_selection && self.selection_scope.is_empty())
+                {
                     self.all_matches_ready = true;
-                    self.search = Some(search);
-                    return;
-                }
-                let scopes = self.scope();
-                let ranges = if self.in_selection {
-                    scopes
-                        .iter()
-                        .map(|r| r.start.max(viewport.start)..r.end.min(viewport.end))
-                        .filter(|r| r.start <= r.end)
-                        .collect::<Vec<_>>()
+                } else if loading {
+                    self.find_status = "Waiting for file to load…".into();
+                } else if editor.text.len_bytes() <= 4096 && !search.options.regex {
+                    // Keep tiny literal searches immediate. A viewport may include
+                    // an arbitrarily long logical line; never scan it as a preview.
+                    self.highlights = search.find(&editor.text, &self.scope());
+                    self.all_matches_ready = true;
                 } else {
-                    std::iter::once(viewport).collect()
-                };
-                if !ranges.is_empty() {
-                    self.highlights = search.find(&workspace.editor().text, &ranges);
+                    self.find_status = "Searching…".into();
+                    self.search_worker.search(
+                        search.clone(),
+                        editor.text.clone(),
+                        editor.revision,
+                        self.scope(),
+                    );
                 }
-                self.search_worker.search(
-                    search.clone(),
-                    workspace.editor().text.clone(),
-                    workspace.editor().revision,
-                    scopes,
-                );
                 self.search = Some(search);
+                if self.all_matches_ready {
+                    self.update_find_status();
+                }
             }
             Err(error) => {
                 self.find_error = Some(error.clone());
+                self.find_status.clone_from(&error);
                 self.set_message(error);
                 self.search = None;
                 self.all_matches_ready = true;
+            }
+        }
+    }
+    fn update_find_status(&mut self) {
+        let Some(search) = &self.search else { return };
+        if !self.find_status.is_empty() && self.message == self.find_status {
+            self.message.clear();
+            self.message_seen.clear();
+            self.message_until = None;
+        }
+        self.find_status = if search.query.is_empty() {
+            String::new()
+        } else if self.highlights.is_empty() {
+            let mut flags = Vec::new();
+            if search.options.case_sensitive {
+                flags.push("Match Case on");
+            }
+            if search.options.whole_word {
+                flags.push("Whole Word on");
+            }
+            if self.in_selection {
+                flags.push(if self.selection_scope.is_empty() {
+                    "In Selection on; no selection"
+                } else {
+                    "In Selection on"
+                });
+            }
+            if flags.is_empty() {
+                "No matches".into()
+            } else {
+                format!("No matches ({})", flags.join(", "))
+            }
+        } else {
+            let n = self.highlights.len();
+            format!("{n} {}", if n == 1 { "match" } else { "matches" })
+        };
+    }
+    fn queue_find(&mut self, workspace: &mut Workspace, action: FindNavigation) {
+        let _navigation =
+            crate::editor::navigation::Guard::command(&workspace.jump_history, "find_next");
+        // Macro playback is ordered with subsequent text commands and cannot yield.
+        if !self.all_matches_ready
+            && workspace.editor().registry.playback_depth() > 1
+            && !FindSnapshot::current(workspace).loading
+            && let Some(search) = &self.search
+        {
+            self.highlights = search.find(&workspace.editor().text, &self.scope());
+            self.search_worker.cancel();
+            self.all_matches_ready = true;
+            self.update_find_status();
+        }
+        self.pending_navigation.push_back(action);
+        if !self.all_matches_ready && action.closes() && self.document_find_visible() {
+            // Accept is a commit even before the worker returns. Release the
+            // input now without discarding the pending command or its scope.
+            self.incremental_origin = None;
+            self.hide_panel_input();
+        }
+        self.finish_pending_find(workspace);
+    }
+    fn finish_pending_find(&mut self, workspace: &mut Workspace) {
+        while self.all_matches_ready
+            && let Some(action) = self.pending_navigation.pop_front()
+        {
+            match action {
+                FindNavigation::Preview(origin) => self.preview_find(workspace, origin),
+                FindNavigation::Next {
+                    backwards,
+                    close,
+                    report,
+                } => {
+                    self.apply_find_next(workspace, backwards, close, report);
+                }
+                FindNavigation::All { close } => {
+                    if self.search.is_some() {
+                        let editor = workspace.editor_mut();
+                        text::select_all(&mut editor.buffer, editor.id, &self.highlights);
+                        editor.sync();
+                        self.remember_find_selection(workspace);
+                        self.reveal = !self.highlights.is_empty();
+                        self.update_find_status();
+                        self.finish_find_navigation(workspace);
+                        if close || !self.document_find_visible() {
+                            self.set_message(self.find_status.clone());
+                        }
+                        if close {
+                            self.close_panel(workspace);
+                        }
+                    } else if let Some(error) = self.find_error.clone() {
+                        self.set_message(error);
+                    }
+                }
             }
         }
     }
@@ -1991,33 +2237,31 @@ impl Panels {
         close: bool,
         report: bool,
     ) {
+        self.queue_find(
+            workspace,
+            FindNavigation::Next {
+                backwards,
+                close,
+                report,
+            },
+        );
+    }
+    fn apply_find_next(
+        &mut self,
+        workspace: &mut Workspace,
+        backwards: bool,
+        close: bool,
+        report: bool,
+    ) {
         let _navigation = crate::editor::navigation::Guard::command(
             &workspace.jump_history,
             if backwards { "find_prev" } else { "find_next" },
         );
-        // One guard is the find interception itself; an outer guard denotes playback.
-        // Playback must finish this find before its next text command can run.
-        if workspace.editor().registry.playback_depth() > 1
-            && !self.all_matches_ready
-            && let Some(search) = &self.search
-        {
-            self.highlights = search.find(&workspace.editor().text, &self.scope());
-            self.all_matches_ready = true;
-            self.pending_navigation = None;
-        }
         if report
             && self.search.is_none()
             && let Some(error) = self.find_error.clone()
         {
             self.set_message(error);
-        }
-        if self.search.is_some() && !self.all_matches_ready {
-            self.pending_navigation = Some(FindNavigation::Next {
-                backwards,
-                close,
-                report,
-            });
-            return;
         }
         let _preview = self
             .find_jump_origin
@@ -2035,9 +2279,16 @@ impl Panels {
                 workspace
                     .editor_mut()
                     .set_selection(Selection::from_regions([Region::from(range)]));
+                self.remember_find_selection(workspace);
                 self.reveal = true;
+                self.update_find_status();
             } else if report && !search.query.is_empty() {
-                self.set_message(format!("Unable to find {}", search.query));
+                self.update_find_status();
+                if !self.highlights.is_empty() {
+                    let direction = if backwards { "previous" } else { "later" };
+                    self.find_status = format!("No {direction} match ({})", self.find_status);
+                }
+                self.set_message(self.find_status.clone());
             }
         }
         self.finish_find_navigation(workspace);
@@ -2055,11 +2306,14 @@ impl Panels {
         if workspace.editor().read_only {
             return Err("document is read only".into());
         }
+        self.ensure_find(workspace, viewport.clone());
         if self.in_selection && self.selection_scope.is_empty() {
             return Ok(());
         }
-        self.ensure_find(workspace, viewport.clone());
         let Some(search) = &self.search else {
+            if let Some(error) = self.find_error.clone() {
+                self.set_message(error);
+            }
             return Ok(()); // Compilation feedback is inline/status-only.
         };
         let mut replacements = search.replacements(
@@ -2971,7 +3225,7 @@ impl Panels {
                 self.accept(workspace, key.modifiers & 9 != 0, viewport)?,
             ));
         }
-        if key.name == "tab" {
+        if key.name == "tab" && matches!(key.modifiers, 0 | 4) {
             let count = match self.panel {
                 Some(Panel::Files) => 3,
                 Some(Panel::Replace) => 2,
@@ -3495,31 +3749,32 @@ impl Panels {
             }
             changed = true;
         }
-        if let Some(matches) = self.search_worker.poll()
-            && self.search_identity.as_ref().is_some_and(|key| {
-                key.0 == workspace.editor().buffer.id()
-                    && key.1 == matches.revision
-                    && matches.revision == workspace.editor().revision
-            })
+        if self.panel.is_none()
+            && !self.pending_navigation.is_empty()
+            && self
+                .search_identity
+                .as_ref()
+                .is_some_and(|key| key.snapshot.sheet != workspace.tabs[workspace.active].sheet)
         {
-            self.highlights = matches.ranges;
-            self.all_matches_ready = true;
-            if let Some(navigation) = self.pending_navigation.take() {
-                match navigation {
-                    FindNavigation::Next {
-                        backwards,
-                        close,
-                        report,
-                    } => self.navigate_find(workspace, backwards, close, report),
-                    FindNavigation::Preview(origin) => self.preview_find(workspace, origin),
-                }
-            }
-            changed = true;
+            self.find_jump_origin = None;
+            self.close_panel(workspace);
         }
-        if self.search.is_some() && self.overlay.is_none() {
-            let old = self.search_identity.clone();
-            self.ensure_find(workspace, viewport);
-            changed |= old != self.search_identity;
+        if self.overlay.is_none()
+            && (self.document_find_visible() || !self.pending_navigation.is_empty())
+        {
+            changed |= self.ensure_find(workspace, viewport);
+            if let Some(matches) = self.search_worker.poll()
+                && self.search_identity.as_ref().is_some_and(|key| {
+                    key.snapshot == FindSnapshot::current(workspace)
+                        && key.snapshot.revision == matches.revision
+                })
+            {
+                self.highlights = matches.ranges;
+                self.all_matches_ready = true;
+                self.update_find_status();
+                changed = true;
+            }
+            self.finish_pending_find(workspace);
         }
         if let Some(task) = &self.file_task {
             let searched = task.searched_files();
@@ -4406,7 +4661,7 @@ impl Panels {
                     theme.text(
                         &mut layer,
                         &text_style,
-                        &self.message,
+                        self.panel_status_message(workspace),
                         clip.x + (8. * self.ui_scale),
                         clip.y + clip.height - (8. * self.ui_scale),
                         self.panel_message_clip(panel),
@@ -4446,7 +4701,7 @@ impl Panels {
             theme.text(
                 &mut layer,
                 &text,
-                &if self.message.is_empty() {
+                &if self.status_message(workspace).is_empty() {
                     format!(
                         "{}{}{}",
                         document_hint,
@@ -4458,7 +4713,7 @@ impl Panels {
                         status_position(workspace)
                     )
                 } else {
-                    self.message.clone()
+                    self.status_message(workspace).to_owned()
                 },
                 10. * self.ui_scale,
                 status.y + (17. * self.ui_scale),
@@ -5249,14 +5504,31 @@ mod tests {
                 0..11,
             )
             .unwrap();
-        panels.in_selection = true;
+        panels
+            .action(
+                &mut workspace,
+                "toggle_find_option",
+                &json!({"option":"in_selection"}),
+                0..11,
+            )
+            .unwrap();
         panels.replace.set("x");
         panels
-            .action(&mut workspace, "replace_all", &json!({}), 0..11)
+            .action(
+                &mut workspace,
+                "replace_all",
+                &json!({"_close_panel":false}),
+                0..11,
+            )
             .unwrap();
         assert_eq!(workspace.editor().text.to_string(), "x x\ncat");
         panels
-            .action(&mut workspace, "replace_all", &json!({}), 0..11)
+            .action(
+                &mut workspace,
+                "replace_all",
+                &json!({"_close_panel":false}),
+                0..11,
+            )
             .unwrap();
         assert_eq!(workspace.editor().text.to_string(), "x x\ncat");
         panels.selection_scope.clear();

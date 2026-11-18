@@ -35,6 +35,26 @@ impl Panels {
         self.message_seen.clone_from(&self.message);
         self.message_until = Some(Instant::now() + Duration::from_secs(5));
     }
+    pub(super) fn panel_status_message(&self, workspace: &Workspace) -> &str {
+        if self.document_find_visible()
+            && !self.find_status.is_empty()
+            && self
+                .search_identity
+                .as_ref()
+                .is_some_and(|key| key.snapshot == FindSnapshot::current(workspace))
+        {
+            &self.find_status
+        } else {
+            &self.message
+        }
+    }
+    pub(super) fn status_message(&self, workspace: &Workspace) -> &str {
+        if self.message.is_empty() {
+            self.panel_status_message(workspace)
+        } else {
+            &self.message
+        }
+    }
     /// Next native wake for feedback expiry or a bounded, slow hover-scope retry.
     pub fn message_deadline(&self) -> Option<Instant> {
         let hover = (!self.hover_term.is_empty()
@@ -98,17 +118,15 @@ impl Panels {
         }
         let hit = self
             .highlights
-            .iter()
-            .find(|r| r.start >= origin)
+            .get(self.highlights.partition_point(|r| r.start < origin))
             .or_else(|| self.options.wrap.then(|| self.highlights.first()).flatten())
             .cloned();
         if let Some(hit) = hit {
             workspace
                 .editor_mut()
                 .set_selection(Selection::from_regions([Region::from(hit)]));
+            self.remember_find_selection(workspace);
             self.reveal = true;
-        } else if !self.query.value().is_empty() {
-            self.set_message(format!("Unable to find {}", self.query.value()));
         }
         workspace
             .jump_history
@@ -508,7 +526,7 @@ mod tests {
             assert!(p.command(&mut w, command, 0..15).unwrap().0);
             p.poll(&mut w, 0..15);
             assert_eq!(w.editor().selection(), 8..11, "{command:?}");
-            assert!(p.pending_navigation.is_none());
+            assert!(p.pending_navigation.is_empty());
             assert!(p.all_matches_ready);
         }
         p.query
@@ -877,7 +895,7 @@ mod tests {
         wait(&mut p, &mut w, |p| p.all_matches_ready);
         assert_eq!(p.message, "Replaced 2 occurrences");
         action(&mut p, &mut w, "find_next", json!({}));
-        assert_eq!(p.message, "Unable to find cat");
+        assert_eq!(p.message, "No matches");
         p.options.regex = true;
         p.query.set("[");
         action(&mut p, &mut w, "replace_all", json!({}));

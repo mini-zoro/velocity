@@ -2398,10 +2398,12 @@ impl App {
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
                 }
-                if *sheet == focused && !self.panels.visible_highlights().is_empty() {
+                if *sheet == focused
+                    && let highlights = self.panels.current_highlights(&self.workspace)
+                    && !highlights.is_empty()
+                {
                     view.apply_style(&self.workspace.tabs[index].editor);
                     let viewport = view.viewport(&self.workspace.tabs[index].editor);
-                    let highlights = self.panels.visible_highlights();
                     let first = highlights.partition_point(|r| r.end < viewport.start);
                     view.find_matches.extend(
                         highlights[first..]

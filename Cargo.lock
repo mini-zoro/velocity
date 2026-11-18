@@ -3374,6 +3374,8 @@ name = "velocity"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "tempfile",
