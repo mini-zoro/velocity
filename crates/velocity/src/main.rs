@@ -157,6 +157,14 @@ impl vel_platform::AppHandler for NativeForwarder {
     }
 }
 fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
+    // Developer tool: offscreen PNGs of real UI states; never creates a window.
+    #[cfg(target_os = "macos")]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("--render-scenes") {
+            return app::render_scenes::run(&args[1..]);
+        }
+    }
     let Some(mut options) = Options::parse(std::env::args().skip(1))? else {
         print!("{}", cli::HELP);
         return Ok(());

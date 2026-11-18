@@ -249,13 +249,25 @@ fn round18_tabs_fit_scroll_dirty_colors_buttons_and_live_hiding() {
         named(&mut a, "new_file", json!({}));
     }
     named(&mut a, "insert", json!({"characters":"x"}));
+    // The dirty tab's label (its dirty dot is drawn by the close button, not the caption).
     let label_color = |a: &mut App| {
         let scene = a.scene();
+        let (dirty, name) = a
+            .workspace
+            .tabs
+            .iter()
+            .find(|t| t.dirty())
+            .map(|t| (t.sheet, t.name()))?;
+        let rect = a.tab_hits.iter().find(|(sheet, _)| *sheet == dirty)?.1;
         scene
             .layers
             .iter()
             .flat_map(|l| &l.text)
-            .find(|t| t.text.contains('•'))
+            .find(|t| {
+                t.text.starts_with(&name)
+                    && f64::from(t.x) >= rect.x
+                    && f64::from(t.x) < rect.x + rect.width
+            })
             .map(|t| t.color)
     };
     set(&mut a, "enable_tab_scrolling", json!(false));

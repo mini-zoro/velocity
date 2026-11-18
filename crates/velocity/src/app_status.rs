@@ -10,7 +10,11 @@ impl App {
     pub(super) fn capture_format_hits(&mut self, scene: &vel_render::scene::Scene) {
         self.format_hits.clear();
         let editor = self.workspace.editor();
-        if !self.panels.chrome || !self.panels.message.is_empty() {
+        // The status text shows the format fields unless a message replaces them; the find
+        // panels show their message themselves.
+        if !self.panels.chrome
+            || (!self.panels.message.is_empty() && !self.panels.message_in_find_panel())
+        {
             return;
         }
         let tab = &self.workspace.tabs[self.workspace.active];

@@ -42,6 +42,7 @@ serde_json = "=1.0.154"
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.3"
 tempfile = "=3.27.0"
+png = "=0.18.1"
 
 
 vel-theme = { path = "../vel-theme" }

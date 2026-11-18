@@ -257,10 +257,15 @@ pub struct Scroll {
     pub row_height: f64,
     /// Visible extent in points.
     pub viewport: f64,
+    /// A row to reveal once the viewport can show a whole row (set while it cannot).
+    pub pending_reveal: Option<usize>,
 }
 impl Scroll {
     /// Clamps scrolling to the current content extent.
     pub fn scroll(&mut self, delta: f64) {
+        if delta != 0. {
+            self.pending_reveal = None;
+        }
         self.offset = (self.offset + delta).clamp(
             0.,
             (self.rows as f64 * self.row_height - self.viewport).max(0.),
@@ -272,16 +277,33 @@ impl Scroll {
         first.min(self.rows)
             ..(first + (self.viewport / self.row_height.max(1.)).ceil() as usize + 1).min(self.rows)
     }
-    /// Reveals a selected row after keyboard navigation.
+    /// Reveals a selected row after keyboard navigation. Before the list has been laid out
+    /// (a viewport smaller than one row) only the top edge is honoured and the rest of the
+    /// reveal waits for [`Scroll::set_viewport`]; revealing against a stale 1-point viewport
+    /// would scroll the row under whatever sits above the list.
     pub fn reveal(&mut self, row: usize) {
         let top = row as f64 * self.row_height;
         if top < self.offset {
             self.offset = top;
         }
+        if self.viewport < self.row_height {
+            self.pending_reveal = Some(row);
+            self.scroll(0.);
+            return;
+        }
+        self.pending_reveal = None;
         if top + self.row_height > self.offset + self.viewport {
             self.offset = top + self.row_height - self.viewport;
         }
         self.scroll(0.);
+    }
+    /// Applies a laid-out viewport extent, completing a deferred reveal, and clamps.
+    pub fn set_viewport(&mut self, viewport: f64) {
+        self.viewport = viewport;
+        match self.pending_reveal {
+            Some(row) if viewport >= self.row_height => self.reveal(row),
+            _ => self.scroll(0.),
+        }
     }
 }
 /// Virtualized quick-panel row with independent caption, badge, annotation and details.
@@ -504,10 +526,23 @@ impl Tree {
         theme: &mut theme::ThemeUi,
         settings: &vel_config::settings::Settings,
     ) -> theme::Style {
+        self.style_child(id, child, &[], theme, settings)
+    }
+    /// Like [`Tree::style`], with dynamic attributes on the semantic child (for example
+    /// a Git badge's status or an input's validity).
+    pub fn style_child(
+        &self,
+        id: Id,
+        child: Option<&str>,
+        child_attributes: &[&str],
+        theme: &mut theme::ThemeUi,
+        settings: &vel_config::settings::Settings,
+    ) -> theme::Style {
         let paint_id = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             child.hash(&mut h);
+            child_attributes.hash(&mut h);
             id.wrapping_mul(0x9e3779b97f4a7c15) ^ h.finish()
         };
         fn find(
@@ -562,7 +597,7 @@ impl Tree {
                 path.push(vel_theme::Element::new(node.class, &node.style_attributes));
             }
             if let Some(child) = child {
-                path.push(vel_theme::Element::new(child, &[]));
+                path.push(vel_theme::Element::new(child, child_attributes));
             }
             return theme.style(paint_id, &vel_theme::ElementPath(&path), settings);
         }
@@ -583,7 +618,7 @@ impl Tree {
                 path[i + 1] = vel_theme::Element::new(node.class, &node.style_attributes);
             }
             let count = if let Some(child) = child {
-                path[n + 1] = vel_theme::Element::new(child, &[]);
+                path[n + 1] = vel_theme::Element::new(child, child_attributes);
                 n + 2
             } else {
                 n + 1
@@ -608,7 +643,7 @@ impl Tree {
             );
         }
         let count = if let Some(child) = child {
-            path[n + 1] = vel_theme::Element::new(child, &[]);
+            path[n + 1] = vel_theme::Element::new(child, child_attributes);
             n + 2
         } else {
             n + 1
@@ -695,6 +730,21 @@ mod tests {
         scroll.reveal(99_999);
         assert!(scroll.visible().len() <= 12);
         assert_eq!(scroll.visible().end, 100_000);
+        // Before layout (1-point viewport) a reveal never scrolls the row out of view; the
+        // first real viewport completes it.
+        let mut scroll = Scroll {
+            rows: 50,
+            row_height: 32.,
+            viewport: 1.,
+            ..Scroll::default()
+        };
+        scroll.reveal(0);
+        assert_eq!(scroll.offset, 0.);
+        scroll.reveal(20);
+        assert_eq!(scroll.offset, 0.);
+        scroll.set_viewport(320.);
+        assert_eq!(scroll.offset, 21. * 32. - 320.);
+        assert_eq!(scroll.pending_reveal, None);
     }
 }
 

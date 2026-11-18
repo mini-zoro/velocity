@@ -65,10 +65,14 @@ fn original_setting_states_and_direct_lane_a_widgets() {
         "show_tab_close_buttons",
         json!(true),
     );
-    let close = ElementPath(&[Element::new("tab_close_button", &[])]);
+    // The glyph is layer 1 (layer 0 is the hover wash); it shows on the selected tab.
+    let close = ElementPath(&[
+        Element::new("tab_control", &["selected"]),
+        Element::new("tab_close_button", &[]),
+    ]);
     assert_eq!(
         r.resolve(&close, &settings, Platform::Mac)
-            .number(&Property::Layer(0, LayerProperty::Opacity)),
+            .number(&Property::Layer(1, LayerProperty::Opacity)),
         Some(1.)
     );
     settings.set(
@@ -78,7 +82,7 @@ fn original_setting_states_and_direct_lane_a_widgets() {
     );
     assert_eq!(
         r.resolve(&close, &settings, Platform::Mac)
-            .number(&Property::Layer(0, LayerProperty::Opacity)),
+            .number(&Property::Layer(1, LayerProperty::Opacity)),
         Some(0.)
     );
     for class in ["tab_control", "open_file"] {

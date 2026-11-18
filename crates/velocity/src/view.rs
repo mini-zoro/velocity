@@ -2243,7 +2243,7 @@ impl View {
                     text_run(
                         &mut layer,
                         "◆",
-                        1.,
+                        3.,
                         baseline,
                         e.preferences.font_size,
                         global("gutter_foreground"),

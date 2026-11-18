@@ -40,6 +40,26 @@ impl App {
             self.external_input += 1;
             return;
         }
+        if event.kind == MouseKind::Move {
+            // Hover feedback for the theme-drawn tab close and tab-bar buttons.
+            let close = self
+                .tab_close_hits
+                .iter()
+                .find(|(_, rect)| vel_ui::contains(*rect, event.position))
+                .map(|(sheet, _)| *sheet);
+            let button = self
+                .tab_button_hits
+                .iter()
+                .find(|(_, _, rect)| vel_ui::contains(*rect, event.position))
+                .map(|(group, class, _)| (*group, *class));
+            if close != self.hovered_close || button != self.hovered_tab_button {
+                self.hovered_close = close;
+                self.hovered_tab_button = button;
+                if let Some(w) = w {
+                    w.request_frame();
+                }
+            }
+        }
         if self.panels.overlay.is_some() && !captured {
             if event.kind == MouseKind::Move {
                 self.panels.tree.pointer(event.position, None);
@@ -158,14 +178,20 @@ impl App {
         }
         if event.kind == MouseKind::Move {
             self.panels.review_hover(&self.workspace, event.position);
-            let byte = self.view.hit_test(
-                self.workspace.editor(),
-                Point {
-                    x: event.position.x - self.content.x,
-                    y: event.position.y - self.content.y,
-                },
-            );
-            self.panels.hover_at(&self.workspace, event.position, byte);
+            // Definition hover belongs to the text area; the panels, side bar and status
+            // bar drawn over or beside it must not open popups for text they cover.
+            if vel_ui::contains(self.content, event.position) {
+                let byte = self.view.hit_test(
+                    self.workspace.editor(),
+                    Point {
+                        x: event.position.x - self.content.x,
+                        y: event.position.y - self.content.y,
+                    },
+                );
+                self.panels.hover_at(&self.workspace, event.position, byte);
+            } else {
+                self.panels.leave_hover(event.position);
+            }
             let _ = self.view.pointer(
                 self.workspace.editor_mut(),
                 Point {

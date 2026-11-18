@@ -54,12 +54,13 @@ pub struct FrameTimes {
 /// Metal renderer, reusable scene buffers, lazy array atlas and layout cache.
 #[derive(Debug)]
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// None for an offscreen renderer, which never presents.
+    surface: Option<wgpu::Surface<'static>>,
     instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    window: WindowHandle,
+    window: Option<WindowHandle>,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     bind: wgpu::BindGroup,
@@ -115,25 +116,7 @@ impl Renderer {
         }))
         .map_err(|e| e.to_string())?;
         phase("adapter");
-        let has_queries =
-            timestamps && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let has_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
-        let mut features = wgpu::Features::empty();
-        if has_queries {
-            features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        if has_cache {
-            features |= wgpu::Features::PIPELINE_CACHE;
-        }
-        let start = Instant::now();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Velocity Metal"),
-            required_features: features,
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .map_err(|e| e.to_string())?;
-        let device_ms = ms(start.elapsed());
+        let device = DeviceParts::request(&adapter, timestamps)?;
         phase("device_queue");
         let capabilities = surface.get_capabilities(&adapter);
         if !capabilities
@@ -161,10 +144,67 @@ impl Renderer {
         {
             config.format = wgpu::TextureFormat::Bgra8Unorm;
         }
-        surface.configure(&device, &config);
+        surface.configure(&device.device, &config);
         phase("surface_configured");
+        Self::assemble(
+            instance,
+            Some(surface),
+            Some(window),
+            &adapter,
+            device,
+            config,
+            Some(cache_dir),
+            phase,
+        )
+    }
+    /// Creates a windowless renderer for developer tools. It never creates a surface,
+    /// window or application object; frames are read back with [`Renderer::render_rgba`].
+    pub fn offscreen(width: u32, height: u32) -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        let device = DeviceParts::request(&adapter, false)?;
+        // Same format as the presented CAMetalLayer surface, so pixels match a window.
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            view_formats: Vec::new(),
+        };
+        Self::assemble(instance, None, None, &adapter, device, config, None, |_| {})
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        instance: wgpu::Instance,
+        surface: Option<wgpu::Surface<'static>>,
+        window: Option<WindowHandle>,
+        adapter: &wgpu::Adapter,
+        parts: DeviceParts,
+        config: wgpu::SurfaceConfiguration,
+        cache_dir: Option<&Path>,
+        mut phase: impl FnMut(&'static str),
+    ) -> Result<Self, String> {
+        let DeviceParts {
+            device,
+            queue,
+            has_queries,
+            has_cache,
+            device_ms,
+        } = parts;
         let info = adapter.get_info();
-        let cache_path = has_cache.then(|| {
+        let cache_path = cache_dir.filter(|_| has_cache).map(|cache_dir| {
             cache_dir.join(format!(
                 "{}.bin",
                 wgpu::util::pipeline_cache_key(&info).unwrap_or_else(|| "metal".into())
@@ -323,7 +363,9 @@ impl Renderer {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         self.queue.write_buffer(
             &self.screen,
             0,
@@ -863,9 +905,10 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
         }
-        if fonts.fallback_pending() {
-            self.window
-                .request_frame_at(Instant::now() + Duration::from_millis(8));
+        if fonts.fallback_pending()
+            && let Some(window) = &self.window
+        {
+            window.request_frame_at(Instant::now() + Duration::from_millis(8));
         }
         Ok(())
     }
@@ -1007,27 +1050,29 @@ impl Renderer {
             return Err("GPU query index exceeds benchmark capacity".into());
         }
         let start = Instant::now();
-        let texture = match self.surface.get_current_texture() {
+        let (Some(surface), Some(window)) = (&self.surface, &self.window) else {
+            return Err("an offscreen renderer cannot present".into());
+        };
+        let texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // SAFETY: the retained window still owns this CAMetalLayer on this thread.
-                self.surface = unsafe {
+                let surface = unsafe {
                     self.instance.create_surface_unsafe(
-                        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
-                            self.window.metal_layer_ptr(),
-                        ),
+                        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(window.metal_layer_ptr()),
                     )
                 }
                 .map_err(|e| e.to_string())?;
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
+                self.surface = Some(surface);
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -1035,7 +1080,7 @@ impl Renderer {
             }
         };
         let acquired = Instant::now();
-        let drawable = self.window.last_acquired_drawable();
+        let drawable = window.last_acquired_drawable();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if first {
             let offscreen = self
@@ -1097,6 +1142,92 @@ impl Renderer {
             present_call_ms: ms(presented - present_start),
         }))
     }
+    /// Renders one scene into a fresh offscreen texture of the configured size and reads it
+    /// back as tightly packed, straight sRGB RGBA8 rows (top row first).
+    pub fn render_rgba(
+        &mut self,
+        scene: &Scene,
+        fonts: &mut Fonts,
+        scale: f32,
+    ) -> Result<Vec<u8>, String> {
+        self.prepare(scene, fonts, scale)?;
+        let (width, height) = (self.config.width, self.config.height);
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen readback"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("offscreen readback rows"),
+            size: u64::from(row) * u64::from(height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode(
+            &mut encoder,
+            &texture.create_view(&Default::default()),
+            None,
+        );
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.wait_idle()?;
+        receiver
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let mapped = buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| e.to_string())?;
+        let bgra = self.config.format == wgpu::TextureFormat::Bgra8Unorm;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height as usize {
+            let start = y * row as usize;
+            for px in mapped[start..start + width as usize * 4].as_chunks::<4>().0 {
+                if bgra {
+                    pixels.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                } else {
+                    pixels.extend_from_slice(px);
+                }
+            }
+        }
+        drop(mapped);
+        buffer.unmap();
+        Ok(pixels)
+    }
     /// Reads all recorded timestamp pairs once after the measured run.
     pub fn gpu_times(&self) -> Result<Option<Vec<f64>>, String> {
         self.queries
@@ -1139,6 +1270,43 @@ impl Renderer {
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+/// Device, queue and the optional features negotiated for one adapter.
+struct DeviceParts {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    has_queries: bool,
+    has_cache: bool,
+    device_ms: f64,
+}
+impl DeviceParts {
+    fn request(adapter: &wgpu::Adapter, timestamps: bool) -> Result<Self, String> {
+        let has_queries =
+            timestamps && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let has_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
+        let mut features = wgpu::Features::empty();
+        if has_queries {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if has_cache {
+            features |= wgpu::Features::PIPELINE_CACHE;
+        }
+        let start = Instant::now();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Velocity Metal"),
+            required_features: features,
+            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        Ok(Self {
+            device,
+            queue,
+            has_queries,
+            has_cache,
+            device_ms: ms(start.elapsed()),
+        })
     }
 }
 fn ms(d: Duration) -> f64 {

@@ -302,7 +302,11 @@ pub fn options(editor: &Editor, width: f64, popup: bool) -> LayoutOptions {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    if !popup {
+    if popup {
+        // Default inset so popup text never touches the popup edge; the scheme's
+        // popup_css (appended after) can still override it.
+        css.insert_str(0, "html{padding:5px 8px}");
+    } else {
         css.push_str("html{background-color:transparent}body{margin:0;padding:0}");
     }
     LayoutOptions {
@@ -466,6 +470,10 @@ pub fn paint(editor: &Editor, view: &View, scene: &mut Scene) {
             theme.surface(&mut layer, &style, rect, viewport);
             scene.layers.push(layer);
             popup.html.paint(scene, rect);
+            // The html background covers the surface; keep the popup's edge visible.
+            let mut edge = Layer::default();
+            theme.border(&mut edge, &style, rect, viewport);
+            scene.layers.push(edge);
         }
     }
     if let Some((point, text)) = &html.tooltip {
@@ -484,11 +492,21 @@ pub fn paint(editor: &Editor, view: &View, scene: &mut Scene) {
             width: 260f64.min(view.size.width),
             height: 28.,
         };
+        // The label is its own element so the container's shadow is not applied to text.
+        let label = theme.style(
+            editor.ui_id(0xA002),
+            &ElementPath(&[
+                Element::new("window", &[]),
+                Element::new("tool_tip_control", &[]),
+                Element::new("tool_tip_label_control", &[]),
+            ]),
+            &editor.settings,
+        );
         let mut layer = Layer::default();
         theme.surface(&mut layer, &style, bounds, viewport);
         theme.text(
             &mut layer,
-            &style,
+            &label,
             text,
             bounds.x + 6.,
             bounds.y + 18.,

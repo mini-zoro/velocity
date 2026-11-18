@@ -2,6 +2,26 @@
 use super::*;
 use std::time::Duration;
 
+/// Find-panel action area: 28x24 icon toggles, 56–88x24 buttons, a message slot that keeps
+/// at least `MESSAGE_MIN` DIPs, and 6 DIPs between wrapped rows.
+const TOGGLE_WIDTH: f64 = 28.;
+const TOGGLE_GAP: f64 = 4.;
+const ACTION_HEIGHT: f64 = 24.;
+const ACTION_ROW_GAP: f64 = 6.;
+const BUTTON_WIDTH: f64 = 88.;
+const BUTTON_MIN: f64 = 56.;
+const BUTTON_GAP: f64 = 6.;
+const MESSAGE_MIN: f64 = 96.;
+
+/// Laid-out find-panel controls; toggles follow [`Panels::find_toggle_options`] order.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FindControls {
+    pub toggles: Vec<Rect>,
+    pub buttons: Vec<Rect>,
+    pub message: Rect,
+    pub rows: usize,
+}
+
 impl Panels {
     pub(super) fn panel_buttons(panel: Panel) -> &'static [(&'static str, &'static str)] {
         match panel {
@@ -22,13 +42,349 @@ impl Panels {
             _ => &[],
         }
     }
-    pub(super) fn panel_message_clip(&self, panel: Panel) -> Rect {
-        Rect {
-            width: (self.panel_bounds.width
-                - (Self::panel_buttons(panel).len() as f64 * 104. + 8.) * self.ui_scale)
-                .max(0.),
-            ..self.panel_bounds
+    /// Find option toggles shown in a panel, as indices into the six find options
+    /// (regex, case, whole word, wrap, in selection, preserve case). The set depends only on
+    /// the panel: wrap and in-selection do not apply to Find in Files, and preserve case only
+    /// applies where there is a replacement.
+    pub(crate) fn find_toggle_options(panel: Panel) -> &'static [usize] {
+        match panel {
+            Panel::Files => &[0, 1, 2, 5],
+            Panel::Replace => &[0, 1, 2, 3, 4, 5],
+            Panel::Find | Panel::Incremental => &[0, 1, 2, 3, 4],
+            _ => &[],
         }
+    }
+    fn find_fields(panel: Panel) -> usize {
+        match panel {
+            Panel::Replace => 2,
+            Panel::Files => 3,
+            _ => 1,
+        }
+    }
+    /// Width (DIPs) left of the inputs for their labels: 80, less when the input would get
+    /// narrower than 120 DIPs, and 8 (no labels) below 64. `close` is the close button's
+    /// reserve in DIPs (zero for panels without one).
+    pub(super) fn find_label_column(width: f64, s: f64, close: f64) -> f64 {
+        let room = width / s - 12. - close - 120.;
+        if room >= 80. {
+            80.
+        } else if room >= 64. {
+            room
+        } else {
+            8.
+        }
+    }
+    /// Height a find panel needs at its natural size, in DIPs, for a panel of `width` pixels.
+    pub(super) fn find_panel_height(panel: Panel, width: f64, s: f64) -> f64 {
+        let rows = if Self::find_toggle_options(panel).is_empty() {
+            0
+        } else {
+            Self::find_controls_at(panel, 0., width, s, s, 0.).rows
+        };
+        let actions = if rows == 0 {
+            0.
+        } else {
+            rows as f64 * (ACTION_HEIGHT + ACTION_ROW_GAP) - ACTION_ROW_GAP
+        };
+        if panel == Panel::Input {
+            return 68.;
+        }
+        8. + Self::find_fields(panel) as f64 * PANEL_ROW + actions + 8.
+    }
+    /// Vertical scale of the open find panel: the UI scale, or less when a short window
+    /// clamps the panel below its natural height (everything then shrinks to fit).
+    pub(super) fn find_vertical_scale(&self) -> f64 {
+        let Some(panel) = self.panel else {
+            return self.ui_scale;
+        };
+        let natural = Self::find_panel_height(panel, self.panel_bounds.width, self.ui_scale);
+        (self.panel_bounds.height / natural.max(1.)).min(self.ui_scale)
+    }
+    /// Toggles, buttons and message slot of the open find panel, as laid out and hit-tested.
+    /// Cached per (panel, bounds, scale): painting asks for it several times a frame.
+    pub(crate) fn find_controls(&mut self) -> Option<FindControls> {
+        let panel = self.panel?;
+        if let Some((p, bounds, scale, controls)) = &self.find_layout
+            && *p == panel
+            && *bounds == self.panel_bounds
+            && *scale == self.ui_scale
+        {
+            return Some(controls.clone());
+        }
+        let controls = self.compute_find_controls()?;
+        self.find_layout = Some((panel, self.panel_bounds, self.ui_scale, controls.clone()));
+        Some(controls)
+    }
+    fn compute_find_controls(&self) -> Option<FindControls> {
+        let panel = self.panel?;
+        if Self::find_toggle_options(panel).is_empty() {
+            return None;
+        }
+        let v = self.find_vertical_scale();
+        let top = self.panel_bounds.y + (8. + Self::find_fields(panel) as f64 * PANEL_ROW) * v;
+        Some(Self::find_controls_at(
+            panel,
+            self.panel_bounds.x,
+            self.panel_bounds.width,
+            self.ui_scale,
+            v,
+            top,
+        ))
+    }
+    /// Flow layout of the action area. At normal widths it is one row aligned with the inputs:
+    /// toggles on the left, the message in the middle, buttons on the right. When that does
+    /// not fit, buttons move to their own row (and toggles or buttons wrap further in very
+    /// narrow panels), so controls never overlap and the message keeps a readable width.
+    fn find_controls_at(
+        panel: Panel,
+        x: f64,
+        width: f64,
+        s: f64,
+        v: f64,
+        top: f64,
+    ) -> FindControls {
+        let toggles = Self::find_toggle_options(panel).len();
+        let buttons = Self::panel_buttons(panel).len();
+        // Inputs span [x + label, x + width - 40] (DIPs); the full area keeps an 8-DIP margin.
+        let label = Self::find_label_column(width, s, CLOSE_BUTTON + 6.);
+        let aligned = (x + label * s, x + width - 40. * s);
+        let full = (x + 8. * s, x + width - 8. * s);
+        let span = |r: (f64, f64)| ((r.1 - r.0) / s).max(0.);
+        let run = |n: usize, item: f64, gap: f64| {
+            if n == 0 {
+                0.
+            } else {
+                n as f64 * item + (n - 1) as f64 * gap
+            }
+        };
+        let toggle_run = run(toggles, TOGGLE_WIDTH, TOGGLE_GAP);
+        let button_min = run(buttons, BUTTON_MIN, BUTTON_GAP);
+        let pitch = (ACTION_HEIGHT + ACTION_ROW_GAP) * v;
+        let height = ACTION_HEIGHT * v;
+        let row_y = |row: usize| top + row as f64 * pitch;
+        let mut out = FindControls::default();
+        let a = span(aligned);
+        if toggle_run + 8. + MESSAGE_MIN + 8. + button_min <= a {
+            let room = a - toggle_run - 16. - MESSAGE_MIN - run(buttons, 0., BUTTON_GAP);
+            let bw = (room / buttons.max(1) as f64).clamp(BUTTON_MIN, BUTTON_WIDTH);
+            for i in 0..toggles {
+                out.toggles.push(Rect {
+                    x: aligned.0 + i as f64 * (TOGGLE_WIDTH + TOGGLE_GAP) * s,
+                    y: top,
+                    width: TOGGLE_WIDTH * s,
+                    height,
+                });
+            }
+            let first = aligned.1 - run(buttons, bw, BUTTON_GAP) * s;
+            for i in 0..buttons {
+                out.buttons.push(Rect {
+                    x: first + i as f64 * (bw + BUTTON_GAP) * s,
+                    y: top,
+                    width: bw * s,
+                    height,
+                });
+            }
+            let left = aligned.0 + (toggle_run + 8.) * s;
+            out.message = Rect {
+                x: left,
+                y: top,
+                width: (first - 8. * s - left).max(0.),
+                height,
+            };
+            out.rows = 1;
+            return out;
+        }
+        let region = if toggle_run.max(button_min) + 8. + MESSAGE_MIN <= a {
+            aligned
+        } else {
+            full
+        };
+        let w = span(region);
+        let mut row = 0;
+        // Toggles, wrapping when even one row of them does not fit.
+        let toggle_w = TOGGLE_WIDTH.min(w);
+        let per = (((w + TOGGLE_GAP) / (toggle_w + TOGGLE_GAP)).floor() as usize).max(1);
+        let mut last_end = region.0;
+        for i in 0..toggles {
+            let (r, c) = (i / per, i % per);
+            let rect = Rect {
+                x: region.0 + c as f64 * (toggle_w + TOGGLE_GAP) * s,
+                y: row_y(row + r),
+                width: toggle_w * s,
+                height,
+            };
+            last_end = rect.x + rect.width;
+            out.toggles.push(rect);
+        }
+        let toggle_rows = toggles.div_ceil(per);
+        let message_on_toggles = (region.1 - last_end) / s - 8. >= MESSAGE_MIN;
+        if message_on_toggles && toggle_rows > 0 {
+            out.message = Rect {
+                x: last_end + 8. * s,
+                y: row_y(row + toggle_rows - 1),
+                width: region.1 - last_end - 8. * s,
+                height,
+            };
+        }
+        row += toggle_rows;
+        // Buttons, right-aligned on the following row(s).
+        let per = (((w + BUTTON_GAP) / (BUTTON_MIN.min(w) + BUTTON_GAP)).floor() as usize).max(1);
+        let in_row = buttons.min(per).max(1);
+        let bw = ((w - run(in_row, 0., BUTTON_GAP)) / in_row as f64)
+            .clamp(BUTTON_MIN.min(w), BUTTON_WIDTH.min(w));
+        let first_row_buttons = buttons.min(per);
+        let first_row_left = region.1 - run(first_row_buttons, bw, BUTTON_GAP) * s;
+        let message_on_buttons =
+            !message_on_toggles && (first_row_left - region.0) / s - 8. >= MESSAGE_MIN;
+        if !message_on_toggles && !message_on_buttons {
+            // A dedicated, full-width message row.
+            out.message = Rect {
+                x: region.0,
+                y: row_y(row),
+                width: region.1 - region.0,
+                height,
+            };
+            row += 1;
+        }
+        for i in 0..buttons {
+            let (r, c) = (i / per, i % per);
+            let count = (buttons - r * per).min(per);
+            let left = region.1 - run(count, bw, BUTTON_GAP) * s;
+            out.buttons.push(Rect {
+                x: left + c as f64 * (bw + BUTTON_GAP) * s,
+                y: row_y(row + r),
+                width: bw * s,
+                height,
+            });
+        }
+        if message_on_buttons {
+            out.message = Rect {
+                x: region.0,
+                y: row_y(row),
+                width: first_row_left - 8. * s - region.0,
+                height,
+            };
+        }
+        out.rows = row + buttons.div_ceil(per);
+        out
+    }
+    /// Quick-panel row height in DIPs. Command lists (palette, syntax and snippet choices)
+    /// show only a caption and key binding; other overlays have a details line.
+    /// Lists without any details line (commands, symbols) use compact rows too.
+    pub(super) fn quick_row_height(&self) -> f64 {
+        let no_details =
+            !self.quick.items.is_empty() && self.quick.items.iter().all(|i| i.details.is_empty());
+        if self.quick_compact() || no_details {
+            32.
+        } else {
+            44.
+        }
+    }
+    /// Overlay header (input) and footer heights in DIPs.
+    pub(super) fn quick_chrome(&self) -> (f64, f64) {
+        if self.quick_tight {
+            (40., 0.)
+        } else {
+            (46., 26.)
+        }
+    }
+    /// Top of the overlay's row list.
+    pub(crate) fn quick_list_top(&self) -> f64 {
+        self.quick_bounds.y + self.quick_chrome().0 * self.ui_scale
+    }
+    pub(super) fn quick_compact(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+        )
+    }
+    /// The find panel's status message slot (match counts, errors).
+    pub(super) fn panel_message_clip(&self) -> Rect {
+        match &self.find_layout {
+            Some((panel, bounds, scale, controls))
+                if Some(*panel) == self.panel
+                    && *bounds == self.panel_bounds
+                    && *scale == self.ui_scale =>
+            {
+                controls.message
+            }
+            _ => self
+                .compute_find_controls()
+                .map(|c| c.message)
+                .unwrap_or_default(),
+        }
+    }
+    /// Whether a find panel shows the status message itself: its slot must be tall enough
+    /// for the 12-point label (very short windows shrink the panel); otherwise the status bar
+    /// shows it.
+    pub(crate) fn message_in_find_panel(&self) -> bool {
+        self.find_panel_visible() && {
+            let slot = self.panel_message_clip();
+            slot.height >= 16. * self.ui_scale && slot.width >= 24. * self.ui_scale
+        }
+    }
+    /// Plain-language name and shortcut of the find-panel control under the pointer.
+    pub(super) fn panel_tooltip(&self, workspace: &Workspace, point: Point) -> Option<String> {
+        if !self.find_panel_visible() {
+            return None;
+        }
+        let id = self.tree.hit_test(point)?;
+        let (name, invocation) = match id {
+            30..=35 => {
+                let (name, option) = [
+                    ("Regular expression", "regex"),
+                    ("Match case", "case_sensitive"),
+                    ("Whole word", "whole_word"),
+                    ("Wrap around", "wrap"),
+                    ("In selection", "in_selection"),
+                    ("Preserve case", "preserve_case"),
+                ][(id - 30) as usize];
+                (
+                    name.to_owned(),
+                    Invocation {
+                        command: "toggle_find_option".into(),
+                        args: json!({ "option": option }),
+                    },
+                )
+            }
+            CLOSE_ID => (
+                "Close".to_owned(),
+                Invocation {
+                    command: "hide_panel".into(),
+                    args: json!({}),
+                },
+            ),
+            _ => {
+                let (caption, command) = self
+                    .panel
+                    .and_then(|p| Self::panel_buttons(p).get(id.checked_sub(50)? as usize))?;
+                (
+                    (*caption).to_owned(),
+                    Invocation {
+                        command: (*command).into(),
+                        args: json!({}),
+                    },
+                )
+            }
+        };
+        let state = match id {
+            30..=35 => {
+                let on = [
+                    self.options.regex,
+                    self.options.case_sensitive,
+                    self.options.whole_word,
+                    self.options.wrap,
+                    self.in_selection,
+                    self.options.preserve_case,
+                ][(id - 30) as usize];
+                if on { ": on" } else { ": off" }
+            }
+            _ => "",
+        };
+        Some(match workspace.editor().keymap.hint(&invocation) {
+            Some(keys) => format!("{name}{state} ({})", super::mac_key_equivalents(&keys)),
+            None => format!("{name}{state}"),
+        })
     }
     pub(crate) fn set_message(&mut self, message: String) {
         self.message = message;
@@ -469,6 +825,187 @@ mod tests {
         key(&mut p, &mut w, "enter");
         assert!(p.overlay.is_none());
     }
+    fn click(p: &mut Panels, w: &mut Workspace, point: Point) {
+        let end = w.editor().text.len_bytes();
+        p.mouse(w, point, true, false, false, 0..end).unwrap();
+        p.mouse(w, point, false, false, false, 0..end).unwrap();
+    }
+    fn center(r: Rect) -> Point {
+        Point {
+            x: r.x + r.width / 2.,
+            y: r.y + r.height / 2.,
+        }
+    }
+    /// Typing moves the selection to a match; "In selection" must stay available (and
+    /// clickable), since it has no key binding.
+    #[test]
+    fn in_selection_toggle_stays_clickable_after_typing() {
+        let (mut w, mut p) = setup("one two\nthree two\nfour two\nfive\n");
+        let end = w.editor().text.line_to_byte(3);
+        w.editor_mut()
+            .set_selection(vel_buffer::Selection::from_regions([Region::new(0, end)]));
+        action(&mut p, &mut w, "show_panel", json!({"panel":"find"}));
+        p.layout(size());
+        p.sync_widgets(&w);
+        assert!(p.tree.nodes.get(&34).is_some_and(|n| n.visible));
+        p.focus_input = 0;
+        type_query(&mut p, &mut w, "two", 0..end);
+        for panel in ["find", "incremental_find", "replace"] {
+            action(&mut p, &mut w, "show_panel", json!({"panel":panel}));
+            p.layout(size());
+            p.sync_widgets(&w);
+            for id in [33, 34] {
+                assert!(
+                    p.tree.nodes.get(&id).is_some_and(|n| n.visible),
+                    "{panel} {id}"
+                );
+            }
+        }
+        let before = p.in_selection;
+        let toggle = p.tree.nodes[&34].rect;
+        click(&mut p, &mut w, center(toggle));
+        assert_ne!(p.in_selection, before);
+        action(
+            &mut p,
+            &mut w,
+            "show_panel",
+            json!({"panel":"find_in_files"}),
+        );
+        p.layout(size());
+        p.sync_widgets(&w);
+        assert!(!p.tree.nodes.get(&34).is_some_and(|n| n.visible));
+        assert!(p.tree.nodes.get(&35).is_some_and(|n| n.visible));
+    }
+    /// A find message whose slot is too short to read (short window, large UI scale) moves to
+    /// the status bar; at normal sizes it stays in the panel.
+    #[test]
+    fn find_message_moves_to_the_status_bar_when_the_panel_slot_is_too_short() {
+        let (mut w, mut p) = setup("text");
+        action(&mut p, &mut w, "show_panel", json!({"panel":"find"}));
+        let painted = |p: &mut Panels, w: &Workspace, window: Size| {
+            p.message = "3 matches".into();
+            p.layout(window);
+            let mut scene = Scene::default();
+            p.paint(w, &mut scene);
+            let status_top = window.height - STATUS * p.ui_scale;
+            let runs: Vec<_> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|t| t.text.contains("3 matches"))
+                .map(|t| f64::from(t.baseline) >= status_top)
+                .collect();
+            (p.message_in_find_panel(), runs)
+        };
+        assert_eq!(painted(&mut p, &w, size()), (true, vec![false]));
+        p.ui_scale = 2.;
+        let (inside, runs) = painted(
+            &mut p,
+            &w,
+            Size {
+                width: 1000.,
+                height: 210.,
+            },
+        );
+        assert!(!inside);
+        assert_eq!(runs, vec![true]);
+    }
+    /// The footer under the list is inert, and the overlay stays inside short windows.
+    #[test]
+    fn overlay_footer_selects_nothing_and_overlay_fits_short_windows() {
+        let (mut w, mut p) = setup("text");
+        w.palette = (0..40)
+            .map(|i| vel_config::ui::PaletteItem {
+                caption: format!("Command {i:02}"),
+                invocation: Invocation {
+                    command: "new_file".into(),
+                    args: json!({ "item": i }),
+                },
+            })
+            .collect();
+        action(
+            &mut p,
+            &mut w,
+            "show_overlay",
+            json!({"overlay":"command_palette"}),
+        );
+        wait(&mut p, &mut w, |p| !p.quick_pending);
+        p.layout(size());
+        p.sync_widgets(&w);
+        let rows = p.quick.scroll.viewport / p.quick.scroll.row_height;
+        assert!((rows - rows.round()).abs() < 1e-6, "whole rows: {rows}");
+        let footer = Point {
+            x: p.quick_bounds.x + 40.,
+            y: p.quick_bounds.y + p.quick_bounds.height - 6.,
+        };
+        let selected = p.quick.selected;
+        click(&mut p, &mut w, footer);
+        assert_eq!(p.quick.selected, selected);
+        assert!(p.pending_command.is_none());
+        assert_eq!(p.overlay, Some(Overlay::Palette));
+        for scale in [1., 1.5, 2.] {
+            p.ui_scale = scale;
+            for height in [100., 120., 150., 200., 240., 300.] {
+                p.layout(Size {
+                    width: 800.,
+                    height,
+                });
+                let q = p.quick_bounds;
+                assert!(
+                    q.y >= 0. && q.y + q.height <= height + 1e-6,
+                    "{scale} {height}"
+                );
+                // From the native minimum height (200) up, at least one whole row shows.
+                if height >= 200. {
+                    assert!(
+                        p.quick.scroll.viewport >= p.quick.scroll.row_height - 1e-6,
+                        "{scale} {height}: {} < {}",
+                        p.quick.scroll.viewport,
+                        p.quick.scroll.row_height
+                    );
+                    assert!(p.quick_input.bounds.height >= 24. * scale - 1e-6);
+                }
+            }
+        }
+    }
+    /// Tool tips follow option changes made by shortcut and vanish with the panel.
+    #[test]
+    fn find_tooltip_follows_options_and_panel_close() {
+        let (mut w, mut p) = setup("text");
+        action(&mut p, &mut w, "show_panel", json!({"panel":"find"}));
+        p.layout(size());
+        p.paint(&w, &mut Scene::default());
+        let toggle = center(p.tree.nodes[&31].rect);
+        p.review_hover(&w, toggle);
+        assert!(
+            p.review
+                .tooltip
+                .as_ref()
+                .unwrap()
+                .0
+                .starts_with("Match case: off")
+        );
+        action(
+            &mut p,
+            &mut w,
+            "toggle_find_option",
+            json!({"option":"case_sensitive"}),
+        );
+        p.layout(size());
+        p.paint(&w, &mut Scene::default());
+        assert!(
+            p.review
+                .tooltip
+                .as_ref()
+                .unwrap()
+                .0
+                .starts_with("Match case: on")
+        );
+        action(&mut p, &mut w, "hide_panel", json!({}));
+        p.layout(size());
+        p.paint(&w, &mut Scene::default());
+        assert!(p.review.tooltip.is_none());
+    }
     #[test]
     fn every_new_palette_query_selects_its_best_hit_including_early_enter() {
         for early in [true, false] {
@@ -638,12 +1175,117 @@ mod tests {
                 action(&mut p, &mut w, "show_panel", json!({"panel":name}));
                 p.layout(size());
                 p.sync_widgets(&w);
-                let message = p.panel_message_clip(p.panel.unwrap());
+                let message = p.panel_message_clip();
                 let button = p.tree.nodes[&50].rect;
-                assert!(message.x + message.width <= button.x, "{name} at {scale}");
+                // Same row: the message ends before the button; or buttons wrapped below.
+                assert!(
+                    message.x + message.width <= button.x || message.y + message.height <= button.y,
+                    "{name} at {scale}"
+                );
                 assert!(message.width > 0.);
             }
         }
+    }
+    /// Every find panel, side bar on/off, UI scale 1/1.5/2, widths 320–1600 and heights
+    /// 120–800: controls stay inside the panel (which stays inside the window above the
+    /// status bar), never overlap, are hit where drawn, and the message keeps a readable slot.
+    #[test]
+    fn find_panel_layout_sweep_never_overlaps_and_keeps_controls_inside() {
+        let (mut w, mut p) = setup("text");
+        let overlap = |a: Rect, b: Rect| {
+            let x = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+            let y = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+            x > 0.01 && y > 0.01
+        };
+        let inside = |r: Rect, outer: Rect| {
+            r.x >= outer.x - 0.01
+                && r.y >= outer.y - 0.01
+                && r.x + r.width <= outer.x + outer.width + 0.01
+                && r.y + r.height <= outer.y + outer.height + 0.01
+        };
+        let mut layouts = 0;
+        for name in ["find", "incremental_find", "replace", "find_in_files"] {
+            action(&mut p, &mut w, "show_panel", json!({"panel":name}));
+            let panel = p.panel.unwrap();
+            let fields = Panels::find_fields(panel);
+            for side in [false, true] {
+                p.side_visible = side;
+                for scale in [1., 1.5, 2.] {
+                    p.ui_scale = scale;
+                    for width in (272..=1600).step_by(16) {
+                        for height in [120., 160., 200., 260., 400., 600., 800.] {
+                            let window = Size {
+                                width: width as f64,
+                                height,
+                            };
+                            p.layout(window);
+                            p.sync_widgets(&w);
+                            layouts += 1;
+                            let at = format!("{name} side={side} ui={scale} {width}x{height}");
+                            let bounds = p.panel_bounds;
+                            assert!(bounds.y >= -0.01, "{at}");
+                            assert!(
+                                bounds.y + bounds.height <= height - STATUS * scale + 0.01,
+                                "{at}"
+                            );
+                            let mut controls: Vec<(u64, Rect)> = (20..20 + fields as u64)
+                                .chain(30..36)
+                                .chain(50..53)
+                                .chain([CLOSE_ID])
+                                .filter_map(|id| {
+                                    p.tree
+                                        .nodes
+                                        .get(&id)
+                                        .filter(|n| n.visible)
+                                        .map(|n| (id, n.rect))
+                                })
+                                .collect();
+                            assert_eq!(
+                                controls
+                                    .iter()
+                                    .filter(|(id, _)| (30..36).contains(id))
+                                    .count(),
+                                Panels::find_toggle_options(panel).len(),
+                                "{at}"
+                            );
+                            let message = p.panel_message_clip();
+                            controls.push((0, message));
+                            for (i, (id, rect)) in controls.iter().enumerate() {
+                                assert!(inside(*rect, bounds), "{at}: {id} {rect:?} {bounds:?}");
+                                for (other, second) in &controls[i + 1..] {
+                                    assert!(
+                                        !overlap(*rect, *second),
+                                        "{at}: {id} {rect:?} overlaps {other} {second:?}"
+                                    );
+                                }
+                                if *id != 0 && rect.width >= 2. && rect.height >= 2. {
+                                    let center = Point {
+                                        x: rect.x + rect.width / 2.,
+                                        y: rect.y + rect.height / 2.,
+                                    };
+                                    assert_eq!(p.tree.hit_test(center), Some(*id), "{at}");
+                                }
+                            }
+                            let readable = (MESSAGE_MIN * scale).min(bounds.width - 16. * scale);
+                            assert!(message.width >= readable - 0.01, "{at}: {message:?}");
+                            // A slot too short for the text hands the message to the status bar.
+                            assert!(p.message_in_find_panel() || p.chrome, "{at}");
+                            if p.message_in_find_panel() {
+                                assert!(message.height >= 16. * scale - 0.01, "{at}");
+                            }
+                            // Inputs keep a usable width: at least 120 DIPs, or all the panel
+                            // has once labels are dropped.
+                            for id in 20..20 + fields as u64 {
+                                let input = p.tree.nodes[&id].rect;
+                                let usable = (120. * scale).min(bounds.width - 48. * scale);
+                                assert!(input.width >= usable - 0.01, "{at}: input {input:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(layouts > 10_000);
     }
     #[test]
     fn file_search_survives_other_panels_and_build_source_switching() {

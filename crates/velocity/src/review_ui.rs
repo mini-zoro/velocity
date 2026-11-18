@@ -459,7 +459,7 @@ impl Panels {
             };
             self.review.bounds = rect;
             let popup = theme.style(
-                0xF000,
+                crate::panels::StyleId::ReviewMenu.at(0),
                 &vel_theme::ElementPath(&[
                     vel_theme::Element::new("window", &[]),
                     vel_theme::Element::new("popup_control", &[]),
@@ -486,8 +486,11 @@ impl Panels {
                         },
                     ),
                 ];
-                let style =
-                    theme.style(0xF100 + i as u64, &vel_theme::ElementPath(&path), settings);
+                let style = theme.style(
+                    crate::panels::StyleId::ReviewMenuRow.at(i as u64),
+                    &vel_theme::ElementPath(&path),
+                    settings,
+                );
                 theme.surface(&mut layer, &style, row, rect);
                 theme.text(
                     &mut layer,
@@ -501,22 +504,45 @@ impl Panels {
         } else if let Some((text, point, since)) = &self.review.tooltip
             && since.elapsed() >= std::time::Duration::from_millis(350)
         {
-            let rect = Rect {
-                x: point.x.min((size.width - 260.).max(0.)),
-                y: (point.y + 18.).min(size.height - 28.),
-                width: 260.,
-                height: 26.,
-            };
             let style = theme.style(
-                0xF200,
+                crate::panels::StyleId::ToolTip.at(0),
                 &vel_theme::ElementPath(&[
                     vel_theme::Element::new("window", &[]),
                     vel_theme::Element::new("tool_tip_control", &[]),
                 ]),
                 settings,
             );
-            theme.surface(&mut layer, &style, rect, rect);
-            theme.text(&mut layer, &style, text, rect.x + 8., rect.y + 18., rect);
+            // Sized to the text; flipped above the pointer when there is no room below.
+            let width = (theme.advance(&style, text) + 16.).clamp(40., 360f64.min(size.width));
+            let below = point.y + 18.;
+            let rect = Rect {
+                x: point.x.min((size.width - width).max(0.)),
+                y: if below + 26. <= size.height {
+                    below
+                } else {
+                    (point.y - 34.).max(0.)
+                },
+                width,
+                height: 26.,
+            };
+            let window = Rect {
+                x: 0.,
+                y: 0.,
+                width: size.width,
+                height: size.height,
+            };
+            theme.surface(&mut layer, &style, rect, window);
+            // The label element carries no container shadow (which would ghost the text).
+            let label = theme.style(
+                crate::panels::StyleId::ToolTipLabel.at(0),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("tool_tip_control", &[]),
+                    vel_theme::Element::new("tool_tip_label_control", &[]),
+                ]),
+                settings,
+            );
+            theme.text(&mut layer, &label, text, rect.x + 8., rect.y + 17., rect);
         }
         if !layer.surfaces.is_empty() || !layer.text.is_empty() {
             scene.layers.push(layer);

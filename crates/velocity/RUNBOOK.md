@@ -888,6 +888,15 @@ CSS boxes/borders/radii, nine-slice image patches, rectangles, glyph runs and cl
 initialize a native window or GPU. The HTML metrics provider switches to the actual native
 font stack only in a window's startup callback.
 
+For pixel review, `velocity --render-scenes <dir> [--scale 1,2] [--appearance dark|light|both]
+[--only a,b]` renders the UI states listed in `docs/design/ui-audit-r1.md` with the real Metal
+renderer into an offscreen texture and writes PNGs; it never creates a window or activates the
+app. Run it with an isolated `HOME`/`SHELL` (`env -i HOME=/tmp/h SHELL=/bin/sh PATH=/usr/bin:/bin`).
+`--bench-scene N` skips rendering and prints the steady-state instructions and time per
+`App::scene` call for each selected scenario (JSON lines, no GPU). `--first-frames N` renders the
+first N frames as the native loop produces them (one worker poll per frame, no settling), e.g. an
+overlay before its ranking arrives.
+
 Outside the sandbox, on a visible display:
 
 ```sh

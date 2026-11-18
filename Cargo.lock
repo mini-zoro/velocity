@@ -3374,6 +3374,7 @@ name = "velocity"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "png",
  "regex",
  "regex-automata",
  "serde",

@@ -113,6 +113,36 @@ const PANEL_ROW: f64 = 34.;
 const CLOSE_BUTTON: f64 = 22.;
 /// Retained widget id of the find-panel close button.
 const CLOSE_ID: u64 = 60;
+/// Theme style-cache ids for chrome painted outside the retained widget tree. Every element
+/// kind owns a disjoint range far above sheet-, row- and widget-based ids, so caches and
+/// transitions of different elements never share an id.
+#[derive(Clone, Copy)]
+pub(crate) enum StyleId {
+    OverlayContainer = 1,
+    OverlayKindLabel,
+    OverlayFooter,
+    FindClose,
+    ToolTip,
+    ToolTipLabel,
+    GroupDivider,
+    TabLabel,
+    TabClose,
+    TabConnector,
+    TabBarButton,
+    ReviewMenuRow,
+    GitBadge,
+    ResultRow,
+    TabBar,
+    TabSet,
+    TitleBar,
+    ReviewMenu,
+    HoverPopup,
+}
+impl StyleId {
+    pub(crate) const fn at(self, index: u64) -> u64 {
+        (0x56 << 56) | ((self as u64) << 40) | (index & 0xFF_FFFF_FFFF)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
     Find,
@@ -224,7 +254,7 @@ pub struct Panels {
     navigation_preview_guard: Option<crate::editor::navigation::Guard>,
     hover_point: Point,
     hover_term: String,
-    hover_since: Instant,
+    pub(crate) hover_since: Instant,
     hover_requested: bool,
     hover_retry: Option<Instant>,
     hover_bounds: Rect,
@@ -292,6 +322,14 @@ pub struct Panels {
     pub output_editor: Option<crate::editor::Editor>,
     pub output_view: crate::view::View,
     pub output_reset: bool,
+    /// Pending prefix replacement of the mirrored output: (old bytes removed, new bytes).
+    output_trim: Option<(usize, usize)>,
+    /// Overlay in a window too short for its footer (see `quick_chrome`).
+    quick_tight: bool,
+    /// Find-panel controls laid out for (panel, bounds, scale); see `find_controls`.
+    find_layout: Option<(Panel, Rect, f64, details::FindControls)>,
+    /// State the shown tool tip was last derived from (control, options, panel).
+    tooltip_key: u64,
     output_mirrored: usize,
     pub input_caption: String,
     pub input_done: Option<Invocation>,
@@ -337,7 +375,7 @@ pub struct Panels {
     pub quick_elapsed_ms: f64,
     pub quick_pending: bool,
     panel_bounds: Rect,
-    quick_bounds: Rect,
+    pub(crate) quick_bounds: Rect,
     side_bounds: Rect,
     size: Size,
 }
@@ -434,6 +472,10 @@ impl Default for Panels {
             output_editor: None,
             output_view: crate::view::View::new(Size::default(), 7.8, 12.),
             output_reset: false,
+            output_trim: None,
+            find_layout: None,
+            quick_tight: false,
+            tooltip_key: 0,
             output_mirrored: 0,
             input_caption: String::new(),
             input_done: None,
@@ -523,6 +565,15 @@ impl Panels {
             ("rulers", json!([])),
             ("draw_centered", json!(false)),
             ("scroll_past_end", json!(false)),
+            // Output grows by megabytes. Pin the large-document policy (it would change the
+            // minimap sampling every 10,000 lines and the highlighting mode at long lines),
+            // because each policy change rebuilds the language and re-wraps every retained
+            // line; nothing here is spell checked, diffed or shown in a minimap anyway.
+            ("spell_check", json!(false)),
+            ("large_file.enable_minimap", json!(true)),
+            ("large_file.enable_highlighting", json!(true)),
+            ("large_file.enable_spell_check", json!(true)),
+            ("large_file.enable_diff", json!(true)),
         ] {
             editor
                 .settings
@@ -555,27 +606,70 @@ impl Panels {
         self.output_view.tab_height = 0.;
         self.output_view.focused = false;
     }
+    /// Records that the build output's first `removed` bytes were replaced by `inserted`
+    /// bytes (retention trimming), so the mirror deletes only that prefix.
+    pub(crate) fn trim_output_prefix(&mut self, removed: usize, inserted: usize) {
+        if self.output_reset || self.output_trim.is_some() {
+            // A second trim before the mirror caught up: rebuild it instead.
+            self.output_reset = true;
+            self.output_trim = None;
+        } else {
+            self.output_trim = Some((removed, inserted));
+        }
+    }
+    /// Whether the read-only output view still lags the build output.
+    fn output_pending(&self) -> bool {
+        self.output_editor.is_some()
+            && (self.output_reset
+                || self.output_trim.is_some()
+                || self.output_mirrored != self.output.len())
+    }
+    /// Mirrors build output into the read-only output view. Appends and trims are applied
+    /// incrementally and at most `OUTPUT_SYNC_BYTES` are inserted per frame, so megabytes of
+    /// output never stall a frame; `busy` keeps frames coming until the view caught up.
     fn sync_output(&mut self) -> bool {
+        const OUTPUT_SYNC_BYTES: usize = 128 * 1024;
+        let pending = self.output_pending();
         let Some(editor) = self.output_editor.as_mut() else {
             return false;
         };
-        let mut changed = editor.poll_language();
-        if self.output_reset || self.output_mirrored != self.output.len() {
-            let (range, value) = if self.output_reset || self.output_mirrored > self.output.len() {
-                (0..editor.text.len_bytes(), self.output.clone())
-            } else {
-                (
-                    editor.text.len_bytes()..editor.text.len_bytes(),
-                    self.output[self.output_mirrored..].to_owned(),
-                )
-            };
-            editor.apply_edits(vec![(range, value)], None, vel_buffer::EditKind::Other);
-            editor.sync();
-            self.output_mirrored = self.output.len();
-            self.output_reset = false;
-            changed = true;
+        let changed = editor.poll_language();
+        if !pending {
+            return changed;
         }
-        changed
+        // The output view is read-only for users; mirror the build output through it.
+        let read_only = std::mem::replace(&mut editor.read_only, false);
+        let edit = |editor: &mut crate::editor::Editor, range, text| {
+            editor.apply_edits(vec![(range, text)], None, vel_buffer::EditKind::Other);
+            editor.sync();
+        };
+        if let Some((removed, inserted)) = self.output_trim.take()
+            && !self.output_reset
+        {
+            let cut = removed.min(self.output_mirrored);
+            edit(editor, 0..cut, self.output[..inserted].to_owned());
+            self.output_mirrored = self.output_mirrored.max(removed) - removed + inserted;
+        }
+        if self.output_reset || self.output_mirrored > self.output.len() {
+            edit(editor, 0..editor.text.len_bytes(), String::new());
+            self.output_mirrored = 0;
+            self.output_reset = false;
+            self.output_trim = None;
+        }
+        if self.output_mirrored < self.output.len() {
+            let end = self.output.floor_char_boundary(
+                (self.output_mirrored + OUTPUT_SYNC_BYTES).min(self.output.len()),
+            );
+            let at = editor.text.len_bytes();
+            edit(
+                editor,
+                at..at,
+                self.output[self.output_mirrored..end].to_owned(),
+            );
+            self.output_mirrored = end;
+        }
+        editor.read_only = read_only;
+        true
     }
     pub fn choices(&mut self, workspace: &mut Workspace, items: Vec<vel_config::ui::PaletteItem>) {
         self.cancel_overlay(workspace);
@@ -1170,6 +1264,7 @@ impl Panels {
                 .output_editor
                 .as_ref()
                 .is_some_and(|e| e.language.borrow().as_ref().is_some_and(|l| l.busy()))
+            || self.output_pending()
             || (self.search.is_some() && !self.all_matches_ready)
     }
     pub fn ranking_pending(&self) -> bool {
@@ -1313,6 +1408,20 @@ impl Panels {
             return Some(true);
         }
         Some(!is("string") && is("source"))
+    }
+    /// The pointer left the text area: drop a pending definition hover. An open popup
+    /// stays while the pointer is over it, as with ordinary pointer moves.
+    pub fn leave_hover(&mut self, point: Point) {
+        if let Some(popup) = &self.hover_html
+            && contains(self.hover_bounds, point)
+            && popup.visible
+        {
+            return;
+        }
+        self.hover.clear();
+        self.hover_html = None;
+        self.hover_term.clear();
+        self.hover_source = None;
     }
     pub fn hover_at(&mut self, workspace: &Workspace, point: Point, byte: usize) {
         if !workspace.editor().settings.bool("show_definitions", true) {
@@ -1863,7 +1972,7 @@ impl Panels {
         Ok(true)
     }
     /// Find-family panels show a close button; Escape and a toggling Cmd+F also close them.
-    fn find_panel_visible(&self) -> bool {
+    pub(crate) fn find_panel_visible(&self) -> bool {
         matches!(
             self.panel,
             Some(Panel::Find | Panel::Replace | Panel::Incremental | Panel::Files)
@@ -1876,12 +1985,14 @@ impl Panels {
         )
     }
     fn close_button_rect(&self) -> Rect {
+        // Centred on the first input row, never taller than it.
+        let height = (CLOSE_BUTTON * self.ui_scale).min(self.query.bounds.height);
         Rect {
             x: self.panel_bounds.x + self.panel_bounds.width
                 - ((CLOSE_BUTTON + 8.) * self.ui_scale),
-            y: self.panel_bounds.y + (11. * self.ui_scale),
+            y: self.query.bounds.y + (self.query.bounds.height - height) / 2.,
             width: CLOSE_BUTTON * self.ui_scale,
-            height: CLOSE_BUTTON * self.ui_scale,
+            height,
         }
     }
     fn panel_kind(panel: &str) -> Panel {
@@ -3812,7 +3923,12 @@ impl Panels {
             changed = true;
         }
         self.result_scroll.rows = if self.panel == Some(Panel::Output) {
-            self.output.lines().count()
+            // The output view's layout supplies the rows when it exists; counting megabytes
+            // of output lines on every frame would not.
+            match &self.output_editor {
+                Some(editor) => editor.layout.borrow().total(),
+                None => self.output.lines().count(),
+            }
         } else {
             self.result_view.rows.len()
         };
@@ -3831,15 +3947,30 @@ impl Panels {
         } else {
             0.
         };
+        // A hidden status bar (distraction free, toggle_status_bar) leaves no unpainted strip.
+        let status = if self.chrome {
+            STATUS * self.ui_scale
+        } else {
+            0.
+        };
         let bottom = match self.panel {
             None => 0.,
-            Some(Panel::Find | Panel::Incremental) => 96. * self.ui_scale,
-            Some(Panel::Replace) => 130. * self.ui_scale,
-            Some(Panel::Files) => 164. * self.ui_scale,
-            Some(Panel::Input) => 68. * self.ui_scale,
-            _ => (size.height * 0.38).clamp(60. * self.ui_scale, 320. * self.ui_scale),
-        }
-        .min((size.height - (80. * self.ui_scale)).max(0.));
+            // Find panels take their natural height (input rows plus action rows, which
+            // depend on the width). A short window shrinks the panel and its controls rather
+            // than drawing them outside it; the editor keeps at least its tab row.
+            Some(
+                panel @ (Panel::Find
+                | Panel::Incremental
+                | Panel::Replace
+                | Panel::Files
+                | Panel::Input),
+            ) => (Self::find_panel_height(panel, (size.width - side).max(1.), self.ui_scale)
+                * self.ui_scale)
+                .min((size.height - status - 32. * self.ui_scale).max(0.)),
+            _ => (size.height * 0.38)
+                .clamp(60. * self.ui_scale, 320. * self.ui_scale)
+                .min((size.height - (80. * self.ui_scale)).max(0.)),
+        };
         self.panel_bounds = Rect {
             x: side,
             y: size.height
@@ -3856,45 +3987,63 @@ impl Panels {
             x: 0.,
             y: (30. * self.ui_scale),
             width: side,
-            height: (size.height - (30. * self.ui_scale) - (STATUS * self.ui_scale)).max(1.),
+            height: (size.height - (30. * self.ui_scale) - status).max(1.),
         };
-        self.side_scroll.viewport = self.side_bounds.height;
-        self.side_scroll.scroll(0.);
+        self.side_scroll.set_viewport(self.side_bounds.height);
         let width = (size.width * 0.7)
             .clamp(240. * self.ui_scale, 820. * self.ui_scale)
             .min(size.width);
+        // The overlay shrinks to whole rows (input 46 + footer 26 + one row height each), so
+        // the list ends exactly where the footer starts. Short windows move it up, then
+        // shrink it, so it never extends below the window.
+        let row = self.quick_row_height();
+        // Windows too short for the input, one row and the footer drop the footer hint and
+        // tighten the input, so at least one whole row stays visible.
+        self.quick_tight = size.height < (72. + row) * self.ui_scale;
+        let (header, footer) = self.quick_chrome();
+        let limit = (size.height * 0.65).min(520. * self.ui_scale);
+        let fits = ((limit / self.ui_scale - header - footer) / row)
+            .floor()
+            .max(1.);
+        let rows = (self.quick.items.len() as f64).min(fits);
+        let height = (header + footer + row * rows) * self.ui_scale;
+        let y = (54. * self.ui_scale).min((size.height - height).max(0.));
         self.quick_bounds = Rect {
             x: (size.width - width) / 2.,
-            y: (54. * self.ui_scale),
+            y,
             width,
-            height: (size.height * 0.65).min(520. * self.ui_scale),
+            height: height.min(size.height - y).max(0.),
         };
+        let inset = if self.quick_tight { 6. } else { 8. };
         self.quick_input.bounds = Rect {
             x: self.quick_bounds.x + (8. * self.ui_scale),
-            y: self.quick_bounds.y + (8. * self.ui_scale),
+            y: self.quick_bounds.y + (inset * self.ui_scale),
             width: width - (16. * self.ui_scale),
-            height: (32. * self.ui_scale),
+            height: (header - inset - 6.) * self.ui_scale,
         };
-        self.quick.scroll.row_height = 44. * self.ui_scale;
-        self.quick.scroll.viewport = (self.quick_bounds.height - (72. * self.ui_scale)).max(1.);
+        self.quick.scroll.row_height = row * self.ui_scale;
         self.quick.scroll.rows = self.quick.items.len();
-        self.quick.scroll.scroll(0.);
+        self.quick
+            .scroll
+            .set_viewport((self.quick_bounds.height - ((header + footer) * self.ui_scale)).max(1.));
         let close = if self.find_panel_visible() {
             CLOSE_BUTTON + 6.
         } else {
             0.
         };
+        let v = self.find_vertical_scale();
+        // Narrow panels give the input room first: the label column shrinks, then the labels
+        // are dropped, before the input would collapse under the close button.
+        let label = Self::find_label_column(self.panel_bounds.width, self.ui_scale, close);
         for (i, input) in [&mut self.query, &mut self.replace, &mut self.where_input]
             .into_iter()
             .enumerate()
         {
             input.bounds = Rect {
-                x: side + (80. * self.ui_scale),
-                y: self.panel_bounds.y
-                    + (8. * self.ui_scale)
-                    + i as f64 * PANEL_ROW * self.ui_scale,
-                width: (self.panel_bounds.width - ((92. + close) * self.ui_scale)).max(1.),
-                height: (28. * self.ui_scale),
+                x: side + label * self.ui_scale,
+                y: self.panel_bounds.y + (8. + i as f64 * PANEL_ROW) * v,
+                width: (self.panel_bounds.width - ((label + 12. + close) * self.ui_scale)).max(1.),
+                height: 28. * v,
             };
             input.reveal();
         }
@@ -3905,8 +4054,8 @@ impl Panels {
             } else {
                 24. * self.ui_scale
             };
-        self.result_scroll.viewport = (bottom - (34. * self.ui_scale)).max(1.);
-        self.result_scroll.scroll(0.);
+        self.result_scroll
+            .set_viewport((bottom - (34. * self.ui_scale)).max(1.));
         // Retained controls expose live theme attributes and shared hit testing.
         self.tree.roots.clear();
         for node in self.tree.nodes.values_mut() {
@@ -3944,7 +4093,7 @@ impl Panels {
             x: side,
             y: 0.,
             width: (size.width - side).max(1.),
-            height: (size.height - (STATUS * self.ui_scale) - bottom).max(32. * self.ui_scale),
+            height: (size.height - status - bottom).max(32. * self.ui_scale),
         }
     }
     fn paint_input(layer: &mut Layer, input: &Input, focused: bool) {
@@ -4025,7 +4174,7 @@ impl Panels {
             self.widget(10, "text_input", self.quick_input.bounds, &["focused"]);
             let list = Rect {
                 x: self.quick_bounds.x,
-                y: self.quick_bounds.y + (46. * self.ui_scale),
+                y: self.quick_list_top(),
                 width: self.quick_bounds.width,
                 height: self.quick.scroll.viewport,
             };
@@ -4035,8 +4184,9 @@ impl Panels {
                 let item = &self.quick.items[row];
                 let id = (1 << 40) + item.value as u64 * 5;
                 let rect = Rect {
-                    y: list.y + row as f64 * (44. * self.ui_scale) - self.quick.scroll.offset,
-                    height: (44. * self.ui_scale),
+                    y: list.y + row as f64 * self.quick.scroll.row_height
+                        - self.quick.scroll.offset,
+                    height: self.quick.scroll.row_height,
                     ..list
                 };
                 let selected = row == self.quick.selected;
@@ -4086,14 +4236,17 @@ impl Panels {
                 self.where_input.bounds,
             ];
             for (i, bounds) in bounds.into_iter().enumerate().take(fields) {
+                let focused = self.panel_focused && self.focus_input == i;
+                let invalid = i == 0 && self.find_error.is_some();
                 self.widget(
                     20 + i as u64,
                     "text_input",
                     bounds,
-                    if self.panel_focused && self.focus_input == i {
-                        &["focused"]
-                    } else {
-                        &[]
+                    match (focused, invalid) {
+                        (true, true) => &["focused", "invalid"],
+                        (true, false) => &["focused"],
+                        (false, true) => &["invalid"],
+                        (false, false) => &[],
                     },
                 );
                 self.tree
@@ -4112,13 +4265,17 @@ impl Panels {
                     self.in_selection,
                     self.options.preserve_case,
                 ];
-                let width = self.panel_bounds.width / (6. * self.ui_scale);
+                // Option toggles under the inputs, buttons at their right (see
+                // `find_controls`); only options that apply to this panel are shown.
+                let controls = self.find_controls().unwrap_or_default();
+                let visible = Self::find_toggle_options(panel);
                 for (i, flag) in flags.into_iter().enumerate() {
-                    let rect = Rect {
-                        x: self.panel_bounds.x + i as f64 * width,
-                        y: self.panel_bounds.y + self.panel_bounds.height - (44. * self.ui_scale),
-                        width: width - (2. * self.ui_scale),
-                        height: (20. * self.ui_scale),
+                    let Some(rect) = visible
+                        .iter()
+                        .position(|v| *v == i)
+                        .and_then(|slot| controls.toggles.get(slot).copied())
+                    else {
+                        continue;
                     };
                     self.widget(
                         30 + i as u64,
@@ -4135,14 +4292,14 @@ impl Panels {
                 }
                 let buttons = Self::panel_buttons(panel);
                 for (i, (caption, _)) in buttons.iter().enumerate() {
-                    let rect = Rect {
-                        x: self.panel_bounds.x + self.panel_bounds.width
-                            - (buttons.len() - i) as f64 * (104. * self.ui_scale),
-                        y: self.panel_bounds.y + self.panel_bounds.height - (23. * self.ui_scale),
-                        width: (100. * self.ui_scale),
-                        height: (22. * self.ui_scale),
-                    };
-                    self.widget(50 + i as u64, "button", rect, &[]);
+                    let rect = controls.buttons.get(i).copied().unwrap_or_default();
+                    // The first action is what Enter does in the panel: draw it as primary.
+                    self.widget(
+                        50 + i as u64,
+                        "button",
+                        rect,
+                        if i == 0 { &["primary"] } else { &[] },
+                    );
                     self.tree
                         .nodes
                         .get_mut(&(50 + i as u64))
@@ -4322,7 +4479,7 @@ impl Panels {
                     caption,
                     10. * self.ui_scale,
                     clip.y + row as f64 * (24. * self.ui_scale) - self.side_scroll.offset
-                        + (18. * self.ui_scale),
+                        + (17. * self.ui_scale),
                     clip,
                 );
             }
@@ -4362,40 +4519,30 @@ impl Panels {
                         icon,
                         Rect {
                             x: (10. * self.ui_scale),
-                            y: node.rect.y + (5. * self.ui_scale),
-                            width: (14. * self.ui_scale),
-                            height: (14. * self.ui_scale),
+                            y: node.rect.y + (4. * self.ui_scale),
+                            width: (16. * self.ui_scale),
+                            height: (16. * self.ui_scale),
                         },
                         clip,
                         label_style.foreground,
                     );
                 }
-                theme.text(
+                let badge = tab
+                    .path
+                    .as_deref()
+                    .and_then(|p| workspace.git.badge(p, false));
+                let label_end =
+                    self.paint_badge(&mut theme, &mut layer, settings, badge, node.rect, clip);
+                let label_x = (34. * self.ui_scale) + f64::from(label_style.margin.left);
+                theme.text_fit(
                     &mut layer,
                     &label_style,
                     &tab.label(),
-                    (30. * self.ui_scale) + f64::from(label_style.margin.left),
-                    node.rect.y + (18. * self.ui_scale),
-                    Rect {
-                        width: (clip.width - (30. * self.ui_scale)).max(0.),
-                        ..clip
-                    },
+                    label_x,
+                    node.rect.y + (17. * self.ui_scale),
+                    label_end - label_x,
+                    clip,
                 );
-                if let Some(badge) = tab
-                    .path
-                    .as_deref()
-                    .and_then(|p| workspace.git.badge(p, false))
-                {
-                    let badge_style = style(id, Some("vcs_status_badge"), &mut theme);
-                    theme.text(
-                        &mut layer,
-                        &badge_style,
-                        crate::git_ui::badge_text(badge).0,
-                        clip.width - (24. * self.ui_scale),
-                        node.rect.y + (18. * self.ui_scale),
-                        clip,
-                    );
-                }
             }
             let base = open_file_count(workspace) + 2;
             for i in visible.start.saturating_sub(base)
@@ -4421,65 +4568,36 @@ impl Panels {
                         .to_string_lossy()
                         .into_owned()
                 };
+                // 16-DIP disclosure and icon columns; a child's disclosure sits under its
+                // parent's icon, and files reserve the disclosure column so siblings align.
                 let x = (10. * self.ui_scale) + row.depth as f64 * (16. * self.ui_scale);
+                let icon_rect = Rect {
+                    x: x + (16. * self.ui_scale),
+                    y: node.rect.y + (4. * self.ui_scale),
+                    width: (16. * self.ui_scale),
+                    height: (16. * self.ui_scale),
+                };
                 if row.directory {
                     let disclosure = style(id, Some("disclosure_button_control"), &mut theme);
-                    theme.surface(
-                        &mut layer,
-                        &disclosure,
-                        Rect {
-                            x,
-                            y: node.rect.y + (6. * self.ui_scale),
-                            width: (12. * self.ui_scale),
-                            height: (12. * self.ui_scale),
-                        },
-                        clip,
-                    );
+                    theme.icon_surface(&mut layer, &disclosure, Rect { x, ..icon_rect }, clip);
                     let folder = style(id, Some("icon_folder"), &mut theme);
-                    theme.surface(
-                        &mut layer,
-                        &folder,
-                        Rect {
-                            x: x + (14. * self.ui_scale),
-                            y: node.rect.y + (5. * self.ui_scale),
-                            width: (14. * self.ui_scale),
-                            height: (14. * self.ui_scale),
-                        },
-                        clip,
-                    );
+                    theme.icon_surface(&mut layer, &folder, icon_rect, clip);
                 } else if let Some(icon) = workspace.themes.file_icon(&row.path) {
-                    theme.icon(
-                        &mut layer,
-                        icon,
-                        Rect {
-                            x: x + (14. * self.ui_scale),
-                            y: node.rect.y + (5. * self.ui_scale),
-                            width: (14. * self.ui_scale),
-                            height: (14. * self.ui_scale),
-                        },
-                        clip,
-                        text.foreground,
-                    );
+                    theme.icon(&mut layer, icon, icon_rect, clip, text.foreground);
                 }
-                theme.text(
+                let badge = workspace.git.badge(&row.path, row.directory);
+                let label_end =
+                    self.paint_badge(&mut theme, &mut layer, settings, badge, node.rect, clip);
+                let label_x = x + (36. * self.ui_scale);
+                theme.text_fit(
                     &mut layer,
                     &text,
                     &name,
-                    x + (32. * self.ui_scale),
-                    node.rect.y + (18. * self.ui_scale),
+                    label_x,
+                    node.rect.y + (17. * self.ui_scale),
+                    label_end - label_x,
                     clip,
                 );
-                if let Some(badge) = workspace.git.badge(&row.path, row.directory) {
-                    let badge_style = style(id, Some("vcs_status_badge"), &mut theme);
-                    theme.text(
-                        &mut layer,
-                        &badge_style,
-                        crate::git_ui::badge_text(badge).0,
-                        clip.width - (24. * self.ui_scale),
-                        node.rect.y + (18. * self.ui_scale),
-                        clip,
-                    );
-                }
             }
         }
         if let Some(panel) = self.panel {
@@ -4520,7 +4638,7 @@ impl Panels {
                             vel_theme::Element::new("quick_panel_row", attrs),
                         ];
                         let row_style = theme.style(
-                            0xB000 + row as u64,
+                            StyleId::ResultRow.at(row as u64),
                             &vel_theme::ElementPath(&path),
                             settings,
                         );
@@ -4568,18 +4686,21 @@ impl Panels {
                         2 => &mut self.where_input,
                         _ => &mut self.query,
                     };
-                    theme.text(
-                        &mut layer,
-                        &text_style,
-                        if panel == Panel::Input {
-                            &self.input_caption
-                        } else {
-                            ["Find", "Replace", "Where"][i]
-                        },
-                        clip.x + (8. * self.ui_scale),
-                        input.bounds.y + (20. * self.ui_scale),
-                        clip,
-                    );
+                    // No label column in very narrow panels (see `find_label_column`).
+                    if input.bounds.x - clip.x >= 64. * self.ui_scale {
+                        theme.text(
+                            &mut layer,
+                            &text_style,
+                            if panel == Panel::Input {
+                                &self.input_caption
+                            } else {
+                                ["Find", "Replace", "Where"][i]
+                            },
+                            clip.x + (8. * self.ui_scale),
+                            input.bounds.y + (20. * self.ui_scale),
+                            clip,
+                        );
+                    }
                     let input_style = style(20 + i as u64, None, &mut theme);
                     paint_themed_input(
                         &theme,
@@ -4590,81 +4711,89 @@ impl Panels {
                     );
                 }
                 if panel != Panel::Input {
-                    for (i, caption) in [".*", "Aa", "Word", "Wrap", "Selection", "Preserve"]
-                        .into_iter()
-                        .enumerate()
+                    // Icon-only toggles (names are exposed to accessibility); the icon
+                    // takes the accent colour while the option is on.
+                    for (i, icon_class) in [
+                        "icon_regex",
+                        "icon_case",
+                        "icon_whole_word",
+                        "icon_wrap",
+                        "icon_in_selection",
+                        "icon_preserve_case",
+                    ]
+                    .into_iter()
+                    .enumerate()
                     {
                         let id = 30 + i as u64;
-                        let node = &self.tree.nodes[&id];
+                        let Some(node) = self.tree.nodes.get(&id).filter(|n| n.visible) else {
+                            continue;
+                        };
                         let button = style(id, None, &mut theme);
                         theme.surface(&mut layer, &button, node.rect, clip);
-                        let icon = style(
-                            id,
-                            Some(
-                                [
-                                    "icon_regex",
-                                    "icon_case",
-                                    "icon_whole_word",
-                                    "icon_wrap",
-                                    "icon_in_selection",
-                                    "icon_preserve_case",
-                                ][i],
-                            ),
-                            &mut theme,
-                        );
-                        theme.surface(
-                            &mut layer,
-                            &icon,
-                            Rect {
-                                x: node.rect.x + (4. * self.ui_scale),
-                                y: node.rect.y + (3. * self.ui_scale),
-                                width: (14. * self.ui_scale),
-                                height: (14. * self.ui_scale),
-                            },
-                            node.rect,
-                        );
-                        theme.text(
-                            &mut layer,
-                            &button,
-                            caption,
-                            node.rect.x + (22. * self.ui_scale),
-                            node.rect.y + (15. * self.ui_scale),
-                            node.rect,
-                        );
+                        let icon = style(id, Some(icon_class), &mut theme);
+                        theme.icon_surface(&mut layer, &icon, node.rect, node.rect);
                     }
                     for id in 50..50 + Self::panel_buttons(panel).len() as u64 {
                         let node = &self.tree.nodes[&id];
                         let button = style(id, None, &mut theme);
                         theme.surface(&mut layer, &button, node.rect, clip);
+                        let width = theme.advance(&button, &node.label);
                         theme.text(
                             &mut layer,
                             &button,
                             &node.label,
-                            node.rect.x + (7. * self.ui_scale),
-                            node.rect.y + (16. * self.ui_scale),
+                            (node.rect.x + (node.rect.width - width) / 2.).round(),
+                            node.rect.y + node.rect.height / 2. + 4. * self.ui_scale,
                             node.rect,
                         );
                     }
                     if let Some(node) = self.tree.nodes.get(&CLOSE_ID).filter(|n| n.visible) {
-                        let rect = node.rect;
-                        let button = style(CLOSE_ID, None, &mut theme);
-                        theme.surface(&mut layer, &button, rect, clip);
-                        theme.text(
-                            &mut layer,
-                            &button,
-                            "\u{d7}",
-                            rect.x + (6. * self.ui_scale),
-                            rect.y + (16. * self.ui_scale),
-                            rect,
+                        // A plain close glyph with a hover wash, not a filled button.
+                        let attributes: Vec<&str> = node.attributes.iter().copied().collect();
+                        let close = theme.style(
+                            StyleId::FindClose.at(0),
+                            &vel_theme::ElementPath(&[
+                                vel_theme::Element::new("window", &[]),
+                                vel_theme::Element::new("panel_control", &[]),
+                                vel_theme::Element::new("panel_close_button", &attributes),
+                            ]),
+                            settings,
                         );
+                        theme.icon_surface(&mut layer, &close, node.rect, clip);
                     }
-                    theme.text(
+                    let message_style = if self.find_error.is_some() {
+                        self.tree.style_child(
+                            2,
+                            Some("label_control"),
+                            &["invalid"],
+                            &mut theme,
+                            settings,
+                        )
+                    } else {
+                        text_style.clone()
+                    };
+                    let message_clip = self.panel_message_clip();
+                    let message_clip = if self.message_in_find_panel() {
+                        message_clip
+                    } else {
+                        // Too short to read: the status bar shows the message instead.
+                        Rect::default()
+                    };
+                    // Multi-line errors (regex diagnostics) are shown on one line. The text is
+                    // the find status (counts, active restrictions) or the panel message.
+                    let message = self
+                        .panel_status_message(workspace)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    theme.text_fit(
                         &mut layer,
-                        &text_style,
-                        self.panel_status_message(workspace),
-                        clip.x + (8. * self.ui_scale),
-                        clip.y + clip.height - (8. * self.ui_scale),
-                        self.panel_message_clip(panel),
+                        &message_style,
+                        &message,
+                        message_clip.x,
+                        message_clip.y + message_clip.height / 2. + 4. * self.ui_scale,
+                        message_clip.width,
+                        message_clip,
                     );
                 }
             }
@@ -4701,7 +4830,8 @@ impl Panels {
             theme.text(
                 &mut layer,
                 &text,
-                &if self.status_message(workspace).is_empty() {
+                // The find panels show their own message; do not repeat it here.
+                &if self.status_message(workspace).is_empty() || self.message_in_find_panel() {
                     format!(
                         "{}{}{}",
                         document_hint,
@@ -4738,11 +4868,24 @@ impl Panels {
                 && let Some(git) = tab.path.as_deref().and_then(|p| workspace.git.status(p))
             {
                 let git_style = style(4, Some("vcs_status"), &mut theme);
+                let x = (status.width - (595. * self.ui_scale)).max(10. * self.ui_scale);
+                let branch = style(4, Some("vcs_branch_icon"), &mut theme);
+                theme.icon_surface(
+                    &mut layer,
+                    &branch,
+                    Rect {
+                        x,
+                        y: status.y + 4. * self.ui_scale,
+                        width: 16. * self.ui_scale,
+                        height: 16. * self.ui_scale,
+                    },
+                    status,
+                );
                 theme.text(
                     &mut layer,
                     &git_style,
                     git,
-                    (status.width - (595. * self.ui_scale)).max(10. * self.ui_scale),
+                    x + 20. * self.ui_scale,
                     status.y + (17. * self.ui_scale),
                     Rect {
                         x: (status.width - (600. * self.ui_scale)).max(0.),
@@ -4842,6 +4985,33 @@ impl Panels {
         if self.overlay.is_some() {
             let mut theme = workspace.themes.ui.borrow_mut();
             let mut overlay = Layer::default();
+            // The floating overlay container (background, border, shadow) holds the quick
+            // panel; its shadow may extend past the panel, so clip to the window.
+            let window = Rect {
+                x: 0.,
+                y: 0.,
+                width: self.size.width,
+                height: self.size.height,
+            };
+            let container = theme.style(
+                StyleId::OverlayContainer.at(0),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new(
+                        match self.overlay {
+                            Some(Overlay::Palette) => "overlay_control command_palette",
+                            Some(Overlay::Goto) => "overlay_control goto_file",
+                            Some(Overlay::ProjectSymbols) => {
+                                "overlay_control goto_symbol_in_project"
+                            }
+                            _ => "overlay_control",
+                        },
+                        &[],
+                    ),
+                ]),
+                settings,
+            );
+            theme.surface(&mut overlay, &container, self.quick_bounds, window);
             let panel = self.tree.style(1, None, &mut theme, settings);
             theme.surface(&mut overlay, &panel, self.quick_bounds, self.quick_bounds);
             let input_style = self.tree.style(10, None, &mut theme, settings);
@@ -4854,10 +5024,16 @@ impl Panels {
             );
             let rows = Rect {
                 x: self.quick_bounds.x,
-                y: self.quick_bounds.y + (46. * self.ui_scale),
+                y: self.quick_list_top(),
                 width: self.quick_bounds.width,
                 height: self.quick.scroll.viewport,
             };
+            let s = self.ui_scale;
+            // Command lists show a caption and key binding only (the command name is not
+            // for users); kind badges appear where kinds differ (files, symbols).
+            let compact = self.quick_compact();
+            let badges = !compact && self.overlay != Some(Overlay::Appearance);
+            let row_height = self.quick.scroll.row_height / s;
             for row in self.quick.scroll.visible() {
                 let item = &self.quick.items[row];
                 let id = (1 << 40) + item.value as u64 * 5;
@@ -4867,82 +5043,139 @@ impl Panels {
                 let caption = self
                     .tree
                     .style(id, Some("quick_panel_label"), &mut theme, settings);
-                theme.text(
-                    &mut overlay,
-                    &caption,
-                    &item.caption,
-                    rect.x + (30. * self.ui_scale),
-                    rect.y + (18. * self.ui_scale),
-                    rows,
-                );
-                for (byte, c) in item
-                    .caption
-                    .char_indices()
-                    .filter(|(i, _)| item.highlights.contains(i))
-                {
-                    let mut matched = caption.clone();
-                    matched.foreground = matched.matched;
-                    theme.text(
-                        &mut overlay,
-                        &matched,
-                        &c.to_string(),
-                        rect.x
-                            + (30. * self.ui_scale)
-                            + theme.advance(&caption, &item.caption[..byte]),
-                        rect.y + (18. * self.ui_scale),
-                        rows,
-                    );
-                }
-                let kind = self.tree.style(
-                    id,
-                    Some(match item.kind.as_str() {
-                        "function" | "symbol" => "kind_container kind_function",
-                        "command" => "kind_container kind_keyword",
-                        _ => "kind_container kind_navigation",
-                    }),
-                    &mut theme,
-                    settings,
-                );
-                let badge = Rect {
-                    x: rect.x + (7. * self.ui_scale),
-                    y: rect.y + (6. * self.ui_scale),
-                    width: (16. * self.ui_scale),
-                    height: (16. * self.ui_scale),
-                };
-                theme.surface(&mut overlay, &kind, badge, rows);
-                theme.text(
-                    &mut overlay,
-                    &kind,
-                    &item.kind.chars().next().unwrap_or('·').to_string(),
-                    badge.x + (3. * self.ui_scale),
-                    badge.y + (12. * self.ui_scale),
-                    rows,
-                );
-                if self.overlay == Some(Overlay::Goto)
-                    && let Some(icon) = workspace.themes.file_icon(Path::new(&item.details))
-                {
-                    theme.icon(&mut overlay, icon, badge, rows, caption.foreground);
-                }
                 let hint =
                     self.tree
                         .style(id, Some("quick_panel_label hint"), &mut theme, settings);
+                let annotation = mac_key_equivalents(&item.annotation);
+                let annotation_width = theme.advance(&hint, &annotation);
+                let text_x = rect.x + if badges { 36. } else { 12. } * s;
+                // Rows without a details line centre their caption and badge vertically.
+                let show_details = !compact && !item.details.is_empty();
+                let baseline = rect.y
+                    + if show_details {
+                        19.
+                    } else {
+                        row_height / 2. + 4.
+                    } * s;
+                let caption_end = if item.annotation.is_empty() {
+                    rect.x + rect.width - 12. * s
+                } else {
+                    rect.x + rect.width - annotation_width - 24. * s
+                };
+                if item.highlights.is_empty() {
+                    theme.text_fit(
+                        &mut overlay,
+                        &caption,
+                        &item.caption,
+                        text_x,
+                        baseline,
+                        caption_end - text_x,
+                        rows,
+                    );
+                } else {
+                    // Matched characters are separate runs in the match colour; each glyph
+                    // is drawn once, never overprinted on the unmatched caption.
+                    let mut matched = caption.clone();
+                    matched.foreground = matched.matched;
+                    let clip = Rect {
+                        width: (caption_end - rows.x).max(0.),
+                        ..rows
+                    };
+                    let mut runs = Vec::new();
+                    let mut start = 0;
+                    let mut highlighted = item.highlights.contains(&0);
+                    for (byte, _) in item.caption.char_indices().skip(1) {
+                        let next = item.highlights.contains(&byte);
+                        if next != highlighted {
+                            runs.push((start, byte, highlighted));
+                            start = byte;
+                            highlighted = next;
+                        }
+                    }
+                    runs.push((start, item.caption.len(), highlighted));
+                    for (start, end, highlighted) in runs {
+                        theme.text(
+                            &mut overlay,
+                            if highlighted { &matched } else { &caption },
+                            &item.caption[start..end],
+                            text_x + theme.advance(&caption, &item.caption[..start]),
+                            baseline,
+                            clip,
+                        );
+                    }
+                }
+                let badge = Rect {
+                    x: rect.x + 10. * s,
+                    y: rect.y
+                        + if show_details {
+                            6.
+                        } else {
+                            (row_height - 18.) / 2.
+                        } * s,
+                    width: 18. * s,
+                    height: 18. * s,
+                };
+                let file_icon = (self.overlay == Some(Overlay::Goto) && item.kind == "file")
+                    .then(|| workspace.themes.file_icon(Path::new(&item.details)))
+                    .flatten();
+                if badges && let Some(icon) = file_icon {
+                    theme.icon(
+                        &mut overlay,
+                        icon,
+                        Rect {
+                            x: badge.x + 1. * s,
+                            y: badge.y + 1. * s,
+                            width: 16. * s,
+                            height: 16. * s,
+                        },
+                        rows,
+                        hint.foreground,
+                    );
+                } else if badges {
+                    let kind_class = match item.kind.as_str() {
+                        "function" | "symbol" => "kind_container kind_function",
+                        "command" => "kind_container kind_keyword",
+                        _ => "kind_container kind_navigation",
+                    };
+                    let kind = self.tree.style(id, Some(kind_class), &mut theme, settings);
+                    theme.surface(&mut overlay, &kind, badge, rows);
+                    let letter = item.kind.chars().next().unwrap_or('·').to_string();
+                    let label = theme.style(
+                        StyleId::OverlayKindLabel.at(row as u64),
+                        &vel_theme::ElementPath(&[
+                            vel_theme::Element::new("window", &[]),
+                            vel_theme::Element::new(kind_class, &[]),
+                            vel_theme::Element::new("kind_label", &[]),
+                        ]),
+                        settings,
+                    );
+                    let width = theme.advance(&label, &letter);
+                    theme.text(
+                        &mut overlay,
+                        &label,
+                        &letter,
+                        (badge.x + (badge.width - width) / 2.).round(),
+                        badge.y + 13. * s,
+                        vel_ui::minihtml::intersection(badge, rows),
+                    );
+                }
                 theme.text(
                     &mut overlay,
                     &hint,
-                    &item.annotation,
-                    (rect.x + rect.width
-                        - theme.advance(&hint, &item.annotation)
-                        - (12. * self.ui_scale))
-                        .max(rect.x + (30. * self.ui_scale)),
-                    rect.y + (18. * self.ui_scale),
+                    &annotation,
+                    (rect.x + rect.width - annotation_width - 12. * s).max(text_x),
+                    baseline,
                     rows,
                 );
+                if !show_details {
+                    continue;
+                }
                 let detail =
                     self.tree
                         .style(id, Some("quick_panel_detail_label"), &mut theme, settings);
                 // Inline minihtml follows the engine's restricted details mode.
                 let options = vel_minihtml::LayoutOptions {
-                    max_width: (rect.width - (42. * self.ui_scale)).max(1.) as f32,
+                    max_width: (rect.width - 48. * s).max(1.) as f32,
                     root_font_size: detail.size,
                     palette: {
                         let mut palette = theme.palette.clone();
@@ -4971,27 +5204,31 @@ impl Panels {
                         scene,
                         vel_ui::minihtml::intersection(
                             Rect {
-                                x: rect.x + (30. * self.ui_scale),
-                                y: rect.y + (23. * self.ui_scale),
-                                width: rect.width - (42. * self.ui_scale),
-                                height: (20. * self.ui_scale),
+                                x: text_x,
+                                y: rect.y + 24. * s,
+                                width: rect.width - 48. * s,
+                                height: (19. * s),
                             },
                             rows,
                         ),
                     );
                 }
             }
-            theme.text(
-                &mut overlay,
-                &panel,
-                self.overlay_footer(),
-                rows.x + (8. * self.ui_scale),
-                self.quick_bounds.y + self.quick_bounds.height - (8. * self.ui_scale),
-                self.quick_bounds,
-            );
+            if !self.quick_tight {
+                let footer = hint_footer(&mut theme, settings);
+                theme.text(
+                    &mut overlay,
+                    &footer,
+                    self.overlay_footer(),
+                    rows.x + (12. * self.ui_scale),
+                    self.quick_bounds.y + self.quick_bounds.height - (9. * self.ui_scale),
+                    self.quick_bounds,
+                );
+            }
             scene.layers.push(overlay);
         }
         self.paint_hover(workspace, scene);
+        self.refresh_tooltip(workspace);
         self.review_paint(workspace, self.size, scene);
         if theme_animating {
             workspace.themes.ui.borrow_mut().request_animation();
@@ -5021,11 +5258,12 @@ impl Panels {
                 self.quick_input.click(point.x, extend);
             } else if down
                 && contains(self.quick_bounds, point)
-                && point.y >= self.quick_bounds.y + (46. * self.ui_scale)
+                && point.y >= self.quick_list_top()
+                && point.y < self.quick_list_top() + self.quick.scroll.viewport
             {
-                let row = ((point.y - self.quick_bounds.y - (46. * self.ui_scale)
-                    + self.quick.scroll.offset)
-                    / (44. * self.ui_scale)) as usize;
+                // Only the visible list selects; the footer below it is inert.
+                let row = ((point.y - self.quick_list_top() + self.quick.scroll.offset)
+                    / self.quick.scroll.row_height.max(1.)) as usize;
                 if row < self.quick.items.len() {
                     self.quick.selected = row;
                     self.preview_current(workspace)?;
@@ -5879,15 +6117,62 @@ impl Panels {
             self.review.tooltip = None;
             return;
         }
-        let text = if self.side_visible && point.x >= self.side_bounds.width - 32. {
+        let text = self.tooltip_text(workspace, point);
+        if self.review.tooltip.as_ref().map(|(t, _, _)| t) != text.as_ref() {
+            self.review.tooltip = text.map(|t| (t, point, Instant::now()));
+        }
+    }
+    /// Tool tip for the find-panel control or side-bar Git badge under the pointer.
+    fn tooltip_text(&self, workspace: &Workspace, point: Point) -> Option<String> {
+        if let Some(tip) = self.panel_tooltip(workspace, point) {
+            Some(tip)
+        } else if self.side_visible && point.x >= self.side_bounds.width - 32. {
             self.review_side_path(workspace, point)
                 .and_then(|(path, folder)| workspace.git.badge(&path, folder))
                 .map(|b| crate::git_ui::badge_text(b).1.to_owned())
         } else {
             None
+        }
+    }
+    /// Keeps a shown tool tip true to the current state: an option toggled by its shortcut
+    /// updates the text, a closed panel removes it, without waiting for a pointer move.
+    fn refresh_tooltip(&mut self, workspace: &Workspace) {
+        let Some((text, point, _)) = &self.review.tooltip else {
+            return;
         };
-        if self.review.tooltip.as_ref().map(|(t, _, _)| t) != text.as_ref() {
-            self.review.tooltip = text.map(|t| (t, point, Instant::now()));
+        // Recompute only when the control under the pointer or an option changed.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.tree.hit_test(*point).hash(&mut h);
+            format!("{:?}", self.panel).hash(&mut h);
+            (
+                self.options.regex,
+                self.options.case_sensitive,
+                self.options.whole_word,
+                self.options.wrap,
+                self.in_selection,
+                self.options.preserve_case,
+            )
+                .hash(&mut h);
+            text.hash(&mut h);
+            h.finish()
+        };
+        if key == self.tooltip_key {
+            return;
+        }
+        self.tooltip_key = key;
+        let Some((text, point, _)) = &self.review.tooltip else {
+            return;
+        };
+        match self.tooltip_text(workspace, *point) {
+            None => self.review.tooltip = None,
+            Some(fresh) if fresh != *text => {
+                if let Some(tooltip) = &mut self.review.tooltip {
+                    tooltip.0 = fresh;
+                }
+            }
+            Some(_) => {}
         }
     }
 }
@@ -6009,7 +6294,10 @@ impl Panels {
             self.hover_bounds = Rect::default();
             return;
         }
-        let mut source = String::new();
+        // Compact headings: the default h3 margins made a two-entry popup taller than the view.
+        let mut source = String::from(
+            "<style>body{margin:0}h3{font-size:0.85rem;margin:6px 0 2px 0;color:color(var(--foreground) alpha(0.6))}div{margin:2px 0}</style>",
+        );
         for (i, location) in self.hover.iter().take(16).enumerate() {
             if i == 0 && self.hover_definitions > 0 {
                 source.push_str("<h3>Definitions</h3>");
@@ -6069,7 +6357,7 @@ impl Panels {
             node.rect = rect;
             node.visible = true;
             let style = theme.style(
-                9001,
+                StyleId::HoverPopup.at(0),
                 &vel_theme::ElementPath(&[
                     vel_theme::Element::new("window", &[]),
                     vel_theme::Element::new("popup_control html_popup", &[]),
@@ -6080,8 +6368,113 @@ impl Panels {
             theme.surface(&mut layer, &style, rect, viewport);
             scene.layers.push(layer);
             popup.html.paint(scene, rect);
+            // The html background covers the surface; keep the popup's edge visible.
+            let mut edge = Layer::default();
+            theme.border(&mut edge, &style, rect, viewport);
+            scene.layers.push(edge);
         }
     }
+}
+impl Panels {
+    /// Paints a side-bar Git badge right-aligned in its status colour and returns the x at
+    /// which the row's label must end (ellipsized) so the two never overlap.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_badge(
+        &self,
+        theme: &mut vel_ui::theme::ThemeUi,
+        layer: &mut Layer,
+        settings: &vel_config::settings::Settings,
+        badge: Option<vel_git::Badge>,
+        row: Rect,
+        clip: Rect,
+    ) -> f64 {
+        let right = clip.x + clip.width - 10. * self.ui_scale;
+        let Some(badge) = badge else {
+            return right;
+        };
+        let text = crate::git_ui::badge_text(badge).0;
+        if text.is_empty() {
+            return right;
+        }
+        use vel_git::Badge::*;
+        let (index, attribute) = match badge {
+            Ignored => (0, "ignored"),
+            Untracked => (1, "untracked"),
+            Modified => (2, "modified"),
+            Missing => (3, "missing"),
+            StagedAddition => (4, "added"),
+            StagedModification => (5, "staged"),
+            StagedDeletion => (6, "deleted"),
+            Unmerged => (7, "unmerged"),
+        };
+        // Badge colours depend only on the status: one cached style per status.
+        let style = theme.style(
+            StyleId::GitBadge.at(index),
+            &vel_theme::ElementPath(&[
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("sidebar_container", &[]),
+                vel_theme::Element::new("vcs_status_badge", &[attribute]),
+            ]),
+            settings,
+        );
+        let width = theme.advance(&style, text);
+        let x = right - width;
+        theme.text(layer, &style, text, x, row.y + 17. * self.ui_scale, clip);
+        x - 6. * self.ui_scale
+    }
+}
+/// Shows key binding hints ("Ctrl+Shift+Cmd+F, Cmd+B") the way macOS menus do ("⌃⇧⌘F ⌘B").
+/// Display only; anything that is not a binding is returned unchanged.
+fn mac_key_equivalents(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('+') {
+        return text.into();
+    }
+    let mut out = Vec::new();
+    for chord in text.split(", ") {
+        let mut parts: Vec<&str> = chord.split('+').collect();
+        let Some(key) = parts.pop().filter(|k| !k.is_empty()) else {
+            return text.into();
+        };
+        let mut symbols = String::new();
+        for (name, symbol) in [("Ctrl", '⌃'), ("Alt", '⌥'), ("Shift", '⇧'), ("Cmd", '⌘')] {
+            if parts.contains(&name) {
+                symbols.push(symbol);
+            }
+        }
+        if symbols.chars().count() != parts.len() {
+            return text.into();
+        }
+        symbols.push_str(match key {
+            "UP" => "↑",
+            "DOWN" => "↓",
+            "LEFT" => "←",
+            "RIGHT" => "→",
+            "ENTER" => "↩",
+            "TAB" => "⇥",
+            "ESCAPE" => "⎋",
+            "BACKSPACE" => "⌫",
+            "DELETE" => "⌦",
+            "SPACE" => "Space",
+            other => other,
+        });
+        out.push(symbols);
+    }
+    out.join(" ").into()
+}
+/// Secondary text style for the overlay footer.
+fn hint_footer(
+    theme: &mut vel_ui::theme::ThemeUi,
+    settings: &vel_config::settings::Settings,
+) -> vel_ui::theme::Style {
+    theme.style(
+        StyleId::OverlayFooter.at(0),
+        &vel_theme::ElementPath(&[
+            vel_theme::Element::new("window", &[]),
+            vel_theme::Element::new("overlay_control", &[]),
+            vel_theme::Element::new("quick_panel_label hint", &[]),
+        ]),
+        settings,
+    )
 }
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")

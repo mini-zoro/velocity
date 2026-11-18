@@ -59,6 +59,16 @@ impl GitUi {
         }
         changed
     }
+    /// Publishes a status snapshot without a repository service (developer scene renderer).
+    #[cfg(target_os = "macos")]
+    pub fn insert_snapshot(&mut self, snapshot: StatusSnapshot) {
+        self.enabled = true;
+        self.labels
+            .insert(snapshot.root.clone(), status_label(&snapshot));
+        self.snapshots
+            .insert(snapshot.root.clone(), Arc::new(snapshot));
+        self.badges.borrow_mut().clear();
+    }
     pub fn snapshot(&self, path: &Path) -> Option<&StatusSnapshot> {
         self.snapshots
             .values()

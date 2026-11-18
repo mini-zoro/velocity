@@ -1,4 +1,5 @@
-//! Every compiled color property, including the sheet modifier, frozen on main 99d1bb4.
+//! Every compiled color property, including the sheet modifier; refreshed for the round-1
+//! design audit (docs/design/ui-audit-r1.md).
 use super::*;
 
 #[test]
@@ -39,5 +40,9 @@ fn shipped_theme_compiled_colors_stay_identical() {
     }
     let actual = serde_json::to_string(&colors).unwrap() + "\n";
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/resource-colors.json");
+    // Deliberate theme changes regenerate the fixture, like the other structural goldens.
+    if std::env::var_os("VEL_UPDATE_GOLDENS").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap());
 }

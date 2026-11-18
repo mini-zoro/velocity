@@ -581,6 +581,42 @@ const BUNDLED: &[(&str, &[u8])] = &[
         include_bytes!("../resources/Packages/Theme - Velocity/file@3x.png"),
     ),
     (
+        "edge-bottom.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-bottom.png"),
+    ),
+    (
+        "edge-bottom@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-bottom@2x.png"),
+    ),
+    (
+        "edge-bottom@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-bottom@3x.png"),
+    ),
+    (
+        "edge-right.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-right.png"),
+    ),
+    (
+        "edge-right@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-right@2x.png"),
+    ),
+    (
+        "edge-right@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-right@3x.png"),
+    ),
+    (
+        "edge-top.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-top.png"),
+    ),
+    (
+        "edge-top@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-top@2x.png"),
+    ),
+    (
+        "edge-top@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/edge-top@3x.png"),
+    ),
+    (
         "folder.png",
         include_bytes!("../resources/Packages/Theme - Velocity/folder.png"),
     ),
@@ -699,6 +735,30 @@ const BUNDLED: &[(&str, &[u8])] = &[
     (
         "whole-word@3x.png",
         include_bytes!("../resources/Packages/Theme - Velocity/whole-word@3x.png"),
+    ),
+    (
+        "tab-divider.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-divider.png"),
+    ),
+    (
+        "tab-divider@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-divider@2x.png"),
+    ),
+    (
+        "tab-divider@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-divider@3x.png"),
+    ),
+    (
+        "tab-indicator.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator.png"),
+    ),
+    (
+        "tab-indicator@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator@2x.png"),
+    ),
+    (
+        "tab-indicator@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator@3x.png"),
     ),
     (
         "wrap.png",

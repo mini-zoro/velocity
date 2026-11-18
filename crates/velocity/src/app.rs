@@ -6,6 +6,8 @@ mod accessibility_adapter;
 mod context_adapter;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
+#[path = "render_scenes.rs"]
+pub(crate) mod render_scenes;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_status.rs"]
@@ -101,6 +103,11 @@ pub struct App {
     visible_view_keys: Vec<(u64, u64, u64, usize)>,
     visible_view_scratch: Vec<(u64, u64, u64, usize)>,
     tab_close_hits: Vec<(u64, Rect)>,
+    /// Pointer-hovered tab close button and tab-bar button, for their theme hover states.
+    hovered_close: Option<u64>,
+    hovered_tab_button: Option<(usize, &'static str)>,
+    /// Per group, the focused sheet whose tab was last scrolled into view.
+    revealed_tabs: Vec<Option<u64>>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
     /// Text selection gesture between a press in the text area and its release.
     drag_select: Option<crate::mouse_select::DragSelect>,
@@ -273,6 +280,9 @@ impl App {
             visible_view_keys: Vec::new(),
             visible_view_scratch: Vec::new(),
             tab_close_hits: Vec::new(),
+            hovered_close: None,
+            hovered_tab_button: None,
+            revealed_tabs: Vec::new(),
             dragging_splitter: None,
             drag_select: None,
             drag_text: None,
@@ -2275,7 +2285,7 @@ impl App {
         let mut chrome = SceneLayer::default();
         let mut exact = true;
         let tabset_style = self.workspace.themes.ui.borrow_mut().style(
-            0xDFFF,
+            crate::panels::StyleId::TabSet.at(0),
             &vel_theme::ElementPath(&[
                 vel_theme::Element::new("window", &[]),
                 vel_theme::Element::new("tabset_control", &[]),
@@ -2447,7 +2457,7 @@ impl App {
                     vel_theme::Element::new("tabset_control", &[]),
                 ];
                 let bar_style = theme.style(
-                    0xD000 + group_index as u64,
+                    crate::panels::StyleId::TabBar.at(group_index as u64),
                     &vel_theme::ElementPath(&bar_path),
                     &self.workspace.editor().settings,
                 );
@@ -2473,7 +2483,22 @@ impl App {
                 };
                 let max_scroll = (group.sheets.len() as f64 * tab_width - bar.width).max(0.);
                 self.tab_bars.push((group_index, bar, max_scroll));
-                let scroll = group.tab_scroll.clamp(0., max_scroll);
+                let mut scroll = group.tab_scroll.clamp(0., max_scroll);
+                // When a group's focused sheet changes, scroll its tab into view once;
+                // later wheel or button scrolling is left alone.
+                if self.revealed_tabs.len() <= group_index {
+                    self.revealed_tabs.resize(group_index + 1, None);
+                }
+                if let Some(target) = group.focused
+                    && self.revealed_tabs[group_index] != Some(target)
+                    && let Some(position) = group.sheets.iter().position(|s| *s == target)
+                {
+                    let left = position as f64 * tab_width;
+                    let wanted = scroll.min(left).max(left + tab_width - bar.width);
+                    scroll = wanted.clamp(0., max_scroll);
+                    self.workspace.workbench.groups[group_index].tab_scroll = scroll;
+                    self.revealed_tabs[group_index] = Some(target);
+                }
                 for (position, sheet) in group.sheets.iter().enumerate() {
                     let Some(index) = self.workspace.sheet_index(*sheet) else {
                         continue;
@@ -2546,25 +2571,48 @@ impl App {
                         ),
                     ];
                     let label = theme.style(
-                        0xD100 + *sheet,
+                        crate::panels::StyleId::TabLabel.at(*sheet),
                         &vel_theme::ElementPath(&label_path),
                         settings,
                     );
-                    if let Some(icon) = tab
+                    let icon = tab
                         .path
                         .as_deref()
-                        .and_then(|p| self.workspace.themes.file_icon(p))
-                    {
+                        .and_then(|p| self.workspace.themes.file_icon(p));
+                    let narrow = rect.width < 48.;
+                    // Close buttons follow show_tab_close_buttons; narrow fitted tabs keep
+                    // their entire target for selecting the tab.
+                    let close_left = tab_style.close_left;
+                    let close_rect = Rect {
+                        x: if close_left {
+                            rect.x + 6.
+                        } else {
+                            rect.x + rect.width - 26.
+                        },
+                        y: rect.y + ((rect.height - 20.) / 2.).round(),
+                        width: 20.,
+                        height: 20.,
+                    };
+                    // The close button exists only where it is entirely visible: tabs clipped
+                    // by the strip edge (or the scroll / new-tab buttons) get no target there.
+                    let has_close = settings.bool("show_tab_close_buttons", true)
+                        && rect.width >= 28.
+                        && close_rect.x >= hit.x
+                        && close_rect.x + close_rect.width <= hit.x + hit.width;
+                    let close_left = has_close && close_left;
+                    // A 16-DIP file icon, a label that ends before the close button, and a
+                    // 20-DIP close target; all vertically centred in the tab.
+                    if let Some(icon) = icon.filter(|_| !narrow) {
                         theme.icon(
                             &mut chrome,
                             icon,
                             Rect {
-                                x: rect.x + if tab_style.close_left { 26. } else { 8. },
-                                y: rect.y + 8.,
-                                width: 14.,
-                                height: 14.,
+                                x: rect.x + if close_left { 30. } else { 10. },
+                                y: rect.y + ((rect.height - 16.) / 2.).round(),
+                                width: 16.,
+                                height: 16.,
                             },
-                            bar,
+                            hit,
                             label.foreground,
                         );
                     }
@@ -2575,53 +2623,75 @@ impl App {
                             read.saturating_mul(100) / total.max(1)
                         )
                     } else {
-                        tab.label()
+                        // A drawn close button shows the dirty dot; tabs without one draw
+                        // the bullet themselves (below) so truncation never hides it.
+                        let label = tab.label();
+                        label
+                            .strip_suffix(" •")
+                            .map_or(label.clone(), str::to_owned)
                     };
-                    let label_offset = if rect.width < 48. {
-                        4.
-                    } else if tab_style.close_left {
-                        46.
+                    let bullet = !has_close && tab.dirty() && tab.progress().is_none();
+                    let label_x = rect.x
+                        + if close_left {
+                            30.
+                        } else if narrow {
+                            4.
+                        } else {
+                            10.
+                        }
+                        + if icon.is_some() && !narrow { 22. } else { 2. };
+                    // Labels (and a dirty bullet) end inside the visible part of the tab.
+                    let label_end = (rect.x + rect.width).min(hit.x + hit.width)
+                        - if has_close && !close_left {
+                            30.
+                        } else if narrow {
+                            2.
+                        } else {
+                            10.
+                        };
+                    let baseline = rect.y + f64::from(label.size) + 8. * self.panels.ui_scale;
+                    let label_clip = Rect {
+                        width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
+                        ..rect
+                    };
+                    let label_end = if bullet {
+                        let width = theme.advance(&label, "•");
+                        let x = (label_end - width).max(hit.x + 1.);
+                        theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
+                        x - 3.
                     } else {
-                        28.
+                        label_end
                     };
-                    theme.text(
+                    theme.text_fit(
                         &mut chrome,
                         &label,
                         &caption,
-                        rect.x + label_offset,
-                        rect.y + f64::from(label.size) + 8. * self.panels.ui_scale,
-                        Rect {
-                            width: (rect.width - if rect.width < 48. { 2. } else { 30. })
-                                .max(0.)
-                                .min(bar.x + bar.width - rect.x),
-                            ..rect
-                        },
+                        label_x,
+                        baseline,
+                        label_end - label_x,
+                        label_clip,
                     );
                     let close_path = [
                         path[0],
                         path[1],
                         path[2],
-                        vel_theme::Element::new("tab_close_button", &[]),
+                        vel_theme::Element::new(
+                            "tab_close_button",
+                            if self.hovered_close == Some(*sheet) {
+                                &["hover"]
+                            } else {
+                                &[]
+                            },
+                        ),
                     ];
                     let close = theme.style(
-                        0xD200 + *sheet,
+                        crate::panels::StyleId::TabClose.at(*sheet),
                         &vel_theme::ElementPath(&close_path),
                         settings,
                     );
-                    let close_rect = Rect {
-                        x: if tab_style.close_left {
-                            rect.x + 6.
-                        } else {
-                            rect.x + rect.width - 20.
-                        },
-                        y: rect.y + (rect.height - 12.) / 2.,
-                        width: 12.,
-                        height: 12.,
-                    };
-                    // Narrow fitted tabs keep their entire target for selecting the tab.
-                    if rect.width >= 28. {
+                    if has_close {
                         self.tab_close_hits.push((*sheet, close_rect));
-                        theme.surface(&mut chrome, &close, close_rect, hit);
+                        theme.icon_surface(&mut chrome, &close, close_rect, hit);
                     }
                     drop(theme);
                     let id = 100 + *sheet;
@@ -2661,7 +2731,7 @@ impl App {
                             vel_theme::Element::new("tab_connector", &["selected"]),
                         ];
                         let style = theme.style(
-                            0xD300 + *sheet,
+                            crate::panels::StyleId::TabConnector.at(*sheet),
                             &vel_theme::ElementPath(&path),
                             &self.workspace.editor().settings,
                         );
@@ -2681,8 +2751,45 @@ impl App {
                 }
             }
         }
-        for (_, divider) in self.workspace.workbench.layout.dividers(bounds, 2.) {
-            vel_ui::fill(&mut chrome, divider, bounds, [0.28, 0.3, 0.35, 1.]);
+        // Group and Split View dividers use the theme's grid border (a 1-DIP hairline);
+        // splitter hit testing keeps its own tolerance and is unaffected.
+        let grid = self.workspace.themes.ui.borrow_mut().style(
+            crate::panels::StyleId::GroupDivider.at(0),
+            &vel_theme::ElementPath(&[
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("grid_layout_control", &[]),
+            ]),
+            &self.workspace.editor().settings,
+        );
+        let (color, thickness) = grid.border().map_or(([0.28, 0.3, 0.35, 1.], 1.), |(c, w)| {
+            (c, f64::from(w.max(1.)))
+        });
+        for (_, divider) in self.workspace.workbench.layout.dividers(bounds, thickness) {
+            vel_ui::fill(&mut chrome, divider, bounds, color);
+        }
+        for (group_index, group) in groups.iter().enumerate() {
+            let visible = group.visible();
+            if visible.len() < 2 {
+                continue;
+            }
+            let Some(area) = self.group_bounds.get(group_index).copied() else {
+                continue;
+            };
+            let top = area.y + if show_tabs { tab_height } else { 0. };
+            for position in 1..visible.len() {
+                let x = area.x + position as f64 * area.width / visible.len() as f64;
+                vel_ui::fill(
+                    &mut chrome,
+                    Rect {
+                        x: x - thickness / 2.,
+                        y: top,
+                        width: thickness,
+                        height: (area.y + area.height - top).max(0.),
+                    },
+                    bounds,
+                    color,
+                );
+            }
         }
         let _ = self.workspace.prepare_sheet(active);
         self.sync_workspace_after_panels();
@@ -2710,7 +2817,7 @@ impl App {
             return;
         }
         let style = self.workspace.themes.ui.borrow_mut().style(
-            0xDFFE,
+            crate::panels::StyleId::TitleBar.at(0),
             &vel_theme::ElementPath(&[
                 vel_theme::Element::new("window", &[]),
                 vel_theme::Element::new("title_bar", &[]),

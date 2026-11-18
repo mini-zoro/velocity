@@ -1,5 +1,5 @@
 //! Cached theme resolution, finite transitions and CPU/GPU-independent widget painting.
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use vel_config::settings::Settings;
 use vel_platform::Rect;
 use vel_render::{
@@ -250,6 +250,12 @@ impl Prepared {
         }
     }
 }
+impl StyleData {
+    /// Theme border colour and width in logical points, when the element draws one.
+    pub fn border(&self) -> Option<(scene::Color, f32)> {
+        self.border.map(|c| (c, self.border_size))
+    }
+}
 impl Style {
     /// Multiplies all paint channels for a finite caller-owned fade.
     pub fn multiply_opacity(&mut self, alpha: f32) {
@@ -277,7 +283,7 @@ pub struct ThemeUi {
     pub revision: u64,
     /// Minihtml metrics; native fonts are explicitly enabled by the application at window startup.
     pub metrics: std::rc::Rc<crate::minihtml::Metrics>,
-    textures: HashMap<String, [Option<Texture>; 3]>,
+    textures: fnv::FnvHashMap<String, [Option<Texture>; 3]>,
     /// Target backing density; decoded variants are selected without frame-path I/O.
     pub density: f32,
     accessibility: vel_platform::accessibility::Preferences,
@@ -292,6 +298,8 @@ pub struct ThemeUi {
     now: Instant,
     origin: Instant,
     active: bool,
+    /// Ellipsized labels by (text, width, font): None when the label fits as is.
+    fitted: std::cell::RefCell<fnv::FnvHashMap<u64, Option<Arc<str>>>>,
 }
 /// Worker-prepared theme paint data. Native font metrics and live widget caches stay local.
 #[derive(Debug)]
@@ -301,7 +309,7 @@ pub struct PreparedUi {
     scheme_color: Color,
     accent_color: Color,
     palette: Palette,
-    textures: HashMap<String, [Option<Texture>; 3]>,
+    textures: fnv::FnvHashMap<String, [Option<Texture>; 3]>,
     setting_keys: Option<Vec<String>>,
     revision: u64,
 }
@@ -333,7 +341,7 @@ impl ThemeUi {
             palette,
             revision: 0,
             metrics: std::rc::Rc::new(Default::default()),
-            textures: HashMap::new(),
+            textures: Default::default(),
             density: 1.,
             accessibility: Default::default(),
             states: Default::default(),
@@ -347,6 +355,7 @@ impl ThemeUi {
             now,
             origin: now,
             active: false,
+            fitted: Default::default(),
         }
     }
     /// Moves compiled themes and decoded textures across a worker boundary. No native objects move.
@@ -775,25 +784,91 @@ impl ThemeUi {
                 fill(layer, rect, paint.color);
             }
         }
-        if let Some(color) = style.border {
-            let b = f64::from(style.border_size);
-            for r in [
-                Rect { height: b, ..rect },
-                Rect {
-                    y: rect.y + rect.height - b,
-                    height: b,
-                    ..rect
-                },
-                Rect { width: b, ..rect },
-                Rect {
-                    x: rect.x + rect.width - b,
-                    width: b,
-                    ..rect
-                },
-            ] {
-                fill(layer, r, color);
-            }
+        self.border(layer, style, rect, clip);
+    }
+    /// Paints only the theme border. Rounded containers use one CSS box so corners follow
+    /// the radius; hosts may repaint it above content that covers the surface (popups).
+    pub fn border(&self, layer: &mut Layer, style: &Style, rect: Rect, clip: Rect) {
+        let Some(color) = style.border.filter(|c| c[3] > 0.) else {
+            return;
+        };
+        let edge = scene::BorderEdge {
+            width: style.border_size,
+            color,
+        };
+        layer.surfaces.push(Surface::CssBox(scene::CssBox {
+            rect,
+            clip,
+            background: [0.; 4],
+            radii: [style.radius; 4],
+            borders: [edge; 4],
+        }));
+    }
+    /// Paints an icon-like element in `rect`: solid layers fill the whole rect (hover and
+    /// pressed backgrounds), while plain textures keep their intrinsic size, centered and
+    /// snapped to device pixels instead of being stretched. Nine-sliced layers still stretch.
+    pub fn icon_surface(&self, layer: &mut Layer, style: &Style, rect: Rect, clip: Rect) {
+        let fill = |layer: &mut Layer, color| {
+            layer.surfaces.push(Surface::Fill(SolidRect {
+                rect,
+                clip,
+                color,
+                radius: style.radius,
+            }))
+        };
+        if let Some(color) = style.background {
+            fill(layer, color);
         }
+        for paint in style.layers.iter().take(style.layer_count) {
+            if paint.color[3] <= 0. {
+                continue;
+            }
+            let Some(resource) = &paint.texture else {
+                fill(layer, paint.color);
+                continue;
+            };
+            let Some(texture) = self.texture(resource) else {
+                continue;
+            };
+            let sliced = paint.slices.iter().any(|m| *m > 0.);
+            let target = if sliced {
+                rect
+            } else {
+                let density = f64::from(texture.density.max(1.));
+                let ui = f64::from(style.scale.max(0.01));
+                let natural = (
+                    f64::from(texture.image.width) / density * ui,
+                    f64::from(texture.image.height) / density * ui,
+                );
+                let fit = (rect.width / natural.0)
+                    .min(rect.height / natural.1)
+                    .min(1.);
+                let (width, height) = (natural.0 * fit, natural.1 * fit);
+                let device = f64::from(self.density.max(1.));
+                let snap = |v: f64| (v * device).round() / device;
+                Rect {
+                    x: snap(rect.x + (rect.width - width) / 2.),
+                    y: snap(rect.y + (rect.height - height) / 2.),
+                    width,
+                    height,
+                }
+            };
+            nine_slice::paint(
+                layer,
+                &texture.image,
+                target,
+                clip,
+                paint.color,
+                Slices {
+                    density: texture.density,
+                    scale: style.scale,
+                    margins: paint.slices,
+                    center: paint.center,
+                    repeat: paint.repeat,
+                },
+            );
+        }
+        self.border(layer, style, rect, clip);
     }
     /// Measures a UI label through the exact shaping provider used by minihtml and painting.
     pub fn advance(&self, style: &Style, text: &str) -> f64 {
@@ -811,6 +886,86 @@ impl ThemeUi {
             color: Color::rgb(0, 0, 0),
         };
         f64::from(self.metrics.measure(text, &font).advance)
+    }
+    /// Paints a label no wider than `max_width`, replacing the clipped tail with an ellipsis
+    /// instead of cutting a glyph in half. Labels that fit are painted unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_fit(
+        &self,
+        layer: &mut Layer,
+        style: &Style,
+        text: &str,
+        x: f64,
+        baseline: f64,
+        max_width: f64,
+        clip: Rect,
+    ) {
+        if max_width <= 0. {
+            return;
+        }
+        // UI glyphs (including colour emoji) stay below 1.4 em, so short labels fit unmeasured.
+        let bound = text.chars().count() as f64 * f64::from(style.size) * 1.4;
+        if text.len() <= 2 || bound <= max_width {
+            self.text(layer, style, text, x, baseline, clip);
+            return;
+        }
+        // Labels are painted every frame; remember each fitting decision.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = fnv::FnvHasher::default();
+            text.hash(&mut h);
+            max_width.to_bits().hash(&mut h);
+            style.family.hash(&mut h);
+            style.size.to_bits().hash(&mut h);
+            (style.font.bold, style.font.italic).hash(&mut h);
+            (std::rc::Rc::as_ptr(&self.metrics) as usize).hash(&mut h);
+            self.metrics.native_enabled().hash(&mut h);
+            h.finish()
+        };
+        let cached = self.fitted.borrow().get(&key).cloned();
+        let shown = match cached {
+            Some(shown) => shown,
+            None => {
+                let shown = self.fit(style, text, max_width);
+                let mut fitted = self.fitted.borrow_mut();
+                if fitted.len() >= 2048 {
+                    fitted.clear();
+                }
+                fitted.insert(key, shown.clone());
+                shown
+            }
+        };
+        self.text(
+            layer,
+            style,
+            shown.as_deref().unwrap_or(text),
+            x,
+            baseline,
+            clip,
+        );
+    }
+    /// The ellipsized form of `text` that fits `max_width`, or None if it fits as is.
+    fn fit(&self, style: &Style, text: &str, max_width: f64) -> Option<Arc<str>> {
+        if self.advance(style, text) <= max_width {
+            return None;
+        }
+        // Largest char-boundary prefix whose ellipsized form fits; O(log n) measurements.
+        let bounds: Vec<usize> = text.char_indices().map(|(i, _)| i).skip(1).collect();
+        let (mut low, mut high) = (0, bounds.len());
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            let candidate = format!("{}\u{2026}", text[..bounds[mid - 1]].trim_end());
+            if self.advance(style, &candidate) <= max_width {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        Some(if low == 0 {
+            Arc::from("\u{2026}")
+        } else {
+            Arc::from(format!("{}\u{2026}", text[..bounds[low - 1]].trim_end()))
+        })
     }
     /// Paints a theme-styled label at an explicit baseline, retaining its clipping geometry.
     pub fn text(

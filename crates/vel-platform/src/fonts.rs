@@ -183,10 +183,17 @@ fn system_face(primary: &str, text: &str) -> Option<FontDescriptor> {
     #[cfg(target_os = "macos")]
     {
         use objc2_core_foundation::{CFRange, CFString, CFURL};
-        use objc2_core_text::{CTFont, CTFontDescriptor, kCTFontURLAttribute};
-        // SAFETY: strings and the in-bounds UTF-16 range outlive the call.
-        let primary =
-            unsafe { CTFont::with_name(&CFString::from_str(primary), 13., std::ptr::null()) };
+        use objc2_core_text::{CTFont, CTFontDescriptor, CTFontUIFontType, kCTFontURLAttribute};
+        // Private system faces (".SFNS-Regular", ".AppleSystemUIFont") must not round-trip
+        // through CTFontCreateWithName: CoreText substitutes Times New Roman, and the whole
+        // fallback cascade (CJK, symbols) would then come from a serif family.
+        let primary = if primary.starts_with('.') || matches!(primary, "system" | "system-ui") {
+            // SAFETY: the system UI type, positive size and default language are valid.
+            unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, 13., None) }?
+        } else {
+            // SAFETY: strings and the in-bounds UTF-16 range outlive the call.
+            unsafe { CTFont::with_name(&CFString::from_str(primary), 13., std::ptr::null()) }
+        };
         // SAFETY: the retained font/string and its in-bounds UTF-16 range are valid.
         let mut font = unsafe {
             primary.for_string(

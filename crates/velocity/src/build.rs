@@ -149,31 +149,7 @@ impl Builds {
                 }
             }
         }
-        // UI retention is bounded too when the consumer keeps up with the producer.
-        const LIMIT: usize = 8 * 1024 * 1024;
-        const NOTICE: &str = "[output truncated]\n";
-        if panels.output.len() > LIMIT {
-            let cut = panels.output.len() - (6 * 1024 * 1024 - NOTICE.len());
-            let at = panels.output.as_bytes()[cut..]
-                .iter()
-                .position(|b| *b == b'\n')
-                .map_or(panels.output.len(), |n| cut + n + 1);
-            self.discard_partial_line = at == panels.output.len() && !panels.output.ends_with('\n');
-            let lines = panels.output[..at].bytes().filter(|b| *b == b'\n').count();
-            panels.output.replace_range(..at, NOTICE);
-            self.discarded_lines += lines.saturating_sub(usize::from(self.retention_notice));
-            self.retention_notice = true;
-            panels.output_reset = true;
-            panels.build_output_offset = panels.build_output_offset.saturating_sub(lines);
-            self.diagnostics.retain(|d| d.output_line >= lines);
-            for d in &mut self.diagnostics {
-                d.output_line = d.output_line - lines + 1;
-            }
-            panels.build_results.retain(|(row, _)| *row >= lines);
-            for (row, _) in &mut panels.build_results {
-                *row = *row - lines + 1;
-            }
-        }
+        self.retain_output(panels);
         // Parsing/counting happens before transport retention. Skipping 400 MB of
         // replay therefore preserves the total count and the retained result rows.
         if let Some(results) = self
@@ -226,6 +202,34 @@ impl Builds {
             let n = self.diagnostics.len() - 32_768;
             self.diagnostics.drain(..n);
             panels.build_results.drain(..n);
+        }
+    }
+    /// UI retention is bounded too when the consumer keeps up with the producer.
+    fn retain_output(&mut self, panels: &mut Panels) {
+        const LIMIT: usize = 8 * 1024 * 1024;
+        const NOTICE: &str = "[output truncated]\n";
+        if panels.output.len() > LIMIT {
+            let cut = panels.output.len() - (6 * 1024 * 1024 - NOTICE.len());
+            let at = panels.output.as_bytes()[cut..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(panels.output.len(), |n| cut + n + 1);
+            self.discard_partial_line = at == panels.output.len() && !panels.output.ends_with('\n');
+            let lines = panels.output[..at].bytes().filter(|b| *b == b'\n').count();
+            panels.output.replace_range(..at, NOTICE);
+            self.discarded_lines += lines.saturating_sub(usize::from(self.retention_notice));
+            self.retention_notice = true;
+            // The output view drops the same prefix instead of re-inserting megabytes.
+            panels.trim_output_prefix(at, NOTICE.len());
+            panels.build_output_offset = panels.build_output_offset.saturating_sub(lines);
+            self.diagnostics.retain(|d| d.output_line >= lines);
+            for d in &mut self.diagnostics {
+                d.output_line = d.output_line - lines + 1;
+            }
+            panels.build_results.retain(|(row, _)| *row >= lines);
+            for (row, _) in &mut panels.build_results {
+                *row = *row - lines + 1;
+            }
         }
     }
     fn append_output(&mut self, panels: &mut Panels, text: &str) {
@@ -479,4 +483,111 @@ fn finish_line_with_signal(
         ),
     };
     format!("\n[Finished in {duration}{suffix}]\n")
+}
+
+#[cfg(test)]
+mod output_mirror_tests {
+    use super::*;
+    use crate::panels::Panel;
+    use std::time::Duration;
+    /// CPU time of the calling thread: frame cost without scheduler noise on a busy machine.
+    fn thread_cpu() -> Duration {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes one timespec for a valid clock id.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+    /// Streams `total` bytes of build output through retention trimming and the output view,
+    /// one producer chunk per frame, then drains; `restart` starts a new build half way.
+    /// Returns per-frame main-thread CPU time (poll + layout + paint, as the native loop does).
+    fn stream(total: usize, wrap: bool, restart: bool) -> Vec<Duration> {
+        let mut workspace =
+            Workspace::new(vel_text::Text::new(), None, None, false).expect("workspace");
+        let mut panels = Panels::new(&workspace, false);
+        panels.configure_output(&workspace, None, wrap);
+        panels.panel = Some(Panel::Output);
+        let size = vel_platform::Size {
+            width: 1200.,
+            height: 800.,
+        };
+        let mut builds = Builds::default();
+        let mut produced = 0;
+        let mut frames = Vec::new();
+        let mut line = 0usize;
+        let mut restarted = !restart;
+        let mut next_long = 1 << 20;
+        let mut long_lines = 0;
+        for _ in 0..10_000 {
+            if !restarted && produced >= total / 2 {
+                // What `Builds::start` does for a new build (no process needed here).
+                restarted = true;
+                panels.configure_output(&workspace, None, wrap);
+                panels.output.clear();
+                panels.output_reset = true;
+                builds = Builds::default();
+            }
+            if produced < total {
+                let mut chunk = String::new();
+                if produced >= next_long {
+                    next_long += 3 << 20;
+                    // An occasional 20 KB line (minified output, long paths) must not
+                    // flip the view's large-document policy either.
+                    chunk.push_str(&"long-line ".repeat(2_000));
+                    chunk.push('\n');
+                    long_lines += 1;
+                }
+                while chunk.len() < 96 * 1024 {
+                    chunk.push_str(&format!(
+                        "{line:>8} awk generated output line {}\n",
+                        "x".repeat(line % 140)
+                    ));
+                    line += 1;
+                }
+                produced += chunk.len();
+                builds.append_output(&mut panels, &chunk);
+                builds.retain_output(&mut panels);
+            } else if !panels.busy() {
+                break;
+            }
+            let at = thread_cpu();
+            panels.poll(&mut workspace, 0..0);
+            panels.layout(size);
+            panels.paint(&workspace, &mut vel_render::scene::Scene::default());
+            frames.push(thread_cpu() - at);
+        }
+        assert!(long_lines >= 2);
+        let editor = panels.output_editor.as_ref().expect("output view");
+        assert!(panels.output.len() <= 8 * 1024 * 1024);
+        assert_eq!(editor.text.to_string(), panels.output, "mirror diverged");
+        frames
+    }
+    #[test]
+    fn trimmed_build_output_is_mirrored_exactly_and_incrementally() {
+        for wrap in [false, true] {
+            let frames = stream(12 * 1024 * 1024, wrap, false);
+            assert!(frames.len() > 10);
+        }
+        stream(6 * 1024 * 1024, true, true);
+    }
+    /// `cargo test --release -p velocity output_mirror -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing; run on an idle machine"]
+    fn large_build_output_frames_stay_short() {
+        for (wrap, restart) in [(false, false), (true, false), (true, true)] {
+            let frames = stream(20 * 1024 * 1024, wrap, restart);
+            let slowest = frames.iter().max().copied().unwrap_or_default();
+            let slow = frames
+                .iter()
+                .filter(|f| **f > Duration::from_millis(16))
+                .count();
+            eprintln!(
+                "wrap={wrap} restart={restart}: {} frames, slowest {slowest:?}, {slow} over 16 ms",
+                frames.len()
+            );
+            assert!(slowest < Duration::from_millis(16), "{slowest:?}");
+        }
+    }
 }

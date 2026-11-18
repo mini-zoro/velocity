@@ -2,20 +2,22 @@
 {
   "extends": "Velocity.sublime-theme",
   "variables": {
-    "surface": "#f5f7f8",
-    "raised": "#e9eff2",
+    "surface": "#e8e6df",
+    "overlay": "#fcfbf8",
     "inset": "#ffffff",
     "fg": "#243843",
-    "muted": "#627984",
-    "accent": "#236c98",
-    "selected": "#d6e7f1",
-    "border": "#9fb5c0",
-    "green": "#397127",
-    "amber": "#875c13",
-    "red": "#b13b37",
-    "violet": "#71509d",
-    "teal": "#27766b",
-    "rose": "#9c476a"
+    "muted": "#51626b",
+    "accent": "#1d6290",
+    "line": "#cdcbc5",
+    "border": "#b9bdb4",
+    "shadow": "#0000002e",
+    "green": "#3a6b22",
+    "amber": "#7d540d",
+    "red": "#a8332f",
+    "violet": "#6a4597",
+    "teal": "#1f6b60",
+    "rose": "#8d3d61",
+    "selected": "#c3ced1"
   },
   "rules": [
     {
