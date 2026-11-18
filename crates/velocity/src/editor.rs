@@ -74,6 +74,8 @@ pub struct Editor {
     pub snippet_path: Option<std::path::PathBuf>,
     pub language: crate::language::LanguageCell,
     pub layout: RefCell<crate::layout::Layout>,
+    // Keep this status-only cache out of the fields touched by scene painting.
+    pub(crate) status_column: Box<RefCell<vel_ui::status::ColumnCache>>,
     selector_snapshots: RefCell<
         Vec<(
             vel_buffer::BufferId,
@@ -223,6 +225,7 @@ impl Editor {
             layout_version: vel_buffer::ChangeId(0),
             language: std::rc::Rc::new(RefCell::new(None)),
             layout: RefCell::new(crate::layout::Layout::default()),
+            status_column: Box::default(),
             selector_snapshots: RefCell::new(Vec::new()),
             selector_points: RefCell::default(),
             exact_scope_cache: RefCell::default(),

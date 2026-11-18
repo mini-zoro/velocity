@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": 20,
+      "path": "/private/tmp/a20v3-mainfix/utf16le_clean/doc.txt",
+      "disk": null,
+      "encoding": "UTF-8",
+      "bom": false,
+      "line_ending": "LF",
+      "dirty": false,
+      "history": null
+    }
+  ],
+  "windows": [
+    {
+      "project": null,
+      "folders": [],
+      "workbench": {
+        "layout": {
+          "cols": [
+            0.0,
+            1.0
+          ],
+          "rows": [
+            0.0,
+            1.0
+          ],
+          "cells": [
+            [
+              0,
+              0,
+              1,
+              1
+            ]
+          ]
+        },
+        "groups": [
+          {
+            "sheets": [
+              19
+            ],
+            "selected": [
+              19
+            ],
+            "focused": 19,
+            "anchor": 19,
+            "tab_scroll": 0.0
+          }
+        ],
+        "active": 0
+      },
+      "sheets": [
+        {
+          "id": 19,
+          "document": 20,
+          "view": {
+            "history_view": 16,
+            "selections": [
+              {
+                "a": 0,
+                "b": 0,
+                "xpos": null
+              }
+            ],
+            "primary": 0,
+            "scroll": [
+              0.0,
+              0.0
+            ],
+            "scroll_line": 0.0,
+            "folds": [],
+            "named_regions": {}
+          },
+          "syntax": null,
+          "transient": false
+        }
+      ],
+      "sidebar_visible": false,
+      "sidebar_expanded": [],
+      "sidebar_scroll": 0.0,
+      "find_history": [],
+      "replace_history": [],
+      "distraction_free": false,
+      "normal_ui": {},
+      "distraction_ui": {},
+      "normal_sidebar": null,
+      "distraction_sidebar": null,
+      "fullscreen_before_distraction": false,
+      "fullscreen": false,
+      "build_system": null
+    }
+  ],
+  "recent_files": [],
+  "recent_folders": [],
+  "recent_projects": []
+}

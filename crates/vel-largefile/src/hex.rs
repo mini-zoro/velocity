@@ -7,24 +7,91 @@ use std::{fs::File, io, path::Path};
 pub enum ContentKind {
     /// UTF-8 or an undecided, possibly incomplete UTF-8 suffix.
     Utf8,
-    /// UTF-16 BOM, or invalid UTF-8: use the encoding-aware full decoder.
+    /// UTF-16, or invalid UTF-8: use the encoding-aware full decoder.
     DecodeRequired,
-    /// NUL outside a UTF-16 BOM: offer a read-only hex view.
+    /// NUL outside recognizable UTF-16: offer a read-only hex view.
     Binary,
 }
 /// Detects BOMs before NULs; an incomplete last scalar is allowed in a sample.
 /// This is a text/binary heuristic, not a MIME classifier.
 pub fn detect_content(prefix: &[u8]) -> ContentKind {
+    let prefix = &prefix[..prefix.len().min(8192)];
     if prefix.starts_with(&[0xff, 0xfe]) || prefix.starts_with(&[0xfe, 0xff]) {
         return ContentKind::DecodeRequired;
     }
     if prefix.contains(&0) {
-        return ContentKind::Binary;
+        return if detect_utf16(prefix).is_some() {
+            ContentKind::DecodeRequired
+        } else {
+            ContentKind::Binary
+        };
     }
     match std::str::from_utf8(prefix) {
         Ok(_) => ContentKind::Utf8,
         Err(e) if e.error_len().is_none() => ContentKind::Utf8,
         Err(_) => ContentKind::DecodeRequired,
+    }
+}
+
+/// Conservatively scores both UTF-16 byte orders over at most 8 KiB.
+/// Pure CJK without ASCII/NUL evidence is ambiguous and deliberately not guessed.
+pub fn detect_utf16(prefix: &[u8]) -> Option<&'static str> {
+    // Automatic detection is documented, but the algorithm is our own:
+    // https://docs.sublimetext.io/reference/settings.html#system-and-miscellaneous-settings
+    let prefix = &prefix[..prefix.len().min(8192)];
+    if prefix.len() < 4 || !prefix.len().is_multiple_of(2) {
+        return None;
+    }
+    fn score(bytes: &[u8], le: bool) -> Option<usize> {
+        let unit = |p: &[u8]| {
+            if le {
+                u16::from_le_bytes([p[0], p[1]])
+            } else {
+                u16::from_be_bytes([p[0], p[1]])
+            }
+        };
+        let mut len = bytes.len();
+        // A bounded sample may stop between the two halves of a surrogate pair.
+        if (0xd800..=0xdbff).contains(&unit(&bytes[len - 2..])) {
+            len -= 2;
+        }
+        let mut ascii = 0;
+        let mut letters = 0;
+        let mut pairs = 0;
+        for scalar in char::decode_utf16(
+            bytes[..len]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| unit(pair)),
+        ) {
+            let ch = scalar.ok()?;
+            if ch.is_control() && !matches!(ch, '\t' | '\r' | '\n' | '\x0c') {
+                return None;
+            }
+            if ch.is_ascii_graphic() || matches!(ch, ' ' | '\t' | '\r' | '\n' | '\x0c') {
+                ascii += 1;
+            } else if ch as u32 > 0xffff {
+                pairs += 1;
+            } else if ch.is_alphabetic() {
+                letters += 1;
+            }
+        }
+        // ASCII code units and valid surrogate pairs provide byte-order evidence;
+        // BMP letters alone (CJK in either order) do not establish UTF-16.
+        if ascii < 2 && pairs < 2 {
+            return None;
+        }
+        Some(ascii * 8 + pairs * 6 + letters)
+    }
+    let le = score(prefix, true);
+    let be = score(prefix, false);
+    match (le, be) {
+        (Some(a), Some(b)) if a >= b + 4 && a * 4 >= b * 5 => Some("UTF-16LE"),
+        (Some(a), Some(b)) if b >= a + 4 && b * 4 >= a * 5 => Some("UTF-16BE"),
+        (Some(_), None) => Some("UTF-16LE"),
+        (None, Some(_)) => Some("UTF-16BE"),
+        _ => None,
     }
 }
 /// A borrowed hex row, including the actual byte count of a partial last row.

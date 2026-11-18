@@ -420,6 +420,15 @@ impl Buffer {
     pub fn set_history_limits(&mut self, mut limits: HistoryLimits) {
         limits.selection_entries = limits.selection_entries.max(256);
         self.limits = limits;
+        // Limit changes are rare; bound selection redo here without walking it
+        // on every typing transaction.
+        for view in self.views.values_mut() {
+            let excess = view
+                .soft_redo
+                .len()
+                .saturating_sub(limits.selection_entries);
+            view.soft_redo.drain(..excess);
+        }
         self.prune();
     }
     /// Current history limits.
@@ -466,9 +475,14 @@ impl Buffer {
     /// Marks restored or externally changed contents unsaved without manufacturing an edit.
     pub fn mark_unsaved(&mut self) {
         if !self.is_dirty() {
-            self.saved = self.next_state;
-            self.next_state = self.next_state.checked_add(1).expect("revision overflow");
+            self.invalidate_saved_revision();
         }
+    }
+    /// Invalidates the previous saved point after accepting a different disk revision.
+    /// No existing undo/redo state can become clean until a successful save.
+    pub fn invalidate_saved_revision(&mut self) {
+        self.saved = self.next_state;
+        self.next_state = self.next_state.checked_add(1).expect("revision overflow");
     }
     /// Whether a replacement leaves its old bytes intact. Insertions/deletions with different
     /// lengths take constant time; equal-length replacements compare only the affected slice.
@@ -541,7 +555,14 @@ impl Buffer {
         after.apply_edits(edits);
         new_selection.normalize();
         new_selection.reset_xpos();
-        validate_selection(&after, &new_selection);
+        // apply_edits has already validated every old endpoint. The end of each
+        // replacement is therefore a proven scalar boundary in the result. Most
+        // Unicode typing places exactly one caret there per edit; checking those
+        // coordinates avoids traversing a growing number of rope fragments.
+        if after.len_bytes() == after.len_chars() || !selection_at_edit_ends(&new_selection, edits)
+        {
+            validate_selection(&after, &new_selection);
+        }
         let run = typing_run(kind, edits, &self.view(id).settings, &before_selection);
         let merge = self.group_open
             && self
@@ -834,6 +855,7 @@ impl Buffer {
         Some(Selection::from_regions(r?).with_primary(s.primary_index()))
     }
     fn clear_redo(&mut self) {
+        let invalidated = !self.redo.is_empty();
         for g in self.redo.drain(..) {
             for s in g.steps {
                 self.retained -= s.bytes;
@@ -843,14 +865,17 @@ impl Buffer {
         }
         for v in self.views.values_mut() {
             v.soft_redo.clear();
-            v.soft.retain(|e| match e {
-                SoftEvent::Edit(s) => self.live.contains(&s.after_state),
-                _ => true,
-            });
+            if invalidated {
+                v.soft.retain(|e| match e {
+                    SoftEvent::Edit(s) => self.live.contains(&s.after_state),
+                    _ => true,
+                });
+            }
         }
     }
     fn prune(&mut self) {
         // ST-BEHAVIOR: unverified [H4]: count transactions, evict complete oldest groups; mark_saved breaks groups; stale soft events are skipped.
+        let mut evicted = false;
         while self.entries > self.limits.entries || self.retained > self.limits.bytes {
             let group = self.undo.pop_front().or_else(|| {
                 if self.redo.is_empty() {
@@ -862,6 +887,7 @@ impl Buffer {
             let Some(g) = group else {
                 break;
             };
+            evicted = true;
             for s in g.steps {
                 self.retained -= s.bytes;
                 self.entries -= 1;
@@ -869,17 +895,22 @@ impl Buffer {
             }
         }
         for v in self.views.values_mut() {
-            v.soft.retain(|e| match e {
-                SoftEvent::Edit(s) => self.live.contains(&s.after_state),
-                _ => true,
-            });
-            v.soft_redo.retain(|e| match e {
-                SoftEvent::Edit(s) => self
-                    .redo
-                    .iter()
-                    .any(|g| g.steps.iter().any(|x| Arc::ptr_eq(s, x))),
-                _ => true,
-            });
+            // Live edit events cannot become stale without eviction or redo
+            // invalidation. Avoid visiting the entire soft history on each key;
+            // selection-only redo is still cleared by every new transaction.
+            if evicted {
+                v.soft.retain(|e| match e {
+                    SoftEvent::Edit(s) => self.live.contains(&s.after_state),
+                    _ => true,
+                });
+                v.soft_redo.retain(|e| match e {
+                    SoftEvent::Edit(s) => self
+                        .redo
+                        .iter()
+                        .any(|g| g.steps.iter().any(|x| Arc::ptr_eq(s, x))),
+                    _ => true,
+                });
+            }
             while v.soft.len() > self.limits.selection_entries {
                 v.soft.pop_front();
             }
@@ -903,10 +934,43 @@ fn validate_region(text: &Text, r: Region) {
         "selection must be on scalar boundaries"
     );
 }
+fn selection_at_edit_ends(selection: &Selection, edits: &[Edit<'_>]) -> bool {
+    if selection.len() != edits.len() {
+        return false;
+    }
+    let mut old_end = 0;
+    let mut new_end = 0;
+    selection.iter().zip(edits).all(|(r, edit)| {
+        new_end += edit.range.start - old_end + edit.text.len();
+        old_end = edit.range.end;
+        r.empty() && r.b == new_end
+    })
+}
+
 fn validate_selection(text: &Text, s: &Selection) {
     if text.len_bytes() == text.len_chars() {
         for r in s.iter() {
             assert!(r.end() <= text.len_bytes(), "selection exceeds text");
+        }
+    } else if s.len() >= 128 && text.len_bytes() <= s.len().saturating_mul(4096) {
+        // Normalized selections have sorted, disjoint ranges. Walk borrowed
+        // chunks once for dense carets instead of two Unicode metric lookups per
+        // caret. Sparse selections still search the tree, even in huge files.
+        let mut chunks = text.chunks();
+        let mut chunk = chunks.next().unwrap_or("");
+        let mut start = 0;
+        for r in s.iter() {
+            assert!(r.end() <= text.len_bytes(), "selection exceeds text");
+            for byte in [r.begin(), r.end()] {
+                while byte > start + chunk.len() {
+                    start += chunk.len();
+                    chunk = chunks.next().expect("selection within text");
+                }
+                assert!(
+                    chunk.is_char_boundary(byte - start),
+                    "selection must be on scalar boundaries"
+                );
+            }
         }
     } else {
         for r in s.iter() {

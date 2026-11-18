@@ -28,11 +28,15 @@
   "word_separators": "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?",
   "ensure_newline_at_eof_on_save": false,
   "trim_trailing_white_space_on_save": false,
-  "trim_only_modified_white_space": false,
+  // Build 4107: https://www.sublimetext.com/download
+  "trim_only_modified_white_space": true,
   // "system" (LF on macOS), "unix" or "windows".
   "default_line_ending": "system",
   "default_encoding": "UTF-8",
   "fallback_encoding": "Western (Windows 1252)",
+  // Build 4107: opt out to ask before replacing even an unchanged buffer.
+  // https://www.sublimetext.com/download
+  "reload_file_on_change": true,
   "caret_style": "solid",
   // Public settings reference: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
   "highlight_line": false,

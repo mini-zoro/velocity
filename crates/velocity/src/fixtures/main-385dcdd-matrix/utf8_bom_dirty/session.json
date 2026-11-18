@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": 48,
+      "path": "/private/tmp/velocity-r20-model-review/generated-main/utf8_bom_dirty/doc.txt",
+      "disk": {
+        "bytes": 25,
+        "modified_ns": 1794990257790604713
+      },
+      "encoding": "UTF-8",
+      "bom": true,
+      "line_ending": "LF",
+      "dirty": true,
+      "history": {
+        "text": "main naïve ✓ café\n edited",
+        "snapshot": {
+          "version": 1,
+          "text_len": 29,
+          "text_hash": "707486508b87236d82acdef7c507f1d0088c101ce0b22a8d01932f8754a83aad",
+          "views": [
+            39
+          ],
+          "data": "eAEVSzcOg1AUs78i/S1jtkghjQQ+sNNPwAUoYoCBnY0ijsCReVhykWXvxSbgpvaCCqANRQh4PcVAE9SPvhvGviOlkwnv4pYfVL//0/ZC40dxulr56/1pvs7sJmU9Le2aXUAoIQDeAEnyJwwN9AFkPxCn"
+        }
+      }
+    }
+  ],
+  "windows": [
+    {
+      "project": null,
+      "folders": [],
+      "workbench": {
+        "layout": {
+          "cols": [
+            0.0,
+            1.0
+          ],
+          "rows": [
+            0.0,
+            1.0
+          ],
+          "cells": [
+            [
+              0,
+              0,
+              1,
+              1
+            ]
+          ]
+        },
+        "groups": [
+          {
+            "sheets": [
+              47
+            ],
+            "selected": [
+              47
+            ],
+            "focused": 47,
+            "anchor": 47,
+            "tab_scroll": 0.0
+          }
+        ],
+        "active": 0
+      },
+      "sheets": [
+        {
+          "id": 47,
+          "document": 48,
+          "view": {
+            "history_view": 39,
+            "selections": [
+              {
+                "a": 29,
+                "b": 29,
+                "xpos": null
+              }
+            ],
+            "primary": 0,
+            "scroll": [
+              0.0,
+              0.0
+            ],
+            "scroll_line": 0.0,
+            "folds": [],
+            "named_regions": {}
+          },
+          "syntax": null,
+          "transient": false
+        }
+      ],
+      "sidebar_visible": false,
+      "sidebar_expanded": [],
+      "sidebar_scroll": 0.0,
+      "find_history": [],
+      "replace_history": [],
+      "distraction_free": false,
+      "normal_ui": {},
+      "distraction_ui": {},
+      "normal_sidebar": null,
+      "distraction_sidebar": null,
+      "fullscreen_before_distraction": false,
+      "fullscreen": false,
+      "build_system": null
+    }
+  ],
+  "recent_files": [],
+  "recent_folders": [],
+  "recent_projects": []
+}

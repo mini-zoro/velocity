@@ -265,30 +265,65 @@ impl Editor {
             .as_ref()
             .map(|_| (self.buffer.id(), self.buffer.change_id()));
         if let Some(language) = self.language.borrow_mut().as_mut() {
+            // Pure insertions without newlines leave overview row coordinates
+            // valid. The guide row map is also identity. Retain both publications
+            // while their worker catches up:
+            // manufacturing provisional token widths scans growing line prefixes
+            // on every key (and at every sampled caret line with many carets).
+            // The worker receives the exact edit and publishes fresh geometry.
+            let overview = (old.len_lines() == self.buffer.text().len_lines()
+                && changes.changes().iter().all(|c| c.old_range.is_empty()))
+            .then(|| {
+                (
+                    std::mem::take(&mut language.minimap),
+                    std::mem::take(&mut language.guides),
+                )
+            });
             language.change(
                 self.buffer.text().clone(),
                 self.buffer.change_id(),
                 changes.clone(),
                 self.preferences.tab_size,
             );
+            if let Some((overview, guides)) = overview {
+                language.minimap = overview;
+                language.guides = guides;
+            }
         }
+        self.status_column.borrow_mut().change(
+            (self.buffer.id(), before_version),
+            (self.buffer.id(), self.buffer.change_id()),
+            &changes,
+        );
+        // A vi command can synchronize layout between its internal edits. Only
+        // reuse geometry belonging to the transaction's actual starting version.
+        self.layout
+            .borrow_mut()
+            .prepare_change((self.buffer.id(), before_version));
         self.layout.borrow_mut().change(
             &old,
             self.buffer.text(),
             (self.buffer.id(), self.buffer.change_id()),
             &changes,
         );
-        let mut shared = self.layout_edits.borrow_mut();
-        shared.push_back(crate::editor::SharedLayoutEdit {
-            buffer: self.buffer.id(),
-            from: before_version,
-            to: self.buffer.change_id(),
-            before: old,
-            after: self.buffer.text().clone(),
-            changes,
-        });
-        while shared.len() > 64 {
-            shared.pop_front();
+        // A sole view has already consumed this edit above. Retaining whole rope
+        // roots for 64 generations only forces copying and retiring growing text.
+        // Cloned/lazy views share this Rc and still need the bounded replay journal.
+        if std::rc::Rc::strong_count(&self.layout_edits) > 1 {
+            let mut shared = self.layout_edits.borrow_mut();
+            shared.push_back(crate::editor::SharedLayoutEdit {
+                buffer: self.buffer.id(),
+                from: before_version,
+                to: self.buffer.change_id(),
+                before: old,
+                after: self.buffer.text().clone(),
+                changes,
+            });
+            while shared.len() > 64 {
+                shared.pop_front();
+            }
+        } else {
+            self.layout_edits.borrow_mut().clear();
         }
         self.layout_version = self.buffer.change_id();
     }

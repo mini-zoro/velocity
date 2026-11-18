@@ -1311,7 +1311,7 @@ mod publication_tests {
         let selected = text(&mut p, &w);
         assert!(selected.contains("2 characters selected"));
         assert!(selected.contains("UTF-8"));
-        assert!(selected.contains(w.tabs[w.active].format.line_ending.name()));
+        assert!(selected.contains(w.tabs[w.active].format.line_ending.display_name()));
         p.set_message("Unable to find missing".into());
         assert!(text(&mut p, &w).contains("Unable to find missing"));
     }

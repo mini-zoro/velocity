@@ -536,6 +536,45 @@ fn invalid_transaction_is_atomic() {
     assert_eq!(b.change_id(), before);
     assert_eq!(b.text().to_string(), "中a");
 }
+
+#[test]
+fn dense_unicode_selection_validation_is_atomic() {
+    let source = "中x\n".repeat(256);
+    let (mut b, v) = setup(&source, &[(0, 0)]);
+    let before = b.change_id();
+    // The final endpoint splits the CJK scalar; all earlier endpoints are valid.
+    let invalid = Selection::from_regions(
+        (0..256).map(|row| Region::caret(row * 5 + if row == 255 { 1 } else { 0 })),
+    );
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.transact(v, EditKind::Other, &[], invalid);
+    }));
+    assert!(failed.is_err());
+    assert_eq!(b.change_id(), before);
+    assert_eq!(b.text().to_string(), source);
+    assert_eq!(b.history_entries(), 0);
+    let edits = (0..256)
+        .map(|row| Edit {
+            range: row * 5..row * 5,
+            text: "z",
+        })
+        .collect::<Vec<_>>();
+    let invalid = Selection::from_regions(
+        (0..256).map(|row| Region::caret(row * 6 + if row == 255 { 2 } else { 1 })),
+    );
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.transact(v, EditKind::InsertChars, &edits, invalid);
+    }));
+    assert!(failed.is_err());
+    assert_eq!(b.change_id(), before);
+    assert_eq!(b.text().to_string(), source);
+    assert_eq!(b.history_entries(), 0);
+    b.set_selection(
+        v,
+        Selection::from_regions((0..256).map(|row| Region::new(row * 5 + 3, row * 5))),
+    );
+    assert_eq!(b.view(v).sel().len(), 256);
+}
 #[test]
 fn change_ids_exclude_noops_and_include_undo_redo() {
     let (mut b, v) = setup("", &[(0, 0)]);

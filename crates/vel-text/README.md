@@ -39,7 +39,7 @@ assert_eq!(text.point_utf16_to_byte(PointUtf16 { row: 1, column: 0 }), 3);
 `estimated_storage_bytes()` 统计可达分配，包含共享原叶、容量和索引；不含 malloc
 额外记账及 size class 舍入，仅用于诊断。基准同时记录该估计和独立 load 的 RSS。
 
-生产配置：内部节点最多 32 个孩子，非根至少 16 个；叶子最多 6144 字节，通常至少
+生产配置：内部节点最多 32 个孩子，非根至少 16 个；普通叶子最多 6144 字节，通常至少
 3072 字节。装载目标为 4096 字节，给小插入保留大小上的余地；String 只分配实际
 装载容量，不为整个 6144 字节上限预留。UTF-8 分界允许最小占用少至三个字节。
 单孩子根会折叠，空树规范化为一个空叶子。单元测试使用 128 字节叶上限，在小输入
@@ -63,13 +63,19 @@ reader 不要求 Send 或 static；单核自动走串行，`from_reader_serial` 
 
 单叶编辑走专用路径：只复制共享路径与该叶，按删除/插入的 summary 差更新祖先；
 独占节点可原地复用。至多 32 字节的单个小替换保留原叶的 Arc，并内联新内容，
-零拷贝共享旧正文，最多提供三段 chunk。再次编辑该叶会压实，不形成编辑历史链。
+零拷贝共享旧正文，最多提供三段 chunk。相接的小插入会延长内联片段。
+重复插入或接近普通叶上限的插入，改用最多 128 个片段的编辑叶；每个片段缓存累计 summary，
+保留一个普通原叶及独立、不可变的插入字符串，不引用其他编辑叶。插入字符串最多
+6144 字节，编辑叶总计最多 24576 字节；超限、复杂替换和删除回退到普通叶重建。
+同一批次的相同插入和续写共享字符串，避免为每个光标复制增长的行前缀。
+复制只涉及命中的树路径、有界叶元数据和新插入内容；分裂/压实成本摊销到该叶的编辑。
 Arc 引用计数保留在小型节点分配内，与正文页分开。跨叶替换和批量编辑走统一的有序遍历。
 
 `apply_edits` 要求原文坐标、start 升序、区间不重叠；允许相接及同位置多次插入，
 同位置按输入顺序拼接。先验证全部区间和 UTF-8 边界，错误时不改变正文；Unicode
 边界检查也是一次有序树遍历。正文修改再遍历一次，只进入受影响子树，在每个受影响
-叶中处理所有编辑：单个小替换用内联表示，其余一次拼接。
+叶中处理所有编辑：小替换用内联表示，连续插入复用片段，其他情况一次拼接。
+边界验证只查询 UTF-8 字节，不为每个端点重新计算 scalar/UTF-16 汇总。
 批量路径缓存同一插入字符串的 scalar/UTF-16/LF 汇总，纯插入不扫描空删除片段。跨叶删除跳过完整子树，未触及节点保持共享。树形不变时复用
 孩子数组；仅在分裂/删除/占用不足时重组并修复相邻节点。复杂度取决于编辑数、触及
 的树路径与被复制的叶内容；不会为每个光标分别搜索和修改整条路径。
@@ -94,6 +100,8 @@ cargo clippy -p vel-text --all-targets -- -D warnings
 cargo test -p vel-text
 cargo test -p vel-text --release
 cargo test -p vel-text --no-default-features
+# 2,048 seeds × 24 batches, all coordinates and retained snapshots:
+cargo test -p vel-text --release batch_string_model_and_immutable_snapshots_over_2048_seeds
 RUSTDOCFLAGS='-D warnings' cargo doc -p vel-text --no-deps
 cargo bench -p vel-text --bench perf -- --runs 5 > crates/vel-text/perf-final.jsonl
 python3 crates/vel-text/benches/report.py crates/vel-text/perf-final.jsonl
@@ -113,6 +121,10 @@ batch 相对同一实现的收益。
 unavailable，不伪造负载数字。macOS 的 ru_maxrss 单位是字节；Linux 换算自 KiB。
 RSS 是整个 worker 的高水位，ops 后面的记录可能包含先前操作的峰值；内存预算
 只使用隔离的 load worker。预算取五次 wall time 的中位数，P95 用 nearest rank。
+
+macOS 还输出每项操作的 `retired_instructions`（`RUSAGE_INFO_V4`）；其他平台为 null。
+计数包围该操作及共同的 OS 用量采样，不包含输入准备、结果析构、JSON 格式化或
+存储估算。忙碌主机上可用配对的操作级指令数检查回归，同时保留 wall/CPU 时间。
 
 可运行 `--impl vel-text --profile --runs 5` 分解加载：scan 只读、校验 UTF-8、数 LF，
 strings 额外持有分块 String，arc_strings 再给每块加 Arc；每项独立进程，观察分配

@@ -18,6 +18,7 @@ fn progressive_decoder_matches_full_decoder_at_boms_cr_seams_and_encoding_fallba
         let text = Text::from(format!("{}\n€\nend", "a".repeat(128 * 1024 - 1)).as_str());
         let format = Format {
             encoding: encoding.into(),
+            display_name: None,
             bom,
             line_ending: LineEnding::CrLf,
         };
@@ -59,6 +60,7 @@ fn encodings_boms_and_endings_round_trip() {
             for ending in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
                 let format = Format {
                     encoding: encoding(enc).unwrap().name().into(),
+                    display_name: None,
                     bom,
                     line_ending: ending,
                 };
@@ -292,6 +294,7 @@ fn trim_all_and_the_system_line_ending() {
     let tracker = ChangeTracker::new(&buffer);
     let settings = EditorSettings {
         trim_trailing_white_space_on_save: vel_config::json!("all"),
+        trim_only_modified_white_space: false,
         ..Default::default()
     };
     prepare_save(&mut buffer, id, &settings, &tracker);
@@ -300,6 +303,22 @@ fn trim_all_and_the_system_line_ending() {
         buffer.text().to_string(),
         "tabs\nideographic\u{3000}\nnbsp\u{a0}\n"
     );
+}
+
+#[test]
+fn default_trimming_preserves_untouched_lines() {
+    let mut buffer = Buffer::new("untouched  \nchanged\n");
+    let id = buffer.new_view();
+    let tracker = ChangeTracker::new(&buffer);
+    buffer.set_selection(id, Selection::from_regions([Region::caret(19)]));
+    ops::insert(&mut buffer, id, "  ");
+    let settings = EditorSettings {
+        trim_trailing_white_space_on_save: vel_config::json!(true),
+        ..Default::default()
+    };
+    assert!(settings.trim_only_modified_white_space);
+    prepare_save(&mut buffer, id, &settings, &tracker);
+    assert_eq!(buffer.text().to_string(), "untouched  \nchanged\n");
 }
 
 #[test]

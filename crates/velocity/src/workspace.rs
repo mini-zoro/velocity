@@ -29,8 +29,12 @@ pub struct Tab {
     pub previous_document: Option<vel_buffer::BufferId>,
     pub restored_document: Option<u64>,
     pub disk_saved: Option<vel_session::DiskStamp>,
-    pub(crate) disk_revision: Option<fileio::regular::Identity>,
-    pub(crate) overwrite_allowed: Option<fileio::regular::Identity>,
+    pub(crate) disk_content: Option<fileio::ContentIdentity>,
+    pub(crate) saved_in_effective_encoding: bool,
+    pub(crate) legacy_stamp_matches: bool,
+    pub(crate) legacy_saved_text: Option<Text>,
+    pub(crate) legacy_text_fingerprint: Option<(usize, String)>,
+    pub(crate) overwrite_allowed: Option<fileio::ContentIdentity>,
     pub sheet: u64,
     pub session_document: u64,
     pub document: vel_buffer::BufferId,
@@ -46,6 +50,14 @@ pub struct Tab {
     pub path: Option<PathBuf>,
     pub(crate) suggested_name: Option<String>,
     pub format: Format,
+    /// Explicit encoding commands set this; automatic detection never does.
+    pub encoding_chosen: bool,
+    /// Reload preference, retained when one disk revision needs automatic decoding.
+    pub(crate) preferred_encoding: Option<String>,
+    pub(crate) load_warning: Option<String>,
+    pub(crate) restore_history: Option<(vel_session::History, bool)>,
+    pub(crate) restored_history_views:
+        std::collections::BTreeMap<vel_buffer::ViewId, vel_buffer::ViewId>,
     pub(crate) saved_format: Format,
     pub tracker: ChangeTracker,
     pub scroll: (f64, f64),
@@ -61,10 +73,47 @@ pub struct Tab {
     /// Center this location once the active view has its final viewport geometry.
     pub pending_center: bool,
     location: Option<FileLocation>,
-    external_load: bool,
+    pub(crate) external_load: bool,
     load_started: Option<Instant>,
     pub(crate) disk_stamp: Option<(u64, SystemTime)>,
     pub external: Option<Loaded>,
+}
+/// Only owned IO results cross the restore watchdog; editor state stays on its thread.
+pub(crate) enum PreparedLoad {
+    Text(Loaded),
+    Loading(LoadTask),
+    Binary(crate::binary::Task, String),
+}
+pub(crate) fn prepare_disk_load(
+    path: &Path,
+    options: fileio::DecodeOptions,
+    background: bool,
+    comparing: bool,
+) -> Result<PreparedLoad, String> {
+    let (_, routing) = fileio::decoding_for_path(path, &options)?;
+    if routing.attempts.is_empty()
+        && let Some(notice) = &routing.binary
+    {
+        return Ok(PreparedLoad::Binary(
+            crate::binary::Task::open(path.to_owned())?,
+            notice.message(path),
+        ));
+    }
+    if background {
+        return Ok(PreparedLoad::Loading(if comparing {
+            fileio::load_background_for_reload(path.to_owned(), options)?
+        } else {
+            fileio::load_background_with_options(path.to_owned(), options)?
+        }));
+    }
+    match fileio::load_with_options(path, &options, |_| {}) {
+        Ok(loaded) => Ok(PreparedLoad::Text(loaded)),
+        Err(notice) if routing.binary.is_some() => Ok(PreparedLoad::Binary(
+            crate::binary::Task::open(path.to_owned())?,
+            notice,
+        )),
+        Err(error) => Err(error),
+    }
 }
 impl Tab {
     pub(crate) fn restore_scroll(&mut self, state: &vel_session::ViewState) {
@@ -113,7 +162,11 @@ impl Tab {
             previous_document: None,
             restored_document: None,
             disk_saved: None,
-            disk_revision: None,
+            disk_content: None,
+            saved_in_effective_encoding: false,
+            legacy_stamp_matches: false,
+            legacy_saved_text: None,
+            legacy_text_fingerprint: None,
             overwrite_allowed: None,
             sheet: crate::workbench::next_sheet(),
             session_document: crate::workbench::next_sheet(),
@@ -129,6 +182,11 @@ impl Tab {
             editor,
             path: None,
             suggested_name: None,
+            encoding_chosen: false,
+            preferred_encoding: None,
+            load_warning: None,
+            restore_history: None,
+            restored_history_views: Default::default(),
             saved_format: format.clone(),
             format,
             tracker,
@@ -166,6 +224,39 @@ impl Tab {
         target.external_load = std::mem::take(&mut self.external_load);
         target.load_started = self.load_started.take();
         target.location = self.location.take();
+        target.load_warning = self.load_warning.take();
+        target.restore_history = self.restore_history.take();
+        target.restored_history_views = std::mem::take(&mut self.restored_history_views);
+    }
+    /// Reload/restore policy belongs to the document, rather than to detection.
+    pub(crate) fn decode_options(&self) -> fileio::DecodeOptions {
+        fileio::DecodeOptions {
+            encoding: self.preferred_encoding.clone().or_else(|| {
+                self.encoding_chosen.then(|| {
+                    self.format
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| self.format.encoding.clone())
+                })
+            }),
+            effective_encoding: Some(self.saved_format.encoding.clone()),
+            saved_in_effective_encoding: self.saved_in_effective_encoding,
+            saved_content: self.disk_content,
+            revision_stamp: self
+                .disk_saved
+                .as_ref()
+                .map(|stamp| (stamp.bytes, stamp.modified_ns)),
+            legacy_format: Some(self.saved_format.clone()),
+            legacy_stamp_matches: self.legacy_stamp_matches
+                && self.path.as_deref().is_some_and(|path| {
+                    self.disk_saved.is_some()
+                        && vel_session::DiskStamp::read(path) == self.disk_saved
+                }),
+            legacy_saved_text: self.legacy_saved_text.clone(),
+            legacy_text_fingerprint: self.legacy_text_fingerprint.clone(),
+            default_line_ending: self.format.line_ending,
+            ..fileio::DecodeOptions::from_settings(&self.editor.preferences)
+        }
     }
     /// Includes removed files whose retained contents have no saved disk copy.
     pub fn dirty(&self) -> bool {
@@ -254,7 +345,113 @@ impl Tab {
             .map(|t| (t.read.load(Ordering::Relaxed), t.total))
             .or_else(|| self.binary_loading.as_ref().map(|t| (0, t.total)))
     }
-    fn install(&mut self, loaded: Loaded) {
+    pub(crate) fn load_disk(
+        &mut self,
+        options: fileio::DecodeOptions,
+        background: bool,
+        external: bool,
+    ) -> Result<(), String> {
+        let path = self.path.clone().ok_or("load requires a saved file")?;
+        let prepared =
+            prepare_disk_load(&path, options, background, external && !self.load_failed)?;
+        self.install_disk_load(prepared, external);
+        Ok(())
+    }
+    pub(crate) fn install_disk_load(&mut self, prepared: PreparedLoad, external: bool) {
+        match prepared {
+            PreparedLoad::Text(loaded) => {
+                if external {
+                    self.accept_reload(loaded);
+                } else {
+                    self.install_restored(loaded);
+                }
+            }
+            PreparedLoad::Loading(task) => {
+                self.external_load = external;
+                self.editor.source_bytes = task.total;
+                self.loading = Some(task);
+                self.editor.refresh_policy();
+                self.load_started = Some(Instant::now());
+                self.editor.read_only = !external || self.load_failed;
+            }
+            PreparedLoad::Binary(task, notice) => {
+                self.load_warning = Some(notice);
+                if external && (self.dirty() || self.editor.marked.is_some()) {
+                    return;
+                }
+                self.loading = None;
+                self.restore_history = None;
+                self.binary_loading = Some(task);
+                self.binary_document = true;
+                self.editor.source_bytes = self.binary_loading.as_ref().map_or(0, |t| t.total);
+                self.editor.refresh_policy();
+                self.editor.read_only = true;
+                self.external = None;
+                self.external_load = false;
+                self.load_failed = false;
+            }
+        }
+    }
+    fn load_hex(&mut self, notice: String, external: bool) -> Result<(), String> {
+        self.load_warning = Some(notice);
+        if external && (self.dirty() || self.editor.marked.is_some()) {
+            // A binary rewrite cannot discard unsaved text. Keep edits visible;
+            // explicit Reopen, or a clean restore, enters the streaming hex view.
+            return Ok(());
+        }
+        self.loading = None;
+        self.restore_history = None;
+        self.binary_document = true;
+        self.binary_loading = Some(crate::binary::Task::open(
+            self.path.clone().ok_or("hex load requires a saved file")?,
+        )?);
+        self.editor.source_bytes = self.binary_loading.as_ref().map_or(0, |t| t.total);
+        self.editor.refresh_policy();
+        self.editor.read_only = true;
+        self.external = None;
+        self.external_load = false;
+        self.load_failed = false;
+        Ok(())
+    }
+    fn accept_reload(&mut self, loaded: Loaded) {
+        if loaded.unchanged && !self.load_failed {
+            self.unchanged_reload(loaded);
+        } else if !self.load_failed
+            && (self.dirty()
+                || self.editor.marked.is_some()
+                || !self.editor.settings.bool("reload_file_on_change", true))
+        {
+            self.external = Some(loaded);
+        } else {
+            self.install(loaded);
+        }
+    }
+    pub(crate) fn failed_load(&mut self, error: String) {
+        // Keep the revision/choice/history for retry. A failed read is neither a
+        // decode result nor a new revision, and must not poison its identity.
+        self.load_warning = Some(error);
+        self.load_failed = true;
+        self.editor.read_only = true;
+        self.loading = None;
+    }
+    fn record_decode(&mut self, loaded: &mut Loaded) {
+        if let Some(warning) = loaded.warning.take() {
+            self.load_warning = Some(warning);
+        }
+    }
+    fn unchanged_reload(&mut self, mut loaded: Loaded) {
+        self.record_decode(&mut loaded);
+        self.disk_content = loaded.disk_content;
+        self.legacy_stamp_matches = false;
+        self.legacy_saved_text = None;
+        self.legacy_text_fingerprint = None;
+        // A disk touch only acknowledges stamps. It does not replace live text,
+        // selections, native history, pending format edits or decode provenance.
+        self.disk_stamp = self.path.as_deref().and_then(stamp);
+        self.disk_saved = self.path.as_deref().and_then(vel_session::DiskStamp::read);
+    }
+    fn install(&mut self, mut loaded: Loaded) {
+        self.record_decode(&mut loaded);
         let navigation = self.editor.navigation.take();
         self.editor.binary = None;
         self.binary_document = false;
@@ -275,6 +472,32 @@ impl Tab {
         ));
         self.editor.buffer = vel_buffer::Buffer::new(loaded.text.clone());
         self.editor.id = self.editor.buffer.new_view();
+        let mut imported_history = false;
+        if self.loading.is_none()
+            && let Some((history, keep)) = self.restore_history.take()
+        {
+            let history = history.with_current_text(loaded.text.clone());
+            match history
+                .restore_views(keep || loaded.unchanged, false)
+                .or_else(|_| history.restore_views(false, false))
+            {
+                Ok((mut buffer, views)) => {
+                    self.editor.id = self
+                        .pending_restore
+                        .as_ref()
+                        .and_then(|state| state.history_view)
+                        .and_then(|old| views.get(&old))
+                        .copied()
+                        // A clone created from a failed-load placeholder owns no
+                        // stored history view; it must not steal a sibling's view.
+                        .unwrap_or_else(|| buffer.new_view());
+                    self.editor.buffer = buffer;
+                    self.restored_history_views = views;
+                    imported_history = true;
+                }
+                Err(error) => self.load_warning = Some(error),
+            }
+        }
         self.editor.read_only = false;
         self.editor.sync();
         self.previous_document = Some(self.document);
@@ -282,6 +505,17 @@ impl Tab {
         self.shared_view = self.editor.id;
         self.needs_detection = !self.indentation_initialized;
         self.saved_format = loaded.format.clone();
+        // Prefix snapshots retain the baseline. A terminal failed/synthetic
+        // install has no disk identity: keeping the previous digest would make
+        // recovery of those bytes a false touch and preserve the blank buffer.
+        if loaded.disk_content.is_some() || self.loading.is_none() {
+            self.disk_content = loaded.disk_content;
+            self.saved_in_effective_encoding = false;
+            self.legacy_stamp_matches = false;
+            self.legacy_saved_text = None;
+            self.legacy_text_fingerprint = None;
+            self.load_failed = false;
+        }
         self.format = loaded.format;
         self.tracker.mark_saved(&self.editor.buffer);
         let regions = positions.into_iter().map(|(row, column)| {
@@ -291,7 +525,9 @@ impl Tab {
                     .point_to_byte(loaded.text.clip_point(vel_text::Point { row, column })),
             )
         });
-        self.editor.set_selection(Selection::from_regions(regions));
+        if !imported_history {
+            self.editor.set_selection(Selection::from_regions(regions));
+        }
         if self.loading.is_none() {
             if let Some(state) = self.pending_restore.take() {
                 state.apply(&mut self.editor.buffer, self.editor.id);
@@ -303,10 +539,6 @@ impl Tab {
         }
         self.disk_stamp = self.path.as_deref().and_then(stamp);
         self.disk_saved = self.path.as_deref().and_then(vel_session::DiskStamp::read);
-        self.disk_revision = self
-            .path
-            .as_deref()
-            .and_then(|p| fileio::regular::identity(p).ok().flatten());
         self.overwrite_allowed = None;
         if let Some(location) = self.location.take() {
             self.goto(&location);
@@ -377,6 +609,8 @@ pub struct Workspace {
     /// Macro filenames from the background resource overlay; contents are loaded on demand.
     pub(crate) macro_paths: std::collections::BTreeSet<String>,
     pub messages: Vec<String>,
+    /// File load/reload diagnostics, consumed by status text and never modal alerts.
+    pub(crate) load_notices: Vec<String>,
     /// Consolidated authoring diagnostics; consumed by the status bar, never alerts.
     pub(crate) resource_reports: Vec<String>,
     pub(crate) settings_reports: crate::settings_reports::Scope,
@@ -1308,6 +1542,7 @@ impl Workspace {
             palette,
             macro_paths,
             messages,
+            load_notices: Vec::new(),
             resource_reports,
             settings_reports: Default::default(),
             restore_in_progress: false,
@@ -1594,32 +1829,24 @@ impl Workspace {
         tab.preview_recent_pending = preview;
         tab.path = Some(path.clone());
         tab.location = Some(location);
-        let fallback = tab.editor.settings.editor().fallback_encoding;
+        let decode = fileio::DecodeOptions::from_settings(&tab.editor.preferences);
         let metadata = fileio::regular::metadata(&path, true)?;
         let size = metadata.as_ref().map_or(0, |m| m.len());
         if metadata.is_none() {
             let location = tab.location.take().expect("open location");
             tab.goto(&location);
-        } else if crate::binary::is_binary(&path)? {
-            tab.editor.source_bytes = size;
-            tab.editor.refresh_policy();
-            tab.editor.read_only = true;
-            tab.binary_document = true;
-            tab.binary_loading = Some(crate::binary::Task::open(path.clone())?);
-        } else if size
-            >= tab
-                .editor
-                .settings
-                .usize("large_file.load_bytes", 64 * 1024 * 1024) as u64
-        {
-            tab.load_started = Some(started);
-            tab.editor.source_bytes = size;
-            tab.editor.refresh_policy();
-            tab.editor.read_only = true;
-            tab.loading = Some(fileio::load_background(path.clone(), fallback)?);
         } else {
-            tab.install(fileio::load(&path, &fallback, |_| {})?);
+            let background = size
+                >= tab
+                    .editor
+                    .settings
+                    .usize("large_file.load_bytes", 64 * 1024 * 1024) as u64;
+            tab.load_disk(decode, background, false)?;
         }
+        // Installation suppresses restore-thread filesystem probes. Ordinary
+        // opens still need initial stamps for focus-save and deletion handling.
+        tab.disk_saved = vel_session::DiskStamp::read(&path);
+        tab.disk_stamp = stamp(&path);
         self.telemetry.push(serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}));
         if let Some(w) = self.watcher.as_mut()
             && path.parent().is_some_and(Path::is_dir)
@@ -1686,7 +1913,7 @@ impl Workspace {
             &tab.tracker,
         );
         tab.editor.sync();
-        fileio::save(
+        let content = fileio::save_with_identity(
             &target,
             tab.editor.buffer.text(),
             &tab.format,
@@ -1695,6 +1922,10 @@ impl Workspace {
         tab.editor.buffer.mark_saved();
         tab.editor.sync();
         tab.saved_format = tab.format.clone();
+        tab.disk_content = Some(content);
+        tab.saved_in_effective_encoding = true;
+        // Plain save records this revision's codec and raw identity. Only an
+        // explicit encoding command can change the independent preference.
         tab.restored_format_dirty = false;
         tab.tracker.mark_saved(&tab.editor.buffer);
         tab.path = Some(target.clone());
@@ -1702,7 +1933,6 @@ impl Workspace {
         let document = tab.session_document;
         tab.disk_stamp = stamp(&target);
         tab.disk_saved = vel_session::DiskStamp::read(&target);
-        tab.disk_revision = fileio::regular::identity(&target)?;
         tab.overwrite_allowed = None;
         tab.editor.annotations.borrow_mut().reference(
             tab.editor.buffer.text().clone(),
@@ -1710,6 +1940,8 @@ impl Workspace {
             self.data_dir.as_ref().map(|d| d.join("Packages")),
         );
         let saved_format = tab.saved_format.clone();
+        let encoding_chosen = tab.encoding_chosen;
+        let preferred_encoding = tab.preferred_encoding.clone();
         let disk_saved = tab.disk_saved.clone();
         self.sync_shared();
         for sibling in &mut self.tabs {
@@ -1721,11 +1953,21 @@ impl Workspace {
                     sibling.path = Some(target.clone());
                     sibling.format = saved_format.clone();
                     sibling.saved_format = saved_format.clone();
+                    sibling.encoding_chosen = encoding_chosen;
+                    sibling.preferred_encoding = preferred_encoding.clone();
                     sibling.disk_saved = disk_saved.clone();
+                    sibling.disk_content = Some(content);
+                    sibling.saved_in_effective_encoding = true;
                     sibling.restored_format_dirty = false;
                     saved.path = Some(target.clone());
                     saved.disk = disk_saved.clone();
+                    saved.disk_content = Some(content);
+                    saved.saved_in_effective_encoding = true;
+                    saved.effective_encoding = Some(saved_format.encoding.clone());
                     saved.encoding = saved_format.encoding.clone();
+                    saved.encoding_chosen = sibling.encoding_chosen;
+                    saved.preferred_encoding = sibling.preferred_encoding.clone();
+                    saved.encoding_display_name = saved_format.display_name.clone();
                     saved.bom = saved_format.bom;
                     saved.line_ending = saved_format.line_ending.name().into();
                     saved.dirty = false;
@@ -1879,8 +2121,51 @@ impl Workspace {
         let index = self.active;
         let tab = &self.tabs[index];
         let path = tab.path.as_deref().ok_or("Reopen requires a saved file")?;
-        let loaded = fileio::load_with_encoding(path, name)?;
-        self.tabs[index].install(loaded);
+        // The current command reference documents encoding arguments, but does
+        // not confirm a Hexadecimal reopen value or menu entry. Keep existing
+        // text-reopen behavior; automatic binary opens still use binary::Task.
+        // https://docs.sublimetext.io/reference/commands.html#reopen
+        let requested = fileio::encoding_format(name, tab.format.line_ending)?;
+        let options = fileio::DecodeOptions {
+            encoding: Some(name.into()),
+            default_line_ending: tab.format.line_ending,
+            ..fileio::DecodeOptions::from_settings(&tab.editor.preferences)
+        };
+        let (_, routing) = fileio::decoding_for_path(path, &options)?;
+        let loaded = fileio::load_with_options(path, &options, |_| {});
+        let prepared = match loaded {
+            Ok(loaded) => Ok(loaded),
+            Err(notice) if routing.binary.is_some() => {
+                Err((crate::binary::Task::open(path.to_owned())?, notice))
+            }
+            Err(error) => return Err(error),
+        };
+        // A failed Reopen must preserve the choice, pending conflict, jobs and edits.
+        self.tabs[index].loading = None;
+        self.tabs[index].binary_loading = None;
+        self.tabs[index].external = None;
+        self.tabs[index].external_load = false;
+        self.tabs[index].preferred_encoding = Some(name.into());
+        self.tabs[index].encoding_chosen = true;
+        match prepared {
+            Ok(loaded) => self.tabs[index].install_restored(loaded),
+            Err((task, notice)) => {
+                let tab = &mut self.tabs[index];
+                tab.load_warning = Some(notice);
+                tab.restore_history = None;
+                tab.editor.source_bytes = task.total;
+                tab.binary_document = true;
+                tab.binary_loading = Some(task);
+                tab.editor.refresh_policy();
+                tab.editor.read_only = true;
+                tab.load_failed = false;
+            }
+        }
+        self.tabs[index].format.display_name = requested.display_name.filter(|caption| {
+            self.tabs[index].encoding_chosen
+                && caption.ends_with("with BOM") == self.tabs[index].format.bom
+        });
+        self.tabs[index].saved_format = self.tabs[index].format.clone();
         self.tabs[index].deleted = false;
         self.tabs[index].restored_format_dirty = false;
         self.reconcile_installs();
@@ -1939,21 +2224,39 @@ impl Workspace {
                 .as_mut()
                 .and_then(|p| p.error.take())
             {
-                self.messages.push(error);
+                // Diff references also load the document on a worker. A failed
+                // guarded read is the same non-modal notice as a failed reload.
+                if tab
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| error.starts_with(&format!("{}: ", path.display())))
+                {
+                    self.resource_reports.push(error);
+                } else {
+                    self.messages.push(error);
+                }
             }
             changed |= tab.editor.poll_completion();
             if let Some(language) = tab.editor.language.borrow_mut().as_mut() {
                 self.messages.append(&mut language.errors);
             }
             // Promotion and recent-file bookkeeping are applied after shared buffers sync.
+            if let Some(message) = tab.load_warning.take() {
+                self.load_notices.push(message);
+                changed = true;
+            }
             if let Some(snapshot) = tab.loading.as_ref().and_then(LoadTask::try_snapshot)
                 && !tab.external_load
             {
                 let source_bytes = tab.loading.as_ref().map_or(0, |t| t.total);
                 let pending_location = tab.location.take();
                 tab.install(Loaded {
+                    disk_content: None,
+                    encoding_chosen: false,
+                    unchanged: false,
+                    warning: None,
                     text: snapshot.text,
-                    format: Format::default(),
+                    format: tab.format.clone(),
                     source_bytes,
                 });
                 tab.location = pending_location;
@@ -2010,29 +2313,34 @@ impl Workspace {
             if let Some(result) = result {
                 self.telemetry.push(serde_json::json!({"kind":"file_open","phase":"fully_loaded","elapsed_ms":tab.load_started.map(|s|s.elapsed().as_secs_f64()*1000.),"source_bytes":tab.loading.as_ref().map(|t|t.total),"path":tab.path,"success":result.is_ok(),"background":true}));
                 tab.load_started = None;
+                let binary = tab.loading.as_ref().is_some_and(LoadTask::binary);
                 tab.loading = None;
+                let external = tab.external_load;
                 match result {
                     Ok(loaded) => {
-                        if tab.external_load && (tab.dirty() || tab.editor.marked.is_some()) {
-                            tab.external = Some(loaded);
-                            tab.editor.read_only = false;
+                        if external {
+                            tab.accept_reload(loaded);
                         } else {
                             tab.install(loaded);
                         }
-                        tab.external_load = false;
                     }
-                    Err(e) => {
-                        self.resource_reports.push(
-                            tab.path
-                                .as_deref()
-                                .map_or_else(|| e.clone(), |p| fileio::regular::error(p, &e)),
-                        );
+                    Err(error) if binary => {
+                        if let Err(error) = tab.load_hex(error, external) {
+                            self.load_notices.push(error);
+                        }
+                    }
+                    Err(error) => {
+                        self.resource_reports.push(tab.path.as_deref().map_or_else(
+                            || error.clone(),
+                            |path| fileio::regular::error(path, &error),
+                        ));
                         if !tab.dirty() {
+                            tab.failed_load(error);
                             failed_documents.push(tab.sheet);
                         }
-                        tab.external_load = false;
                     }
                 }
+                tab.external_load = false;
                 changed = true;
             }
         }
@@ -2044,7 +2352,7 @@ impl Workspace {
         let mut close_deleted = Vec::new();
         for event in events {
             match event {
-                Err(e) => self.messages.push(e),
+                Err(e) => self.load_notices.push(e),
                 Ok(paths) => {
                     for path in paths {
                         for tab in &mut self.tabs {
@@ -2085,53 +2393,28 @@ impl Workspace {
                             if tab.editor.binary.is_some() {
                                 match crate::binary::Task::open(path.clone()) {
                                     Ok(task) => tab.binary_loading = Some(task),
-                                    Err(e) => self.messages.push(e),
+                                    Err(e) => self.load_notices.push(e),
                                 }
                                 continue;
                             }
-                            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024 * 1024) {
-                                match fileio::load_background(
-                                    path.clone(),
-                                    tab.editor.settings.editor().fallback_encoding,
-                                ) {
-                                    Ok(task) => {
-                                        tab.load_started = Some(Instant::now());
-                                        tab.external_load = true;
-                                        tab.loading = Some(task);
-                                    }
-                                    Err(e) => self.messages.push(e),
-                                }
-                                continue;
-                            }
-                            match fileio::load(
-                                &path,
-                                &tab.editor.settings.editor().fallback_encoding,
-                                |_| {},
-                            ) {
-                                Ok(loaded) => {
-                                    if tab.tracker.is_saved(&loaded.text)
-                                        && tab.format == loaded.format
-                                    {
-                                        tab.disk_saved = vel_session::DiskStamp::read(&path);
-                                        tab.disk_revision =
-                                            fileio::regular::identity(&path).ok().flatten();
-                                        tab.overwrite_allowed = None;
-                                        continue;
-                                    }
-                                    if tab.dirty() || tab.editor.marked.is_some() {
-                                        tab.external = Some(loaded);
-                                    } else {
-                                        tab.install(loaded);
-                                    }
-                                    changed = true;
-                                }
-                                Err(e) => {
-                                    self.resource_reports.push(fileio::regular::error(&path, e));
-                                    if !tab.dirty() {
-                                        failed_documents.push(tab.sheet);
-                                    }
+                            let background = std::fs::metadata(&path).is_ok_and(|m| {
+                                m.len()
+                                    >= tab
+                                        .editor
+                                        .settings
+                                        .usize("large_file.load_bytes", 64 * 1024 * 1024)
+                                        as u64
+                            });
+                            if let Err(error) =
+                                tab.load_disk(tab.decode_options(), background, true)
+                            {
+                                self.resource_reports
+                                    .push(fileio::regular::error(&path, error));
+                                if !tab.dirty() {
+                                    failed_documents.push(tab.sheet);
                                 }
                             }
+                            changed = true;
                         }
                     }
                 }
@@ -2498,18 +2781,24 @@ impl Workspace {
         Ok(())
     }
     pub fn reload_external(&mut self, index: usize, reload: bool) {
-        if !reload {
-            self.tabs[index].overwrite_allowed = self.tabs[index]
-                .path
-                .as_deref()
-                .and_then(|p| fileio::regular::identity(p).ok().flatten());
-        }
-        if let Some(loaded) = self.tabs[index].external.take()
-            && reload
-        {
-            self.tabs[index].install(loaded);
-            self.reconcile_installs();
-            let _ = self.prepare_sheet(self.active);
+        if let Some(loaded) = self.tabs[index].external.take() {
+            if reload {
+                self.tabs[index].install(loaded);
+                self.reconcile_installs();
+                let _ = self.prepare_sheet(self.active);
+            } else {
+                let tab = &mut self.tabs[index];
+                tab.disk_content = loaded.disk_content;
+                tab.overwrite_allowed = None;
+                tab.saved_format = loaded.format;
+                tab.editor.buffer.invalidate_saved_revision();
+                tab.editor.sync();
+                tab.legacy_stamp_matches = false;
+                tab.legacy_saved_text = None;
+                tab.legacy_text_fingerprint = None;
+                tab.disk_saved = tab.path.as_deref().and_then(vel_session::DiskStamp::read);
+                tab.disk_stamp = tab.path.as_deref().and_then(stamp);
+            }
         }
     }
     pub fn default_data_dir() -> Option<PathBuf> {
@@ -2787,6 +3076,10 @@ mod tests {
         assert!(workspace.take_pending_center());
         assert!(!workspace.take_pending_center());
         workspace.tabs[0].install(Loaded {
+            disk_content: None,
+            encoding_chosen: false,
+            unchanged: false,
+            warning: None,
             text: Text::from("replacement"),
             format: Format::default(),
             source_bytes: 11,
@@ -2799,6 +3092,10 @@ mod tests {
             column: 2,
         });
         workspace.tabs[0].install(Loaded {
+            disk_content: None,
+            encoding_chosen: false,
+            unchanged: false,
+            warning: None,
             text: Text::from("first\n你好\nthird"),
             format: Format::default(),
             source_bytes: 18,
@@ -2950,6 +3247,10 @@ mod tests {
             .run("insert", &json!({"characters":"local "}))
             .unwrap();
         let loaded = || Loaded {
+            disk_content: None,
+            encoding_chosen: false,
+            unchanged: false,
+            warning: None,
             text: Text::from("external"),
             format: Format::default(),
             source_bytes: 8,
@@ -3123,6 +3424,20 @@ mod round15_tests {
     }
     #[test]
     fn explicit_reopen_decodes_selected_codec_and_failure_preserves_dirty_contents() {
+        // Round 20 deliberately falls back when a codec rejects readable bytes;
+        // I/O failure is the unchanged-document case from lane B's original test.
+        explicit_reopen_decodes_selected_codec_and_io_failure_preserves_dirty_contents();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.txt");
+        std::fs::write(&path, b"a").unwrap();
+        let mut w = workspace();
+        w.open(location(path)).unwrap();
+        w.reopen_encoding("UTF-16 LE with BOM").unwrap();
+        assert_eq!(w.editor().text, "a");
+        assert_eq!(w.tabs[0].format.encoding, "UTF-8");
+    }
+    #[test]
+    fn explicit_reopen_decodes_selected_codec_and_io_failure_preserves_dirty_contents() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("encoding.txt");
         std::fs::write(&path, "é").unwrap();
@@ -3134,7 +3449,7 @@ mod round15_tests {
             .run("insert", &json!({"characters":"keep unsaved "}))
             .unwrap();
         let old = w.editor().text.clone();
-        std::fs::write(&path, b"a").unwrap();
+        std::fs::remove_file(&path).unwrap();
         assert!(w.reopen_encoding("UTF-16 LE with BOM").is_err());
         assert_eq!(w.editor().text, old);
         assert!(w.tabs[0].dirty());
@@ -3381,6 +3696,12 @@ mod round15_tests {
     #[cfg(unix)]
     #[test]
     fn failing_visible_and_lazy_restore_is_reported_once_and_other_tabs_load() {
+        // Both lanes' assertions now use the shared non-modal recovery channel.
+        failing_visible_and_lazy_restore_is_status_only_and_other_tabs_load();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn failing_visible_and_lazy_restore_is_status_only_and_other_tabs_load() {
         use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("failed.txt");
@@ -3399,7 +3720,10 @@ mod round15_tests {
         let mut restored = workspace();
         restored.restore_window(&window, &documents).unwrap();
         assert_eq!(restored.editor().text.to_string(), "good");
-        restored.prepare_sheet(0).unwrap();
+        assert!(restored.prepare_sheet(0).is_ok());
+        assert!(restored.tabs[0].load_failed);
+        assert!(restored.tabs[0].editor.read_only);
+        assert!(restored.messages.is_empty());
         assert!(restored.tabs[0].lazy.is_none());
         assert!(restored.tabs[0].editor.read_only);
         assert!(restored.messages.is_empty());
@@ -3408,6 +3732,8 @@ mod round15_tests {
         window.workbench.groups[0].selected.extend(sheets);
         let mut visible = workspace();
         visible.restore_window(&window, &documents).unwrap();
+        visible.poll();
+        assert!(visible.messages.is_empty());
         assert_eq!(
             visible
                 .resource_reports
@@ -3418,6 +3744,8 @@ mod round15_tests {
         );
         visible.select(0);
         visible.editor_mut();
+        visible.poll();
+        assert!(visible.messages.is_empty());
         assert_eq!(
             visible
                 .resource_reports

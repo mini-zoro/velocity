@@ -22,7 +22,14 @@ impl Tab {
         self.saved_format = source.saved_format.clone();
         self.tracker = source.tracker.clone();
         self.disk_saved = source.disk_saved.clone();
-        self.disk_revision = source.disk_revision;
+        self.disk_content = source.disk_content;
+        self.saved_in_effective_encoding = source.saved_in_effective_encoding;
+        self.legacy_stamp_matches = source.legacy_stamp_matches;
+        self.legacy_saved_text = source.legacy_saved_text.clone();
+        self.legacy_text_fingerprint = source.legacy_text_fingerprint.clone();
+        self.encoding_chosen = source.encoding_chosen;
+        self.preferred_encoding = source.preferred_encoding.clone();
+        self.restore_history = source.restore_history.clone();
         self.overwrite_allowed = source.overwrite_allowed;
         self.disk_stamp = source.disk_stamp;
         self.needs_detection = source.needs_detection;
@@ -36,7 +43,7 @@ impl Tab {
         self.binary_document = source.binary_document;
         self.editor.binary = source.editor.binary.clone();
         self.editor.read_only = source.editor.read_only
-            || source.loading.is_some()
+            || (source.loading.is_some() && !source.external_load)
             || source.binary_loading.is_some()
             || source.editor.binary.is_some();
         self.editor.features = source.editor.features;
@@ -54,7 +61,7 @@ impl Workspace {
         let path = chosen
             .or(tab.path.as_deref())
             .ok_or("save requires a path")?;
-        let current = vel_fileio::regular::identity(path)?;
+        let current = vel_fileio::content_identity(path)?;
         let inplace = chosen.is_none()
             || tab.path.as_deref().is_some_and(|p| {
                 p == path
@@ -63,13 +70,14 @@ impl Workspace {
         if !inplace || current.is_none() || current == tab.overwrite_allowed {
             return Ok(false);
         }
-        Ok(if let Some(previous) = tab.disk_revision {
-            current != Some(previous)
-        } else {
-            tab.path
-                .as_ref()
-                .is_some_and(|p| vel_session::DiskStamp::read(p) != tab.disk_saved)
-        })
+        if tab.disk_content.is_some() {
+            return Ok(current != tab.disk_content);
+        }
+        // Legacy sessions have no raw digest. Their saved text/format can prove
+        // equality, but a matching stamp alone must not authorize an overwrite.
+        let mut options = tab.decode_options();
+        options.legacy_stamp_matches = false;
+        Ok(!vel_fileio::revision_unchanged(path, &options)?)
     }
     pub(crate) fn acknowledge_overwrite(
         &mut self,
@@ -79,7 +87,7 @@ impl Workspace {
         let path = chosen
             .or(self.tabs[index].path.as_deref())
             .ok_or("save requires a path")?;
-        self.tabs[index].overwrite_allowed = vel_fileio::regular::identity(path)?;
+        self.tabs[index].overwrite_allowed = vel_fileio::content_identity(path)?;
         Ok(())
     }
     pub(crate) fn retry_failed_document(&mut self, index: usize) -> Result<(), String> {
@@ -87,12 +95,21 @@ impl Workspace {
         let document = vel_session::Document {
             id: identity,
             path: self.tabs[index].path.clone(),
-            disk: None,
+            disk: self.tabs[index].disk_saved.clone(),
+            disk_content: self.tabs[index].disk_content,
+            saved_in_effective_encoding: self.tabs[index].saved_in_effective_encoding,
+            effective_encoding: Some(self.tabs[index].saved_format.encoding.clone()),
+            encoding_chosen: self.tabs[index].encoding_chosen,
+            preferred_encoding: self.tabs[index].preferred_encoding.clone(),
+            encoding_display_name: self.tabs[index].format.display_name.clone(),
             encoding: self.tabs[index].format.encoding.clone(),
             bom: self.tabs[index].format.bom,
             line_ending: self.tabs[index].format.line_ending.name().into(),
             dirty: false,
-            history: None,
+            history: self.tabs[index]
+                .restore_history
+                .as_ref()
+                .map(|(history, _)| history.clone()),
         };
         for sibling in 0..self.tabs.len() {
             if self.tabs[sibling].session_document != identity {
@@ -130,7 +147,8 @@ impl Workspace {
     }
     pub(crate) fn saved_sheet_state(&self, index: usize) -> ViewState {
         let tab = &self.tabs[index];
-        tab.pending_restore
+        let mut state = tab
+            .pending_restore
             .as_ref()
             .or_else(|| tab.lazy.as_ref().map(|(_, view)| view))
             .cloned()
@@ -140,7 +158,22 @@ impl Workspace {
                 } else {
                     ViewState::default()
                 }
-            })
+            });
+        if tab.load_failed
+            && let Some((history, _)) = self
+                .tabs
+                .iter()
+                .filter(|owner| owner.session_document == tab.session_document)
+                .find_map(|owner| owner.restore_history.as_ref())
+            && state
+                .history_view
+                .is_some_and(|id| !history.view_ids().contains(&id))
+        {
+            // Runtime placeholder/clone IDs do not belong to the retained native
+            // history. Keep the selection/folds, and attach a fresh view on retry.
+            state.history_view = None;
+        }
+        state
     }
     /// Creates a missing view before any capture/adoption. Never dereference an untrusted ID.
     pub(crate) fn ensure_shared_view(
@@ -210,6 +243,12 @@ impl Workspace {
                 }
             })
             .collect::<Vec<_>>();
+        // Retry checkpoints retain the original native history. Every sibling
+        // must therefore retain its original history view, even if that lazy
+        // sibling had not started loading when the shared owner failed.
+        let retains_history = siblings
+            .iter()
+            .any(|i| self.tabs[*i].restore_history.is_some());
         let mut buffer = Buffer::new(text.clone());
         if dirty {
             buffer.mark_unsaved();
@@ -232,7 +271,11 @@ impl Workspace {
             tab.loading = None;
             tab.binary_loading = None;
             tab.previous_document = None;
-            tab.pending_restore = None;
+            if retains_history {
+                tab.pending_restore = Some(states[at].clone());
+            } else {
+                tab.pending_restore = None;
+            }
             tab.lazy = None;
             tab.document = document;
             tab.shared_view = views[at];
@@ -250,7 +293,7 @@ impl Workspace {
                 tab.suggested_name = Some(recovered_name.clone());
                 tab.deleted = false;
                 tab.disk_saved = None;
-                tab.disk_revision = None;
+                tab.disk_content = None;
                 tab.overwrite_allowed = None;
                 tab.binary_document = false;
                 tab.editor.binary = None;

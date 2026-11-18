@@ -83,8 +83,27 @@ pub struct Document {
     pub path: Option<PathBuf>,
     /// Disk version when saved/loaded.
     pub disk: Option<DiskStamp>,
+    /// Raw bytes of the last saved/load revision, retained for dirty hot-exit tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_content: Option<vel_fileio::ContentIdentity>,
+    /// Legacy compatibility field; plain saves never change the explicit choice.
+    #[serde(default)]
+    pub saved_in_effective_encoding: bool,
+    /// Decoder of the last complete disk load/save, before any pending format change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_encoding: Option<String>,
     /// File encoding name.
     pub encoding: String,
+    /// Whether the user explicitly chose an encoding. Main-format sessions did
+    /// not record choices; their stored codec belongs only to the stored revision.
+    #[serde(default)]
+    pub encoding_chosen: bool,
+    /// Explicit reload preference, independent of the current revision's decoder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_encoding: Option<String>,
+    /// Selected menu caption when aliases share a decoder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_display_name: Option<String>,
     /// Byte-order marker preference.
     pub bom: bool,
     /// LF, CRLF or CR.

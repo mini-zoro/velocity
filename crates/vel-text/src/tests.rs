@@ -166,6 +166,211 @@ fn check_view(view: TextSlice<'_>, s: &str) {
     assert_eq!(hash(&view), hash(&Text::from(s)));
 }
 
+// Deterministic seeds make a failed transaction directly reproducible. Unlike
+// the sampled large-view helper above, this oracle checks every coordinate in
+// every generated document after every batch, including retained snapshots.
+fn check_batch_model(text: &Text, model: &str) {
+    tree::assert_invariants(&text.root);
+    assert_eq!(text.root.summary, tree::Summary::of(model));
+    assert_eq!(text.to_string(), model);
+    assert_eq!(text.chunks().collect::<String>(), model);
+    assert_eq!(
+        text.chunks()
+            .rev()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>(),
+        model
+    );
+    let mut row = 0;
+    let mut line_start = 0;
+    let mut units = 0;
+    let mut line_units = 0;
+    for (scalar, (byte, c)) in model
+        .char_indices()
+        .map(|(b, c)| (b, Some(c)))
+        .chain([(model.len(), None)])
+        .enumerate()
+    {
+        assert_eq!(text.byte_to_char(byte), scalar);
+        assert_eq!(text.char_to_byte(scalar), byte);
+        assert_eq!(text.byte_to_utf16(byte), units);
+        assert_eq!(text.utf16_to_byte(units), byte);
+        assert_eq!(text.byte_to_line(byte), row);
+        assert_eq!(text.line_to_byte(row), line_start);
+        assert_eq!(
+            text.byte_to_point(byte),
+            Point {
+                row,
+                column: byte - line_start
+            }
+        );
+        assert_eq!(
+            text.point_to_byte(Point {
+                row,
+                column: byte - line_start
+            }),
+            byte
+        );
+        assert_eq!(
+            text.byte_to_point_utf16(byte),
+            PointUtf16 {
+                row,
+                column: units - line_units
+            }
+        );
+        assert_eq!(
+            text.point_utf16_to_byte(PointUtf16 {
+                row,
+                column: units - line_units
+            }),
+            byte
+        );
+        if let Some(c) = c {
+            assert_eq!(text.char_at(byte), c);
+            units += c.len_utf16();
+            if c == '\n' {
+                row += 1;
+                line_start = byte + 1;
+                line_units = units;
+            }
+        }
+    }
+    for byte in 0..=model.len() {
+        assert_eq!(text.is_char_boundary(byte), model.is_char_boundary(byte));
+        assert_eq!(
+            text.floor_char_boundary(byte),
+            model.floor_char_boundary(byte)
+        );
+        assert_eq!(
+            text.ceil_char_boundary(byte),
+            model.ceil_char_boundary(byte)
+        );
+        let (chunk, start) = text.chunk_at_byte(byte);
+        assert_eq!(chunk, &model[start..start + chunk.len()]);
+        assert!(start <= byte && byte <= start + chunk.len());
+        if byte < model.len() {
+            assert_eq!(text.byte_at(byte), model.as_bytes()[byte]);
+        }
+    }
+    for (row, line) in model.split('\n').enumerate() {
+        assert_eq!(text.line(row).to_string(), line);
+        assert_eq!(text.line_len_bytes(row), line.len());
+    }
+}
+
+#[test]
+fn batch_string_model_and_immutable_snapshots_over_5000_seeds() {
+    const TOKENS: &[&str] = &[
+        "",
+        "x",
+        "let x = 1; ",
+        " ",
+        "\t",
+        "\n",
+        "\r\n",
+        "\r",
+        "你好",
+        "🦀",
+        "e\u{301}",
+        "\u{301}",
+        "🇺🇳",
+    ];
+    for seed in (0..5000_u64).chain([1000493]) {
+        let mut state = seed + 1;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize % n
+        };
+        let mut model = (0..32)
+            .map(|_| TOKENS[next(TOKENS.len())])
+            .collect::<String>();
+        let mut text = Text::from(model.as_str());
+        let mut snapshots = Vec::new();
+        for batch in 0..40 {
+            let before = text.clone();
+            let old = model.clone();
+            let points = boundaries(&model);
+            let mut owned = Vec::new();
+            let mut end = 0;
+            // Some entire batches are empty. Adjacent ranges and repeated zero
+            // length positions deliberately survive sorting and overlap removal.
+            for _ in 0..if batch % 7 == 0 { 0 } else { next(12) + 1 } {
+                let a = next(points.len());
+                let b = if batch % 3 == 0 {
+                    a
+                } else {
+                    next(points.len())
+                };
+                owned.push((
+                    points[a.min(b)]..points[a.max(b)],
+                    TOKENS[next(TOKENS.len())],
+                ));
+            }
+            owned.sort_by_key(|(r, _)| (r.start, r.end));
+            owned.retain(|(r, _)| {
+                if r.start >= end {
+                    end = r.end;
+                    true
+                } else {
+                    false
+                }
+            });
+            let edits = owned
+                .iter()
+                .map(|(r, s)| Edit {
+                    range: r.clone(),
+                    text: s,
+                })
+                .collect::<Vec<_>>();
+            text.apply_edits(&edits);
+            for e in edits.iter().rev() {
+                model.replace_range(e.range.clone(), e.text);
+            }
+            check_batch_model(&text, &model);
+            check_batch_model(&before, &old);
+            let points = boundaries(&model);
+            for _ in 0..3 {
+                let a = next(points.len());
+                let b = next(points.len());
+                let range = points[a.min(b)]..points[a.max(b)];
+                check_view(text.slice(range.clone()), &model[range]);
+            }
+            if batch % 6 == 0 {
+                snapshots.push((before, old));
+            }
+            for (snapshot, old) in &snapshots {
+                assert_eq!(snapshot.to_string(), *old, "seed {seed}, batch {batch}");
+                assert_eq!(snapshot.root.summary, tree::Summary::of(old));
+            }
+        }
+        // True overlaps are invalid, even if a preceding edit was valid. The
+        // entire call must fail atomically; adjacent edits above must succeed.
+        if !model.is_empty() {
+            let end = model.chars().next().unwrap().len_utf8();
+            let before = text.clone();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| text.apply_edits(&[
+                    Edit {
+                        range: 0..end,
+                        text: "replacement"
+                    },
+                    Edit {
+                        range: 0..0,
+                        text: "overlap"
+                    },
+                ])))
+                .is_err()
+            );
+            check_batch_model(&text, &model);
+            assert_eq!(text, before);
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(72))]
     #[test]

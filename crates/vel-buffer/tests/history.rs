@@ -249,3 +249,27 @@ fn consecutive_deletions_in_one_direction_are_one_undo_step() {
     assert!(b.undo(v));
     assert_eq!(b.text().to_string(), "hell world");
 }
+
+#[test]
+fn reducing_history_limits_bounds_selection_soft_redo() {
+    let mut buffer = Buffer::new("x".repeat(1024).as_str());
+    let view = buffer.new_view();
+    buffer.set_history_limits(vel_buffer::HistoryLimits {
+        selection_entries: 1024,
+        ..buffer.history_limits()
+    });
+    for at in 1..=600 {
+        buffer.set_selection(view, Selection::from(Region::caret(at)));
+    }
+    for _ in 0..600 {
+        assert!(buffer.soft_undo(view));
+    }
+    buffer.set_history_limits(vel_buffer::HistoryLimits {
+        selection_entries: 256,
+        ..buffer.history_limits()
+    });
+    for _ in 0..256 {
+        assert!(buffer.soft_redo(view));
+    }
+    assert!(!buffer.soft_redo(view));
+}

@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": 40,
+      "path": "/private/tmp/a20v3-mainfix/cp1252_dirty/doc.txt",
+      "disk": {
+        "bytes": 18,
+        "modified_ns": 1794985287037911338
+      },
+      "encoding": "windows-1252",
+      "bom": false,
+      "line_ending": "LF",
+      "dirty": true,
+      "history": {
+        "text": "café crème brûlée\n edited",
+        "snapshot": {
+          "version": 1,
+          "text_len": 29,
+          "text_hash": "6ab97d04a7f642704e2958b047b37c76ac6cb42ecb00be39467b7f4b8707abd4",
+          "views": [
+            33
+          ],
+          "data": "eAEVSzkOg0AQs1eRtkuZLlI2d8ICPfcL+ACHKKCgp+MQT+DJDJZ8yLK3fBVwVVtOBdBAEQKeD7HQBPWta/uha0npZMKruPH88vu7f9zAemGULCZ7PF/1+z85cVGNc7OkJxBKCIAXQJL8CUsLvQNgPRCb"
+        }
+      }
+    }
+  ],
+  "windows": [
+    {
+      "project": null,
+      "folders": [],
+      "workbench": {
+        "layout": {
+          "cols": [
+            0.0,
+            1.0
+          ],
+          "rows": [
+            0.0,
+            1.0
+          ],
+          "cells": [
+            [
+              0,
+              0,
+              1,
+              1
+            ]
+          ]
+        },
+        "groups": [
+          {
+            "sheets": [
+              39
+            ],
+            "selected": [
+              39
+            ],
+            "focused": 39,
+            "anchor": 39,
+            "tab_scroll": 0.0
+          }
+        ],
+        "active": 0
+      },
+      "sheets": [
+        {
+          "id": 39,
+          "document": 40,
+          "view": {
+            "history_view": 33,
+            "selections": [
+              {
+                "a": 29,
+                "b": 29,
+                "xpos": null
+              }
+            ],
+            "primary": 0,
+            "scroll": [
+              0.0,
+              0.0
+            ],
+            "scroll_line": 0.0,
+            "folds": [],
+            "named_regions": {}
+          },
+          "syntax": null,
+          "transient": false
+        }
+      ],
+      "sidebar_visible": false,
+      "sidebar_expanded": [],
+      "sidebar_scroll": 0.0,
+      "find_history": [],
+      "replace_history": [],
+      "distraction_free": false,
+      "normal_ui": {},
+      "distraction_ui": {},
+      "normal_sidebar": null,
+      "distraction_sidebar": null,
+      "fullscreen_before_distraction": false,
+      "fullscreen": false,
+      "build_system": null
+    }
+  ],
+  "recent_files": [],
+  "recent_folders": [],
+  "recent_projects": []
+}

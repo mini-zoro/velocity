@@ -71,6 +71,7 @@ pub struct App {
     #[cfg(test)]
     overwrite_decisions: std::collections::VecDeque<bool>,
     pending_menu: Option<context_adapter::PendingMenu>,
+    pending_utf8_saves: std::collections::VecDeque<(u64, Option<std::path::PathBuf>, String)>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_preferences: accessibility::Preferences,
     releases: crate::release::Actions,
@@ -222,6 +223,7 @@ impl App {
             #[cfg(test)]
             overwrite_decisions: Default::default(),
             pending_menu: None,
+            pending_utf8_saves: Default::default(),
             accessibility_focus: None,
             accessibility_preferences: Default::default(),
             releases: Default::default(),
@@ -705,7 +707,9 @@ impl App {
         }
         match name {
             "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
-            "reopen_encoding" if self.workspace.tabs[target].path.is_none() => return false,
+            "reopen" | "reopen_encoding" if self.workspace.tabs[target].path.is_none() => {
+                return false;
+            }
             "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
             | "save_encoding"
                 if self.workspace.is_empty() =>
@@ -1113,7 +1117,9 @@ impl App {
         match self.save_tab_with_path(Some(w), index, save_as, None) {
             Ok(saved) => saved,
             Err(error) => {
-                self.panels.message = error;
+                if !self.offer_utf8_save(index, None, &error) {
+                    self.panels.set_message(error);
+                }
                 false
             }
         }
@@ -1143,6 +1149,7 @@ impl App {
             None
         };
         if !self.workspace.tabs[index].editor.read_only
+            && !self.workspace.tabs[index].binary_document
             && self.workspace.save_conflict(index, path.as_deref())?
         {
             let overwrite = if let Some(window) = window {
@@ -1169,6 +1176,189 @@ impl App {
                 .acknowledge_overwrite(index, path.as_deref())?;
         }
         self.workspace.save(index, path)?;
+        Ok(true)
+    }
+    /// Encoding failures keep the document/bytes intact and offer an explicit retry.
+    fn offer_utf8_save(
+        &mut self,
+        index: usize,
+        path: Option<std::path::PathBuf>,
+        error: &str,
+    ) -> bool {
+        if !error.contains("characters cannot be represented in") {
+            return false;
+        }
+        // The current public docs/changelog do not establish automatic UTF-8
+        // fallback on this error. Preserve our strict error and require the user
+        // to select recovery; never silently change the document's encoding.
+        // https://docs.sublimetext.io/reference/commands.html#save
+        // https://www.sublimetext.com/download
+        let mut args = json!({"encoding":"UTF-8", "_context_menu":"tab",
+            "_context_sheet":self.workspace.tabs[index].sheet});
+        if let Some(path) = path {
+            args["file"] = json!(path);
+        }
+        self.panels.choices(
+            &mut self.workspace,
+            vec![vel_config::ui::PaletteItem {
+                caption: "Save as UTF-8".into(),
+                invocation: vel_config::keymap::Invocation {
+                    command: "save_encoding".into(),
+                    args,
+                },
+            }],
+        );
+        self.panels.set_message(format!(
+            "{error}. Choose Save as UTF-8 to save these characters."
+        ));
+        true
+    }
+    fn next_utf8_save(&mut self) {
+        if self.panels.overlay.is_some() {
+            return;
+        }
+        while let Some((sheet, path, error)) = self.pending_utf8_saves.pop_front() {
+            if let Some(index) = self.workspace.sheet_index(sheet) {
+                self.offer_utf8_save(index, path, &error);
+                break;
+            }
+        }
+    }
+    /// One shared dispatcher for native menus, user keymaps and headless tests.
+    fn format_action(
+        &mut self,
+        window: Option<&WindowHandle>,
+        name: &str,
+        args: &Value,
+    ) -> Result<bool, String> {
+        let active = self.workspace.active;
+        match name {
+            "set_line_ending" | "set_line_endings" => {
+                // https://docs.sublimetext.io/reference/commands.html#set-line-ending
+                self.workspace.tabs[active].format.line_ending = vel_fileio::LineEnding::parse(
+                    args["type"].as_str().ok_or("set_line_ending needs type")?,
+                )?;
+            }
+            "set_encoding" => {
+                self.workspace.tabs[active].format = vel_fileio::encoding_format(
+                    args["encoding"]
+                        .as_str()
+                        .ok_or("set_encoding needs encoding")?,
+                    self.workspace.tabs[active].format.line_ending,
+                )?;
+                self.workspace.tabs[active].encoding_chosen = true;
+                self.workspace.tabs[active].saved_in_effective_encoding = false;
+                self.workspace.tabs[active].preferred_encoding =
+                    Some(self.workspace.tabs[active].format.display_encoding().into());
+            }
+            "reopen" | "reopen_encoding" => {
+                if self.workspace.tabs[active].dirty() {
+                    let window = window.ok_or("Reopen requires confirmation of unsaved changes")?;
+                    if !self.can_close_document(window, active) {
+                        return Ok(true);
+                    }
+                }
+                self.workspace
+                    .reopen_encoding(args["encoding"].as_str().ok_or("missing encoding")?)?;
+            }
+            "save_all" => {
+                let mut failures = Vec::new();
+                let mut seen = std::collections::BTreeSet::new();
+                for index in 0..self.workspace.tabs.len() {
+                    if !self.workspace.tabs[index].dirty()
+                        || !seen.insert(self.workspace.tabs[index].session_document)
+                    {
+                        continue;
+                    }
+                    let path = if self.workspace.tabs[index].path.is_none() {
+                        let Some(path) = window.and_then(|window| {
+                            window.save_file(&self.workspace.tabs[index].name())
+                        }) else {
+                            continue;
+                        };
+                        Some(path)
+                    } else {
+                        None
+                    };
+                    match self.save_tab_with_path(window, index, false, path.clone()) {
+                        Ok(true) => continue,
+                        Ok(false) => break, // Cancel stops the sequential document operation.
+                        Err(error) => {
+                            if error.contains("characters cannot be represented in") {
+                                self.pending_utf8_saves.push_back((
+                                    self.workspace.tabs[index].sheet,
+                                    path,
+                                    error,
+                                ));
+                            } else {
+                                failures.push(format!(
+                                    "{}: {error}",
+                                    self.workspace.tabs[index].name()
+                                ));
+                            }
+                        }
+                    }
+                }
+                self.next_utf8_save();
+                if !failures.is_empty() {
+                    self.panels.set_message(failures.join("\n"));
+                }
+            }
+            "save" | "save_encoding" | "save_and_close" | "save_as" | "prompt_save_as" => {
+                let previous = (
+                    self.workspace.tabs[active].format.clone(),
+                    self.workspace.tabs[active].encoding_chosen,
+                    self.workspace.tabs[active].preferred_encoding.clone(),
+                );
+                if name == "save_encoding" && args["encoding"].as_str().is_none() {
+                    return Err("missing encoding".into());
+                }
+                let path = args["file"].as_str().map(std::path::PathBuf::from);
+                let save_as = matches!(name, "save_as" | "prompt_save_as");
+                if path.is_none()
+                    && (save_as || self.workspace.tabs[active].path.is_none())
+                    && window.is_none()
+                {
+                    return Err("Save requires a file path".into());
+                }
+                if let Some(encoding) = args["encoding"].as_str() {
+                    self.workspace.tabs[active].format = vel_fileio::encoding_format(
+                        encoding,
+                        self.workspace.tabs[active].format.line_ending,
+                    )?;
+                    self.workspace.tabs[active].encoding_chosen = true;
+                    self.workspace.tabs[active].preferred_encoding = Some(encoding.into());
+                }
+                let saved =
+                    if path.is_none() && (save_as || self.workspace.tabs[active].path.is_none()) {
+                        self.save_tab(window.ok_or("Save requires a file path")?, active, save_as)
+                    } else {
+                        match self.save_tab_with_path(window, active, false, path.clone()) {
+                            Ok(saved) => saved,
+                            Err(error) => {
+                                // A failed explicit save has not changed the disk format.
+                                // Restore it before presenting a cancellable retry.
+                                self.workspace.tabs[active].format = previous.0.clone();
+                                self.workspace.tabs[active].encoding_chosen = previous.1;
+                                self.workspace.tabs[active].preferred_encoding = previous.2.clone();
+                                if !self.offer_utf8_save(active, path, &error) {
+                                    return Err(error);
+                                }
+                                false
+                            }
+                        }
+                    };
+                if !saved {
+                    self.workspace.tabs[active].format = previous.0;
+                    self.workspace.tabs[active].encoding_chosen = previous.1;
+                    self.workspace.tabs[active].preferred_encoding = previous.2;
+                }
+                if saved && name == "save_and_close" {
+                    self.workspace.close(active)?;
+                }
+            }
+            _ => return Ok(false),
+        }
         Ok(true)
     }
     fn can_close(&mut self, w: &WindowHandle, index: usize) -> bool {
@@ -1306,6 +1496,9 @@ impl App {
             return Ok(());
         }
         if self.apply_settings_action(window, name, args)? {
+            return Ok(());
+        }
+        if self.format_action(window, name, args)? {
             return Ok(());
         }
         if self.apply_view_action(name, args)? {
@@ -1677,37 +1870,19 @@ impl App {
                     },
                 )?;
             }
-            "reopen_encoding" => {
-                if self.can_close_document(w, active) {
-                    self.workspace
-                        .reopen_encoding(args["encoding"].as_str().ok_or("missing encoding")?)?;
-                }
-            }
-            "save_encoding" => {
-                self.workspace.tabs[active].format = vel_fileio::encoding_format(
-                    args["encoding"].as_str().ok_or("missing encoding")?,
-                    self.workspace.tabs[active].format.line_ending,
-                )?;
-                self.save_tab(w, active, false);
-            }
             "open_file" => {
                 if let Some(file) = args["file"].as_str() {
                     self.workspace.open(crate::cli::FileLocation::parse(file))?;
                 } else if (args["force"].as_bool().unwrap_or(false) || self.can_close(w, active))
                     && let Some(path) = self.workspace.tabs[active].path.clone()
                 {
-                    let fallback = self
-                        .workspace
-                        .editor()
-                        .preferences
-                        .fallback_encoding
-                        .clone();
+                    let decode = self.workspace.tabs[active].decode_options();
                     if self.workspace.editor().binary.is_some() {
                         self.workspace.tabs[active].binary_loading =
                             Some(crate::binary::Task::open(path)?);
                     } else {
                         self.workspace.tabs[active].loading =
-                            Some(vel_fileio::load_background(path, fallback)?);
+                            Some(vel_fileio::load_background_with_options(path, decode)?);
                     }
                     self.workspace.tabs[active].editor.read_only = true;
                 }
@@ -1728,9 +1903,6 @@ impl App {
                     self.show_error(w, &errors.join("\n"));
                 }
             }
-            "save" | "save_and_close" => {
-                self.apply_save_action(Some(w), name, args)?;
-            }
             "prompt_save_as" => {
                 self.save_tab(w, active, true);
             }
@@ -1745,20 +1917,6 @@ impl App {
             }
             "increase_font_size" | "decrease_font_size" | "reset_font_size" => {
                 self.workspace.zoom_font(name)?;
-            }
-            "set_line_endings" => {
-                self.workspace.tabs[active].format.line_ending = vel_fileio::LineEnding::parse(
-                    args["type"].as_str().ok_or("set_line_endings needs type")?,
-                )?;
-            }
-            "set_encoding" => {
-                let requested = args["encoding"]
-                    .as_str()
-                    .ok_or("set_encoding needs encoding")?;
-                self.workspace.tabs[active].format = vel_fileio::encoding_format(
-                    requested,
-                    self.workspace.tabs[active].format.line_ending,
-                )?;
             }
             "show_at_center" => {
                 let caret = self
@@ -2576,6 +2734,7 @@ impl App {
         w.request_frame();
     }
     fn changed_state(&mut self, received: Instant, reveal: bool) {
+        self.next_utf8_save();
         let reveal = self.panels.should_reveal(reveal);
         if reveal {
             self.view.reset_caret();
@@ -3083,21 +3242,22 @@ impl AppHandler for App {
             "set_max_columns" => {
                 args["columns"].as_u64() == Some(self.workspace.workbench.max_columns as u64)
             }
-            "reopen_encoding" | "save_encoding" => {
-                args["encoding"].as_str()
-                    == Some(self.workspace.tabs[target].format.encoding.as_str())
+            "reopen" | "reopen_encoding" | "save" | "save_encoding"
+                if args["encoding"].as_str().is_some() =>
+            {
+                vel_fileio::encoding_format(
+                    args["encoding"].as_str().unwrap(),
+                    self.workspace.tabs[target].format.line_ending,
+                )
+                .is_ok_and(|format| {
+                    format.display_encoding()
+                        == self.workspace.tabs[target].format.display_encoding()
+                })
             }
-            "set_line_ending" => {
-                let current = match self.workspace.tabs[self.workspace.active]
-                    .format
-                    .line_ending
-                {
-                    vel_fileio::LineEnding::Lf => "unix",
-                    vel_fileio::LineEnding::CrLf => "windows",
-                    vel_fileio::LineEnding::Cr => "cr",
-                };
-                args["type"].as_str() == Some(current)
-            }
+            "set_line_ending" | "set_line_endings" => args["type"]
+                .as_str()
+                .and_then(|value| vel_fileio::LineEnding::parse(value).ok())
+                .is_some_and(|ending| ending == self.workspace.tabs[target].format.line_ending),
             "toggle_setting" => args["setting"]
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),

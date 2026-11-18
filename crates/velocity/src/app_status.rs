@@ -18,12 +18,12 @@ impl App {
             (
                 FormatItem::Encoding,
                 editor.settings.bool("show_encoding", false),
-                tab.format.encoding.as_str(),
+                tab.format.display_encoding(),
             ),
             (
                 FormatItem::LineEndings,
                 editor.settings.bool("show_line_endings", false),
-                tab.format.line_ending.name(),
+                tab.format.line_ending.display_name(),
             ),
         ];
         if !fields.iter().any(|(_, show, _)| *show) {
@@ -72,36 +72,23 @@ impl App {
         }
     }
     pub(super) fn format_menu(&self, item: FormatItem) -> Vec<MenuEntry> {
-        // The status popup has the same resource rows and validation/checks as the
-        // main menu. Public status-menu names and command arguments:
-        // https://docs.sublimetext.io/guide/customization/menus.html#available-menus
-        // https://docs.sublimetext.io/reference/commands.html#set-line-ending
-        // Lane A's round-20 panels::status_format_menu is not in this checkout.
-        // Reuse the installed menu resources until that model is integrated; do
-        // not register a placeholder set_line_ending command.
-        let mut rows = vec![];
-        fn collect(
-            items: &[vel_config::ui::MenuItem],
-            names: &[&str],
-            out: &mut Vec<vel_config::ui::MenuItem>,
-        ) {
-            for row in items {
-                if names.contains(&row.caption.as_str()) {
-                    out.push(row.clone());
-                } else {
-                    collect(&row.children, names, out);
-                }
+        // Paint, hit testing and menus use the same effective captions/model.
+        let item = match item {
+            FormatItem::Encoding => vel_ui::status::FormatItem::Encoding,
+            FormatItem::LineEndings => vel_ui::status::FormatItem::LineEndings,
+        };
+        fn native(row: vel_ui::status::FormatMenuItem) -> MenuEntry {
+            MenuEntry {
+                caption: row.caption,
+                command: row.command.map(str::to_owned),
+                args: row.args.to_string(),
+                children: row.children.into_iter().map(native).collect(),
             }
         }
-        let names: &[&str] = match item {
-            FormatItem::Encoding => &["Reopen with Encoding", "Save with Encoding"],
-            FormatItem::LineEndings => &["Line Endings"],
-        };
-        collect(&self.workspace.menus, names, &mut rows);
-        if item == FormatItem::LineEndings {
-            rows = rows.into_iter().flat_map(|r| r.children).collect();
-        }
-        native_menu(&rows, &[])
+        crate::panels::status_format_menu(&self.workspace, item)
+            .into_iter()
+            .map(native)
+            .collect()
     }
     pub(super) fn format_status_mouse(
         &mut self,

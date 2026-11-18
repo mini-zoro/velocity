@@ -395,8 +395,7 @@ impl<'a> TextSlice<'a> {
             return true;
         }
         let absolute = self.start.bytes + byte;
-        let (s, before) = tree::seek(&self.text.root, absolute, Metric::Byte);
-        s.is_char_boundary(absolute - before.bytes)
+        tree::is_char_boundary(&self.text.root, absolute)
     }
     /// Clamps to EOF and rounds down to a scalar boundary.
     pub fn floor_char_boundary(&self, byte: usize) -> usize {

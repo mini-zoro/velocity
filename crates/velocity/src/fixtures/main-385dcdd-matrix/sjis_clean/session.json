@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": 12,
+      "path": "/private/tmp/a20v3-mainfix/sjis_clean/doc.txt",
+      "disk": {
+        "bytes": 11,
+        "modified_ns": 1794985286779761782
+      },
+      "encoding": "Shift_JIS",
+      "bom": false,
+      "line_ending": "LF",
+      "dirty": false,
+      "history": {
+        "disk": [
+          "/private/tmp/a20v3-mainfix/sjis_clean/doc.txt",
+          "Shift_JIS"
+        ],
+        "snapshot": {
+          "version": 1,
+          "text_len": 16,
+          "text_hash": "bf27a04542012be8a7e58306594c76b8f8dfd77d44dba927676ca2ac445f1215",
+          "views": [
+            10
+          ],
+          "data": "eAEBQgC9/5BOgICAgAGAApBOAAEAAAAAAAEKAQAAAAAhLi9cKCkiJy06LC47PD5+IUAjJCVeJip8Kz1bXXt9YH4/BAEBAAAAAMQ8DOc="
+        }
+      }
+    }
+  ],
+  "windows": [
+    {
+      "project": null,
+      "folders": [],
+      "workbench": {
+        "layout": {
+          "cols": [
+            0.0,
+            1.0
+          ],
+          "rows": [
+            0.0,
+            1.0
+          ],
+          "cells": [
+            [
+              0,
+              0,
+              1,
+              1
+            ]
+          ]
+        },
+        "groups": [
+          {
+            "sheets": [
+              11
+            ],
+            "selected": [
+              11
+            ],
+            "focused": 11,
+            "anchor": 11,
+            "tab_scroll": 0.0
+          }
+        ],
+        "active": 0
+      },
+      "sheets": [
+        {
+          "id": 11,
+          "document": 12,
+          "view": {
+            "history_view": 10,
+            "selections": [
+              {
+                "a": 0,
+                "b": 0,
+                "xpos": null
+              }
+            ],
+            "primary": 0,
+            "scroll": [
+              0.0,
+              0.0
+            ],
+            "scroll_line": 0.0,
+            "folds": [],
+            "named_regions": {}
+          },
+          "syntax": null,
+          "transient": false
+        }
+      ],
+      "sidebar_visible": false,
+      "sidebar_expanded": [],
+      "sidebar_scroll": 0.0,
+      "find_history": [],
+      "replace_history": [],
+      "distraction_free": false,
+      "normal_ui": {},
+      "distraction_ui": {},
+      "normal_sidebar": null,
+      "distraction_sidebar": null,
+      "fullscreen_before_distraction": false,
+      "fullscreen": false,
+      "build_system": null
+    }
+  ],
+  "recent_files": [],
+  "recent_folders": [],
+  "recent_projects": []
+}

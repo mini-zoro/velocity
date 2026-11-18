@@ -258,7 +258,9 @@ impl Default for EditorSettings {
             ruler_entries: vec![],
             ensure_newline_at_eof_on_save: false,
             trim_trailing_white_space_on_save: Value::Bool(false),
-            trim_only_modified_white_space: false,
+            // Build 4107: trimming newly inserted whitespace is the default.
+            // https://www.sublimetext.com/download
+            trim_only_modified_white_space: true,
             default_line_ending: "system".into(),
             default_encoding: "UTF-8".into(),
             fallback_encoding: "Western (Windows 1252)".into(),

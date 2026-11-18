@@ -13,6 +13,9 @@ vel-buffer = { path = "../vel-buffer" }
 vel-text = { path = "../vel-text", default-features = false }
 vel-config = { path = "../vel-config" }
 encoding_rs = "=0.8.35"
+blake3 = "1"
+memchr = "2"
+serde = { version = "=1.0.229", features = ["derive"] }
 notify = "=8.2.0"
 tempfile = "=3.27.0"
 [target.'cfg(unix)'.dependencies]

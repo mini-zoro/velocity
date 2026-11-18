@@ -199,6 +199,11 @@ pub struct History {
     text: Option<Text>,
     disk: Option<(std::path::PathBuf, String)>,
     snapshot: HistorySnapshot,
+    encoding_chosen: bool,
+    fallback_encoding: Option<String>,
+    effective_encoding: Option<String>,
+    saved_in_effective_encoding: bool,
+    saved_content: Option<vel_fileio::ContentIdentity>,
 }
 impl History {
     /// Captures groups, saved point, typing continuation and all attached views.
@@ -207,23 +212,114 @@ impl History {
             text: Some(buffer.text().clone()),
             disk: None,
             snapshot: buffer.export_history(),
+            encoding_chosen: false,
+            fallback_encoding: None,
+            effective_encoding: None,
+            saved_in_effective_encoding: false,
+            saved_content: None,
         }
     }
     /// Captures clean files without duplicating their current disk contents in session JSON.
     /// Native history still retains selection events and any saved text undo/redo steps.
     pub fn capture_saved(buffer: &Buffer, path: std::path::PathBuf, encoding: String) -> Self {
         let mut history = Self::capture(buffer);
+        history.effective_encoding = Some(encoding.clone());
         history.disk = Some((path, encoding));
+        history
+    }
+    /// Captures a clean disk reference with the tab's actual decode policy.
+    pub fn capture_saved_with_options(
+        buffer: &Buffer,
+        path: std::path::PathBuf,
+        options: vel_fileio::DecodeOptions,
+    ) -> Self {
+        let mut history = Self::capture_saved(
+            buffer,
+            path,
+            options.encoding.clone().unwrap_or_else(|| "UTF-8".into()),
+        );
+        history.encoding_chosen = options.encoding.is_some();
+        history.fallback_encoding = Some(options.fallback_encoding);
+        history.effective_encoding = options.effective_encoding;
+        history.saved_in_effective_encoding = options.saved_in_effective_encoding;
+        history.saved_content = options.saved_content;
+        history
+    }
+    /// Supplies an already decoded snapshot, retaining the checked native history.
+    /// Used after progressive loading so restore never rereads the complete file.
+    pub fn with_current_text(&self, text: Text) -> Self {
+        let mut history = self.clone();
+        history.text = Some(text);
+        history.disk = None;
         history
     }
     /// Supplies the current text, lazily reading clean files only on activation.
     pub fn current_text(&self) -> Result<Text, String> {
         if let Some((path, encoding)) = &self.disk {
-            return vel_fileio::load(path, encoding, |_| {}).map(|loaded| loaded.text);
+            // Detection is not a user choice. A clean disk reference carries
+            // the same provenance as its document, including across sessions.
+            return vel_fileio::load_with_options(
+                path,
+                &vel_fileio::DecodeOptions {
+                    encoding: self.encoding_chosen.then(|| encoding.clone()),
+                    effective_encoding: self
+                        .effective_encoding
+                        .clone()
+                        .or_else(|| Some(encoding.clone())),
+                    saved_in_effective_encoding: self.saved_in_effective_encoding,
+                    saved_content: self.saved_content,
+                    legacy_text_fingerprint: self
+                        .saved_content
+                        .is_none()
+                        .then(|| self.text_fingerprint())
+                        .flatten(),
+                    fallback_encoding: self
+                        .fallback_encoding
+                        .clone()
+                        .unwrap_or_else(|| "Western (Windows 1252)".into()),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .map(|loaded| loaded.text);
         }
         self.text
             .clone()
             .ok_or_else(|| "missing session contents".into())
+    }
+    /// Normalized current-text proof retained by old clean native histories.
+    /// Called only during migration; packed snapshots expose this without decoding
+    /// their edit payload or reading the file.
+    pub fn text_fingerprint(&self) -> Option<(usize, String)> {
+        let wire = serde_json::to_value(&self.snapshot).ok()?;
+        Some((
+            wire.get("text_len")?.as_u64()? as usize,
+            wire.get("text_hash")?.as_str()?.into(),
+        ))
+    }
+    /// Recovers the saved revision from a retained dirty history, if its saved
+    /// point is still reachable. Only a detached buffer is traversed.
+    pub fn saved_text(&self) -> Option<Text> {
+        if !self.retains_text() {
+            return None;
+        }
+        let (buffer, id) = self.restore(true, true).ok()?;
+        if !buffer.is_dirty() {
+            return Some(buffer.text().clone());
+        }
+        let mut before = buffer;
+        while before.undo(id) {
+            if !before.is_dirty() {
+                return Some(before.text().clone());
+            }
+        }
+        let (mut after, id) = self.restore(true, true).ok()?;
+        while after.redo(id) {
+            if !after.is_dirty() {
+                return Some(after.text().clone());
+            }
+        }
+        None
     }
     /// Whether current contents are retained independently of the clean disk file.
     pub fn retains_text(&self) -> bool {
@@ -280,6 +376,11 @@ impl Serialize for History {
             #[serde(skip_serializing_if = "Option::is_none")]
             disk: &'a Option<(std::path::PathBuf, String)>,
             snapshot: &'a HistorySnapshot,
+            encoding_chosen: bool,
+            fallback_encoding: &'a Option<String>,
+            effective_encoding: &'a Option<String>,
+            saved_in_effective_encoding: bool,
+            saved_content: Option<vel_fileio::ContentIdentity>,
         }
         Wire {
             text: if self.disk.is_none() {
@@ -294,6 +395,11 @@ impl Serialize for History {
             },
             disk: &self.disk,
             snapshot: &self.snapshot,
+            encoding_chosen: self.encoding_chosen,
+            fallback_encoding: &self.fallback_encoding,
+            effective_encoding: &self.effective_encoding,
+            saved_in_effective_encoding: self.saved_in_effective_encoding,
+            saved_content: self.saved_content,
         }
         .serialize(serializer)
     }
@@ -308,7 +414,17 @@ impl<'de> Deserialize<'de> for History {
                 text: Option<String>,
                 #[serde(default)]
                 disk: Option<(std::path::PathBuf, String)>,
-                snapshot: HistorySnapshot,
+                snapshot: Box<HistorySnapshot>,
+                #[serde(default)]
+                encoding_chosen: bool,
+                #[serde(default)]
+                fallback_encoding: Option<String>,
+                #[serde(default)]
+                effective_encoding: Option<String>,
+                #[serde(default)]
+                saved_in_effective_encoding: bool,
+                #[serde(default)]
+                saved_content: Option<vel_fileio::ContentIdentity>,
             },
             Legacy(crate::legacy::History),
         }
@@ -317,6 +433,11 @@ impl<'de> Deserialize<'de> for History {
                 text,
                 disk,
                 snapshot,
+                encoding_chosen,
+                fallback_encoding,
+                effective_encoding,
+                saved_in_effective_encoding,
+                saved_content,
             } => {
                 if text.is_none() && disk.is_none() {
                     return Err(serde::de::Error::custom("missing session contents"));
@@ -324,7 +445,12 @@ impl<'de> Deserialize<'de> for History {
                 Ok(Self {
                     text: text.map(|s| Text::from(s.as_str())),
                     disk,
-                    snapshot,
+                    snapshot: *snapshot,
+                    encoding_chosen,
+                    fallback_encoding,
+                    effective_encoding,
+                    saved_in_effective_encoding,
+                    saved_content,
                 })
             }
             Wire::Legacy(history) => {

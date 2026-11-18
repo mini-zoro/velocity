@@ -305,6 +305,10 @@ fn clone_wrap_layouts_receive_exact_edits_and_external_reload_keeps_shared_views
     }
     w.prepare_sheet(original).unwrap();
     w.tabs[original].install_restored(vel_fileio::Loaded {
+        disk_content: None,
+        encoding_chosen: false,
+        unchanged: false,
+        warning: None,
         text: Text::from("external\n"),
         format: Default::default(),
         source_bytes: 9,

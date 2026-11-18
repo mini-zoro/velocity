@@ -68,6 +68,30 @@ fn loadavg() -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn retired_instructions() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
+    // SAFETY: the v4 flavor initializes this aligned v4 buffer on success;
+    // getpid has no preconditions and we query only the current process.
+    let result = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            info.as_mut_ptr().cast(),
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: the successful call above initialized the complete structure.
+    Some(unsafe { info.assume_init() }.ri_instructions)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn retired_instructions() -> Option<u64> {
+    None
+}
+
 fn measure<T: 'static>(
     implementation: &str,
     corpus: &str,
@@ -77,11 +101,16 @@ fn measure<T: 'static>(
     f: impl FnOnce() -> T,
 ) -> T {
     let load = loadavg();
+    let before_instructions = retired_instructions();
     let before = usage();
     let start = Instant::now();
     let result = black_box(f());
     let ns = start.elapsed().as_nanos();
     let after = usage();
+    let instructions = retired_instructions()
+        .zip(before_instructions)
+        .map(|(after, before)| (after - before).to_string())
+        .unwrap_or_else(|| "null".to_owned());
     let resident = resident_rss()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".to_owned());
@@ -98,7 +127,7 @@ fn measure<T: 'static>(
         .unwrap_or_else(|| "null".to_owned());
     let run = env::var("VEL_TEXT_BENCH_RUN").unwrap_or_else(|_| "0".to_owned());
     println!(
-        "{{\"implementation\":{implementation:?},\"corpus\":{corpus:?},\"operation\":{operation:?},\"run\":{run},\"total_ns\":{ns},\"cpu_ns\":{cpu_ns},\"minor_faults\":{},\"major_faults\":{},\"count\":{count},\"content_bytes\":{bytes},\"peak_rss_bytes\":{},\"resident_rss_bytes\":{resident},\"estimated_storage_bytes\":{storage},\"loadavg\":{load:?}}}",
+        "{{\"implementation\":{implementation:?},\"corpus\":{corpus:?},\"operation\":{operation:?},\"run\":{run},\"total_ns\":{ns},\"cpu_ns\":{cpu_ns},\"retired_instructions\":{instructions},\"minor_faults\":{},\"major_faults\":{},\"count\":{count},\"content_bytes\":{bytes},\"peak_rss_bytes\":{},\"resident_rss_bytes\":{resident},\"estimated_storage_bytes\":{storage},\"loadavg\":{load:?}}}",
         after.ru_minflt - before.ru_minflt,
         after.ru_majflt - before.ru_majflt,
         peak_rss(&after)

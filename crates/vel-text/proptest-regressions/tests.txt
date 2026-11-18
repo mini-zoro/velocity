@@ -1,0 +1,2 @@
+# Regression: materializing a grown fragment leaf after deletion.
+cc 4c78eec869639ecf8a198ecb347c54aac30ba1b550c4165e04bbc28cc118e89b

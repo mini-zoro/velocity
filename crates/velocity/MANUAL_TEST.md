@@ -1,3 +1,926 @@
+# Round 20 Lane A final review on b56986f
+
+These fixes remain uncommitted on `b56986f`. This section supersedes the earlier
+review notes below where they describe hash-first decoding or normalized legacy
+proofs. Every build, test and probe uses a disposable HOME and SHELL; release
+checks run in this worktree's own `target`. No GUI or packaging run is claimed.
+
+The four choice/revision rules remain unchanged: only explicit encoding commands
+change the choice; every completed load/save records raw identity plus effective
+codec; changed bytes use BOM → explicit choice → valid UTF-8 → NUL-gated UTF-16 →
+binary → fallback; main-format codecs belong to their stored revision, never an
+explicit choice. Plain save and fallback do not promote an encoding to a choice.
+
+Additional guarantees in this review:
+
+- Keep My Edits invalidates the previous saved point unconditionally. Undo/redo
+  cannot make old disk text appear saved against the acknowledged external revision.
+  A successful save establishes the new saved point normally.
+- Legacy normalized histories prove unchanged disk text only when their stored
+  BOM and **every** decoded newline convention also match. Unknown or mixed
+  representations cannot prove equality; a real format change conflicts.
+- Reopen stages reading/decoding (or the binary task) before changing the choice,
+  cancelling jobs or clearing a pending conflict. An unsuccessful read preserves them.
+- Replacement decoding always retains its file-named non-modal notice, including
+  unchanged restores and touches. Notices do not enter `workspace.messages`.
+- A matching saved size/mtime starts progressive decoding with the revision codec
+  immediately. The raw digest is computed during that same full streaming pass.
+  A final digest mismatch discards the attempt and runs the changed-byte policy;
+  any rare intermediate preview is replaced by the correct completed result.
+  Changed stamps use the policy directly, with no whole-file hash pre-pass. If its
+  final digest proves a touch, the revision codec still governs the accepted text.
+
+The adopted independent harness is `src/app_round20_matrix_tests.rs`. It replaces
+our older v3 adaptation, keeps the independent oracle and all original tables,
+and adds the verifier's plain-save, unreadable recovery and Keep Edits tables.
+Its documents are synthetic; the real `385dcdd` snapshot JSON/byte fixtures are
+embedded and relocated into TempDirs. It never reads a verifier checkout or an
+absolute fixture path. The cross products are ignored; small focused regressions
+remain in the normal gate. Reports default to a process-specific temp directory.
+
+```sh
+# Use your fixture HOME/SHELL, CARGO_HOME/RUSTUP_HOME as required by the runner.
+R20_MATRIX_REPORT="$TMPDIR/velocity-r20-matrix" \
+cargo test --release --locked -p velocity round20_matrix -- \
+  --ignored --nocapture --test-threads=1
+```
+
+`r20_matrix_probe_unchanged_large_restore_latency` measures the full headless
+restore path from `restore_window` through the first content installed by the App
+frame, and through final completion. It uses >100 MiB raw UTF-8 and Shift JIS
+fixtures, with/without native history, three restores per case. To enforce the
+≤1.5× parent median gate, set `R20_RESTORE_PARENT_REPORT` to the TSV produced by
+the same probe in archived `3015ba2` (the parent before hash-first decoding).
+Without that optional baseline it still asserts progressive, correct completion.
+
+Focused regression tests:
+
+| Finding | Test |
+| --- | --- |
+| Keep Edits then all undo/redo points, hot exit, save and touch | `r20_matrix_probe_keep_then_undo_stale_clean` |
+| Legacy BOM/newline-only changes, open and while closed | `r20_matrix_probe_legacy_line_ending_and_bom_changes`; `r20_matrix_legacy_dirty_closed_format_change_conflicts` |
+| Failed Reopen preserves choice, dirty text, revision and pending conflict | `r20_matrix_probe_failed_reopen_keeps_choice` |
+| Replacement notices across reload/unchanged and changed restores | `r20_matrix_probe_replacement_on_reload_and_restore` |
+| Same size/mtime with different raw bytes, both load modes and history settings | `r20_matrix_same_stamp_different_bytes_finishes_with_policy_text` |
+| Progressive unchanged large restore latency | `r20_matrix_probe_unchanged_large_restore_latency` |
+
+Native manual checklist (pending; sandbox has no GUI):
+
+- [ ] Open `base\n`, type `+k`, rewrite externally as `base\nexternal\n`, Keep My
+  Edits, undo and redo to every point. Dirty state and close prompting remain
+  correct. Save and touch: saved state/text/undo remain stable.
+- [ ] Restore a dirty main-format UTF-8/1252/Shift JIS/UTF-16 document after only
+  its BOM or line endings changed. The edits remain and the conflict is offered.
+- [ ] With a pending conflict, make its file unreadable and Reopen with another
+  encoding. The original choice, text and conflict remain after failure.
+- [ ] Open malformed Shift JIS fallback bytes, restart and touch: the file-named
+  replacement notice stays non-modal and no alert appears.
+- [ ] Restore an unchanged >100 MiB UTF-8 and Shift JIS file: early content,
+  responsive frames and correct final encoding; undo still works afterward.
+- [ ] Rewrite bytes while preserving size/mtime, then restore: the completed view
+  contains the correct text and codec. A rare interim preview may be corrected.
+
+Known limits retained: wrapped typing on one line of 100,000 CJK characters still
+scales with line length (~3.1 ms/key versus main's ~6.7 ms); single-caret unwrapped
+CJK was 15→74 µs over 1,000 keys. No typing/layout/rope path is changed here.
+
+The adopted ignored suite passes **8,587 matrix cells / 18 tables / 0 failures**,
+including the original 7,831 cells, 252 plain-save-choice cells, 288 unreadable
+recovery cells and 216 Keep Edits cells. Its separate 12 restore timing cases also
+pass. The original focused choice/revision, malformed fallback, dirty legacy BOM
+and unreadable-placeholder regressions are retained in the normal gate.
+
+Fresh archived-parent/current measurements (three warm restores per case):
+
+| Raw fixture / native history | Parent `3015ba2` first / complete (ms) | Current first / complete (ms) | First ratio |
+| --- | ---: | ---: | ---: |
+| UTF-8, 136 MiB / with history | 8.9 / 494.4 | 8.9 / 498.2 | 1.000× |
+| UTF-8, 136 MiB / without history | 8.9 / 321.8 | 8.9 / 323.5 | 1.000× |
+| Shift JIS, 112 MiB / with history | 10.2 / 655.0 | 10.3 / 645.4 | 1.010× |
+| Shift JIS, 112 MiB / without history | 10.3 / 470.6 | 10.4 / 468.7 | 1.010× |
+
+These are medians on the full App restore/frame path; source fixtures are >100
+MiB on disk. All first snapshots pass ≤1.5× parent. Compared with the reviewed
+hash-first result (about 107 ms UTF-8 and 92–95 ms Shift JIS), early content is
+restored. The parent archive's production loading sources match `3015ba2`.
+
+Seven alternating whole-process Darwin `RUSAGE_INFO_V4` retired-instruction pairs
+against frozen main `385dcdd`, sampled after child exit before reaping:
+
+| Workload | Main median instructions | Current median instructions | Change |
+| --- | ---: | ---: | ---: |
+| `typing1` | 427,906,757 | 303,546,722 | −29.06% |
+| `typing1000` | 10,640,129,340 | 4,143,179,768 | −61.06% |
+
+Both pass the ≤5% regression gate. This includes setup, App input/editing,
+background work and CPU scenes; it is not per-key latency or GUI presentation.
+Runs began after builds and matrix work finished and inherited fixture HOME/SHELL.
+No defaults or typing/layout/rope implementations changed.
+
+The final gate passes in this worktree's own target directory: fmt; strict release
+clippy for the workspace/all targets with `-D warnings`; **1,073 workspace tests
+passed / 0 failed / 40 ignored**; rustdoc with `RUSTDOCFLAGS="-D warnings"`; and
+**126,600 syntax assertions / 203 syntaxes / 242 files / 0 failures or skips**.
+Lane B's preference reload-count test passed unchanged. The final release binary
+SHA-256 is `652af5e5738cbaade100d028e216c6914931d80d0fa950bda9dddca81a97aca8`,
+identical to the binary used for the paired typing measurements. No commit or
+amend was made; native checklist items above remain pending.
+Evidence: `/tmp/velocity-r20-final-review/verification.json`, `final/gate.json`,
+`matrix-final/*.tsv`, `parent-report/probe_large_restore.tsv`,
+`parent-provenance.json` and `instructions-final/report.json`. Earlier gate logs
+in `gate-before-restoring-focused-tests` predate the four retained tests.
+
+---
+
+# Round 20 Lane A revision/choice model on 3015ba2
+
+This section supersedes the earlier decode-policy record below. Work remains
+uncommitted on `3015ba2`; no reset, amend or commit. Evidence and original-file
+backups: `/tmp/velocity-r20-model-review/`. All builds, probes and test children
+use fixture `HOME=/tmp/velocity-r20-model-review/fixture-home`, `SHELL=/bin/false`,
+explicit Cargo/rustup directories and this worktree's own `target`. No GUI,
+packaging script, `cargo clean` or access to `target/package-macos/`.
+
+The four rules are:
+
+1. Explicit Reopen/Save with Encoding (including aliases), and `set_encoding`,
+   set the persistent choice. Plain save and fallback never create or change it.
+   The displayed caption follows the effective format; it need not be the
+   retained preferred codec after a fallback.
+2. Each complete text load/save records raw byte count + BLAKE3 identity and its
+   effective codec. Matching bytes decode with that revision's codec, independent
+   of the choice. Touches preserve live text, selections, format and undo. Raw
+   comparison also detects one changed CRLF among otherwise unchanged lines.
+3. Changed bytes use BOM, then a strictly decodable explicit choice, valid UTF-8,
+   NUL-gated UTF-16 evidence, binary, then configured fallback. Strong binary
+   signatures override text choices. **NUL-bearing content counts as binary or
+   UTF-16 evidence and may override a non-UTF-16 choice.** A malformed configured
+   fallback uses replacement characters and a file-named non-modal notice.
+4. Main-format sessions have no explicit-choice information. Their text codec belongs
+   to the stored revision only. An unchanged disk stamp, or the saved text/digest
+   retained by native history, validates that revision; otherwise detection runs.
+   Unchanged dirty restores do not start a load that blocks focus-loss save.
+   A legacy binary view's default UTF-8 label does not mask NUL/UTF-16 evidence.
+   Changed small revisions (at most 8 KiB) validate before native history import;
+   confirmed rewrites keep the existing history-discard behavior. Large same-size
+   revisions validate off-thread with retained edits intact.
+
+`vel-fileio::decide_decoding` remains the sole pure policy. The foreground loader
+and progressive worker check a saved raw identity **before** choosing a decoder.
+Ordinary opens need no extra pass. No last-effective speculative prefix is
+published. Legacy text validation runs privately and cannot publish a prefix.
+Binary terminal results, including a failed UTF-16 attempt, use `binary::Task`;
+unsaved text is preserved on an external binary rewrite until explicit Reopen.
+Known source size applies the large-file policy before the first prefix.
+Load notices never enter `workspace.messages`. An unreadable restored tab remains
+a watched, read-only error placeholder and retries when permission/timestamps
+change. Hot-exiting an error placeholder again preserves its original native
+revision proof and view ownership rather than serializing its empty buffer.
+Choosing Keep My Edits acknowledges the exact external raw revision, so
+a subsequent unchanged touch is quiet.
+
+The App matrix is in `app_round20_revision_matrix_tests.rs`: the independent
+verifier's 34 byte samples and 34 states, with real main-format JSON/bytes from
+its archived `385dcdd` snapshot generator. The fixtures and generators are checked
+in under `src/fixtures/main-385dcdd-matrix/`; session schema is not hand-edited.
+Two additional dirty UTF-16/UTF-8 BOM sessions were generated afresh with main's
+production snapshot code and exercise another 16 touch/undo cases. The shared
+policy receives validated legacy saved-text proof even when BOM routing chose
+the codec directly.
+The oracle now implements these four rules rather than fallback/save promotion.
+It asserts text, effective codec, persistent choice, exact save bytes, non-modal
+notices and unchanged text/selection/undo through reload, touch, restart,
+Reopen/Save variants, inactive activation and failed-read recovery. Its formerly
+informational Keep My Edits re-prompt is now a failure. Dirty restores retaining
+edits on binary disk changes are treated as protected text, not a harness failure.
+
+Run the full matrix, including ignored large cross products, with fixtures:
+
+```sh
+HOME=/tmp/velocity-r20-model-review/fixture-home SHELL=/bin/false \
+CARGO_HOME=/Users/zoro/.cargo RUSTUP_HOME=/Users/zoro/.rustup \
+V3_REPORT=/tmp/velocity-r20-model-review/matrix-final-pass \
+cargo test --release --locked -p velocity v3_ -- --include-ignored --test-threads=1
+```
+
+The regular workspace gate includes the smaller legacy restore, inactive-tab,
+transient-preview, failed-read recovery and Keep My Edits regressions, plus
+`r20_explicit_choice_and_revision_encoding_are_independent`,
+`r20_malformed_fallback_revision_survives_touch_and_restart`,
+`r20_main_dirty_bom_history_touch_keeps_undo`, and
+`r20_main_error_placeholder_keeps_revision_proof_on_restart`. Existing round-20
+expectations were updated where they asserted the superseded promotion model.
+No editor, layout, rope or typing transaction implementation changes.
+
+Native manual checklist (pending; this sandbox has no GUI):
+
+- [ ] Choose Shift JIS, UTF-8 or UTF-16 LE; externally force a fallback, edit and
+  plain-save. Touch/restart: text, effective encoding and undo stay unchanged.
+  Write new bytes in the explicit chosen codec: it is tried again, and text is correct.
+- [ ] Restore main-format auto 1252/UTF-16 and explicitly reopened Shift JIS/GBK
+  sessions; touch dirty and clean tabs, including inactive tabs. Undo survives;
+  a real external byte change still offers the normal conflict handling.
+- [ ] Reopen a PNG/NUL binary as either UTF-16 order and restart in both load
+  modes: streaming hexadecimal view and file-named status notice, no alert/blank page.
+- [ ] Restore an unreadable file, restart again while unreadable, then grant
+  permission and touch it: the tab recovers with its effective codec, original
+  history and selection.
+- [ ] Keep My Edits after a real rewrite, then touch: edits remain dirty and no
+  repeated conflict appears. Use malformed Shift JIS fallback input: replacement
+  text plus the same non-modal notice on foreground/background paths.
+- [ ] Restore a several-MiB legacy-encoded revision after external UTF-8 rewrite:
+  no mojibake preview appears. Verify encoding/line-ending status menus and checked rows.
+
+Known limits retained: wrapped typing on one line of 100,000 CJK characters still
+scales with line length (~3.1 ms/key versus main's ~6.7 ms); single-caret unwrapped
+CJK was 15→74 µs over 1,000 keys. Neither path is changed in this review.
+
+Final validation on this source:
+
+- Fmt, strict release clippy with all targets, `cargo test --workspace --locked
+  --release`, and rustdoc with `RUSTDOCFLAGS="-D warnings"` all pass in this
+  worktree's own target directory: **1,071 tests passed, 0 failed, 31 ignored**.
+- The independent syntax runner passes **126,600 assertions**, 203 syntaxes /
+  242 files, zero failures or skips.
+- The full App matrix passes **7,831 cells / 15 tables / 0 failed cells**. The
+  additional 16 dirty-BOM touch/undo cells and repeated-unreadable-restart checks
+  pass in the regular gate. Its legacy BOM-less UTF-16 row now asserts correct
+  text/codec rather than merely logging the old binary-view default.
+- `blocked_preference_queue_defers_one_reload_and_tracks_multiple_keys_per_write`
+  is unchanged and passed this full run. The original focus-save, first-prefix
+  large-file policy, and confirmed-rewrite history-discard tests also pass;
+  the old restore-error assertion now checks the required status-only placeholder.
+- No setting defaults or editor/layout/buffer/rope typing implementations changed.
+
+Seven alternating retired-instruction pairs against frozen main `385dcdd`:
+
+| Workload | Main median instructions | Current median instructions | Change |
+| --- | ---: | ---: | ---: |
+| `typing1` | 428,455,679 | 304,072,857 | **−29.03%** |
+| `typing1000` | 10,708,611,441 | 4,225,845,118 | **−60.54%** |
+
+Both pass the ≤5% regression gate. These are Darwin `RUSAGE_INFO_V4` counts
+for complete headless child processes, measured after exit before reaping:
+setup, editing, background work and CPU scenes are included. They are not
+per-key latency or GUI measurements. Runs started after the builds and matrix
+finished; all children inherited fixture HOME/SHELL.
+
+Current candidate SHA-256:
+`c6772b3a1edfbb20383184ef17d49ea79f2638389ea287d2d01a5904cb25871a`.
+The frozen main binary is
+`59b6864104f4f8f1a12f5b7aa6afcc95f5df6dc5a9e5ba75839b59b9cd142272`.
+
+Final records (earlier logs in the parent directory are superseded attempts):
+`/tmp/velocity-r20-model-review/validation.json`, `final/gate.json`,
+`matrix-final-pass/*.tsv`, `matrix-report.json`, and
+`instructions-final/report.json`. `main-generator-provenance.json` verifies
+that the archived main production sources used for the additional fixtures
+match `385dcdd`; the original 40 verifier fixture files remain byte-identical.
+
+---
+
+# Round 20 Lane A decode-policy review on a5fa68e
+
+These changes are uncommitted on `a5fa68e` (`WIP round 20 lane A fixes 2`).
+No reset, amend or commit. Evidence, scripts and original-file backups are in
+`/tmp/velocity-r20-policy-review/`. Every build/test/probe and child uses fixture
+`HOME=/tmp/velocity-r20-policy-review/fixture-home`, `SHELL=/bin/false`, explicit
+Cargo/rustup paths, and this worktree's own `target` for the final gate. No GUI,
+packaging script, `cargo clean`, or access to `target/package-macos/`.
+
+`vel-fileio::decide_decoding(PrefixFacts, DecodeOptions)` is the sole pure
+policy. Prefix facts come from at most 8 KiB; the policy does no IO, logging or
+global diagnostic bookkeeping. Both streaming executors consume its strict
+attempt list. Converted UTF-8 goes directly to the rope snapshot builder, with
+no second content sniff or second BOM removal. Open, Reopen, both reload sizes, restore with/without native
+history, `History::current_text`, and touch comparison all use that decision.
+No typing, layout, rope, rendering or setting-default changes.
+
+| Evidence/state | Decision |
+| --- | --- |
+| BOM | Try its codec first. A contradictory preference gets a file-named notice. Malformed BOM data retains the existing lossless configured fallback, with a notice and automatic provenance. |
+| Recognized binary signature | Refuse text even with a preferred codec. Open/restore use the existing streaming hex task; reload/Reopen keep the live text. The same file-named status notice is used everywhere. |
+| Explicit preference | Try it strictly before automatic detection. NUL-preserving non-UTF-16 codecs cannot turn NUL-containing binary/UTF-16 data into text. A failed preference remains separate from this revision's effective codec. |
+| Automatic text | Valid UTF-8, then the UTF-16 heuristic only with NUL evidence, then binary rejection or the configured fallback. Pure CJK/short ambiguous UTF-16 without evidence is not guessed. |
+| Unchanged raw identity | Decode with the last effective codec, accepting this speculative attempt only if the complete byte count and BLAKE3 digest match. Otherwise follow the ordinary decision. No hash pass precedes progressive snapshots. Touches preserve the buffer, selections, format and undo; a changed mtime alone does not invalidate clean restored history. |
+| Successful save | The effective codec becomes the accepted preference when it differs from the previous choice. A later explicit pending choice supersedes that acceptance. Both the effective codec and save acceptance survive sessions. |
+| Dirty hot exit | Persist the last saved/load raw digest independently of the dirty retained rope. A touch matches it; an actual byte change, including a single CRLF-to-LF conversion, conflicts. |
+| Main-format session without provenance | Its stored encoding is a strong first-try hint after BOM/binary evidence. Explicit `false` in newer sessions remains automatic. The fixture is real main snapshot JSON, not a hand-written approximation. |
+
+The table tests explicitly distinguish ambiguous bytes from determinable text:
+a valid user-requested legacy reinterpretation wins. For example the GBK trap
+sample is also valid UTF-8; without a matching explicit choice the specified
+UTF-8 rule wins. A decoder cannot infer the original codec from those bytes.
+
+| Finding | Implementation | Headless test |
+| --- | --- | --- |
+| One policy / B | `decoding::decide_decoding`, `load_cancellable`, progressive worker; explicit choice and valid UTF-8 precede the NUL-gated heuristic. | `decode_policy_fact_truth_table`; `decode_policy_exhaustive_inputs_and_streaming_table`; `r20_decode_policy_app_path_table` |
+| A: save after fallback | `Workspace::save`, `Tab::decode_options`, session/history state accept the saved effective codec and retain native history on a proven unchanged restore. | `r20_save_after_fallback_accepts_effective_codec_touch_and_restart`; `r20_saved_effective_codec_does_not_mask_a_new_pending_choice` |
+| C: dirty restored touch | `save_with_identity`, digest readers, session `Document::disk_content`, `Tab::unchanged_reload`. Hash raw bytes during existing read/write passes; no UI rope scan. | `r20_hot_exit_dirty_touch_uses_persisted_raw_identity` (foreground/background; saved or loaded identity; selection/revision, undo/redo and real-change conflict) |
+| D: main-format Shift JIS | Legacy provenance defaults in `Document` and native `History`; ordinary restore uses the shared policy. | `r20_main_format_shift_jis_session_uses_legacy_hint` (foreground/background, with/without history) |
+| Failed load recovery | `Tab::install` clears stale raw identity on a terminal failed load, while provisional prefixes retain their baseline. | `r20_failed_background_restore_can_recover_the_original_revision` (with/without native history) |
+| One CRLF changes | Raw identity replaces normalized text plus dominant-ending comparison. | `r20_one_mixed_line_ending_change_is_a_disk_change` |
+| Notice wording | `DecodeNotice::message` supplies the same file-named non-modal wording; automatic binary notices never claim a stored choice. | `r20_decode_policy_app_path_table`; existing `r20_load_override_notices_are_status_only_and_identical_across_paths` |
+
+Policy coverage: **960** combinations in the fact truth table; **2,016** actual
+foreground/background decodes (21 byte samples × eight preferred/effective
+states × two save states × three fallbacks × two executors), plus equal/different
+raw identity decisions. Boundary samples include NULs after the 8 KiB sample,
+UTF-8 BOM plus NULs, and a literal U+FEFF following the source BOM; both executors
+use the same bounded detection rule. The App table covers **1,344** path cases over the same
+21 samples and eight document states: foreground/background reload, clean
+restore with/without native history, and open/Reopen. Its disk-backed native
+histories also call `current_text` through the public history API. All App cases
+check that notices bypass `workspace.messages` and native/modal overlays.
+
+Legacy fixture provenance: `src/fixtures/main-385dcdd-shift-jis-session.json` was
+emitted by main's unmodified `Workspace::snapshot` and serde serializer in a
+fresh `git archive 385dcdd`. The exact generator and reproduction notes live next
+to it. The test only relocates `Document.path` after deserialization, retaining
+the original JSON keys and history payload.
+
+Final verification on this source:
+
+- `cargo fmt --all --check`.
+- `cargo clippy --workspace --all-targets --release --locked -- -D warnings`.
+- `cargo test --workspace --locked --release`: **1,062 passed, 0 failed,
+  21 ignored**, including the full policy tables and recovery regression.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`.
+- Syntax runner: **126,600 passed / 0 failed** (203 syntaxes, 242 files).
+- The unchanged Lane B preference reload-count test passed this full run.
+- The worktree's release build passed. Final gate logs are in
+  `/tmp/velocity-r20-policy-review/final/`; scripts and the original-file backups
+  are in its parent directory.
+
+Seven alternating paired retired-instruction runs against the verified frozen
+`385dcdd` binary, with fixture HOME/SHELL and no concurrent compilation:
+
+| Workload | Main instructions | Final instructions | Change |
+| --- | ---: | ---: | ---: |
+| typing1 | 429,429,071 | 304,318,369 | -29.13% |
+| typing1000 | 11,506,969,159 | 4,421,372,528 | -61.58% |
+
+Darwin RUSAGE_INFO_V4 counters cover the complete headless child process after
+exit and before reaping: setup, editing, background threads and CPU scenes.
+These are whole-process instruction medians, not per-key App latency or native
+frame timings. All samples, executable hashes and host loads are in
+`/tmp/velocity-r20-policy-review/instructions-final/report.json`.
+`editor.rs`, `editing.rs`, `layout.rs`, `vel-buffer` and `vel-text` have no diff
+from `a5fa68e`. No new flatness claim is made for the known CJK limits below.
+
+
+Native checklist (pending; no GUI available):
+
+1. Reopen Shift JIS, externally replace it with UTF-8 `naïve café ✓!`, delete
+   ` ✓!` and save. Touch and restart: text/checked encoding remain UTF-8 and
+   undo survives. Repeat below/above the large-file threshold.
+2. Hot-exit a dirty tab, restore and touch its unchanged file. Verify no conflict,
+   unchanged caret/selections and working undo/redo. A real rewrite must conflict.
+3. Change only one CRLF to LF in an otherwise CRLF file behind a dirty tab. The
+   conflict must appear even though the text and dominant convention match.
+4. Restore a main-format Shift JIS session. Verify Japanese text, clean state,
+   caption and subsequent reload. Repeat with lazy/shared tabs.
+5. Try the 1252/GBK/UTF-8 heuristic trap samples, BOM overrides and PNG replacement.
+   Check correct chosen/automatic decoding and file-named status notices with no
+   alerts; binary reloads retain text and binary restores display the hex view.
+6. Restore large UTF-8/Shift JIS files: the first progressive prefix must remain
+   prompt. Keep the existing many-caret and fold/scroll native checks below.
+
+Known limits retained: the verifier measured roughly 3.1 ms/key on a single
+100,000-character wrapped CJK line (main 6.7 ms); one-caret unwrapped CJK grew
+15–74 µs over 1,000 keys. No further typing optimization or new flatness claim is
+made here. Older records below are historical, including superseded decode and
+normalized-touch descriptions.
+
+## Previous round-20 record (committed as a5fa68e)
+
+# Round 20 Lane A follow-up on 123af57
+
+The remaining review fixes are uncommitted on `123af57` (`WIP round 20 lane A
+fixes`). No reset or amend. Evidence, scripts and original-file backups are in
+`/tmp/velocity-r20-final-review/`. Every build/test/probe and its children use
+fixture `HOME=/tmp/velocity-r20-final-review/fixture-home`, `SHELL=/bin/false`,
+explicit Cargo/rustup directories, and this worktree's own `target`.
+No GUI, packaging, `cargo clean`, or `target/package-macos/` access.
+
+| Finding | Final behavior and implementation | Headless App-path test |
+| --- | --- | --- |
+| 1 — failed explicit decode | `vel-fileio::load_cancellable` and the progressive worker return a diagnostic when detection/fallback takes over. `Tab::record_decode` marks the current effective codec as automatic. `Tab::preferred_encoding` and session `Document::preferred_encoding` retain the original user choice independently, including shared/lazy views and explicit-save cancellation. Old sessions without the new field still use their existing provenance. BOM and clear BOM-less UTF-16 evidence can override a legacy/UTF-8 preference for that revision. The next reload retries the retained preference. | `r20_failed_decode_keeps_preference_across_rewrites_and_restore`: Shift JIS → UTF-8 → BOM-less UTF-16 → Shift JIS → UTF-8; explicit UTF-8 → Windows-1252 fallback → UTF-16 → UTF-8. Foreground/background and restart during fallback; current codec/provenance, retained choice, notices, clean state and session wire are checked. |
+| 2 — modal notices | `Workspace::load_notices` is consumed by `Panels::poll` using `set_message`; it never reaches `show_error`/native alerts. File-worker errors, reload errors and BOM/binary/fallback notices share this status path. Foreground/background errors use identical path formatting. Automatic binary rejection does not claim a stored choice was ignored. Earlier tests no longer accept the modal queue as evidence of a notice. | `r20_load_override_notices_are_status_only_and_identical_across_paths`: automatic/explicit binary rejection, BOM override, foreground/background wording and restore; checks status text, empty `workspace.messages` and no overlay. Finding 1's test also requires status-only fallback diagnostics. |
+| 3 — large-file touch | `load_background_for_reload` compares the decoded text with `ChangeTracker::saved_text` on the worker: byte length first, then exact chunk equality. This avoids hash collisions and UI scans. External reloads publish no temporary prefixes; an unchanged decoded tree is retired on the worker. Completion uses `Tab::unchanged_reload` to acknowledge only stamps, preserving the buffer ID/revision, selections and all history. Dirty edits and pending format edits remain intact. Foreground no-op events follow the same rule. | `r20_large_file_touch_keeps_clean_and_dirty_history_and_selections`: actual mtime-only changes through the watcher, small/forced-large paths, clean/dirty tabs, auto-reload on/off, buffer/revision/view/selection identity and undo/redo; same-sized real rewrites still reload or conflict. |
+
+No setting defaults, layout internals, rope implementation, rendering or typing
+algorithms changed in this follow-up. The documented unknown Hexadecimal reopen
+value and automatic UTF-8 save fallback remain unchanged.
+
+Known timing limits retained deliberately:
+
+- A single long wrapped CJK line still has per-key growth with line length. The
+  verifier measured about **3.1 ms/key at 100,000 CJK characters**, versus **6.7 ms**
+  on main. This is a verifier observation, not a fresh measurement here. Per the
+  review instruction, no further wrapped-line optimization was attempted.
+- One-caret unwrapped CJK typing grows from about **15 to 74 µs/key** over 1,000
+  keys despite beating main. No small isolated fix was established in this
+  follow-up; the existing input/rope behavior is retained. This is not a flatness
+  claim. Earlier full-App measurements and their exact boundary remain below.
+
+Native checklist (pending; no GUI available):
+
+1. Explicitly reopen Shift JIS, rewrite through UTF-8, BOM-less UTF-16 and Shift
+   JIS again, restarting during fallback. Check correct text/current codec and
+   that the original choice is retried. Repeat after choosing UTF-8.
+2. Reload files with a conflicting BOM or PNG content. All notices must appear
+   in status text without an alert. Automatic binary notices must not mention a
+   stored choice. Restore a binary replacement into the existing hex view.
+3. Touch a large clean file with saved undo, then a dirty file. Verify unchanged
+   text, caret/selection, undo/redo and no disk-change prompt. Repeat with
+   auto-reload disabled and with pending encoding/line-ending edits.
+4. Rewrite actual content using the same byte count. Verify clean auto-reload,
+   or the existing conflict UI for dirty/opt-out tabs, including shared views.
+
+
+Final verification on this source:
+
+- `cargo fmt --all --check`.
+- `cargo clippy --workspace --all-targets --release --locked -- -D warnings`.
+- `cargo test --workspace --locked --release`: **1,053 passed, 0 failed,
+  21 ignored**, including doctests and the three new App regressions.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`.
+- Syntax runner: **126,600 passed / 0 failed**, 203 syntaxes, 242 files.
+- Explicit model reruns: the existing rope model ran 5,000 seeds plus 1000493,
+  40 batches each; the layout model ran 2,048 seeds plus 1000493 and 23028,
+  24 transactions × five widths × two indent settings (492,000 comparisons).
+  Both exceed the requested 2,000 seeds and passed without changing model code.
+- Lane B's existing tests are unchanged. Its previously reported preference
+  reload-count test passed this full gate too.
+
+Seven alternating paired retired-instruction runs against the frozen clean
+`385dcdd` binary, with fixture HOME/SHELL and no concurrent compilation:
+
+| Workload | Main instructions | Follow-up instructions | Change |
+| --- | ---: | ---: | ---: |
+| typing1 | 428,134,308 | 303,578,147 | -29.09% |
+| typing1000 | 10,653,859,480 | 4,147,375,201 | -61.07% |
+
+Darwin RUSAGE_INFO_V4 counters cover the complete headless child process after
+exit and before reaping: setup, editing, background work and CPU scenes. They
+are not per-key App timings or native latency. No new flatness claim is made for
+the two known limits above. `instructions/report.json` retains all samples,
+executable hashes and host loads. Gate/model logs, the exact scripts and source
+fingerprints are in `/tmp/velocity-r20-final-review/`. The final gate uses this
+worktree's own target directory; no defaults, layout or rope code changed.
+
+## Previous round-20 record (committed as 123af57)
+
+# Round 20 Lane A review fixes on b9f5dcf
+
+The review fixes are uncommitted on `b9f5dcf` (`WIP round 20 lane A`), based on
+main `385dcdd`. No reset or amend was used. Evidence and original-file backups are
+in `/tmp/velocity-r20-review/`. All tests, probes and their children use fixture
+`HOME=/tmp/velocity-r20-review/fixture-home` and `SHELL=/bin/false`; Cargo and rustup
+retain their explicit toolchain directories. The gate uses this worktree's own
+`target`. No GUI, packaging script, `cargo clean`, or `target/package-macos/`.
+
+No preference default changes in this review. UTF-16 captions without “with BOM”
+now write without a BOM, including encoding arguments using codec names. The
+existing strict encode error remains; UTF-8 recovery is explicit and non-modal.
+Pure BMP CJK without a BOM or byte-order evidence is deliberately not guessed as
+UTF-16. The preceding round's source references/default decisions remain below.
+
+| Finding | Fix | Headless test |
+| --- | --- | --- |
+| H1 | `Tab::encoding_chosen`, `decode_options`, session `Document` and disk-backed `History` retain encoding provenance. Automatic tabs redetect after rewrite/restore; chosen codecs yield to BOM/binary with a diagnostic. Shared and lazy views retain the choice. | `r20_detected_encoding_redetects_external_rewrites_and_restore`; `r20_user_choice_yields_to_conflicting_bom_and_binary`; `r20_explicit_save_aliases_persist_encoding_provenance`; existing user-choice survival tables |
+| M1 | `hex::detect_utf16` scores both orders, validates bounded surrogate samples, and permits form feed/tab/CR/LF. ASCII and valid surrogate evidence must clearly favor one order; pure CJK remains ambiguous. | `bomless_utf16_review_surrogate_endianness_and_controls_table`; existing PNG/binary negatives and byte-identical round trips |
+| M2 | `load_background_with_options` streams forced UTF-8 directly and other codecs through encoding_rs. Clean restored history attaches to the completed snapshot without rereading the file. History view IDs and soft undo survive. | `r20_large_restores_publish_utf8_and_shift_jis_prefix_before_completion` (136 MiB UTF-8 / 112 MiB Shift JIS, with/without native history); `r20_clean_history_restore_preserves_soft_undo_and_saved_typing_undo` |
+| M3 | `Line` has its original 40-byte representation and `Arc<[Segment]>`; final-grapheme and lookahead metadata are separate and allocated only for wrapped rows. `Segment` also has its original 40-byte geometry. A single wrap dependency stays inline; fully hidden unwrapped rows share one empty slice, avoiding per-row allocations and frees. Stable-count edits mutate unique slices; moved breaks rebuild only edited lines. | `ordinary_line_metadata_remains_forty_bytes`; clean-main paired `--headless-view-features`; full-App flatness gate |
+| M4 | `encoding_format` derives BOM solely from the name; checked menu rows preserve bytes. | `r20_menu_encoding_bytes_and_selected_alias_survive_restore`: four UTF-16 and two UTF-8 variants, save/reopen/click-current bytes |
+| L1 | `tree::repair` chooses a boundary that fits both leaves, using the ordinary builder if no two-leaf boundary exists. | `merged_multibyte_leaf_split_seed_1000493`; 5,000-seed String/query/snapshot model plus seed 1000493 |
+| L2 | `rewrap_suffix` binary-searches prefix maxima of exact lookahead, including non-adjacent dependencies and oversized extending graphemes. | `nonadjacent_grapheme_lookahead_matches_full_layout`; `oversized_grapheme_lookahead_seed_570`; expanded 2,048-seed layout model |
+| L3 | `ColumnCache` keeps tab-expanded checkpoints per line/revision, rebases them through changes and scans only invalidated suffixes during typing; its status-only storage is boxed outside the scene data. No 16 KiB switch to scalar-only columns. | `r20_status_columns_remain_tab_expanded_across_long_line_and_edits`; existing status table updated to the correct long-line value |
+| L4 | `Format::display_name` preserves alias captions and session restores retain them. | `r20_menu_encoding_bytes_and_selected_alias_survive_restore`; `r20_explicit_save_aliases_persist_encoding_provenance` (ISO 8859-1 and ISO 8859-9) |
+| L5 cancel | Failed explicit saves restore the previous format and provenance before offering the cancellable recovery. | `r20_failed_explicit_save_cancel_restores_format_and_save_all_recovers_each_tab` |
+| L5 save-all | Encoding failures queue one recovery per tab; accepting or dismissing advances to the next offer. | `r20_failed_explicit_save_cancel_restores_format_and_save_all_recovers_each_tab` |
+| L5 minimap | Retain the existing cheap insertion path: the next analysis publication supplies fresh width. No synchronous document scan added. | `r20_pure_insert_minimap_width_is_refreshed_by_next_publication`: new revision, correct width, within one second |
+| L5 soft redo | `set_history_limits` bounds selection redo immediately, outside the typing path. | `reducing_history_limits_bounds_selection_soft_redo` |
+| Equal-start ChangeSet | Insertion plus replacement at the same start takes the full layout fallback. | `equal_start_insert_and_replace_map_uses_full_geometry` |
+
+The rope model runs 5,000 seeds plus 1000493, each with 40 batches; it checks
+String content, all byte/char/UTF-16/line conversions, chunks, slices, summaries,
+invariants and immutable snapshots after each batch. The layout model adds the
+emoji modifier to its edit tokens and includes seeds 1000493 and 23028 in addition
+to 0–2047: 492,000 incremental/full comparisons, over widths 1, 2, 7, 13 and 80
+with both indentation settings. Exact tests retain the review's original
+lookahead repro and the newly exposed seed-570 oversized-grapheme dependency.
+Dense, fold/phantom and Lane B's existing geometry tests are included in the gate.
+
+The unchanged Lane B test
+`blocked_preference_queue_defers_one_reload_and_tracks_multiple_keys_per_write`
+passed the review-fix full workspace run. The preceding investigation found one
+failure in three isolated runs, so its flakiness is not limited to full-suite
+load. It remains assigned to Lane B; no edit was made to it.
+
+Native checklist (not run: no GUI is available):
+
+1. Open detected UTF-16 BOM and Windows-1252 files, transcode externally to UTF-8,
+   and verify redetection. Replace one with a PNG: retain the current text on
+   reload with a binary diagnostic, and restore as hex on next launch.
+2. Explicitly reopen Shift JIS/ISO aliases, rewrite externally, and restart.
+   Verify the choice and checked caption survive. A conflicting UTF-8 BOM must
+   take precedence with a non-modal message; restoring must not dirty the tab.
+3. Save each UTF-16/UTF-8 BOM variant from the encoding status menu and click the
+   checked row again. Verify the disk BOM and status caption stay consistent.
+4. Fail an explicit Windows-1252 save containing emoji, press Escape and verify
+   the original encoding remains. Run Save All with two failing tabs and accept
+   or dismiss each UTF-8 offer independently.
+5. Restore large UTF-8 and Shift JIS files. A read-only prefix must appear while
+   loading continues, then become editable with selections and undo intact.
+6. Move/type past a 16 KiB tab prefix, change tab width, and undo. Columns must
+   stay tab-expanded. Confirm minimap width catches up after ordinary insertion.
+7. Fold/unfold, scroll, rewrap and type code/CJK at many carets. Check wrap/fold
+   geometry, one typing-run undo step and the existing soft-undo boundaries.
+
+Lane B's menu integration is still required: View › Line Endings has Unix,
+Windows and Mac OS 9 rows using `set_line_ending {type: unix|windows|cr}`. Encoding
+status clicks use Reopen with Encoding / Save with Encoding, all codec captions
+from `ENCODINGS` (BOM variants and ISO aliases included), with one checked row;
+line-ending status clicks use the same three ending rows.
+
+
+Final review verification (supersedes the historical results below):
+
+The exact review sources passed `cargo fmt --all --check`, release workspace
+clippy with `-D warnings`, release locked workspace tests, warning-free workspace
+docs, and the syntax runner. Workspace: **1,050 passed / 0 failed / 21 ignored**;
+syntax: **126,600 passed / 0 failed** over 203 syntaxes and 242 files. The expanded
+rope and layout models above ran as part of this gate. Logs are `gate-*.log` and
+`gate.json` in `/tmp/velocity-r20-review/`.
+
+The ignored full-App timing test passed again with the identical timed loop on
+clean `385dcdd`. Samples include key binding dispatch, text input/command routing,
+changed-state handling, workspace and panel polling; exclude native delivery,
+painting, GPU and scanout. No compilation ran concurrently. First/last numbers
+below are medians of keys 1–100 and 901–1000, in milliseconds per key.
+
+| 10,000 carets | Main first / last | Review first / last | Rule |
+| --- | ---: | ---: | --- |
+| code/wrapped | 26.9057 / 298.5014 | 8.1601 / 11.7643 | ratio 1.442 ≤1.5 |
+| code/unwrapped | 1.0287 / 2.0795 | 1.0125 / 1.2498 | ratio 1.234 ≤1.5 |
+| cjk/wrapped | 60.1755 / 455.5301 | 13.9363 / 19.6756 | ratio 1.412 ≤1.5 |
+| cjk/unwrapped | 22.1701 / 31.5546 | 1.3088 / 2.1345 | unwrapped +0.8256 ms ≤1 ms |
+
+| One caret | Main first / last | Review first / last |
+| --- | ---: | ---: |
+| code/wrapped | 0.01408 / 0.06679 | 0.01021 / 0.01438 |
+| code/unwrapped | 0.01379 / 0.06542 | 0.01154 / 0.01963 |
+| cjk/wrapped | 0.01554 / 0.10063 | 0.01250 / 0.04354 |
+| cjk/unwrapped | 0.01729 / 0.10767 | 0.01650 / 0.07554 |
+
+All one-caret matching blocks remain within main +5%; all many-caret first
+blocks are no slower than main. Existing run undo and soft undo/redo assertions
+run after the timed keys. Data: `flatness-main.json`, `flatness-candidate.json`.
+
+Seven alternating whole-child retired-instruction pairs (Darwin RUSAGE_INFO_V4,
+read after exit before reaping; includes setup/editing/background work/scenes):
+
+| Workload | Main | Review | Change |
+| --- | ---: | ---: | ---: |
+| typing1 | 427,953,788 | 303,757,355 | -29.02% |
+| typing1000 | 10,638,667,451 | 4,141,190,267 | -61.07% |
+
+Seven alternating `--headless-view-features` pairs against the frozen clean main
+binary, using the same Rust fixture. These are CPU scene/command timings, not
+native latency. Fold/unfold includes the named-region command and projection
+rebuild; scroll waits for exact asynchronous styles before timing; highlighted
+typing includes edit plus CPU scene; rewrap excludes the transaction itself.
+
+| Metric | Main p50 ms | Review p50 ms | p50 change | p95 change | p99 change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Scroll | 0.298520 | 0.303895 | +1.80% | -6.07% | -4.29% |
+| Fold | 9.625187 | 9.356542 | -2.79% | -0.67% | -0.98% |
+| Unfold | 0.902187 | 0.851875 | -5.58% | -5.92% | -9.55% |
+| Rewrap | 0.008208 | 0.002000 | -75.63% | -75.38% | -67.26% |
+| Highlighted typing | 0.821374 | 0.558458 | -32.01% | -54.80% | -53.88% |
+
+Every final feature P50/P95/P99 is within the 5% limit or improved. The feature
+report stores all pairs and executable hashes. Earlier failing runs remain in
+the review evidence directories and are not presented as passes. Two strict
+App attempts on this final binary failed during variable host load at different
+workloads; they remain in `shared-hidden-rows-flatness-contention` and
+`shared-hidden-rows-flatness-second`. The final complete run passed the original
+assertions; no threshold, key count or input-path step was changed.
+
+Existing vel-text benchmarks ran seven alternating pairs against main across 24
+operations (100 MB ASCII, 1 GB ASCII, 100 MB Unicode). Every per-operation retired
+instruction count is within +3%; maximum +1.83% for `ascii-1gb/sequential_uniform_100000`.
+Complete workers are within +1.95%. The five vel-largefile budget B
+workers are within +0.59%. Their code/binaries did not change during the
+subsequent layout/status-cache refinements; source hashes are retained. Reports
+include wall/CPU samples too: host load reached 12–21 on an 8-CPU machine, so the
+requested busy-host instruction comparison is the regression gate, not a claim
+that every wall-time percentile met 3%.
+
+All probes and tests use the fixture HOME/SHELL declared above. Reproduce the
+full-App gate after the workspace release test build, without concurrent builds:
+
+```sh
+env HOME=/tmp/velocity-r20-review/fixture-home SHELL=/bin/false \
+  CARGO_HOME=/Users/zoro/.cargo RUSTUP_HOME=/Users/zoro/.rustup \
+  VELOCITY_R20_TYPING_BASELINE=/tmp/velocity-r20-review/flatness-main.json \
+  cargo test --release --locked -p velocity r20_typing_cost_stays_flat -- \
+  --ignored --nocapture --test-threads=1
+```
+
+## Original round 20 implementation record (b9f5dcf)
+
+The section below is historical. Its pre-rope scroll/features comparison already
+contained the layout change and does **not** establish the clean-main fold/unfold
+budget. The review-fix comparison and final gate results above supersede it.
+
+# Round 20 Lane A: encodings, reloads, status text and typing cost
+
+Started clean on `lane-a` at `385dcdd`; no commit was made. The approved history,
+layout and rope extensions are applied in this worktree. Original backups,
+matching-main measurements and logs are in `/tmp/velocity-lane-a-r20/`.
+No GUI, packaging script, `cargo clean` or `target/package-macos/` was used.
+
+| Item | Implementation (file:function) | Headless user-path test |
+| --- | --- | --- |
+| A1 | `workspace.rs:Tab::decode_options/Workspace::poll` decode reloads with the tab's codec first, including background loads, and detect only after decoding fails. | `r20_external_rewrites_keep_encoding_and_respect_reload_opt_out`; fileio preferred-codec table |
+| A2 | `workbench.rs:prepare_sheet_inner` uses the stored codec; the approved one-call change in `vel-session/history.rs:current_text` also covers saved history. Restore does not manufacture an edit. | `r20_session_restore_uses_stored_encoding_without_becoming_dirty`: serialized sessions with/without history and synchronous/worker loads, including Windows-1252 bytes that are also valid UTF-8 |
+| A3 | `hex.rs:detect_utf16` checks at most 8 KiB for one-sided NULs, valid surrogates and text control characters; fileio shares it. | `bomless_utf16_detection_and_roundtrip_table`; `r20_app_encoding_roundtrip_table_and_save_defaults`: LE/BE, BOM choices, all endings, PNG/binary negatives |
+| A4 | `app.rs:format_action/offer_utf8_save` retains strict errors and presents an explicit non-modal **Save as UTF-8** choice. | `r20_unrepresentable_save_offers_explicit_utf8_recovery`: bytes/codec retained until Enter accepts recovery |
+| A5 | `vel-commands` registry and `app.rs:format_action` support public `reopen`, `save {encoding}`, `set_line_ending` aliases and checked state. | `r20_encoding_and_line_ending_command_dispatch_table`, including a copied user key binding |
+| A6 | `vel-fileio:Format::display_encoding/LineEnding::display_name`, `panels.rs:status_position/status_format_menu`, and `vel-ui/status.rs` supply BOM captions, platform line-ending names and popup models. | `r20_status_text_and_format_menu_table`; existing status selection table |
+| A7 | `vel-fileio:DecodeOptions/DecodeReader::ending` and `progressive.rs` use `default_line_ending` only when there are no breaks. | `no_line_break_uses_the_configured_convention_in_every_decoder`; App first-newline save check |
+| A8 | `vel-config:EditorSettings::default` and our preferences set `trim_only_modified_white_space` to true. Explicit false keeps trim-all behavior. | `default_trimming_preserves_untouched_lines`; App save-default check; existing trim-all test explicitly selects false |
+| A9 | `workspace.rs:Workspace::poll` sends a clean tab with reload disabled through the existing external-change prompt. Reload is not a user edit. | Real external rewrite table: sync/worker, true/false, dirty/clean protection and no new jump origin |
+| A10 | Unchanged: current documentation/ST4 changelog did not confirm the proposed Hexadecimal reopen value/menu entry. Existing binary opens use `binary::Task`. | Existing binary engine/user-path tests; no speculative behavior asserted |
+| B1 | `vel-ui/status.rs:column` expands tabs for status text, counts CJK scalars once and uses the scalar summary past the existing 16 KiB prefix limit. | Exact tab-size 4/8, CJK and 128 KiB tab-prefix status table |
+| C | `layout.rs:change/rewrap_suffix` retains stable wraps and rechecks the final grapheme; `editing.rs:publish_direct_change` preserves valid publications and shared-view replay; `vel-text/tree.rs:edit_node/Leaf::seek` shares bounded fragments and avoids redundant Unicode scans; `vel-buffer:transact/clear_redo/prune` verifies edit-end carets and avoids redundant history walks. | 2,048-seed layout and String models, dense/fold/phantom and immutable-snapshot oracles, App undo/soft-undo and full-App timing gate; existing rope/buffer, scroll and large-file tests |
+
+Only the trimming default changes existing behavior. `reload_file_on_change: true`
+is now explicit and preserves automatic reload as the default. Both are supported
+by the [ST4 Build 4107 changelog](https://www.sublimetext.com/download).
+The [settings reference](https://docs.sublimetext.io/reference/settings.html#system-and-miscellaneous-settings)
+confirms automatic UTF-16 detection and `default_line_ending`; the heuristic is our
+own. The [commands reference](https://docs.sublimetext.io/reference/commands.html)
+confirms the aliases. The [menu guide's status-bar animation](https://docs.sublimetext.io/guide/customization/menus.html#available-menus)
+confirms Unix / Windows / Mac OS 9 and the format popup sections. The changelog's
+encoding-restore fix is in **4213**, not the spec's 4200. Build 4152 supports the
+inference that status columns expand tabs. Relevant implementation comments cite
+these sources. Automatic UTF-8 fallback on an encode error could not be confirmed;
+strict failure plus an explicit recovery choice preserves today's behavior.
+
+The typing profile found repeated soft-history walks, growing physical-line scans
+in wrapping/minimap/guides, copied batch leaves, repeated Unicode summaries for
+endpoint checks, and a growing pass over resulting caret fragments. Ordinary undo
+and soft undo keep their existing boundaries, including word/space/punctuation runs
+and CJK. Temporary stage probes were removed. Native `/usr/bin/sample` was unavailable;
+the stage evidence is instrumented CPU work, not a native latency claim.
+
+The general wrapper retains stable segments, reconsiders previous lookahead when a
+word or combining mark can move a break, and converges at a shifted old break only
+when tab phase and continuation indentation agree. An append that still fits rechecks
+the complete cached final grapheme. All content uses the same correctness rules:
+spaces, tabs, CJK, wide characters and combining marks. Folds, inline phantoms,
+cross-segment deletions and uncertain geometry use `make_line`. Cached physical byte
+lengths and borrowed chunk descriptors avoid scanning growing prefixes. The version
+guard rejects geometry refreshed inside a Vintage command before publication.
+
+The layout oracle uses 2,048 seeds × 24 transactions × five widths (1, 2, 7, 13, 80)
+× both indentation values: 491,520 incremental/full-layout comparisons. It includes
+multi-carets, newlines, insertions, deletions, spaces, tabs, CJK, emoji, regional
+indicators and combining marks. Dense 160-caret, fold/phantom and Lane B geometry
+tests also pass.
+
+The rope retains immutable flat bases and bounded fragment metadata, with cached
+cumulative summaries and shared insertion strings. Ordinary flat leaves remain at
+6 KiB; edited leaves allow at most 128 fragments and 24 KiB before materialization.
+No fragment retains another edited leaf. Copying is confined to touched paths and
+bounded leaves; compaction is amortized across edits. Dense one-off batches keep
+the flat-copy path. Run caching is disabled for small batches that cannot amortize
+it. Public APIs and snapshot semantics are unchanged.
+
+Before the rope change, instrumented `Text::apply_edits` took 0.286 ms at key 50
+and 1.283 ms at key 950: touched copy-on-write leaves copied more old text as the
+document grew. These are individual stage samples, not block medians. The final
+comparison below measures the entire App input path. Repeated typing now shares
+old bytes and copies bounded metadata on touched paths; leaf compaction is amortized.
+
+The new String model uses 2,048 seeds × 24 batches and checks every byte/scalar/UTF-16
+and line conversion after each batch, plus slices, chunks, summaries and retained
+snapshots. It covers empty batches/edits, adjacent/repeated positions, replacements,
+Unicode, CRLF and lone CR; actual overlaps must fail atomically. Production tests
+exercise grown-fragment deletion and equal-length runs with different Unicode text.
+The buffer verifies carets at already validated replacement ends numerically;
+arbitrary selections retain full validation, including an invalid near-match case.
+
+A paired single-caret regression exposed one more display cost: patched-fragment
+lookup summarized the entire selected fragment, including a large unchanged suffix.
+`Leaf::seek` now returns that fragment directly when byte lengths or the final-piece
+rule already choose it. The unchanged Unicode prefix metrics are cached in the inline
+leaf, preventing repeated scans during highlighted scene construction. The bounded
+constructor stays inline; the Unicode prefix measurement is a separate helper.
+This removes redundant work without weakening queries.
+
+The ignored App timing gate starts with `"x\n".repeat(carets)`, places each caret
+before its x, and types 1,000 committed characters using repeating `let x = 1; `
+or `你好世界中文输入`, fixed wrap width 80 on/off, and 1 / 10,000 carets. Every sample
+includes App key dispatch, panel/text routing, named action draining, `changed_state`,
+workspace polling and panel polling. There are no excluded warm-up keys. Native
+receipt, IME composition, scene drawing, GPU presentation and scanout are outside
+this measurement. History limits are 1 GiB so the run remains available for undo.
+Soft undo/redo and undo back to the original text are checked after timing; a
+separate App command test checks exact existing run boundaries.
+
+Full-App median milliseconds per key (first / last 100 of 1,000 keys):
+
+| 10,000-caret workload | Main `385dcdd` | Worktree | Last / first | Accepted rule |
+| --- | ---: | ---: | ---: | --- |
+| code/wrapped | 27.2950 / 305.0282 | 7.8119 / 10.9921 | 1.407 | ratio ≤1.5 |
+| code/unwrapped | 1.0775 / 2.5468 | 0.9761 / 1.2146 | 1.244 | ratio ≤1.5 |
+| cjk/wrapped | 61.1613 / 464.0509 | 13.5446 / 18.3550 | 1.355 | ratio ≤1.5 |
+| cjk/unwrapped | 22.4656 / 32.7093 | 1.2603 / 2.0452 | 1.623 | unwrapped +0.7849 ms ≤1 ms |
+
+| One-caret workload | Main first / last | Worktree first / last | Matching-block check |
+| --- | ---: | ---: | --- |
+| code/wrapped | 0.0138 / 0.0689 | 0.0102 / 0.0146 | ≤5% pass |
+| code/unwrapped | 0.0158 / 0.0673 | 0.0108 / 0.0188 | ≤5% pass |
+| cjk/wrapped | 0.0178 / 0.1076 | 0.0132 / 0.0419 | ≤5% pass |
+| cjk/unwrapped | 0.0182 / 0.1105 | 0.0159 / 0.0735 | ≤5% pass |
+
+The final ignored gate passes (`final-app-result.json`, `final-app.json`, `final-app.log`).
+Pre-final failures and probes remain archived; they do not supersede this final build.
+Reproduce without concurrent compilation:
+
+```sh
+VELOCITY_R20_TYPING_BASELINE=/tmp/velocity-lane-a-r20/realistic-run1/main.json \
+  cargo test --release --locked -p velocity r20_typing_cost_stays_flat -- \
+  --ignored --nocapture --test-threads=1
+cargo test --release --locked -p velocity layout::round20_tests
+cargo test --release --locked -p vel-text batch_string_model_and_immutable_snapshots_over_2048_seeds
+```
+
+On another host, inject only the identical timing harness into a clean `385dcdd`
+checkout with its own target, and capture with `VELOCITY_R20_TYPING_RECORD`.
+JSON keys include pattern/wrap/caret count, with first/last and all ten block medians.
+Record mode measures main's known growth without asserting it as correct. The
+candidate requires wrapped last ≤1.5×first; unwrapped accepts that ratio or ≤1 ms
+growth; first must be no slower than main, with ≤5% matching-block checks at one caret.
+
+Required checks run in this worktree's own target and all pass:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --release --locked -- -D warnings
+cargo test --workspace --locked --release
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+```
+
+The workspace reports **1,034 passed, 0 failed, 21 ignored** across 114 summaries, including doctests.
+`worktree-r20-final-gate.json` records command status and duration. Additional
+vel-text debug and no-default-feature tests pass. The workspace includes both
+2,048-seed models and Lane B's existing wrap/fold tests; no Lane B test was edited.
+
+Seven alternating whole-child retired-instruction pairs against clean `385dcdd`:
+
+| Benchmark | Main instructions | Worktree instructions | Change |
+| --- | ---: | ---: | ---: |
+| typing1 | 428,473,909 | 300,511,301 | -29.86% |
+| typing1000 | 10,659,791,738 | 4,083,289,343 | -61.69% |
+
+`instructions-r20-final/report.json` retains all pairs, hashes and host load. Darwin
+`RUSAGE_INFO_V4` is read after exit before reaping. This counts each complete
+`--headless-smoke --carets 1|1000` child, including setup, editing, undo/redo,
+background work and CPU scenes. It is distinct from the full-App per-key gate.
+
+The existing vel-text benchmark was built with `cargo bench --locked -p vel-text
+--bench perf --no-run`. Its unchanged worker operations ran before/after in 21
+alternating pairs: 100 MB and 1 GB ASCII loads, 100 MB mixed-Unicode load and all
+1 GB operations (24 reported operations). Matching benchmark-only Darwin counters
+were added to both builds; the baseline rope is `385dcdd`. The 1 GB input is a
+deterministic tenfold repetition of the provided 100 MB fixture because the 1 GB
+fixture was absent. The Unicode fixture uses the benchmark's existing generator.
+
+All 24 operations pass the **3% retired-instruction budget**, as do the complete
+workers. This is the busy-host comparison; it is not a claim that every wall-time
+sample passed. The final load averages were [11.6337890625, 8.15283203125, 7.46826171875].
+The initial seven-pair load sample was noisy, so the final sample size was raised
+to 21 pairs before collecting it; the earlier observations remain archived.
+`core-bench-instructions-extended/report.json` and `observations.json` retain all
+wall/CPU/counter results and binary hashes.
+
+| Existing rope operation | Before instructions | After instructions | Change |
+| --- | ---: | ---: | ---: |
+| ascii-100mb/load | 384,519,944 | 375,099,379 | -2.45% |
+| ascii-1gb/batch_lines_10000 | 2,526,206 | 2,551,633 | +1.01% |
+| ascii-1gb/batch_lines_100000 | 25,142,634 | 24,514,763 | -2.50% |
+| ascii-1gb/batch_uniform_100000 | 84,573,936 | 84,530,263 | -0.05% |
+| ascii-1gb/byte_char | 45,142,154 | 45,138,911 | -0.01% |
+| ascii-1gb/byte_line | 465,004,085 | 468,985,179 | +0.86% |
+| ascii-1gb/byte_point | 538,459,182 | 541,017,550 | +0.48% |
+| ascii-1gb/byte_point_utf16 | 581,885,471 | 584,959,284 | +0.53% |
+| ascii-1gb/byte_utf16 | 46,020,678 | 46,020,678 | +0.00% |
+| ascii-1gb/char_byte | 17,020,678 | 17,020,678 | +0.00% |
+| ascii-1gb/chunks | 28,143,335 | 27,883,014 | -0.92% |
+| ascii-1gb/clone | 1,112,927 | 1,112,927 | +0.00% |
+| ascii-1gb/delete | 25,882,229 | 26,230,698 | +1.35% |
+| ascii-1gb/insert | 27,648,841 | 27,978,843 | +1.19% |
+| ascii-1gb/line_byte | 477,542,070 | 481,407,338 | +0.81% |
+| ascii-1gb/lines | 3,639,346,641 | 3,638,081,677 | -0.03% |
+| ascii-1gb/load | 3,680,217,409 | 3,686,664,950 | +0.18% |
+| ascii-1gb/point_byte | 591,641,755 | 594,661,821 | +0.51% |
+| ascii-1gb/point_utf16_byte | 613,956,797 | 617,115,584 | +0.51% |
+| ascii-1gb/sequential_lines_10000 | 71,027,783 | 71,448,354 | +0.59% |
+| ascii-1gb/sequential_lines_100000 | 677,409,913 | 682,973,883 | +0.82% |
+| ascii-1gb/sequential_uniform_100000 | 166,772,142 | 169,797,845 | +1.81% |
+| ascii-1gb/utf16_byte | 17,020,678 | 17,020,678 | +0.00% |
+| unicode-100mb/load | 701,635,467 | 695,401,058 | -0.89% |
+
+Wall-time medians above 3% in this run: `ascii-1gb/batch_lines_10000` +7.15%, `ascii-1gb/byte_point_utf16` +51.93%, `ascii-1gb/chunks` +3.14%.
+These are not counted as passing wall-time results. Retired instructions are the
+reported regression measure under load; native and quiet-host latency remain
+outside this headless counter result.
+
+Seven paired existing large-file budget runs compare the pre-rope build with the
+final core, including index maintenance for insertions. Both wall and whole-worker
+instruction medians pass 3%. Whole-worker counters include load/index setup; very
+short navigation operations are at or below timer resolution.
+
+| Large-file operation | Before / after wall ns | Instruction change |
+| --- | ---: | ---: |
+| load | 621,804,916.0 / 622,433,500.0 | +0.800% |
+| insert | 267,729.5 / 267,437.5 | -0.002% |
+| word | 41.0 / 42.0 | +0.003% |
+| end | 0.0 / 0.0 | +0.004% |
+| window | 84.0 / 84.0 | -0.002% |
+
+Seven paired existing scroll/features CPU runs compare the pre-rope build with the
+final core. Every recorded P50/P95/P99 metric passes 3%, including highlighted
+editing and scene construction. This baseline already contains the general layout
+changes, isolating the rope change. The separate typing1/typing1000 gate above uses
+main `385dcdd` as requested. No renderer, GPU or native window is exercised.
+
+| Existing scroll/features metric | Before ms | After ms | Change |
+| --- | ---: | ---: | ---: |
+| highlight_minimap_scroll_cpu/stats_ms/p50 | 0.28860 | 0.29263 | +1.39% |
+| highlight_minimap_scroll_cpu/stats_ms/p95 | 0.36018 | 0.35819 | -0.55% |
+| highlight_minimap_scroll_cpu/stats_ms/p99 | 0.40504 | 0.40183 | -0.79% |
+| highlighted_typing_cpu/stats_ms/p50 | 0.78777 | 0.56056 | -28.84% |
+| highlighted_typing_cpu/stats_ms/p95 | 1.27589 | 0.59489 | -53.37% |
+| highlighted_typing_cpu/stats_ms/p99 | 1.31379 | 0.61811 | -52.95% |
+| highlighted_typing_cpu/edit_stats_ms/p50 | 0.02090 | 0.01427 | -31.70% |
+| highlighted_typing_cpu/edit_stats_ms/p95 | 0.03497 | 0.02456 | -29.78% |
+| highlighted_typing_cpu/edit_stats_ms/p99 | 0.04135 | 0.03247 | -21.47% |
+| highlighted_typing_cpu/scene_stats_ms/p50 | 0.75900 | 0.54642 | -28.01% |
+| highlighted_typing_cpu/scene_stats_ms/p95 | 1.25017 | 0.57280 | -54.18% |
+| highlighted_typing_cpu/scene_stats_ms/p99 | 1.28433 | 0.59029 | -54.04% |
+
+
+The unchanged test is
+`app::lane_b_round17_tests::blocked_preference_queue_defers_one_reload_and_tracks_multiple_keys_per_write`.
+It fails intermittently even when selected alone: **1 of 3 isolated runs** observed
+`resource_revision` **3 rather than 2** at line 1530. The other two isolated runs,
+the full workspace run, and both Lane B sweeps at 32 and 16 threads pass. This is
+not specific to a loaded suite; the evidence does not establish a load-only cause.
+The test captures a revision after a fixed three-second polling window without
+waiting for every asynchronous configuration publication to finish; a publication
+race is a hypothesis, not a confirmed root cause. Logs and
+`preference-load-results.json` are ready for Lane B; no test or preference-reload
+implementation was changed.
+
+Lane B menu integration (text/model is ready; drawing/hit testing stays Lane B's):
+
+- View > Line Endings: **Unix**, **Windows**, **Mac OS 9**, using
+  `set_line_ending {"type":"unix"|"windows"|"cr"}` and `command_checked`.
+- Encoding status item: **Reopen with Encoding** and **Save with Encoding**
+  submenus from `status_format_menu(Encoding)` / `ENCODINGS`, using public
+  `reopen {encoding}` / `save {encoding}` and the supplied enabled/check states.
+- Line-ending status item: the same three choices from
+  `status_format_menu(LineEndings)`.
+
+Native checklist, pending human review on macOS 14+ (no GUI in the sandbox):
+
+- [ ] Reopen Shift JIS; rewrite externally with reload on/off, clean/dirty tabs and
+  low `large_file.load_bytes`. Check prompts, retained edits, no jump-history entry
+  and the chosen encoding after restart (with and without saved history).
+- [ ] Open BOM-less UTF-16 LE/BE, UTF-8 with BOM and a real PNG/binary. Save text
+  byte-identically without edits. With Windows default endings, a one-line file
+  gains CRLF on its first inserted newline; existing line conventions win.
+- [ ] Paste an emoji into Windows-1252 and Cmd+S. Escape from **Save as UTF-8**
+  retains bytes/codec; accepting saves valid UTF-8 and clears dirty state. Repeat
+  Save As to a chosen destination; the editor remains usable throughout.
+- [ ] Enable format status fields. Check BOM captions and Unix / Windows /
+  Mac OS 9. Once Lane B connects menus, check enable/check state and keyboard
+  selection. In `\tab`, tab size 4 to 8 changes column 7 to 11; CJK counts once;
+  huge lines remain responsive.
+- [ ] Enable save trimming, edit one line and save: untouched trailing spaces
+  survive by default. Set modified-only trimming false and verify trim-all.
+- [ ] Type realistic code/spaces and CJK with 10,000 carets, wrapped/unwrapped;
+  undo/redo whole typing runs and soft undo/redo individual keys. Check tabs,
+  combining marks, wide characters, indentation, folds and phantoms for wrap,
+  scroll and caret geometry. Native latency remains a manual measurement.
+
 # Round 19 Lane B review fixes (native verification pending)
 
 Timing note: `r19_app_sustained_build_output_has_steady_progress_and_lossless_tail` enforces the strict 50 ms UI-gap budget only with `VELOCITY_STRICT_TIMING=1`; the default gate keeps the data-per-poll ratio (which detects lock starvation) and a 1 s bound, because a loaded parallel gate can deschedule the test's own poll work.

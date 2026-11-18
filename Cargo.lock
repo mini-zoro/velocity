@@ -3056,10 +3056,13 @@ dependencies = [
 name = "vel-fileio"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "encoding_rs",
+ "memchr",
  "notify",
  "proptest",
  "rustix",
+ "serde",
  "tempfile",
  "vel-buffer",
  "vel-config",

@@ -1,6 +1,18 @@
 //! Round 18 follows the shared native/headless command, input and resource paths.
 #[path = "app_round19_tests.rs"]
 mod round19;
+#[path = "app_round20_tests.rs"]
+mod round20;
+#[path = "app_round20_followup_tests.rs"]
+mod round20_followup;
+#[path = "app_round20_matrix_tests.rs"]
+mod round20_matrix;
+#[path = "app_round20_merge_tests.rs"]
+mod round20_merge;
+#[path = "app_round20_policy_tests.rs"]
+mod round20_policy;
+#[path = "app_round20_review_tests.rs"]
+mod round20_review;
 use super::*;
 use vel_buffer::{Region, Selection};
 use vel_config::keymap::Key;

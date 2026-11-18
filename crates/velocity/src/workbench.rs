@@ -448,6 +448,13 @@ impl Workspace {
                     |path| vel_fileio::regular::error(path, &error),
                 );
                 self.fail_shared_document(index)?;
+                // A read failure is retryable. Register the path even when the
+                // first restore failed before reaching the normal watch boundary.
+                if let Some(watcher) = &mut self.watcher
+                    && let Some(path) = &self.tabs[index].path
+                {
+                    let _ = watcher.watch(path);
+                }
                 // The error document is ready for normal focus/close operations.
                 // A load error must not trap a tab or turn into a modal dialog.
                 self.resource_reports.push(message);
@@ -479,7 +486,10 @@ impl Workspace {
                 crate::session_restore::step("attach_lazy");
                 let view = self.ensure_shared_view(owner, index)?;
                 self.copy_document_properties(owner, index);
-                if self.tabs[owner].loading.is_some() || self.tabs[owner].binary_loading.is_some() {
+                if (self.tabs[owner].loading.is_some() && !self.tabs[owner].external_load)
+                    || self.tabs[owner].binary_loading.is_some()
+                    || self.tabs[owner].load_failed
+                {
                     self.tabs[index].pending_restore = Some(state);
                 }
                 self.tabs[index].lazy = None;
@@ -492,65 +502,81 @@ impl Workspace {
             let deadline = self
                 .restore_deadline
                 .unwrap_or_else(|| Instant::now() + crate::restore_io::BUDGET);
-            let disk_path = document.path.clone();
             let retained = document.history.as_ref().is_some_and(|h| h.retains_text());
-            let (binary, disk, size, stamp, revision) = if retained {
-                if let Some(path) = disk_path {
-                    crate::restore_io::run(deadline, move || {
-                        Ok((
-                            false,
-                            vel_session::DiskStamp::read(&path),
-                            0,
-                            crate::workspace::stamp(&path),
-                            None,
-                        ))
-                    })?
-                } else {
-                    (false, None, 0, None, None)
-                }
-            } else if let Some(path) = disk_path {
+            self.tabs[index].restore_history =
+                document.history.clone().map(|history| (history, false));
+            self.tabs[index].pending_restore = Some(state.clone());
+            // Retain native proof before a metadata failure can leave a watched
+            // placeholder. Its later reload must still recognize the old codec.
+            let legacy = document.disk_content.is_none()
+                && (document.effective_encoding.is_none() || document.history.is_some());
+            if legacy {
+                let history = document.history.clone();
+                let (saved, fingerprint) = crate::restore_io::run(deadline, move || {
+                    Ok(history.as_ref().map_or((None, None), |history| {
+                        (
+                            history.saved_text(),
+                            (!history.retains_text())
+                                .then(|| history.text_fingerprint())
+                                .flatten(),
+                        )
+                    }))
+                })?;
+                let tab = &mut self.tabs[index];
+                tab.legacy_saved_text = saved;
+                tab.legacy_text_fingerprint = fingerprint;
+            }
+            let disk_path = document.path.clone();
+            let (disk, size, stamp) = if let Some(path) = disk_path {
                 crate::restore_io::run(deadline, move || {
-                    let metadata =
-                        vel_fileio::regular::metadata(&path, false)?.ok_or("missing document")?;
+                    // Retained edits never require readable disk text; clean loads
+                    // reject all special files through the common guarded boundary.
+                    let metadata = vel_fileio::regular::metadata(&path, false);
+                    let size = if retained {
+                        metadata.ok().flatten().map_or(0, |m| m.len())
+                    } else {
+                        metadata?.ok_or("missing document")?.len()
+                    };
                     Ok((
-                        crate::binary::is_binary(&path)?,
                         vel_session::DiskStamp::read(&path),
-                        metadata.len(),
+                        size,
                         crate::workspace::stamp(&path),
-                        vel_fileio::regular::identity(&path)?,
                     ))
                 })?
             } else {
-                (false, None, 0, None, None)
+                (None, 0, None)
             };
-            let mut document = document;
-            if binary {
-                document.history = None;
+            let changed = document.path.is_some() && disk != document.disk;
+            if legacy {
+                self.tabs[index].legacy_stamp_matches = !changed;
             }
-            let changed = document
-                .path
-                .as_deref()
-                .is_some_and(|_| disk != document.disk);
             let mut imported = false;
-            if let Some(history) = &document.history {
-                // Dirty/untitled histories retain their text and restore without reading the
-                // file. Permission/decoding failures on disk cannot discard those edits.
-                let dirty = document.dirty || (changed && history.retains_text());
+            if let Some(history) = document.history.as_ref().filter(|h| h.retains_text()) {
+                let dirty = document.dirty || changed;
                 crate::session_restore::step("restore_history");
                 let history = history.clone();
-                let (buffer, map, kept) = crate::restore_io::run(deadline, move || {
-                    let restored = history.restore_views(!changed, dirty);
-                    let kept = restored.is_ok() && !changed;
+                let path = document.path.clone();
+                let options = self.tabs[index].decode_options();
+                let original_size = document.disk.as_ref().map(|s| s.bytes);
+                let (mut buffer, map, kept) = crate::restore_io::run(deadline, move || {
+                    let keep = if !changed {
+                        true
+                    } else if size <= 8192 {
+                        path.as_deref().is_none_or(|path| {
+                            vel_fileio::revision_unchanged(path, &options).unwrap_or(true)
+                        })
+                    } else {
+                        original_size.is_none_or(|bytes| bytes == size)
+                    };
+                    let restored = history.restore_views(keep, dirty);
+                    let kept = restored.is_ok() && keep;
                     let (buffer, map) =
                         restored.or_else(|_| history.restore_views(false, dirty))?;
                     Ok((buffer, map, kept))
                 })?;
-                imported = kept;
-                let id = state
-                    .history_view
-                    .and_then(|id| map.get(&id).copied())
-                    .or_else(|| map.values().next().copied())
-                    .ok_or("history has no view")?;
+                let stored_view = state.history_view.and_then(|id| map.get(&id).copied());
+                imported = kept && stored_view.is_some();
+                let id = stored_view.unwrap_or_else(|| buffer.new_view());
                 self.tabs[index].editor.buffer = buffer;
                 self.tabs[index].editor.id = id;
                 // Every clone, including lazy sheets, must keep its original edit ownership.
@@ -564,45 +590,48 @@ impl Workspace {
                 }
                 self.require_editor_view(index)?;
                 let tab = &mut self.tabs[index];
+                // Native history has now been installed. Its original view IDs
+                // were mapped above; apply each view's folds/selection once below.
+                tab.restore_history = None;
+                tab.pending_restore = None;
                 tab.editor.sync();
+                if changed && let Some(path) = document.path.clone() {
+                    let options = tab.decode_options();
+                    match crate::restore_io::run(deadline, move || {
+                        crate::workspace::prepare_disk_load(&path, options, true, true)
+                    }) {
+                        Ok(prepared) => tab.install_disk_load(prepared, true),
+                        Err(error) if error.contains(crate::restore_io::TIMEOUT) => {
+                            return Err(error);
+                        }
+                        Err(error) => tab.load_warning = Some(error),
+                    }
+                }
             } else if let Some(path) = &document.path {
+                if document.history.is_some() {
+                    crate::session_restore::step("restore_history");
+                }
                 crate::session_restore::step("restore_file");
                 let tab = &mut self.tabs[index];
-                if binary {
-                    tab.binary_document = true;
-                    let path = path.clone();
-                    tab.binary_loading = Some(crate::restore_io::run(deadline, move || {
-                        crate::binary::Task::open(path)
-                    })?);
-                    tab.editor.source_bytes = size;
-                    tab.pending_restore = Some(state.clone());
-                } else if size
+                tab.restore_history = document.history.clone().map(|history| (history, !changed));
+                let background = size
                     >= tab
                         .editor
                         .settings
                         .usize("large_file.load_bytes", 64 * 1024 * 1024)
-                        as u64
-                {
-                    let path = path.clone();
-                    let fallback = tab.editor.preferences.fallback_encoding.clone();
-                    tab.loading = Some(crate::restore_io::run(deadline, move || {
-                        vel_fileio::load_background(path, fallback)
-                    })?);
-                    tab.editor.source_bytes = size;
-                    tab.pending_restore = Some(state.clone());
-                } else {
-                    let path = path.clone();
-                    let fallback = tab.editor.preferences.fallback_encoding.clone();
-                    let loaded = crate::restore_io::run(deadline, move || {
-                        vel_fileio::load(&path, &fallback, |_| {})
-                    })?;
-                    tab.install_restored(loaded);
-                }
+                        as u64;
+                let options = tab.decode_options();
+                let path = path.clone();
+                let prepared = crate::restore_io::run(deadline, move || {
+                    crate::workspace::prepare_disk_load(&path, options, background, false)
+                })?;
+                tab.install_disk_load(prepared, false);
             }
             let tab = &mut self.tabs[index];
             tab.lazy = None;
-            tab.editor.read_only = tab.loading.is_some()
+            tab.editor.read_only = tab.load_failed
                 || tab.binary_loading.is_some()
+                || (tab.loading.is_some() && !tab.external_load)
                 || tab
                     .editor
                     .settings
@@ -619,9 +648,12 @@ impl Workspace {
             tab.document = tab.editor.buffer.id();
             tab.shared_view = tab.editor.id;
             tab.shared_dirty = false;
-            tab.disk_saved = if retained { document.disk } else { disk };
+            if retained || tab.loading.is_some() || tab.load_failed {
+                tab.disk_saved = document.disk.clone();
+            } else if tab.disk_saved.is_none() {
+                tab.disk_saved = disk;
+            }
             tab.disk_stamp = stamp;
-            tab.disk_revision = revision;
             tab.overwrite_allowed = None;
             // A lazy sheet references this live document from now on. Its history is
             // only a recovery source while *no* view has loaded the shared buffer.
@@ -657,6 +689,7 @@ impl Workspace {
                 let _ = w.watch(path);
             }
             self.configure_language(index, None, true)?;
+            self.reconcile_restored_views(index);
         }
         let doc = self.tabs[index].document;
         let owner = self.tabs.iter().position(|t| t.editor.buffer.id() == doc);
@@ -778,9 +811,18 @@ impl Workspace {
                 self.tabs[index].path = self.tabs[owner].path.clone();
                 self.tabs[index].format = self.tabs[owner].format.clone();
                 self.tabs[index].saved_format = self.tabs[owner].saved_format.clone();
+                self.tabs[index].load_failed = self.tabs[owner].load_failed;
+                self.tabs[index].legacy_stamp_matches = self.tabs[owner].legacy_stamp_matches;
+                self.tabs[index].legacy_saved_text = self.tabs[owner].legacy_saved_text.clone();
+                self.tabs[index].legacy_text_fingerprint =
+                    self.tabs[owner].legacy_text_fingerprint.clone();
+                self.tabs[index].encoding_chosen = self.tabs[owner].encoding_chosen;
+                self.tabs[index].preferred_encoding = self.tabs[owner].preferred_encoding.clone();
                 self.tabs[index].tracker = self.tabs[owner].tracker.clone();
                 self.tabs[index].disk_saved = self.tabs[owner].disk_saved.clone();
-                self.tabs[index].disk_revision = self.tabs[owner].disk_revision;
+                self.tabs[index].disk_content = self.tabs[owner].disk_content;
+                self.tabs[index].saved_in_effective_encoding =
+                    self.tabs[owner].saved_in_effective_encoding;
                 self.tabs[index].overwrite_allowed = self.tabs[owner].overwrite_allowed;
                 self.tabs[index].disk_stamp = self.tabs[owner].disk_stamp;
                 self.tabs[index].restored_format_dirty = self.tabs[owner].restored_format_dirty;
@@ -788,8 +830,24 @@ impl Workspace {
             self.tabs[owner].shared_dirty = false;
         }
     }
+    fn reconcile_restored_views(&mut self, index: usize) {
+        let views = std::mem::take(&mut self.tabs[index].restored_history_views);
+        if views.is_empty() {
+            return;
+        }
+        let document = self.tabs[index].restored_document;
+        for sibling in &mut self.tabs {
+            if sibling.restored_document == document
+                && let Some((_, state)) = &sibling.lazy
+                && let Some(view) = state.history_view.and_then(|old| views.get(&old))
+            {
+                sibling.shared_view = *view;
+            }
+        }
+    }
     pub fn reconcile_installs(&mut self) {
         for index in 0..self.tabs.len() {
+            self.reconcile_restored_views(index);
             let Some(old) = self.tabs[index].previous_document.take() else {
                 continue;
             };
@@ -1150,6 +1208,7 @@ impl Workspace {
                     id: tab.sheet,
                     document: identity,
                     view: loaded
+                        .filter(|owner| !owner.load_failed)
                         .map(|owner| {
                             owner
                                 .editor
@@ -1172,10 +1231,15 @@ impl Workspace {
                 .iter()
                 .position(|t| t.editor.buffer.id() == doc)
                 .unwrap_or(index);
-            let view = self.tabs[owner]
-                .editor
-                .folded_view_state(tab.shared_view, tab.scroll)
-                .with_line_height(tab.scroll_line_height);
+            let view = if self.tabs[owner].load_failed && self.tabs[owner].restore_history.is_some()
+            {
+                self.saved_sheet_state(index)
+            } else {
+                self.tabs[owner]
+                    .editor
+                    .folded_view_state(tab.shared_view, tab.scroll)
+                    .with_line_height(tab.scroll_line_height)
+            };
             sheets.push(Sheet {
                 settings: sheet_state(tab),
                 html: tab
@@ -1212,11 +1276,22 @@ impl Workspace {
                     id: identity,
                     path: owner.path.clone(),
                     disk: owner.disk_saved.clone(),
+                    disk_content: owner.disk_content,
+                    saved_in_effective_encoding: owner.saved_in_effective_encoding,
+                    effective_encoding: Some(owner.saved_format.encoding.clone()),
                     encoding: owner.format.encoding.clone(),
+                    encoding_chosen: owner.encoding_chosen,
+                    preferred_encoding: owner.preferred_encoding.clone(),
+                    encoding_display_name: owner.format.display_name.clone(),
                     bom: owner.format.bom,
                     line_ending: owner.format.line_ending.name().into(),
                     dirty: retained_dirty && !empty_error,
-                    history: if owner.loading.is_some()
+                    history: if owner.load_failed && owner.restore_history.is_some() {
+                        owner
+                            .restore_history
+                            .as_ref()
+                            .map(|(history, _)| history.clone())
+                    } else if (owner.loading.is_some() && !owner.external_load)
                         || owner.binary_loading.is_some()
                         || owner.editor.binary.is_some()
                         || empty_error
@@ -1225,10 +1300,10 @@ impl Workspace {
                     } else {
                         Some(if !retained_dirty {
                             if let Some(path) = &owner.path {
-                                vel_session::History::capture_saved(
+                                vel_session::History::capture_saved_with_options(
                                     &owner.editor.buffer,
                                     path.clone(),
-                                    owner.format.encoding.clone(),
+                                    owner.decode_options(),
                                 )
                             } else {
                                 vel_session::History::capture(&owner.editor.buffer)
@@ -1377,11 +1452,23 @@ impl Workspace {
             tab.deleted = missing;
             tab.format = vel_fileio::Format {
                 encoding: document.encoding.clone(),
+                display_name: document.encoding_display_name.clone(),
                 bom: document.bom,
                 line_ending: vel_fileio::LineEnding::parse(&document.line_ending)?,
             };
             tab.saved_format = tab.format.clone();
+            if let Some(effective) = &document.effective_encoding {
+                tab.saved_format.encoding = effective.clone();
+            }
+            tab.encoding_chosen = document.encoding_chosen;
+            tab.preferred_encoding = document.preferred_encoding.clone().or_else(|| {
+                document
+                    .encoding_chosen
+                    .then(|| tab.format.display_encoding().into())
+            });
             tab.disk_saved = document.disk.clone();
+            tab.disk_content = document.disk_content;
+            tab.saved_in_effective_encoding = document.saved_in_effective_encoding;
             tab.transient = sheet.transient;
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
             if let Some(html) = &sheet.html {

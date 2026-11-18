@@ -8,6 +8,7 @@ pub(crate) const CHUNK: usize = 6144;
 #[cfg(test)]
 pub(crate) const CHUNK: usize = 128;
 const FANOUT: usize = 32;
+const EDIT_CHUNK: usize = CHUNK * 4;
 #[cfg(not(test))]
 const FILL: usize = 4096;
 #[cfg(test)]
@@ -96,15 +97,297 @@ pub(crate) enum Kind {
 }
 
 // Small replacements share the original allocation instead of copying kilobytes
-// for each distant cursor. A second replacement compacts this bounded, three-piece
-// leaf, so lookup depth and fragment count can never grow with edit history.
+// for each distant cursor. Adjacent typing extends the bounded inline piece;
+// fragment leaves below handle longer runs without an edit-history chain.
 #[derive(Clone, Debug)]
 pub(crate) enum Leaf {
     Flat(Flat),
     Patched(Patched),
+    Spliced(Spliced),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+// Batch typing shares the untouched flat allocation and copies only bounded
+// fragment metadata / shared insertions. Never retain another spliced leaf: undo
+// snapshots must not turn this representation into an edit-history chain.
+#[derive(Clone, Debug)]
+pub(crate) struct Spliced {
+    original: Arc<Node>,
+    pieces: Vec<Piece>,
+}
+
+#[derive(Clone, Debug)]
+struct Piece {
+    source: PieceSource,
+    end: Summary,
+}
+
+#[derive(Clone, Debug)]
+enum PieceSource {
+    Original(std::ops::Range<usize>),
+    Inserted(Arc<str>),
+}
+
+impl PieceSource {
+    fn text<'a>(&'a self, original: &'a str) -> &'a str {
+        match self {
+            Self::Original(range) => &original[range.clone()],
+            Self::Inserted(text) => text,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Parts<'a> {
+    leaf: &'a Leaf,
+    range: std::ops::Range<usize>,
+}
+
+impl<'a> Iterator for Parts<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next().map(|i| self.leaf.part(i))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.range.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for Parts<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.range.next_back().map(|i| self.leaf.part(i))
+    }
+}
+
+impl ExactSizeIterator for Parts<'_> {}
+
+// Per batch only. Repeated caret text shares its allocation, including appended
+// runs, without interning a document or retaining earlier edits. The comparison
+// and copy are bounded by the ordinary leaf-size insertion-piece limit.
+#[derive(Default)]
+struct InsertionCache {
+    reuse: bool,
+    text: Option<Arc<str>>,
+    prefix: Option<Arc<str>>,
+    joined: Vec<Option<Joined>>,
+}
+type Joined = (Arc<str>, Arc<str>, Arc<str>);
+impl InsertionCache {
+    fn intern(slot: &mut Option<Arc<str>>, text: &str) -> Arc<str> {
+        if let Some(old) = slot
+            && old.as_ref() == text
+        {
+            return old.clone();
+        }
+        let new = Arc::<str>::from(text);
+        *slot = Some(new.clone());
+        new
+    }
+    fn text(&mut self, text: &str) -> Arc<str> {
+        if self.reuse {
+            Self::intern(&mut self.text, text)
+        } else {
+            Arc::from(text)
+        }
+    }
+    fn prefix(&mut self, text: &str) -> Arc<str> {
+        if self.reuse {
+            Self::intern(&mut self.prefix, text)
+        } else {
+            Arc::from(text)
+        }
+    }
+    fn join(&mut self, a: &Arc<str>, b: &str) -> Arc<str> {
+        // Index by bounded run length, not growing strings. Always verify the
+        // contents: equal lengths are a hint, never an equality oracle.
+        let key = a.len();
+        if self.reuse
+            && let Some((old_a, old_b, joined)) = self.joined.get(key).and_then(Option::as_ref)
+            && (Arc::ptr_eq(old_a, a) || old_a.as_ref() == a.as_ref())
+            && old_b.as_ref() == b
+        {
+            return joined.clone();
+        }
+        let mut text = String::with_capacity(a.len() + b.len());
+        text.push_str(a);
+        text.push_str(b);
+        let joined = Arc::<str>::from(text);
+        if self.reuse {
+            if self.joined.len() <= key {
+                self.joined.resize_with(key + 1, || None);
+            }
+            self.joined[key] = Some((a.clone(), Arc::from(b), joined.clone()));
+        }
+        joined
+    }
+}
+
+impl Spliced {
+    fn push(
+        &mut self,
+        source: PieceSource,
+        summary: Summary,
+        cache: &mut InsertionCache,
+    ) -> Option<()> {
+        if summary.bytes == 0 {
+            return Some(());
+        }
+        let end = self.pieces.last().map_or(summary, |p| p.end.plus(summary));
+        if let Some(previous) = self.pieces.last_mut() {
+            match (&mut previous.source, &source) {
+                (PieceSource::Original(a), PieceSource::Original(b)) if a.end == b.start => {
+                    a.end = b.end;
+                    previous.end = end;
+                    return Some(());
+                }
+                (PieceSource::Inserted(a), PieceSource::Inserted(b)) => {
+                    if a.len() + b.len() > CHUNK {
+                        return None;
+                    }
+                    *a = cache.join(a, b);
+                    previous.end = end;
+                    return Some(());
+                }
+                _ => {}
+            }
+        }
+        if self.pieces.len() == 128 {
+            return None;
+        }
+        self.pieces.push(Piece { source, end });
+        Some(())
+    }
+
+    fn insertions(
+        node: &Arc<Node>,
+        edits: &[crate::Edit<'_>],
+        start: usize,
+        cache: &mut InsertionCache,
+    ) -> Option<Leaf> {
+        if edits.is_empty()
+            || edits
+                .iter()
+                .any(|e| !e.range.is_empty() || e.text.len() > 32)
+        {
+            return None;
+        }
+        let Kind::Leaf(old) = &node.kind else {
+            return None;
+        };
+        let scratch;
+        let (original, pieces): (&Arc<Node>, &[Piece]) = match old {
+            Leaf::Flat(_) => {
+                // Dense one-off batches copy one small flat run more cheaply
+                // than constructing two fragment descriptors per caret.
+                if edits.len() > 16 {
+                    return None;
+                }
+                scratch = vec![Piece {
+                    source: PieceSource::Original(0..node.summary.bytes),
+                    end: node.summary,
+                }];
+                (node, &scratch)
+            }
+            Leaf::Patched(p) => {
+                let prefix = p.prefix_summary();
+                let inserted = prefix.plus(Summary::of(old.part(1)));
+                scratch = vec![
+                    Piece {
+                        source: PieceSource::Original(0..p.range.start),
+                        end: prefix,
+                    },
+                    Piece {
+                        source: PieceSource::Inserted(cache.prefix(old.part(1))),
+                        end: inserted,
+                    },
+                    Piece {
+                        source: PieceSource::Original(p.range.end..p.original.summary.bytes),
+                        end: node.summary,
+                    },
+                ];
+                (&p.original, &scratch)
+            }
+            Leaf::Spliced(s) => (&s.original, &s.pieces),
+        };
+        let Kind::Leaf(Leaf::Flat(flat)) = &original.kind else {
+            unreachable!()
+        };
+        let mut out = Self {
+            original: original.clone(),
+            pieces: Vec::with_capacity(if matches!(old, Leaf::Spliced(_)) {
+                pieces.len()
+            } else {
+                (pieces.len() + edits.len() * 2).min(128)
+            }),
+        };
+        let mut index = 0;
+        let mut consumed = 0;
+        let mut copy_until = |out: &mut Self,
+                              until: usize,
+                              append: Option<&str>,
+                              cache: &mut InsertionCache|
+         -> Option<bool> {
+            while consumed < until {
+                let piece = &pieces[index];
+                let before = if index == 0 {
+                    Summary::default()
+                } else {
+                    pieces[index - 1].end
+                };
+                let end = until.min(piece.end.bytes);
+                let range = consumed - before.bytes..end - before.bytes;
+                let text = piece.source.text(flat);
+                if range.len() == text.len()
+                    && end == until
+                    && let (PieceSource::Inserted(old), Some(append)) = (&piece.source, append)
+                {
+                    if old.len() + append.len() > CHUNK {
+                        return None;
+                    }
+                    let joined = cache.join(old, append);
+                    out.push(
+                        PieceSource::Inserted(joined),
+                        piece.end.minus(before).plus(Summary::of(append)),
+                        cache,
+                    )?;
+                    consumed = end;
+                    index += 1;
+                    return Some(true);
+                }
+                if range.len() == text.len() {
+                    out.push(piece.source.clone(), piece.end.minus(before), cache)?;
+                } else if !range.is_empty() {
+                    let summary = Summary::of(&text[range.clone()]);
+                    let source = match &piece.source {
+                        PieceSource::Original(r) => {
+                            PieceSource::Original(r.start + range.start..r.start + range.end)
+                        }
+                        PieceSource::Inserted(_) => {
+                            PieceSource::Inserted(Arc::from(&text[range.clone()]))
+                        }
+                    };
+                    out.push(source, summary, cache)?;
+                }
+                consumed = end;
+                if consumed == piece.end.bytes {
+                    index += 1;
+                }
+            }
+            Some(false)
+        };
+        for edit in edits {
+            // Append directly from the borrowed old piece. Cloning and then
+            // replacing its Arc would add two atomic operations per caret.
+            if !copy_until(&mut out, edit.range.start - start, Some(edit.text), cache)? {
+                let text = cache.text(edit.text);
+                out.push(PieceSource::Inserted(text), Summary::of(edit.text), cache)?;
+            }
+        }
+        copy_until(&mut out, node.summary.bytes, None, cache)?;
+        (!out.pieces.is_empty()).then_some(Leaf::Spliced(out))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Flat {
     text: String,
     newlines: LineIndex,
@@ -234,29 +517,111 @@ pub(crate) struct Patched {
     range: std::ops::Range<usize>,
     inserted: [u8; 32],
     len: u8,
+    // These fit the old inline leaf's padding. ASCII prefixes use the LF index;
+    // Unicode prefixes are measured once, then shared by adjacent typing.
+    prefix: [u16; 3],
+}
+
+impl Patched {
+    // Keep the Unicode scan out of the ordinary ASCII edit path. Otherwise the
+    // vectorized summary loop increases the hot edit frame and register spills.
+    #[inline(never)]
+    fn unicode_prefix(flat: &str, at: usize) -> [u16; 3] {
+        let summary = Summary::of(&flat[..at]);
+        [
+            summary.chars as u16,
+            summary.utf16 as u16,
+            summary.newlines as u16,
+        ]
+    }
+
+    fn prefix_summary(&self) -> Summary {
+        if self.prefix[0] != u16::MAX {
+            return Summary {
+                bytes: self.range.start,
+                chars: self.prefix[0] as usize,
+                utf16: self.prefix[1] as usize,
+                newlines: self.prefix[2] as usize,
+            };
+        }
+        let Kind::Leaf(Leaf::Flat(flat)) = &self.original.kind else {
+            unreachable!("patched leaves retain one flat leaf")
+        };
+        flat.removed(0..self.range.start, self.original.summary)
+    }
 }
 
 impl Leaf {
-    fn parts(&self) -> [&str; 3] {
+    fn part_count(&self) -> usize {
         match self {
-            Self::Flat(s) => [s, "", ""],
+            Self::Flat(_) => 1,
+            Self::Patched(_) => 3,
+            Self::Spliced(s) => s.pieces.len(),
+        }
+    }
+    fn part(&self, index: usize) -> &str {
+        match self {
+            Self::Flat(s) => s,
             Self::Patched(p) => {
-                let Kind::Leaf(Leaf::Flat(original)) = &p.original.kind else {
+                let Kind::Leaf(Self::Flat(original)) = &p.original.kind else {
                     unreachable!("patched leaves retain exactly one flat leaf")
                 };
-                [
-                    &original[..p.range.start],
-                    std::str::from_utf8(&p.inserted[..p.len as usize])
+                match index {
+                    0 => &original[..p.range.start],
+                    1 => std::str::from_utf8(&p.inserted[..p.len as usize])
                         .expect("validated inline UTF-8"),
-                    &original[p.range.end..],
-                ]
+                    2 => &original[p.range.end..],
+                    _ => unreachable!(),
+                }
+            }
+            Self::Spliced(s) => {
+                let Kind::Leaf(Self::Flat(original)) = &s.original.kind else {
+                    unreachable!("spliced leaves retain exactly one flat leaf")
+                };
+                s.pieces[index].source.text(original)
             }
         }
+    }
+    fn parts(&self) -> Parts<'_> {
+        Parts {
+            leaf: self,
+            range: 0..self.part_count(),
+        }
+    }
+    #[inline(never)]
+    fn edge_part(&self, forward: bool) -> (usize, &str) {
+        let parts = self.parts();
+        let part = if forward {
+            parts.clone().position(|s| !s.is_empty())
+        } else {
+            parts.clone().rposition(|s| !s.is_empty())
+        }
+        .unwrap_or(0);
+        (part, self.part(part))
+    }
+    fn boundary(&self, byte: usize) -> bool {
+        if let Self::Spliced(s) = self {
+            let i = s
+                .pieces
+                .partition_point(|p| p.end.bytes <= byte)
+                .min(s.pieces.len() - 1);
+            let before = if i == 0 { 0 } else { s.pieces[i - 1].end.bytes };
+            return self.part(i).is_char_boundary(byte - before);
+        }
+        let mut before = 0;
+        for part in self.parts() {
+            if byte <= before + part.len() {
+                return part.is_char_boundary(byte - before);
+            }
+            before += part.len();
+        }
+        false
     }
     fn len(&self) -> usize {
         match self {
             Self::Flat(s) => s.len(),
             Self::Patched(p) => p.original.summary.bytes - p.range.len() + p.len as usize,
+            Self::Spliced(s) => s.pieces.last().expect("nonempty pieces").end.bytes,
         }
     }
     fn flatten(&self) -> String {
@@ -266,6 +631,9 @@ impl Leaf {
         }
         s
     }
+    // The callers already prove the flat/small case. Inline the bounded record
+    // construction to avoid an extra large return-value copy for every caret.
+    #[inline(always)]
     fn small(original: &Arc<Node>, range: std::ops::Range<usize>, text: &str) -> Option<Self> {
         let Kind::Leaf(Self::Flat(_)) = &original.kind else {
             return None;
@@ -275,23 +643,72 @@ impl Leaf {
         }
         let mut inserted = [0; 32];
         inserted[..text.len()].copy_from_slice(text.as_bytes());
+        let prefix = if original.summary.bytes == original.summary.chars {
+            [u16::MAX; 3]
+        } else {
+            let Kind::Leaf(Self::Flat(flat)) = &original.kind else {
+                unreachable!()
+            };
+            Patched::unicode_prefix(flat, range.start)
+        };
         Some(Self::Patched(Patched {
             original: original.clone(),
             range,
             inserted,
             len: text.len() as u8,
+            prefix,
         }))
     }
+    fn extend(&self, at: usize, text: &str) -> Option<Self> {
+        let Self::Patched(p) = self else { return None };
+        let len = p.len as usize;
+        if at != p.range.start + len || len + text.len() > p.inserted.len() {
+            return None;
+        }
+        let mut next = p.clone();
+        next.inserted[len..len + text.len()].copy_from_slice(text.as_bytes());
+        next.len = (len + text.len()) as u8;
+        Some(Self::Patched(next))
+    }
     fn seek(&self, offset: usize, metric: Metric) -> (&str, Summary) {
+        if let Self::Flat(s) = self {
+            return (s, Summary::default());
+        }
+        if let Self::Spliced(s) = self {
+            let i = s
+                .pieces
+                .partition_point(|p| p.end.get(metric) <= offset)
+                .min(s.pieces.len() - 1);
+            return (
+                self.part(i),
+                if i == 0 {
+                    Summary::default()
+                } else {
+                    s.pieces[i - 1].end
+                },
+            );
+        }
         let parts = self.parts();
-        let last = parts.iter().rposition(|s| !s.is_empty()).unwrap_or(0);
+        let last = parts.clone().rposition(|s| !s.is_empty()).unwrap_or(0);
         let mut before = Summary::default();
-        for (i, s) in parts.into_iter().enumerate() {
+        for (i, s) in parts.enumerate() {
             if s.is_empty() && i != last {
                 continue;
             }
-            let sum = Summary::of(s);
-            if offset < before.get(metric) + sum.get(metric) || i == last {
+            // The final piece is selected regardless of its metrics. Byte
+            // lookups can also choose the current piece by length alone. Do not
+            // scan its Unicode summary merely to return it to the caller.
+            if i == last || (matches!(metric, Metric::Byte) && offset < before.bytes + s.len()) {
+                return (s, before);
+            }
+            let sum = if i == 0
+                && let Self::Patched(p) = self
+            {
+                p.prefix_summary()
+            } else {
+                Summary::of(s)
+            };
+            if offset < before.get(metric) + sum.get(metric) {
                 return (s, before);
             }
             before = before.plus(sum);
@@ -635,11 +1052,16 @@ pub(crate) fn seek(node: &Node, offset: usize, metric: Metric) -> (&str, Summary
     let (leaf, before, offset) = find_leaf(node, offset, metric);
     match leaf {
         Leaf::Flat(s) => (s, before),
-        Leaf::Patched(_) => {
+        _ => {
             let (s, part) = leaf.seek(offset, metric);
             (s, before.plus(part))
         }
     }
+}
+
+pub(crate) fn is_char_boundary(root: &Node, byte: usize) -> bool {
+    let (leaf, _, local) = find_leaf(root, byte, Metric::Byte);
+    leaf.boundary(local)
 }
 
 pub(crate) fn byte_line(root: &Node, byte: usize, ascii: bool) -> usize {
@@ -723,9 +1145,9 @@ pub(crate) fn validate_boundaries(root: &Node, edits: &[crate::Edit<'_>]) {
                     if p > end {
                         break;
                     }
-                    let (part, before) = s.seek(p - start, Metric::Byte);
+                    // Boundary validation needs bytes only, never Unicode summaries.
                     assert!(
-                        part.is_char_boundary(p - start - before.bytes),
+                        s.boundary(p - start),
                         "edit endpoint is not a UTF-8 scalar boundary"
                     );
                     points.next();
@@ -740,9 +1162,11 @@ pub(crate) fn validate_boundaries(root: &Node, edits: &[crate::Edit<'_>]) {
             }
         }
     }
+    let mut previous = None;
     let mut points = edits
         .iter()
         .flat_map(|e| [e.range.start, e.range.end])
+        .filter(|&point| previous.replace(point) != Some(point))
         .peekable();
     visit(root, 0, &mut points);
     assert!(
@@ -759,7 +1183,7 @@ pub(crate) fn equal(a: &Arc<Node>, b: &Arc<Node>) -> bool {
         return false;
     }
     match (&a.kind, &b.kind) {
-        (Kind::Leaf(Leaf::Flat(a)), Kind::Leaf(Leaf::Flat(b))) => a == b,
+        (Kind::Leaf(Leaf::Flat(a)), Kind::Leaf(Leaf::Flat(b))) => a.text == b.text,
         (Kind::Branch(a), Kind::Branch(b))
             if a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.end == b.end) =>
         {
@@ -801,41 +1225,72 @@ pub(crate) fn storage_excluding(root: &Arc<Node>, shared: Option<&Arc<Node>>) ->
     if shared.is_some_and(|other| Arc::ptr_eq(root, other)) {
         return 0;
     }
-    fn mark(node: &Arc<Node>, seen: &mut std::collections::HashSet<*const Node>) {
+    fn mark(
+        node: &Arc<Node>,
+        seen: &mut std::collections::HashSet<*const Node>,
+        strings: &mut std::collections::HashSet<*const u8>,
+    ) {
         if !seen.insert(Arc::as_ptr(node)) {
             return;
         }
         match &node.kind {
-            Kind::Leaf(Leaf::Patched(p)) => mark(&p.original, seen),
+            Kind::Leaf(Leaf::Patched(p)) => mark(&p.original, seen, strings),
+            Kind::Leaf(Leaf::Spliced(s)) => {
+                mark(&s.original, seen, strings);
+                for piece in &s.pieces {
+                    if let PieceSource::Inserted(text) = &piece.source {
+                        strings.insert(text.as_ptr());
+                    }
+                }
+            }
             Kind::Branch(children) => {
                 for child in children {
-                    mark(&child.node, seen);
+                    mark(&child.node, seen, strings);
                 }
             }
             Kind::Leaf(Leaf::Flat(_)) => {}
         }
     }
-    fn visit(node: &Arc<Node>, seen: &mut std::collections::HashSet<*const Node>) -> usize {
+    fn visit(
+        node: &Arc<Node>,
+        seen: &mut std::collections::HashSet<*const Node>,
+        strings: &mut std::collections::HashSet<*const u8>,
+    ) -> usize {
         if !seen.insert(Arc::as_ptr(node)) {
             return 0;
         }
-        // Arc's two counters plus this crate's payload; allocator bookkeeping and
-        // size-class rounding are deliberately excluded from this estimate.
+        // Arc counters and reachable allocations, excluding allocator bookkeeping.
         let own = std::mem::size_of::<Node>() + 2 * std::mem::size_of::<usize>();
         own + match &node.kind {
             Kind::Leaf(Leaf::Flat(s)) => s.text.capacity() + s.newlines.data.len(),
-            Kind::Leaf(Leaf::Patched(p)) => visit(&p.original, seen),
+            Kind::Leaf(Leaf::Patched(p)) => visit(&p.original, seen, strings),
+            Kind::Leaf(Leaf::Spliced(s)) => {
+                s.pieces.capacity() * std::mem::size_of::<Piece>()
+                    + visit(&s.original, seen, strings)
+                    + s.pieces
+                        .iter()
+                        .map(|p| match &p.source {
+                            PieceSource::Inserted(text) if strings.insert(text.as_ptr()) => {
+                                text.len() + 2 * std::mem::size_of::<usize>()
+                            }
+                            _ => 0,
+                        })
+                        .sum::<usize>()
+            }
             Kind::Branch(c) => {
                 c.capacity() * std::mem::size_of::<Child>()
-                    + c.iter().map(|c| visit(&c.node, seen)).sum::<usize>()
+                    + c.iter()
+                        .map(|c| visit(&c.node, seen, strings))
+                        .sum::<usize>()
             }
         }
     }
     let mut seen = std::collections::HashSet::new();
+    let mut strings = std::collections::HashSet::new();
     if let Some(other) = shared {
-        mark(other, &mut seen);
+        mark(other, &mut seen, &mut strings);
     }
-    visit(root, &mut seen)
+    visit(root, &mut seen, &mut strings)
 }
 
 pub(crate) fn metric_to_byte(root: &Node, value: usize, metric: Metric) -> usize {
@@ -959,15 +1414,30 @@ fn repair(nodes: &mut Vec<Arc<Node>>) {
         let replacement = match (&left.kind, &right.kind) {
             (Kind::Leaf(a), Kind::Leaf(b)) => {
                 let mut s = String::with_capacity(a.len() + b.len());
-                for part in a.parts().into_iter().chain(b.parts()) {
+                for part in a.parts().chain(b.parts()) {
                     s.push_str(part);
                 }
                 if s.len() <= CHUNK {
                     vec![Node::leaf(s)]
+                } else if s.len() > CHUNK * 2 {
+                    // Fragment leaves have bounded headroom for insertions.
+                    // Materializing a large neighbor must still produce ordinary
+                    // bounded flat leaves and valid compact LF indexes.
+                    let mut builder = Builder::default();
+                    builder.push(&s);
+                    builder.leaves()
                 } else {
-                    let mid = s.floor_char_boundary(s.len() / 2);
-                    let tail = s.split_off(mid);
-                    vec![Node::leaf(s), Node::leaf(tail)]
+                    // Both ordinary leaves must fit, including a 4-byte scalar
+                    // straddling the midpoint. The feasible boundary is [len-CHUNK, CHUNK].
+                    let mid = s.ceil_char_boundary((s.len() / 2).max(s.len() - CHUNK));
+                    if mid <= CHUNK {
+                        let tail = s.split_off(mid);
+                        vec![Node::leaf(s), Node::leaf(tail)]
+                    } else {
+                        let mut builder = Builder::default();
+                        builder.push(&s);
+                        builder.leaves()
+                    }
                 }
             }
             (Kind::Branch(a), Kind::Branch(b)) => {
@@ -996,6 +1466,7 @@ struct Batch<'a, 'b> {
     deleted_until: usize,
     len: usize,
     inserted: Option<(&'b str, Summary)>,
+    pieces: InsertionCache,
 }
 
 impl Batch<'_, '_> {
@@ -1045,6 +1516,26 @@ fn edit_node(node: &mut Arc<Node>, start: usize, batch: &mut Batch<'_, '_>) -> C
         return Change::Remove;
     }
     if let Kind::Leaf(old) = &node.kind {
+        if matches!(old, Leaf::Patched(_))
+            && let Some(edit) = batch.edits.get(batch.next)
+            && batch.deleted_until <= start
+            && edit.range.start >= start
+            && edit.range.is_empty()
+            && batch
+                .edits
+                .get(batch.next + 1)
+                .is_none_or(|e| e.range.start >= end && !(end == batch.len && e.range.start == end))
+            && node.summary.bytes + edit.text.len() <= CHUNK
+            && let Some(leaf) = old.extend(edit.range.start - start, edit.text)
+        {
+            let summary = node
+                .summary
+                .plus(inserted_summary(&mut batch.inserted, edit.text));
+            batch.next += 1;
+            batch.deleted_until = edit.range.end;
+            set_leaf(node, leaf, summary);
+            return Change::Keep;
+        }
         if let Leaf::Flat(original) = old
             && let Some(edit) = batch.edits.get(batch.next)
         {
@@ -1073,6 +1564,25 @@ fn edit_node(node: &mut Arc<Node>, start: usize, batch: &mut Batch<'_, '_>) -> C
                 }
             }
         }
+        let count = batch.edits[batch.next..]
+            .partition_point(|e| e.range.start < end || (end == batch.len && e.range.start == end));
+        let local = &batch.edits[batch.next..batch.next + count];
+        let insert_bytes = local.iter().map(|e| e.text.len()).sum::<usize>();
+        let new_len = node.summary.bytes + insert_bytes;
+        if batch.deleted_until <= start
+            && new_len <= EDIT_CHUNK
+            && (!matches!(old, Leaf::Flat(_)) || local.len() <= 16)
+            && let Some(leaf) = Spliced::insertions(node, local, start, &mut batch.pieces)
+        {
+            let summary = match &leaf {
+                Leaf::Spliced(s) => s.pieces.last().unwrap().end,
+                _ => unreachable!(),
+            };
+            batch.next += count;
+            batch.deleted_until = local.last().unwrap().range.end;
+            set_leaf(node, leaf, summary);
+            return Change::Keep;
+        }
         let owned;
         let old = match old {
             Leaf::Flat(s) => &**s,
@@ -1081,11 +1591,6 @@ fn edit_node(node: &mut Arc<Node>, start: usize, batch: &mut Batch<'_, '_>) -> C
                 &owned
             }
         };
-        let insert_bytes: usize = batch.edits[batch.next..]
-            .iter()
-            .take_while(|e| e.range.start < end || (end == batch.len && e.range.start == end))
-            .map(|e| e.text.len())
-            .sum();
         let mut out = String::with_capacity(old.len() + insert_bytes);
         let mut at = batch.deleted_until.saturating_sub(start).min(old.len());
         let mut summary = if at == 0 {
@@ -1113,16 +1618,7 @@ fn edit_node(node: &mut Arc<Node>, start: usize, batch: &mut Batch<'_, '_>) -> C
             return Change::Remove;
         }
         if out.len() <= CHUNK {
-            if let Some(unique) = Arc::get_mut(node) {
-                unique.summary = summary;
-                unique.kind = Kind::Leaf(Leaf::Flat(Flat::new(out, summary.newlines)));
-            } else {
-                *node = Arc::new(Node {
-                    summary,
-                    height: 0,
-                    kind: Kind::Leaf(Leaf::Flat(Flat::new(out, summary.newlines))),
-                });
-            }
+            set_leaf(node, Leaf::Flat(Flat::new(out, summary.newlines)), summary);
             Change::Keep
         } else {
             let mut builder = Builder::default();
@@ -1214,7 +1710,9 @@ fn edit_node(node: &mut Arc<Node>, start: usize, batch: &mut Batch<'_, '_>) -> C
 }
 
 fn set_leaf(node: &mut Arc<Node>, leaf: Leaf, summary: Summary) {
-    if let Some(unique) = Arc::get_mut(node) {
+    if Arc::strong_count(node) == 1
+        && let Some(unique) = Arc::get_mut(node)
+    {
         unique.kind = Kind::Leaf(leaf);
         unique.summary = summary;
     } else {
@@ -1233,7 +1731,38 @@ fn single(node: &mut Arc<Node>, start: usize, edit: &crate::Edit<'_>, is_root: b
             let a = edit.range.start - start;
             let b = edit.range.end - start;
             let len = old.len() - (b - a) + edit.text.len();
-            if len > CHUNK || (!is_root && len < CHUNK / 2) {
+            let maximum = if matches!(old, Leaf::Spliced(_)) {
+                EDIT_CHUNK
+            } else {
+                CHUNK
+            };
+            if len > maximum || (!is_root && len < CHUNK / 2) {
+                return false;
+            }
+            if matches!(old, Leaf::Patched(_))
+                && a == b
+                && let Some(leaf) = old.extend(a, edit.text)
+            {
+                let summary = node.summary.plus(Summary::of(edit.text));
+                set_leaf(node, leaf, summary);
+                return true;
+            }
+            if matches!(old, Leaf::Spliced(_))
+                && let Some(leaf) = Spliced::insertions(
+                    node,
+                    std::slice::from_ref(edit),
+                    start,
+                    &mut InsertionCache::default(),
+                )
+            {
+                let Leaf::Spliced(s) = &leaf else {
+                    unreachable!()
+                };
+                let summary = s.pieces.last().unwrap().end;
+                set_leaf(node, leaf, summary);
+                return true;
+            }
+            if len > CHUNK {
                 return false;
             }
             let owned;
@@ -1301,6 +1830,12 @@ pub(crate) fn apply(root: &mut Arc<Node>, edits: &[crate::Edit<'_>]) {
         deleted_until: 0,
         len: root.summary.bytes,
         inserted: None,
+        pieces: InsertionCache {
+            // Sparse/single edits cannot amortize a length-indexed table. The
+            // ordinary persistent leaf path stays allocation-light for them.
+            reuse: edits.len() >= 8,
+            ..Default::default()
+        },
     };
     match edit_node(root, 0, &mut batch) {
         Change::Keep => {}
@@ -1349,8 +1884,8 @@ impl<'a> Cursor<'a> {
             unreachable!()
         };
         let parts = leaf.parts();
-        let last = parts.iter().rposition(|s| !s.is_empty()).unwrap_or(0);
-        for (part, text) in parts.into_iter().enumerate() {
+        let last = parts.clone().rposition(|s| !s.is_empty()).unwrap_or(0);
+        for (part, text) in parts.enumerate() {
             if !text.is_empty() && byte < start + text.len() || part == last {
                 return Self {
                     text,
@@ -1370,26 +1905,30 @@ impl<'a> Cursor<'a> {
     pub fn backtrack(&mut self) -> bool {
         self.step(false)
     }
-    fn step(&mut self, forward: bool) -> bool {
-        // Flat leaves have no sibling fragments. Avoid constructing and searching
-        // three-part arrays on every chunk in the common traversal path.
-        if matches!(self.leaf, Leaf::Patched(_)) {
-            let parts = self.leaf.parts();
-            let adjacent = if forward {
-                (self.part + 1..3).find(|&i| !parts[i].is_empty())
+    // Keep dynamic fragment navigation out of the ordinary leaf walk's register
+    // and stack requirements. Most loaded documents contain only flat leaves.
+    #[inline(never)]
+    fn step_part(&mut self, forward: bool) -> bool {
+        let adjacent = if forward {
+            (self.part + 1..self.leaf.part_count()).find(|&i| !self.leaf.part(i).is_empty())
+        } else {
+            (0..self.part).rfind(|&i| !self.leaf.part(i).is_empty())
+        };
+        if let Some(part) = adjacent {
+            if forward {
+                self.start += self.text.len();
             } else {
-                (0..self.part).rfind(|&i| !parts[i].is_empty())
-            };
-            if let Some(part) = adjacent {
-                if forward {
-                    self.start += self.text.len();
-                } else {
-                    self.start -= parts[part].len();
-                }
-                self.text = parts[part];
-                self.part = part;
-                return true;
+                self.start -= self.leaf.part(part).len();
             }
+            self.text = self.leaf.part(part);
+            self.part = part;
+            return true;
+        }
+        false
+    }
+    fn step(&mut self, forward: bool) -> bool {
+        if !matches!(self.leaf, Leaf::Flat(_)) && self.step_part(forward) {
+            return true;
         }
         let Some(level) = self
             .path
@@ -1420,14 +1959,7 @@ impl<'a> Cursor<'a> {
         let (part, text) = if let Leaf::Flat(flat) = leaf {
             (0, &**flat)
         } else {
-            let parts = leaf.parts();
-            let part = if forward {
-                parts.iter().position(|s| !s.is_empty())
-            } else {
-                parts.iter().rposition(|s| !s.is_empty())
-            }
-            .unwrap_or(0);
-            (part, parts[part])
+            leaf.edge_part(forward)
         };
         self.text = text;
         self.leaf = leaf;
@@ -1453,7 +1985,14 @@ pub(crate) fn assert_invariants(root: &Node) {
                         memchr::memchr_iter(b'\n', flat.as_bytes()).collect::<Vec<_>>()
                     );
                 }
-                assert!(s.len() <= CHUNK);
+                assert!(
+                    s.len()
+                        <= if matches!(s, Leaf::Spliced(_)) {
+                            EDIT_CHUNK
+                        } else {
+                            CHUNK
+                        }
+                );
                 // A scalar can straddle the ideal midpoint by at most three bytes.
                 assert!(
                     root || s.len() >= CHUNK / 2 - 3,
@@ -1463,7 +2002,6 @@ pub(crate) fn assert_invariants(root: &Node) {
                 assert_eq!(
                     node.summary,
                     s.parts()
-                        .into_iter()
                         .fold(Summary::default(), |sum, part| sum.plus(Summary::of(part)))
                 );
             }
@@ -1486,4 +2024,38 @@ pub(crate) fn assert_invariants(root: &Node) {
         node.summary
     }
     check(root, true);
+}
+
+#[cfg(test)]
+#[test]
+fn merged_multibyte_leaf_split_seed_1000493() {
+    // The review seed exposed a 130-byte flat leaf at batch 27. Exercise
+    // every midpoint alignment as well as the 5,000-seed String model.
+    for leading in 0..4 {
+        for length in CHUNK + 1..=CHUNK * 2 {
+            let mut content = "x".repeat(leading);
+            while content.len() + 4 <= length {
+                content.push('🏽');
+            }
+            content.push_str(&"y".repeat(length - content.len()));
+            let split = content.floor_char_boundary(CHUNK / 2 - 4);
+            let mut leaves = vec![
+                Node::leaf(content[..split].into()),
+                Node::leaf(content[split..].into()),
+            ];
+            repair(&mut leaves);
+            for leaf in &leaves {
+                assert_invariants(leaf);
+                assert!(leaf.summary.bytes <= CHUNK);
+            }
+            let joined = leaves
+                .iter()
+                .flat_map(|leaf| match &leaf.kind {
+                    Kind::Leaf(value) => value.parts(),
+                    _ => unreachable!(),
+                })
+                .collect::<String>();
+            assert_eq!(joined, content);
+        }
+    }
 }

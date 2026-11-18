@@ -3,6 +3,63 @@ use proptest::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use vel_text::{Edit, Text};
 
+#[test]
+fn grown_fragment_leaf_materializes_safely_on_deletion() {
+    let mut model = "x".repeat(6000);
+    let mut text = Text::from(model.as_str());
+    for _ in 0..1000 {
+        text.insert(3000, "中");
+        model.insert(3000, '中');
+    }
+    let snapshot = text.clone();
+    let old = model.clone();
+    text.delete(0..1);
+    model.remove(0);
+    assert_eq!(text.to_string(), model);
+    assert_eq!(snapshot.to_string(), old);
+    assert_eq!(text.len_chars(), model.chars().count());
+    assert_eq!(text.len_utf16(), model.encode_utf16().count());
+    for (scalar, (byte, _)) in model.char_indices().enumerate() {
+        assert_eq!(text.byte_to_char(byte), scalar);
+        assert_eq!(text.char_to_byte(scalar), byte);
+        assert_eq!(text.byte_to_line(byte), 0);
+    }
+    assert_eq!(text.chunks().collect::<String>(), model);
+}
+
+#[test]
+fn equal_length_caret_runs_keep_distinct_unicode_content() {
+    let rows = 80;
+    let mut model = ("x".repeat(511) + "\n").repeat(rows);
+    let mut text = Text::from(model.as_str());
+    for key in 0..200 {
+        let stride = 512 + key * 3;
+        let edits = (0..rows)
+            .map(|row| {
+                let at = row * stride + 511 + key * 3;
+                Edit {
+                    range: at..at,
+                    text: if row % 2 == 0 { "你" } else { "好" },
+                }
+            })
+            .collect::<Vec<_>>();
+        let snapshot = text.clone();
+        let before = model.clone();
+        text.apply_edits(&edits);
+        for e in edits.iter().rev() {
+            model.insert_str(e.range.start, e.text);
+        }
+        assert_eq!(text.to_string(), model);
+        assert_eq!(snapshot.to_string(), before);
+        assert_eq!(text.len_chars(), model.chars().count());
+        assert_eq!(text.len_utf16(), model.encode_utf16().count());
+        for (row, line) in model.split('\n').enumerate() {
+            assert_eq!(text.line(row).to_string(), line);
+            assert_eq!(text.line_to_byte(row), row * (stride + 3));
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(40))]
     #[test]

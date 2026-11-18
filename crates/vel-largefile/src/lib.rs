@@ -7,7 +7,7 @@ mod line;
 mod load;
 mod policy;
 
-pub use hex::{ContentKind, HexRow, HexView, detect_content};
+pub use hex::{ContentKind, HexRow, HexView, detect_content, detect_utf16};
 pub use line::{LongLineIndex, WordClass};
 pub use load::{
     Cancellation, LoadError, LoadOptions, LoadSnapshot, LoadTask, Loaded, Progress, load_utf8,

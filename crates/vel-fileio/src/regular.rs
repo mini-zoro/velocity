@@ -32,9 +32,9 @@ pub fn metadata(path: &Path, allow_missing: bool) -> Result<Option<Metadata>, St
         Err(e) => Err(error(path, e)),
     }
 }
-/// Raw identity of one regular-file revision, independent of text decoding.
+/// Descriptor stamp for the check/open race only; document revisions use ContentIdentity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Identity {
+struct DescriptorStamp {
     bytes: u64,
     modified: Option<std::time::SystemTime>,
     #[cfg(unix)]
@@ -42,7 +42,7 @@ pub struct Identity {
     #[cfg(unix)]
     inode: u64,
 }
-impl Identity {
+impl DescriptorStamp {
     fn of(m: &Metadata) -> Self {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
@@ -56,14 +56,10 @@ impl Identity {
         }
     }
 }
-/// Reads the identity used to reject unacknowledged replacements before saving.
-pub fn identity(path: &Path) -> Result<Option<Identity>, String> {
-    Ok(metadata(path, true)?.as_ref().map(Identity::of))
-}
 #[cfg(test)]
 thread_local! { static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 fn open(path: &Path, write: bool) -> Result<File, String> {
-    let expected = metadata(path, write)?.as_ref().map(Identity::of);
+    let expected = metadata(path, write)?.as_ref().map(DescriptorStamp::of);
     #[cfg(test)]
     if let Some(swap) = BEFORE_OPEN.with(|hook| hook.take()) {
         swap();
@@ -91,7 +87,7 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
     if !opened.is_file() {
         return Err(error(path, "only regular files can be used as documents"));
     }
-    if write && expected.is_some_and(|expected| expected != Identity::of(&opened)) {
+    if write && expected.is_some_and(|expected| expected != DescriptorStamp::of(&opened)) {
         return Err(error(
             path,
             "file changed while opening for save; retry after reviewing it",

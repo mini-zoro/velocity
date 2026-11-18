@@ -322,7 +322,8 @@ fn r19_commit_preserves_view_and_syntax_overrides() {
     let preview = scheme(&a);
     key(&mut a, "enter");
     drive_until(&mut a, |a| {
-        a.workspace.appearance_writes.load(Ordering::Relaxed) == 1 && !a.panels.message.is_empty()
+        a.workspace.appearance_writes.load(Ordering::Relaxed) == 1
+            && a.panels.message.contains("overrides")
     });
     assert!(a.panels.message.contains("overrides"));
     assert_eq!(

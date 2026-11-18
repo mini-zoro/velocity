@@ -1,11 +1,11 @@
-//! Progressive, normalized UTF-8 loading; encoding fallback remains a worker-only full decode.
-use super::{Format, LineEnding, Loaded, Progress, load_cancellable};
+//! Progressive, normalized loading with streaming codec conversion and bounded snapshots.
+use super::{DecodeOptions, DecodeReader, LineEnding, Loaded, Progress};
 use std::{
     io::{self, BufReader, Read},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver},
     },
 };
@@ -52,8 +52,19 @@ pub struct LoadTask {
     pub result: Receiver<Result<Loaded, String>>,
     latest: Arc<Mutex<Option<LoadSnapshot>>>,
     cancel: Cancellation,
+    unchanged: Arc<AtomicBool>,
+    binary: Arc<AtomicBool>,
 }
 impl LoadTask {
+    /// A terminal decode result classified as binary by the shared policy.
+    pub fn binary(&self) -> bool {
+        self.binary.load(Ordering::Acquire)
+    }
+    /// Exact raw disk identity comparison, performed on the worker.
+    /// Read this only after receiving the terminal result.
+    pub fn unchanged(&self) -> bool {
+        self.unchanged.load(Ordering::Acquire)
+    }
     /// Poll before the terminal result. An empty prefix invalidates a failed UTF-8 attempt.
     pub fn try_snapshot(&self) -> Option<LoadSnapshot> {
         self.latest.try_lock().ok()?.take()
@@ -73,9 +84,41 @@ impl Drop for LoadTask {
     }
 }
 
-/// Starts a progressive UTF-8 worker. Other encodings discard prefixes and fully decode
-/// on this same worker, retaining original-byte progress and cancellation.
+/// Starts a progressive encoding-aware worker, retaining original-byte progress
+/// and cancellation. Invalid codec attempts discard their provisional prefixes.
 pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, String> {
+    load_background_with_options(
+        path,
+        DecodeOptions {
+            fallback_encoding: fallback,
+            ..Default::default()
+        },
+    )
+}
+/// Loads on a cancellable worker, publishing shared prefixes for every supported codec.
+pub fn load_background_with_options(
+    path: PathBuf,
+    options: DecodeOptions,
+) -> Result<LoadTask, String> {
+    start_background(path, options, false)
+}
+/// Loads an external revision, comparing raw identity off the UI thread.
+/// Provisional prefixes never replace the live buffer during this comparison.
+pub fn load_background_for_reload(
+    path: PathBuf,
+    options: DecodeOptions,
+) -> Result<LoadTask, String> {
+    start_background(path, options, true)
+}
+fn start_background(
+    path: PathBuf,
+    options: DecodeOptions,
+    comparing: bool,
+) -> Result<LoadTask, String> {
+    let binary = Arc::new(AtomicBool::new(false));
+    let binary_result = binary.clone();
+    let unchanged = Arc::new(AtomicBool::new(false));
+    let comparison = unchanged.clone();
     let total = super::regular::metadata(&path, false)?
         .ok_or("missing document")?
         .len();
@@ -90,65 +133,115 @@ pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, Stri
         .name("velocity-file-load".into())
         .spawn(move || {
             let publish = |snapshot| {
-                if !cancellation.is_cancelled() {
+                if !comparing && !cancellation.is_cancelled() {
                     let old = mailbox.lock().expect("prefix mailbox").replace(snapshot);
                     drop(old);
                 }
             };
-            let loaded = (|| {
-                let kind = content_kind(&path)?;
-                if kind == ContentKind::Binary {
-                    return Err("binary file: use hexadecimal view".into());
-                }
-                if kind == ContentKind::Utf8 {
+            let mut loaded = (|| {
+                let mut plan = super::decoding::DecodePlan::new(&path, &options)?;
+                let mut failure = "invalid encoded text".to_owned();
+                while let Some(attempt) = plan.next() {
                     let file = super::regular::read(&path)?;
-                    let mut normalized =
-                        Normalized::new(file, counter.clone(), cancellation.clone());
-                    match vel_largefile::stream_utf8(
-                        &mut normalized,
-                        Some(total),
-                        &LoadOptions::default(),
-                        &cancellation,
-                        |mut s| {
-                            s.progress.read = counter.load(Ordering::Relaxed);
-                            publish(s);
-                        },
-                    ) {
-                        Ok(loaded) => {
-                            return Ok(Loaded {
-                                text: loaded.text,
-                                format: Format {
-                                    encoding: "UTF-8".into(),
-                                    bom: loaded.bom,
-                                    line_ending: normalized.ending(),
+                    let mut raw = super::identity::DigestReader::new(file);
+                    raw.read_exact(&mut vec![0; attempt.skip])
+                        .map_err(|e| e.to_string())?;
+                    counter.store(attempt.skip as u64, Ordering::Relaxed);
+                    let mut emit = |mut snapshot: LoadSnapshot| {
+                        snapshot.progress.read = counter.load(Ordering::Relaxed);
+                        if !attempt.verify_legacy_revision {
+                            publish(snapshot);
+                        }
+                    };
+                    let (result, ending, line_counts) =
+                        if attempt.encoding == encoding_rs::UTF_8 && !attempt.replacement {
+                            // Keep first-snapshot latency and direct UTF-8 construction.
+                            let mut normalized = Normalized::new(
+                                &mut raw,
+                                counter.clone(),
+                                cancellation.clone(),
+                                options.default_line_ending,
+                            );
+                            let result = stream_decoded_utf8(
+                                &mut normalized,
+                                Some(total),
+                                &LoadOptions::default(),
+                                &cancellation,
+                                &mut emit,
+                            );
+                            (result, normalized.ending(), normalized.counts)
+                        } else {
+                            let mut progress = |p: Progress| {
+                                counter.store(p.read + attempt.skip as u64, Ordering::Relaxed);
+                            };
+                            let mut decoder = DecodeReader::new(
+                                CheckedReader {
+                                    input: &mut raw,
+                                    cancel: Some(&cancellation),
                                 },
-                                source_bytes: counter.load(Ordering::Relaxed),
-                            });
+                                attempt.encoding,
+                                total,
+                                &mut progress,
+                                options.default_line_ending,
+                            );
+                            decoder.allow_replacement = attempt.replacement;
+                            let result = stream_decoded_utf8(
+                                &mut decoder,
+                                Some(total),
+                                &LoadOptions::default(),
+                                &cancellation,
+                                &mut emit,
+                            );
+                            (result, decoder.ending(), decoder.counts)
+                        };
+                    match result {
+                        Ok(text) => {
+                            let loaded = super::finish_decoding(
+                                &path,
+                                &options,
+                                plan.facts.clone(),
+                                &attempt,
+                                super::DecodedContent {
+                                    text,
+                                    ending,
+                                    line_counts,
+                                    content: raw.digest.identity(),
+                                },
+                            )?;
+                            if plan.accept(&options, &attempt, &loaded)? {
+                                return Ok(loaded);
+                            }
                         }
                         Err(LoadError::DecodeRequired) => {}
-                        Err(e) => return Err(e.to_string()),
+                        Err(LoadError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
+                            failure = error.to_string();
+                        }
+                        Err(error) => return Err(error.to_string()),
                     }
+                    // A failed strict attempt invalidates its read-only prefix.
+                    counter.store(0, Ordering::Relaxed);
+                    publish(LoadSnapshot {
+                        text: vel_text::Text::new(),
+                        progress: vel_largefile::Progress {
+                            read: 0,
+                            total: Some(total),
+                        },
+                        metrics: Default::default(),
+                    });
                 }
-                // The old root is never editable/savable. Invalidate it before retrying the codec.
-                counter.store(0, Ordering::Relaxed);
-                publish(LoadSnapshot {
-                    text: vel_text::Text::new(),
-                    progress: vel_largefile::Progress {
-                        read: 0,
-                        total: Some(total),
-                    },
-                    metrics: vel_largefile::DocumentMetrics::default(),
-                });
-                load_cancellable(
-                    &path,
-                    &fallback,
-                    &mut |p: Progress| {
-                        counter.store(p.read, Ordering::Relaxed);
-                    },
-                    Some(&cancellation),
-                )
+                binary_result.store(plan.binary().is_some(), Ordering::Release);
+                Err(plan
+                    .binary()
+                    .map_or(failure, |notice| notice.message(&path)))
             })();
-            let _ = tx.send(loaded.map_err(|e| super::regular::error(&path, e)));
+            if let Ok(loaded) = &mut loaded {
+                comparison.store(loaded.unchanged, Ordering::Release);
+                if comparing && loaded.unchanged {
+                    // Retire the duplicate tree on this worker, not on the UI frame.
+                    loaded.text = vel_text::Text::new();
+                }
+            }
+            let _ = tx.send(loaded.map_err(|error| super::regular::error(&path, error)));
         })
         .map_err(|e| e.to_string())?;
     Ok(LoadTask {
@@ -157,7 +250,62 @@ pub fn load_background(path: PathBuf, fallback: String) -> Result<LoadTask, Stri
         result,
         latest,
         cancel,
+        unchanged,
+        binary,
     })
+}
+
+// The source codec, binary decision and BOM consumption are already settled
+// by decide_decoding. Feed normalized UTF-8 directly to the same rope snapshot
+// builder as vel-largefile, without sniffing/stripping the converted text again.
+fn stream_decoded_utf8(
+    reader: impl Read,
+    total: Option<u64>,
+    options: &LoadOptions,
+    cancel: &Cancellation,
+    mut publish: impl FnMut(LoadSnapshot),
+) -> Result<vel_text::Text, LoadError> {
+    let mut metrics = vel_largefile::DocumentMetrics {
+        lines: 1,
+        ..Default::default()
+    };
+    let mut measured = 0;
+    let mut line_bytes = 0;
+    let result = vel_text::Text::from_reader_snapshots(
+        reader,
+        options.publish_bytes,
+        options.publish_interval,
+        |text| {
+            if cancel.is_cancelled() {
+                return Err(io::Error::other("load cancelled"));
+            }
+            for chunk in text.slice(measured..text.len_bytes()).chunks() {
+                let mut start = 0;
+                for lf in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
+                    line_bytes += (lf - start) as u64;
+                    metrics.longest_line_bytes = metrics.longest_line_bytes.max(line_bytes);
+                    line_bytes = 0;
+                    start = lf + 1;
+                }
+                line_bytes += (chunk.len() - start) as u64;
+                metrics.longest_line_bytes = metrics.longest_line_bytes.max(line_bytes);
+            }
+            measured = text.len_bytes();
+            metrics.bytes = measured as u64;
+            metrics.lines = text.len_lines() as u64;
+            publish(LoadSnapshot {
+                text,
+                progress: vel_largefile::Progress { read: 0, total },
+                metrics,
+            });
+            Ok(())
+        },
+    );
+    match result {
+        _ if cancel.is_cancelled() => Err(LoadError::Cancelled),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Err(LoadError::DecodeRequired),
+        other => other.map_err(LoadError::Io),
+    }
 }
 
 pub(super) struct CheckedReader<'a, R> {
@@ -180,11 +328,17 @@ struct Normalized<R> {
     cr: bool,
     eof: bool,
     counts: [u64; 3],
+    default_line_ending: LineEnding,
     read: Arc<AtomicU64>,
     cancel: Cancellation,
 }
 impl<R: Read> Normalized<R> {
-    fn new(input: R, read: Arc<AtomicU64>, cancel: Cancellation) -> Self {
+    fn new(
+        input: R,
+        read: Arc<AtomicU64>,
+        cancel: Cancellation,
+        default_line_ending: LineEnding,
+    ) -> Self {
         Self {
             input: BufReader::with_capacity(128 * 1024, input),
             ready: Vec::new(),
@@ -192,12 +346,15 @@ impl<R: Read> Normalized<R> {
             cr: false,
             eof: false,
             counts: [0; 3],
+            default_line_ending,
             read,
             cancel,
         }
     }
     fn ending(&self) -> LineEnding {
-        if self.counts[1] > self.counts[0] && self.counts[1] >= self.counts[2] {
+        if self.counts == [0; 3] {
+            self.default_line_ending
+        } else if self.counts[1] > self.counts[0] && self.counts[1] >= self.counts[2] {
             LineEnding::CrLf
         } else if self.counts[2] > self.counts[0] && self.counts[2] > self.counts[1] {
             LineEnding::Cr

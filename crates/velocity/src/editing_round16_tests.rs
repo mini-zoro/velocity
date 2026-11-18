@@ -219,6 +219,8 @@ fn noops_do_not_publish_layout_language_annotations_or_shared_changes() {
     let mut e = editor("UPPER", "Rust");
     e.set_selection(Selection::from(Region::new(0, 5)));
     let version = e.buffer.change_id();
+    // A second consumer requires the replay journal; a sole view consumes edits directly.
+    let _consumer = e.layout_edits.clone();
     let shared = e.layout_edits.borrow().len();
     e.run("upper_case", &json!({})).unwrap();
     assert_eq!(e.buffer.change_id(), version);

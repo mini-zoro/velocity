@@ -1,7 +1,7 @@
 //! Read-only hex tabs backed by an immutable, application-owned snapshot.
 use std::{
     ops::Range,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -124,7 +124,4 @@ pub fn offset(value: &str) -> Result<usize, String> {
         value.parse()
     }
     .map_err(|_| "Offset must be decimal or 0x-prefixed hexadecimal".into())
-}
-pub fn is_binary(path: &Path) -> Result<bool, String> {
-    Ok(vel_fileio::content_kind(path)? == vel_largefile::ContentKind::Binary)
 }

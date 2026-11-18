@@ -13,7 +13,7 @@ pub struct Options {
     pub tab: usize,
     pub indent: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Segment {
     pub bytes: Range<usize>,
     pub indent: usize,
@@ -28,10 +28,66 @@ pub struct Unit<'a> {
     pub text: &'a str,
     pub width: usize,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Line {
     segments: Arc<[Segment]>,
     hidden: Vec<Range<usize>>,
+}
+// Editing-only metadata must not enlarge the geometry returned to display code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Dependency {
+    end: usize,
+    inspected_until: usize,
+}
+// Most physical rows have one segment. Keep their dependency inline so the
+// geometry allocation retains the same locality as the ordinary Line cache.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Dependencies {
+    #[default]
+    Empty,
+    One(Dependency),
+    Many(Arc<[Dependency]>),
+}
+impl From<Vec<Dependency>> for Dependencies {
+    fn from(value: Vec<Dependency>) -> Self {
+        match value.len() {
+            0 => Self::Empty,
+            1 => Self::One(value[0]),
+            _ => Self::Many(value.into()),
+        }
+    }
+}
+impl std::ops::Deref for Dependencies {
+    type Target = [Dependency];
+    fn deref(&self) -> &[Dependency] {
+        match self {
+            Self::Empty => &[],
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
+        }
+    }
+}
+impl Dependencies {
+    fn as_mut_slice(&mut self) -> &mut [Dependency] {
+        match self {
+            Self::Empty => &mut [],
+            Self::One(value) => std::slice::from_mut(value),
+            Self::Many(values) => Arc::make_mut(values),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+struct WrapCache {
+    tail: (usize, usize),
+    dependencies: Dependencies,
+}
+impl Default for WrapCache {
+    fn default() -> Self {
+        Self {
+            tail: (usize::MAX, 0),
+            dependencies: Dependencies::Empty,
+        }
+    }
 }
 #[derive(Debug, Default)]
 struct Heights {
@@ -39,10 +95,13 @@ struct Heights {
 }
 impl Heights {
     fn build(lines: &[Line]) -> Self {
-        let mut tree = vec![0; lines.len() + 1];
-        for (row, line) in lines.iter().enumerate() {
+        Self::from_sizes(lines.iter().map(|line| line.segments.len()))
+    }
+    fn from_sizes(sizes: impl ExactSizeIterator<Item = usize>) -> Self {
+        let mut tree = vec![0; sizes.len() + 1];
+        for (row, size) in sizes.enumerate() {
             let i = row + 1;
-            tree[i] += line.segments.len();
+            tree[i] += size;
             let parent = i + i.isolate_lowest_one();
             if parent < tree.len() {
                 tree[parent] += tree[i];
@@ -88,7 +147,11 @@ pub struct Layout {
     pub long: crate::large::LongLines,
     options: Options,
     lines: Vec<Line>,
+    // Allocated only for wrapped rows; unwrapped geometry has its original size.
+    wrap: Vec<WrapCache>,
     heights: Heights,
+    // Physical byte weights (including a virtual final LF), independent of wraps.
+    byte_rows: Heights,
     folds: Vec<Region>,
     requested_folds: Vec<Region>,
     count: usize,
@@ -137,13 +200,15 @@ impl Layout {
             .collect();
         self.count = text.len_lines();
         self.rewrapped = 0;
+        self.byte_rows.tree.clear();
+        self.wrap.clear();
         if options.width == 0 && folds.is_empty() {
             self.lines.clear();
             self.heights.tree.clear();
             return;
         }
         if options.width == 0 {
-            let single: Arc<[Segment]> = Arc::from([Segment {
+            let single = Arc::from([Segment {
                 bytes: 0..usize::MAX,
                 indent: 0,
                 source_column: 0,
@@ -152,10 +217,13 @@ impl Layout {
             self.lines = vec![
                 Line {
                     segments: single,
-                    hidden: vec![]
+                    hidden: vec![],
                 };
                 self.count
             ];
+            // Hidden rows share one empty slice, just as ordinary rows share
+            // the unwrapped segment. Avoid one allocation/free per hidden row.
+            let empty = Line::default();
             for fold in &self.folds {
                 let first = text.byte_to_line(fold.begin());
                 let last = text.byte_to_line(fold.end());
@@ -177,13 +245,13 @@ impl Layout {
                 }]);
                 line.hidden.push(fold.begin() - start..hidden_end);
                 for row in first + 1..last {
-                    self.lines[row] = Line::default();
+                    self.lines[row] = empty.clone();
                 }
                 if last > first {
                     let end = fold.end() - text.line_to_byte(last);
                     if end > 0 {
                         self.lines[last] = if end >= text.line_len_bytes(last) {
-                            Line::default()
+                            empty.clone()
                         } else {
                             Line {
                                 segments: Arc::from([Segment {
@@ -201,11 +269,10 @@ impl Layout {
             self.heights = Heights::build(&self.lines);
             return;
         }
-        self.lines = (0..self.count)
-            .map(|row| self.make_line(text, row))
-            .collect();
+        (self.lines, self.wrap) = (0..self.count).map(|row| self.make_line(text, row)).unzip();
         self.rewrapped = self.count;
         self.heights = Heights::build(&self.lines);
+        self.rebuild_byte_rows();
     }
     pub fn invalidate(&mut self) {
         self.identity = None;
@@ -237,6 +304,25 @@ impl Layout {
             .collect();
         self.count = after.len_lines();
         self.rewrapped = 0;
+        if changes.changes().windows(2).any(|pair| {
+            pair[0].old_range.end > pair[1].old_range.start
+                || pair[0].old_range.start == pair[1].old_range.start
+        }) {
+            // Such externally supplied maps are valid to represent, but their
+            // left-biased point transform is not a row-edit oracle.
+            if self.options.width != 0 || !self.folds.is_empty() {
+                (self.lines, self.wrap) = (0..self.count)
+                    .map(|row| self.make_line(after, row))
+                    .unzip();
+                if self.options.width == 0 {
+                    self.wrap.clear();
+                }
+                self.heights = Heights::build(&self.lines);
+                self.rebuild_byte_rows();
+                self.rewrapped = self.count;
+            }
+            return;
+        }
         if self.lines.is_empty() {
             return;
         }
@@ -247,39 +333,458 @@ impl Layout {
         let start = old.byte_to_line(first.old_range.start);
         let end = old.byte_to_line(last.old_range.end) + 1;
         let new_end = after.len_lines() - (self.lines.len() - end);
-        // Each disjoint same-line edit rewraps just its own physical line.
+        // Pure insertions cannot cancel a newline. Equal line counts establish
+        // the common typing case without four rope lookups for every caret.
         if old.len_lines() == after.len_lines()
-            && changes.changes().iter().all(|c| {
-                let at = changes.transform_point(c.old_range.start, vel_buffer::Bias::Left);
-                old.byte_to_line(c.old_range.start) == old.byte_to_line(c.old_range.end)
-                    && after.byte_to_line(at) == after.byte_to_line(at + c.new_len)
-            })
+            && (changes.changes().iter().all(|c| c.old_range.is_empty())
+                || changes.changes().iter().all(|c| {
+                    let at = changes.transform_point(c.old_range.start, vel_buffer::Bias::Left);
+                    old.byte_to_line(c.old_range.start) == old.byte_to_line(c.old_range.end)
+                        && after.byte_to_line(at) == after.byte_to_line(at + c.new_len)
+                }))
         {
-            let mut previous = None;
-            for c in changes.changes() {
-                let row = after.byte_to_line(
-                    changes.transform_point(c.old_range.start, vel_buffer::Bias::Left),
-                );
-                if previous == Some(row) {
-                    continue;
+            // Descend in old row order: changes to later byte weights cannot
+            // move the old coordinates of rows still to be visited.
+            let cached_rows = !self.byte_rows.tree.is_empty();
+            let reader = ByteReader::new(
+                after,
+                if cached_rows {
+                    changes.changes().len()
+                } else {
+                    0
+                },
+            );
+            let mut end_index = changes.changes().len();
+            while end_index > 0 {
+                let at = changes.changes()[end_index - 1].old_range.start;
+                let row = if cached_rows {
+                    self.byte_rows.locate(at).0
+                } else {
+                    old.byte_to_line(at)
+                };
+                let old_start = if cached_rows {
+                    self.byte_rows.before(row)
+                } else {
+                    old.line_to_byte(row)
+                };
+                let mut index = end_index - 1;
+                while index > 0 && changes.changes()[index - 1].old_range.start >= old_start {
+                    index -= 1;
                 }
-                previous = Some(row);
-                let line = self.make_line(after, row);
-                self.heights
-                    .update(row, self.lines[row].segments.len(), line.segments.len());
-                self.lines[row] = line;
+                let old_len = self.lines[row].segments.last().map_or(0, |s| s.bytes.end);
+                if !self.rewrap_suffix(
+                    &reader,
+                    row,
+                    old_start,
+                    &changes.changes()[index..end_index],
+                    changes,
+                ) {
+                    let (line, cache) = self.make_line(after, row);
+                    self.heights
+                        .update(row, self.lines[row].segments.len(), line.segments.len());
+                    self.lines[row] = line;
+                    if let Some(slot) = self.wrap.get_mut(row) {
+                        *slot = cache;
+                    }
+                }
+                if cached_rows {
+                    let len = self.lines[row]
+                        .segments
+                        .last()
+                        .expect("unfolded row")
+                        .bytes
+                        .end;
+                    self.byte_rows.update(row, old_len + 1, len + 1);
+                }
                 self.rewrapped += 1;
+                end_index = index;
             }
         } else {
-            let replacement: Vec<_> = (start..new_end)
+            let (replacement, caches): (Vec<_>, Vec<_>) = (start..new_end)
                 .map(|row| self.make_line(after, row))
-                .collect();
+                .unzip();
             self.rewrapped = replacement.len();
             self.lines.splice(start..end, replacement);
+            if self.options.width > 0 {
+                self.wrap.splice(start..end, caches);
+            }
             self.heights = Heights::build(&self.lines);
+            self.rebuild_byte_rows();
         }
     }
-    fn make_line(&self, text: &Text, row: usize) -> Line {
+    fn rebuild_byte_rows(&mut self) {
+        self.byte_rows = if self.options.width > 0 && self.folds.is_empty() {
+            Heights::from_sizes(
+                self.lines
+                    .iter()
+                    .map(|line| line.segments.last().expect("unfolded row").bytes.end + 1),
+            )
+        } else {
+            Heights::default()
+        };
+    }
+    /// Retain the unaffected prefix and stop at a stable old break. Only the
+    /// previous segment needs reconsidering when a word joins across a break.
+    /// Fold/phantom projection and cross-segment deletions use the full oracle.
+    fn rewrap_suffix(
+        &mut self,
+        reader: &ByteReader<'_>,
+        row: usize,
+        old_start: usize,
+        edits: &[vel_buffer::Change],
+        map: &ChangeSet,
+    ) -> bool {
+        let line = &self.lines[row];
+        if self.options.width == 0
+            || !self.folds.is_empty()
+            || !self.phantom_inline.is_empty()
+            || !line.hidden.is_empty()
+            || line.segments.is_empty()
+            || edits
+                .windows(2)
+                .any(|p| p[0].old_range.start == p[1].old_range.start)
+        {
+            return false;
+        }
+        let first = edits[0].old_range.start - old_start;
+        let containing = |at| {
+            line.segments
+                .partition_point(|s| s.bytes.end <= at)
+                .min(line.segments.len() - 1)
+        };
+        if edits.iter().any(|c| {
+            !c.old_range.is_empty()
+                && c.old_range.end - old_start
+                    > line.segments[containing(c.old_range.start - old_start)]
+                        .bytes
+                        .end
+        }) {
+            return false;
+        }
+        let containing = containing(first);
+        // A word rollback can inspect beyond intervening short segments. A
+        // grapheme can also be wider than the entire wrap width. Prefix maxima
+        // capture both dependencies without scanning a growing row on each key.
+        let restart = self.wrap[row].dependencies[..containing]
+            .partition_point(|dependency| dependency.inspected_until < first);
+        let begin = line.segments[restart].bytes.start;
+        let mut column = line.segments[restart].source_column;
+        let start = map.transform_point(old_start, vel_buffer::Bias::Left);
+        // The cached final break is the exact body length; asking the rope for
+        // every growing line's end would itself add a per-key prefix scan.
+        let old_len = line.segments.last().expect("wrapped line").bytes.end;
+        let removed = edits.iter().map(|c| c.old_range.len()).sum::<usize>();
+        let inserted = edits.iter().map(|c| c.new_len).sum::<usize>();
+        let Some(len) = old_len
+            .checked_sub(removed)
+            .and_then(|n| n.checked_add(inserted))
+        else {
+            return false;
+        };
+        let Some(end) = start
+            .checked_add(len)
+            .filter(|&end| end <= reader.text.len_bytes())
+        else {
+            return false;
+        };
+        // A stale or projected segment is not a physical line-length oracle.
+        // Validate the cached window endpoints before taking any string slices.
+        if begin > len
+            || !reader.is_char_boundary(start + begin)
+            || !reader.is_char_boundary(end)
+            || (start > 0 && reader.byte_at(start - 1) != b'\n')
+            || (end < reader.text.len_bytes() && reader.byte_at(end) != b'\n')
+        {
+            return false;
+        }
+        let continuation_indent = line.segments.get(1).map_or_else(
+            || self.line_indent(reader, start, len),
+            |segment| segment.indent,
+        );
+        // A stable previous break and an append that still fits cannot change
+        // earlier units. This applies to spaces, tabs and Unicode alike; include
+        // the entire old final grapheme so a joining mark can change its width.
+        // Overflow, uncertain indentation and projected content use rewrapping.
+        let last_segment = line.segments.last().expect("wrapped line");
+        let cached_tail = self.wrap[row].tail;
+        let line_tail = if cached_tail.0 == usize::MAX
+            && first == old_len
+            && edits.len() == 1
+            && edits[0].old_range.is_empty()
+        {
+            // First edit since full layout: measure only the final old segment,
+            // then subsequent appends reuse the final grapheme directly.
+            let content = reader.copy_bytes(start + last_segment.bytes.start..start + old_len);
+            units_from(&content, &[], self.options.tab, last_segment.source_column)
+                .last()
+                .map_or((0, 0), |unit| {
+                    (last_segment.bytes.start + unit.bytes.start, unit.width)
+                })
+        } else {
+            cached_tail
+        };
+
+        if edits.len() == 1
+            && edits[0].old_range.is_empty()
+            && first == old_len
+            && (line.segments.len() == 1 || restart == line.segments.len() - 1)
+            && (continuation_indent == 0 || line.segments.len() > 1)
+            && let (tail_start, tail_width) = line_tail
+            && tail_start != usize::MAX
+            && tail_start >= last_segment.bytes.start
+            && len - tail_start <= self.options.width.saturating_add(1).saturating_mul(8)
+        {
+            let content = reader.copy_bytes(start + tail_start..start + len);
+            let source_column = last_segment.source_column + last_segment.columns - tail_width;
+            let units = units_from(&content, &[], self.options.tab, source_column);
+            let columns =
+                last_segment.columns - tail_width + units.iter().map(|u| u.width).sum::<usize>();
+            if !units.is_empty() && columns + last_segment.indent <= self.options.width {
+                let tail = units
+                    .last()
+                    .map_or((0, 0), |u| (tail_start + u.bytes.start, u.width));
+                let line = &mut self.lines[row];
+                let segments = Arc::make_mut(&mut line.segments);
+                let segment = segments.last_mut().expect("wrapped line");
+                segment.bytes.end = len;
+                segment.columns = columns;
+                *self.wrap[row]
+                    .dependencies
+                    .as_mut_slice()
+                    .last_mut()
+                    .expect("wrapped dependency") = Dependency {
+                    end: len,
+                    inspected_until: len,
+                };
+                self.wrap[row].tail = tail;
+                return true;
+            }
+        }
+        let last = edits.last().expect("edited row").old_range.end - old_start;
+        let last_after = last + inserted - removed;
+        let indent = if restart == 0 && (first == 0 || continuation_indent != 0) {
+            self.line_indent(reader, start, len)
+        } else {
+            continuation_indent
+        };
+        // An edit in a later segment cannot change leading indentation: the
+        // previous segment starts after an already capped/non-whitespace prefix.
+        // If that is not established (e.g. a huge leading grapheme), use make_line.
+        if restart > 0 && first == begin {
+            return false;
+        }
+        let mut tail = Vec::new();
+        let mut dependencies = Vec::new();
+        let mut at = begin;
+        let mut reuse = line.segments.len();
+        let mut final_unit = None;
+        let tab = self.options.tab.max(1);
+        while at < len {
+            // Read only a bounded window, including its last complete grapheme.
+            // In particular an interior edit does not copy the untouched tail.
+            let mut window = self
+                .options
+                .width
+                .saturating_add(1)
+                .saturating_mul(4)
+                .max(32);
+            let (content_len, units) = loop {
+                let limit = start + at.saturating_add(window).min(len);
+                let mut end = if limit == start + len {
+                    limit
+                } else {
+                    reader.floor_char_boundary(limit)
+                };
+                if end < start + len {
+                    end = reader.text.next_grapheme_boundary(end).min(start + len);
+                }
+                let content = reader.copy_bytes(start + at..end);
+                // Retain owned content outside this loop; unit ranges suffice
+                // once grapheme widths and whitespace breaks have been read.
+                let parts = units_from(&content, &[], tab, column);
+                let (end_unit, _) = wrap_end(
+                    &parts,
+                    0,
+                    if at == 0 { 0 } else { indent },
+                    self.options.width,
+                    |_| 0,
+                );
+                if end == start + len || end_unit < parts.len() {
+                    let parts: Vec<_> = parts
+                        .into_iter()
+                        .map(|u| (u.bytes, u.width, u.text.chars().all(char::is_whitespace)))
+                        .collect();
+                    break (content.len(), parts);
+                }
+                window = window.saturating_mul(2);
+            };
+            let eof = at + content_len == len;
+            if eof {
+                final_unit = units.last().map(|u| (at + u.0.start, u.1));
+            }
+            let base = at;
+            let mut from = 0;
+            while from < units.len() {
+                let left = if at == 0 { 0 } else { indent };
+                let mut col = left;
+                let mut end = from;
+                let mut word = None;
+                while end < units.len() {
+                    if col + units[end].1 > self.options.width && end > from {
+                        break;
+                    }
+                    col += units[end].1;
+                    end += 1;
+                    if units[end - 1].2 {
+                        word = Some(end);
+                    }
+                }
+                let lookahead = base + units[end.min(units.len() - 1)].0.end;
+                if end == units.len() && !eof {
+                    break;
+                }
+                if end < units.len()
+                    && let Some(boundary) = word
+                {
+                    end = boundary;
+                }
+                let columns = units[from..end].iter().map(|u| u.1).sum::<usize>();
+                at = base + units[end - 1].0.end;
+                tail.push(Segment {
+                    bytes: base + units[from].0.start..at,
+                    indent: left,
+                    source_column: column,
+                    columns,
+                });
+                dependencies.push(Dependency {
+                    end: lookahead,
+                    inspected_until: 0,
+                });
+                column += columns;
+                from = end;
+                // Matching byte breaks alone are insufficient: a changed source
+                // column can change all subsequent tab stops. Require that phase
+                // and continuation indentation to agree before reusing a suffix.
+                if at > last_after && at < len && indent == continuation_indent {
+                    let old_at = at + removed - inserted;
+                    let next = line.segments.partition_point(|s| s.bytes.end < old_at);
+                    if let Some(segment) = line.segments.get(next)
+                        && segment.bytes.end == old_at
+                        && column % tab == (segment.source_column + segment.columns) % tab
+                    {
+                        reuse = next + 1;
+                        break;
+                    }
+                }
+            }
+            if reuse < line.segments.len() {
+                break;
+            }
+        }
+        if tail.is_empty() {
+            tail.push(Segment {
+                bytes: 0..0,
+                indent: 0,
+                source_column: 0,
+                columns: 0,
+            });
+            dependencies.push(Dependency::default());
+        }
+        let old_count = line.segments.len();
+        let column_at_reuse = line.segments.get(reuse).map(|s| s.source_column);
+        let line = &mut self.lines[row];
+        self.wrap[row].tail = if reuse < old_count {
+            if cached_tail.0 == usize::MAX {
+                cached_tail
+            } else {
+                (cached_tail.0 + inserted - removed, cached_tail.1)
+            }
+        } else {
+            final_unit.unwrap_or((0, 0))
+        };
+        // A changed row normally keeps its segment count. Mutate its unique
+        // slices then; a moved/added break rebuilds only this row's two slices.
+        let mut rebuilt_segments = if tail.len() == reuse - restart {
+            None
+        } else {
+            let mut segments = line.segments.to_vec();
+            segments.splice(restart..reuse, tail.iter().cloned());
+            Some(segments)
+        };
+        let segments = if let Some(segments) = &mut rebuilt_segments {
+            segments.as_mut_slice()
+        } else {
+            let segments = Arc::make_mut(&mut line.segments);
+            segments[restart..reuse].clone_from_slice(&tail);
+            segments
+        };
+        let cache = &mut self.wrap[row];
+        let mut rebuilt_dependencies = if dependencies.len() == reuse - restart {
+            None
+        } else {
+            let mut result = cache.dependencies.to_vec();
+            result.splice(restart..reuse, dependencies.iter().copied());
+            Some(result)
+        };
+        let metadata = if let Some(metadata) = &mut rebuilt_dependencies {
+            metadata.as_mut_slice()
+        } else {
+            let metadata = cache.dependencies.as_mut_slice();
+            metadata[restart..reuse].copy_from_slice(&dependencies);
+            metadata
+        };
+        let suffix = segments.len() - (old_count - reuse);
+        if let Some(old_column) = column_at_reuse {
+            for (segment, dependency) in segments[suffix..].iter_mut().zip(&mut metadata[suffix..])
+            {
+                segment.bytes = segment.bytes.start + inserted - removed
+                    ..segment.bytes.end + inserted - removed;
+                segment.source_column = segment.source_column + column - old_column;
+                dependency.end = dependency.end + inserted - removed;
+            }
+        }
+        let mut inspected = if restart == 0 {
+            0
+        } else {
+            metadata[restart - 1].inspected_until
+        };
+        for dependency in &mut metadata[restart..] {
+            inspected = inspected.max(dependency.end);
+            dependency.inspected_until = inspected;
+        }
+        self.heights.update(row, old_count, segments.len());
+        if let Some(segments) = rebuilt_segments {
+            line.segments = segments.into();
+        }
+        if let Some(dependencies) = rebuilt_dependencies {
+            cache.dependencies = dependencies.into();
+        }
+        true
+    }
+    fn line_indent(&self, reader: &ByteReader<'_>, start: usize, len: usize) -> usize {
+        if !self.options.indent || self.options.width <= 1 {
+            return 0;
+        }
+        let mut column = 0;
+        let tab = self.options.tab.max(1);
+        let mut at = start;
+        while at < start + len {
+            let (chunk, base) = reader.chunk_at_byte(at);
+            for byte in chunk.as_bytes()[at - base..].iter().take(start + len - at) {
+                match byte {
+                    b' ' => column += 1,
+                    b'\t' => column += tab - column % tab,
+                    _ => return column,
+                }
+                if column >= self.options.width / 2 {
+                    return self.options.width / 2;
+                }
+                at += 1;
+            }
+        }
+        column
+    }
+    fn make_line(&self, text: &Text, row: usize) -> (Line, WrapCache) {
         let start = text.line_to_byte(row);
         let content = text.line(row).to_string();
         let len = content.trim_end_matches('\n').len();
@@ -293,7 +798,7 @@ impl Layout {
         {
             if fold.begin() < start && fold.end() > start {
                 if fold.end() >= start + len {
-                    return Line::default();
+                    return (Line::default(), WrapCache::default());
                 }
                 visible_start = fold.end() - start;
                 continue;
@@ -322,6 +827,7 @@ impl Layout {
             0
         };
         let mut segments = Vec::new();
+        let mut dependencies = Vec::new();
         let mut from = 0;
         if units.is_empty() {
             segments.push(Segment {
@@ -330,37 +836,14 @@ impl Layout {
                 source_column: 0,
                 columns: 0,
             });
+            dependencies.push(Dependency::default());
         }
         let mut source_column = 0;
         while from < units.len() {
             let left = if from == 0 { 0 } else { indent };
-            let mut col = left;
-            let mut end = from;
-            let mut word = None;
-            while end < units.len() {
-                if self.options.width > 0
-                    && col + units[end].width + self.phantom_gap(start + units[end].bytes.start)
-                        > self.options.width
-                    && end > from
-                {
-                    break;
-                }
-                col += units[end].width + self.phantom_gap(start + units[end].bytes.start);
-                end += 1;
-                // The public settings reference explicitly excludes word wrapping from
-                // word_separators. No current documentation confirms the proposed CJK
-                // boundary change, so preserve today's whitespace/fallback rule.
-                // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#automatic-behavior
-                if units[end - 1].text.chars().all(char::is_whitespace) {
-                    word = Some(end);
-                }
-            }
-            if end < units.len()
-                && let Some(boundary) = word
-                && boundary > from
-            {
-                end = boundary;
-            }
+            let (end, lookahead) = wrap_end(&units, from, left, self.options.width, |at| {
+                self.phantom_gap(start + at)
+            });
             let columns = units[from..end].iter().map(|u| u.width).sum::<usize>();
             segments.push(Segment {
                 bytes: units[from].bytes.start..units[end - 1].bytes.end,
@@ -368,13 +851,28 @@ impl Layout {
                 source_column,
                 columns,
             });
+            dependencies.push(Dependency {
+                end: lookahead,
+                inspected_until: 0,
+            });
             source_column += columns;
             from = end;
         }
-        Line {
-            segments: segments.into(),
-            hidden,
+        let mut inspected = 0;
+        for dependency in &mut dependencies {
+            inspected = inspected.max(dependency.end);
+            dependency.inspected_until = inspected;
         }
+        (
+            Line {
+                segments: segments.into(),
+                hidden,
+            },
+            WrapCache {
+                tail: (usize::MAX, 0),
+                dependencies: dependencies.into(),
+            },
+        )
     }
     pub fn set_phantom_inline(&mut self, text: &Text, inline: Vec<(usize, usize)>) {
         if self.phantom_inline == inline {
@@ -383,9 +881,12 @@ impl Layout {
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
         self.phantom_inline = inline;
         if !self.lines.is_empty() {
-            self.lines = (0..text.len_lines())
+            (self.lines, self.wrap) = (0..text.len_lines())
                 .map(|row| self.make_line(text, row))
-                .collect();
+                .unzip();
+            if self.options.width == 0 {
+                self.wrap.clear();
+            }
             self.heights = Heights::build(&self.lines);
         }
     }
@@ -528,7 +1029,7 @@ impl Layout {
         }
     }
     pub fn hidden(&self, row: usize) -> &[Range<usize>] {
-        self.lines.get(row).map_or(&[], |l| &l.hidden)
+        self.lines.get(row).map_or(&[], |line| &line.hidden)
     }
     pub fn visual_at(&self, text: &Text, byte: usize) -> (usize, Segment) {
         let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
@@ -797,10 +1298,114 @@ impl VerticalLayout for MotionLayout<'_> {
         self.layout.borrow().lines_per_page()
     }
 }
+/// Dense caret edits get an index of borrowed chunks, never their contents.
+/// A rope's generic slice/seek computes scalar summaries of patched leaf prefixes;
+/// repeating those scans for every caret makes Unicode typing grow with the run.
+/// Limit indexing to dense edits so sparse edits do not traverse a large document.
+struct ByteReader<'a> {
+    text: &'a Text,
+    chunks: Vec<(usize, &'a str)>,
+}
+impl<'a> ByteReader<'a> {
+    fn new(text: &'a Text, edits: usize) -> Self {
+        let chunks = if edits >= 128 && text.len_bytes() <= edits.saturating_mul(4096) {
+            let mut at = 0;
+            text.chunks()
+                .map(|chunk| {
+                    let start = at;
+                    at += chunk.len();
+                    (start, chunk)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self { text, chunks }
+    }
+    fn chunk_at_byte(&self, at: usize) -> (&'a str, usize) {
+        if self.chunks.is_empty() {
+            return self.text.chunk_at_byte(at);
+        }
+        let index = self
+            .chunks
+            .partition_point(|(start, _)| *start <= at)
+            .saturating_sub(1);
+        let (start, chunk) = self.chunks[index];
+        (chunk, start)
+    }
+    fn is_char_boundary(&self, at: usize) -> bool {
+        if at == self.text.len_bytes() {
+            return true;
+        }
+        let (chunk, start) = self.chunk_at_byte(at);
+        chunk.is_char_boundary(at - start)
+    }
+    fn byte_at(&self, at: usize) -> u8 {
+        let (chunk, start) = self.chunk_at_byte(at);
+        chunk.as_bytes()[at - start]
+    }
+    fn floor_char_boundary(&self, at: usize) -> usize {
+        let (chunk, start) = self.chunk_at_byte(at);
+        start + chunk.floor_char_boundary(at - start)
+    }
+    fn copy_bytes(&self, range: Range<usize>) -> String {
+        let mut result = String::with_capacity(range.len());
+        let mut at = range.start;
+        while at < range.end {
+            let (chunk, base) = self.chunk_at_byte(at);
+            let end = range.end.min(base + chunk.len());
+            result.push_str(&chunk[at - base..end - base]);
+            at = end;
+        }
+        result
+    }
+}
+
+// The full and incremental paths use the same whitespace/fallback rule.
+// https://docs.sublimetext.io/reference/settings.html#automatic-behavior
+// The reference excludes word wrapping from word_separators; no current source
+// confirms changing today's CJK breaks, so preserve them.
+fn wrap_end(
+    units: &[Unit<'_>],
+    from: usize,
+    left: usize,
+    width: usize,
+    gap: impl Fn(usize) -> usize,
+) -> (usize, usize) {
+    let mut col = left;
+    let mut end = from;
+    let mut word = None;
+    while end < units.len() {
+        let cells = units[end].width + gap(units[end].bytes.start);
+        if width > 0 && col + cells > width && end > from {
+            break;
+        }
+        col += cells;
+        end += 1;
+        if units[end - 1].text.chars().all(char::is_whitespace) {
+            word = Some(end);
+        }
+    }
+    let lookahead = units[end.min(units.len().saturating_sub(1))].bytes.end;
+    if end < units.len()
+        && let Some(boundary) = word
+    {
+        end = boundary;
+    }
+    (end, lookahead)
+}
+
 /// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
 pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit<'a>> {
+    units_from(line, hidden, tab, 0)
+}
+fn units_from<'a>(
+    line: &'a str,
+    hidden: &[Range<usize>],
+    tab: usize,
+    mut column: usize,
+) -> Vec<Unit<'a>> {
     let mut units = Vec::new();
-    let mut column = 0;
     let tab = tab.max(1);
     let mut fold_index = 0;
     let mut at = 0;
@@ -820,12 +1425,26 @@ pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit
             if fold.is_empty() { /* A fold starting at EOL still draws its marker below. */ }
             continue;
         }
-        let g = line[at..].graphemes(true).next().expect("grapheme");
+        // ASCII followed by ASCII is already a complete grapheme (except CRLF).
+        // Spaces/tabs take this path too; non-ASCII neighbors still get Unicode
+        // segmentation so a following combining mark stays with its base.
+        let byte = line.as_bytes()[at];
+        let next = line.as_bytes().get(at + 1);
+        let g = if byte.is_ascii()
+            && next.is_none_or(u8::is_ascii)
+            && !(byte == b'\r' && next == Some(&b'\n'))
+        {
+            &line[at..at + 1]
+        } else {
+            line[at..].graphemes(true).next().expect("grapheme")
+        };
         if g == "\n" {
             break;
         }
         let width = if g == "\t" {
             tab - column % tab
+        } else if g.len() == 1 && byte.is_ascii() {
+            1
         } else {
             g.width().max(1)
         };
@@ -936,4 +1555,339 @@ mod tests {
         let units = units("<tag a='b'>", std::slice::from_ref(&hidden), 4);
         assert_eq!(units.iter().map(|u| u.text).collect::<String>(), "<tag…>");
     }
+}
+
+#[cfg(test)]
+mod round20_tests {
+    use super::*;
+    use vel_buffer::Change;
+    fn random(seed: &mut u64, bound: usize) -> usize {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*seed >> 32) as usize % bound
+    }
+    fn equal(actual: &Layout, model: &Layout, seed: u64, step: usize, text: &Text) {
+        assert_eq!(
+            actual.lines, model.lines,
+            "seed {seed}, step {step}, options {:?}, text {text}",
+            actual.options
+        );
+        assert_eq!(
+            actual
+                .wrap
+                .iter()
+                .map(|cache| &cache.dependencies)
+                .collect::<Vec<_>>(),
+            model
+                .wrap
+                .iter()
+                .map(|cache| &cache.dependencies)
+                .collect::<Vec<_>>(),
+            "dependency cache seed {seed}, step {step}, text {text}"
+        );
+        assert_eq!(actual.total(), model.total());
+        if !actual.byte_rows.tree.is_empty() {
+            for row in 0..text.len_lines() {
+                assert_eq!(
+                    actual.byte_rows.before(row),
+                    text.line_to_byte(row),
+                    "cached physical row {row}"
+                );
+            }
+        }
+        for visual in 0..actual.total() {
+            assert_eq!(actual.locate(visual), model.locate(visual));
+        }
+    }
+    #[test]
+    fn dense_unicode_caret_edits_match_full_layout_and_chunk_reads() {
+        for width in [1, 2, 7, 13, 80] {
+            for indent in [false, true] {
+                let mut source = Text::from("  let x = 1; 你好 e\u{301}\tend\n".repeat(160));
+                let id = BufferId(922);
+                let options = Options {
+                    width,
+                    tab: 4,
+                    indent,
+                };
+                let mut actual = Layout::default();
+                actual.configure(&source, (id, ChangeId(0)), options, &[]);
+                let mut rng = 222;
+                for step in 1..=40 {
+                    let mut edits = Vec::new();
+                    for row in 0..160 {
+                        let line = source.line(row).to_string();
+                        let positions: Vec<_> = line
+                            .char_indices()
+                            .map(|(at, _)| at)
+                            .chain([line.len()])
+                            .collect();
+                        let from = random(&mut rng, positions.len());
+                        let to = (from + random(&mut rng, 2)).min(positions.len() - 1);
+                        let start = source.line_to_byte(row);
+                        let text = [
+                            "let x = 1; ",
+                            " ",
+                            "\t",
+                            "界",
+                            "e\u{301}",
+                            "\u{301}",
+                            "",
+                            "\n",
+                        ][random(&mut rng, 8)];
+                        edits.push(vel_text::Edit {
+                            range: start + positions[from]..start + positions[to],
+                            text,
+                        });
+                    }
+                    let before = source.clone();
+                    source.apply_edits(&edits);
+                    let changes = ChangeSet::new(
+                        edits
+                            .iter()
+                            .map(|e| Change {
+                                old_range: e.range.clone(),
+                                new_len: e.text.len(),
+                            })
+                            .collect(),
+                    );
+                    actual.change(&before, &source, (id, ChangeId(step)), &changes);
+                    let mut model = Layout::default();
+                    model.configure(&source, (id, ChangeId(step)), options, &[]);
+                    equal(&actual, &model, 222, step as usize, &source);
+                    let reader = ByteReader::new(&source, edits.len());
+                    assert!(!reader.chunks.is_empty());
+                    for row in [0, 79, 159] {
+                        let start = source.line_to_byte(row);
+                        let end = start + body_len(&source, row);
+                        assert_eq!(reader.copy_bytes(start..end), source.line(row).to_string());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn incremental_unicode_wrap_matches_full_layout_over_2048_seeds() {
+        const TOKENS: &[&str] = &[
+            "a",
+            "let x = 1; ",
+            " ",
+            "\t",
+            "你好",
+            "界",
+            "e\u{301}",
+            "\u{301}",
+            "👩‍💻",
+            "🏽",
+            "🇨🇳",
+            "\n",
+            "",
+            "  \t  ",
+        ];
+        let id = BufferId(920);
+        for seed in (0..2048).chain([1000493, 23028]) {
+            for width in [1, 2, 7, 13, 80] {
+                for indent in [false, true] {
+                    let mut rng = seed + 1;
+                    let mut source = Text::from("  let x = 1; 你好 e\u{301}\tmore words\n\t世界\n");
+                    let options = Options {
+                        width,
+                        tab: 1 + random(&mut rng, 8),
+                        indent,
+                    };
+                    let mut actual = Layout::default();
+                    actual.configure(&source, (id, ChangeId(0)), options, &[]);
+                    for step in 1..=24 {
+                        let content = source.to_string();
+                        let boundaries: Vec<_> = content
+                            .char_indices()
+                            .map(|(at, _)| at)
+                            .chain([content.len()])
+                            .collect();
+                        let count = 1 + random(&mut rng, 4);
+                        let mut edits = Vec::new();
+                        for _ in 0..count {
+                            let from = random(&mut rng, boundaries.len());
+                            let to = if random(&mut rng, 3) == 0 {
+                                (from + random(&mut rng, 5)).min(boundaries.len() - 1)
+                            } else {
+                                from
+                            };
+                            let range = boundaries[from]..boundaries[to];
+                            if edits.iter().any(|(r, _): &(Range<usize>, &str)| {
+                                r.start <= range.end && range.start <= r.end
+                            }) {
+                                continue;
+                            }
+                            edits.push((range, TOKENS[random(&mut rng, TOKENS.len())]));
+                        }
+                        edits.sort_by_key(|(r, _)| r.start);
+                        let before = source.clone();
+                        for (range, text) in edits.iter().rev() {
+                            source.replace(range.clone(), text);
+                        }
+                        let changes = ChangeSet::new(
+                            edits
+                                .iter()
+                                .map(|(range, text)| Change {
+                                    old_range: range.clone(),
+                                    new_len: text.len(),
+                                })
+                                .collect(),
+                        );
+                        actual.change(&before, &source, (id, ChangeId(step as u64)), &changes);
+                        let mut model = Layout::default();
+                        model.configure(&source, (id, ChangeId(step as u64)), options, &[]);
+                        if actual.lines != model.lines {
+                            eprintln!("before: {before}\nedits: {edits:?}");
+                        }
+                        equal(&actual, &model, seed, step, &source);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn incremental_wrap_folds_and_inline_phantoms_use_full_geometry() {
+        for width in [0, 1, 2, 7, 13, 80] {
+            for indent in [false, true] {
+                let mut source = Text::from("  let x = 1; 你好\nfold me\n\tend e\u{301}\n");
+                let id = BufferId(921);
+                let options = Options {
+                    width,
+                    tab: 4,
+                    indent,
+                };
+                let mut folds = vec![Region::new(4, source.line_to_byte(2) + 1)];
+                let mut actual = Layout::default();
+                actual.configure(&source, (id, ChangeId(0)), options, &folds);
+                actual.set_phantom_inline(&source, vec![(2, 3)]);
+                for step in 1..=20 {
+                    let before = source.clone();
+                    let at = if step % 2 == 0 {
+                        1
+                    } else {
+                        source.len_bytes() - 1
+                    };
+                    source.insert(at, "界 ");
+                    let changes = ChangeSet::new(vec![Change {
+                        old_range: at..at,
+                        new_len: "界 ".len(),
+                    }]);
+                    folds = folds
+                        .into_iter()
+                        .map(|r| changes.transform_region(r))
+                        .collect();
+                    actual.change(&before, &source, (id, ChangeId(step)), &changes);
+                    let mut model = Layout::default();
+                    model.configure(&source, (id, ChangeId(step)), options, &folds);
+                    model.set_phantom_inline(&source, vec![(2, 3)]);
+                    equal(&actual, &model, 0, step as usize, &source);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod review20_tests {
+    use super::*;
+    use vel_buffer::Change;
+    #[test]
+    fn nonadjacent_grapheme_lookahead_matches_full_layout() {
+        let old = Text::from("  \u{308}abcdefghijklmnopqrstuvwxyz");
+        let mut after = old.clone();
+        after.insert(16, "🏽");
+        let options = Options {
+            width: 13,
+            tab: 4,
+            indent: true,
+        };
+        let id = BufferId(201);
+        let mut layout = Layout::default();
+        layout.configure(&old, (id, ChangeId(0)), options, &[]);
+        layout.change(
+            &old,
+            &after,
+            (id, ChangeId(1)),
+            &ChangeSet::new(vec![Change {
+                old_range: 16..16,
+                new_len: 4,
+            }]),
+        );
+        let mut model = Layout::default();
+        model.configure(&after, (id, ChangeId(1)), options, &[]);
+        assert_eq!(layout.lines, model.lines);
+        assert_eq!(layout.wrap[0].dependencies[0].end, 20);
+        assert_eq!(layout.wrap[0].dependencies, model.wrap[0].dependencies);
+    }
+    #[test]
+    fn equal_start_insert_and_replace_map_uses_full_geometry() {
+        for width in [0, 1, 2, 7, 13, 80] {
+            let old = Text::from("abc\n  hello world\n");
+            let after = Text::from("xQbc\n  hello world\n");
+            let options = Options {
+                width,
+                tab: 4,
+                indent: true,
+            };
+            let id = BufferId(202);
+            let mut layout = Layout::default();
+            layout.configure(&old, (id, ChangeId(0)), options, &[]);
+            layout.change(
+                &old,
+                &after,
+                (id, ChangeId(1)),
+                &ChangeSet::new(vec![
+                    Change {
+                        old_range: 0..0,
+                        new_len: 1,
+                    },
+                    Change {
+                        old_range: 0..1,
+                        new_len: 1,
+                    },
+                ]),
+            );
+            let mut model = Layout::default();
+            model.configure(&after, (id, ChangeId(1)), options, &[]);
+            assert_eq!(layout.lines, model.lines);
+            assert_eq!(layout.total(), model.total());
+        }
+    }
+    #[test]
+    fn ordinary_line_metadata_remains_forty_bytes() {
+        assert_eq!(std::mem::size_of::<Line>(), 40);
+        assert_eq!(std::mem::size_of::<Segment>(), 40);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn oversized_grapheme_lookahead_seed_570() {
+    let old = Text::from("re界a \tr👩‍💻🏽🇨🇳世");
+    let mut after = old.clone();
+    after.insert(24, "🏽");
+    let options = Options {
+        width: 1,
+        tab: 1,
+        indent: false,
+    };
+    let id = BufferId(570);
+    let mut actual = Layout::default();
+    actual.configure(&old, (id, ChangeId(0)), options, &[]);
+    actual.change(
+        &old,
+        &after,
+        (id, ChangeId(1)),
+        &ChangeSet::new(vec![vel_buffer::Change {
+            old_range: 24..24,
+            new_len: 4,
+        }]),
+    );
+    let mut model = Layout::default();
+    model.configure(&after, (id, ChangeId(1)), options, &[]);
+    assert_eq!(actual.lines, model.lines);
+    assert_eq!(actual.wrap[0].dependencies, model.wrap[0].dependencies);
 }

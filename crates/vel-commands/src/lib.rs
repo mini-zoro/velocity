@@ -283,6 +283,11 @@ const WINDOW: &[&str] = &[
     "new_file",
     "prompt_open_file",
     "open_file",
+    // Public command spellings; our older aliases remain supported.
+    // https://docs.sublimetext.io/reference/commands.html#reopen
+    "reopen",
+    "reopen_encoding",
+    "save_encoding",
     "save",
     "prompt_save_as",
     "save_all",
@@ -295,6 +300,7 @@ const WINDOW: &[&str] = &[
     "decrease_font_size",
     "reset_font_size",
     "set_line_endings",
+    "set_line_ending",
     "set_encoding",
     "toggle_setting",
     "set_setting",

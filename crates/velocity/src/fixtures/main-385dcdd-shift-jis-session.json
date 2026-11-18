@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": 4,
+      "path": "/private/tmp/velocity-r20-policy-review/main-fixture/crates/velocity/main-format-shift-jis.txt",
+      "disk": {
+        "bytes": 11,
+        "modified_ns": 1794980860149798857
+      },
+      "encoding": "Shift_JIS",
+      "bom": false,
+      "line_ending": "LF",
+      "dirty": false,
+      "history": {
+        "disk": [
+          "/private/tmp/velocity-r20-policy-review/main-fixture/crates/velocity/main-format-shift-jis.txt",
+          "Shift_JIS"
+        ],
+        "snapshot": {
+          "version": 1,
+          "text_len": 16,
+          "text_hash": "bf27a04542012be8a7e58306594c76b8f8dfd77d44dba927676ca2ac445f1215",
+          "views": [
+            4
+          ],
+          "data": "eAEBQgC9/5BOgICAgAGAApBOAAEAAAAAAAEEAQAAAAAhLi9cKCkiJy06LC47PD5+IUAjJCVeJip8Kz1bXXt9YH4/BAEBAAAAAMMiDOE="
+        }
+      }
+    }
+  ],
+  "windows": [
+    {
+      "project": null,
+      "folders": [],
+      "workbench": {
+        "layout": {
+          "cols": [
+            0.0,
+            1.0
+          ],
+          "rows": [
+            0.0,
+            1.0
+          ],
+          "cells": [
+            [
+              0,
+              0,
+              1,
+              1
+            ]
+          ]
+        },
+        "groups": [
+          {
+            "sheets": [
+              3
+            ],
+            "selected": [
+              3
+            ],
+            "focused": 3,
+            "anchor": 3,
+            "tab_scroll": 0.0
+          }
+        ],
+        "active": 0
+      },
+      "sheets": [
+        {
+          "id": 3,
+          "document": 4,
+          "view": {
+            "history_view": 4,
+            "selections": [
+              {
+                "a": 0,
+                "b": 0,
+                "xpos": null
+              }
+            ],
+            "primary": 0,
+            "scroll": [
+              0.0,
+              0.0
+            ],
+            "scroll_line": 0.0,
+            "folds": [],
+            "named_regions": {}
+          },
+          "syntax": null,
+          "transient": false
+        }
+      ],
+      "sidebar_visible": false,
+      "sidebar_expanded": [],
+      "sidebar_scroll": 0.0,
+      "find_history": [],
+      "replace_history": [],
+      "distraction_free": false,
+      "normal_ui": {},
+      "distraction_ui": {},
+      "normal_sidebar": null,
+      "distraction_sidebar": null,
+      "fullscreen_before_distraction": false,
+      "fullscreen": false,
+      "build_system": null
+    }
+  ],
+  "recent_files": [],
+  "recent_folders": [],
+  "recent_projects": []
+}

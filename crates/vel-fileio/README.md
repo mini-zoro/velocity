@@ -1,23 +1,38 @@
 # vel-fileio
 
-Headless encoding-aware document IO. BOMs select UTF-8/UTF-16LE/UTF-16BE; otherwise loading
-tries UTF-8 before the configured fallback (Windows-1252 by default). NUL in the first 8 KiB
-is rejected as binary unless a UTF-16 BOM establishes the encoding. Decode errors never
-silently replace characters. The detected encoding, BOM and majority LF/CRLF/CR convention
-are retained in `Format`; mixed input is normalized to LF and saved in the majority convention.
-Ties choose LF, then CRLF. A leading UTF-8 U+FEFF byte sequence is interpreted as a BOM.
+Headless encoding-aware document IO. Automatic loading checks BOMs, valid UTF-8,
+then a bounded UTF-16 heuristic before using the configured fallback (Windows-1252
+by default). NULs outside recognizable UTF-16 route to the binary view. The UTF-16
+heuristic scores both byte orders over the first 8 KiB, validates surrogate pairs,
+and allows tab, CR, LF and form feed. A trailing high surrogate can belong to the
+next sample. Pure BMP CJK without ASCII or surrogate evidence is deliberately not
+guessed: either byte order can look like letters. Decode errors never silently
+replace characters. `Format` retains the encoding, chosen alias caption, BOM and
+majority LF/CRLF/CR convention; mixed input is normalized to LF. Ties choose LF,
+then CRLF. Encoding names ending in “with BOM” request a BOM; other names do not.
 
-A streaming decoder feeds `vel_text::Text::from_reader`, including CR/UTF-8/UTF-16 boundary
-handling. `load_background` exposes byte progress and a terminal channel without UI dependencies.
-Velocity queues files at/above 64 MiB on this worker. UTF-8 uses `vel_largefile::stream_utf8`
-through a bounded CR/CRLF normalizer, publishing shared prefix snapshots from the first 2 MiB.
-`LoadTask::try_snapshot` is a nonblocking, coalescing mailbox; poll it before the terminal result.
-Prefixes are provisional and must remain read-only and unsavable. Closing/dropping a task cancels
-at the next read/build boundary without joining the UI thread. Encoding fallback clears the
-prefix before the existing full worker decoder retries; cancellation also covers that decoder.
-Progress counts source bytes, while the snapshot metrics describe normalized UTF-8. The final
-`Format` preserves BOM, encoding and majority source line endings. `content_kind` exposes the
-first-8-KiB/BOM heuristic so the editor can route binary files to a hex tab before decoding.
+`DecodeOptions.encoding` represents an explicit user choice, never an automatic
+detection result. Reload and clean session restore retain the explicit preference
+separately from the decoder used for the current revision. A conflicting disk BOM
+or clear UTF-16 byte-order evidence overrides that preference with a non-modal
+diagnostic; binary content is rejected before decoding. A chosen decoder that
+cannot read the bytes falls back to ordinary detection with a diagnostic, without
+turning the detected/fallback codec into a user choice. Later reloads retry the
+retained preference.
+
+`load_background_with_options` streams UTF-8 through a bounded CR/CRLF normalizer;
+other codecs use encoding_rs streaming conversion followed by the same rope snapshot
+builder. Both publish shared prefixes before the complete file is decoded,
+including forced encodings on reload/restore. Byte progress and cancellation track
+the source stream. Provisional buffers stay read-only and unsavable. Invalid codec
+attempts clear their prefixes before retrying detection/fallback. Dropping a task
+cancels without joining the UI thread. Clean native history is attached to the
+completed decoded snapshot without rereading the disk file.
+`load_background_for_reload` also compares the decoded revision with the immutable
+saved snapshot on the worker (length plus exact chunk comparison). It publishes no
+provisional prefixes and retires an unchanged decoded tree on the worker. The UI
+can acknowledge a touch without scanning text, replacing a buffer, losing undo,
+or conflicting with dirty edits.
 
 `prepare_save` makes whitespace/final-newline cleanup one undoable buffer transaction and maps
 all selections. `ChangeTracker` retains the saved text/change identity and uses the buffer's
@@ -35,7 +50,8 @@ keep pointing to their target. `atomic_save` defaults to false, as in Sublime.
 `Watcher` watches parent directories through notify, surviving atomic replacements. It also
 checks watched-file metadata when polled, because native notifications may be unavailable in
 restricted sessions. Velocity polls every 200 ms without rendering when idle, reloads clean
-files and asks before replacing dirty files. Large external reloads also use workers.
+files and asks before replacing dirty files. With `reload_file_on_change: false`, clean files
+use that same confirmation path. Large external reloads also use workers.
 
 ```sh
 cargo test -p vel-fileio

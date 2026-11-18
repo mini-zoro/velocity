@@ -42,6 +42,72 @@ fn open_file_count(workspace: &Workspace) -> usize {
 }
 
 pub const STATUS: f64 = 24.;
+/// Document-format menu model; Lane B connects it to the status hit rectangles.
+pub(crate) fn status_format_menu(
+    workspace: &Workspace,
+    item: vel_ui::status::FormatItem,
+) -> Vec<vel_ui::status::FormatMenuItem> {
+    let tab = &workspace.tabs[workspace.active];
+    match item {
+        vel_ui::status::FormatItem::Encoding => vel_ui::status::encoding_menu(
+            vel_fileio::ENCODINGS,
+            tab.format.display_encoding(),
+            tab.path.is_some(),
+            !tab.editor.read_only && !workspace.is_empty(),
+        ),
+        vel_ui::status::FormatItem::LineEndings => {
+            vel_ui::status::line_ending_menu(match tab.format.line_ending {
+                vel_fileio::LineEnding::Lf => "unix",
+                vel_fileio::LineEnding::CrLf => "windows",
+                vel_fileio::LineEnding::Cr => "cr",
+            })
+        }
+    }
+}
+/// Pure input model for the status text; shared by paint and headless App tests.
+pub(crate) fn status_position(workspace: &Workspace) -> String {
+    let editor = workspace.editor();
+    let tab = &workspace.tabs[workspace.active];
+    let regions = editor.regions();
+    let (row, column, selected) = if editor.binary.is_some() {
+        (
+            editor.caret / 16 + 1,
+            editor.caret % 16 + 1,
+            editor.selection().len(),
+        )
+    } else {
+        (
+            editor.text.byte_to_line(editor.caret) + 1,
+            editor.status_column.borrow_mut().column(
+                &editor.text,
+                (editor.buffer.id(), editor.buffer.change_id()),
+                editor.caret,
+                editor.preferences.tab_size,
+                crate::large::LONG_LINE,
+            ),
+            regions
+                .iter()
+                .filter(|r| !r.empty())
+                .map(|r| editor.text.slice(r.to_range()).len_chars())
+                .sum(),
+        )
+    };
+    vel_ui::status::position_mode(
+        editor.settings.string("show_line_column", "compact"),
+        row,
+        column,
+        regions.len(),
+        selected,
+        editor
+            .settings
+            .bool("show_encoding", false)
+            .then_some(tab.format.display_encoding()),
+        editor
+            .settings
+            .bool("show_line_endings", false)
+            .then_some(tab.format.line_ending.display_name()),
+    )
+}
 const PANEL_ROW: f64 = 34.;
 /// Side of the find-panel close button, in points.
 const CLOSE_BUTTON: f64 = 22.;
@@ -3166,6 +3232,10 @@ impl Panels {
         Ok(())
     }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
+        let load_notice = !workspace.load_notices.is_empty();
+        if load_notice {
+            self.set_message(std::mem::take(&mut workspace.load_notices).join("; "));
+        }
         if let Some(message) = workspace.appearance_notice.take() {
             self.set_message(message);
         }
@@ -3354,7 +3424,7 @@ impl Panels {
         {
             self.query_quick(workspace);
         }
-        let mut changed = intelligence_changed || query_changed;
+        let mut changed = load_notice || intelligence_changed || query_changed;
         changed |= self.expire_message(Instant::now());
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
@@ -4350,31 +4420,7 @@ impl Panels {
             theme.surface(&mut layer, &status_style, status, status);
             let text = style(4, Some("status_container"), &mut theme);
             let editor = workspace.editor();
-            let row = if editor.binary.is_some() {
-                editor.caret / 16
-            } else {
-                editor.text.byte_to_line(editor.caret)
-            };
-            let start = if editor.binary.is_some() {
-                0
-            } else {
-                editor.text.line_to_byte(row)
-            };
-            let col = if editor.binary.is_some() {
-                editor.caret % 16 + 1
-            } else {
-                editor.text.slice(start..editor.caret).len_chars() + 1
-            };
             let tab = &workspace.tabs[workspace.active];
-            let selected: usize = if editor.binary.is_some() {
-                editor.selection().len()
-            } else {
-                editor
-                    .regions()
-                    .iter()
-                    .map(|r| editor.text.slice(r.to_range()).len_chars())
-                    .sum()
-            };
             let document_hint = if let Some(binary) = &editor.binary {
                 format!(
                     "Read-only hex · Offset 0x{:x} / {} bytes · ",
@@ -4409,21 +4455,7 @@ impl Panels {
                         } else {
                             String::new()
                         },
-                        vel_ui::status::position_mode(
-                            editor.settings.string("show_line_column", "compact"),
-                            row + 1,
-                            col,
-                            editor.regions().len(),
-                            selected,
-                            editor
-                                .settings
-                                .bool("show_encoding", false)
-                                .then_some(tab.format.encoding.as_str()),
-                            editor
-                                .settings
-                                .bool("show_line_endings", false)
-                                .then_some(tab.format.line_ending.name())
-                        )
+                        status_position(workspace)
                     )
                 } else {
                     self.message.clone()
