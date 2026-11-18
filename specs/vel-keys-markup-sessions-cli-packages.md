@@ -6,6 +6,12 @@ runtime). Lane B: sections D-I (saving and sessions, command line, packages, Got
 accessibility, window commands and menus). Each item carries its own priority. Do P2 items first. Lane B is
 larger, so its P3 items may slip to round 22; record which ones did.
 
+**Lane split update (2026-11-19):** lane A finished sections A-C (merged as `3cb35a0`). To run in parallel with lane C's round 20,
+sections D (saving and sessions), F (packages and resources) and H (accessibility) move to **lane A, round 22**;
+sections E (command line), G (Goto Anything and the index) and I (window commands and menus) stay with **lane B,
+round 21**, starting after lane C's round 20 merges. Each lane adds the key bindings, menu rows, palette entries,
+settings rows and MANUAL_TEST entries for its own items, grouped in one block per file.
+
 Background: a reviewer audit (2026-11-19, main at 63c4db2) looked at areas no earlier spec covers. Nothing was
 built or run: every item comes from reading the code, public documentation and the changelogs. Line numbers are
 approximate and from 63c4db2.
