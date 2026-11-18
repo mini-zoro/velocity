@@ -1204,8 +1204,10 @@ fn focus_save_writes_a_shared_buffer_once_and_preserves_safety_skips() {
             let original = a.workspace.active;
             a.workspace.clone_file().unwrap();
             let sibling = a.workspace.active;
+            named(&mut a, "select_by_index", json!({"index":original}));
+            // Corrupt only the inactive adapter's cached format, not the live
+            // document owner. Focus follows the same tab command as the UI.
             a.workspace.tabs[sibling].format.encoding = "invalid-encoding-fixture".into();
-            a.workspace.active = original;
         } else if skip == "deleted" {
             a.workspace.tabs[a.workspace.active].deleted = true;
         } else if skip == "ime" {

@@ -12,6 +12,19 @@ impl App {
         let settings = &self.workspace.editor().settings;
         let mut theme = self.workspace.themes.ui.borrow_mut();
         let mut right = bar.x + bar.width;
+        let key = (
+            std::rc::Rc::as_ptr(&self.workspace.themes.ui) as usize,
+            theme.revision,
+            settings.revision(),
+        );
+        if self
+            .absent_tab_buttons
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != key)
+        {
+            self.absent_tab_buttons = Some((key, [false; 3]));
+        }
+        let absent = &mut self.absent_tab_buttons.as_mut().unwrap().1;
         // Themes opt into drawing these controls through their content insets.
         // https://www.sublimetext.com/docs/themes.html#settings
         for (slot, class, hide) in [
@@ -35,7 +48,7 @@ impl App {
                     || count as f64 * width <= bar.width,
             ),
         ] {
-            if hide {
+            if hide || absent[slot as usize] {
                 continue;
             }
             let path = [
@@ -50,6 +63,9 @@ impl App {
             );
             let extent = f64::from((style.margin.left + style.margin.right).max(style.min_size[0]));
             if extent <= 0. {
+                // Themes without this optional control need no resolver work on
+                // subsequent keys. Resource/settings changes invalidate the cache.
+                absent[slot as usize] = true;
                 continue;
             }
             let extent = extent.max(16.).min((right - bar.x).max(0.));

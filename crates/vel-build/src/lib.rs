@@ -1,6 +1,13 @@
 //! Original build-system parsing, variable expansion, streaming exec and result navigation.
 #![warn(missing_docs)]
 mod environment;
+#[doc(hidden)]
+pub use environment::set_login_capture_provider;
+#[cfg(test)]
+extern crate self as vel_build;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_login;
 /// Warms the cached login environment in the background when build systems are selected.
 pub fn warm_login_environment() {
     environment::warm_login_environment();

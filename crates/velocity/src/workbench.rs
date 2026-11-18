@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 use vel_buffer::Buffer;
 use vel_config::{Value, json, settings::Layer};
@@ -21,6 +22,48 @@ pub fn reserve_sheet_ids(maximum: u64) {
 pub fn next_sheet() -> u64 {
     SHEET.fetch_add(1, Ordering::Relaxed)
 }
+pub(crate) fn sheet_state(tab: &crate::workspace::Tab) -> Option<vel_session::SettingsSheet> {
+    let label = tab
+        .editor
+        .settings
+        .get("velocity_settings_label")?
+        .as_str()?
+        .to_owned();
+    Some(vel_session::SettingsSheet {
+        resource: tab
+            .editor
+            .settings
+            .get("velocity_settings_resource")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        label,
+    })
+}
+pub(crate) fn restore_settings_tab(
+    tab: &mut crate::workspace::Tab,
+    state: &vel_session::SettingsSheet,
+) {
+    tab.editor.read_only = state.resource.is_some();
+    if let Some(resource) = &state.resource {
+        tab.editor
+            .settings
+            .set(Layer::View, "velocity_settings_resource", json!(resource));
+        tab.suggested_name = Some(state.label.clone());
+    }
+    tab.editor
+        .settings
+        .set(Layer::View, "velocity_settings_label", json!(state.label));
+    // The existing view-title override also names resource-backed scratch views.
+    tab.editor
+        .settings
+        .set(Layer::View, "velocity_html_sheet_title", json!(state.label));
+    tab.editor.settings.set(
+        Layer::View,
+        "syntax",
+        json!("Packages/JSON/JSON.sublime-syntax"),
+    );
+}
+
 pub fn remember(list: &mut Vec<PathBuf>, path: PathBuf) {
     list.retain(|p| *p != path);
     list.insert(0, path);
@@ -46,6 +89,30 @@ pub(crate) fn apply_window_layers(
     tab: &mut Tab,
     window: &vel_config::settings::Settings,
 ) -> Result<(), String> {
+    for name in [
+        "edit_settings",
+        "edit_syntax_settings",
+        "open_file_settings",
+        "customize_color_scheme",
+        "customize_theme",
+        "open_dir",
+        "set_max_columns",
+        "close_by_index",
+        "close_others_by_index",
+        "close_to_right_by_index",
+        "close_unmodified",
+        "close_deleted_files",
+        "close_selected",
+        // Close All's public command name: https://forum.sublimetext.com/t/close-all/3841
+        "close_all",
+        "split_view",
+    ] {
+        if tab.editor.registry.kind(name).is_none() {
+            tab.editor
+                .registry
+                .register(name, vel_commands::Kind::WindowCommand, None);
+        }
+    }
     let mut changed = false;
     let mut view = tab.editor.settings.layer(Layer::View).clone();
     let before = view.len();
@@ -79,6 +146,29 @@ pub(crate) fn apply_window_layers(
     Ok(())
 }
 impl Workspace {
+    /// The owning buffer's dirty state, rather than an unsynchronized clone's.
+    pub(crate) fn document_dirty(&self, tab: &Tab) -> bool {
+        self.tabs
+            .iter()
+            .find(|t| t.editor.buffer.id() == tab.document)
+            .unwrap_or(tab)
+            .dirty()
+    }
+    /// Contents/format dirtiness for Close Deleted, independent of the deletion marker.
+    pub(crate) fn document_contents_dirty(&self, tab: &Tab) -> bool {
+        if tab.load_failed {
+            return false;
+        }
+        let owner = self
+            .tabs
+            .iter()
+            .find(|t| t.editor.buffer.id() == tab.document)
+            .unwrap_or(tab);
+        owner.editor.buffer.is_dirty()
+            || owner.restored_format_dirty
+            || owner.lazy.as_ref().is_some_and(|(doc, _)| doc.dirty)
+            || owner.format != owner.saved_format
+    }
     /// Commits a window preference through the one shared, atomic preferences writer.
     pub fn set_user_preference(&mut self, key: &str, value: Value) -> Result<(), String> {
         self.settings.set(Layer::User, key, value.clone());
@@ -93,6 +183,7 @@ impl Workspace {
         }
         if let Some(data) = &self.data_dir {
             let path = data.join("Packages/User/Preferences.sublime-settings");
+            self.settings_reports.claim(&path);
             let key = key.to_owned();
             let pending = value.clone();
             let tracked = key.clone();
@@ -100,13 +191,16 @@ impl Workspace {
                 let source = match std::fs::read_to_string(&path) {
                     Ok(source) => source,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => return Err(format!("{}: {e}", path.display())),
                 };
-                let source = vel_config::json::Document::parse(&source)?.set(&key, &value)?;
+                let source = vel_config::json::Document::parse(&source)
+                    .and_then(|doc| doc.set(&key, &value))
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
                 vel_session::atomic_write(&path, |file| {
                     use std::io::Write;
                     file.write_all(source.as_bytes()).map_err(|e| e.to_string())
                 })
+                .map_err(|e| format!("{}: {e}", path.display()))
             })?;
             self.track_settings_write(rx, &[(tracked, Some(pending))]);
         }
@@ -210,15 +304,17 @@ impl Workspace {
         }
         if let Some(data) = &self.data_dir {
             let path = data.join("Packages/User/Preferences.sublime-settings");
+            self.settings_reports.claim(&path);
             let pending_value = value.clone();
             // Settings IO runs away from input/scroll; serialize zoom writes in enqueue order.
             let rx = crate::release::enqueue(move || {
                 let source = match std::fs::read_to_string(&path) {
                     Ok(s) => s,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
-                    Err(e) => return Err(e.to_string()),
+                    Err(e) => return Err(format!("{}: {e}", path.display())),
                 };
-                let document = vel_config::json::Document::parse(&source)?;
+                let document = vel_config::json::Document::parse(&source)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
                 let source = if let Some(value) = value {
                     document.set("font_size", &value)?
                 } else {
@@ -228,6 +324,7 @@ impl Workspace {
                     use std::io::Write;
                     file.write_all(source.as_bytes()).map_err(|e| e.to_string())
                 })
+                .map_err(|e| format!("{}: {e}", path.display()))
             })?;
             self.track_settings_write(rx, &[("font_size".into(), pending_value)]);
         }
@@ -323,81 +420,132 @@ impl Workspace {
     /// Transfers the actual shared Buffer between editor adapters. Inactive clones retain
     /// read-only rope snapshots; all edits and visible scenes use this actual buffer/view.
     pub fn prepare_sheet(&mut self, index: usize) -> Result<(), String> {
-        let result = self.prepare_sheet_inner(index);
-        if result.is_err()
-            && let Some(tab) = self.tabs.get_mut(index)
+        let result = if self.tabs.get(index).is_some_and(|t| t.lazy.is_some())
+            && !self.restore_in_progress
         {
-            // Consume a failing lazy restore once. Repeated paint/access must not retry IO
-            // or flood the error log; explicit Reopen is the user's retry operation.
-            tab.lazy = None;
-            tab.editor.read_only = true;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.prepare_sheet_inner(index)
+            })) {
+                Ok(result) => result,
+                Err(_) => {
+                    self.report_restore_failure(None, &[], "lazy document restore panicked");
+                    Err("lazy document restore failed; recovery saved in the status report".into())
+                }
+            }
+        } else {
+            self.prepare_sheet_inner(index)
+        };
+        match result {
+            Err(error) if self.tabs.get(index).is_some() => {
+                if error.contains(crate::restore_io::TIMEOUT) {
+                    if self.restore_in_progress {
+                        return Err(error);
+                    }
+                    self.report_restore_failure(None, &[], &error);
+                }
+                let message = self.tabs[index].path.as_deref().map_or_else(
+                    || error.clone(),
+                    |path| vel_fileio::regular::error(path, &error),
+                );
+                self.fail_shared_document(index)?;
+                // The error document is ready for normal focus/close operations.
+                // A load error must not trap a tab or turn into a modal dialog.
+                self.resource_reports.push(message);
+                Ok(())
+            }
+            result => result,
         }
-        result
     }
     fn prepare_sheet_inner(&mut self, index: usize) -> Result<(), String> {
         if index >= self.tabs.len() {
             return Err("unknown sheet".into());
         }
+        self.require_editor_view(index)?;
         if let Some((document, state)) = self.tabs[index].lazy.clone() {
+            state.validate()?;
+            let identity = self.tabs[index].session_document;
             let owner = self
                 .tabs
                 .iter()
                 .enumerate()
                 .find(|(i, t)| {
                     *i != index
-                        && t.restored_document == Some(document.id)
+                        && t.session_document == identity
                         && t.lazy.is_none()
                         && t.editor.buffer.id() == t.document
                 })
                 .map(|(i, _)| i);
             if let Some(owner) = owner {
+                crate::session_restore::step("attach_lazy");
+                let view = self.ensure_shared_view(owner, index)?;
+                self.copy_document_properties(owner, index);
+                if self.tabs[owner].loading.is_some() || self.tabs[owner].binary_loading.is_some() {
+                    self.tabs[index].pending_restore = Some(state);
+                }
                 self.tabs[index].lazy = None;
-                self.tabs[index].needs_detection = self.tabs[owner].needs_detection;
-                self.tabs[index].indentation_initialized = self.tabs[owner].indentation_initialized;
-                let existing = self.tabs[index].shared_view;
-                let view = if self.tabs[owner]
-                    .editor
-                    .buffer
-                    .views()
-                    .any(|id| id == existing)
-                {
-                    existing
-                } else {
-                    let view = self.tabs[owner].editor.buffer.new_view();
-                    state.apply(&mut self.tabs[owner].editor.buffer, view);
-                    view
-                };
-                self.tabs[owner]
-                    .editor
-                    .restore_folded_view_state(&state, view);
-                self.tabs[index].document = self.tabs[owner].document;
                 self.tabs[index].shared_view = view;
                 self.tabs[index].editor.shared_shadow = true;
-                self.tabs[index].editor.language = self.tabs[owner].editor.language.clone();
-                self.tabs[index].editor.layout_edits = self.tabs[owner].editor.layout_edits.clone();
-                self.tabs[index].editor.annotations = self.tabs[owner].editor.annotations.clone();
                 self.prepare_sheet(index)?;
                 self.sync_shared();
                 return Ok(());
             }
+            let deadline = self
+                .restore_deadline
+                .unwrap_or_else(|| Instant::now() + crate::restore_io::BUDGET);
+            let disk_path = document.path.clone();
+            let retained = document.history.as_ref().is_some_and(|h| h.retains_text());
+            let (binary, disk, size, stamp, revision) = if retained {
+                if let Some(path) = disk_path {
+                    crate::restore_io::run(deadline, move || {
+                        Ok((
+                            false,
+                            vel_session::DiskStamp::read(&path),
+                            0,
+                            crate::workspace::stamp(&path),
+                            None,
+                        ))
+                    })?
+                } else {
+                    (false, None, 0, None, None)
+                }
+            } else if let Some(path) = disk_path {
+                crate::restore_io::run(deadline, move || {
+                    let metadata =
+                        vel_fileio::regular::metadata(&path, false)?.ok_or("missing document")?;
+                    Ok((
+                        crate::binary::is_binary(&path)?,
+                        vel_session::DiskStamp::read(&path),
+                        metadata.len(),
+                        crate::workspace::stamp(&path),
+                        vel_fileio::regular::identity(&path)?,
+                    ))
+                })?
+            } else {
+                (false, None, 0, None, None)
+            };
+            let mut document = document;
+            if binary {
+                document.history = None;
+            }
             let changed = document
                 .path
                 .as_deref()
-                .is_some_and(|p| vel_session::DiskStamp::read(p) != document.disk);
+                .is_some_and(|_| disk != document.disk);
             let mut imported = false;
-            let missing = document
-                .path
-                .as_deref()
-                .is_some_and(|p| matches!(p.try_exists(), Ok(false)));
-            if missing && !document.history.as_ref().is_some_and(|h| h.retains_text()) {
-                self.tabs[index].deleted = true;
-            } else if let Some(history) = &document.history {
+            if let Some(history) = &document.history {
                 // Dirty/untitled histories retain their text and restore without reading the
                 // file. Permission/decoding failures on disk cannot discard those edits.
                 let dirty = document.dirty || (changed && history.retains_text());
-                let restored = history.restore_views(!changed, dirty);
-                imported = restored.is_ok() && !changed;
-                let (buffer, map) = restored.or_else(|_| history.restore_views(false, dirty))?;
+                crate::session_restore::step("restore_history");
+                let history = history.clone();
+                let (buffer, map, kept) = crate::restore_io::run(deadline, move || {
+                    let restored = history.restore_views(!changed, dirty);
+                    let kept = restored.is_ok() && !changed;
+                    let (buffer, map) =
+                        restored.or_else(|_| history.restore_views(false, dirty))?;
+                    Ok((buffer, map, kept))
+                })?;
+                imported = kept;
                 let id = state
                     .history_view
                     .and_then(|id| map.get(&id).copied())
@@ -407,48 +555,59 @@ impl Workspace {
                 self.tabs[index].editor.id = id;
                 // Every clone, including lazy sheets, must keep its original edit ownership.
                 for sibling in &mut self.tabs {
-                    if sibling.restored_document == Some(document.id)
+                    if sibling.session_document == identity
                         && let Some((_, view)) = &sibling.lazy
                         && let Some(id) = view.history_view.and_then(|old| map.get(&old))
                     {
                         sibling.shared_view = *id;
                     }
                 }
+                self.require_editor_view(index)?;
                 let tab = &mut self.tabs[index];
                 tab.editor.sync();
             } else if let Some(path) = &document.path {
+                crate::session_restore::step("restore_file");
                 let tab = &mut self.tabs[index];
-                if crate::binary::is_binary(path)? {
-                    tab.binary_loading = Some(crate::binary::Task::open(path.clone())?);
-                    tab.editor.source_bytes =
-                        std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+                if binary {
+                    tab.binary_document = true;
+                    let path = path.clone();
+                    tab.binary_loading = Some(crate::restore_io::run(deadline, move || {
+                        crate::binary::Task::open(path)
+                    })?);
+                    tab.editor.source_bytes = size;
                     tab.pending_restore = Some(state.clone());
-                } else if std::fs::metadata(path).map_err(|e| e.to_string())?.len()
+                } else if size
                     >= tab
                         .editor
                         .settings
                         .usize("large_file.load_bytes", 64 * 1024 * 1024)
                         as u64
                 {
-                    tab.loading = Some(vel_fileio::load_background(
-                        path.clone(),
-                        tab.editor.preferences.fallback_encoding.clone(),
-                    )?);
-                    tab.editor.source_bytes =
-                        std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+                    let path = path.clone();
+                    let fallback = tab.editor.preferences.fallback_encoding.clone();
+                    tab.loading = Some(crate::restore_io::run(deadline, move || {
+                        vel_fileio::load_background(path, fallback)
+                    })?);
+                    tab.editor.source_bytes = size;
                     tab.pending_restore = Some(state.clone());
                 } else {
-                    let loaded =
-                        vel_fileio::load(path, &tab.editor.preferences.fallback_encoding, |_| {})
-                            .inspect_err(|_| {
-                            tab.editor.read_only = true;
-                        })?;
+                    let path = path.clone();
+                    let fallback = tab.editor.preferences.fallback_encoding.clone();
+                    let loaded = crate::restore_io::run(deadline, move || {
+                        vel_fileio::load(&path, &fallback, |_| {})
+                    })?;
                     tab.install_restored(loaded);
                 }
             }
             let tab = &mut self.tabs[index];
             tab.lazy = None;
-            tab.editor.read_only = tab.loading.is_some() || tab.binary_loading.is_some();
+            tab.editor.read_only = tab.loading.is_some()
+                || tab.binary_loading.is_some()
+                || tab
+                    .editor
+                    .settings
+                    .get("velocity_settings_resource")
+                    .is_some();
             if tab.pending_restore.is_none() {
                 if !imported {
                     state.apply(&mut tab.editor.buffer, tab.editor.id);
@@ -460,8 +619,38 @@ impl Workspace {
             tab.document = tab.editor.buffer.id();
             tab.shared_view = tab.editor.id;
             tab.shared_dirty = false;
-            tab.disk_saved = document.disk;
-            tab.disk_stamp = tab.path.as_deref().and_then(crate::workspace::stamp);
+            tab.disk_saved = if retained { document.disk } else { disk };
+            tab.disk_stamp = stamp;
+            tab.disk_revision = revision;
+            tab.overwrite_allowed = None;
+            // A lazy sheet references this live document from now on. Its history is
+            // only a recovery source while *no* view has loaded the shared buffer.
+            // clone_file shares one buffer: https://docs.sublimetext.io/reference/commands.html#clone-file
+            let buffer = tab.document;
+            for sibling in 0..self.tabs.len() {
+                if self.tabs[sibling].session_document != identity {
+                    continue;
+                }
+                self.tabs[sibling].document = buffer;
+                if let Some((_, state)) = self.tabs[sibling].lazy.clone() {
+                    state.validate()?;
+                    let view = self.tabs[sibling].shared_view;
+                    let view = if self.tabs[index].editor.buffer.views().any(|id| id == view) {
+                        view
+                    } else {
+                        let view = self.tabs[index].editor.buffer.new_view();
+                        state.apply(&mut self.tabs[index].editor.buffer, view);
+                        view
+                    };
+                    // Restore once, before any live edits. Later lazy attachment must
+                    // retain the buffer's rebased selections/folds, not replay old offsets.
+                    self.tabs[index]
+                        .editor
+                        .restore_folded_view_state(&state, view);
+                    self.tabs[sibling].shared_view = view;
+                }
+            }
+            let tab = &mut self.tabs[index];
             if let Some(w) = self.watcher.as_mut()
                 && let Some(path) = &tab.path
             {
@@ -474,8 +663,11 @@ impl Workspace {
         if let Some(owner) = owner
             && owner != index
         {
+            self.require_editor_view(owner)?;
+            self.ensure_shared_view(owner, owner)?;
+            let target_view = self.ensure_shared_view(owner, index)?;
+            crate::session_restore::step("transfer_buffer");
             self.tabs[owner].editor.unmark();
-            let target_view = self.tabs[index].shared_view;
             let source_view = self.tabs[owner].shared_view;
             let source_state = vel_session::ViewState::capture(
                 &self.tabs[owner].editor.buffer,
@@ -489,6 +681,8 @@ impl Workspace {
                 let (a, b) = self.tabs.split_at_mut(owner);
                 (&mut b[0], &mut a[index])
             };
+            b.inherit_document(a);
+            a.transfer_document_io(b);
             std::mem::swap(&mut a.editor.buffer, &mut b.editor.buffer);
             a.editor.shared_shadow = true;
             b.editor.shared_shadow = false;
@@ -500,6 +694,7 @@ impl Workspace {
             b.editor.sync();
             a.editor.sync();
         }
+        self.require_editor_view(index)?;
         self.tabs[index].editor.adopt_document();
         Ok(())
     }
@@ -524,6 +719,13 @@ impl Workspace {
             .map(|(i, _)| i)
             .collect();
         for owner in owners {
+            if let Err(error) = self.ensure_shared_view(owner, owner) {
+                if let Err(repair) = self.fail_shared_document(owner) {
+                    self.resource_reports.push(repair);
+                }
+                self.resource_reports.push(error);
+                continue;
+            }
             let doc = self.tabs[owner].document;
             let others: Vec<_> = self
                 .tabs
@@ -538,6 +740,13 @@ impl Workspace {
             }
             let dirty = self.tabs[owner].editor.buffer.is_dirty();
             for index in others {
+                if let Err(error) = self.ensure_shared_view(owner, index) {
+                    if let Err(repair) = self.fail_shared_document(owner) {
+                        self.resource_reports.push(repair);
+                    }
+                    self.resource_reports.push(error);
+                    break;
+                }
                 let state = vel_session::ViewState::capture(
                     &self.tabs[owner].editor.buffer,
                     self.tabs[index].shared_view,
@@ -557,6 +766,13 @@ impl Workspace {
                     self.tabs[index].editor.sync();
                     self.tabs[index].editor.revision = version;
                 }
+                if owner < index {
+                    let (a, b) = self.tabs.split_at_mut(index);
+                    b[0].inherit_document_mode(&a[owner]);
+                } else {
+                    let (a, b) = self.tabs.split_at_mut(owner);
+                    a[index].inherit_document_mode(&b[0]);
+                }
                 self.tabs[index].shared_dirty = dirty;
                 self.tabs[index].deleted = self.tabs[owner].deleted;
                 self.tabs[index].path = self.tabs[owner].path.clone();
@@ -564,6 +780,8 @@ impl Workspace {
                 self.tabs[index].saved_format = self.tabs[owner].saved_format.clone();
                 self.tabs[index].tracker = self.tabs[owner].tracker.clone();
                 self.tabs[index].disk_saved = self.tabs[owner].disk_saved.clone();
+                self.tabs[index].disk_revision = self.tabs[owner].disk_revision;
+                self.tabs[index].overwrite_allowed = self.tabs[owner].overwrite_allowed;
                 self.tabs[index].disk_stamp = self.tabs[owner].disk_stamp;
                 self.tabs[index].restored_format_dirty = self.tabs[owner].restored_format_dirty;
             }
@@ -575,22 +793,28 @@ impl Workspace {
             let Some(old) = self.tabs[index].previous_document.take() else {
                 continue;
             };
+            if let Err(error) = self.require_editor_view(index) {
+                let _ = self.fail_shared_document(index);
+                self.resource_reports.push(error);
+                continue;
+            }
             let document = self.tabs[index].document;
             self.tabs[index].editor.layout_edits.borrow_mut().clear();
             for other in 0..self.tabs.len() {
-                if other == index
-                    || self.tabs[other].document != old
-                    || self.tabs[other].lazy.is_some()
-                {
+                if other == index || self.tabs[other].document != old {
                     continue;
                 }
-                let state = vel_session::ViewState::capture(
-                    &self.tabs[other].editor.buffer,
-                    self.tabs[other].editor.id,
-                    self.tabs[other].scroll,
-                );
+                let state = self.saved_sheet_state(other);
+                if state.validate().is_err() {
+                    let _ = self.fail_shared_document(index);
+                    break;
+                }
                 let view = self.tabs[index].editor.buffer.new_view();
                 state.apply(&mut self.tabs[index].editor.buffer, view);
+                if self.tabs[index].loading.is_none() && self.tabs[index].binary_loading.is_none() {
+                    self.tabs[other].pending_restore = None;
+                }
+                self.copy_document_properties(index, other);
                 self.tabs[other].document = document;
                 self.tabs[other].shared_view = view;
                 self.tabs[other].editor.shared_shadow = true;
@@ -603,7 +827,7 @@ impl Workspace {
     }
     pub fn clone_file(&mut self) -> Result<(), String> {
         if self.empty {
-            self.new_file()?;
+            return self.new_file();
         }
         if self.tabs[self.active].loading.is_some()
             || self.tabs[self.active].binary_loading.is_some()
@@ -632,27 +856,10 @@ impl Workspace {
             &self.keymap,
         )?;
         apply_window_layers(&mut clone, &self.settings)?;
-        clone.session_document = self.tabs[index].session_document;
-        clone.deleted = self.tabs[index].deleted;
-        clone.document = self.tabs[index].document;
+        clone.inherit_document(&self.tabs[index]);
         clone.shared_view = id;
-        clone.disk_saved = self.tabs[index].disk_saved.clone();
-        clone.disk_stamp = self.tabs[index].disk_stamp;
-        clone.needs_detection = self.tabs[index].needs_detection;
-        clone.indentation_initialized = self.tabs[index].indentation_initialized;
-        clone.restored_document = self.tabs[index].restored_document;
-        clone.editor.binary = self.tabs[index].editor.binary.clone();
-        clone.editor.read_only = self.tabs[index].editor.read_only;
-        clone.editor.features = self.tabs[index].editor.features;
         clone.editor.shared_shadow = true;
-        clone.editor.language = self.tabs[index].editor.language.clone();
-        clone.editor.layout_edits = self.tabs[index].editor.layout_edits.clone();
-        clone.editor.annotations = self.tabs[index].editor.annotations.clone();
         clone.editor.layout_version = self.tabs[index].editor.layout_version;
-        clone.path = self.tabs[index].path.clone();
-        clone.format = self.tabs[index].format.clone();
-        clone.saved_format = self.tabs[index].saved_format.clone();
-        clone.tracker = self.tabs[index].tracker.clone();
         clone.scroll = self.tabs[index].scroll;
         clone.scroll_line_height = self.tabs[index].scroll_line_height;
         let sheet = clone.sheet;
@@ -663,14 +870,41 @@ impl Workspace {
         self.sync_shared();
         Ok(())
     }
+    /// User-facing Split View: adjacent shared view selected alongside its source.
+    pub fn split_view(&mut self) -> Result<(), String> {
+        if self.empty {
+            return self.new_file();
+        }
+        let source = self.tabs[self.active].sheet;
+        let group = &self.workbench.groups[self.workbench.active];
+        let at = group
+            .sheets
+            .iter()
+            .position(|id| *id == source)
+            .ok_or("source tab missing")?
+            + 1;
+        self.clone_file()?;
+        let sheet = self.tabs[self.active].sheet;
+        // File > Split View uses tab multiselect (build 4107):
+        // https://www.sublimetext.com/docs/tab_multi-select.html
+        // https://www.sublimetext.com/download
+        let group = &mut self.workbench.groups[self.workbench.active];
+        group.sheets.retain(|id| *id != sheet);
+        group.sheets.insert(at, sheet);
+        group.selected.clear();
+        group.selected.extend([source, sheet]);
+        group.focused = Some(sheet);
+        group.anchor = Some(source);
+        Ok(())
+    }
     pub fn prepare_close_sheet(&mut self, index: usize) -> Result<(), String> {
         self.prepare_sheet(index)?;
-        let doc = self.tabs[index].document;
+        let doc = self.tabs[index].session_document;
         let other = self
             .tabs
             .iter()
             .enumerate()
-            .find(|(i, t)| *i != index && t.document == doc)
+            .find(|(i, t)| *i != index && t.session_document == doc)
             .map(|(i, _)| i);
         let view = self.tabs[index].shared_view;
         if let Some(other) = other {
@@ -727,7 +961,7 @@ impl Workspace {
                     return Err("unknown group".into());
                 }
                 if name == "move_to_group" {
-                    self.workbench.move_selected(group)?;
+                    self.workbench.move_active(group)?;
                 } else {
                     self.workbench.active = group;
                 }
@@ -740,22 +974,63 @@ impl Workspace {
                     .neighbor(self.workbench.active, direction(args))
                 {
                     if name == "move_to_neighboring_group" {
-                        self.workbench.move_selected(group)?;
+                        self.workbench.move_active(group)?;
                     } else {
                         self.workbench.active = group;
                     }
                     self.focus_current_group()?;
                 }
             }
+            "set_max_columns" => {
+                let columns = args["columns"].as_u64().ok_or("columns required")? as usize;
+                if !(1..=64).contains(&columns) {
+                    return Err("columns must be 1..64".into());
+                }
+                self.workbench.max_columns = columns;
+            }
             "new_pane" => {
-                self.workbench
-                    .new_pane(!matches!(args["direction"].as_str(), Some("up" | "down")))?;
+                // Build 4126 confirms that new panes move all selected sheets:
+                // https://www.sublimetext.com/download. The direction and limit
+                // implement the round-19 window contract, without pixel state.
+                let active = self.workbench.active;
+                let cell = self.workbench.layout.cells[active];
+                let columns = self
+                    .workbench
+                    .layout
+                    .cells
+                    .iter()
+                    .filter(|c| c[1] <= cell[1] && c[3] > cell[1])
+                    .count();
+                let vertical = args["direction"]
+                    .as_str()
+                    .map_or(columns < self.workbench.max_columns, |direction| {
+                        !matches!(direction, "up" | "down")
+                    });
+                let mut next = self.workbench.clone();
+                next.new_pane(vertical)?;
+                let bounds = vel_platform::Rect {
+                    x: 0.,
+                    y: 0.,
+                    width: self.pane_extent.0,
+                    height: self.pane_extent.1,
+                };
+                if (0..next.groups.len())
+                    .filter_map(|i| next.layout.rect(i, bounds))
+                    .any(|r| {
+                        r.width + 0.01 < self.pane_minimum.0
+                            || r.height + 0.01 < self.pane_minimum.1
+                    })
+                {
+                    return Err("Pane is too small to split further".into());
+                }
+                self.workbench = next;
+                let last = self.workbench.groups.len() - 1;
                 if matches!(args["direction"].as_str(), Some("left" | "up")) {
-                    let last = self.workbench.layout.cells.len() - 1;
-                    self.workbench
-                        .layout
-                        .cells
-                        .swap(self.workbench.active, last);
+                    self.workbench.layout.cells.swap(active, last);
+                }
+                if args["move"].as_bool().unwrap_or(true) {
+                    self.workbench.move_selected(last)?;
+                    self.focus_current_group()?;
                 }
             }
             "close_pane" | "close_split" => {
@@ -764,7 +1039,11 @@ impl Workspace {
                     self.focus_current_group()?;
                 }
             }
+            // clone_file selects the new view alone; Split View uses multi-select.
+            // https://docs.sublimetext.io/reference/commands.html#clone-file
+            // https://www.sublimetext.com/download (File/Split View)
             "clone_file" => self.clone_file()?,
+            "split_view" => self.split_view()?,
             "select_all_tabs" => {
                 let g = &mut self.workbench.groups[self.workbench.active];
                 g.selected.extend(&g.sheets);
@@ -812,6 +1091,14 @@ impl Workspace {
         Ok(true)
     }
     pub fn snapshot(&mut self) -> Result<(Window, Vec<Document>), String> {
+        let ids = if self.empty {
+            BTreeSet::new()
+        } else {
+            self.tabs.iter().map(|tab| tab.sheet).collect()
+        };
+        if self.workbench.normalize(&ids) {
+            eprintln!("Repaired window workbench before checkpoint");
+        }
         self.materialize_input();
         self.sync_shared();
         let active = self.active;
@@ -835,7 +1122,7 @@ impl Workspace {
             let identity = tab.session_document;
             if let Some((document, view)) = &tab.lazy {
                 let loaded = self.tabs.iter().find(|t| {
-                    t.restored_document == Some(document.id)
+                    t.session_document == identity
                         && t.lazy.is_none()
                         && t.editor.buffer.id() == t.document
                 });
@@ -846,6 +1133,7 @@ impl Workspace {
                     documents.push(document);
                 }
                 sheets.push(Sheet {
+                    settings: sheet_state(tab),
                     html: tab
                         .editor
                         .settings
@@ -889,6 +1177,7 @@ impl Workspace {
                 .folded_view_state(tab.shared_view, tab.scroll)
                 .with_line_height(tab.scroll_line_height);
             sheets.push(Sheet {
+                settings: sheet_state(tab),
                 html: tab
                     .editor
                     .settings
@@ -915,6 +1204,10 @@ impl Workspace {
             });
             if seen.insert(identity) {
                 let owner = &mut self.tabs[owner];
+                let empty_error =
+                    owner.load_failed && !owner.shared_dirty && !owner.editor.buffer.is_dirty();
+                let retained_dirty =
+                    owner.dirty() || (owner.load_failed && owner.editor.buffer.is_dirty());
                 documents.push(Document {
                     id: identity,
                     path: owner.path.clone(),
@@ -922,14 +1215,15 @@ impl Workspace {
                     encoding: owner.format.encoding.clone(),
                     bom: owner.format.bom,
                     line_ending: owner.format.line_ending.name().into(),
-                    dirty: owner.dirty(),
+                    dirty: retained_dirty && !empty_error,
                     history: if owner.loading.is_some()
                         || owner.binary_loading.is_some()
                         || owner.editor.binary.is_some()
+                        || empty_error
                     {
                         None
                     } else {
-                        Some(if !owner.dirty() {
+                        Some(if !retained_dirty {
                             if let Some(path) = &owner.path {
                                 vel_session::History::capture_saved(
                                     &owner.editor.buffer,
@@ -977,11 +1271,12 @@ impl Workspace {
         ))
     }
     /// Installs placeholders for hidden documents and loads only selected sheets.
-    pub fn restore_window(
+    pub(crate) fn restore_window_inner(
         &mut self,
         window: &Window,
         documents: &[Document],
     ) -> Result<(), String> {
+        crate::session_restore::step("folders");
         for path in &window.folders {
             if !self.folders.iter().any(|f| &f.path == path) {
                 self.folders.push(vel_search::project::Folder {
@@ -1014,6 +1309,7 @@ impl Workspace {
                 });
             }
         }
+        crate::session_restore::step("window_settings");
         self.window_layers.normal = window.normal_ui.clone();
         self.window_layers.distraction = window.distraction_ui.clone();
         self.window_layers
@@ -1038,14 +1334,34 @@ impl Workspace {
         let mut tabs = Vec::new();
         let mut remap = BTreeMap::new();
         let mut document_ids = BTreeMap::new();
+        let mut buffer_ids = BTreeMap::new();
+        let mut paths: BTreeMap<u64, (Option<PathBuf>, bool)> = BTreeMap::new();
         for sheet in &window.sheets {
+            crate::session_restore::step("create_sheet");
             let document = docs
                 .get(&sheet.document)
                 .ok_or("session document missing")?;
-            let missing = document
-                .path
-                .as_deref()
-                .is_some_and(|p| matches!(p.try_exists(), Ok(false)));
+            let (path, missing) = if let Some(resolved) = paths.get(&document.id) {
+                resolved.clone()
+            } else {
+                let path = document.path.clone();
+                let resolved = crate::restore_io::run(
+                    self.restore_deadline
+                        .unwrap_or_else(|| Instant::now() + crate::restore_io::BUDGET),
+                    move || {
+                        let path = path
+                            .as_deref()
+                            .map(crate::workspace::absolute)
+                            .transpose()?;
+                        let missing = path
+                            .as_deref()
+                            .is_some_and(|p| matches!(p.try_exists(), Ok(false)));
+                        Ok((path, missing))
+                    },
+                )?;
+                paths.insert(document.id, resolved.clone());
+                resolved
+            };
             if missing && self.settings.bool("close_deleted_files", false) && !document.dirty {
                 continue;
             }
@@ -1053,13 +1369,12 @@ impl Workspace {
             remap.insert(sheet.id, tab.sheet);
             tab.restored_document = Some(document.id);
             tab.session_document = *document_ids.entry(document.id).or_insert_with(next_sheet);
-            tab.path = document.path.clone();
+            // Even unopened siblings refer to one document, never independent buffers.
+            tab.document = *buffer_ids.entry(document.id).or_insert(tab.document);
+            tab.path = path;
             // Missing files with retained contents must still prompt/save after restore.
             // Derive the marker from disk without extending the session wire format.
-            tab.deleted = tab
-                .path
-                .as_deref()
-                .is_some_and(|path| matches!(path.try_exists(), Ok(false)));
+            tab.deleted = missing;
             tab.format = vel_fileio::Format {
                 encoding: document.encoding.clone(),
                 bom: document.bom,
@@ -1077,6 +1392,9 @@ impl Workspace {
                     .settings
                     .set(Layer::View, "velocity_html_sheet_title", json!(html.name));
                 tab.editor.read_only = true;
+            }
+            if let Some(settings) = &sheet.settings {
+                restore_settings_tab(&mut tab, settings);
             }
             if let Some(syntax) = &sheet.syntax {
                 tab.editor
@@ -1110,6 +1428,7 @@ impl Workspace {
         }
         self.tabs = tabs;
         self.active = 0;
+        crate::session_restore::step("groups");
         self.workbench = window.workbench.clone();
         for g in &mut self.workbench.groups {
             g.sheets = g
@@ -1132,9 +1451,13 @@ impl Workspace {
             .flat_map(|g| g.visible())
             .filter_map(|s| self.sheet_index(s))
             .collect();
+        crate::session_restore::step("visible_views");
         for index in visible {
             if let Err(error) = self.prepare_sheet(index) {
-                self.messages.push(error);
+                if error.contains(crate::restore_io::TIMEOUT) {
+                    return Err(error);
+                }
+                self.resource_reports.push(error);
             }
         }
         self.distraction_free = false;
@@ -1143,10 +1466,22 @@ impl Workspace {
         if window.distraction_free {
             self.workbench_action("toggle_distraction_free", &json!({}))?;
         }
+        crate::session_restore::step("focus");
         if let Err(error) = self.focus_current_group() {
-            self.messages.push(error);
+            if error.contains(crate::restore_io::TIMEOUT) {
+                return Err(error);
+            }
+            self.resource_reports.push(error);
         }
+        crate::session_restore::step("synchronize");
         self.sync_shared();
+        crate::session_restore::step("validate");
+        self.validate_document_views()?;
+        self.workbench.validate(&if self.empty {
+            BTreeSet::new()
+        } else {
+            self.tabs.iter().map(|t| t.sheet).collect()
+        })?;
         Ok(())
     }
     /// Accept legacy boolean hot_exit without weakening the string policies.
@@ -1193,7 +1528,11 @@ impl Workspace {
         let recovery = vel_session::load(&vel_session::project::workspace_path(&path));
         config.messages.extend(recovery.messages);
         if let Some(window) = recovery.session.windows.first() {
-            config.restore_window(window, &recovery.session.documents)?;
+            config.restore_window_from(
+                window,
+                &recovery.session.documents,
+                Some(&vel_session::project::workspace_path(&path)),
+            )?;
         }
         std::mem::swap(self, &mut config);
         Ok(())

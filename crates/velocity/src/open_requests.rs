@@ -42,7 +42,7 @@ pub(crate) fn restored_window(windows: &[vel_session::Window], options: &Options
     (!windows.is_empty()).then_some(0)
 }
 fn same_path(a: &Path, b: &Path) -> bool {
-    let normalized = |path: &Path| fs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    let normalized = crate::workspace::absolute;
     match (normalized(a), normalized(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -192,7 +192,7 @@ impl Router {
         let mut errors = Vec::new();
         for path in self.pending.drain(..) {
             if let Err(error) = open_path(workspace, panels, &path) {
-                errors.push(format!("{}: {error}", path.display()));
+                errors.push(vel_fileio::regular::error(&path, error));
             }
         }
         if errors.is_empty() {
@@ -236,7 +236,7 @@ pub fn open_locations(
             workspace.open(location)
         };
         if let Err(error) = result {
-            errors.push(format!("{}: {error}", path.display()));
+            errors.push(vel_fileio::regular::error(&path, error));
         }
     }
     errors
@@ -444,7 +444,10 @@ mod tests {
         let (mut workspace, mut panels) = window();
         open_paths(&mut workspace, &mut panels, &[missing.clone(), valid]).unwrap();
         assert_eq!(workspace.tabs.len(), 2);
-        assert_eq!(workspace.tabs[0].path.as_ref(), Some(&missing));
+        assert_eq!(
+            workspace.tabs[0].path.as_ref(),
+            Some(&directory.path().canonicalize().unwrap().join("missing"))
+        );
         assert!(!workspace.tabs[0].deleted);
         assert_eq!(workspace.editor().text.to_string(), "valid");
     }
@@ -652,7 +655,10 @@ mod round15_tests {
         assert!(errors[0].contains(&first.display().to_string()));
         assert!(errors[1].contains(&second.display().to_string()));
         assert_eq!(w.tabs.len(), 2);
-        assert_eq!(w.tabs[w.active].path.as_ref(), Some(&new));
+        assert_eq!(
+            w.tabs[w.active].path.as_ref(),
+            Some(&dir.path().canonicalize().unwrap().join("new.txt"))
+        );
     }
     #[test]
     fn successful_root_trash_detaches_and_persists_while_failed_paths_remain() {

@@ -99,7 +99,9 @@ fn lazy_restore_keeps_hidden_file_unopened_and_clones_attach_on_demand() {
     .unwrap();
     restored.prepare_sheet(2).unwrap();
     assert!(restored.tabs[2].deleted);
-    assert!(restored.tabs[2].dirty());
+    assert!(!restored.tabs[2].dirty());
+    assert!(restored.tabs[2].load_failed);
+    assert!(restored.tabs[2].editor.read_only);
     assert!(restored.tabs[2].lazy.is_none());
     assert_eq!(restored.tabs[0].editor.text.to_string(), "unsaved");
 }
@@ -172,12 +174,14 @@ fn launch_with_nonexistent_readonly_and_corrupt_data_roots() {
     let bad = missing.join("Packages/User/Preferences.sublime-settings");
     std::fs::write(&bad, "{ corrupt").unwrap();
     let w = Workspace::new(Text::new(), Some(missing), None, false).unwrap();
+    assert!(w.messages.is_empty());
     assert!(
-        w.messages
+        w.resource_reports
             .iter()
-            .any(|message| message.contains("Preferences.sublime-settings")),
+            .any(|message| message.contains("Preferences.sublime-settings")
+                && message.contains("line 1")),
         "{:?}",
-        w.messages
+        w.resource_reports
     );
     #[cfg(unix)]
     {

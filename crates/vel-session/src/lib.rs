@@ -102,9 +102,20 @@ pub struct HtmlSheet {
     /// Minihtml document source, bounded to the parser's 4 MiB input limit.
     pub contents: String,
 }
+/// Settings editor identity, separate from writable document contents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SettingsSheet {
+    /// Bundled/installed source for the read-only side; absent for the User file.
+    pub resource: Option<String>,
+    /// Distinct default/user tab title.
+    pub label: String,
+}
 /// One sheet's view-local state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sheet {
+    /// Settings-window identity; absent in older sessions and ordinary views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SettingsSheet>,
     /// Optional retained minihtml sheet; missing in older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub html: Option<HtmlSheet>,

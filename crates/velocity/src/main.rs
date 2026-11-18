@@ -31,12 +31,19 @@ mod panels;
 mod parse_bench;
 mod release;
 mod report;
+mod restore_io;
 mod review_bench;
 #[cfg(test)]
 mod review_tests;
 mod review_ui;
 mod session;
+mod session_restore;
+mod settings_reports;
+mod shared_document;
 mod stats;
+#[cfg(test)]
+#[path = "../../vel-build/tests/support/mod.rs"]
+mod test_login;
 mod theme_bench;
 #[cfg(test)]
 mod theme_tests;
@@ -399,6 +406,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 Err(e) => return Err(e),
             };
             workspace.recent_files = restored.recent_files.clone();
+            workspace.restore_original = sessions.borrow().original.clone();
             workspace.recent_folders = restored.recent_folders.clone();
             workspace.recent_projects = restored.recent_projects.clone();
             if let Some(path) = workspace.project_path().map(Path::to_owned) {
@@ -419,7 +427,11 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 let recovery = vel_session::load(&vel_session::project::workspace_path(project));
                 workspace.messages.extend(recovery.messages);
                 if let Some(window) = recovery.session.windows.first() {
-                    if let Err(e) = workspace.restore_window(window, &recovery.session.documents) {
+                    if let Err(e) = workspace.restore_window_from(
+                        window,
+                        &recovery.session.documents,
+                        Some(&vel_session::project::workspace_path(project)),
+                    ) {
                         workspace.messages.push(e);
                     } else {
                         restored_ui = Some(window.clone());

@@ -33,6 +33,8 @@ impl Builds {
         panels: &mut Panels,
         args: &Value,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        crate::test_login::install();
         let direct = args.get("cmd").is_some() || args.get("shell_cmd").is_some();
         let build = if direct {
             BuildSystem::from_value("exec", args.clone())?

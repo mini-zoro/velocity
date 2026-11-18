@@ -21,8 +21,8 @@ impl Default for Layout {
 impl Layout {
     /// Equal-sized preset, in row-major order.
     pub fn grid(columns: usize, rows: usize) -> Self {
-        let columns = columns.clamp(1, 16);
-        let rows = rows.clamp(1, 16);
+        let columns = columns.clamp(1, 64);
+        let rows = rows.clamp(1, 64 / columns);
         Self {
             cols: (0..=columns).map(|n| n as f64 / columns as f64).collect(),
             rows: (0..=rows).map(|n| n as f64 / rows as f64).collect(),
@@ -153,6 +153,42 @@ impl Layout {
         }
         let margin = 0.04_f64.min((coords[i + 1] - coords[i - 1]) / 3.);
         coords[i] = position.clamp(coords[i - 1] + margin, coords[i + 1] - margin);
+        true
+    }
+    /// Drags a divider with a minimum logical size for every touching cell.
+    pub fn drag_with_minimum(
+        &mut self,
+        splitter: Splitter,
+        position: f64,
+        bounds: Rect,
+        minimum: (f64, f64),
+    ) -> bool {
+        if !position.is_finite() {
+            return false;
+        }
+        let (lo, hi, coords, extent, pixels) = if splitter.vertical {
+            (0, 2, &mut self.cols, bounds.width, minimum.0)
+        } else {
+            (1, 3, &mut self.rows, bounds.height, minimum.1)
+        };
+        let i = splitter.index;
+        if i == 0 || i + 1 >= coords.len() || extent <= 0. {
+            return false;
+        }
+        let mut low = coords[i - 1] + f64::EPSILON;
+        let mut high = coords[i + 1] - f64::EPSILON;
+        for cell in &self.cells {
+            if cell[hi] == i {
+                low = low.max(coords[cell[lo]] + pixels / extent);
+            }
+            if cell[lo] == i {
+                high = high.min(coords[cell[hi]] - pixels / extent);
+            }
+        }
+        if low > high {
+            return false;
+        }
+        coords[i] = position.clamp(low, high);
         true
     }
     /// Finds the closest group in a cardinal direction, preferring overlapping edges.
@@ -358,6 +394,12 @@ pub struct Workbench {
     pub groups: Vec<Group>,
     /// Focused group index.
     pub active: usize,
+    /// Window-local limit used by automatic new panes before adding rows.
+    #[serde(default = "default_max_columns")]
+    pub max_columns: usize,
+}
+fn default_max_columns() -> usize {
+    2
 }
 impl Default for Workbench {
     fn default() -> Self {
@@ -365,6 +407,7 @@ impl Default for Workbench {
             layout: Layout::default(),
             groups: vec![Group::default()],
             active: 0,
+            max_columns: default_max_columns(),
         }
     }
 }
@@ -373,12 +416,20 @@ impl Workbench {
     pub fn set_layout(&mut self, layout: Layout) -> Result<(), String> {
         layout.validate()?;
         let count = layout.cells.len();
-        while self.groups.len() > count {
-            let group = self.groups.pop().expect("group");
+        if self.groups.len() > count {
+            let removed = self.groups.split_off(count);
             let target = &mut self.groups[count - 1];
-            for id in group.sheets {
-                target.add(id, false);
+            for group in removed {
+                target.sheets.extend(group.sheets);
             }
+            // A layout merge retains the receiving group's own active view.
+            // It must not turn unrelated groups into a multi-selection.
+            target.focused = target.focused.or_else(|| target.sheets.first().copied());
+            target.selected.clear();
+            if let Some(focus) = target.focused {
+                target.selected.insert(focus);
+            }
+            target.anchor = target.focused;
         }
         self.groups.resize_with(count, Group::default);
         self.active = self.active.min(count - 1);
@@ -389,6 +440,21 @@ impl Workbench {
     pub fn group_of(&self, id: u64) -> Option<usize> {
         self.groups.iter().position(|g| g.sheets.contains(&id))
     }
+    /// Moves only the focused view, as documented for move_to_group.
+    /// <https://docs.sublimetext.io/reference/commands.html#move-to-group>
+    pub fn move_active(&mut self, target: usize) -> Result<(), String> {
+        if target >= self.groups.len() {
+            return Err("unknown group".into());
+        }
+        if target != self.active
+            && let Some(id) = self.groups[self.active].focused
+        {
+            self.groups[self.active].remove(id);
+            self.groups[target].add(id, false);
+            self.active = target;
+        }
+        Ok(())
+    }
     /// Moves all selected sheets in display order and focuses the destination.
     pub fn move_selected(&mut self, target: usize) -> Result<(), String> {
         if target >= self.groups.len() {
@@ -398,11 +464,17 @@ impl Workbench {
             return Ok(());
         }
         let ids = self.groups[self.active].visible();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let focus = self.groups[self.active].focused;
         self.groups[target].selected.clear();
         for id in ids {
             self.groups[self.active].remove(id);
             self.groups[target].add(id, true);
         }
+        self.groups[target].focused = focus;
+        self.groups[target].anchor = focus;
         self.active = target;
         Ok(())
     }
@@ -415,17 +487,92 @@ impl Workbench {
     /// Closes the focused pane and moves its sheets to a survivor.
     pub fn close_pane(&mut self) -> Result<(), String> {
         let index = self.active;
+        // Route sheets to the cell that actually absorbs this cell's area.
+        // Layout::remove chooses a full-edge neighbor or retessellates columns.
+        let bounds = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1.,
+            height: 1.,
+        };
+        let closed = self.layout.rect(index, bounds).ok_or("unknown group")?;
         self.layout.remove(index)?;
         let removed = self.groups.remove(index);
-        self.active = index.min(self.groups.len() - 1);
-        for id in removed.sheets {
-            self.groups[self.active].add(id, false);
+        self.active = (0..self.groups.len())
+            .max_by(|a, b| {
+                let overlap = |i| {
+                    let r = self.layout.rect(i, bounds).expect("validated cell");
+                    ((r.x + r.width).min(closed.x + closed.width) - r.x.max(closed.x)).max(0.)
+                        * ((r.y + r.height).min(closed.y + closed.height) - r.y.max(closed.y))
+                            .max(0.)
+                };
+                overlap(*a).total_cmp(&overlap(*b))
+            })
+            .expect("surviving group");
+        let target = &mut self.groups[self.active];
+        target.sheets.extend(removed.sheets);
+        if removed.focused.is_some() {
+            target.selected = removed.selected;
+            target.focused = removed.focused;
+            target.anchor = removed.anchor;
         }
         Ok(())
+    }
+    /// Repairs persisted focus/selection and sheet membership without dropping views.
+    /// Unknown or duplicate references are discarded; orphan sheets join the active group.
+    pub fn normalize(&mut self, ids: &BTreeSet<u64>) -> bool {
+        if self.validate(ids).is_ok() {
+            return false;
+        }
+        self.max_columns = self.max_columns.clamp(1, 64);
+        if self.groups.is_empty() {
+            self.groups.push(Group::default());
+        }
+        if self.groups.len() > 64 {
+            let removed = self.groups.split_off(64);
+            for group in removed {
+                self.groups[63].sheets.extend(group.sheets);
+            }
+        }
+        if self.layout.validate().is_err() || self.layout.cells.len() != self.groups.len() {
+            self.layout = Layout::grid(self.groups.len(), 1);
+        }
+        self.active = self.active.min(self.groups.len() - 1);
+        let mut seen = BTreeSet::new();
+        for group in &mut self.groups {
+            group
+                .sheets
+                .retain(|id| ids.contains(id) && seen.insert(*id));
+        }
+        self.groups[self.active]
+            .sheets
+            .extend(ids.difference(&seen).copied());
+        for group in &mut self.groups {
+            group.selected.retain(|id| group.sheets.contains(id));
+            group.focused = group
+                .focused
+                .filter(|id| group.sheets.contains(id))
+                .or_else(|| group.selected.first().copied())
+                .or_else(|| group.sheets.first().copied());
+            if let Some(focus) = group.focused {
+                group.selected.insert(focus);
+            }
+            group.anchor = group
+                .anchor
+                .filter(|id| group.sheets.contains(id))
+                .or(group.focused);
+            if !group.tab_scroll.is_finite() {
+                group.tab_scroll = 0.;
+            }
+        }
+        true
     }
     /// Validates persisted sheet references and selection invariants.
     pub fn validate(&self, ids: &BTreeSet<u64>) -> Result<(), String> {
         self.layout.validate()?;
+        if !(1..=64).contains(&self.max_columns) {
+            return Err("invalid maximum columns".into());
+        }
         if self.groups.len() != self.layout.cells.len() || self.active >= self.groups.len() {
             return Err("invalid group count/focus".into());
         }
@@ -438,6 +585,7 @@ impl Workbench {
             }
             if !g.selected.iter().all(|s| g.sheets.contains(s))
                 || g.focused.is_some_and(|f| !g.selected.contains(&f))
+                || g.anchor.is_some_and(|id| !g.sheets.contains(&id))
                 || (!g.sheets.is_empty() && (g.focused.is_none() || g.selected.is_empty()))
                 || !g.tab_scroll.is_finite()
             {

@@ -1,3 +1,4 @@
+mod support;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -76,6 +77,7 @@ fn relative_file_regex_and_line_only_results_use_latest_header() {
 fn streams_both_pipes_and_preserves_split_utf8() {
     let build=BuildSystem::parse("fixture",r#"{"shell_cmd":"printf 'hello\\n'; printf 'error\\n' >&2; printf '\\344'; printf '\\275\\240\\n'"}"#).unwrap();
     let exec = build.resolve(&Variables::default()).unwrap();
+    support::install();
     let task = Task::spawn(&exec).unwrap();
     let mut output = String::new();
     let mut stderr = false;
@@ -108,6 +110,7 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
     let build =
         BuildSystem::parse("fixture", r#"{"shell_cmd":"sleep 30 & echo ready; wait"}"#).unwrap();
     let exec = build.resolve(&Variables::default()).unwrap();
+    support::install();
     let task = Task::spawn(&exec).unwrap();
     // Login fallback may report a warning before the process produces output.
     // Cancel only once the real child has started, not after an environment event.
@@ -151,6 +154,7 @@ fn dropping_a_build_with_full_output_queue_reaps_its_tree_without_a_consumer() {
         .unwrap()
         .resolve(&Variables::default())
         .unwrap();
+    support::install();
     let task = Task::spawn(&exec).unwrap();
     std::thread::sleep(Duration::from_millis(30));
     let (done, completion) = std::sync::mpsc::channel();
@@ -267,6 +271,7 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
         .unwrap()
         .resolve(&Variables::default())
         .unwrap();
+    support::install();
     let old = Task::spawn(&exec).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     while !grandchild_path.exists() && Instant::now() < deadline {
@@ -287,6 +292,7 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
         .resolve(&Variables::default())
         .unwrap();
     let at = Instant::now();
+    support::install();
     let task = Task::spawn_after(&next, Some(old)).unwrap();
     assert!(
         at.elapsed() < Duration::from_millis(100),
@@ -366,6 +372,7 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
         .unwrap()
         .resolve(&Variables::default())
         .unwrap();
+        support::install();
         let old = Task::spawn(&exec).unwrap();
         loop {
             if matches!(
@@ -419,6 +426,7 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
     .unwrap()
     .resolve(&Variables::default())
     .unwrap();
+    support::install();
     let old = Task::spawn(&old_exec).unwrap();
     loop {
         if matches!(
@@ -451,6 +459,7 @@ fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
         .unwrap()
         .resolve(&Variables::default())
         .unwrap();
+    support::install();
     let task = Task::spawn(&exec).unwrap();
     let mut output = String::new();
     loop {
@@ -475,4 +484,95 @@ fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
             .unwrap()
             .contains("exec /bin/sh -c")
     );
+}
+
+#[test]
+fn round19_sustained_output_keeps_ui_polling_progress_with_regex() {
+    support::install();
+    // Full-speed 4 KiB diagnostic lines for three seconds; the same reader,
+    // bounded transport and result snapshots as a user's running build.
+    let source = r#"use Time::HiRes qw(time); $|=1; my $end=time()+3; my $line='fixture.rs:1:1: '.('x' x 4079)."\n"; while(time()<$end) { print $line; } print "TAIL_MARKER\n";"#;
+    let exec = BuildSystem::from_value(
+        "steady",
+        serde_json::json!({
+            "cmd":["/usr/bin/perl","-e",source.replace('$',r"\$")],
+            "file_regex":"^([^:]+):([0-9]+):([0-9]+): (.*)$"
+        }),
+    )
+    .unwrap()
+    .resolve(&Variables::default())
+    .unwrap();
+    let task = Task::spawn(&exec).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut started = None;
+    let mut last = Instant::now();
+    let mut polls = 0;
+    let mut updates = 0;
+    let mut longest = Duration::ZERO;
+    let mut sleep_stall = Duration::ZERO;
+    let mut excluded_sleep = Duration::ZERO;
+    let mut tail = String::new();
+    let mut done = false;
+    let mut errors = 0;
+    while !done {
+        assert!(Instant::now() < deadline);
+        let cadence = Duration::from_millis(16);
+        let sleeping = Instant::now();
+        std::thread::sleep(cadence);
+        // A delayed test thread did not poll the transport. Exclude only sleep
+        // beyond the requested cadence; poll work and missed data polls count.
+        let stall = sleeping.elapsed().saturating_sub(cadence);
+        sleep_stall += stall;
+        excluded_sleep += stall;
+        let mut data = false;
+        for _ in 0..128 {
+            match task.events.try_recv() {
+                Ok(Event::Output { text, .. }) => {
+                    data = true;
+                    tail = text;
+                }
+                Ok(Event::OutputBatch(chunks)) => {
+                    data = true;
+                    tail = chunks.into_iter().map(|(_, t)| t).collect();
+                }
+                Ok(Event::Results(results)) => errors = results.errors,
+                Ok(Event::Finished {
+                    code, cancelled, ..
+                }) => {
+                    assert_eq!(code, Some(0));
+                    assert!(!cancelled);
+                    done = true;
+                    break;
+                }
+                Ok(Event::Error(e)) => panic!("{e}"),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let now = Instant::now();
+        if started.is_some() && !done {
+            polls += 1;
+        }
+        if data {
+            if started.is_some() && !done {
+                updates += 1;
+                longest = longest.max((now - last).saturating_sub(sleep_stall));
+            }
+            started.get_or_insert(now);
+            last = now;
+            sleep_stall = Duration::ZERO;
+        }
+        let _ = task.events.results(usize::MAX);
+    }
+    eprintln!(
+        "steady output: {updates}/{polls} data polls; UI gap {longest:?}; excluded sleep {excluded_sleep:?}; {errors} diagnostics"
+    );
+    assert!(polls >= 100);
+    assert!(updates * 100 >= polls * 90);
+    assert!(longest < Duration::from_millis(50));
+    assert!(tail.ends_with("TAIL_MARKER\n"));
+    assert!(errors > 0);
+    let stats = task.events.stats();
+    assert!(stats.peak_bytes <= 8 * 1024 * 1024);
+    assert_eq!(stats.spill_file_bytes, 0);
 }

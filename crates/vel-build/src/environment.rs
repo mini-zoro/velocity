@@ -128,53 +128,29 @@ pub(crate) fn warm_login_environment() {
         .unwrap_or_else(|e| e.into_inner())
         .prepare(key, &inherited);
 }
-// Test entry points cannot accidentally execute the developer's login profiles.
-// Integration/app harnesses enable test-login through dev-dependencies as cfg(test)
-// alone does not apply to their copy of this library.
+// Injection is explicit runtime state. Cargo feature unification must never choose
+// a fixture for a production binary, including `build --all-targets`.
+static PROVIDER: OnceLock<fn() -> Environment> = OnceLock::new();
+#[doc(hidden)]
+pub fn set_login_capture_provider(provider: fn() -> Environment) {
+    if let Some(installed) = PROVIDER.get() {
+        assert!(
+            std::ptr::fn_addr_eq(*installed, provider),
+            "login provider already installed"
+        );
+    } else if PROVIDER.set(provider).is_err() {
+        assert!(
+            std::ptr::fn_addr_eq(*PROVIDER.get().unwrap(), provider),
+            "login provider already installed"
+        );
+    }
+}
 fn inherited_environment() -> Environment {
-    #[cfg(not(any(test, feature = "test-login")))]
-    {
-        std::env::vars().collect()
-    }
-    #[cfg(any(test, feature = "test-login"))]
-    {
-        static FIXTURE: OnceLock<tempfile::TempDir> = OnceLock::new();
-        let mut env = std::env::vars().collect::<Environment>();
-        let (home, shell) = if let Some(root) = std::env::var_os("VELOCITY_R18_LOGIN_FIXTURE") {
-            // Explicit profile tests run as isolated children, never change the
-            // harness's process environment. Only shells inside that fixture qualify.
-            let root = std::path::PathBuf::from(root);
-            let shell = std::path::PathBuf::from(env.get("SHELL").expect("fixture SHELL"));
-            assert_eq!(env.get("HOME"), Some(&root.to_string_lossy().into_owned()));
-            assert!(shell.starts_with(&root) && shell.is_file());
-            (root, shell)
-        } else {
-            let root = FIXTURE
-                .get_or_init(|| {
-                    let dir = tempfile::tempdir().expect("test login HOME");
-                    let shell = dir.path().join("login-shell");
-                    std::fs::write(&shell, "#!/bin/sh\nexec /bin/sh -c \"$3\"\n")
-                        .expect("fixture shell");
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700))
-                            .unwrap();
-                    }
-                    dir
-                })
-                .path()
-                .to_owned();
-            let shell = root.join("login-shell");
-            (root, shell)
-        };
-        env.insert("HOME".into(), home.to_string_lossy().into_owned());
-        env.insert("SHELL".into(), shell.to_string_lossy().into_owned());
-        env.insert("ZDOTDIR".into(), home.to_string_lossy().into_owned());
-        env.remove("BASH_ENV");
-        env.remove("ENV");
-        env
-    }
+    #[cfg(test)]
+    crate::test_login::install();
+    PROVIDER
+        .get()
+        .map_or_else(|| std::env::vars().collect(), |provider| provider())
 }
 // Build-specific env/path overrides are applied after capture, never part of its identity.
 fn cache_key(inherited: &Environment) -> Environment {

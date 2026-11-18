@@ -520,10 +520,10 @@ impl TabCloseKind {
     /// Maps both existing single-close and custom context resource commands.
     pub fn from_command(name: &str) -> Option<Self> {
         Some(match name {
-            "close" | "close_file" => Self::Current,
-            "close_other_tabs" => Self::Others,
-            "close_tabs_to_right" => Self::ToRight,
-            "close_unmodified_tabs" => Self::Unmodified,
+            "close" | "close_file" | "close_by_index" => Self::Current,
+            "close_other_tabs" | "close_others_by_index" => Self::Others,
+            "close_tabs_to_right" | "close_to_right_by_index" => Self::ToRight,
+            "close_unmodified_tabs" | "close_unmodified" => Self::Unmodified,
             _ => return None,
         })
     }

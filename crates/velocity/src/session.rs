@@ -5,6 +5,69 @@ use std::{
     time::Duration,
 };
 use vel_session::{Document, HotExit, Session, Window, Writer};
+
+/// Checkpoints must preserve documents even when one window's UI state is broken.
+fn repair_window(window: &mut Window, documents: &[Document]) {
+    let docs: BTreeSet<_> = documents.iter().map(|doc| doc.id).collect();
+    let mut ids = BTreeSet::new();
+    let before = window.sheets.len();
+    window
+        .sheets
+        .retain(|sheet| docs.contains(&sheet.document) && ids.insert(sheet.id));
+    let mut repaired = before != window.sheets.len();
+    // Keep documents even if a damaged window lost their last sheet reference.
+    for document in documents {
+        if !window.sheets.iter().any(|s| s.document == document.id) {
+            let id = crate::workbench::next_sheet();
+            ids.insert(id);
+            window.sheets.push(vel_session::Sheet {
+                id,
+                document: document.id,
+                view: Default::default(),
+                syntax: None,
+                transient: false,
+                html: None,
+                settings: None,
+            });
+            repaired = true;
+        }
+    }
+    repaired |= window.workbench.normalize(&ids);
+    if !window.sidebar_scroll.is_finite() || window.sidebar_scroll < 0. {
+        window.sidebar_scroll = 0.;
+        repaired = true;
+    }
+    let valid = Session {
+        windows: vec![window.clone()],
+        documents: documents.to_vec(),
+        ..Default::default()
+    }
+    .validate();
+    if let Err(error) = valid {
+        // Last resort: retain all document histories, discard only window layout
+        // and view metadata. A bad layout must never prevent saving dirty text.
+        eprintln!("Saving Hot Exit documents without window layout: {error}");
+        window.workbench = Default::default();
+        for sheet in &mut window.sheets {
+            sheet.view = Default::default();
+            if sheet
+                .html
+                .as_ref()
+                .is_some_and(|h| h.contents.len() > 4 * 1024 * 1024 || h.name.len() > 4096)
+            {
+                sheet.html = None;
+            }
+            window.workbench.groups[0].add(sheet.id, false);
+        }
+        repaired = true;
+    }
+    if repaired {
+        eprintln!(
+            "Repaired session window; retained {} documents",
+            documents.len()
+        );
+    }
+}
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
     pub hot: HotExit,
@@ -15,6 +78,7 @@ pub struct Policy {
 #[derive(Debug)]
 pub struct Sessions {
     pub restored: Session,
+    pub(crate) original: Option<std::sync::Arc<crate::session_restore::Original>>,
     pub instance: Option<crate::instance::Instance>,
     pub active_window: Option<u64>,
     recent: [Vec<PathBuf>; 3],
@@ -33,6 +97,8 @@ impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
         let path = data.map(|p| p.join("Sessions/Session.sublime-session"));
         let recovery = path.as_deref().map(vel_session::load).unwrap_or_default();
+        // Every recovered window owns the launch snapshot independently of cache eviction.
+        let original = path.as_deref().and_then(crate::session_restore::original);
         let mut messages = recovery.messages;
         let writer = path.and_then(|p| match Writer::new(p, Duration::from_millis(400)) {
             Ok(w) => Some(w),
@@ -43,6 +109,7 @@ impl Sessions {
         });
         Self {
             restored: recovery.session,
+            original,
             instance: None,
             active_window: None,
             recent: Default::default(),
@@ -129,13 +196,14 @@ impl Sessions {
     pub fn publish(
         &mut self,
         id: u64,
-        window: Window,
+        mut window: Window,
         documents: Vec<Document>,
         recent: [Vec<PathBuf>; 3],
         policy: Policy,
     ) -> Result<(), String> {
         self.hot = policy.hot;
         self.remember = policy.remember;
+        repair_window(&mut window, &documents);
         self.windows.insert(id, (window.clone(), documents.clone()));
         let heads = std::array::from_fn(|index| recent[index].first().cloned());
         let previous = self.recent_heads.insert(id, heads);
@@ -194,8 +262,35 @@ impl Sessions {
     fn collect(&self, recent: [Vec<PathBuf>; 3]) -> Session {
         let mut docs = BTreeMap::new();
         let mut windows = Vec::new();
+        let mut sheets = BTreeSet::new();
         for (window, documents) in self.windows.values().chain(self.closed.iter()) {
-            windows.push(window.clone());
+            let mut window = window.clone();
+            repair_window(&mut window, documents);
+            for sheet in &mut window.sheets {
+                if !sheets.insert(sheet.id) {
+                    let old = sheet.id;
+                    sheet.id = crate::workbench::next_sheet();
+                    sheets.insert(sheet.id);
+                    for group in &mut window.workbench.groups {
+                        for id in &mut group.sheets {
+                            if *id == old {
+                                *id = sheet.id;
+                            }
+                        }
+                        if group.selected.remove(&old) {
+                            group.selected.insert(sheet.id);
+                        }
+                        if group.focused == Some(old) {
+                            group.focused = Some(sheet.id);
+                        }
+                        if group.anchor == Some(old) {
+                            group.anchor = Some(sheet.id);
+                        }
+                    }
+                    eprintln!("Repaired duplicate sheet identity in session window");
+                }
+            }
+            windows.push(window);
             for document in documents {
                 docs.insert(document.id, document.clone());
             }
@@ -293,6 +388,44 @@ mod tests {
             .run("insert", &vel_config::json!({"characters":text}))
             .unwrap();
         workspace.snapshot().unwrap()
+    }
+    #[test]
+    fn r19_checkpoint_repairs_previous_window_without_blocking_next_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sessions = Sessions::new(Some(dir.path()));
+        let first = sessions.register();
+        let second = sessions.register();
+        let policy = Policy {
+            hot: HotExit::Always,
+            quitting: true,
+            remember: true,
+            closing: false,
+        };
+        let (window, documents) = snapshot_text("first dirty");
+        sessions
+            .publish(first, window, documents, Default::default(), policy)
+            .unwrap();
+        let (mut next, documents) = snapshot_text("second dirty");
+        let (bad, _) = sessions.windows.get_mut(&first).unwrap();
+        bad.workbench.groups[0].focused = None;
+        bad.workbench.groups[0].selected.insert(u64::MAX);
+        bad.workbench.groups[0].sheets.push(u64::MAX);
+        bad.sheets[0].view.scroll.0 = f64::NAN;
+        // Even cross-window sheet identity damage cannot poison a valid publish.
+        let old = next.sheets[0].id;
+        next.sheets[0].id = bad.sheets[0].id;
+        next.workbench.groups[0].remove(old);
+        next.workbench.groups[0].add(next.sheets[0].id, false);
+        sessions
+            .publish(second, next, documents, Default::default(), policy)
+            .unwrap();
+        sessions.flush().unwrap();
+        let recovered = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
+        assert!(recovered.messages.is_empty(), "{:?}", recovered.messages);
+        recovered.session.validate().unwrap();
+        assert_eq!(recovered.session.windows.len(), 2);
+        assert_eq!(recovered.session.documents.len(), 2);
+        assert!(sessions.messages.is_empty());
     }
     #[test]
     fn recovered_reservations_preserve_other_dirty_windows_during_first_publish() {

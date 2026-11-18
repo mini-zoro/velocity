@@ -61,6 +61,7 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
             history,
         });
         sheets.push(Sheet {
+            settings: None,
             html: None,
             id,
             document: id,

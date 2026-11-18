@@ -35,9 +35,84 @@ pub struct OutputStats {
     /// Retained result text/path/record bytes; at most sixteen MiB.
     pub diagnostic_bytes: usize,
 }
+// The reader serializes parser state separately from the UI mailbox. Every
+// publication is a pipe-sized batch; no regex, text scan, trim/copy or destruction
+// of a discarded backlog runs under the mailbox lock.
+#[derive(Debug)]
+struct Chunk {
+    stream: Stream,
+    text: String,
+    start: usize,
+    lines: usize,
+    first_lf: Option<usize>,
+    ends_lf: bool,
+}
+impl Chunk {
+    fn new(stream: Stream, text: String) -> Self {
+        let lines = text.bytes().filter(|b| *b == b'\n').count();
+        let first_lf = text.find('\n');
+        let ends_lf = text.ends_with('\n');
+        Self {
+            stream,
+            text,
+            start: 0,
+            lines,
+            first_lf,
+            ends_lf,
+        }
+    }
+    fn len(&self) -> usize {
+        self.text.len() - self.start
+    }
+    fn into_output(mut self) -> (Stream, String) {
+        if self.start > 0 {
+            self.text.drain(..self.start);
+        }
+        (self.stream, self.text)
+    }
+}
+#[derive(Debug)]
+struct Parsing {
+    parser: ResultParser,
+    pending: String,
+    seen: usize,
+    errors: usize,
+}
+impl Parsing {
+    fn parse(&mut self, text: &str, finish: bool) -> Vec<(Arc<Diagnostic>, usize)> {
+        self.seen += text.len();
+        let mut diagnostics = Vec::new();
+        for piece in text.split_inclusive('\n') {
+            self.pending.push_str(piece);
+            if self.pending.len() > 1024 * 1024 {
+                let cut = self
+                    .pending
+                    .ceil_char_boundary(self.pending.len() - 1024 * 1024);
+                self.pending.drain(..cut);
+            }
+            if piece.ends_with('\n') {
+                self.line(&mut diagnostics);
+            }
+        }
+        if finish && !self.pending.is_empty() {
+            self.line(&mut diagnostics);
+        }
+        diagnostics
+    }
+    fn line(&mut self, diagnostics: &mut Vec<(Arc<Diagnostic>, usize)>) {
+        if let Some(diagnostic) = self.parser.parse(&self.pending) {
+            self.errors += 1;
+            diagnostics.push((Arc::new(diagnostic), self.seen));
+        }
+        self.pending.clear();
+    }
+}
+fn diagnostic_bytes(d: &Diagnostic) -> usize {
+    d.message.len() + d.path.as_os_str().len() + std::mem::size_of::<Diagnostic>()
+}
 #[derive(Debug)]
 struct State {
-    chunks: VecDeque<(Stream, String)>,
+    chunks: VecDeque<Chunk>,
     messages: VecDeque<Event>,
     bytes: usize,
     peak: usize,
@@ -50,166 +125,159 @@ struct State {
     results_delivered: bool,
     senders: usize,
     closed: bool,
-    parser: ResultParser,
-    pending: String,
     errors: usize,
-    diagnostics: VecDeque<(Diagnostic, usize)>,
+    diagnostics: VecDeque<(Arc<Diagnostic>, usize)>,
     diagnostic_bytes: usize,
-    seen: usize,
+}
+// Moving ownership out of the mailbox keeps text trimming, diagnostics cloning
+// and freeing a cancelled/evicted backlog off its short critical section.
+enum Delivery {
+    Event(Event),
+    Output(Chunk),
+    Batch(VecDeque<Chunk>),
+    Results(usize, VecDeque<(Arc<Diagnostic>, usize)>),
+    Cancel(usize, VecDeque<Chunk>, VecDeque<(Arc<Diagnostic>, usize)>),
+}
+impl Delivery {
+    fn event(self) -> Event {
+        match self {
+            Self::Event(event) => event,
+            Self::Output(chunk) => {
+                let (stream, text) = chunk.into_output();
+                Event::Output { stream, text }
+            }
+            Self::Batch(chunks) => {
+                Event::OutputBatch(chunks.into_iter().map(Chunk::into_output).collect())
+            }
+            Self::Results(errors, diagnostics) => Event::Results(Results {
+                reset: true,
+                errors,
+                diagnostics: diagnostics
+                    .into_iter()
+                    .map(|(d, _)| Arc::unwrap_or_clone(d))
+                    .collect(),
+            }),
+            Self::Cancel(errors, chunks, diagnostics) => {
+                drop((chunks, diagnostics));
+                Event::Results(Results {
+                    reset: false,
+                    errors,
+                    diagnostics: vec![],
+                })
+            }
+        }
+    }
 }
 impl State {
-    fn parse(&mut self, text: &str) {
-        self.seen += text.len();
-        for piece in text.split_inclusive('\n') {
-            self.pending.push_str(piece);
-            if self.pending.len() > 1024 * 1024 {
-                let cut = self
-                    .pending
-                    .ceil_char_boundary(self.pending.len() - 1024 * 1024);
-                self.pending.drain(..cut);
-            }
-            if piece.ends_with('\n') {
-                self.parse_pending();
-            }
-        }
-        while self
-            .diagnostics
-            .front()
-            .is_some_and(|(_, at)| self.seen.saturating_sub(*at) > LIMIT)
-        {
-            self.pop_diagnostic();
-        }
-    }
-    fn parse_pending(&mut self) {
-        if let Some(diagnostic) = self.parser.parse(&self.pending) {
-            self.errors += 1;
-            self.diagnostic_bytes += diagnostic.message.len()
-                + diagnostic.path.as_os_str().len()
-                + std::mem::size_of::<Diagnostic>();
-            self.diagnostics.push_back((diagnostic, self.seen));
-            while self.diagnostics.len() > 32_768 || self.diagnostic_bytes > LIMIT * 2 {
-                self.pop_diagnostic();
-            }
-        }
-        self.pending.clear();
-    }
-    fn pop_diagnostic(&mut self) {
-        if let Some((diagnostic, _)) = self.diagnostics.pop_front() {
-            self.diagnostic_bytes -= diagnostic.message.len()
-                + diagnostic.path.as_os_str().len()
-                + std::mem::size_of::<Diagnostic>();
-        }
-    }
-    fn discard(&mut self, text: &str) {
-        self.dropped += text.len();
-        self.row += text.matches('\n').count();
+    fn discard(&mut self, chunk: &Chunk) {
+        self.dropped += chunk.len();
+        self.row += chunk.lines;
         self.reset = true;
     }
-    fn trim(&mut self) {
-        if self.bytes <= LIMIT {
-            return;
-        }
-        while self.bytes > KEEP {
-            let (stream, mut text) = self.chunks.pop_front().expect("queued bytes");
-            self.bytes -= text.len();
-            if self.bytes < KEEP {
-                let cut = text.len().saturating_sub(KEEP.saturating_sub(self.bytes));
-                if let Some(lf) = text.as_bytes()[cut..].iter().position(|b| *b == b'\n') {
-                    let cut = cut + lf + 1;
-                    self.discard(&text[..cut]);
-                    text.drain(..cut);
-                    self.bytes += text.len();
-                    self.chunks.push_front((stream, text));
-                    self.partial = false;
-                    break;
-                }
-            }
-            self.partial = !text.ends_with('\n');
-            self.discard(&text);
-        }
-        // The next retained row must start at a line boundary, including when a
-        // single pathological line spans multiple reads or exceeds the whole limit.
-        while self.partial {
-            let Some((stream, mut text)) = self.chunks.pop_front() else {
-                break;
-            };
-            self.bytes -= text.len();
-            if let Some(lf) = text.find('\n') {
-                self.discard(&text[..lf + 1]);
-                text.drain(..lf + 1);
-                self.bytes += text.len();
-                self.chunks.push_front((stream, text));
+    fn publish(&mut self, mut chunk: Chunk, retired: &mut Vec<Chunk>) {
+        if self.partial {
+            if let Some(lf) = chunk.first_lf {
+                self.dropped += lf + 1;
+                self.row += 1;
+                self.reset = true;
+                chunk.start = lf + 1;
+                chunk.lines -= 1;
                 self.partial = false;
             } else {
-                self.discard(&text);
+                self.discard(&chunk);
+                retired.push(chunk);
+                return;
             }
         }
-    }
-    fn take_results(&mut self) -> Results {
-        self.diagnostic_bytes = 0;
-        Results {
-            reset: true,
-            errors: self.errors,
-            diagnostics: self.diagnostics.drain(..).map(|(d, _)| d).collect(),
+        if chunk.len() > 0 {
+            self.bytes += chunk.len();
+            self.chunks.push_back(chunk);
         }
+        if self.bytes > LIMIT {
+            while self.bytes > KEEP {
+                let chunk = self.chunks.pop_front().expect("queued bytes");
+                self.bytes -= chunk.len();
+                self.partial = !chunk.ends_lf;
+                self.discard(&chunk);
+                retired.push(chunk);
+            }
+            while self.partial {
+                let Some(mut chunk) = self.chunks.pop_front() else {
+                    break;
+                };
+                self.bytes -= chunk.len();
+                if let Some(lf) = chunk.first_lf.filter(|lf| *lf >= chunk.start) {
+                    self.dropped += lf + 1 - chunk.start;
+                    self.row += 1;
+                    self.reset = true;
+                    chunk.start = lf + 1;
+                    chunk.lines -= 1;
+                    self.bytes += chunk.len();
+                    self.chunks.push_front(chunk);
+                    self.partial = false;
+                } else {
+                    self.discard(&chunk);
+                    retired.push(chunk);
+                }
+            }
+        }
+        self.peak = self.peak.max(self.bytes);
     }
-    fn next(&mut self, cancel: bool, started: Instant) -> Result<Event, TryRecvError> {
+    fn next(&mut self, cancel: bool, started: Instant) -> Result<Delivery, TryRecvError> {
         if cancel && !self.cancelled_delivered {
-            self.chunks.clear();
             self.bytes = 0;
             self.messages.clear();
             self.finished = None;
             if !self.results_delivered {
                 self.results_delivered = true;
-                self.diagnostics.clear();
                 self.diagnostic_bytes = 0;
-                return Ok(Event::Results(Results {
-                    reset: false,
-                    errors: self.errors,
-                    diagnostics: vec![],
-                }));
+                return Ok(Delivery::Cancel(
+                    self.errors,
+                    std::mem::take(&mut self.chunks),
+                    std::mem::take(&mut self.diagnostics),
+                ));
             }
             self.cancelled_delivered = true;
-            return Ok(Event::Finished {
+            return Ok(Delivery::Event(Event::Finished {
                 code: None,
                 signal: None,
                 cancelled: true,
                 elapsed: started.elapsed(),
-            });
+            }));
         }
         if self.cancelled_delivered {
             return Err(TryRecvError::Disconnected);
         }
         if self.reset {
             self.reset = false;
-            return Ok(Event::Truncated {
+            return Ok(Delivery::Event(Event::Truncated {
                 bytes: self.dropped,
                 first_line: self.row,
-            });
+            }));
         }
         if let Some(event) = self.messages.pop_front() {
-            return Ok(event);
+            return Ok(Delivery::Event(event));
         }
         if self.finished.is_some() && self.bytes > 65536 {
-            self.row += self
-                .chunks
-                .iter()
-                .map(|(_, text)| text.matches('\n').count())
-                .sum::<usize>();
+            self.row += self.chunks.iter().map(|c| c.lines).sum::<usize>();
             self.bytes = 0;
-            return Ok(Event::OutputBatch(self.chunks.drain(..).collect()));
+            return Ok(Delivery::Batch(std::mem::take(&mut self.chunks)));
         }
-        if let Some((stream, text)) = self.chunks.pop_front() {
-            self.bytes -= text.len();
-            self.row += text.matches('\n').count();
-            return Ok(Event::Output { stream, text });
+        if let Some(chunk) = self.chunks.pop_front() {
+            self.bytes -= chunk.len();
+            self.row += chunk.lines;
+            return Ok(Delivery::Output(chunk));
         }
         if self.finished.is_some() && !self.results_delivered {
             self.results_delivered = true;
-            return Ok(Event::Results(self.take_results()));
+            self.diagnostic_bytes = 0;
+            return Ok(Delivery::Results(
+                self.errors,
+                std::mem::take(&mut self.diagnostics),
+            ));
         }
         if let Some(event) = self.finished.take() {
-            return Ok(event);
+            return Ok(Delivery::Event(event));
         }
         Err(if self.senders == 0 {
             TryRecvError::Disconnected
@@ -221,6 +289,7 @@ impl State {
 #[derive(Debug)]
 struct Shared {
     state: Mutex<State>,
+    parsing: Mutex<Parsing>,
     ready: Condvar,
     done: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -242,52 +311,59 @@ impl Drop for Sender {
 }
 impl Sender {
     pub(crate) fn send(&self, event: Event) -> bool {
-        let mut s = self.0.state.lock().unwrap();
-        if s.closed || self.0.cancel.load(Ordering::Acquire) {
+        if self.0.cancel.load(Ordering::Acquire) {
             if matches!(event, Event::Finished { .. }) {
                 self.0.done.store(true, Ordering::Release);
             }
             return false;
         }
-        match event {
+        // Only producers acquire this mutex. Holding it until publication preserves
+        // stdout/stderr order and parser row coordinates without blocking the UI.
+        let mut parsing = self.0.parsing.lock().unwrap();
+        let (chunk, diagnostics, event) = match event {
             Event::Output { stream, text } => {
-                s.parse(&text);
-                let displayed = if s.partial {
-                    if let Some(lf) = text.find('\n') {
-                        s.discard(&text[..lf + 1]);
-                        s.partial = false;
-                        &text[lf + 1..]
-                    } else {
-                        s.discard(&text);
-                        ""
-                    }
-                } else {
-                    &text
-                };
-                if !displayed.is_empty() {
-                    s.bytes += displayed.len();
-                    if let Some((previous, tail)) = s.chunks.back_mut()
-                        && *previous == stream
-                        && tail.len() + displayed.len() <= 65536
-                    {
-                        tail.push_str(displayed);
-                    } else {
-                        s.chunks.push_back((stream, displayed.to_owned()));
-                    }
-                    s.trim();
-                    s.peak = s.peak.max(s.bytes);
-                }
+                let diagnostics = parsing.parse(&text, false);
+                (Some(Chunk::new(stream, text)), diagnostics, None)
             }
-            event @ Event::Finished { .. } => {
-                if !s.pending.is_empty() {
-                    s.parse_pending();
-                }
+            event @ Event::Finished { .. } => (None, parsing.parse("", true), Some(event)),
+            event => (None, vec![], Some(event)),
+        };
+        let mut retired = Vec::new();
+        let mut retired_diagnostics = Vec::new();
+        let mut s = self.0.state.lock().unwrap();
+        if s.closed || self.0.cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        s.errors = parsing.errors;
+        for (d, at) in diagnostics {
+            s.diagnostic_bytes += diagnostic_bytes(&d);
+            s.diagnostics.push_back((d, at));
+        }
+        while s
+            .diagnostics
+            .front()
+            .is_some_and(|(_, at)| parsing.seen.saturating_sub(*at) > LIMIT)
+            || s.diagnostics.len() > 32_768
+            || s.diagnostic_bytes > LIMIT * 2
+        {
+            let (d, _) = s.diagnostics.pop_front().expect("retained diagnostics");
+            s.diagnostic_bytes -= diagnostic_bytes(&d);
+            retired_diagnostics.push(d);
+        }
+        if let Some(chunk) = chunk {
+            s.publish(chunk, &mut retired);
+        }
+        if let Some(event) = event {
+            if matches!(event, Event::Finished { .. }) {
                 s.finished = Some(event);
                 self.0.done.store(true, Ordering::Release);
+            } else {
+                s.messages.push_back(event);
             }
-            event => s.messages.push_back(event),
         }
+        drop(s);
         self.0.ready.notify_all();
+        drop((retired, retired_diagnostics));
         true
     }
 }
@@ -299,19 +375,20 @@ pub struct Events {
     reported_errors: AtomicUsize,
 }
 impl Events {
-    /// Receives ready output without blocking the UI on a producer.
-    pub fn try_recv(&self) -> Result<Event, TryRecvError> {
-        let Ok(mut s) = self.shared.state.try_lock() else {
-            return Err(TryRecvError::Empty);
-        };
-        let event = s.next(
-            self.shared.cancel.load(Ordering::Acquire),
-            self.shared.started,
-        );
-        if let Ok(Event::Truncated { first_line, .. }) = &event {
+    fn delivered(&self, delivery: Delivery) -> Event {
+        let event = delivery.event();
+        if let Event::Truncated { first_line, .. } = &event {
             self.next_result_row.store(*first_line, Ordering::Relaxed);
         }
         event
+    }
+    /// Receives ready output without waiting for parsing or treating publication as no data.
+    pub fn try_recv(&self) -> Result<Event, TryRecvError> {
+        let delivery = self.shared.state.lock().unwrap().next(
+            self.shared.cancel.load(Ordering::Acquire),
+            self.shared.started,
+        )?;
+        Ok(self.delivered(delivery))
     }
     /// Waits for output on worker/test callers.
     pub fn recv_timeout(&self, duration: Duration) -> Result<Event, RecvTimeoutError> {
@@ -322,11 +399,9 @@ impl Events {
                 self.shared.cancel.load(Ordering::Acquire),
                 self.shared.started,
             ) {
-                Ok(event) => {
-                    if let Event::Truncated { first_line, .. } = &event {
-                        self.next_result_row.store(*first_line, Ordering::Relaxed);
-                    }
-                    return Ok(event);
+                Ok(delivery) => {
+                    drop(s);
+                    return Ok(self.delivered(delivery));
                 }
                 Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
                 Err(TryRecvError::Empty) => {}
@@ -344,15 +419,14 @@ impl Events {
         }
     }
     /// At most 256 newly parsed diagnostics through the displayed complete rows.
-    /// Completion moves one final retained snapshot into the event stream instead.
     pub fn results(&self, through_row: usize) -> Option<Results> {
-        let s = self.shared.state.try_lock().ok()?;
+        let s = self.shared.state.lock().unwrap();
         if s.results_delivered {
             return None;
         }
         let row = self.next_result_row.load(Ordering::Relaxed);
         let first = s.diagnostics.partition_point(|(d, _)| d.output_line < row);
-        let diagnostics = s
+        let retained = s
             .diagnostics
             .iter()
             .skip(first)
@@ -360,17 +434,23 @@ impl Events {
             .take(256)
             .map(|(d, _)| d.clone())
             .collect::<Vec<_>>();
+        let errors = s.errors;
+        drop(s);
+        let diagnostics = retained
+            .into_iter()
+            .map(|d| (*d).clone())
+            .collect::<Vec<_>>();
         if let Some(last) = diagnostics.last() {
             self.next_result_row
                 .store(last.output_line + 1, Ordering::Relaxed);
         }
-        if diagnostics.is_empty() && self.reported_errors.load(Ordering::Relaxed) == s.errors {
+        if diagnostics.is_empty() && self.reported_errors.load(Ordering::Relaxed) == errors {
             return None;
         }
-        self.reported_errors.store(s.errors, Ordering::Relaxed);
+        self.reported_errors.store(errors, Ordering::Relaxed);
         Some(Results {
             reset: false,
-            errors: s.errors,
+            errors,
             diagnostics,
         })
     }
@@ -412,12 +492,15 @@ pub(crate) fn channel(
             results_delivered: false,
             senders: 1,
             closed: false,
-            parser,
-            pending: String::new(),
             errors: 0,
             diagnostics: VecDeque::new(),
             diagnostic_bytes: 0,
+        }),
+        parsing: Mutex::new(Parsing {
+            parser,
+            pending: String::new(),
             seen: 0,
+            errors: 0,
         }),
         ready: Condvar::new(),
         done,

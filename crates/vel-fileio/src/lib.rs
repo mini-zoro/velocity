@@ -1,8 +1,9 @@
 //! Encoding-aware streaming IO, atomic saves and parent-directory file watching.
 #![forbid(unsafe_code)]
 mod progressive;
+pub mod regular;
 use encoding_rs::{CoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
-pub use progressive::{LoadTask, content_kind, load_background};
+pub use progressive::{LoadTask, content_kind, load_background, with_cancellation};
 use std::{
     fs::{self, File},
     io::{self, BufReader, BufWriter, Read, Write},
@@ -182,7 +183,7 @@ pub struct Loaded {
 /// Decodes with an explicit codec for Reopen with Encoding, preserving the line convention.
 pub fn load_with_encoding(path: &Path, name: &str) -> Result<Loaded, String> {
     let codec = encoding(name)?;
-    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = regular::read(path)?;
     let total = file
         .metadata()
         .map_err(|e| format!("{}: {e}", path.display()))?
@@ -240,7 +241,9 @@ fn load_cancellable(
     progress: &mut dyn FnMut(Progress),
     cancel: Option<&vel_largefile::Cancellation>,
 ) -> Result<Loaded, String> {
-    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let scoped = progressive::current_cancellation();
+    let cancel = cancel.or(scoped.as_ref());
+    let file = regular::read(path)?;
     let total = file.metadata().map_err(|e| e.to_string())?.len();
     let mut prefix = [0; 8192];
     let n = BufReader::new(&file)
@@ -262,7 +265,7 @@ fn load_cancellable(
                    skip: usize,
                    progress: &mut dyn FnMut(Progress)|
      -> Result<(Text, LineEnding), String> {
-        let mut file = File::open(path).map_err(|e| e.to_string())?;
+        let mut file = regular::read(path)?;
         let mut ignored = vec![0; skip];
         file.read_exact(&mut ignored).map_err(|e| e.to_string())?;
         let mut reader = DecodeReader::new(
@@ -694,7 +697,7 @@ pub fn save(path: &Path, text: &Text, format: &Format, atomic: bool) -> Result<(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let existing = fs::metadata(&target).ok();
+    let existing = regular::metadata(&target, true)?;
     let in_place = match &existing {
         None => true,
         Some(metadata) => !atomic || rename_would_lose(&target, metadata),
@@ -704,11 +707,8 @@ pub fn save(path: &Path, text: &Text, format: &Format, atomic: bool) -> Result<(
         if codec != UTF_8 && codec != UTF_16LE && codec != UTF_16BE {
             write_encoded(&mut io::sink(), text, format, codec)?;
         }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
-        let file = options.open(&target).map_err(error)?;
+        let file = regular::write(&target)?;
+        file.set_len(0).map_err(error)?;
         let mut writer = BufWriter::with_capacity(256 * 1024, &file);
         write_encoded(&mut writer, text, format, codec)?;
         drop(writer);
@@ -724,6 +724,7 @@ pub fn save(path: &Path, text: &Text, format: &Format, atomic: bool) -> Result<(
         write_encoded(&mut writer, text, format, codec)?;
         drop(writer);
         temp.as_file().sync_all().map_err(error)?;
+        regular::metadata(&target, true)?;
         temp.persist(&target).map_err(|e| error(e.error))?;
     }
     #[cfg(unix)]

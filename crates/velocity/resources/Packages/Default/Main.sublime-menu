@@ -1,3 +1,5 @@
+// Settings: https://www.sublimetext.com/docs/settings.html
+// Groups/line endings: https://docs.sublimetext.io/reference/commands.html
 // Original Velocity captions, authored from public command behavior.
 [
   {
@@ -118,6 +120,8 @@
         "caption": "Close File",
         "command": "close_file"
       },
+      {"caption":"Close All Files","command":"close_all"},
+      {"caption":"Split View","command":"split_view"},
       {
         "caption": "New Window",
         "command": "new_window"
@@ -658,21 +662,58 @@
     "caption": "View",
     "id": "view",
     "children": [
-      {"caption":"Preferences","children":[
-        {"caption":"Color Scheme…","command":"select_color_scheme"},
-        {"caption":"Theme…","command":"select_theme"}
-      ]},
-      // Public command arguments: https://www.sublimetext.com/docs/indentation.html
-      { "caption": "Indentation", "children": [
-        { "caption": "Convert Indentation to Spaces", "command": "expand_tabs", "args": {"set_translate_tabs": true} },
-        { "caption": "Convert Indentation to Tabs", "command": "unexpand_tabs", "args": {"set_translate_tabs": true} },
-        { "caption": "Guess Settings from Buffer", "command": "detect_indentation" }
-      ] },
-      { "caption": "Minimap", "command": "toggle_minimap" },
-      { "caption": "Side Bar", "command": "toggle_side_bar" },
-      { "caption": "Tabs", "command": "toggle_tabs" },
-      { "caption": "Status Bar", "command": "toggle_status_bar" },
-
+      {
+        "caption": "Preferences",
+        "children": [
+          {
+            "caption": "Color Scheme…",
+            "command": "select_color_scheme"
+          },
+          {
+            "caption": "Theme…",
+            "command": "select_theme"
+          }
+        ]
+      },
+      {
+        "caption": "Indentation",
+        "children": [
+          {
+            "caption": "Convert Indentation to Spaces",
+            "command": "expand_tabs",
+            "args": {
+              "set_translate_tabs": true
+            }
+          },
+          {
+            "caption": "Convert Indentation to Tabs",
+            "command": "unexpand_tabs",
+            "args": {
+              "set_translate_tabs": true
+            }
+          },
+          {
+            "caption": "Guess Settings from Buffer",
+            "command": "detect_indentation"
+          }
+        ]
+      },
+      {
+        "caption": "Minimap",
+        "command": "toggle_minimap"
+      },
+      {
+        "caption": "Side Bar",
+        "command": "toggle_side_bar"
+      },
+      {
+        "caption": "Tabs",
+        "command": "toggle_tabs"
+      },
+      {
+        "caption": "Status Bar",
+        "command": "toggle_status_bar"
+      },
       {
         "caption": "Next Tab",
         "command": "next_view"
@@ -802,6 +843,41 @@
             "args": {
               "group": 3
             }
+          },
+          {
+            "caption": "5",
+            "command": "move_to_group",
+            "args": {
+              "group": 4
+            }
+          },
+          {
+            "caption": "6",
+            "command": "move_to_group",
+            "args": {
+              "group": 5
+            }
+          },
+          {
+            "caption": "7",
+            "command": "move_to_group",
+            "args": {
+              "group": 6
+            }
+          },
+          {
+            "caption": "8",
+            "command": "move_to_group",
+            "args": {
+              "group": 7
+            }
+          },
+          {
+            "caption": "9",
+            "command": "move_to_group",
+            "args": {
+              "group": 8
+            }
           }
         ]
       },
@@ -835,15 +911,47 @@
             "args": {
               "group": 3
             }
+          },
+          {
+            "caption": "5",
+            "command": "focus_group",
+            "args": {
+              "group": 4
+            }
+          },
+          {
+            "caption": "6",
+            "command": "focus_group",
+            "args": {
+              "group": 5
+            }
+          },
+          {
+            "caption": "7",
+            "command": "focus_group",
+            "args": {
+              "group": 6
+            }
+          },
+          {
+            "caption": "8",
+            "command": "focus_group",
+            "args": {
+              "group": 7
+            }
+          },
+          {
+            "caption": "9",
+            "command": "focus_group",
+            "args": {
+              "group": 8
+            }
           }
         ]
       },
       {
         "caption": "New Pane",
-        "command": "new_pane",
-        "args": {
-          "direction": "right"
-        }
+        "command": "new_pane"
       },
       {
         "caption": "Close Pane",
@@ -871,6 +979,165 @@
       {
         "caption": "Dictionary…",
         "command": "show_dictionary"
+      },
+      {
+        "caption": "Line Endings",
+        "children": [
+          {
+            "caption": "Windows",
+            "command": "set_line_ending",
+            "args": {
+              "type": "windows"
+            }
+          },
+          {
+            "caption": "Unix",
+            "command": "set_line_ending",
+            "args": {
+              "type": "unix"
+            }
+          },
+          {
+            "caption": "Mac OS 9",
+            "command": "set_line_ending",
+            "args": {
+              "type": "cr"
+            }
+          }
+        ]
+      },
+      {
+        "caption": "Groups",
+        "children": [
+          {
+            "caption": "New Group",
+            "command": "new_pane"
+          },
+          {
+            "caption": "New Empty Group",
+            "command": "new_pane",
+            "args": {
+              "move": false
+            }
+          },
+          {
+            "caption": "Close Group",
+            "command": "close_pane"
+          },
+          {
+            "caption": "Focus Neighboring Group",
+            "children": [
+              {
+                "caption": "Left",
+                "command": "focus_neighboring_group",
+                "args": {
+                  "direction": "left"
+                }
+              },
+              {
+                "caption": "Right",
+                "command": "focus_neighboring_group",
+                "args": {
+                  "direction": "right"
+                }
+              },
+              {
+                "caption": "Up",
+                "command": "focus_neighboring_group",
+                "args": {
+                  "direction": "up"
+                }
+              },
+              {
+                "caption": "Down",
+                "command": "focus_neighboring_group",
+                "args": {
+                  "direction": "down"
+                }
+              }
+            ]
+          },
+          {
+            "caption": "Move Selection Neighboring Group",
+            "children": [
+              {
+                "caption": "Left",
+                "command": "move_to_neighboring_group",
+                "args": {
+                  "direction": "left"
+                }
+              },
+              {
+                "caption": "Right",
+                "command": "move_to_neighboring_group",
+                "args": {
+                  "direction": "right"
+                }
+              },
+              {
+                "caption": "Up",
+                "command": "move_to_neighboring_group",
+                "args": {
+                  "direction": "up"
+                }
+              },
+              {
+                "caption": "Down",
+                "command": "move_to_neighboring_group",
+                "args": {
+                  "direction": "down"
+                }
+              }
+            ]
+          },
+          {
+            "caption": "Max Columns",
+            "children": [
+              {
+                "caption": "1",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 1
+                }
+              },
+              {
+                "caption": "2",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 2
+                }
+              },
+              {
+                "caption": "3",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 3
+                }
+              },
+              {
+                "caption": "4",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 4
+                }
+              },
+              {
+                "caption": "5",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 5
+                }
+              },
+              {
+                "caption": "6",
+                "command": "set_max_columns",
+                "args": {
+                  "columns": 6
+                }
+              }
+            ]
+          }
+        ]
       }
     ]
   },
@@ -985,6 +1252,87 @@
       {
         "caption": "Indexing Status",
         "command": "show_indexing_status"
+      }
+    ]
+  },
+  {
+    "caption": "Preferences",
+    "children": [
+      {
+        "caption": "Settings…",
+        "command": "edit_settings",
+        "args": {
+          "base_file": "${packages}/Default/Preferences.sublime-settings",
+          "default": "{\n\t$0\n}\n"
+        }
+      },
+      {
+        "caption": "Key Bindings",
+        "command": "edit_settings",
+        "args": {
+          "base_file": "${packages}/Default/Velocity.sublime-keymap",
+          "default": "[\n\t$0\n]\n"
+        }
+      },
+      {
+        "caption": "Mouse Bindings",
+        "command": "edit_settings",
+        "args": {
+          "base_file": "${packages}/Default/Velocity.sublime-mousemap",
+          "default": "[\n\t$0\n]\n"
+        }
+      },
+      {
+        "caption": "Settings – Syntax Specific",
+        "command": "edit_syntax_settings"
+      },
+      {
+        "caption": "Settings – Distraction Free",
+        "command": "edit_settings",
+        "args": {
+          "base_file": "${packages}/Default/Distraction Free.sublime-settings",
+          "default": "{\n\t$0\n}\n"
+        }
+      },
+      {
+        "caption": "Color Scheme…",
+        "command": "select_color_scheme"
+      },
+      {
+        "caption": "Theme…",
+        "command": "select_theme"
+      },
+      {
+        "caption": "Customize Color Scheme",
+        "command": "customize_color_scheme"
+      },
+      {
+        "caption": "Customize Theme",
+        "command": "customize_theme"
+      },
+      {
+        "caption": "Font",
+        "children": [
+          {
+            "caption": "Larger",
+            "command": "increase_font_size"
+          },
+          {
+            "caption": "Smaller",
+            "command": "decrease_font_size"
+          },
+          {
+            "caption": "Reset",
+            "command": "reset_font_size"
+          }
+        ]
+      },
+      {
+        "caption": "Browse Packages",
+        "command": "open_dir",
+        "args": {
+          "dir": "$packages"
+        }
       }
     ]
   }

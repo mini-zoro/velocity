@@ -23,6 +23,7 @@ fn sample() -> Session {
         }],
         windows: vec![Window {
             sheets: vec![Sheet {
+                settings: None,
                 html: None,
                 id: 7,
                 document: 1,

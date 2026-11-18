@@ -1,8 +1,6 @@
 //! Native menu orchestration. Tracking starts only after the platform releases App.
 use super::*;
-use crate::context_menu::{
-    self as menus, ContextMenuKind, MenuContext, SidebarEffect, TabCloseKind, TabSnapshot,
-};
+use crate::context_menu::{self as menus, ContextMenuKind, MenuContext, SidebarEffect};
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -44,50 +42,11 @@ impl App {
             .map(|folder| folder.path.clone())
             .collect()
     }
-    fn context_tab(&self, args: &Value) -> Option<usize> {
-        if let Some(sheet) = args["_context_sheet"].as_u64() {
-            return self.workspace.sheet_index(sheet);
-        }
-        let group = args["group"].as_u64()? as usize;
-        let index = args["index"].as_u64()? as usize;
-        let sheet = self
-            .workspace
-            .workbench
-            .groups
-            .get(group)?
-            .sheets
-            .get(index)?;
-        self.workspace.sheet_index(*sheet)
-    }
+    #[cfg(test)]
     fn context_close_targets(&self, name: &str, args: &Value) -> Vec<usize> {
-        let Some(kind) = TabCloseKind::from_command(name) else {
-            return vec![];
-        };
-        let Some(index) = self.context_tab(args) else {
-            return vec![];
-        };
-        let sheet = self.workspace.tabs[index].sheet;
-        let Some(group) = self.workspace.workbench.group_of(sheet) else {
-            return vec![];
-        };
-        let group = &self.workspace.workbench.groups[group];
-        let Some(clicked) = group.sheets.iter().position(|id| *id == sheet) else {
-            return vec![];
-        };
-        let tabs: Vec<_> = group
-            .sheets
-            .iter()
-            .filter_map(|sheet| {
-                let tab = &self.workspace.tabs[self.workspace.sheet_index(*sheet)?];
-                Some(TabSnapshot {
-                    sheet: *sheet,
-                    dirty: tab.dirty(),
-                })
-            })
-            .collect();
-        menus::tab_close_targets(&tabs, clicked, kind)
+        self.tab_close_sheets(name, args)
             .into_iter()
-            .filter_map(|sheet| self.workspace.sheet_index(sheet))
+            .filter_map(|id| self.workspace.sheet_index(id))
             .collect()
     }
     pub(super) fn context_state(
@@ -98,11 +57,9 @@ impl App {
         if let Some(state) = menus::sidebar_command_state(name, args, &self.context_roots()) {
             return Some(state);
         }
-        if TabCloseKind::from_command(name).is_some()
-            && (args["_context_menu"] == "tab" || menus::COMMANDS.contains(&name))
-        {
+        if Self::is_tab_close(name) {
             return Some(vel_config::ui::CommandState {
-                enabled: !self.context_close_targets(name, args).is_empty(),
+                enabled: !self.tab_close_sheets(name, args).is_empty(),
                 ..Default::default()
             });
         }
@@ -266,30 +223,6 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<bool, String> {
-        if TabCloseKind::from_command(name).is_some()
-            && (args["_context_menu"] == "tab" || menus::COMMANDS.contains(&name))
-        {
-            let mut targets = self.context_close_targets(name, args);
-            if self.can_close_many(w, &targets) {
-                targets.sort_unstable();
-                targets.dedup();
-                // Same rule as `close`: closing every tab may close the window.
-                let all = !targets.is_empty() && targets.len() == self.workspace.tabs.len();
-                for index in targets.into_iter().rev() {
-                    self.workspace.close(index)?;
-                }
-                if all
-                    && self
-                        .workspace
-                        .editor()
-                        .settings
-                        .bool("close_windows_when_empty", false)
-                {
-                    w.request_close();
-                }
-            }
-            return Ok(true);
-        }
         if !menus::COMMANDS.contains(&name) {
             return Ok(false);
         }

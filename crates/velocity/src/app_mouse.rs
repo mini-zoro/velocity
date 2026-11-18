@@ -122,7 +122,12 @@ impl App {
                 } else {
                     (event.position.y - bounds.y) / bounds.height
                 };
-                self.workspace.workbench.layout.drag(splitter, position);
+                self.workspace.workbench.layout.drag_with_minimum(
+                    splitter,
+                    position,
+                    bounds,
+                    self.workspace.pane_minimum,
+                );
                 self.named_changed(w, false);
                 return;
             }
@@ -175,6 +180,9 @@ impl App {
             if let Some(w) = w {
                 w.request_frame();
             }
+            return;
+        }
+        if self.format_status_mouse(w, &event) {
             return;
         }
         let viewport = self.viewport();
@@ -243,34 +251,13 @@ impl App {
                 .copied()
         {
             if let Some(index) = self.workspace.sheet_index(sheet) {
-                if event.button == 2 {
-                    // Middle click closes the tab under the pointer, like Sublime.
-                    if self.can_close_mouse(w, &[index]) {
-                        let _ = self.workspace.close(index);
-                    }
-                } else if self
-                    .tab_close_hits
-                    .iter()
-                    .any(|(id, rect)| *id == sheet && vel_ui::contains(*rect, event.position))
+                if event.button == 2
+                    || self
+                        .tab_close_hits
+                        .iter()
+                        .any(|(id, rect)| *id == sheet && vel_ui::contains(*rect, event.position))
                 {
-                    let mut indices = if self.workspace.workbench.group_of(sheet).is_some_and(|g| {
-                        self.workspace.workbench.groups[g].selected.contains(&sheet)
-                    }) {
-                        let group = self.workspace.workbench.group_of(sheet).expect("group");
-                        self.workspace.workbench.groups[group]
-                            .visible()
-                            .iter()
-                            .filter_map(|s| self.workspace.sheet_index(*s))
-                            .collect::<Vec<_>>()
-                    } else {
-                        vec![index]
-                    };
-                    if self.can_close_mouse(w, &indices) {
-                        indices.sort_unstable();
-                        for index in indices.into_iter().rev() {
-                            let _ = self.workspace.close(index);
-                        }
-                    }
+                    self.run_named(w, "close_by_index", &json!({"_context_sheet":sheet}));
                 } else {
                     self.workspace.tabs[self.workspace.active].scroll =
                         (self.view.scroll_x, self.view.scroll_y);
@@ -595,13 +582,6 @@ impl App {
 }
 
 impl App {
-    fn can_close_mouse(&mut self, window: Option<&WindowHandle>, indices: &[usize]) -> bool {
-        if let Some(window) = window {
-            self.can_close_many(window, indices)
-        } else {
-            indices.iter().all(|i| !self.workspace.tabs[*i].dirty())
-        }
-    }
     fn mouse_binding(
         &mut self,
         button: usize,

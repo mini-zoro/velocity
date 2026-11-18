@@ -175,10 +175,8 @@ fn run(
         command.args(&exec.cmd[1..]);
         command
     };
-    // Test fixtures also exclude inherited startup hooks from non-login shells.
-    #[cfg(any(test, feature = "test-login"))]
-    command.env_clear();
     command
+        .env_clear()
         .current_dir(&exec.working_dir)
         .envs(env)
         .stdin(Stdio::null())

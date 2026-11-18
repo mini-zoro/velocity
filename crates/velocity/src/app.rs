@@ -6,6 +6,12 @@ mod accessibility_adapter;
 mod context_adapter;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
+#[path = "settings_entry.rs"]
+mod settings_entry;
+#[path = "app_status.rs"]
+mod status_adapter;
+#[path = "app_tabs.rs"]
+mod tab_adapter;
 use crate::{
     bench::{Bench, SCROLL_FRAMES, TYPING_INSERTIONS},
     cli::{Mode, Options},
@@ -29,7 +35,19 @@ use vel_platform::*;
 use vel_render::scene::Layer as SceneLayer;
 use vel_render::{FrameTimes, Renderer, font::Fonts};
 
-type CommandStates = Vec<(u64, vel_buffer::ChangeId, vel_buffer::Selection)>;
+type CommandState = (u64, vel_buffer::ChangeId, vel_buffer::Selection);
+enum CommandStates {
+    Single(CommandState),
+    Multiple(Vec<CommandState>),
+}
+impl CommandStates {
+    fn iter(&self) -> std::slice::Iter<'_, CommandState> {
+        match self {
+            Self::Single(state) => std::slice::from_ref(state).iter(),
+            Self::Multiple(states) => states.iter(),
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 struct Sample {
     index: usize,
@@ -44,6 +62,14 @@ struct Sample {
 pub struct App {
     /// A playback may edit only the workbench sheet that started it, including nested chains.
     macro_origin: Option<u64>,
+    opened_settings: Vec<App>,
+    revealed_directory: Option<std::path::PathBuf>,
+    format_hits: Vec<(status_adapter::FormatItem, Rect)>,
+    last_format_menu: Vec<MenuEntry>,
+    #[cfg(test)]
+    close_decisions: std::collections::VecDeque<tab_adapter::CloseDecision>,
+    #[cfg(test)]
+    overwrite_decisions: std::collections::VecDeque<bool>,
     pending_menu: Option<context_adapter::PendingMenu>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_preferences: accessibility::Preferences,
@@ -62,12 +88,17 @@ pub struct App {
     sheet_bounds: std::collections::BTreeMap<u64, Rect>,
     group_bounds: Vec<Rect>,
     workbench_bounds: Rect,
+    native_pane_minimum: Option<(f64, f64)>,
     tab_hits: Vec<(u64, Rect)>,
     /// Tab bar of each group and its largest scroll offset, for clicks on its empty part and
     /// for clamping wheel scrolling.
     tab_bars: Vec<(usize, Rect, f64)>,
     tab_button_hits: Vec<(usize, &'static str, Rect)>,
+    absent_tab_buttons: Option<((usize, u64, u64), [bool; 3])>,
     keyboard_center: Option<u64>,
+    key_context: Option<(u64, u64, bool, bool)>,
+    visible_view_keys: Vec<(u64, u64, u64, usize)>,
+    visible_view_scratch: Vec<(u64, u64, u64, usize)>,
     tab_close_hits: Vec<(u64, Rect)>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
     /// Text selection gesture between a press in the text area and its release.
@@ -124,6 +155,7 @@ impl App {
             .and_then(|window| window.project.clone())
             .filter(|path| path.is_file());
         let mut workspace = Workspace::new(vel_text::Text::new(), directory, project, true)?;
+        workspace.restore_original = sessions.original.clone();
         if let Some(window) = &first {
             workspace.restore_window(window, &restored.documents)?;
         }
@@ -157,6 +189,11 @@ impl App {
         done: Arc<AtomicBool>,
         sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     ) -> Self {
+        #[cfg(test)]
+        crate::test_login::install();
+        if workspace.restore_original.is_none() {
+            workspace.restore_original = sessions.borrow().original.clone();
+        }
         if options.mode == Mode::ThemeUi
             && let Err(e) = crate::theme_bench::demo(&mut workspace)
         {
@@ -176,6 +213,14 @@ impl App {
         let session_id = sessions.borrow_mut().register();
         Self {
             macro_origin: None,
+            opened_settings: Vec::new(),
+            revealed_directory: None,
+            format_hits: Vec::new(),
+            last_format_menu: Vec::new(),
+            #[cfg(test)]
+            close_decisions: Default::default(),
+            #[cfg(test)]
+            overwrite_decisions: Default::default(),
             pending_menu: None,
             accessibility_focus: None,
             accessibility_preferences: Default::default(),
@@ -196,7 +241,7 @@ impl App {
             panels: {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
-                panels.message = std::mem::take(&mut workspace.resource_reports).join("; ");
+                panels.message = workspace.take_resource_reports().join("; ");
                 if !matches!(
                     options.mode,
                     Mode::Interactive | Mode::Panels | Mode::ThemeUi
@@ -216,10 +261,15 @@ impl App {
             sheet_bounds: Default::default(),
             group_bounds: Vec::new(),
             workbench_bounds: Rect::default(),
+            native_pane_minimum: None,
             tab_hits: Vec::new(),
             tab_bars: Vec::new(),
             tab_button_hits: Vec::new(),
+            absent_tab_buttons: None,
             keyboard_center: None,
+            key_context: None,
+            visible_view_keys: Vec::new(),
+            visible_view_scratch: Vec::new(),
             tab_close_hits: Vec::new(),
             dragging_splitter: None,
             drag_select: None,
@@ -319,6 +369,44 @@ impl App {
         self.session_due = None;
         Ok(())
     }
+    fn prepare_quit(&mut self, window: Option<&WindowHandle>) -> bool {
+        if self.options.mode != Mode::Interactive {
+            let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
+            return true;
+        }
+        for index in 0..self.workspace.tabs.len() {
+            let _ = self.workspace.prepare_sheet(index);
+            self.workspace.tabs[index].editor.unmark();
+        }
+        let _ = self.workspace.prepare_sheet(self.workspace.active);
+        if self.hot_exit().retain(true) {
+            if let Err(error) = self.save_workspace_checkpoint() {
+                if self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
+                {
+                    self.named_error(window,&format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
+                    return false;
+                }
+                self.panels.message = error;
+            }
+        } else {
+            if !window.is_some_and(|w| {
+                self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+            }) {
+                return false;
+            }
+            if let Err(error) = self.save_workspace_checkpoint() {
+                self.panels.message = error;
+            }
+        }
+        for waiter in &mut self.waiters {
+            waiter.finish(&mut self.workspace);
+        }
+        true
+    }
     fn save_workspace_checkpoint(&mut self) -> Result<(), String> {
         self.checkpoint(true)?;
         self.sessions.borrow().flush()
@@ -339,6 +427,7 @@ impl App {
         workspace.recent_files = self.workspace.recent_files.clone();
         workspace.recent_folders = self.workspace.recent_folders.clone();
         workspace.recent_projects = self.workspace.recent_projects.clone();
+        workspace.restore_original = self.sessions.borrow().original.clone();
         if let Some(window) = &restored {
             let documents = self.sessions.borrow().restored.documents.clone();
             workspace.restore_window(window, &documents)?;
@@ -550,15 +639,20 @@ impl App {
         }
         Ok(())
     }
-    fn show_error(&self, w: &WindowHandle, message: &str) {
+    fn show_error(&mut self, w: &WindowHandle, message: &str) {
         let _ = self
             .reporter
             .emit(json!({"kind":"editor_error","message":message}));
-        w.alert("Velocity", message, &["OK"]);
+        if message.contains("only regular files can be used as documents") {
+            self.panels.message = message.to_owned();
+        } else {
+            w.alert("Velocity", message, &["OK"]);
+        }
     }
     fn publish_resource_reports(&mut self) {
-        if !self.workspace.resource_reports.is_empty() {
-            self.panels.message = std::mem::take(&mut self.workspace.resource_reports).join("; ");
+        let reports = self.workspace.take_resource_reports();
+        if !reports.is_empty() {
+            self.panels.message = reports.join("; ");
         }
     }
     fn sync_workspace_after_panels(&mut self) {
@@ -579,18 +673,125 @@ impl App {
         }
         self.workspace.sync_shared();
     }
-    fn command_states(&self) -> CommandStates {
+    fn command_enabled_args(&self, name: &str, args: &Value) -> bool {
+        let context_tab = args["_context_sheet"]
+            .as_u64()
+            .map(|sheet| self.workspace.sheet_index(sheet));
+        if context_tab == Some(None) {
+            return false;
+        }
+        let target = context_tab.flatten().unwrap_or(self.workspace.active);
+        if args["_context_version"]
+            .as_u64()
+            .is_some_and(|version| version != self.workspace.tabs[target].editor.revision)
+        {
+            return false;
+        }
+        if let Some(state) = self.context_state(name, args) {
+            return state.enabled;
+        }
+        if name == "package_check_upgrades"
+            && self
+                .workspace
+                .settings
+                .get("package_index_url")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return false;
+        }
+        if self.releases.busy() && (name.starts_with("package_") || name == "install_cli") {
+            return false;
+        }
+        match name {
+            "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
+            "reopen_encoding" if self.workspace.tabs[target].path.is_none() => return false,
+            "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
+            | "save_encoding"
+                if self.workspace.is_empty() =>
+            {
+                return false;
+            }
+            "save_all" => return self.workspace.tabs.iter().any(|tab| tab.dirty()),
+            "focus_group" | "move_to_group"
+                if args["group"]
+                    .as_u64()
+                    .is_none_or(|g| g as usize >= self.workspace.workbench.groups.len()) =>
+            {
+                return false;
+            }
+            "close_pane" | "close_split" if self.workspace.workbench.groups.len() < 2 => {
+                return false;
+            }
+            "cancel_build" if self.builds.task.is_none() => return false,
+            "next_result" | "prev_result"
+                if if self.panels.search_results_active {
+                    !self.panels.has_search_results()
+                } else {
+                    self.builds.diagnostics.is_empty()
+                } =>
+            {
+                return false;
+            }
+            "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
+                return false;
+            }
+            _ => {}
+        }
+        if args["_context_menu"].is_null()
+            && self.panels.input().is_some()
+            && !self.panels.palette_accept_pending(name, args)
+            && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+        {
+            return true;
+        }
+        let tab = &self.workspace.tabs[target];
+        if tab.editor.read_only
+            && matches!(
+                name,
+                "cut" | "paste" | "paste_and_indent" | "revert_hunk" | "replace_misspelling"
+            )
+        {
+            return false;
+        }
+        if tab.editor.read_only
+            && matches!(
+                name,
+                "save" | "save_as" | "prompt_save_as" | "save_encoding"
+            )
+        {
+            return false;
+        }
+        if matches!(name, "goto_hex_offset" | "copy_hex" | "copy_hex_text")
+            && tab.editor.binary.is_none()
+        {
+            return false;
+        }
         self.workspace
-            .tabs
-            .iter()
-            .map(|tab| {
-                (
-                    tab.sheet,
-                    tab.editor.buffer.change_id(),
-                    tab.editor.buffer.view(tab.editor.id).sel().clone(),
-                )
-            })
-            .collect()
+            .editor()
+            .registry
+            .is_enabled(name, args, self.workspace.editor())
+            && !((tab.loading.is_some() || tab.binary_loading.is_some())
+                && self.workspace.editor().registry.kind(name)
+                    == Some(vel_commands::Kind::TextCommand)
+                && !matches!(
+                    name,
+                    "move" | "move_to" | "select_all" | "copy" | "single_selection"
+                ))
+    }
+    fn command_states(&self) -> CommandStates {
+        let capture = |tab: &crate::workspace::Tab| {
+            (
+                tab.sheet,
+                tab.editor.buffer.change_id(),
+                tab.editor.buffer.view(tab.editor.id).sel().clone(),
+            )
+        };
+        if self.workspace.tabs.len() == 1 {
+            CommandStates::Single(capture(&self.workspace.tabs[0]))
+        } else {
+            CommandStates::Multiple(self.workspace.tabs.iter().map(capture).collect())
+        }
     }
     fn target_changed(&self, before: &CommandStates) -> bool {
         let tab = &self.workspace.tabs[self.workspace.active];
@@ -613,11 +814,30 @@ impl App {
         if key.name == "escape" {
             self.keyboard_center = None;
         }
-        self.workspace
-            .editor_mut()
-            .keymap
-            .set_app_context("build_running", json!(self.builds.task.is_some()));
-        let intercepted_before = self.command_states();
+        let context = (
+            self.workspace.tabs[self.workspace.active].sheet,
+            self.workspace.resource_revision,
+            self.builds.task.is_some(),
+            self.workspace.workbench.groups[self.workspace.workbench.active]
+                .selected
+                .len()
+                > 1,
+        );
+        if self.key_context != Some(context) {
+            let keymap = &mut self.workspace.editor_mut().keymap;
+            keymap.set_app_context("build_running", json!(context.2));
+            // Side-by-side selected tabs: https://www.sublimetext.com/docs/tab_multi-select.html
+            keymap.set_app_context("group_has_multiselect", json!(context.3));
+            self.key_context = Some(context);
+        }
+        // Vintage motions and operators can edit/move while resolving Pending.
+        // Capture only the active view: selection clones share their storage.
+        let tab = &self.workspace.tabs[self.workspace.active];
+        let intercepted_before = CommandStates::Single((
+            tab.sheet,
+            tab.editor.buffer.change_id(),
+            tab.editor.buffer.view(tab.editor.id).sel().clone(),
+        ));
         let find_reveal = self.panels.overlay.is_none()
             && key.name == "enter"
             && matches!(
@@ -767,7 +987,7 @@ impl App {
         }
         if matches!(args["_context_menu"].as_str(), Some("editor" | "tab"))
             && !crate::context_menu::COMMANDS.contains(&name)
-            && crate::context_menu::TabCloseKind::from_command(name).is_none()
+            && !Self::is_tab_close(name)
             && let Some(sheet) = args["_context_sheet"].as_u64()
             && let Some(index) = self.workspace.sheet_index(sheet)
         {
@@ -777,7 +997,7 @@ impl App {
         if !self.macro_view_active() {
             return Ok(());
         }
-        if !palette_accept && !self.command_enabled(name, &args.to_string()) {
+        if !palette_accept && !self.command_enabled_args(name, args) {
             return Ok(());
         }
         match window.map_or(Ok(false), |window| self.context_action(window, name, args)) {
@@ -830,11 +1050,22 @@ impl App {
             self.workspace.editor_mut().clipboard = window.clipboard_text().unwrap_or_default();
         }
         let before = self.workspace.editor().clipboard.clone();
-        let document_before = self.command_states();
+        let document_before = if self.workspace.editor().registry.kind(name)
+            == Some(vel_commands::Kind::TextCommand)
+        {
+            let tab = &self.workspace.tabs[self.workspace.active];
+            CommandStates::Single((
+                tab.sheet,
+                tab.editor.buffer.change_id(),
+                tab.editor.buffer.view(tab.editor.id).sel().clone(),
+            ))
+        } else {
+            self.command_states()
+        };
         let animate = (name == "move" && args["by"].as_str() == Some("pages"))
             || matches!(name, "show_at_center" | "goto_line" | "scroll_to");
-        let now = Instant::now();
-        let scroll_from = animate.then(|| {
+        let now = animate.then(Instant::now);
+        let scroll_from = now.map(|now| {
             self.view
                 .prepare_keyboard_scroll(self.workspace.editor(), now)
         });
@@ -872,41 +1103,80 @@ impl App {
             self.view.animate_scroll_from(
                 self.workspace.editor(),
                 from,
-                now,
+                now.expect("animated command start"),
                 self.accessibility_preferences.reduce_motion,
             );
         }
         result.and(actions)
     }
     fn save_tab(&mut self, w: &WindowHandle, index: usize, save_as: bool) -> bool {
-        let path = if save_as || self.workspace.tabs[index].path.is_none() {
+        match self.save_tab_with_path(Some(w), index, save_as, None) {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.panels.message = error;
+                false
+            }
+        }
+    }
+    fn save_tab_with_path(
+        &mut self,
+        window: Option<&WindowHandle>,
+        index: usize,
+        save_as: bool,
+        chosen: Option<std::path::PathBuf>,
+    ) -> Result<bool, String> {
+        let path = if chosen.is_some() {
+            chosen
+        } else if save_as || self.workspace.tabs[index].path.is_none() {
             let suggested = self.workspace.tabs[index]
                 .path
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.workspace.tabs[index].name());
-            let Some(path) = w.save_file(&suggested) else {
-                return false;
+            let window = window.ok_or("Saving an untitled document requires a file path")?;
+            let Some(path) = window.save_file(&suggested) else {
+                return Ok(false);
             };
             Some(path)
         } else {
             None
         };
-        match self.workspace.save(index, path) {
-            Ok(()) => true,
-            Err(error) => {
-                self.show_error(w, &error);
-                false
+        if !self.workspace.tabs[index].editor.read_only
+            && self.workspace.save_conflict(index, path.as_deref())?
+        {
+            let overwrite = if let Some(window) = window {
+                window.alert(
+                    "File changed on disk",
+                    "The file has changed since it was loaded. Overwrite the disk contents?",
+                    &["Overwrite", "Cancel"],
+                ) == 0
+            } else {
+                #[cfg(test)]
+                {
+                    self.overwrite_decisions.pop_front().unwrap_or(false)
+                }
+                #[cfg(not(test))]
+                {
+                    false
+                }
+            };
+            if !overwrite {
+                self.panels.message = "Save cancelled: file changed on disk".into();
+                return Ok(false);
             }
+            self.workspace
+                .acknowledge_overwrite(index, path.as_deref())?;
         }
+        self.workspace.save(index, path)?;
+        Ok(true)
     }
     fn can_close(&mut self, w: &WindowHandle, index: usize) -> bool {
         if self
             .workspace
             .tabs
             .iter()
-            .filter(|t| t.document == self.workspace.tabs[index].document)
+            .filter(|t| t.session_document == self.workspace.tabs[index].session_document)
             .count()
             > 1
         {
@@ -918,14 +1188,14 @@ impl App {
         self.sync_workspace_after_panels();
         let mut seen = std::collections::BTreeSet::new();
         for index in indices {
-            let doc = self.workspace.tabs[*index].document;
+            let doc = self.workspace.tabs[*index].session_document;
             if !seen.insert(doc)
                 || self
                     .workspace
                     .tabs
                     .iter()
                     .enumerate()
-                    .any(|(i, t)| t.document == doc && !indices.contains(&i))
+                    .any(|(i, t)| t.session_document == doc && !indices.contains(&i))
             {
                 continue;
             }
@@ -936,19 +1206,61 @@ impl App {
         true
     }
     fn can_close_document(&mut self, w: &WindowHandle, index: usize) -> bool {
-        let _ = self.workspace.prepare_sheet(index);
-        self.workspace.tabs[index].editor.unmark();
-        if !self.workspace.tabs[index].dirty() {
-            return true;
+        match self.decide_close_document(Some(w), index, false) {
+            Ok(close) => close,
+            Err(error) => {
+                self.panels.message = error;
+                false
+            }
         }
-        match w.alert(
-            "Save changes?",
-            &self.workspace.tabs[index].name(),
-            &["Save", "Don't Save", "Cancel"],
-        ) {
-            0 => self.save_tab(w, index, false),
-            1 => true,
-            _ => false,
+    }
+    // The provider supplies only the UI answer. Native and headless callers share
+    // dirty checks, save-as cancellation, I/O errors and the actual save path.
+    fn decide_close_document(
+        &mut self,
+        window: Option<&WindowHandle>,
+        index: usize,
+        contents_only: bool,
+    ) -> Result<bool, String> {
+        self.workspace.prepare_sheet(index)?;
+        self.workspace.tabs[index].editor.unmark();
+        let dirty = if contents_only {
+            self.workspace
+                .document_contents_dirty(&self.workspace.tabs[index])
+        } else {
+            self.workspace.document_dirty(&self.workspace.tabs[index])
+        };
+        if !dirty {
+            return Ok(true);
+        }
+        let decision = if let Some(window) = window {
+            match window.alert(
+                "Save changes?",
+                &self.workspace.tabs[index].name(),
+                &["Save", "Don't Save", "Cancel"],
+            ) {
+                0 => tab_adapter::CloseDecision::Save(None),
+                1 => tab_adapter::CloseDecision::Discard,
+                _ => tab_adapter::CloseDecision::Cancel,
+            }
+        } else {
+            #[cfg(test)]
+            {
+                self.close_decisions
+                    .pop_front()
+                    .ok_or("Unsaved changes require a save decision")?
+            }
+            #[cfg(not(test))]
+            {
+                return Err("Unsaved changes require a save decision".into());
+            }
+        };
+        match decision {
+            tab_adapter::CloseDecision::Save(path) => {
+                self.save_tab_with_path(window, index, false, path)
+            }
+            tab_adapter::CloseDecision::Discard => Ok(true),
+            tab_adapter::CloseDecision::Cancel => Ok(false),
         }
     }
     fn handle_named_actions(&mut self, window: Option<&WindowHandle>) -> Result<(), String> {
@@ -990,6 +1302,12 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
+        if self.apply_tab_close_action(window, name, args)? {
+            return Ok(());
+        }
+        if self.apply_settings_action(window, name, args)? {
+            return Ok(());
+        }
         if self.apply_view_action(name, args)? {
             return Ok(());
         }
@@ -1039,6 +1357,26 @@ impl App {
         }
         if name == "new_file" {
             return self.workspace.new_file();
+        }
+        if name == "save_all" {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut errors = Vec::new();
+            for index in 0..self.workspace.tabs.len() {
+                let tab = &self.workspace.tabs[index];
+                if !tab.dirty() || !seen.insert(tab.session_document) {
+                    continue;
+                }
+                if let Err(error) = self.save_tab_with_path(window, index, false, None) {
+                    errors.push(error);
+                }
+            }
+            if !errors.is_empty() {
+                self.panels.message = errors.join("\n");
+            }
+            return Ok(());
+        }
+        if matches!(name, "save" | "save_and_close") {
+            return self.apply_save_action(window, name, args);
         }
         if matches!(name, "close" | "close_file") {
             let active = self.workspace.active;
@@ -1391,34 +1729,10 @@ impl App {
                 }
             }
             "save" | "save_and_close" => {
-                let saved = if let Some(file) = args["file"].as_str() {
-                    match self
-                        .workspace
-                        .save(active, Some(std::path::PathBuf::from(file)))
-                    {
-                        Ok(()) => true,
-                        Err(error) => {
-                            self.show_error(w, &error);
-                            false
-                        }
-                    }
-                } else {
-                    self.save_tab(w, active, false)
-                };
-                if saved && name == "save_and_close" {
-                    self.workspace.close(active)?;
-                }
+                self.apply_save_action(Some(w), name, args)?;
             }
             "prompt_save_as" => {
                 self.save_tab(w, active, true);
-            }
-            "save_all" => {
-                let errors = self
-                    .workspace
-                    .save_all(|suggestion| w.save_file(suggestion));
-                if !errors.is_empty() {
-                    self.show_error(w, &errors.join("\n"));
-                }
             }
             "next_view" | "prev_view" | "select_by_index" => {
                 self.select_tab_action(name, args);
@@ -1491,9 +1805,35 @@ impl App {
     }
     fn resize_views(&mut self, size: Size, scale: f64) {
         self.workspace.themes.ui.borrow_mut().density = scale as f32;
-        self.window_size = size;
+        let minimum = self.pane_window_minimum();
+        self.window_size = Size {
+            width: size.width.max(minimum.width),
+            height: size.height.max(minimum.height),
+        };
         // Pane widths are assigned by scene; apply_style anchors each view there.
         // Applying full-window width to the focused pane here causes a second reflow.
+    }
+    fn pane_window_minimum(&self) -> Size {
+        let (width, height) = self.pane_minimum_extent();
+        Size {
+            width: (width + (self.window_size.width - self.workspace.pane_extent.0).max(0.))
+                .max(320.),
+            height: (height + (self.window_size.height - self.workspace.pane_extent.1).max(0.))
+                .max(200.),
+        }
+    }
+    fn pane_minimum_extent(&self) -> (f64, f64) {
+        let layout = &self.workspace.workbench.layout;
+        let mut size = self.workspace.pane_minimum;
+        for &[l, t, r, b] in &layout.cells {
+            size.0 = size
+                .0
+                .max(self.workspace.pane_minimum.0 / (layout.cols[r] - layout.cols[l]));
+            size.1 = size
+                .1
+                .max(self.workspace.pane_minimum.1 / (layout.rows[b] - layout.rows[t]));
+        }
+        size
     }
     fn reload_font_views(&mut self, fonts: Fonts, scale: f64) {
         for view in std::iter::once(&mut self.view).chain(self.sheet_views.values_mut()) {
@@ -1716,33 +2056,48 @@ impl App {
             return scene;
         }
         self.sync_workspace_after_panels();
-        let mut visible = std::collections::BTreeMap::<
-            vel_buffer::BufferId,
-            std::collections::BTreeSet<vel_buffer::ViewId>,
-        >::new();
-        for id in self
-            .workspace
-            .workbench
-            .groups
-            .iter()
-            .flat_map(|g| g.visible())
-        {
-            if let Some(i) = self.workspace.sheet_index(id) {
-                let tab = &self.workspace.tabs[i];
+        // The visible view set changes on selection, document/language replacement
+        // or settings reload. Typing need not allocate the same map on every frame.
+        self.visible_view_scratch.clear();
+        for group in &self.workspace.workbench.groups {
+            for id in &group.selected {
+                if let Some(index) = self.workspace.sheet_index(*id) {
+                    let tab = &self.workspace.tabs[index];
+                    self.visible_view_scratch.push((
+                        tab.document.0,
+                        tab.shared_view.0,
+                        tab.editor.settings.revision(),
+                        std::rc::Rc::as_ptr(&tab.editor.language) as usize,
+                    ));
+                }
+            }
+        }
+        if self.visible_view_keys != self.visible_view_scratch || self.panels.overlay.is_some() {
+            let mut visible = std::collections::BTreeMap::<
+                vel_buffer::BufferId,
+                std::collections::BTreeSet<vel_buffer::ViewId>,
+            >::new();
+            for &(document, view, _, _) in &self.visible_view_scratch {
                 visible
-                    .entry(tab.document)
+                    .entry(vel_buffer::BufferId(document))
                     .or_default()
-                    .insert(tab.shared_view);
+                    .insert(vel_buffer::ViewId(view));
+            }
+            for (document, views) in visible {
+                if let Some(tab) = self.workspace.tabs.iter().find(|t| t.document == document)
+                    && let Some(language) = tab.editor.language.borrow_mut().as_mut()
+                {
+                    language.retain_visible_views(&views);
+                }
+            }
+            std::mem::swap(&mut self.visible_view_keys, &mut self.visible_view_scratch);
+            // A preview may publish a temporary view during overlay processing.
+            // Reconcile once more as soon as the overlay has closed.
+            if self.panels.overlay.is_some() {
+                self.visible_view_keys.clear();
             }
         }
-        for (document, views) in visible {
-            if let Some(tab) = self.workspace.tabs.iter().find(|t| t.document == document)
-                && let Some(language) = tab.editor.language.borrow_mut().as_mut()
-            {
-                language.retain_visible_views(&views);
-            }
-        }
-        let bounds = self.panels.layout(self.window_size);
+        let mut bounds = self.panels.layout(self.window_size);
         self.workbench_bounds = bounds;
         self.sheet_bounds.clear();
         self.group_bounds.clear();
@@ -1776,6 +2131,12 @@ impl App {
             0.
         };
         let tab_width = f64::from(tabset_style.tab_width).max(72.);
+        self.workspace.pane_minimum = (120., tab_height + 3. * self.view.line_height.max(16.));
+        let minimum = self.pane_minimum_extent();
+        bounds.width = bounds.width.max(minimum.0);
+        bounds.height = bounds.height.max(minimum.1);
+        self.workspace.pane_extent = (bounds.width, bounds.height);
+        self.workbench_bounds = bounds;
         let groups = self.workspace.workbench.groups.clone();
         for (group_index, group) in groups.iter().enumerate() {
             let Some(group_bounds) = self.workspace.workbench.layout.rect(group_index, bounds)
@@ -1800,13 +2161,9 @@ impl App {
                     self.workspace.messages.push(e);
                     continue;
                 }
-                let mut other;
                 let reused = *sheet == focused || self.sheet_views.contains_key(sheet);
-                let view = if *sheet == focused {
-                    self.content = rect;
-                    &mut self.view
-                } else {
-                    other = self.sheet_views.remove(sheet).unwrap_or_else(|| {
+                let mut other = if *sheet != focused {
+                    Some(self.sheet_views.remove(sheet).unwrap_or_else(|| {
                         View::new(
                             Size {
                                 width: rect.width,
@@ -1815,8 +2172,15 @@ impl App {
                             self.fonts.as_ref().map_or(8., |f| f.cell as f64),
                             self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
                         )
-                    });
-                    &mut other
+                    }))
+                } else {
+                    None
+                };
+                let view = if let Some(view) = other.as_mut() {
+                    view
+                } else {
+                    self.content = rect;
+                    &mut self.view
                 };
                 view.mouse_preferences = self.mouse_preferences;
                 view.size = Size {
@@ -1845,9 +2209,7 @@ impl App {
                         self.workspace.themes.ui.borrow().density as f64,
                     );
                 }
-                if reused {
-                    view.apply_style(&self.workspace.tabs[index].editor);
-                } else {
+                if !reused {
                     let tab = &self.workspace.tabs[index];
                     let position = crate::view::ScrollPosition {
                         x: tab.scroll.0,
@@ -1878,7 +2240,8 @@ impl App {
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
                 }
-                if *sheet == focused {
+                if *sheet == focused && !self.panels.visible_highlights().is_empty() {
+                    view.apply_style(&self.workspace.tabs[index].editor);
                     let viewport = view.viewport(&self.workspace.tabs[index].editor);
                     let highlights = self.panels.visible_highlights();
                     let first = highlights.partition_point(|r| r.end < viewport.start);
@@ -1906,7 +2269,8 @@ impl App {
                 if *sheet != focused {
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
-                    let view = std::mem::replace(view, View::new(Size::default(), 8., 12.));
+                }
+                if let Some(view) = other {
                     self.sheet_views.insert(*sheet, view);
                 }
                 translate_scene(&mut part, rect.x, rect.y);
@@ -2165,6 +2529,7 @@ impl App {
         self.exact_scene = exact;
         scene.layers.push(chrome);
         self.panels.paint(&self.workspace, &mut scene);
+        self.capture_format_hits(&scene);
         if theme_animating {
             self.workspace.themes.ui.borrow_mut().request_animation();
         }
@@ -2679,110 +3044,7 @@ impl AppHandler for App {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
-        let context_tab = args["_context_sheet"]
-            .as_u64()
-            .map(|sheet| self.workspace.sheet_index(sheet));
-        if context_tab == Some(None) {
-            return false;
-        }
-        let target = context_tab.flatten().unwrap_or(self.workspace.active);
-        if args["_context_version"]
-            .as_u64()
-            .is_some_and(|version| version != self.workspace.tabs[target].editor.revision)
-        {
-            return false;
-        }
-        if let Some(state) = self.context_state(name, &args) {
-            return state.enabled;
-        }
-        if name == "package_check_upgrades"
-            && self
-                .workspace
-                .settings
-                .get("package_index_url")
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty)
-        {
-            return false;
-        }
-        if self.releases.busy() && (name.starts_with("package_") || name == "install_cli") {
-            return false;
-        }
-        match name {
-            "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
-            "reopen_encoding" if self.workspace.tabs[target].path.is_none() => return false,
-            "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
-            | "save_encoding"
-                if self.workspace.is_empty() =>
-            {
-                return false;
-            }
-            "save_all" => return self.workspace.tabs.iter().any(|tab| tab.dirty()),
-            "focus_group" | "move_to_group"
-                if args["group"]
-                    .as_u64()
-                    .is_none_or(|g| g as usize >= self.workspace.workbench.groups.len()) =>
-            {
-                return false;
-            }
-            "close_pane" | "close_split" if self.workspace.workbench.groups.len() < 2 => {
-                return false;
-            }
-            "cancel_build" if self.builds.task.is_none() => return false,
-            "next_result" | "prev_result"
-                if if self.panels.search_results_active {
-                    !self.panels.has_search_results()
-                } else {
-                    self.builds.diagnostics.is_empty()
-                } =>
-            {
-                return false;
-            }
-            "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
-                return false;
-            }
-            _ => {}
-        }
-        if args["_context_menu"].is_null()
-            && self.panels.input().is_some()
-            && !self.panels.palette_accept_pending(name, &args)
-            && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
-        {
-            return true;
-        }
-        let tab = &self.workspace.tabs[target];
-        if tab.editor.read_only
-            && matches!(
-                name,
-                "cut" | "paste" | "paste_and_indent" | "revert_hunk" | "replace_misspelling"
-            )
-        {
-            return false;
-        }
-        if tab.editor.read_only
-            && matches!(
-                name,
-                "save" | "save_as" | "prompt_save_as" | "save_encoding"
-            )
-        {
-            return false;
-        }
-        if matches!(name, "goto_hex_offset" | "copy_hex" | "copy_hex_text")
-            && tab.editor.binary.is_none()
-        {
-            return false;
-        }
-        self.workspace
-            .editor()
-            .registry
-            .is_enabled(name, &args, self.workspace.editor())
-            && !((tab.loading.is_some() || tab.binary_loading.is_some())
-                && self.workspace.editor().registry.kind(name)
-                    == Some(vel_commands::Kind::TextCommand)
-                && !matches!(
-                    name,
-                    "move" | "move_to" | "select_all" | "copy" | "single_selection"
-                ))
+        self.command_enabled_args(name, &args)
     }
     fn command_visible(&self, name: &str, args: &str) -> bool {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
@@ -2817,6 +3079,24 @@ impl AppHandler for App {
                     .as_deref()
                     .unwrap_or("Automatic")
                     == args["name"].as_str().unwrap_or("Automatic")
+            }
+            "set_max_columns" => {
+                args["columns"].as_u64() == Some(self.workspace.workbench.max_columns as u64)
+            }
+            "reopen_encoding" | "save_encoding" => {
+                args["encoding"].as_str()
+                    == Some(self.workspace.tabs[target].format.encoding.as_str())
+            }
+            "set_line_ending" => {
+                let current = match self.workspace.tabs[self.workspace.active]
+                    .format
+                    .line_ending
+                {
+                    vel_fileio::LineEnding::Lf => "unix",
+                    vel_fileio::LineEnding::CrLf => "windows",
+                    vel_fileio::LineEnding::Cr => "cr",
+                };
+                args["type"].as_str() == Some(current)
             }
             "toggle_setting" => args["setting"]
                 .as_str()
@@ -2945,6 +3225,11 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
+        let minimum = self.pane_window_minimum();
+        if self.native_pane_minimum != Some((minimum.width, minimum.height)) {
+            ctx.window.set_minimum_content_size(minimum);
+            self.native_pane_minimum = Some((minimum.width, minimum.height));
+        }
         self.workspace.themes.ui.borrow_mut().density = ctx.window.scale_factor() as f32;
         self.workspace
             .themes
@@ -3399,40 +3684,7 @@ impl AppHandler for App {
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
         self.workspace.fullscreen = w.is_full_screen();
-        if self.options.mode != Mode::Interactive {
-            let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
-            return true;
-        }
-        for index in 0..self.workspace.tabs.len() {
-            let _ = self.workspace.prepare_sheet(index);
-            self.workspace.tabs[index].editor.unmark();
-        }
-        let _ = self.workspace.prepare_sheet(self.workspace.active);
-        if self.hot_exit().retain(true) {
-            if let Err(error) = self.save_workspace_checkpoint() {
-                if self
-                    .workspace
-                    .tabs
-                    .iter()
-                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
-                {
-                    self.show_error(w,&format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
-                    return false;
-                }
-                self.panels.message = error;
-            }
-        } else {
-            if !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {
-                return false;
-            }
-            if let Err(error) = self.save_workspace_checkpoint() {
-                self.panels.message = error;
-            }
-        }
-        for waiter in &mut self.waiters {
-            waiter.finish(&mut self.workspace);
-        }
-        true
+        self.prepare_quit(Some(w))
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
         self.workspace.fullscreen = w.is_full_screen();
@@ -3941,3 +4193,11 @@ mod app_chrome;
 #[cfg(test)]
 #[path = "app_lane_b_round18_tests.rs"]
 mod lane_b_round18_tests;
+
+#[cfg(test)]
+#[path = "app_lane_b_round19_perf.rs"]
+mod lane_b_round19_perf;
+
+#[cfg(test)]
+#[path = "app_lane_b_round19_tests.rs"]
+mod lane_b_round19_tests;

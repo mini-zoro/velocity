@@ -1,11 +1,33 @@
-// Original Velocity captions, authored from public command behavior.
+// Original resources. Settings: https://www.sublimetext.com/docs/settings.html
+// Groups/commands and line-ending arguments: https://docs.sublimetext.io/reference/commands.html
+// Split View and selected sheets: https://www.sublimetext.com/download (4107, 4126).
 [
-  { "caption": "Indentation: Convert to Spaces", "command": "expand_tabs", "args": {"set_translate_tabs": true} },
-  { "caption": "Indentation: Convert to Tabs", "command": "unexpand_tabs", "args": {"set_translate_tabs": true} },
-  { "caption": "Indentation: Guess Settings from Buffer", "command": "detect_indentation" },
-  { "caption": "View: Toggle Tabs", "command": "toggle_tabs" },
-  { "caption": "View: Toggle Status Bar", "command": "toggle_status_bar" },
-
+  {
+    "caption": "Indentation: Convert to Spaces",
+    "command": "expand_tabs",
+    "args": {
+      "set_translate_tabs": true
+    }
+  },
+  {
+    "caption": "Indentation: Convert to Tabs",
+    "command": "unexpand_tabs",
+    "args": {
+      "set_translate_tabs": true
+    }
+  },
+  {
+    "caption": "Indentation: Guess Settings from Buffer",
+    "command": "detect_indentation"
+  },
+  {
+    "caption": "View: Toggle Tabs",
+    "command": "toggle_tabs"
+  },
+  {
+    "caption": "View: Toggle Status Bar",
+    "command": "toggle_status_bar"
+  },
   {
     "caption": "File: Save All",
     "command": "save_all"
@@ -747,12 +769,251 @@
       "file": "res://Packages/Default/Delete Line.sublime-macro"
     }
   },
-  {"caption":"UI: Select Color Scheme","command":"select_color_scheme"},
-  {"caption":"UI: Select Theme","command":"select_theme"},
-  {"caption": "Goto: Goto Line…", "command": "goto_line"},
-  {"caption": "Goto: Next File", "command": "next_view"},
-  {"caption": "Goto: Previous File", "command": "prev_view"},
-  {"caption": "Build: Save All on Build", "command": "toggle_setting", "args": {"setting": "save_all_on_build"}},
-  {"caption": "Build: Show Results", "command": "show_panel", "args": {"panel": "output.exec"}},
-  {"caption": "Build: New Build System", "command": "new_build_system"}
+  {
+    "caption": "UI: Select Color Scheme",
+    "command": "select_color_scheme"
+  },
+  {
+    "caption": "UI: Select Theme",
+    "command": "select_theme"
+  },
+  {
+    "caption": "Goto: Goto Line…",
+    "command": "goto_line"
+  },
+  {
+    "caption": "Goto: Next File",
+    "command": "next_view"
+  },
+  {
+    "caption": "Goto: Previous File",
+    "command": "prev_view"
+  },
+  {
+    "caption": "Build: Save All on Build",
+    "command": "toggle_setting",
+    "args": {
+      "setting": "save_all_on_build"
+    }
+  },
+  {
+    "caption": "Build: Show Results",
+    "command": "show_panel",
+    "args": {
+      "panel": "output.exec"
+    }
+  },
+  {
+    "caption": "Build: New Build System",
+    "command": "new_build_system"
+  },
+  {
+    "caption": "Preferences: Settings…",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Default/Preferences.sublime-settings",
+      "default": "{\n\t$0\n}\n"
+    }
+  },
+  {
+    "caption": "Preferences: Key Bindings",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Default/Velocity.sublime-keymap",
+      "default": "[\n\t$0\n]\n"
+    }
+  },
+  {
+    "caption": "Preferences: Mouse Bindings",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Default/Velocity.sublime-mousemap",
+      "default": "[\n\t$0\n]\n"
+    }
+  },
+  {
+    "caption": "Preferences: Settings – Syntax Specific",
+    "command": "edit_syntax_settings"
+  },
+  {
+    "caption": "Preferences: Settings – Distraction Free",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Default/Distraction Free.sublime-settings",
+      "default": "{\n\t$0\n}\n"
+    }
+  },
+  {
+    "caption": "Preferences: Color Scheme…",
+    "command": "select_color_scheme"
+  },
+  {
+    "caption": "Preferences: Theme…",
+    "command": "select_theme"
+  },
+  {
+    "caption": "Preferences: Customize Color Scheme",
+    "command": "customize_color_scheme"
+  },
+  {
+    "caption": "Preferences: Customize Theme",
+    "command": "customize_theme"
+  },
+  {
+    "caption": "Preferences: Font: Larger",
+    "command": "increase_font_size"
+  },
+  {
+    "caption": "Preferences: Font: Smaller",
+    "command": "decrease_font_size"
+  },
+  {
+    "caption": "Preferences: Font: Reset",
+    "command": "reset_font_size"
+  },
+  {
+    "caption": "Preferences: Browse Packages",
+    "command": "open_dir",
+    "args": {
+      "dir": "$packages"
+    }
+  },
+  {
+    "caption": "View: Groups: New Group",
+    "command": "new_pane"
+  },
+  {
+    "caption": "View: Groups: New Empty Group",
+    "command": "new_pane",
+    "args": {
+      "move": false
+    }
+  },
+  {
+    "caption": "View: Groups: Close Group",
+    "command": "close_pane"
+  },
+  {
+    "caption": "View: Groups: Focus Neighboring Group: Left",
+    "command": "focus_neighboring_group",
+    "args": {
+      "direction": "left"
+    }
+  },
+  {
+    "caption": "View: Groups: Focus Neighboring Group: Right",
+    "command": "focus_neighboring_group",
+    "args": {
+      "direction": "right"
+    }
+  },
+  {
+    "caption": "View: Groups: Focus Neighboring Group: Up",
+    "command": "focus_neighboring_group",
+    "args": {
+      "direction": "up"
+    }
+  },
+  {
+    "caption": "View: Groups: Focus Neighboring Group: Down",
+    "command": "focus_neighboring_group",
+    "args": {
+      "direction": "down"
+    }
+  },
+  {
+    "caption": "View: Groups: Move Selection Neighboring Group: Left",
+    "command": "move_to_neighboring_group",
+    "args": {
+      "direction": "left"
+    }
+  },
+  {
+    "caption": "View: Groups: Move Selection Neighboring Group: Right",
+    "command": "move_to_neighboring_group",
+    "args": {
+      "direction": "right"
+    }
+  },
+  {
+    "caption": "View: Groups: Move Selection Neighboring Group: Up",
+    "command": "move_to_neighboring_group",
+    "args": {
+      "direction": "up"
+    }
+  },
+  {
+    "caption": "View: Groups: Move Selection Neighboring Group: Down",
+    "command": "move_to_neighboring_group",
+    "args": {
+      "direction": "down"
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 1",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 1
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 2",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 2
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 3",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 3
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 4",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 4
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 5",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 5
+    }
+  },
+  {
+    "caption": "View: Groups: Max Columns: 6",
+    "command": "set_max_columns",
+    "args": {
+      "columns": 6
+    }
+  },
+  {
+    "caption": "File: Split View",
+    "command": "split_view"
+  },
+  {
+    "caption": "File: Windows Line Endings",
+    "command": "set_line_ending",
+    "args": {
+      "type": "windows"
+    }
+  },
+  {
+    "caption": "File: Unix Line Endings",
+    "command": "set_line_ending",
+    "args": {
+      "type": "unix"
+    }
+  },
+  {
+    "caption": "File: Mac OS 9 Line Endings",
+    "command": "set_line_ending",
+    "args": {
+      "type": "cr"
+    }
+  }
 ]

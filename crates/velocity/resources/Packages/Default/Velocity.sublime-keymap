@@ -2081,5 +2081,16 @@
   {"keys": ["super+alt+shift+down"], "command": "goto_reference"},
   // Lane B round 18 builds: Ctrl+C only takes over while this window has a build.
   {"keys":["f7"],"command":"build"},
-  {"keys":["ctrl+c"],"command":"cancel_build","context":[{"key":"build_running","operand":true}]}
+  {"keys":["ctrl+c"],"command":"cancel_build","context":[{"key":"build_running","operand":true}]},
+  // Layouts: https://docs.sublimetext.io/reference/keyboard_shortcuts_osx.html#split-window
+  // This public table confirms groups 1..4 only. Row-layout shortcuts, groups
+  // 5..9 and new/close/neighbor pane chords are not documented there; preserve
+  // their existing bindings until confirmed (round-19 clean-room requirement).
+  // Settings entry: https://www.sublimetext.com/docs/settings.html
+  {"keys": ["super+alt+1"], "command": "set_layout", "args": {"preset": "single"}},
+  {"keys": ["super+alt+2"], "command": "set_layout", "args": {"preset": "columns2"}},
+  {"keys": ["super+alt+3"], "command": "set_layout", "args": {"preset": "columns3"}},
+  {"keys": ["super+alt+4"], "command": "set_layout", "args": {"preset": "columns4"}},
+  {"keys": ["super+alt+5"], "command": "set_layout", "args": {"preset": "grid4"}},
+  {"keys": ["super+,"], "command": "edit_settings", "args": {"base_file": "${packages}/Default/Preferences.sublime-settings", "default": "{\n\t$0\n}\n"}}
 ]

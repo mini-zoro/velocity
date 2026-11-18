@@ -222,6 +222,9 @@ pub struct View {
     started: Instant,
     scroll_animation: Option<ScrollAnimation>,
     caret_lines: std::collections::BTreeSet<usize>,
+    bar_style_key: Option<(usize, u64, u64)>,
+    style_inputs: Option<[u64; 23]>,
+    font_revision: u64,
 }
 #[derive(Clone, Copy, Debug)]
 struct ScrollAnimation {
@@ -320,7 +323,7 @@ impl View {
                 self.gutter(e) - 12. - number.len() as f64 * self.cell,
                 baseline,
                 e.preferences.font_size,
-                self.line_number_color(e, scheme, row),
+                self.line_number_color(scheme, row),
                 FontStyle::default(),
                 Rect {
                     x: 0.,
@@ -543,6 +546,13 @@ impl View {
         metrics: vel_render::typography::FontMetrics,
         device_scale: f64,
     ) {
+        if self.font_metrics.is_none_or(|old| {
+            (old.ascent, old.descent, old.leading)
+                != (metrics.ascent, metrics.descent, metrics.leading)
+        }) || self.device_scale != device_scale.max(1.)
+        {
+            self.font_revision = self.font_revision.wrapping_add(1);
+        }
         self.font_metrics = Some(metrics);
         self.base_ascent = metrics.ascent;
         self.device_scale = device_scale.max(1.);
@@ -621,6 +631,9 @@ impl View {
             started: Instant::now(),
             scroll_animation: None,
             caret_lines: Default::default(),
+            bar_style_key: None,
+            style_inputs: None,
+            font_revision: 0,
         }
     }
     fn line_units(&mut self, line: &str, hidden: &[Range<usize>], tab: usize) -> Arc<[CachedUnit]> {
@@ -716,7 +729,56 @@ impl View {
             .floor()
             .max(1.) as usize
     }
+    fn style_input_key(&self, e: &Editor) -> Option<[u64; 23]> {
+        // Inline/HTML blocks and composition may change independently of document
+        // revisions. Those paths always run the full public layout synchronization.
+        if e.binary.is_some()
+            || e.marked.is_some()
+            || !e.annotations.borrow().inline.is_empty()
+            || !e.html.borrow().phantoms.is_empty()
+        {
+            return None;
+        }
+        let layout = e.layout.borrow();
+        Some([
+            e.buffer.id().0,
+            e.id.0,
+            e.revision,
+            e.layout_version.0,
+            e.settings.revision(),
+            std::rc::Rc::as_ptr(&e.theme) as usize as u64,
+            e.theme.borrow().revision,
+            self.font_revision,
+            e.caret as u64,
+            self.scroll_x.to_bits(),
+            self.scroll_y.to_bits(),
+            self.size.width.to_bits(),
+            self.size.height.to_bits(),
+            self.base_cell.to_bits(),
+            self.base_ascent.to_bits(),
+            self.device_scale.to_bits(),
+            self.tab_height.to_bits(),
+            self.focused as u64,
+            self.follow_caret as u64,
+            std::ptr::from_ref(&e.layout) as usize as u64,
+            layout.viewport_width as u64,
+            layout.page as u64,
+            layout.geometry_revision,
+        ])
+    }
     pub fn apply_style(&mut self, e: &Editor) {
+        let folds = e.folded();
+        let inputs = self.style_input_key(e);
+        if inputs.is_some()
+            && self.style_inputs == inputs
+            && self
+                .reflow_anchor
+                .as_ref()
+                .is_some_and(|state| state.folds == folds)
+        {
+            return;
+        }
+        self.style_inputs = None;
         let old = self.reflow_anchor.take().filter(|state| {
             let same_document = state.identity.0 == e.buffer.id();
             if !same_document {
@@ -724,18 +786,28 @@ impl View {
             }
             same_document
         });
-        self.bar_overlay = e
-            .theme
-            .borrow_mut()
-            .style(
-                e.ui_id(0xE300),
-                &vel_theme::ElementPath(&[
-                    vel_theme::Element::new("window", &[]),
-                    vel_theme::Element::new("scroll_area_control", &[]),
-                ]),
-                &e.settings,
-            )
-            .overlay;
+        // Overlay is a discrete theme property, cached until theme/settings change.
+        // The animated colors and dimensions still resolve for every frame.
+        let style_key = (
+            std::rc::Rc::as_ptr(&e.theme) as usize,
+            e.theme.borrow().revision,
+            e.settings.revision(),
+        );
+        if self.bar_style_key != Some(style_key) {
+            self.bar_overlay = e
+                .theme
+                .borrow_mut()
+                .style(
+                    e.ui_id(0xE300),
+                    &vel_theme::ElementPath(&[
+                        vel_theme::Element::new("window", &[]),
+                        vel_theme::Element::new("scroll_area_control", &[]),
+                    ]),
+                    &e.settings,
+                )
+                .overlay;
+            self.bar_style_key = Some(style_key);
+        }
         let scale = e.preferences.font_size / 13.;
         self.cell = self.base_cell * scale;
         self.ascent = self.base_ascent * scale;
@@ -759,7 +831,6 @@ impl View {
             / self.cell)
             .floor() as usize;
         e.layout.borrow_mut().viewport_width = width;
-        let folds = e.folded();
         let options = motion_layout_options(e);
         let geometry = ReflowGeometry {
             options,
@@ -918,6 +989,7 @@ impl View {
         if self.reflow_anchor.as_ref().unwrap().mark.is_none() && parked {
             self.record_reading_mark(e);
         }
+        self.style_inputs = self.style_input_key(e);
     }
     // Only geometry + text changes reconstruct an old layout. Ordinary typing and
     // scrolling retain the cheap painted bookmark and never shape a caret here.
@@ -1373,10 +1445,10 @@ impl View {
         caret.height += top + e.settings.number("caret_extra_bottom", 0.).max(0.);
         caret
     }
-    fn line_number_color(&self, e: &Editor, scheme: &ColorScheme, row: usize) -> Color {
+    fn line_number_color(&self, scheme: &ColorScheme, row: usize) -> Color {
         // ST4 added highlight_line_number: https://www.sublimetext.com/download
         // No documented default: retain unhighlighted line numbers unless opted in.
-        if e.settings.bool("highlight_line_number", false) && self.caret_lines.contains(&row) {
+        if self.caret_lines.contains(&row) {
             scheme
                 .globals
                 .color("gutter_foreground_highlight")
@@ -1843,6 +1915,9 @@ impl View {
             global("gutter"),
         );
         let regions = e.regions();
+        // Most keystrokes leave only carets. Avoid a binary search and range
+        // classification for every painted grapheme when no text is selected.
+        let has_selection = regions.iter().any(|region| !region.empty());
         self.caret_lines.clear();
         if e.settings.bool("highlight_line_number", false) {
             let layout = e.layout.borrow();
@@ -2192,7 +2267,7 @@ impl View {
                         gutter - 12. - number.len() as f64 * self.cell,
                         baseline,
                         e.preferences.font_size,
-                        self.line_number_color(e, scheme, row),
+                        self.line_number_color(scheme, row),
                         FontStyle::default(),
                         Rect {
                             width: gutter,
@@ -2517,9 +2592,10 @@ impl View {
                 let text = unit.text(&line);
                 let x = left + column as f64 * self.cell - self.scroll_x;
                 let at = start + unit.bytes.start;
-                let selected = regions
-                    .get(regions.partition_point(|r| r.end() <= at))
-                    .is_some_and(|r| !r.empty() && r.begin() <= at && at < r.end());
+                let selected = has_selection
+                    && regions
+                        .get(regions.partition_point(|r| r.end() <= at))
+                        .is_some_and(|r| !r.empty() && r.begin() <= at && at < r.end());
                 let found = self
                     .find_matches
                     .get(self.find_matches.partition_point(|r| r.end <= at))
@@ -4297,10 +4373,10 @@ mod lane_b_round18_tests {
                     "gutter_foreground"
                 },
             );
-            assert_eq!(v.line_number_color(&e, &scheme, 0), expected);
-            assert_eq!(v.line_number_color(&e, &scheme, 2), expected);
+            assert_eq!(v.line_number_color(&scheme, 0), expected);
+            assert_eq!(v.line_number_color(&scheme, 2), expected);
             assert_eq!(
-                v.line_number_color(&e, &scheme, 1),
+                v.line_number_color(&scheme, 1),
                 color(&scheme, "gutter_foreground")
             );
             v.scene(&e);
@@ -4321,7 +4397,7 @@ mod lane_b_round18_tests {
                 .iter()
                 .find(|t| t.text == "1")
                 .expect("long-line gutter number");
-            assert_eq!(number.color, v.line_number_color(&long, &scheme, 0));
+            assert_eq!(number.color, v.line_number_color(&scheme, 0));
         }
     }
     #[test]

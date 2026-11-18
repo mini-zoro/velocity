@@ -50,6 +50,7 @@ impl Resources {
         if let Err(error) = self.load_inner(data, &mut Some(&mut warnings)) {
             warnings.push(format!("{}: {error}", data.display()));
         }
+        crate::settings_source::retain_valid(data, &mut self.entries, &mut warnings);
         warnings
     }
     fn load_inner(

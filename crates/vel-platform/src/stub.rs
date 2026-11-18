@@ -4,6 +4,8 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Updates the native minimum content extent (unavailable on this platform).
+    pub fn set_minimum_content_size(&self, _size: Size) {}
     /// Retains no factory on unsupported platforms; native windows require macOS.
     pub fn set_window_factory(
         &self,
@@ -61,6 +63,10 @@ impl WindowHandle {
     /// No native file viewer exists on unsupported platforms.
     pub fn reveal_file(&self, _path: &std::path::Path) -> Result<(), String> {
         Err("revealing files requires macOS".into())
+    }
+    /// No native file manager exists on unsupported platforms.
+    pub fn show_directory(&self, _path: &std::path::Path) -> Result<(), String> {
+        Err("opening directories requires macOS".into())
     }
     /// No native chooser on this platform.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {

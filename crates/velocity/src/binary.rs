@@ -29,7 +29,9 @@ impl Drop for Task {
 }
 impl Task {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let total = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let total = vel_fileio::regular::metadata(&path, false)?
+            .ok_or("missing document")?
+            .len();
         let cancel = Arc::new(AtomicBool::new(false));
         let cancelled = cancel.clone();
         let (tx, result) = mpsc::channel();
@@ -39,9 +41,24 @@ impl Task {
                 let result = (|| {
                     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
                     let copy = directory.path().join("snapshot");
-                    // On filesystems supporting copy-on-write, std::fs::copy can clone the file.
-                    // Otherwise this is a worker-only full copy; no map of a mutable source exists.
-                    std::fs::copy(path, &copy).map_err(|e| e.to_string())?;
+                    // Copy only from the checked descriptor, with cancellation between chunks.
+                    // No map of a mutable source or unchecked path-based copy exists.
+                    let mut source = vel_fileio::regular::read(&path)?;
+                    let mut output = std::fs::File::create(&copy).map_err(|e| e.to_string())?;
+                    use std::io::{Read, Write};
+                    let mut bytes = [0; 64 * 1024];
+                    loop {
+                        if cancelled.load(Ordering::Acquire) {
+                            return Err("hex load cancelled".into());
+                        }
+                        let n = source
+                            .read(&mut bytes)
+                            .map_err(|e| vel_fileio::regular::error(&path, e))?;
+                        if n == 0 {
+                            break;
+                        }
+                        output.write_all(&bytes[..n]).map_err(|e| e.to_string())?;
+                    }
                     if cancelled.load(Ordering::Acquire) {
                         return Err("hex load cancelled".into());
                     }

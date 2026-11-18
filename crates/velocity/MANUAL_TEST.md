@@ -1,3 +1,115 @@
+# Round 19 Lane B review fixes (native verification pending)
+
+Timing note: `r19_app_sustained_build_output_has_steady_progress_and_lossless_tail` enforces the strict 50 ms UI-gap budget only with `VELOCITY_STRICT_TIMING=1`; the default gate keeps the data-per-poll ratio (which detects lock starvation) and a 1 s bound, because a loaded parallel gate can deschedule the test's own poll work.
+
+No GUI or packaging was run. Headless evidence, command/test mapping, public
+sources and performance boundaries are in `ROUND19_LANE_B.md`. Leave these boxes
+unchecked until observed on a macOS desktop.
+
+- [ ] **Special document types:** hot-exit a cloned text file, replace its path
+  with a FIFO, Unix socket or symlink to `/dev/zero`, and restart. Repeat with the
+  original, clone, three views and all views hidden. Startup and later tab clicks
+  stay responsive; affected views are read-only, clean and report the path once
+  in the status. With edited text still open, Cmd+S, Save All, Save As and Save on
+  close refuse the special path and retain the edits. Restore a regular file at
+  that path and Open File again: the existing error tabs become live views.
+- [ ] **Restore watchdog and backups:** simulate stalled document IO on a test
+  volume. The two-second restore deadline opens recovered unsaved text or a blank
+  window and names the session backup non-modally. When two windows fail, both
+  numbered backups reside beside the session and retain its original bytes.
+- [ ] **Changed disk contents:** replace a clean text file with a binary before
+  restart; its first restored view is hex/read-only. Replace the disk file while
+  its text buffer has unsaved edits; Cmd+S, Save All and Save on close offer
+  Overwrite/Cancel. Cancel preserves both versions, Overwrite saves the buffer.
+- [ ] **Minimum pane size:** repeatedly run New Pane, drag both splitter axes
+  to the edge and resize the window. Every group retains its tab bar and at least
+  three text lines; further splits are refused. Middle click closes the tab
+  under the pointer. Check native window minimums after font zoom and hiding or
+  showing the tab bar.
+
+- [ ] **Unavailable restored clones:** hot-exit a clean cloned file; make it
+  unreadable, replace it with a directory, or deny access through macOS privacy
+  controls. Relaunch with original/clone/three views selected, then with both
+  hidden. Startup and later tab clicks remain usable; the affected views are
+  read-only and report the filename non-modally. Close them, keep other dirty
+  text, and restart again. Unexpected restore failures report a timestamped
+  session backup; recovered text opens unsaved and other windows remain usable.
+- [ ] **Binary clones:** clone a 4 MiB file containing NULs and restart. Click
+  either view immediately and after loading completes; both stay hex/read-only.
+  Cmd+S and attempted typing never change the file's bytes. Repeat with both
+  views initially hidden behind another tab.
+- [ ] **Symlink Save As:** save a new filename through a directory symlink.
+  Modify it externally through the real directory and observe the reload.
+  Opening its real path focuses the existing document, including after restart.
+
+- [ ] **Vintage reveal:** in a 3,000-line document, enable Vintage; Esc, G, gg,
+  80 × j, dd near the bottom, /search and n must keep the resulting caret visible.
+  Repeat after scrolling the caret offscreen and in a wrapped pane.
+- [ ] **Layout reduction and Hot Exit:** Cmd+Option+3, Ctrl+Shift+3, Ctrl+1,
+  Cmd+Option+2; keep dirty text in this and another window, quit and reopen.
+  Both windows' contents return. A layout merge retains one selected view in the
+  receiving group. Repeat every column/row/grid preset and New Pane custom cells.
+- [ ] **Groups:** exercise Cmd+Option+1…5 and Ctrl+1…4 / Ctrl+Shift+1…4, all Groups
+  menu entries, neighboring focus/move, New Pane with/without moving, and Max
+  Columns before row splitting. Closing bottom-left in a grid moves its tabs to
+  the cell that grows into its space. No selection, anchor, folds or text is lost.
+- [ ] **Clone/Split/close:** Clone File selects only the clone; moving it leaves
+  the original in place. File › Split View displays both adjacent shared views
+  with independent carets/scroll/folds. On an empty window, either command creates
+  one untitled view. Cmd+W, middle click and the tab close button close one view,
+  including when four tabs are selected; the other selected tabs stay side by side
+  and the neighboring tab receives focus. Closing a split never prompts while the
+  original remains. Restart with a dirty untitled original/clone pair and only one
+  selected view. Edit the visible view and close it: no prompt, no lost text.
+  Repeat with the original visible, then Save As, close, edit the remaining view
+  and Cmd+S; verify the saved contents and undo survive another restart.
+  Close Selected handles the set, asking only when the final view of a dirty
+  buffer closes; Cancel stops the remaining operation.
+- [ ] **Close variants:** test File > Close All Files and context
+  Close/Others/Right/Unmodified/Selected/Deleted with Save, Don't Save and Cancel,
+  including Save As cancellation and a write failure. A dirty cloned buffer is
+  not offered by Close Unmodified. Delete clean and modified files both from Finder and the side bar: Close Deleted checks the
+  paths now and asks only for edited contents. Ordinary Cmd+W retains the existing
+  prompt for a document marked deleted.
+- [ ] **Settings windows:** Cmd+, and Velocity › Settings… open a separate window
+  with read-only defaults on the left and the writable User file on the right.
+  The labels distinguish Default/User; both use JSON highlighting for settings.
+  Existing User bytes are preserved, missing files receive the template. Restart
+  the settings window: labels, syntax and read-only protection return.
+- [ ] **Live settings/errors:** save font_size 19, then invalid JSON on line 2.
+  All windows keep 19; only the window that saved the file reports the filename
+  and line non-modally, once for that revision. Try Save All's preference toggle
+  and font larger/smaller/reset while JSON is broken: no alert or file overwrite.
+  Change an unrelated settings file and open/close another window: no repeated
+  error. Save a new broken revision: one new report. Fix it to 21 and observe live
+  apply. Repeat with a syntax-specific settings file while changing a different
+  valid file; the valid change must still apply.
+- [ ] **Settings entries:** test settings, key/mouse bindings, syntax-specific and
+  distraction-free settings, scheme/theme pickers, both customize commands and
+  font larger/smaller/reset. Customize `auto` in each appearance: status identifies
+  the active variant. Left resources remain read-only, existing overrides survive.
+  Browse Packages opens the Packages folder itself in Finder. An open_dir command
+  with $file_path/$folder opens the expanded directory and never creates a path.
+- [ ] **Menus and format status:** New File leads the File menu; Split View sits
+  with file/view commands. Test Copy Path, Reveal in Side Bar and Reveal in Finder.
+  Encoding status offers Reopen/Save with Encoding; line-ending status and View ›
+  Line Endings offer checked Windows/Unix/Mac OS 9 rows. Command execution awaits
+  Lane A's set_line_ending merge; no placeholder command was added.
+- [ ] **Builds/performance:** stream 4 KiB diagnostics for three seconds and a
+  distinctive tail. Keep steady progress and correct totals; stall consumption,
+  cancel and restart. Repeat native typing in one pane and two wrapped shared
+  panes, font/geometry changes while reading a parked clone, and optional tab
+  controls becoming visible after a theme reload.
+
+The cited macOS shortcut table confirms column/grid layouts and groups 1…4.
+It does not document Cmd+Option+Shift+2/3, Ctrl+5…9 / Ctrl+Shift+5…9 or the
+requested Cmd+K pane chords. Their bindings remain unchanged. Public sources also
+do not establish multi-selected close_file/move_to_group behavior, so those commands
+act on the active view; Close Selected and New Pane explicitly handle a set.
+Legacy XML scheme customization retains its status message and existing behavior.
+
+---
+
 # Round 18 Lane B third verification (native review pending)
 
 Continued uncommitted on `ac6f530`, keeping the pre-merge preference-test fix.

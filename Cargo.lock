@@ -2962,7 +2962,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "vel-build",
  "vel-config",
  "vel-scope",
  "vel-snippet",

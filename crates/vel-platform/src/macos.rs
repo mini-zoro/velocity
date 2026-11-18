@@ -326,12 +326,27 @@ impl WindowHandle {
         self.0.menu_commands.borrow_mut().clear();
         if let Some(application) = main.itemAtIndex(0).and_then(|item| item.submenu()) {
             for index in (0..application.numberOfItems()).rev() {
-                if application
-                    .itemAtIndex(index)
-                    .is_some_and(|item| item.title().to_string() == "Install Command Line Tool…")
-                {
+                if application.itemAtIndex(index).is_some_and(|item| {
+                    matches!(
+                        item.title().to_string().as_str(),
+                        "Install Command Line Tool…" | "Settings…" | "Preferences"
+                    )
+                }) {
                     application.removeItemAtIndex(index);
                 }
+            }
+            // Preferences edits defaults beside User settings:
+            // https://www.sublimetext.com/docs/settings.html
+            // Keep the native app-menu entry and the full resource-defined submenu.
+            if let Some(preferences) = entries.iter().find(|entry| entry.caption == "Preferences") {
+                if let Some(settings) = preferences.children.first() {
+                    append_menu(&self.0, &application, std::slice::from_ref(settings));
+                    if let Some(item) = application.itemAtIndex(application.numberOfItems() - 1) {
+                        application.removeItem(&item);
+                        application.insertItem_atIndex(&item, 1);
+                    }
+                }
+                append_menu(&self.0, &application, std::slice::from_ref(preferences));
             }
             append_menu(
                 &self.0,
@@ -344,7 +359,12 @@ impl WindowHandle {
                 }],
             );
         }
-        append_menu(&self.0, &main, entries);
+        let entries = entries
+            .iter()
+            .filter(|entry| entry.caption != "Preferences")
+            .cloned()
+            .collect::<Vec<_>>();
+        append_menu(&self.0, &main, &entries);
     }
     /// Queues a native context menu for the most recent unconsumed mouse press.
     /// Its native event survives `on_mouse` so a later frame can offer spelling
@@ -394,6 +414,18 @@ impl WindowHandle {
         NSWorkspace::sharedWorkspace()
             .activateFileViewerSelectingURLs(&NSArray::from_slice(&[&*url]));
         Ok(())
+    }
+    /// Opens a directory in Finder, without selecting it inside its parent.
+    pub fn show_directory(&self, path: &Path) -> Result<(), String> {
+        if !path.is_dir() {
+            return Err(format!("{}: directory does not exist", path.display()));
+        }
+        let url = file_url(path)?;
+        if NSWorkspace::sharedWorkspace().openURL(&url) {
+            Ok(())
+        } else {
+            Err(format!("could not open {}", path.display()))
+        }
     }
     /// Opens a native multi-file chooser.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {
@@ -452,6 +484,20 @@ impl WindowHandle {
     /// Actual content size in points.
     pub fn content_size(&self) -> Size {
         self.0.size.get()
+    }
+    /// Updates the minimum content extent needed by the current pane layout.
+    pub fn set_minimum_content_size(&self, size: Size) {
+        if let Some(window) = self.0.window.get() {
+            let minimum = NSSize::new(size.width.max(320.), size.height.max(200.));
+            window.setContentMinSize(minimum);
+            let current = self.content_size();
+            if current.width < minimum.width || current.height < minimum.height {
+                window.setContentSize(NSSize::new(
+                    current.width.max(minimum.width),
+                    current.height.max(minimum.height),
+                ));
+            }
+        }
     }
     /// Maximum frames per second on the hosting display.
     pub fn maximum_frames_per_second(&self) -> f32 {
@@ -1568,6 +1614,12 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
                 &NSString::from_str(""),
             )
         };
+        if entry.command.as_deref() == Some("edit_settings")
+            && entry.args.contains("/Preferences.sublime-settings")
+        {
+            item.setKeyEquivalent(&NSString::from_str(","));
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        }
         if let Some(command) = &entry.command {
             let mut commands = host.menu_commands.borrow_mut();
             item.setTag(commands.len() as isize);

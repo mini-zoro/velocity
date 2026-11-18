@@ -29,6 +29,8 @@ pub struct Tab {
     pub previous_document: Option<vel_buffer::BufferId>,
     pub restored_document: Option<u64>,
     pub disk_saved: Option<vel_session::DiskStamp>,
+    pub(crate) disk_revision: Option<fileio::regular::Identity>,
+    pub(crate) overwrite_allowed: Option<fileio::regular::Identity>,
     pub sheet: u64,
     pub session_document: u64,
     pub document: vel_buffer::BufferId,
@@ -50,6 +52,11 @@ pub struct Tab {
     pub scroll_line_height: f64,
     pub loading: Option<LoadTask>,
     pub binary_loading: Option<crate::binary::Task>,
+    /// Binary identity survives worker completion/failure independently of its snapshot.
+    pub(crate) binary_document: bool,
+    /// The source could not load. Never persist an empty error placeholder as
+    /// if it were recovered user text; retained dirty contents still survive.
+    pub(crate) load_failed: bool,
     pub pending_restore: Option<vel_session::ViewState>,
     /// Center this location once the active view has its final viewport geometry.
     pub pending_center: bool,
@@ -106,6 +113,8 @@ impl Tab {
             previous_document: None,
             restored_document: None,
             disk_saved: None,
+            disk_revision: None,
+            overwrite_allowed: None,
             sheet: crate::workbench::next_sheet(),
             session_document: crate::workbench::next_sheet(),
             document: editor.buffer.id(),
@@ -127,6 +136,8 @@ impl Tab {
             scroll_line_height: 20.,
             loading: None,
             binary_loading: None,
+            binary_document: false,
+            load_failed: false,
             pending_restore: None,
             pending_center: false,
             location: None,
@@ -139,10 +150,28 @@ impl Tab {
         Ok(tab)
     }
     pub fn install_restored(&mut self, loaded: Loaded) {
+        // Restore already probed the path on its bounded reader. Installing editor
+        // state must not repeat document IO on the startup thread.
+        let path = self.path.take();
         self.install(loaded);
+        self.path = path;
+    }
+    /// Move the document's worker with its actual buffer. Pending view restoration
+    /// remains on each sheet so completion restores that sheet's own selection.
+    pub(crate) fn transfer_document_io(&mut self, target: &mut Self) {
+        target.loading = self.loading.take();
+        target.binary_loading = self.binary_loading.take();
+        target.previous_document = self.previous_document.take();
+        target.external = self.external.take();
+        target.external_load = std::mem::take(&mut self.external_load);
+        target.load_started = self.load_started.take();
+        target.location = self.location.take();
     }
     /// Includes removed files whose retained contents have no saved disk copy.
     pub fn dirty(&self) -> bool {
+        if self.load_failed {
+            return false;
+        }
         self.deleted
             || self.shared_dirty
             || self.restored_format_dirty
@@ -228,6 +257,8 @@ impl Tab {
     fn install(&mut self, loaded: Loaded) {
         let navigation = self.editor.navigation.take();
         self.editor.binary = None;
+        self.binary_document = false;
+        self.load_failed = false;
         self.editor.source_bytes = self.loading.as_ref().map_or(0, |t| t.total);
         self.editor.cancel_composition();
         *self.editor.html.borrow_mut() = Default::default();
@@ -272,6 +303,11 @@ impl Tab {
         }
         self.disk_stamp = self.path.as_deref().and_then(stamp);
         self.disk_saved = self.path.as_deref().and_then(vel_session::DiskStamp::read);
+        self.disk_revision = self
+            .path
+            .as_deref()
+            .and_then(|p| fileio::regular::identity(p).ok().flatten());
+        self.overwrite_allowed = None;
         if let Some(location) = self.location.take() {
             self.goto(&location);
         }
@@ -343,6 +379,13 @@ pub struct Workspace {
     pub messages: Vec<String>,
     /// Consolidated authoring diagnostics; consumed by the status bar, never alerts.
     pub(crate) resource_reports: Vec<String>,
+    pub(crate) settings_reports: crate::settings_reports::Scope,
+    pub(crate) restore_in_progress: bool,
+    pub(crate) restore_source: Option<PathBuf>,
+    pub(crate) restore_deadline: Option<Instant>,
+    pub(crate) pane_extent: (f64, f64),
+    pub(crate) pane_minimum: (f64, f64),
+    pub(crate) restore_original: Option<Arc<crate::session_restore::Original>>,
     pub telemetry: Vec<Value>,
     pub(crate) settings: Settings,
     pub(crate) keymap: Keymap,
@@ -399,15 +442,26 @@ fn package_stamps(
         }
     }
 }
-fn absolute(path: &Path) -> Result<PathBuf, String> {
-    if path.exists() {
-        std::fs::canonicalize(path).map_err(|e| e.to_string())
-    } else if path.is_absolute() {
-        Ok(path.into())
+/// One document identity for opens, Save As and restored paths. New filenames
+/// also resolve their existing parent, including directory symlinks.
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
+    if std::fs::metadata(path).is_ok_and(|m| m.is_file() || m.is_dir()) {
+        return std::fs::canonicalize(path).map_err(|e| e.to_string());
+    }
+    let absolute = if path.is_absolute() {
+        path.to_owned()
     } else {
         std::env::current_dir()
             .map(|p| p.join(path))
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
+    };
+    if let Some(parent) = absolute.parent()
+        && let Some(name) = absolute.file_name()
+        && parent.exists()
+    {
+        Ok(parent.canonicalize().map_err(|e| e.to_string())?.join(name))
+    } else {
+        Ok(absolute)
     }
 }
 #[derive(Debug)]
@@ -609,7 +663,13 @@ impl Configuration {
             );
         }
         if let Some(data) = &data_dir {
-            let warnings = resources.load_with_warnings(data);
+            let (mut settings_reports, warnings): (Vec<_>, Vec<_>) = resources
+                .load_with_warnings(data)
+                .into_iter()
+                .partition(|w| crate::settings_reports::source(w).is_some());
+            // Retain each settings filename and location for the non-modal report.
+            resource_log.extend(settings_reports.iter().cloned());
+            resource_reports.append(&mut settings_reports);
             let paths: Vec<_> = warnings
                 .iter()
                 .map(|w| w.split_once(": ").map_or(w.as_str(), |(p, _)| p))
@@ -1249,6 +1309,13 @@ impl Workspace {
             macro_paths,
             messages,
             resource_reports,
+            settings_reports: Default::default(),
+            restore_in_progress: false,
+            restore_source: None,
+            restore_deadline: None,
+            pane_extent: (1200., 800.),
+            pane_minimum: (120., 112.),
+            restore_original: None,
             telemetry: Vec::new(),
             settings,
             keymap,
@@ -1495,11 +1562,20 @@ impl Workspace {
     fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
         self.materialize_input();
         let path = absolute(&location.path)?;
-        if let Some(index) = self
-            .tabs
-            .iter()
-            .position(|t| t.path.as_ref() == Some(&path))
-        {
+        if let Some(index) = self.tabs.iter().position(|t| {
+            t.path.as_ref() == Some(&path)
+                || (t.load_failed
+                    && t.path.as_deref().and_then(|p| absolute(p).ok()).as_ref() == Some(&path))
+        }) {
+            if self.tabs[index].load_failed {
+                let identity = self.tabs[index].session_document;
+                for tab in &mut self.tabs {
+                    if tab.session_document == identity {
+                        tab.path = Some(path.clone());
+                    }
+                }
+                self.retry_failed_document(index)?;
+            }
             self.select(index);
             if !preview {
                 self.make_permanent(index);
@@ -1519,17 +1595,7 @@ impl Workspace {
         tab.path = Some(path.clone());
         tab.location = Some(location);
         let fallback = tab.editor.settings.editor().fallback_encoding;
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => Some(metadata),
-            Ok(_) => {
-                return Err(format!(
-                    "{}: only regular files can be opened",
-                    path.display()
-                ));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        };
+        let metadata = fileio::regular::metadata(&path, true)?;
         let size = metadata.as_ref().map_or(0, |m| m.len());
         if metadata.is_none() {
             let location = tab.location.take().expect("open location");
@@ -1538,6 +1604,7 @@ impl Workspace {
             tab.editor.source_bytes = size;
             tab.editor.refresh_policy();
             tab.editor.read_only = true;
+            tab.binary_document = true;
             tab.binary_loading = Some(crate::binary::Task::open(path.clone())?);
         } else if size
             >= tab
@@ -1593,14 +1660,24 @@ impl Workspace {
         self.prepare_sheet(index)?;
         self.make_permanent(index);
         let tab = &mut self.tabs[index];
+        // Never serialize a binary/hex document through text, even if a future
+        // attachment path accidentally loses its read-only flag.
+        if tab.binary_document || tab.editor.binary.is_some() {
+            return Err("binary/hex documents cannot be saved as text".into());
+        }
         if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.read_only {
             return Err("file is loading or its load failed".into());
         }
+        if self.save_conflict(index, path.as_deref())? {
+            return Err("File changed on disk; confirm Overwrite or Cancel".into());
+        }
+        let tab = &mut self.tabs[index];
         tab.editor.unmark();
         let target = path
             .or_else(|| tab.path.clone())
             .ok_or("save requires a path")?;
         let target = absolute(&target)?;
+        self.settings_reports.claim(&target);
         let settings = tab.editor.settings.editor();
         fileio::prepare_save(
             &mut tab.editor.buffer,
@@ -1625,6 +1702,8 @@ impl Workspace {
         let document = tab.session_document;
         tab.disk_stamp = stamp(&target);
         tab.disk_saved = vel_session::DiskStamp::read(&target);
+        tab.disk_revision = fileio::regular::identity(&target)?;
+        tab.overwrite_allowed = None;
         tab.editor.annotations.borrow_mut().reference(
             tab.editor.buffer.text().clone(),
             tab.path.clone(),
@@ -1666,6 +1745,7 @@ impl Workspace {
     }
     /// Saves dirty documents independently. Cancellation skips that document; errors
     /// include its path/name and do not prevent later documents from being saved.
+    #[cfg(test)]
     pub fn save_all(&mut self, mut choose: impl FnMut(&str) -> Option<PathBuf>) -> Vec<String> {
         let mut errors = Vec::new();
         for index in 0..self.tabs.len() {
@@ -1701,8 +1781,13 @@ impl Workspace {
             .unwrap_or(self.workbench.active);
         let order = &self.workbench.groups[group].sheets;
         let at = order.iter().position(|id| *id == sheet).unwrap_or(0);
+        let selected = &self.workbench.groups[group].selected;
         let neighbor = order
-            .get(at + 1)
+            .iter()
+            .skip(at + 1)
+            .find(|id| selected.contains(id))
+            .or_else(|| order[..at].iter().rev().find(|id| selected.contains(id)))
+            .or_else(|| order.get(at + 1))
             .or_else(|| at.checked_sub(1).and_then(|i| order.get(i)))
             .copied();
         if (!tab.transient || tab.dirty())
@@ -1748,7 +1833,18 @@ impl Workspace {
             })
             .unwrap_or(0);
             self.active = target;
+            // Closing one sheet retains the surviving side-by-side selection. The
+            // public multi-select guide does not specify close's selection behavior;
+            // preserve it rather than treating close as an ordinary tab click.
+            // https://www.sublimetext.com/docs/tab_multi-select.html
+            let target_group = self.workbench.group_of(self.tabs[target].sheet);
+            let selection = target_group.map(|g| self.workbench.groups[g].selected.clone());
             self.select(target);
+            if let Some(group) = target_group {
+                self.workbench.groups[group]
+                    .selected
+                    .extend(selection.unwrap_or_default());
+            }
         }
         Ok(())
     }
@@ -1828,6 +1924,7 @@ impl Workspace {
                 }
             }
         }
+        let mut failed_documents = Vec::new();
         for tab in &mut self.tabs {
             if tab.lazy.is_some() || tab.editor.shared_shadow {
                 continue;
@@ -1881,6 +1978,7 @@ impl Workspace {
                     Ok(snapshot) => {
                         *tab.editor.language.borrow_mut() = None;
                         tab.editor.binary = Some(snapshot);
+                        tab.binary_document = true;
                         tab.editor.read_only = true;
                         tab.editor.caret = 0;
                         tab.editor.anchor = 0;
@@ -1888,7 +1986,16 @@ impl Workspace {
                         tab.needs_detection = false;
                         tab.disk_stamp = tab.path.as_deref().and_then(stamp);
                     }
-                    Err(e) => self.messages.push(e),
+                    Err(e) => {
+                        self.resource_reports.push(
+                            tab.path
+                                .as_deref()
+                                .map_or_else(|| e.clone(), |p| fileio::regular::error(p, &e)),
+                        );
+                        if !tab.dirty() {
+                            failed_documents.push(tab.sheet);
+                        }
+                    }
                 }
                 changed = true;
             }
@@ -1915,15 +2022,15 @@ impl Workspace {
                         tab.external_load = false;
                     }
                     Err(e) => {
-                        if !tab.external_load {
-                            tab.install(Loaded {
-                                text: Text::new(),
-                                format: Format::default(),
-                                source_bytes: 0,
-                            });
-                            tab.editor.read_only = true;
+                        self.resource_reports.push(
+                            tab.path
+                                .as_deref()
+                                .map_or_else(|| e.clone(), |p| fileio::regular::error(p, &e)),
+                        );
+                        if !tab.dirty() {
+                            failed_documents.push(tab.sheet);
                         }
-                        self.messages.push(e);
+                        tab.external_load = false;
                     }
                 }
                 changed = true;
@@ -1959,6 +2066,14 @@ impl Workspace {
                                 tab.deleted = true;
                                 tab.transient = false;
                                 tab.external = None;
+                                changed = true;
+                                continue;
+                            }
+                            if let Err(error) = fileio::regular::metadata(&path, false) {
+                                self.resource_reports.push(error);
+                                if !tab.dirty() {
+                                    failed_documents.push(tab.sheet);
+                                }
                                 changed = true;
                                 continue;
                             }
@@ -1998,6 +2113,9 @@ impl Workspace {
                                         && tab.format == loaded.format
                                     {
                                         tab.disk_saved = vel_session::DiskStamp::read(&path);
+                                        tab.disk_revision =
+                                            fileio::regular::identity(&path).ok().flatten();
+                                        tab.overwrite_allowed = None;
                                         continue;
                                     }
                                     if tab.dirty() || tab.editor.marked.is_some() {
@@ -2007,11 +2125,21 @@ impl Workspace {
                                     }
                                     changed = true;
                                 }
-                                Err(e) => self.messages.push(e),
+                                Err(e) => {
+                                    self.resource_reports.push(fileio::regular::error(&path, e));
+                                    if !tab.dirty() {
+                                        failed_documents.push(tab.sheet);
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+        for sheet in failed_documents {
+            if let Some(index) = self.sheet_index(sheet) {
+                let _ = self.fail_shared_document(index);
             }
         }
         for sheet in close_deleted {
@@ -2030,7 +2158,7 @@ impl Workspace {
                 false
             }
             Ok(Err(error)) => {
-                self.messages.push(error);
+                self.resource_reports.push(error);
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
@@ -2370,6 +2498,12 @@ impl Workspace {
         Ok(())
     }
     pub fn reload_external(&mut self, index: usize, reload: bool) {
+        if !reload {
+            self.tabs[index].overwrite_allowed = self.tabs[index]
+                .path
+                .as_deref()
+                .and_then(|p| fileio::regular::identity(p).ok().flatten());
+        }
         if let Some(loaded) = self.tabs[index].external.take()
             && reload
         {
@@ -2862,7 +2996,7 @@ mod round15_tests {
     #[test]
     fn missing_paths_are_named_new_documents_and_save_errors_keep_the_buffer() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("new.txt");
+        let path = dir.path().canonicalize().unwrap().join("new.txt");
         let mut w = workspace();
         w.open(location(path.clone())).unwrap();
         assert_eq!(w.tabs[0].path.as_ref(), Some(&path));
@@ -2981,7 +3115,10 @@ mod round15_tests {
         assert!(w.tabs[1].dirty());
         assert!(w.tabs[2].dirty());
         assert!(!w.tabs[3].dirty());
-        assert_eq!(w.recent_files.first(), Some(&dir.path().join("save this")));
+        assert_eq!(
+            w.recent_files.first(),
+            Some(&dir.path().canonicalize().unwrap().join("save this"))
+        );
         assert!(w.tabs[4].dirty());
     }
     #[test]
@@ -3217,7 +3354,9 @@ mod round15_tests {
         assert_eq!(restored.tabs.len(), 2);
         restored.select(0);
         assert!(restored.tabs[0].deleted);
-        assert!(restored.tabs[0].dirty());
+        assert!(!restored.tabs[0].dirty());
+        assert!(restored.tabs[0].load_failed);
+        assert!(restored.tabs[0].editor.read_only);
         restored.select(1);
         assert_eq!(restored.editor().text.to_string(), "healthy");
         let mut close_deleted = workspace();
@@ -3260,8 +3399,10 @@ mod round15_tests {
         let mut restored = workspace();
         restored.restore_window(&window, &documents).unwrap();
         assert_eq!(restored.editor().text.to_string(), "good");
-        assert!(restored.prepare_sheet(0).is_err());
+        restored.prepare_sheet(0).unwrap();
         assert!(restored.tabs[0].lazy.is_none());
+        assert!(restored.tabs[0].editor.read_only);
+        assert!(restored.messages.is_empty());
         assert!(restored.prepare_sheet(0).is_ok());
         let sheets = window.workbench.groups[0].sheets.clone();
         window.workbench.groups[0].selected.extend(sheets);
@@ -3269,7 +3410,7 @@ mod round15_tests {
         visible.restore_window(&window, &documents).unwrap();
         assert_eq!(
             visible
-                .messages
+                .resource_reports
                 .iter()
                 .filter(|m| m.contains("failed.txt"))
                 .count(),
@@ -3279,7 +3420,7 @@ mod round15_tests {
         visible.editor_mut();
         assert_eq!(
             visible
-                .messages
+                .resource_reports
                 .iter()
                 .filter(|m| m.contains("failed.txt"))
                 .count(),
