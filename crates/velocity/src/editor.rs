@@ -16,6 +16,10 @@ use vel_config::{
 use vel_platform::{Command, TextInput, Utf16Range};
 use vel_text::Text;
 
+#[cfg(test)]
+#[path = "editor/round21_tests.rs"]
+mod round21_tests;
+
 #[path = "navigation.rs"]
 pub(crate) mod navigation;
 
@@ -85,12 +89,8 @@ pub struct Editor {
     >,
     selector_points: RefCell<SelectorPoints>,
     pub(crate) exact_scope_cache: RefCell<crate::editing::ExactScopeCache>,
-    pub(crate) pending_closing_tag: Option<(
-        vel_buffer::BufferId,
-        vel_buffer::ChangeId,
-        Vec<Region>,
-        vel_scope::Scope,
-    )>,
+    pub(crate) automatic_indents: Option<crate::editing::AutomaticIndents>,
+    pub(crate) pending_closing_tag: Option<crate::editing::PendingClosingTag>,
     #[cfg(test)]
     pub(crate) exact_scope_parses: std::cell::Cell<usize>,
     last_visual_boundary: Option<(bool, vel_buffer::ChangeId, Selection)>,
@@ -229,6 +229,7 @@ impl Editor {
             selector_snapshots: RefCell::new(Vec::new()),
             selector_points: RefCell::default(),
             exact_scope_cache: RefCell::default(),
+            automatic_indents: None,
             pending_closing_tag: None,
             #[cfg(test)]
             exact_scope_parses: std::cell::Cell::new(0),
@@ -476,6 +477,7 @@ impl Editor {
             &self.settings,
         )?;
         *self.language.borrow_mut() = Some(language);
+        self.automatic_indents = None;
         self.language_buffer = Some(self.buffer.id());
         Ok(())
     }
@@ -644,6 +646,11 @@ impl Editor {
             }
         }
         let before_version = self.buffer.change_id();
+        let line_folds = if matches!(name, "duplicate_line" | "join_lines") {
+            self.line_command_folds()
+        } else {
+            None
+        };
         let before_selection = (
             self.anchor,
             self.caret,
@@ -659,6 +666,9 @@ impl Editor {
         let mut registry = self.registry.take_for_dispatch();
         let mut result = registry.run(name, args, self);
         self.registry = registry;
+        if let Some(folds) = line_folds {
+            self.reveal_line_edits(before_version, folds);
+        }
         for command in std::mem::take(&mut self.vintage_requests) {
             if let Err(error) = self.run(&command.command, &command.args) {
                 result = Err(error);
@@ -873,6 +883,15 @@ impl Editor {
         let mut keymap = std::mem::take(&mut self.keymap);
         let resolution = keymap.resolve(key, &EditorContext(self));
         self.keymap = keymap;
+        if matches!(resolution, Resolution::Unbound)
+            && key.modifiers == 1
+            && key.name == "o"
+            && self.command_mode()
+        {
+            // AppKit expands this key into two selectors, the second a movement.
+            // Vintage and user bindings got first refusal; do not run half the sequence.
+            return Resolution::Pending;
+        }
         resolution
     }
     pub fn key(&mut self, key: &Key) -> Result<bool, String> {
@@ -1128,8 +1147,36 @@ impl Editor {
             self.keymap.cancel();
             return;
         }
-        let (name, args) = selector_command(command);
-        let _ = self.run(name, &args);
+        if self.accepts_native_selector(command) {
+            let (name, args) = selector_command(command);
+            let _ = self.run(name, &args);
+        }
+    }
+    /// Key resolution gives Vintage first refusal; AppKit fallback must not edit normal mode.
+    pub(crate) fn accepts_native_selector(&self, command: Command) -> bool {
+        !matches!(
+            command,
+            Command::DeleteBackward
+                | Command::DeleteForward
+                | Command::DeleteWord(_)
+                | Command::DeleteDecomposingBackward
+                | Command::DeleteToLineStart
+                | Command::DeleteToParagraphEnd
+                | Command::Newline
+                | Command::LiteralNewline
+                | Command::Tab
+                | Command::Backtab
+                | Command::Yank
+                | Command::Transpose
+                | Command::DeleteToMark
+                | Command::UppercaseWord
+                | Command::LowercaseWord
+                | Command::CapitalizeWord
+                | Command::Cut
+                | Command::Paste
+                | Command::Undo
+                | Command::Redo
+        ) || !self.command_mode()
     }
 }
 impl Host for Editor {
@@ -1162,6 +1209,31 @@ impl Host for Editor {
         if self.vintage_command(name, args)? {
             return Ok(true);
         }
+        if matches!(name, "swap_line_up" | "swap_line_down")
+            && let Some(folds) = self.line_command_folds()
+        {
+            // Build 4107 notes improved Swap Lines, but doesn't specify fold semantics.
+            // https://www.sublimetext.com/download
+            ops::swap_folded_lines(
+                &mut self.buffer,
+                self.id,
+                name == "swap_line_down",
+                &folds,
+                crate::layout::FOLDS,
+            );
+            return Ok(true);
+        }
+        if name == "unindent"
+            && self.buffer.views().any(|id| {
+                self.buffer
+                    .view(id)
+                    .get_regions(crate::layout::FOLDS)
+                    .is_some_and(|set| !set.is_empty())
+            })
+        {
+            ops::unindent_preserving_folds(&mut self.buffer, self.id, crate::layout::FOLDS);
+            return Ok(true);
+        }
         if self.html_command(name, args)? {
             return Ok(true);
         }
@@ -1187,6 +1259,29 @@ impl Host for Editor {
     }
     fn wrap_width(&self) -> Option<usize> {
         Some(self.settings.usize("wrap_width", 0))
+    }
+    fn kill_to_bol(&mut self) -> Vec<String> {
+        self.synchronize_layout();
+        let layout = self.layout.borrow();
+        let starts: Vec<_> = self
+            .buffer
+            .view(self.id)
+            .sel()
+            .iter()
+            .map(|r| {
+                let (visual, segment) = layout.visual_at(&self.text, r.b);
+                self.text.line_to_byte(layout.locate(visual).0) + segment.bytes.start
+            })
+            .collect();
+        drop(layout);
+        ops::delete_to_bol(&mut self.buffer, self.id, Some(&starts))
+    }
+    fn kill_to_hard_eol(&mut self) -> Vec<String> {
+        let values = ops::delete_to_hard_eol(&mut self.buffer, self.id);
+        if values.iter().any(|s| !s.is_empty()) {
+            self.finish_vintage_visual_kill();
+        }
+        values
     }
     fn wrap_comment_prefixes(&self) -> Vec<String> {
         let language = self.language.borrow();
@@ -1336,8 +1431,14 @@ pub fn selector_command(command: Command) -> (&'static str, Value) {
     match command {
         DeleteBackward => ("left_delete", json!({})),
         DeleteForward => ("right_delete", json!({})),
+        DeleteWord(forward) => ("delete_word", json!({"forward":forward})),
+        DeleteDecomposingBackward => ("left_delete", json!({"decompose":true})),
+        DeleteToLineStart => ("delete_to_bol", json!({})),
+        DeleteToParagraphEnd => ("delete_to_hard_eol", json!({})),
         Newline => ("insert", json!({"characters":"\n"})),
+        LiteralNewline => ("insert", json!({"characters":"\n","literal":true})),
         Tab => ("insert_best_completion", json!({})),
+        Backtab => ("unindent", json!({})),
         Left(extend) | Right(extend) => (
             "move",
             json!({"by":"characters","forward":matches!(command,Right(_)),"extend":extend}),
@@ -1352,9 +1453,33 @@ pub fn selector_command(command: Command) -> (&'static str, Value) {
         ),
         Home(extend) => ("move_to", json!({"to":"bol","extend":extend})),
         End(extend) => ("move_to", json!({"to":"eol","extend":extend})),
+        ParagraphStart(extend) => ("move_to", json!({"to":"hardbol","extend":extend})),
+        ParagraphEnd(extend) => ("move_to", json!({"to":"hardeol","extend":extend})),
+        SelectParagraphBoundary(forward) => (
+            "move",
+            json!({"by":"paragraphs","forward":forward,"extend":true}),
+        ),
         DocumentStart(extend) => ("move_to", json!({"to":"bof","extend":extend})),
         DocumentEnd(extend) => ("move_to", json!({"to":"eof","extend":extend})),
         PageUp | PageDown => ("move", json!({"by":"pages","forward":command==PageDown})),
+        ScrollPage(forward) => ("scroll_page", json!({"forward":forward})),
+        SelectPage(forward) => (
+            "move",
+            json!({"by":"pages","forward":forward,"extend":true}),
+        ),
+        CenterSelection => ("show_at_center", json!({})),
+        Yank => ("yank", json!({})),
+        Transpose => ("transpose", json!({})),
+        SetMark => ("set_mark", json!({})),
+        SelectToMark => ("select_to_mark", json!({})),
+        SwapWithMark => ("swap_with_mark", json!({})),
+        DeleteToMark => ("delete_to_mark", json!({})),
+        UppercaseWord => ("upper_case", json!({})),
+        LowercaseWord => ("lower_case", json!({})),
+        CapitalizeWord => ("title_case", json!({})),
+        SelectWord => ("expand_selection", json!({"to":"word"})),
+        SelectLine => ("expand_selection", json!({"to":"line"})),
+        SelectParagraph => ("expand_selection", json!({"to":"paragraph"})),
         Undo => ("undo", json!({})),
         Redo => ("redo", json!({})),
         Copy => ("copy", json!({})),

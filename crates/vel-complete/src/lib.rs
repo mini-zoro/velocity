@@ -1,6 +1,7 @@
 //! Completion sources, scope-aware ranking and cancellable snapshot queries.
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+mod markup;
 mod worker;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -156,6 +157,10 @@ impl PreserveOrder {
 pub struct CompletionSettings {
     /// Enable popup while typing.
     pub auto_complete: bool,
+    /// Opt out of the built-in HTML and CSS rows; other providers are unaffected.
+    pub disable_default_completions: bool,
+    /// Override the selector controlling eligibility for the markup provider.
+    pub default_completions_selector: Option<String>,
     /// Main automatic scope selector.
     pub auto_complete_selector: String,
     /// Explicit character/scope triggers.
@@ -193,6 +198,8 @@ impl Default for CompletionSettings {
     fn default() -> Self {
         Self {
             auto_complete: true,
+            disable_default_completions: false,
+            default_completions_selector: None,
             // Public selector example: https://www.sublimetext.com/docs/completions.html#settings
             auto_complete_selector: "meta.tag, source - comment - string.quoted.double.block - string.quoted.single.block - string.unquoted.heredoc".into(),
             auto_complete_triggers: Vec::new(),
@@ -517,6 +524,61 @@ impl CompletionEngine {
             prefixes.push(view.text.slice(start..caret).to_string());
         }
         let matches = |selector: &Selector| stacks.iter().all(|stack| selector.matches(stack));
+        // This is a worker snapshot: both the text and scopes above are from the same
+        // revision. Do not ask an editor/main-thread provider to parse missing scopes.
+        let mut markup_slot = None;
+        let slot_at = |caret: usize, stack: &[vel_scope::Scope], selector: &Selector| {
+            // A '<' immediately after the prefix belongs to the *next* tag.
+            // Consult the prefix's scope for text expansion, but keep the usual
+            // scope for tag attributes, CSS, and resource/snippet selectors.
+            if !matches!(view.invocation, Invocation::Typing { .. })
+                && caret > 0
+                && caret < view.text.len_bytes()
+                && view.text.byte_at(caret) == b'<'
+                && let Some(left) = scopes.scopes_at(view.text.floor_char_boundary(caret - 1))
+                && let Some(
+                    found @ (
+                        markup::Slot::Tag {
+                            after_open: false, ..
+                        },
+                        _,
+                    ),
+                ) = markup::slot(&view.text, caret, left, selector)
+            {
+                return Some(found);
+            }
+            markup::slot(&view.text, caret, stack, selector)
+        };
+        if !settings.disable_default_completions
+            && let Some(selector) =
+                markup::selector(settings.default_completions_selector.as_deref())
+            && let Some((slot, start)) = slot_at(carets[0], stacks[0], &selector)
+        {
+            let mut starts = vec![start];
+            let compatible = carets[1..].iter().zip(&stacks[1..]).all(|(&caret, stack)| {
+                if let Some((other, start)) = slot_at(caret, stack, &selector)
+                    && other == slot
+                {
+                    starts.push(start);
+                    true
+                } else {
+                    false
+                }
+            });
+            if compatible {
+                for (((range, prefix), start), &caret) in list
+                    .replace_ranges
+                    .iter_mut()
+                    .zip(&mut prefixes)
+                    .zip(starts)
+                    .zip(carets)
+                {
+                    *range = start..caret;
+                    *prefix = view.text.slice(range.clone()).to_string();
+                }
+                markup_slot = Some(slot);
+            }
+        }
         if let Invocation::Typing { character, idle } = view.invocation {
             if !settings.auto_complete
                 || idle < settings.auto_complete_delay
@@ -594,6 +656,11 @@ impl CompletionEngine {
             }
             order += 1;
         };
+        if let Some(slot) = markup_slot {
+            for item in slot.items(primary, view.invocation) {
+                add(item, 120, true, false);
+            }
+        }
         for (i, resource) in self.resources.iter().enumerate() {
             if i % 256 == 0 && cancel() {
                 list.cancelled = true;

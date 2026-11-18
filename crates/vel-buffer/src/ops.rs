@@ -44,6 +44,8 @@ pub enum MoveUnit {
     Stops(Stops),
     /// One LF line through a supplied layout.
     Lines,
+    /// The next/previous LF-delimited paragraph boundary (Cocoa).
+    Paragraphs,
     /// One layout page.
     Pages,
 }
@@ -111,8 +113,13 @@ fn first_nonblank(text: &Text, row: usize) -> usize {
     }
     at
 }
-fn sub_boundary(left: char, right: char) -> bool {
-    left == '_' || right == '_' || (left.is_lowercase() && right.is_uppercase())
+fn sub_boundary(left: char, right: char, s: &Settings) -> bool {
+    // Build 4142 documents configurable separators, not acronym or digit
+    // transitions. Retain the existing lowercase-to-uppercase stop.
+    // https://www.sublimetext.com/download
+    s.sub_word_separators.contains(left)
+        || s.sub_word_separators.contains(right)
+        || (left.is_lowercase() && right.is_uppercase())
 }
 fn boundary(text: &Text, at: usize, s: &Settings, stops: Option<Stops>, sub: bool) -> bool {
     let (Some(a), Some(b)) = (prev(text, at), ch(text, at)) else {
@@ -127,9 +134,9 @@ fn boundary(text: &Text, at: usize, s: &Settings, stops: Option<Stops>, sub: boo
                 && ac != bc
                 && (ac == Class::Punctuation || bc == Class::Punctuation))
             || (t.newline && (a == '\n' || b == '\n'))
-            || (t.subword && sub_boundary(a, b));
+            || (t.subword && sub_boundary(a, b, s));
     }
-    ac != bc || (sub && sub_boundary(a, b)) || a == '\n' || b == '\n'
+    ac != bc || (sub && sub_boundary(a, b, s)) || a == '\n' || b == '\n'
 }
 fn walk(text: &Text, mut at: usize, unit: MoveUnit, forward: bool, s: &Settings) -> usize {
     if unit == MoveUnit::Characters {
@@ -335,6 +342,106 @@ pub fn delete_right(buffer: &mut Buffer, id: ViewId, _by: DeleteBy) -> ChangeId 
 pub fn delete_word(buffer: &mut Buffer, id: ViewId, forward: bool) -> ChangeId {
     delete(buffer, id, forward, true)
 }
+
+/// Deletes a selection or the last canonically decomposed component of a grapheme.
+pub fn delete_backward_component(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    commit_owned(buffer, id, decomposing_deletions(buffer, id))
+}
+
+/// Plans decomposing Backspace in old coordinates for hosts that manage edits.
+pub fn decomposing_deletions(buffer: &Buffer, id: ViewId) -> Vec<(Range<usize>, String)> {
+    use unicode_normalization::UnicodeNormalization;
+    // https://developer.apple.com/documentation/appkit/nsstandardkeybindingresponding/deletebackwardbydecomposingpreviouscharacter(_:)
+    let text = buffer.text();
+    let selection = buffer.view(id).sel();
+    let mut deletion: Vec<(Range<usize>, bool)> = Vec::new();
+    for r in selection.iter() {
+        let mut range = if r.empty() {
+            text.prev_grapheme_boundary(r.b)..r.b
+        } else {
+            r.to_range()
+        };
+        if range.is_empty() {
+            continue;
+        }
+        let mut decompose = r.empty();
+        while deletion
+            .last()
+            .is_some_and(|(last, _)| last.end > range.start)
+        {
+            let (last, was_component) = deletion.pop().unwrap();
+            range.start = range.start.min(last.start);
+            decompose &= was_component;
+        }
+        deletion.push((range, decompose));
+    }
+    deletion
+        .into_iter()
+        .map(|(range, decompose)| {
+            let mut result = String::new();
+            if decompose {
+                result.extend(text.slice(range.clone()).chars().nfd());
+                result.pop();
+            }
+            (range, result)
+        })
+        .collect()
+}
+
+/// Removes both delimiters around empty carets in one transaction.
+pub fn delete_left_right(buffer: &mut Buffer, id: ViewId) -> ChangeId {
+    let text = buffer.text();
+    let deletion = Selection::from_regions(buffer.view(id).sel().iter().map(|r| {
+        Region::new(
+            if r.empty() {
+                text.prev_grapheme_boundary(r.b)
+            } else {
+                r.begin()
+            },
+            text.next_grapheme_boundary(r.end()),
+        )
+    }));
+    commit_owned(
+        buffer,
+        id,
+        deletion
+            .iter()
+            .filter(|r| !r.empty())
+            .map(|r| (r.to_range(), String::new()))
+            .collect(),
+    )
+}
+
+/// Kills to the hard line end, including the LF if already at that boundary.
+pub fn delete_to_hard_eol(buffer: &mut Buffer, id: ViewId) -> Vec<String> {
+    let text = buffer.text();
+    let deletion = Selection::from_regions(buffer.view(id).sel().iter().map(|r| {
+        if !r.empty() {
+            return r;
+        }
+        let end = line_end(text, text.byte_to_line(r.b));
+        let end = if r.b == end && end < text.len_bytes() {
+            end + 1
+        } else {
+            end
+        };
+        Region::new(r.b, end)
+    }));
+    kill_regions(buffer, id, deletion)
+}
+/// Kills backwards to each supplied visual line start, or to hard BOL without a layout.
+pub fn delete_to_bol(buffer: &mut Buffer, id: ViewId, starts: Option<&[usize]>) -> Vec<String> {
+    let text = buffer.text();
+    let deletion =
+        Selection::from_regions(buffer.view(id).sel().iter().enumerate().map(|(i, r)| {
+            if !r.empty() {
+                return r;
+            }
+            let start = starts.map_or_else(|| text.line_to_byte(text.byte_to_line(r.b)), |v| v[i]);
+            Region::new(start.min(r.b), r.b)
+        }));
+    kill_regions(buffer, id, deletion)
+}
 /// Moves every caret; vertical units require a layout and preserve each goal column.
 pub fn move_by(
     buffer: &mut Buffer,
@@ -365,6 +472,16 @@ pub fn move_by(
                 row.saturating_sub(delta)
             };
             layout.offset_at(text, row, x)
+        } else if unit == MoveUnit::Paragraphs {
+            let row = text.byte_to_line(r.b);
+            if forward {
+                let row =
+                    row + usize::from(r.b == line_end(text, row) && row + 1 < text.len_lines());
+                line_end(text, row)
+            } else {
+                let row = row.saturating_sub(usize::from(r.b == text.line_to_byte(row)));
+                text.line_to_byte(row)
+            }
         } else if !extend && !r.empty() {
             if forward { r.end() } else { r.begin() }
         } else {
@@ -740,10 +857,14 @@ pub fn find_all_under(buffer: &mut Buffer, id: ViewId) {
         });
     }
 }
-fn commit_owned(
+fn commit_owned(buffer: &mut Buffer, id: ViewId, owned: Vec<(Range<usize>, String)>) -> ChangeId {
+    commit_owned_with_moves(buffer, id, owned, None)
+}
+fn commit_owned_with_moves(
     buffer: &mut Buffer,
     id: ViewId,
     mut owned: Vec<(Range<usize>, String)>,
+    moves: Option<crate::change::RegionMoves>,
 ) -> ChangeId {
     // Keep unchanged columns and anchors stable when a line command only adds/removes a prefix.
     // ST-BEHAVIOR: unverified [E2]: commands reduce replacements to their changed scalar-aligned span.
@@ -799,11 +920,12 @@ fn commit_owned(
             )
         }
     });
-    buffer.transact(id, EditKind::Other, &edits, selection)
+    buffer.transact_with_region_moves(id, EditKind::Other, &edits, selection, moves)
 }
 fn line_edits(
     buffer: &mut Buffer,
     id: ViewId,
+    moves: Option<crate::change::RegionMoves>,
     mut f: impl FnMut(&Text, usize, &Settings) -> String,
 ) -> ChangeId {
     let text = buffer.text();
@@ -818,13 +940,13 @@ fn line_edits(
             )
         })
         .collect();
-    commit_owned(buffer, id, edits)
+    commit_owned_with_moves(buffer, id, edits, moves)
 }
 /// Indents every touched line once, using a tab or `tab_size` spaces.
 pub fn indent(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     // Verification: https://www.sublimetext.com/download, build 4166 mentions an
     // improvement on empty lines without specifying the rule. Retain today's behavior.
-    line_edits(buffer, id, |t, l, s| {
+    line_edits(buffer, id, None, |t, l, s| {
         let prefix = if s.translate_tabs_to_spaces {
             " ".repeat(s.tab_size)
         } else {
@@ -835,7 +957,26 @@ pub fn indent(buffer: &mut Buffer, id: ViewId) -> ChangeId {
 }
 /// Removes one leading tab or up to `tab_size` spaces from each touched line.
 pub fn unindent(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    line_edits(buffer, id, |t, l, s| {
+    unindent_with_moves(buffer, id, None)
+}
+/// Unindents lines without excluding restored leading indentation from folds on undo.
+pub fn unindent_preserving_folds(
+    buffer: &mut Buffer,
+    id: ViewId,
+    fold_key: &'static str,
+) -> ChangeId {
+    unindent_with_moves(
+        buffer,
+        id,
+        Some(crate::change::RegionMoves::unindent(fold_key)),
+    )
+}
+fn unindent_with_moves(
+    buffer: &mut Buffer,
+    id: ViewId,
+    moves: Option<crate::change::RegionMoves>,
+) -> ChangeId {
+    line_edits(buffer, id, moves, |t, l, s| {
         let line = t.line(l).to_string();
         let n = if line.starts_with('\t') {
             1
@@ -851,7 +992,7 @@ pub fn unindent(buffer: &mut Buffer, id: ViewId) -> ChangeId {
 /// Removes spaces/tabs/CR and other Unicode horizontal whitespace at line ends.
 pub fn trim_trailing_whitespace(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     // ST-BEHAVIOR: unverified [L4]: trim Unicode whitespace other than LF, including literal CR.
-    line_edits(buffer, id, |t, l, _| {
+    line_edits(buffer, id, None, |t, l, _| {
         t.line(l)
             .to_string()
             .trim_end_matches(char::is_whitespace)
@@ -1063,31 +1204,75 @@ pub fn duplicate_line(buffer: &mut Buffer, id: ViewId) -> ChangeId {
         .collect();
     buffer.transact(id, EditKind::Other, &edit_list, after)
 }
-fn swap_lines(buffer: &mut Buffer, id: ViewId, forward: bool) -> ChangeId {
-    // ST-BEHAVIOR: unverified [L8]: move each touched block one LF line, preserve line termination and relative caret columns/direction; edge blocks stay put.
+fn swap_lines(
+    buffer: &mut Buffer,
+    id: ViewId,
+    forward: bool,
+    folds: &[Region],
+    fold_key: Option<&'static str>,
+) -> ChangeId {
     let text = buffer.text();
     let selection = buffer.view(id).sel().clone();
-    let groups = blocks(touched_lines(text, &selection));
+    let mut units: Vec<Range<usize>> = Vec::new();
+    for fold in folds {
+        let start = text.byte_to_line(fold.begin());
+        let end_row = text.byte_to_line(fold.end());
+        let end = end_row + usize::from(text.line_to_byte(end_row) != fold.end());
+        let end = end.max(start + 1);
+        if let Some(last) = units.last_mut().filter(|last| last.end > start) {
+            last.end = last.end.max(end);
+        } else {
+            units.push(start..end);
+        }
+    }
+    let unit = |row| {
+        units
+            .get(units.partition_point(|unit| unit.end <= row))
+            .filter(|unit| unit.contains(&row))
+            .cloned()
+            .unwrap_or(row..row + 1)
+    };
+    let mut groups: Vec<Range<usize>> = Vec::new();
+    for g in blocks(touched_lines(text, &selection)) {
+        let rows = unit(g.start).start..unit(g.end - 1).end;
+        if let Some(last) = groups.last_mut().filter(|last| last.end >= rows.start) {
+            last.end = last.end.max(rows.end);
+        } else {
+            groups.push(rows);
+        }
+    }
     let mut edits = Vec::new();
     let mut shifts = Vec::new();
+    let mut rotated = Vec::new();
     for g in groups {
         if (!forward && g.start == 0) || (forward && g.end == text.len_lines()) {
             continue;
         }
-        let a = if forward { g.start } else { g.start - 1 };
-        let b = if forward { g.end + 1 } else { g.end };
-        let mut lines: Vec<_> = (a..b).map(|l| text.line(l).to_string()).collect();
-        if forward {
-            lines.rotate_right(1);
+        let a = if forward {
+            g.start
         } else {
-            lines.rotate_left(1);
-        }
+            unit(g.start - 1).start
+        };
+        let b = if forward { unit(g.end).end } else { g.end };
+        let middle = if forward { g.end } else { g.start };
+        let mut lines: Vec<_> = (a..b).map(|l| text.line(l).to_string()).collect();
+        lines.rotate_left(middle - a);
         let end = full_line_end(text, b - 1);
         let mut value = lines.join("\n");
         if b < text.len_lines() {
             value.push('\n');
         }
-        shifts.push((g, if forward { 1isize } else { -1 }));
+        if fold_key.is_some() && text.slice(text.line_to_byte(a)..end) != value.as_str() {
+            rotated.push((a, middle, b, end));
+        }
+        shifts.push((
+            g,
+            if forward {
+                (b - middle) as isize
+            } else {
+                -((middle - a) as isize)
+            },
+        ));
         edits.push((text.line_to_byte(a)..end, value));
     }
     let owned = edits;
@@ -1121,15 +1306,42 @@ fn swap_lines(buffer: &mut Buffer, id: ViewId, forward: bool) -> ChangeId {
         };
         Region::new(map(r.a), map(r.b))
     });
-    buffer.transact(id, EditKind::Other, &edits, new)
+    let relocations = fold_key.map(|name| {
+        crate::change::RegionMoves::lines(
+            name,
+            rotated
+                .into_iter()
+                .flat_map(|(a, mid, b, end)| {
+                    let start = text.line_to_byte(a);
+                    let pivot = text.line_to_byte(mid);
+                    let new_pivot = after.line_to_byte(a + b - mid);
+                    [
+                        (start..pivot, new_pivot..end),
+                        (pivot..end, start..new_pivot),
+                    ]
+                })
+                .collect(),
+        )
+    });
+    buffer.transact_with_region_moves(id, EditKind::Other, &edits, new, relocations)
 }
 /// Moves each touched block one line upward.
 pub fn swap_line_up(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    swap_lines(buffer, id, false)
+    swap_lines(buffer, id, false, &[], None)
 }
 /// Moves each touched block one line downward.
 pub fn swap_line_down(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    swap_lines(buffer, id, true)
+    swap_lines(buffer, id, true, &[], None)
+}
+/// Swaps projected line units, keeping the named fold regions on their content.
+pub fn swap_folded_lines(
+    buffer: &mut Buffer,
+    id: ViewId,
+    forward: bool,
+    folds: &[Region],
+    fold_key: &'static str,
+) -> ChangeId {
+    swap_lines(buffer, id, forward, folds, Some(fold_key))
 }
 fn case(buffer: &mut Buffer, id: ViewId, mode: u8) -> ChangeId {
     // ST-BEHAVIOR: unverified [C1]: empty carets transform the word run; title case uses word classes; swap case uses Unicode scalar mappings, without locale.
@@ -1818,7 +2030,10 @@ pub fn delete_to_mark(buffer: &mut Buffer, id: ViewId) -> Vec<String> {
     if !select_to_mark(buffer, id) {
         return vec![];
     }
-    let regions: Vec<_> = buffer.view(id).sel().iter().collect();
+    kill_regions(buffer, id, buffer.view(id).sel().clone())
+}
+
+fn kill_regions(buffer: &mut Buffer, id: ViewId, regions: Selection) -> Vec<String> {
     let edits: Vec<_> = regions
         .iter()
         .filter(|r| !r.empty())

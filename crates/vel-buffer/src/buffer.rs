@@ -62,6 +62,11 @@ impl Default for HistoryLimits {
 pub struct Settings {
     /// Characters classified as punctuation.
     pub word_separators: String,
+    /// Extra delimiters for sub-word boundaries.
+    // Editor configuration reapplies this value on restore. Do not change the
+    // positional Settings payload in the version-1 postcard undo history.
+    #[serde(skip, default = "default_sub_word_separators")]
+    pub sub_word_separators: String,
     /// Visual tab width, at least one.
     pub tab_size: usize,
     /// Indent with spaces and erase leading spaces to a previous tab stop.
@@ -74,11 +79,15 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             word_separators: "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?".into(),
+            sub_word_separators: default_sub_word_separators(),
             tab_size: 4,
             translate_tabs_to_spaces: true,
             use_tab_stops: true,
         }
     }
+}
+fn default_sub_word_separators() -> String {
+    "_".into()
 }
 /// One named annotation set. Overlapping regions are allowed.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -87,6 +96,16 @@ pub struct RegionSet {
     pub regions: Vec<Region>,
     /// Whether regions collapsed by editing are discarded.
     pub drop_empty: bool,
+    // A fold can include a line separator even when the line is temporarily at
+    // an unterminated EOF. Keep that affinity separate from physical ranges.
+    #[serde(skip)]
+    pub(crate) missing_lf: Vec<Region>,
+}
+impl RegionSet {
+    /// Whether there are any regions, including folds with no physical byte at EOF.
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty() && self.missing_lf.is_empty()
+    }
 }
 #[derive(Clone, Debug)]
 enum SoftEvent {
@@ -309,6 +328,7 @@ impl Buffer {
                 RegionSet {
                     regions,
                     drop_empty,
+                    missing_lf: Vec::new(),
                 },
             );
     }
@@ -505,7 +525,17 @@ impl Buffer {
         id: ViewId,
         kind: EditKind,
         edits: &[Edit<'_>],
+        new_selection: Selection,
+    ) -> ChangeId {
+        self.transact_with_region_moves(id, kind, edits, new_selection, None)
+    }
+    pub(crate) fn transact_with_region_moves(
+        &mut self,
+        id: ViewId,
+        kind: EditKind,
+        edits: &[Edit<'_>],
         mut new_selection: Selection,
+        moves: Option<crate::change::RegionMoves>,
     ) -> ChangeId {
         // Validate even an all-no-op request, before changing selections or history.
         let mut previous_end = 0;
@@ -541,15 +571,18 @@ impl Buffer {
             return self.change;
         }
         let before_selection = self.view(id).selection.clone();
-        let changes = Arc::new(ChangeSet::new(
-            edits
-                .iter()
-                .map(|e| Change {
-                    old_range: e.range.clone(),
-                    new_len: e.text.len(),
-                })
-                .collect(),
-        ));
+        let changes = Arc::new(
+            ChangeSet::new(
+                edits
+                    .iter()
+                    .map(|e| Change {
+                        old_range: e.range.clone(),
+                        new_len: e.text.len(),
+                    })
+                    .collect(),
+            )
+            .with_region_moves(moves),
+        );
         let before = self.text.clone();
         let mut after = before.clone();
         after.apply_edits(edits);
@@ -657,9 +690,12 @@ impl Buffer {
             }
             v.find = None;
             // ST-BEHAVIOR: unverified [M2]: annotations map through undo/redo; dropped regions are not resurrected. Equal starts keep input order.
-            for set in v.regions.values_mut() {
+            for (key, set) in &mut v.regions {
+                if map.transform_separator_regions(key, set, self.text.len_bytes()) {
+                    continue;
+                }
                 for r in &mut set.regions {
-                    *r = map.transform_region(*r);
+                    *r = map.transform_named_region(key, *r);
                 }
                 if set.drop_empty {
                     set.regions.retain(|r| !r.empty());

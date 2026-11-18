@@ -9,6 +9,9 @@ use std::{
 use vel_regex::{Regex, Region};
 use vel_scope::{Scope, ScopeStack, Selector};
 
+/// Shared regex for a scope's effective metadata pattern.
+pub type MetadataPattern = Regex;
+
 /// Invalid plist, selector, or transformation program.
 #[derive(Debug, thiserror::Error)]
 #[error("invalid tmPreferences: {0}")]
@@ -256,17 +259,19 @@ impl MetadataSet {
     }
     /// Tests a cached Oniguruma indentation pattern. Empty/missing patterns do not match.
     pub fn matches_pattern(&self, metadata: &Metadata, key: &str, line: &str) -> bool {
-        let Some(pattern) = metadata.string(key).filter(|s| !s.is_empty()) else {
-            return false;
-        };
-        let regex = self
-            .patterns
-            .lock()
-            .unwrap()
-            .entry(pattern.into())
-            .or_insert_with(|| Regex::new(pattern.into()))
-            .clone();
-        regex.is_match(line)
+        self.pattern(metadata, key)
+            .is_some_and(|re| re.is_match(line))
+    }
+    /// Retains the effective pattern without looking it up again for each match.
+    pub fn pattern(&self, metadata: &Metadata, key: &str) -> Option<MetadataPattern> {
+        let pattern = metadata.string(key).filter(|s| !s.is_empty())?;
+        let mut patterns = self.patterns.lock().unwrap();
+        if let Some(regex) = patterns.get(pattern) {
+            return Some(regex.clone());
+        }
+        let regex = Regex::new(pattern.into());
+        patterns.insert(pattern.into(), regex.clone());
+        Some(regex)
     }
     /// Applies the selected symbol/index transformation; failures remain explicit.
     pub fn transform(

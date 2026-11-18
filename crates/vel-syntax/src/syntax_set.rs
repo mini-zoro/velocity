@@ -209,6 +209,11 @@ impl SyntaxSet {
         &self.warnings
     }
 
+    /// Adds diagnostics from the resource loader to the linked set's diagnostics.
+    pub fn extend_resource_warnings(&mut self, warnings: impl IntoIterator<Item = String>) {
+        self.warnings.extend(warnings);
+    }
+
     /// The list of syntaxes in the set
     pub fn syntaxes(&self) -> &[SyntaxReference] {
         &self.syntaxes[..]

@@ -922,6 +922,12 @@ impl App {
                 .drag_ready(now.saturating_duration_since(pressed))
         })
     }
+    fn run_editor_selector(&mut self, window: Option<&WindowHandle>, command: Command) {
+        if self.workspace.editor().accepts_native_selector(command) {
+            let (name, args) = crate::editor::selector_command(command);
+            self.run_named(window, name, &args);
+        }
+    }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
             self.named_error(window, &error);
@@ -1960,9 +1966,18 @@ impl App {
                     group.sheets.get(next).copied()
                 }
             }
+            // A negative index counts from the end: the documented Cmd+9 binding passes -1
+            // to select the last tab (docs.sublimetext.io reference/keyboard_shortcuts_osx).
             "select_by_index" => args["index"]
-                .as_u64()
-                .and_then(|i| group.sheets.get(i as usize))
+                .as_i64()
+                .and_then(|i| {
+                    if i < 0 {
+                        group.sheets.len().checked_sub(i.unsigned_abs() as usize)
+                    } else {
+                        Some(i as usize)
+                    }
+                })
+                .and_then(|i| group.sheets.get(i))
                 .copied(),
             _ => return false,
         };
@@ -3435,7 +3450,15 @@ impl AppHandler for App {
             input.set_clipboard(w.clipboard_text().unwrap_or_default());
         }
         let viewport = self.viewport();
-        match self.panels.command(&mut self.workspace, command, viewport) {
+        let panel_command = match command {
+            Command::ParagraphStart(extend) => Command::Home(extend),
+            Command::ParagraphEnd(extend) => Command::End(extend),
+            _ => command,
+        };
+        match self
+            .panels
+            .command(&mut self.workspace, panel_command, viewport)
+        {
             Ok((true, invocation)) => {
                 if let Some(input) = self.panels.input() {
                     w.set_clipboard_text(input.clipboard());
@@ -3457,8 +3480,7 @@ impl AppHandler for App {
             self.changed(w, Instant::now(), true);
             return;
         }
-        let (name, args) = crate::editor::selector_command(command);
-        self.run_named(Some(w), name, &args);
+        self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
         self.handle_mouse_event(Some(w), event);
@@ -4470,3 +4492,11 @@ mod lane_b_round19_perf;
 #[cfg(test)]
 #[path = "app_lane_b_round19_tests.rs"]
 mod lane_b_round19_tests;
+
+#[cfg(test)]
+#[path = "app_round21_review_tests.rs"]
+mod round21_review;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "app_round21_typing_perf.rs"]
+mod round21_typing_perf;

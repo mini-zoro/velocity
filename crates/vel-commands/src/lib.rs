@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
 };
 use vel_buffer::{
-    Buffer, Edit, EditKind, MonospaceLayout, Region, Selection, ViewId,
+    Buffer, Edit, EditKind, MonospaceLayout, Region, Selection, VerticalLayout, ViewId,
     ops::{self, DeleteBy, ExpandTo, MoveTo, MoveUnit, Stops},
 };
 use vel_config::settings::EditorSettings;
@@ -36,6 +36,16 @@ pub trait Host {
     /// Comment markers supplied by the active language. Plain text has none.
     fn wrap_comment_prefixes(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// Kills to the beginning of each caret's line, respecting visual wrapping when available.
+    fn kill_to_bol(&mut self) -> Vec<String> {
+        let (buffer, id) = self.buffer();
+        ops::delete_to_bol(buffer, id, None)
+    }
+    /// Kills to the end of each caret's hard line, or kills its selection.
+    fn kill_to_hard_eol(&mut self) -> Vec<String> {
+        let (buffer, id) = self.buffer();
+        ops::delete_to_hard_eol(buffer, id)
     }
     /// Clipboard contents.
     fn clipboard(&mut self) -> String;
@@ -151,6 +161,9 @@ const TEXT: &[&str] = &[
     "prev_field",
     "clear_fields",
     "toggle_comment",
+    "close_tag",
+    "show_scope_name",
+    "copy_scope_name",
     "reindent",
     "expand_tabs",
     "unexpand_tabs",
@@ -166,6 +179,9 @@ const TEXT: &[&str] = &[
     "cut",
     "left_delete",
     "right_delete",
+    "delete_left_right",
+    "delete_to_hard_eol",
+    "delete_to_bol",
     "delete_word",
     "move",
     "move_to",
@@ -204,6 +220,7 @@ const TEXT: &[&str] = &[
     "yank",
     "paste_and_indent",
     "scroll_lines",
+    "scroll_page",
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
@@ -486,10 +503,19 @@ impl Registry {
                 }
                 return Ok(());
             }
-            "delete_to_mark" => {
-                let (b, id) = host.buffer();
-                let values = ops::delete_to_mark(b, id);
+            "delete_to_mark" | "delete_to_hard_eol" | "delete_to_bol" => {
+                let values = match name {
+                    "delete_to_bol" => host.kill_to_bol(),
+                    "delete_to_hard_eol" => host.kill_to_hard_eol(),
+                    _ => {
+                        let (b, id) = host.buffer();
+                        ops::delete_to_mark(b, id)
+                    }
+                };
                 if values.iter().any(|s| !s.is_empty()) {
+                    // Cocoa documents a separate kill buffer for line, paragraph and mark
+                    // deletions, but no coalescing rule. Keep one entry per kill command.
+                    // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/TextDefaultsBindings/TextDefaultsBindings.html
                     let mut state = self.shared.borrow_mut();
                     state.kill_ring.push_front(values);
                     state.kill_ring.truncate(32);
@@ -596,7 +622,10 @@ fn builtin_macro(name: &str) -> Option<Vec<(&'static str, Value)>> {
             ("move_to", json!({"to": "hardeol", "extend": true})),
             ("right_delete", json!({})),
         ],
-        "Delete Left Right" => vec![("left_delete", json!({})), ("right_delete", json!({}))],
+        // Pair deletion is one edit. Public macro docs don't specify playback undo
+        // grouping: https://docs.sublimetext.io/guide/extensibility/macros.html
+        // Leave arbitrary user and built-in macro sequences alone.
+        "Delete Left Right" => vec![("delete_left_right", json!({}))],
         _ => return None,
     })
 }
@@ -612,6 +641,7 @@ pub fn buffer_settings(settings: &EditorSettings) -> vel_buffer::Settings {
         tab_size: settings.tab_size,
         translate_tabs_to_spaces: settings.translate_tabs_to_spaces,
         word_separators: settings.word_separators.clone(),
+        sub_word_separators: settings.sub_word_separators.clone(),
         use_tab_stops: settings.use_tab_stops,
     }
 }
@@ -710,10 +740,21 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
             ops::paste(b, id, clipboard.as_deref().unwrap_or(""));
         }
         "left_delete" => {
-            ops::delete_left(b, id, DeleteBy::Char);
+            if boolean(args, "decompose") {
+                ops::delete_backward_component(b, id);
+            } else {
+                ops::delete_left(b, id, DeleteBy::Char);
+            }
+        }
+        "scroll_page" => {
+            let amount = layout.lines_per_page() as f64 * if forward { -1. } else { 1. };
+            return host.action("scroll_lines", &json!({"amount":amount}));
         }
         "right_delete" => {
             ops::delete_right(b, id, DeleteBy::Char);
+        }
+        "delete_left_right" => {
+            ops::delete_left_right(b, id);
         }
         "delete_word" => {
             if boolean(args, "sub_words") {
@@ -731,6 +772,7 @@ fn text_command(name: &str, args: &Value, host: &mut dyn Host) -> Result<(), Str
                 "subwords" => MoveUnit::Subwords,
                 "subword_ends" => MoveUnit::SubwordEnds,
                 "lines" => MoveUnit::Lines,
+                "paragraphs" => MoveUnit::Paragraphs,
                 "pages" => MoveUnit::Pages,
                 "stops" => MoveUnit::Stops(Stops {
                     word_start: boolean(args, "word_begin"),

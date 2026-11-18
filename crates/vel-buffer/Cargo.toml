@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 vel-text = { path = "../vel-text" }
 memchr = "2"
+unicode-normalization = "0.1"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 serde = { version = "1", features = ["derive", "rc"] }

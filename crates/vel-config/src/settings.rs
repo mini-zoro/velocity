@@ -199,6 +199,8 @@ pub struct EditorSettings {
     pub translate_tabs_to_spaces: bool,
     /// Characters that delimit words.
     pub word_separators: String,
+    /// Extra delimiters for sub-word motion and deletion.
+    pub sub_word_separators: String,
     /// Requested primary font.
     pub font_face: String,
     /// Font size in logical points.
@@ -236,6 +238,10 @@ pub struct EditorSettings {
     pub highlight_line: bool,
     /// Enable context-based bracket/quote pairing.
     pub auto_match_enabled: bool,
+    /// Suppress built-in HTML and CSS completion candidates.
+    pub disable_default_completions: bool,
+    /// Override the built-in completion scope selector (a string or a list of fragments).
+    pub default_completions_selector: Option<Value>,
     /// Replace existing files using temp + rename when that keeps their identity.
     pub atomic_save: bool,
     /// Tab / Backspace with spaces move to tab stops instead of a fixed `tab_size` / one space.
@@ -249,6 +255,9 @@ impl Default for EditorSettings {
             tab_size: 4,
             translate_tabs_to_spaces: false,
             word_separators: "./\\()\"'-:,.;<>~!@#$%^&*|+=[]{}`~?".into(),
+            // Build 4142 made this configurable; retain Velocity's underscore delimiter.
+            // https://www.sublimetext.com/download
+            sub_word_separators: "_".into(),
             font_face: "Menlo".into(),
             font_size: 13.,
             line_numbers: true,
@@ -268,6 +277,10 @@ impl Default for EditorSettings {
             caret_style: "solid".into(),
             highlight_line: true,
             auto_match_enabled: true,
+            // HTML/CSS defaults are enabled unless the syntax or user opts out.
+            // https://www.sublimetext.com/3 (HTML and CSS default completion opt-out).
+            disable_default_completions: false,
+            default_completions_selector: None,
             atomic_save: false,
             use_tab_stops: true,
             copy_with_empty_selection: true,

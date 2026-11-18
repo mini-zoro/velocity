@@ -281,6 +281,16 @@ impl Editor {
             self.sync();
         }
     }
+    pub(crate) fn finish_vintage_visual_kill(&mut self) {
+        if self.vintage.as_ref().is_some_and(|vi| {
+            matches!(
+                vi.engine.mode(),
+                Mode::VisualChar | Mode::VisualLine | Mode::VisualBlock
+            )
+        }) {
+            self.feed_vintage(vel_vintage::Key::Escape, "");
+        }
+    }
     /// Handles vi host operations through the application's ordinary command registry.
     pub fn vintage_command(&mut self, name: &str, args: &Value) -> Result<bool, String> {
         // This is the first host text-command hook, including ordinary editing

@@ -629,3 +629,24 @@ fn cmd_f_large_file_main_thread_timing() {
         }
     }
 }
+
+#[test]
+fn super_nine_selects_the_last_tab_through_a_negative_index() {
+    // The documented macOS Cmd+9 binding passes index -1: select the last tab.
+    let mut a = find_app("first");
+    for _ in 0..4 {
+        named(&mut a, "new_file", json!({}));
+    }
+    let last = a.workspace.active;
+    named(&mut a, "select_by_index", json!({"index": 0}));
+    assert_ne!(a.workspace.active, last);
+    key(&mut a, "super+9");
+    assert_eq!(a.workspace.active, last);
+    named(&mut a, "select_by_index", json!({"index": -2}));
+    assert_ne!(a.workspace.active, last);
+    named(&mut a, "select_by_index", json!({"index": -99}));
+    assert_ne!(
+        a.workspace.active, last,
+        "an out-of-range index changes nothing"
+    );
+}

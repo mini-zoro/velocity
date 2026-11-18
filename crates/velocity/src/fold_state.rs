@@ -50,7 +50,10 @@ impl FoldStates {
                             .revealed
                             .iter()
                             .map(|&(a, b)| {
-                                let r = changes.transform_region(Region::new(a, b));
+                                let r = changes.transform_named_region(
+                                    crate::layout::FOLDS,
+                                    Region::new(a, b),
+                                );
                                 (r.begin(), r.end())
                             })
                             .collect();

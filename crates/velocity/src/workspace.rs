@@ -1209,21 +1209,37 @@ impl Configuration {
             .into_iter()
             .filter(|r| {
                 user_resource(r, data_dir.as_deref())
-                    && [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
-                        .iter()
-                        .any(|suffix| r.path.ends_with(suffix))
+                    && [
+                        ".sublime-syntax",
+                        ".tmLanguage",
+                        ".tmLanguage.json",
+                        ".tmPreferences",
+                    ]
+                    .iter()
+                    .any(|suffix| r.path.ends_with(suffix))
             })
             .collect();
-        let syntax_warnings = assets.syntaxes.warnings().iter().map(|warning| {
-            let path = user_syntaxes
-                .iter()
-                .find(|r| warning_from_path(warning, &r.path))
-                .map(|r| r.path.as_str());
-            (path, warning.as_str())
-        });
+        let (metadata_warnings, syntax_warnings): (Vec<_>, Vec<_>) = assets
+            .syntaxes
+            .warnings()
+            .iter()
+            .map(|warning| {
+                let path = user_syntaxes
+                    .iter()
+                    .find(|r| warning_from_path(warning, &r.path))
+                    .map(|r| r.path.as_str());
+                (path, warning.as_str())
+            })
+            .partition(|(path, _)| path.is_some_and(|p| p.ends_with(".tmPreferences")));
         collect_resource_warnings(
             "syntax",
             syntax_warnings,
+            &mut resource_reports,
+            &mut resource_log,
+        );
+        collect_resource_warnings(
+            "syntax metadata",
+            metadata_warnings,
             &mut resource_reports,
             &mut resource_log,
         );

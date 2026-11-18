@@ -11,6 +11,8 @@ use vel_render::scene::{Layer, Scene};
 use vel_theme::{Element, ElementPath};
 use vel_ui::minihtml::{Annotation, Html, Phantom, PhantomLayout, Popup, PopupFlags};
 pub const COMMANDS: &[&str] = &[
+    "show_scope_name",
+    "copy_scope_name",
     "show_popup",
     "update_popup",
     "hide_popup",
@@ -191,6 +193,19 @@ impl Editor {
         }
         let key = args["key"].as_str().unwrap_or("default");
         match name {
+            "show_scope_name" => {
+                // https://www.sublimetext.com/3 (3114): display the scope in a popup.
+                let content = self.scope_popup_content();
+                return self
+                    .html_command("show_popup", &json!({"content":content,"max_width":480}));
+            }
+            "copy_scope_name" => {
+                self.clipboard = args["scopes"]
+                    .as_str()
+                    .ok_or("missing scope string")?
+                    .into();
+                self.html.borrow_mut().popup = None;
+            }
             "show_popup" => {
                 let popup = Popup::new(
                     args["content"].as_str().unwrap_or(""),
@@ -286,6 +301,33 @@ impl Editor {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    fn scope_popup_content(&self) -> String {
+        use vel_highlight::ScopeProvider;
+        let language = self.language.borrow();
+        let snapshot = language
+            .as_ref()
+            .and_then(|l| l.scope_snapshot_at(self.caret));
+        let Some(scopes) = snapshot.as_ref().and_then(|s| s.scopes_at(self.caret)) else {
+            return "<p>Scopes not ready yet</p>".into();
+        };
+        let scopes: Vec<_> = scopes.iter().map(|s| s.build_string()).collect();
+        let escape = |s: &str| {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\'', "&#39;")
+        };
+        let body = scopes
+            .iter()
+            .map(|s| escape(s))
+            .collect::<Vec<_>>()
+            .join("<br>");
+        let args = escape(&json!({"scopes":scopes.join(" ")}).to_string());
+        format!(
+            "<p><code>{body}</code></p><p><a href='subl:copy_scope_name {args}'>Copy scope</a></p>"
+        )
     }
 }
 pub fn options(editor: &Editor, width: f64, popup: bool) -> LayoutOptions {

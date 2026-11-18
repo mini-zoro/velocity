@@ -373,7 +373,9 @@ impl Assets {
             .into_iter()
             .flat_map(|suffix| resources.matching(suffix))
             .collect::<Vec<_>>();
+        let preferences = resources.matching(".tmPreferences");
         if effective.is_empty()
+            && preferences.is_empty()
             && resources
                 .get("Packages/Default/Preferences.sublime-settings")
                 .is_none()
@@ -382,27 +384,22 @@ impl Assets {
         }
         if effective.len() + 1 == base.syntaxes.syntaxes().len()
             && effective.iter().all(|r| r.origin.starts_with(&root))
-            && resources
-                .matching(".tmPreferences")
-                .iter()
-                .all(|r| r.origin.starts_with(&root))
+            && preferences.iter().all(|r| r.origin.starts_with(&root))
         {
             return Ok(base.clone());
         }
-        let grammar = [(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)]
-            .into_iter()
-            .chain(
-                [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
-                    .into_iter()
-                    .flat_map(|suffix| resources.matching(suffix))
-                    .map(|r| Ok((r.path.as_str(), r.text()?)))
-                    .collect::<Result<Vec<_>, String>>()?,
-            )
-            .collect::<Vec<_>>();
+        let mut warnings = Vec::new();
+        let mut grammar = vec![(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)];
+        for resource in effective {
+            match resource.text() {
+                Ok(text) => grammar.push((resource.path.as_str(), text)),
+                Err(warning) => warnings.push(warning),
+            }
+        }
         // All effective grammars are virtual extras. Physical roots would bypass
         // ignored_packages and reintroduce disabled loose/bundled grammars.
         let load = || SyntaxSet::load_roots(&[], &grammar);
-        let syntaxes = if let Some(data) = data {
+        let mut syntaxes = if let Some(data) = data {
             SyntaxSet::load_cached_roots(&[], &grammar, &data.join("Cache/Syntaxes"))
                 .map(|(set, _)| set)
                 .or_else(|_| load())
@@ -410,12 +407,14 @@ impl Assets {
             load()
         }
         .map_err(|e| e.to_string())?;
-        let preferences = resources
-            .matching(".tmPreferences")
-            .into_iter()
-            .map(|r| Ok((r.path.as_str(), r.text()?)))
-            .collect::<Result<Vec<_>, String>>()?;
-        let metadata = MetadataSet::load_roots(&[], &preferences).map_err(|e| e.to_string())?;
+        let mut metadata = MetadataSet::new();
+        for resource in preferences {
+            // add_plist commits only after validating the entire file, and supports binary plists.
+            if let Err(error) = metadata.add_plist(&resource.bytes) {
+                warnings.push(format!("{}: {error}", resource.path));
+            }
+        }
+        syntaxes.extend_resource_warnings(warnings);
         Ok(Arc::new(Self {
             syntaxes: Arc::new(syntaxes),
             metadata: Arc::new(metadata),

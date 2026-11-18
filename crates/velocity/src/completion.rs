@@ -614,6 +614,24 @@ fn settings(editor: &Editor) -> CompletionSettings {
     let d = CompletionSettings::default();
     CompletionSettings {
         auto_complete: s.bool("auto_complete", d.auto_complete),
+        disable_default_completions: editor.preferences.disable_default_completions,
+        default_completions_selector: editor
+            .preferences
+            .default_completions_selector
+            .as_ref()
+            .and_then(|selector| {
+                if let Some(parts) = selector.as_array() {
+                    Some(
+                        parts
+                            .iter()
+                            .map(Value::as_str)
+                            .collect::<Option<Vec<_>>>()?
+                            .concat(),
+                    )
+                } else {
+                    selector.as_str().map(str::to_owned)
+                }
+            }),
         auto_complete_selector: s
             .string("auto_complete_selector", &d.auto_complete_selector)
             .into(),

@@ -165,6 +165,10 @@ pub fn detect_syntax<'a>(
     user_override: Option<&str>,
 ) -> Option<&'a SyntaxReference> {
     if let Some(value) = user_override {
+        // https://www.sublimetext.com/download: set_file_type accepts scope: syntax names.
+        if let Some(scope) = value.strip_prefix("scope:") {
+            return set.find_syntax_by_scope(scope.parse().ok()?);
+        }
         return set
             .find_syntax_by_path(value)
             .or_else(|| set.find_syntax_by_name(value))

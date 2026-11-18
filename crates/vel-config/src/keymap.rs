@@ -2,7 +2,10 @@
 use crate::{Value, json::Document, settings::Settings};
 use regex::Regex;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 /// A normalized chord, including modifier-only taps and named/keypad keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -127,7 +130,19 @@ pub struct Context {
     #[serde(default)]
     pub match_all: bool,
     #[serde(skip)]
-    compiled: Option<Regex>,
+    regex: Option<Arc<ContextRegex>>,
+}
+#[derive(Debug)]
+struct ContextRegex {
+    pattern: String,
+    compiled: OnceLock<Option<Regex>>,
+}
+impl ContextRegex {
+    fn get(&self) -> Option<&Regex> {
+        self.compiled
+            .get_or_init(|| Regex::new(&self.pattern).ok())
+            .as_ref()
+    }
 }
 fn equal() -> String {
     "equal".into()
@@ -136,7 +151,7 @@ fn truth() -> Value {
     Value::Bool(true)
 }
 impl Context {
-    /// Validates an operator and compiles its regex once at resource load time.
+    /// Validates the context at load time without building its regex automata.
     pub fn prepare(&mut self) -> Result<(), String> {
         match self.operator.as_str() {
             "equal" | "not_equal" => {}
@@ -150,7 +165,13 @@ impl Context {
                 } else {
                     pattern.into()
                 };
-                self.compiled = Some(Regex::new(&pattern).map_err(|e| e.to_string())?);
+                regex_syntax::Parser::new()
+                    .parse(&pattern)
+                    .map_err(|e| e.to_string())?;
+                self.regex = Some(Arc::new(ContextRegex {
+                    pattern,
+                    compiled: OnceLock::new(),
+                }));
             }
             _ => return Err(format!("unknown context operator {}", self.operator)),
         }
@@ -176,10 +197,11 @@ impl Context {
             "equal" => v == &self.operand,
             "not_equal" => v != &self.operand,
             op => {
-                let matched = self
-                    .compiled
-                    .as_ref()
-                    .is_some_and(|r| r.is_match(v.as_str().unwrap_or("")));
+                let Some(regex) = self.regex.as_ref().and_then(|r| r.get()) else {
+                    // Compile-size errors fail closed even for negated predicates.
+                    return false;
+                };
+                let matched = regex.is_match(v.as_str().unwrap_or(""));
                 if op.starts_with("not_") {
                     !matched
                 } else {
@@ -240,7 +262,7 @@ impl ContextProvider for SettingsContext<'_> {
         vec![PlainScope.matches(selector, 0)]
     }
 }
-/// Deserialized binding with compiled context regular expressions.
+/// Deserialized binding with validated, lazily compiled context regexes.
 #[derive(Clone, Debug)]
 pub struct Binding {
     /// Parsed sequence.
@@ -441,5 +463,65 @@ impl Keymap {
     /// Whether no bindings have been loaded.
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TextContext;
+    impl ContextProvider for TextContext {
+        fn values(&self, key: &str) -> Vec<Value> {
+            assert_eq!(key, "preceding_text");
+            vec![Value::String("café".into())]
+        }
+        fn selector_matches(&self, _: &str) -> Vec<bool> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn context_regex_validates_at_load_and_compiles_on_first_matching_key() {
+        let mut map = Keymap::default();
+        map.append(
+            r#"[
+          {"keys":["a"],"command":"base"},
+          {"keys":["'"],"command":"word","context":[
+            {"key":"preceding_text","operator":"regex_contains","operand":"[\\w]$"}]}
+        ]"#,
+        )
+        .unwrap();
+        let regex = map.bindings[1].context[0].regex.clone().unwrap();
+        assert!(regex.compiled.get().is_none());
+        assert!(
+            matches!(map.resolve(&Key::parse("a").unwrap(), &TextContext), Resolution::Command(i) if i.command == "base")
+        );
+        assert!(regex.compiled.get().is_none());
+        assert!(
+            matches!(map.resolve(&Key::parse("'").unwrap(), &TextContext), Resolution::Command(i) if i.command == "word")
+        );
+        let first = regex.compiled.get().unwrap().as_ref().unwrap();
+        let mut clone = map.clone();
+        assert!(
+            matches!(clone.resolve(&Key::parse("'").unwrap(), &TextContext), Resolution::Command(i) if i.command == "word")
+        );
+        assert!(std::ptr::eq(
+            first,
+            clone.bindings[1].context[0]
+                .regex
+                .as_ref()
+                .unwrap()
+                .get()
+                .unwrap()
+        ));
+        assert!(
+            map.append(
+                r#"[{"keys":["'"],"command":"invalid","context":[
+            {"key":"preceding_text","operator":"not_regex_contains","operand":"["}]}]"#
+            )
+            .is_err()
+        );
+        assert_eq!(map.len(), 2);
     }
 }

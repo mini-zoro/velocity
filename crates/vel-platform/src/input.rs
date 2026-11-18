@@ -200,10 +200,22 @@ pub enum Command {
     DeleteBackward,
     /// Remove following grapheme/selection.
     DeleteForward,
+    /// Decompose the preceding grapheme, then remove its last component.
+    DeleteDecomposingBackward,
+    /// Remove a word; true deletes forwards.
+    DeleteWord(bool),
+    /// Kill text before the caret on the current visual line.
+    DeleteToLineStart,
+    /// Kill the remaining text on the hard line.
+    DeleteToParagraphEnd,
     /// Insert LF.
     Newline,
+    /// Insert LF without auto-indentation.
+    LiteralNewline,
     /// Insert a tab.
     Tab,
+    /// Remove one level of indentation.
+    Backtab,
     /// Move one grapheme left/right; bool extends selection.
     Left(bool),
     /// Move right.
@@ -216,6 +228,12 @@ pub enum Command {
     Home(bool),
     /// Move to line end.
     End(bool),
+    /// Move to the start of a hard line.
+    ParagraphStart(bool),
+    /// Move to the end of a hard line.
+    ParagraphEnd(bool),
+    /// Extend backward/forward by a hard line boundary.
+    SelectParagraphBoundary(bool),
     /// Move one word left.
     WordLeft(bool),
     /// Move one word right.
@@ -228,6 +246,36 @@ pub enum Command {
     PageUp,
     /// Page down.
     PageDown,
+    /// Scroll without moving the selection; true scrolls down.
+    ScrollPage(bool),
+    /// Extend the selection by a page; true moves down.
+    SelectPage(bool),
+    /// Center the primary selection.
+    CenterSelection,
+    /// Restore killed text.
+    Yank,
+    /// Transpose adjacent characters.
+    Transpose,
+    /// Save the selection as the mark.
+    SetMark,
+    /// Select through the mark.
+    SelectToMark,
+    /// Exchange the selection and the mark.
+    SwapWithMark,
+    /// Kill text through the mark.
+    DeleteToMark,
+    /// Uppercase the current word.
+    UppercaseWord,
+    /// Lowercase the current word.
+    LowercaseWord,
+    /// Capitalize the current word.
+    CapitalizeWord,
+    /// Expand to the current word.
+    SelectWord,
+    /// Expand to the current line.
+    SelectLine,
+    /// Expand to the current paragraph.
+    SelectParagraph,
     /// Cancel current composition.
     Cancel,
     /// Undo the last edit.
@@ -246,11 +294,19 @@ pub enum Command {
 impl Command {
     /// Maps AppKit's standard selector spelling; unknown selectors are ignored.
     pub fn from_selector(selector: &str) -> Option<Self> {
+        // https://developer.apple.com/documentation/appkit/nsstandardkeybindingresponding
         Some(match selector {
             "deleteBackward:" => Self::DeleteBackward,
             "deleteForward:" => Self::DeleteForward,
+            "deleteBackwardByDecomposingPreviousCharacter:" => Self::DeleteDecomposingBackward,
+            "deleteWordBackward:" => Self::DeleteWord(false),
+            "deleteWordForward:" => Self::DeleteWord(true),
+            "deleteToBeginningOfLine:" => Self::DeleteToLineStart,
+            "deleteToEndOfParagraph:" => Self::DeleteToParagraphEnd,
             "insertNewline:" | "insertLineBreak:" => Self::Newline,
+            "insertNewlineIgnoringFieldEditor:" => Self::LiteralNewline,
             "insertTab:" => Self::Tab,
+            "insertBacktab:" => Self::Backtab,
             "moveLeft:" | "moveBackward:" => Self::Left(false),
             "moveRight:" | "moveForward:" => Self::Right(false),
             "moveLeftAndModifySelection:" | "moveBackwardAndModifySelection:" => Self::Left(true),
@@ -259,20 +315,48 @@ impl Command {
             "moveUpAndModifySelection:" => Self::Up(true),
             "moveDown:" => Self::Down(false),
             "moveDownAndModifySelection:" => Self::Down(true),
+            // NSTextView's lines are layout rows; its paragraphs are LF-delimited.
             "moveToBeginningOfLine:" => Self::Home(false),
             "moveToBeginningOfLineAndModifySelection:" => Self::Home(true),
             "moveToEndOfLine:" => Self::End(false),
             "moveToEndOfLineAndModifySelection:" => Self::End(true),
+            "moveToBeginningOfParagraph:" => Self::ParagraphStart(false),
+            "moveToBeginningOfParagraphAndModifySelection:" => Self::ParagraphStart(true),
+            "moveToEndOfParagraph:" => Self::ParagraphEnd(false),
+            "moveToEndOfParagraphAndModifySelection:" => Self::ParagraphEnd(true),
+            "moveParagraphBackwardAndModifySelection:" => Self::SelectParagraphBoundary(false),
+            "moveParagraphForwardAndModifySelection:" => Self::SelectParagraphBoundary(true),
             "moveWordLeft:" | "moveWordBackward:" => Self::WordLeft(false),
             "moveWordRight:" | "moveWordForward:" => Self::WordRight(false),
-            "moveWordLeftAndModifySelection:" => Self::WordLeft(true),
-            "moveWordRightAndModifySelection:" => Self::WordRight(true),
+            "moveWordLeftAndModifySelection:" | "moveWordBackwardAndModifySelection:" => {
+                Self::WordLeft(true)
+            }
+            "moveWordRightAndModifySelection:" | "moveWordForwardAndModifySelection:" => {
+                Self::WordRight(true)
+            }
             "moveToBeginningOfDocument:" => Self::DocumentStart(false),
             "moveToBeginningOfDocumentAndModifySelection:" => Self::DocumentStart(true),
             "moveToEndOfDocument:" => Self::DocumentEnd(false),
             "moveToEndOfDocumentAndModifySelection:" => Self::DocumentEnd(true),
-            "pageUp:" | "scrollPageUp:" => Self::PageUp,
-            "pageDown:" | "scrollPageDown:" => Self::PageDown,
+            "pageUp:" => Self::PageUp,
+            "pageDown:" => Self::PageDown,
+            "scrollPageUp:" => Self::ScrollPage(false),
+            "scrollPageDown:" => Self::ScrollPage(true),
+            "pageUpAndModifySelection:" => Self::SelectPage(false),
+            "pageDownAndModifySelection:" => Self::SelectPage(true),
+            "centerSelectionInVisibleArea:" => Self::CenterSelection,
+            "yank:" => Self::Yank,
+            "transpose:" => Self::Transpose,
+            "setMark:" => Self::SetMark,
+            "selectToMark:" => Self::SelectToMark,
+            "swapWithMark:" => Self::SwapWithMark,
+            "deleteToMark:" => Self::DeleteToMark,
+            "uppercaseWord:" => Self::UppercaseWord,
+            "lowercaseWord:" => Self::LowercaseWord,
+            "capitalizeWord:" => Self::CapitalizeWord,
+            "selectWord:" => Self::SelectWord,
+            "selectLine:" => Self::SelectLine,
+            "selectParagraph:" => Self::SelectParagraph,
             "cancelOperation:" => Self::Cancel,
             "undo:" => Self::Undo,
             "redo:" => Self::Redo,
