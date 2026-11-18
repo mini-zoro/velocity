@@ -108,6 +108,8 @@ pub(crate) struct History {
 }
 pub(crate) type Shared = Rc<RefCell<History>>;
 pub(crate) fn position(text: &vel_text::Text, byte: usize) -> vel_text::Point {
+    // A hex caret addresses the bytes of the file, not the empty text buffer.
+    let byte = byte.min(text.len_bytes());
     let row = text.byte_to_line(byte);
     vel_text::Point {
         row,

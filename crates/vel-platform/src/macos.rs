@@ -72,6 +72,86 @@ fn restore_simple_presentation(mtm: MainThreadMarker) {
     }
 }
 impl WindowHandle {
+    /// Whether this handle represents the windowless application template.
+    pub fn is_closed(&self) -> bool {
+        self.0.stopped.get()
+    }
+    /// Finds the frontmost eligible Velocity tab strip under the mouse.
+    pub fn tab_drop_destination(&self) -> Option<(WindowHandle, u64, usize)> {
+        let point = NSEvent::mouseLocation();
+        let number =
+            NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, self.0.mtm);
+        for host in lifecycle::live_hosts() {
+            let (Some(window), Some(view)) = (host.window.get(), host.view.get()) else {
+                continue;
+            };
+            if host.id == self.0.id || window.windowNumber() != number {
+                continue;
+            }
+            let p = view.convertPoint_fromView(window.convertPointFromScreen(point), None);
+            let (token, group) = host
+                .app
+                .try_borrow()
+                .ok()?
+                .as_ref()?
+                .tab_drop_destination(Point { x: p.x, y: p.y })?;
+            return Some((host.handle(), token, group));
+        }
+        None
+    }
+    /// Notifies macOS of a completed document open, or clears system recents.
+    pub fn system_recent_document(&self, path: Option<&Path>) {
+        let controller = NSDocumentController::sharedDocumentController(self.0.mtm);
+        if let Some(path) = path {
+            use std::os::unix::ffi::OsStrExt;
+            if let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+                // SAFETY: NSURL reads a terminated OS path during this call.
+                let url = unsafe {
+                    NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+                        NonNull::from(path.as_c_str()).cast(),
+                        false,
+                        None,
+                    )
+                };
+                controller.noteNewRecentDocumentURL(&url);
+            }
+        } else {
+            // SAFETY: AppKit's standard clear action permits a nil sender.
+            unsafe { controller.clearRecentDocuments(None) };
+        }
+    }
+    /// Reads the last windowed frame, excluding AppKit's full-screen transition.
+    pub fn frame(&self) -> Option<Rect> {
+        let w = self.0.window.get()?;
+        if w.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            return None;
+        }
+        let frame = self
+            .0
+            .simple_fullscreen
+            .borrow()
+            .as_ref()
+            .map_or_else(|| w.frame(), |(frame, _, _)| *frame);
+        Some(screen_rect(frame))
+    }
+    /// Restores a frame within the current visible screen geometry.
+    pub fn restore_frame(&self, frame: Rect) {
+        if let Some(w) = self.0.window.get() {
+            let screens: Vec<_> = NSScreen::screens(self.0.mtm)
+                .into_iter()
+                .map(|s| screen_rect(s.visibleFrame()))
+                .collect();
+            if let Some(frame) = clamp_window_frame(frame, &screens) {
+                w.setFrame_display(
+                    NSRect::new(
+                        NSPoint::new(frame.x, frame.y),
+                        NSSize::new(frame.width, frame.height),
+                    ),
+                    false,
+                );
+            }
+        }
+    }
     /// Registers a process-wide factory independent of any one window's lifetime.
     /// With a factory installed, closing the final window leaves the application
     /// running. Dock reopen and subsequent Finder opens create a fresh host.
@@ -317,9 +397,8 @@ impl WindowHandle {
         if !INSTALLED_MENU.with(|installed| installed.borrow_mut().update(self.0.id, entries)) {
             return;
         }
-        let main = NSApplication::sharedApplication(self.0.mtm)
-            .mainMenu()
-            .expect("application menu");
+        let app = NSApplication::sharedApplication(self.0.mtm);
+        let main = app.mainMenu().expect("application menu");
         while main.numberOfItems() > 1 {
             main.removeItemAtIndex(1);
         }
@@ -365,6 +444,18 @@ impl WindowHandle {
             .cloned()
             .collect::<Vec<_>>();
         append_menu(&self.0, &main, &entries);
+        let windows = main
+            .itemWithTitle(&NSString::from_str("Window"))
+            .and_then(|item| item.submenu());
+        app.setWindowsMenu(windows.as_deref());
+        if windows.is_some() {
+            for window in lifecycle::live_hosts()
+                .iter()
+                .filter_map(|h| h.window.get())
+            {
+                app.addWindowsItem_title_filename(window, &window.title(), false);
+            }
+        }
     }
     /// Queues a native context menu for the most recent unconsumed mouse press.
     /// Its native event survives `on_mouse` so a later frame can offer spelling
@@ -1015,7 +1106,17 @@ define_class!(
         fn named_command(&self, item: &NSMenuItem) {
             if let Some(h) = self.ivars().host.upgrade() {
                 let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
-                if let Some((name,args)) = command { h.dispatch(Event::NamedCommand(name,args)); h.flush(); }
+                if let Some((name,args)) = command {
+                    if h.stopped.get() && lifecycle::is_template(h.id) {
+                        if windowless_command(&name) && let Ok(mut slot) = h.app.try_borrow_mut()
+                            && let Some(app) = slot.as_mut() {
+                            app.on_named_command(&h.handle(), &name, &args);
+                        }
+                    } else {
+                        h.dispatch(Event::NamedCommand(name,args));
+                        h.flush();
+                    }
+                }
             }
         }
         #[unsafe(method(validateMenuItem:))]
@@ -1023,7 +1124,11 @@ define_class!(
             self.ivars().host.upgrade().is_some_and(|h| {
                 let commands=h.menu_commands.borrow();
                 commands.get(item.tag().max(0) as usize).is_some_and(|(name,args)| {
-                    h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(name,args)))
+                    if h.stopped.get() && lifecycle::is_template(h.id) {
+                        windowless_command(name)
+                    } else {
+                        h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(name,args)))
+                    }
                 })
             })
         }
@@ -1383,6 +1488,10 @@ define_class!(
         fn resized(&self, _n: &NSNotification) {
             self.ivars().host.resize();
         }
+        #[unsafe(method(windowDidMove:))]
+        fn moved(&self, _n: &NSNotification) {
+            self.ivars().host.resize();
+        }
         #[unsafe(method(windowDidChangeBackingProperties:))]
         fn scale_changed(&self, _n: &NSNotification) {
             self.ivars().host.resize();
@@ -1448,6 +1557,18 @@ impl Delegate {
             window.setContentMinSize(NSSize::new(320., 200.));
         }
         window.setTitle(&NSString::from_str(&self.ivars().options.title));
+        // ST4 build 4152: cascade from the front window's top-left corner.
+        // https://www.sublimetext.com/download
+        if let Some(previous) = NSApplication::sharedApplication(mtm).keyWindow() {
+            let frame = previous.frame();
+            let next = window.cascadeTopLeftFromPoint(NSPoint::new(
+                frame.origin.x,
+                frame.origin.y + frame.size.height,
+            ));
+            window.cascadeTopLeftFromPoint(next);
+        }
+        // ST4 4126/4131 added fixes for native tabs (https://www.sublimetext.com/download).
+        // Keep them off until native tab groups participate in Velocity's window/session model.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
         window.setDelegate(Some(ProtocolObject::from_ref(self)));
@@ -1543,6 +1664,25 @@ impl Delegate {
         Ok(())
     }
 }
+fn screen_rect(frame: NSRect) -> Rect {
+    Rect {
+        x: frame.origin.x,
+        y: frame.origin.y,
+        width: frame.size.width,
+        height: frame.size.height,
+    }
+}
+fn windowless_command(name: &str) -> bool {
+    matches!(
+        name,
+        "new_window"
+            | "prompt_open_file"
+            | "open_recent_file"
+            | "open_recent_folder"
+            | "open_project"
+            | "clear_recent_items"
+    )
+}
 fn build_menu(mtm: MainThreadMarker) {
     let main = NSMenu::new(mtm);
     let application = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Velocity"));
@@ -1606,14 +1746,25 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
             menu.addItem(&NSMenuItem::separatorItem(host.mtm));
             continue;
         }
-        // SAFETY: velocityCommand: has the one-sender menu action signature.
+        let native = match entry.command.as_deref() {
+            Some("native_minimize") => Some((sel!(performMiniaturize:), "m")),
+            Some("native_zoom") => Some((sel!(performZoom:), "")),
+            Some("native_bring_all_to_front") => Some((sel!(arrangeInFront:), "")),
+            _ => None,
+        };
+        // SAFETY: These selectors all take one optional sender.
         let item = unsafe {
             menu.addItemWithTitle_action_keyEquivalent(
                 &NSString::from_str(&entry.caption),
-                entry.command.as_ref().map(|_| sel!(velocityCommand:)),
-                &NSString::from_str(""),
+                native
+                    .map(|(selector, _)| selector)
+                    .or_else(|| entry.command.as_ref().map(|_| sel!(velocityCommand:))),
+                &NSString::from_str(native.map_or("", |(_, key)| key)),
             )
         };
+        if native.is_some() {
+            continue;
+        }
         if entry.command.as_deref() == Some("edit_settings")
             && entry.args.contains("/Preferences.sublime-settings")
         {

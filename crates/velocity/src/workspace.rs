@@ -593,6 +593,7 @@ pub struct Workspace {
     recent_menu_state: Option<([Vec<PathBuf>; 3], u64)>,
     pub(crate) distraction_settings: serde_json::Map<String, Value>,
     pub folders: Vec<vel_search::project::Folder>,
+    pub(crate) transient_folders: std::collections::BTreeSet<PathBuf>,
     pub tabs: Vec<Tab>,
     pub active: usize,
     /// An empty window retains an input adapter but has no workbench sheet.
@@ -697,6 +698,21 @@ pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
     } else {
         Ok(absolute)
     }
+}
+
+pub(crate) fn absolute_folder(path: &Path) -> Result<PathBuf, String> {
+    let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    // Normalize system aliases to agree with document paths and FSEvents,
+    // but keep user-selected components (including symlinks) below them.
+    #[cfg(target_os = "macos")]
+    for alias in ["/tmp", "/var", "/etc"] {
+        if let Ok(suffix) = path.strip_prefix(alias)
+            && let Ok(base) = std::fs::canonicalize(alias)
+        {
+            return Ok(base.join(suffix));
+        }
+    }
+    Ok(path)
 }
 #[derive(Debug)]
 struct Configuration {
@@ -1096,7 +1112,7 @@ impl Configuration {
                     .unwrap_or(Path::new("."))
                     .join(path)
             };
-            let path = absolute(&path)?;
+            let path = absolute_folder(&path)?;
             let mut excludes = Vec::new();
             for key in [
                 "file_exclude_patterns",
@@ -1546,6 +1562,7 @@ impl Workspace {
             recent_projects: Vec::new(),
             recent_menu_state: None,
             folders,
+            transient_folders: Default::default(),
             tabs: vec![tab],
             active: 0,
             empty: false,
@@ -2510,11 +2527,12 @@ impl Workspace {
                     .iter()
                     .any(|(path, saved)| path == project && stamp(path) != *saved)
             });
-            let folders = if project_changed {
-                Vec::new()
-            } else {
-                self.folders.clone()
-            };
+            let folders = self
+                .folders
+                .iter()
+                .filter(|f| !project_changed || self.transient_folders.contains(&f.path))
+                .cloned()
+                .collect::<Vec<_>>();
             match result {
                 Ok(mut config) => {
                     // A resource worker may have read an intermediate result from our
@@ -2558,6 +2576,9 @@ impl Workspace {
                     self.schemes = config.schemes;
                     self.appearance = config.appearance;
                     self.folders = config.folders;
+                    for folder in &self.folders {
+                        self.transient_folders.remove(&folder.path);
+                    }
                     self.distraction_settings = config.distraction_settings;
                     self.build_systems = config.build_systems;
                     self.project_model = config.project_model;
@@ -2664,6 +2685,23 @@ impl Workspace {
     }
     pub fn set_file_type(&mut self, syntax: &str) -> Result<(), String> {
         self.configure_language(self.active, Some(syntax), false)
+    }
+    pub(crate) fn adopt_transferred_settings(&self, tab: &mut Tab) {
+        for layer in [
+            Layer::Default,
+            Layer::Platform,
+            Layer::User,
+            Layer::Project,
+            Layer::Syntax,
+            Layer::DistractionFree,
+        ] {
+            let values = self.settings.layer(layer).clone();
+            let _ = tab.editor.settings.replace(layer, Value::Object(values));
+        }
+        tab.editor.theme = self.themes.ui.clone();
+        tab.editor.keymap = self.keymap.clone();
+        tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
+        tab.language_settings_revision = u64::MAX;
     }
     pub fn set_appearance(&mut self, dark: bool) -> Result<(), String> {
         self.dark = dark;

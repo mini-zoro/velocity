@@ -229,19 +229,24 @@ impl Default for Intelligence {
     }
 }
 impl Intelligence {
+    pub(crate) fn rescan(&self) {
+        for project in &self.projects {
+            project.index.rescan();
+        }
+    }
     pub fn poll(&mut self, workspace: &mut Workspace) -> bool {
         let settings = &workspace.settings;
         // View-local changes do not restart indexing. Only index settings, roots and resource identities do.
         let key = format!(
-            "{:?}:{}:{}:{}:{}:{}:{}:{:?}:{:?}",
+            "{:?}:{}:{}:{}:{}:{:?}:{:?}:{}:{}:{:?}:{:?}",
             workspace.folders,
             settings.bool("index_files", true),
             settings.usize("index_workers", 0),
             settings.bool("index_exclude_gitignore", true),
             settings.bool("index_skip_unknown_extensions", true),
-            settings
-                .get("index_exclude_patterns")
-                .unwrap_or(&vel_config::Value::Null),
+            settings.get("index_exclude_patterns"),
+            settings.get("index_include_patterns"),
+            workspace.resource_revision,
             settings.usize("index_max_file_size", 2 * 1024 * 1024),
             Arc::as_ptr(&workspace.catalog),
             Arc::as_ptr(&workspace.assets)
@@ -268,12 +273,18 @@ impl Intelligence {
                     .set_engine(workspace.catalog.engine.clone());
             }
             if settings.bool("index_files", true) && !workspace.folders.is_empty() {
-                let roots: Vec<_> = workspace.folders.iter().map(|f| f.path.clone()).collect();
+                let folders = workspace.folders.clone();
+                let project_folders = workspace.project_model.folders.clone();
+                let project_base = workspace
+                    .project_path()
+                    .and_then(Path::parent)
+                    .map(Path::to_owned);
                 let assets = workspace.assets.clone();
                 let catalog = workspace.catalog.clone();
                 let options = IndexOptions {
                     index_workers: settings.usize("index_workers", 0),
                     index_exclude_patterns: patterns(settings, "index_exclude_patterns"),
+                    index_include_patterns: patterns(settings, "index_include_patterns"),
                     index_exclude_gitignore: settings.bool("index_exclude_gitignore", true),
                     index_skip_unknown_extensions: settings
                         .bool("index_skip_unknown_extensions", true),
@@ -296,8 +307,43 @@ impl Intelligence {
                     .spawn(move || {
                         let mut projects = Vec::new();
                         let mut messages = Vec::new();
-                        for root in roots {
-                            match open_index(&root, &assets, options.clone(), &mut messages) {
+                        // https://www.sublimetext.com/docs/projects.html#folders-key
+                        // Per-folder index arrays extend, not replace, global arrays.
+                        let local: std::collections::HashMap<_, _> = project_folders
+                            .into_iter()
+                            .filter_map(|f| {
+                                let path = project_base
+                                    .as_ref()
+                                    .map_or_else(|| f.path.clone(), |base| base.join(&f.path));
+                                Some((path.canonicalize().ok()?, f.extra))
+                            })
+                            .collect();
+                        for folder in folders {
+                            let root = folder.path.clone();
+                            let mut options = options.clone();
+                            if let Some(local) = local.get(&root) {
+                                for (key, patterns) in [
+                                    (
+                                        "index_include_patterns",
+                                        &mut options.index_include_patterns,
+                                    ),
+                                    (
+                                        "index_exclude_patterns",
+                                        &mut options.index_exclude_patterns,
+                                    ),
+                                ] {
+                                    patterns.extend(
+                                        local
+                                            .get(key)
+                                            .and_then(vel_config::Value::as_array)
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(vel_config::Value::as_str)
+                                            .map(str::to_owned),
+                                    );
+                                }
+                            }
+                            match open_index(folder, &assets, options, &mut messages) {
                                 Ok(index) => {
                                     let index = Arc::new(index);
                                     let engine = catalog
@@ -507,13 +553,13 @@ fn patterns(settings: &vel_config::settings::Settings, key: &str) -> Vec<String>
         .collect()
 }
 fn open_index(
-    root: &Path,
+    folder: vel_search::project::Folder,
     assets: &crate::language::Assets,
     mut options: IndexOptions,
     messages: &mut Vec<String>,
 ) -> Result<ProjectIndex, String> {
-    match ProjectIndex::open(
-        root,
+    match ProjectIndex::open_folder(
+        folder.clone(),
         assets.syntaxes.clone(),
         assets.metadata.clone(),
         options.clone(),
@@ -529,8 +575,8 @@ fn open_index(
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             )));
-            ProjectIndex::open(
-                root,
+            ProjectIndex::open_folder(
+                folder,
                 assets.syntaxes.clone(),
                 assets.metadata.clone(),
                 options,

@@ -1,9 +1,8 @@
 //! Parallel grep-searcher traversal, streaming result lines and reviewable replacements.
 use crate::{
-    project::{Folder, Rules},
+    project::{Folder, Patterns, Rules},
     text::{Search, apply},
 };
-use globset::{GlobBuilder, GlobMatcher};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -23,68 +22,6 @@ use std::{
 };
 use vel_text::Text;
 
-#[derive(Clone, Debug)]
-struct Pattern {
-    matcher: GlobMatcher,
-    directory: bool,
-    basename: bool,
-    project_relative: bool,
-    absolute: bool,
-}
-impl Pattern {
-    fn new(source: &str) -> Result<Self, String> {
-        let directory = source.ends_with('/');
-        let source = source.trim_end_matches('/');
-        let project_relative = source.starts_with("//");
-        let absolute = source.starts_with('/') && !project_relative;
-        let source = source.strip_prefix("//").unwrap_or(source);
-        Ok(Self {
-            matcher: GlobBuilder::new(source)
-                .literal_separator(!source.contains('/'))
-                .build()
-                .map_err(|e| e.to_string())?
-                .compile_matcher(),
-            directory,
-            basename: !source.contains('/') && !project_relative,
-            project_relative,
-            absolute,
-        })
-    }
-    fn matches(&self, path: &Path, root: &Path, project_root: &Path, directory: bool) -> bool {
-        // A directory match includes its descendants, even without a trailing slash.
-        for (i, ancestor) in path.ancestors().enumerate() {
-            if ancestor == root || !ancestor.starts_with(root) {
-                break;
-            }
-            if i == 0 && self.directory && !directory {
-                continue;
-            }
-            if self.basename {
-                if ancestor
-                    .file_name()
-                    .is_some_and(|name| self.matcher.is_match(Path::new(name)))
-                {
-                    return true;
-                }
-            } else if self.absolute {
-                if self.matcher.is_match(ancestor) {
-                    return true;
-                }
-            } else if ancestor
-                .strip_prefix(if self.project_relative {
-                    project_root
-                } else {
-                    root
-                })
-                .is_ok_and(|relative| self.matcher.is_match(relative))
-            {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 /// Parsed Where field. Commas separate locations, include patterns and `-exclude` patterns.
 #[derive(Clone, Debug, Default)]
 pub struct Where {
@@ -96,14 +33,22 @@ pub struct Where {
     pub open_files: bool,
     /// Search the first live buffer supplied in the request (the active file).
     pub current_file: bool,
-    include: Vec<Pattern>,
-    exclude: Vec<Pattern>,
+    include: Patterns,
+    exclude: Patterns,
 }
 impl Where {
     /// Parses symbolic locations and name/path patterns; an empty location uses open folders.
     pub fn parse(input: &str, base: &Path) -> Result<Self, String> {
         let mut result = Self::default();
-        for part in input.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (mut include, mut exclude) = (Vec::new(), Vec::new());
+        let mut quoted = false;
+        let fields = input.split(|c| {
+            if c == '"' {
+                quoted = !quoted;
+            }
+            c == ',' && !quoted
+        });
+        for part in fields.map(str::trim).filter(|p| !p.is_empty()) {
             let part = part.trim_matches('"');
             match part {
                 "<project>" | "<open folders>" => result.project = true,
@@ -111,12 +56,12 @@ impl Where {
                 "<current file>" => result.current_file = true,
                 _ => {
                     if let Some(pattern) = part.strip_prefix('-') {
-                        result.exclude.push(Pattern::new(pattern)?);
+                        exclude.push(pattern.trim_matches('"').to_owned());
                     } else {
                         let path = Path::new(part);
                         let resolved = base.join(path);
                         if !part.starts_with("//")
-                            && !part.contains(['*', '?', '['])
+                            && !part.contains(['*', '?'])
                             && (path.is_absolute()
                                 || (part.contains('/')
                                     && !part.ends_with('/')
@@ -124,12 +69,16 @@ impl Where {
                         {
                             result.roots.push(resolved);
                         } else {
-                            result.include.push(Pattern::new(part)?);
+                            include.push(part.to_owned());
                         }
                     }
                 }
             }
         }
+        // https://www.sublimetext.com/docs/file_patterns.html#uses includes the
+        // Find in Files Where field; only its location and exclusion syntax is separate.
+        result.include = Patterns::new(&include);
+        result.exclude = Patterns::new(&exclude);
         result.project |= !result.open_files && !result.current_file && result.roots.is_empty();
         Ok(result)
     }
@@ -142,22 +91,11 @@ impl Where {
         self.allows_at(path, root, root)
     }
     fn prunes_at(&self, path: &Path, root: &Path, project_root: &Path) -> bool {
-        path != root
-            && self
-                .exclude
-                .iter()
-                .any(|p| p.matches(path, root, project_root, true))
+        self.exclude.matches_within(project_root, root, path, true)
     }
     fn allows_at(&self, path: &Path, root: &Path, project_root: &Path) -> bool {
-        (self.include.is_empty()
-            || self
-                .include
-                .iter()
-                .any(|p| p.matches(path, root, project_root, false)))
-            && !self
-                .exclude
-                .iter()
-                .any(|p| p.matches(path, root, project_root, false))
+        (self.include.is_empty() || self.include.matches_within(project_root, root, path, false))
+            && !self.exclude.matches_within(project_root, root, path, false)
     }
 }
 /// A searchable live buffer. Path may be a user-facing Untitled caption.
@@ -724,7 +662,7 @@ mod tests {
             ("//src/", "/project/src/file.rs", true),
             ("//src/", "/project/sub/src/file.rs", false),
             ("//*.rs", "/project/file.rs", true),
-            ("//*.rs", "/project/sub/file.rs", false),
+            ("//*.rs", "/project/sub/file.rs", true),
             ("sub/*.rs", "/project/sub/deep/file.rs", true),
             ("*.rs", "/project/sub/file.rs", true),
             (
@@ -800,15 +738,15 @@ mod tests {
         );
     }
     #[test]
-    fn relative_where_patterns_never_match_absolute_ancestors_or_prune_the_root() {
+    fn where_path_patterns_are_suffix_anchored_and_name_filters_skip_the_root() {
         let root = Path::new("/Users/me/src/app");
         for (pattern, path, expected) in [
-            ("src/*.rs", "/Users/me/src/app/main.rs", false),
+            ("src/*.rs", "/Users/me/src/app/main.rs", true),
             ("src/*.rs", "/Users/me/src/app/src/main.rs", true),
-            ("src/*.rs", "/Users/me/src/app/nested/src/main.rs", false),
-            ("-src/*.rs", "/Users/me/src/app/main.rs", true),
+            ("src/*.rs", "/Users/me/src/app/nested/src/main.rs", true),
+            ("-src/*.rs", "/Users/me/src/app/main.rs", false),
             ("-src/*.rs", "/Users/me/src/app/src/main.rs", false),
-            ("-me/*", "/Users/me/src/app/main.rs", true),
+            ("-me/*", "/Users/me/src/app/main.rs", false),
         ] {
             assert_eq!(
                 Where::parse(pattern, root)
@@ -831,14 +769,14 @@ mod tests {
             root,
             project
         ));
-        assert!(!Where::parse("src/app/*.rs", project).unwrap().allows_at(
+        assert!(Where::parse("src/app/*.rs", project).unwrap().allows_at(
             &root.join("main.rs"),
             root,
             project
         ));
     }
     #[test]
-    fn hidden_search_root_is_walked_and_explicit_nested_patterns_use_that_root() {
+    fn hidden_search_root_is_walked_with_full_path_and_project_relative_filters() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("src/.dotfiles");
         for name in ["one.rs", "src/two.rs", ".hidden/no.rs"] {
@@ -848,9 +786,10 @@ mod tests {
         }
         for (patterns, expected) in [
             ("-.*", 2),
-            ("src/*.rs", 1),
-            ("-src/*.rs, -.*", 1),
-            ("-src/*", 2),
+            ("src/*.rs", 3),
+            ("-src/*.rs, -.*", 0),
+            ("-src/*", 0),
+            ("//src/.dotfiles/src/*.rs", 1),
         ] {
             let task = Task::start(Request {
                 search: Search::new("needle", crate::text::Options::default()).unwrap(),

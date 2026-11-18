@@ -14,8 +14,10 @@ vel-syntax = { path = "../vel-syntax" }
 vel-scope = { path = "../vel-scope" }
 vel-text = { path = "../vel-text", default-features = false }
 vel-highlight = { path = "../vel-highlight" }
+vel-search = { path = "../vel-search" }
+vel-fileio = { path = "../vel-fileio" }
 ignore = "0.4"
-globset = "0.4"
+hashlink = "0.12"
 notify = "=8.2.0"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"

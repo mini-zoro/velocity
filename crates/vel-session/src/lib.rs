@@ -163,6 +163,16 @@ pub struct Window {
     pub sheets: Vec<Sheet>,
     /// Sidebar visibility.
     pub sidebar_visible: bool,
+    /// Open Files section visibility; older sessions retain the preexisting visible default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_open_files: Option<bool>,
+    /// Native outer frame as x, y, width, height in logical screen coordinates.
+    #[serde(
+        default,
+        deserialize_with = "read_frame",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub frame: Option<[f64; 4]>,
     /// Expanded directory paths.
     pub sidebar_expanded: Vec<PathBuf>,
     /// Sidebar scroll offset.
@@ -187,6 +197,23 @@ pub struct Window {
     pub fullscreen: bool,
     /// Explicit build system selection; None means Automatic.
     pub build_system: Option<String>,
+}
+fn read_frame<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<[f64; 4]>, D::Error> {
+    let value = Box::<serde_json::value::RawValue>::deserialize(input)?;
+    Ok(serde_json::from_str::<[f64; 4]>(value.get())
+        .ok()
+        .and_then(|[x, y, w, h]| {
+            // Bound serialized geometry before doing screen intersection arithmetic.
+            const LIMIT: f64 = 1_000_000.;
+            [x, y, w, h].iter().all(|n| n.is_finite()).then(|| {
+                [
+                    x.clamp(-LIMIT, LIMIT),
+                    y.clamp(-LIMIT, LIMIT),
+                    w.clamp(320., LIMIT),
+                    h.clamp(200., LIMIT),
+                ]
+            })
+        }))
 }
 /// Versioned application session. Unknown fields are tolerated; invalid references are rejected.
 #[derive(Clone, Debug, Serialize, Deserialize)]

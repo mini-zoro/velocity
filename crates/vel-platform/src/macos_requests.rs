@@ -29,7 +29,7 @@ fn hosts() -> Vec<Rc<Host>> {
             .collect()
     })
 }
-fn live_hosts() -> Vec<Rc<Host>> {
+pub(super) fn live_hosts() -> Vec<Rc<Host>> {
     hosts()
         .into_iter()
         .filter(|host| !host.stopped.get())

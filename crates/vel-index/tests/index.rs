@@ -54,6 +54,151 @@ fn options(cache: &Path) -> IndexOptions {
         ..IndexOptions::default()
     }
 }
+
+#[test]
+fn repository_parent_ignores_and_index_directory_names_apply_in_root_and_subproject() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let package = repo.join("packages/app");
+    std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+    std::fs::create_dir_all(package.join("generated")).unwrap();
+    std::fs::create_dir_all(package.join("vendor")).unwrap();
+    std::fs::create_dir_all(package.join("node_modules")).unwrap();
+    std::fs::create_dir_all(package.join("target")).unwrap();
+    std::fs::write(repo.join(".gitignore"), "generated/\n*.gen.fix\n").unwrap();
+    std::fs::write(repo.join(".git/info/exclude"), "secret.fix\n").unwrap();
+    let excluded = [
+        ("generated/code.fix", "generated"),
+        ("auto.gen.fix", "autogen"),
+        ("secret.fix", "secret"),
+        ("vendor/build.fix", "vendor"),
+        ("target/build.fix", "target"),
+        ("node_modules/pkg.fix", "node_modules"),
+    ];
+    for (path, symbol) in excluded {
+        std::fs::write(package.join(path), format!("fn {symbol}")).unwrap();
+    }
+    std::fs::write(package.join("keep.fix"), "fn keep").unwrap();
+    for root in [&package, &repo] {
+        let cache = tempfile::tempdir().unwrap();
+        let opts = IndexOptions {
+            index_exclude_patterns: ["vendor", "node_modules", "target"]
+                .map(str::to_owned)
+                .into(),
+            ..options(cache.path())
+        };
+        let index = ProjectIndex::open(root, set(), Arc::new(MetadataSet::new()), opts).unwrap();
+        index.flush().unwrap();
+        assert_eq!(index.lookup_definition("keep").len(), 1);
+        for (path, symbol) in excluded {
+            assert!(
+                index.lookup_definition(symbol).is_empty(),
+                "cold scan: {root:?} {path}"
+            );
+            let path = package.join(path);
+            index.reindex_file(&path);
+            index.update_buffer(&path, 1, Text::from(format!("fn {symbol}")));
+        }
+        index.flush().unwrap();
+        for (_, symbol) in excluded {
+            assert!(
+                index.lookup_definition(symbol).is_empty(),
+                "direct update: {root:?} {symbol}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn canonical_definitions_stay_unique_through_link_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let real = root.join("source");
+    let alias = root.join("before-source");
+    let second = root.join("second");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("symbol.fix"), "fn original").unwrap();
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    std::os::unix::fs::symlink(&real, &second).unwrap();
+    let index = ProjectIndex::open_folder(
+        vel_search::project::Folder {
+            path: root.clone(),
+            name: "Project".into(),
+            follow_links: true,
+            rules: Default::default(),
+        },
+        set(),
+        Arc::new(MetadataSet::new()),
+        options(cache.path()),
+    )
+    .unwrap();
+    index.flush().unwrap();
+    let original = index.lookup_definition("original");
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0].file.as_path(), real.join("symbol.fix"));
+    for step in 0..16 {
+        let symbol = format!("edit_{}", char::from(b'a' + step));
+        let renamed = root.join(format!("link{step}"));
+        std::fs::rename(&second, &renamed).unwrap();
+        std::fs::write(alias.join("symbol.fix"), format!("fn {symbol}")).unwrap();
+        index.reindex_file(&second);
+        index.reindex_file(&renamed);
+        index.reindex_file(alias.join("symbol.fix"));
+        index.flush().unwrap();
+        assert_eq!(index.lookup_definition(&symbol).len(), 1);
+        assert!(index.lookup_definition("original").is_empty());
+        std::fs::rename(&renamed, &second).unwrap();
+        index.reindex_file(&renamed);
+        index.reindex_file(&second);
+    }
+}
+#[test]
+fn project_filtered_index_and_updates_follow_allowed_symlinks() {
+    use vel_search::project::{Folder, Rules};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("work");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(root.join("vendor")).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(root.join("vendor/no.fix"), "fn vendorSymbol").unwrap();
+    std::fs::write(root.join("skip.fix"), "fn excludedSymbol").unwrap();
+    std::fs::write(outside.join("yes.fix"), "fn includedSymbol").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(root.join("linked")).unwrap();
+        std::fs::copy(outside.join("yes.fix"), root.join("linked/yes.fix")).unwrap();
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let opts = IndexOptions {
+        index_exclude_patterns: vec!["//skip.fix".into()],
+        index_include_patterns: vec!["*.fix".into()],
+        index_exclude_gitignore: false,
+        ..options(cache.path())
+    };
+    let folder = Folder {
+        path: root,
+        name: "Root".into(),
+        follow_links: true,
+        rules: Rules::new(&[], &["vendor".into()], &[]).unwrap(),
+    };
+    let index =
+        ProjectIndex::open_folder(folder, set(), Arc::new(MetadataSet::new()), opts).unwrap();
+    index.flush().unwrap();
+    assert_eq!(index.lookup_definition("includedSymbol").len(), 1);
+    for (path, symbol) in [
+        ("vendor/no.fix", "vendorSymbol"),
+        ("skip.fix", "excludedSymbol"),
+    ] {
+        index.reindex_file(path);
+        index.update_buffer(path, 1, Text::from(format!("fn {symbol}")));
+        index.flush().unwrap();
+        assert!(index.lookup_definition(symbol).is_empty());
+    }
+}
 #[test]
 fn background_ignore_size_binary_persistence_overlay_staleness_and_deletion() {
     let directory = tempfile::tempdir().unwrap();
@@ -286,6 +431,53 @@ fn notify_changes_or_reported_watcher_fallback_update_the_index() {
         std::thread::park_timeout(Duration::from_millis(10));
     }
     assert!(index.lookup_definition("original").is_empty());
+}
+
+#[test]
+fn subtree_rescans_keep_the_project_file_total() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let left = root.path().join("left");
+    let right = root.path().join("right");
+    std::fs::create_dir(&left).unwrap();
+    std::fs::create_dir(&right).unwrap();
+    std::fs::write(right.join("kept.fix"), "fn kept\n").unwrap();
+    std::fs::write(left.join("unknown.no_such_extension"), b"unknown").unwrap();
+    let index = ProjectIndex::open(
+        root.path(),
+        set(),
+        Arc::new(MetadataSet::new()),
+        options(cache.path()),
+    )
+    .unwrap();
+    index.flush().unwrap();
+    assert_eq!(index.status().total_files, 2);
+    assert_eq!(index.lookup_definition("kept").len(), 1);
+    let mut present = [false; 7];
+    let mut random = 1493u64;
+    for step in 0..49 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let i = (random >> 32) as usize % present.len();
+        let file = left.join(format!("{i}.fix"));
+        let name = format!("left_{}", char::from(b'a' + i as u8));
+        if present[i] {
+            std::fs::remove_file(&file).unwrap();
+        } else {
+            std::fs::write(&file, format!("fn {name}\n")).unwrap();
+        }
+        present[i] = !present[i];
+        // This is the same request sent for a notify event on the directory.
+        // With native watching off, a full rescan cannot mask the partial count.
+        index.reindex_file("left");
+        index.flush().unwrap();
+        assert_eq!(
+            index.status().total_files,
+            2 + present.iter().filter(|&&p| p).count(),
+            "step {step}"
+        );
+        assert_eq!(index.lookup_definition("kept").len(), 1);
+        assert_eq!(!index.lookup_definition(&name).is_empty(), present[i]);
+    }
 }
 
 #[test]

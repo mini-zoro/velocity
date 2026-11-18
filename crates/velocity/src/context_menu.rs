@@ -250,7 +250,7 @@ fn paths(args: &Value) -> Result<Vec<PathBuf>, String> {
     }
     Ok(unique)
 }
-fn one_path(args: &Value) -> Result<PathBuf, String> {
+pub(crate) fn one_path(args: &Value) -> Result<PathBuf, String> {
     let paths = paths(args)?;
     if paths.len() != 1 {
         return Err("Choose exactly one file or folder".into());
@@ -768,41 +768,6 @@ pub fn apply_rename(
     } else {
         Err(failures.join("\n"))
     }
-}
-
-/// Detaches a root from both the live sidebar and the in-memory project model.
-///
-/// Project model paths may be relative to the project file, while sidebar paths
-/// are canonical. Retained model entries keep their original path spelling and
-/// settings. The caller refreshes Panels and persists the updated project model;
-/// this function never writes the project file or removes files/open tabs.
-/// Returns whether either folder list changed.
-pub fn apply_remove_folder(workspace: &mut crate::workspace::Workspace, path: &Path) -> bool {
-    let root = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    let matches = |candidate: &Path| {
-        candidate == root || fs::canonicalize(candidate).is_ok_and(|resolved| resolved == root)
-    };
-    let previous_live = workspace.folders.len();
-    workspace.folders.retain(|folder| !matches(&folder.path));
-    let project_base = workspace
-        .project_path()
-        .and_then(Path::parent)
-        .unwrap_or(Path::new("."))
-        .to_owned();
-    // The root can already be in Trash. Resolve its still-existing project directory
-    // (e.g. /var -> /private/var) before matching entries whose last component is gone.
-    let project_base = fs::canonicalize(&project_base).unwrap_or(project_base);
-    let previous_model = workspace.project_model.folders.len();
-    workspace.project_model.folders.retain(|folder| {
-        let resolved = if folder.path.is_absolute() {
-            folder.path.clone()
-        } else {
-            project_base.join(&folder.path)
-        };
-        !matches(&resolved)
-    });
-    previous_live != workspace.folders.len()
-        || previous_model != workspace.project_model.folders.len()
 }
 
 /// Marks successfully trashed open files deleted while retaining all buffer state.

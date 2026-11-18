@@ -143,6 +143,86 @@ impl Document {
         Self::parse(&source)?;
         Ok(source)
     }
+
+    /// Appends to a root array without rewriting any of its existing elements.
+    pub fn append_array(&self, key: &str, value: &Value) -> Result<String, String> {
+        let pointer = format!("/{}", escape(key));
+        let Some(span) = self.spans.get(&pointer) else {
+            return self.set(key, &Value::Array(vec![value.clone()]));
+        };
+        let array = self.value[key].as_array().ok_or("expected an array")?;
+        let last = array
+            .len()
+            .checked_sub(1)
+            .map(|i| &self.spans[&format!("{pointer}/{i}")]);
+        let close = span.end - 1;
+        let trailing =
+            last.is_some_and(|s| self.trivia[s.end..close].trim_start().starts_with(','));
+        let token = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        let mut source = self.source.clone();
+        let line = |at| self.source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let close_line = line(close);
+        let indentation = &self.source[close_line..close];
+        if close_line > span.start && indentation.bytes().all(|b| matches!(b, b' ' | b'\t')) {
+            let indent = last
+                .map(|span| &self.source[line(span.start)..span.start])
+                .filter(|indent| indent.bytes().all(|b| matches!(b, b' ' | b'\t')))
+                .map_or_else(|| format!("{indentation}    "), str::to_owned);
+            let newline = if self.source[..close_line].ends_with("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            source.insert_str(
+                close_line,
+                &format!(
+                    "{indent}{token}{}{newline}",
+                    if trailing { "," } else { "" }
+                ),
+            );
+        } else {
+            source.insert_str(
+                close,
+                &format!(" {token}{}", if trailing { "," } else { "" }),
+            );
+        }
+        if !trailing && let Some(last) = last {
+            source.insert(last.end, ',');
+        }
+        Self::parse(&source)?;
+        Ok(source)
+    }
+
+    /// Removes one element and one separator, preserving surrounding trivia.
+    pub fn remove_array_element(&self, key: &str, index: usize) -> Result<String, String> {
+        let pointer = format!("/{}", escape(key));
+        let span = self
+            .spans
+            .get(&format!("{pointer}/{index}"))
+            .ok_or("missing array element")?;
+        let close = self.spans[&pointer].end - 1;
+        let following = self.trivia[span.end..close]
+            .bytes()
+            .position(|b| !b.is_ascii_whitespace())
+            .map(|i| span.end + i)
+            .filter(|&i| self.trivia.as_bytes()[i] == b',');
+        let preceding = index.checked_sub(1).and_then(|i| {
+            let start = self.spans[&format!("{pointer}/{i}")].end;
+            self.trivia[start..span.start].find(',').map(|i| start + i)
+        });
+        let mut source = self.source.clone();
+        if let Some(comma) = following {
+            source.remove(comma);
+        }
+        source.replace_range(span.clone(), "");
+        if following.is_none()
+            && let Some(comma) = preceding
+        {
+            source.remove(comma);
+        }
+        Self::parse(&source)?;
+        Ok(source)
+    }
 }
 fn escape(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")

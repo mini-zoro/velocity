@@ -3,6 +3,7 @@ use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vel_buffer::{BufferId, ChangeId, ChangeSet, Region, VerticalLayout};
+use vel_render::invisibles::Invisible;
 use vel_text::Text;
 
 pub const FOLDS: &str = "velocity.folds";
@@ -80,12 +81,45 @@ impl Dependencies {
 struct WrapCache {
     tail: (usize, usize),
     dependencies: Dependencies,
+    invisible: Option<Arc<Vec<(usize, usize)>>>,
+}
+impl WrapCache {
+    /// Replace gaps in the rewrapped section and rebase the untouched suffix.
+    fn edit_gaps(
+        &mut self,
+        begin: usize,
+        old_end: usize,
+        new_end: usize,
+        new: Vec<(usize, usize)>,
+    ) {
+        let Some(gaps) = &mut self.invisible else {
+            self.invisible = (!new.is_empty()).then(|| Arc::new(new));
+            return;
+        };
+        let first = gaps.partition_point(|&(at, _)| at < begin);
+        let last = gaps.partition_point(|&(at, _)| at < old_end);
+        if first == last && new.is_empty() && (old_end == new_end || last == gaps.len()) {
+            return;
+        }
+        let gaps = Arc::make_mut(gaps);
+        let suffix = first + new.len();
+        gaps.splice(first..last, new);
+        if old_end != new_end {
+            for (at, _) in &mut gaps[suffix..] {
+                *at = *at - old_end + new_end;
+            }
+        }
+        if gaps.is_empty() {
+            self.invisible = None;
+        }
+    }
 }
 impl Default for WrapCache {
     fn default() -> Self {
         Self {
             tail: (usize::MAX, 0),
             dependencies: Dependencies::Empty,
+            invisible: None,
         }
     }
 }
@@ -157,6 +191,7 @@ pub struct Layout {
     count: usize,
     inline: Vec<(usize, usize)>,
     phantom_inline: Vec<(usize, usize)>,
+    invisible: Option<Invisible>,
     pub rewrapped: usize,
     pub page: usize,
     /// Last viewport width in cells, also used for commands between frames.
@@ -425,8 +460,24 @@ impl Layout {
     }
     /// Retain the unaffected prefix and stop at a stable old break. Only the
     /// previous segment needs reconsidering when a word joins across a break.
-    /// Fold/phantom projection and cross-segment deletions use the full oracle.
+    /// Fold/phantom projection and cross-segment deletions use the full row oracle.
     fn rewrap_suffix(
+        &mut self,
+        reader: &ByteReader<'_>,
+        row: usize,
+        old_start: usize,
+        edits: &[vel_buffer::Change],
+        map: &ChangeSet,
+    ) -> bool {
+        // Keep the text-only loop free of placeholder work, including its unit
+        // storage and cache updates, when none of the drawing options is on.
+        if self.invisible.is_some() {
+            self.rewrap_suffix_impl::<true>(reader, row, old_start, edits, map)
+        } else {
+            self.rewrap_suffix_impl::<false>(reader, row, old_start, edits, map)
+        }
+    }
+    fn rewrap_suffix_impl<const GAPS: bool>(
         &mut self,
         reader: &ByteReader<'_>,
         row: usize,
@@ -480,6 +531,17 @@ impl Layout {
             .and_then(|n| n.checked_add(inserted))
         else {
             return false;
+        };
+        let short = len < crate::large::LONG_LINE;
+        if GAPS && short != (old_len < crate::large::LONG_LINE) {
+            // Crossing the drawing cutoff changes gaps throughout the row.
+            return false;
+        }
+        let invisible = if GAPS && short { self.invisible } else { None };
+        let gap = |unit: &Unit<'_>| {
+            invisible
+                .and_then(|opt| opt.cell(unit.text, unit.width))
+                .map_or(0, |(_, gap)| gap)
         };
         let Some(end) = start
             .checked_add(len)
@@ -539,7 +601,27 @@ impl Layout {
             let units = units_from(&content, &[], self.options.tab, source_column);
             let columns =
                 last_segment.columns - tail_width + units.iter().map(|u| u.width).sum::<usize>();
-            if !units.is_empty() && columns + last_segment.indent <= self.options.width {
+            let mut new_gaps = Vec::new();
+            let mut gap_width = 0;
+            if GAPS && let Some(gaps) = &self.wrap[row].invisible {
+                let first = gaps.partition_point(|&(at, _)| at < last_segment.bytes.start);
+                gap_width += gaps[first..]
+                    .iter()
+                    .take_while(|&&(at, _)| at < tail_start)
+                    .map(|&(_, width)| width)
+                    .sum::<usize>();
+            }
+            if invisible.is_some() {
+                for unit in &units {
+                    let width = gap(unit);
+                    if width != 0 {
+                        gap_width += width;
+                        new_gaps.push((tail_start + unit.bytes.start, width));
+                    }
+                }
+            }
+            if !units.is_empty() && columns + gap_width + last_segment.indent <= self.options.width
+            {
                 let tail = units
                     .last()
                     .map_or((0, 0), |u| (tail_start + u.bytes.start, u.width));
@@ -557,6 +639,9 @@ impl Layout {
                     inspected_until: len,
                 };
                 self.wrap[row].tail = tail;
+                if invisible.is_some() {
+                    self.wrap[row].edit_gaps(tail_start, old_len, len, new_gaps);
+                }
                 return true;
             }
         }
@@ -575,6 +660,7 @@ impl Layout {
         }
         let mut tail = Vec::new();
         let mut dependencies = Vec::new();
+        let mut new_gaps = Vec::new();
         let mut at = begin;
         let mut reuse = line.segments.len();
         let mut final_unit = None;
@@ -588,7 +674,7 @@ impl Layout {
                 .saturating_add(1)
                 .saturating_mul(4)
                 .max(32);
-            let (content_len, units) = loop {
+            let (content_len, units, gaps) = loop {
                 let limit = start + at.saturating_add(window).min(len);
                 let mut end = if limit == start + len {
                     limit
@@ -602,19 +688,36 @@ impl Layout {
                 // Retain owned content outside this loop; unit ranges suffice
                 // once grapheme widths and whitespace breaks have been read.
                 let parts = units_from(&content, &[], tab, column);
+                let gaps = if invisible.is_some() {
+                    parts
+                        .iter()
+                        .filter_map(|unit| {
+                            let width = gap(unit);
+                            (width != 0).then_some((unit.bytes.start, width))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 let (end_unit, _) = wrap_end(
                     &parts,
                     0,
                     if at == 0 { 0 } else { indent },
                     self.options.width,
-                    |_| 0,
+                    |at| {
+                        if GAPS {
+                            Self::invisible_gap(&gaps, at)
+                        } else {
+                            0
+                        }
+                    },
                 );
                 if end == start + len || end_unit < parts.len() {
                     let parts: Vec<_> = parts
                         .into_iter()
                         .map(|u| (u.bytes, u.width, u.text.chars().all(char::is_whitespace)))
                         .collect();
-                    break (content.len(), parts);
+                    break (content.len(), parts, gaps);
                 }
                 window = window.saturating_mul(2);
             };
@@ -630,10 +733,16 @@ impl Layout {
                 let mut end = from;
                 let mut word = None;
                 while end < units.len() {
-                    if col + units[end].1 > self.options.width && end > from {
+                    let width = units[end].1
+                        + if GAPS {
+                            Self::invisible_gap(&gaps, units[end].0.start)
+                        } else {
+                            0
+                        };
+                    if col + width > self.options.width && end > from {
                         break;
                     }
-                    col += units[end].1;
+                    col += width;
                     end += 1;
                     if units[end - 1].2 {
                         word = Some(end);
@@ -649,6 +758,17 @@ impl Layout {
                     end = boundary;
                 }
                 let columns = units[from..end].iter().map(|u| u.1).sum::<usize>();
+                if GAPS && !gaps.is_empty() {
+                    let begin = units[from].0.start;
+                    let finish = units[end - 1].0.end;
+                    let first_gap = gaps.partition_point(|&(at, _)| at < begin);
+                    new_gaps.extend(
+                        gaps[first_gap..]
+                            .iter()
+                            .take_while(|&&(at, _)| at < finish)
+                            .map(|&(at, width)| (base + at, width)),
+                    );
+                }
                 at = base + units[end - 1].0.end;
                 tail.push(Segment {
                     bytes: base + units[from].0.start..at,
@@ -692,6 +812,10 @@ impl Layout {
         }
         let old_count = line.segments.len();
         let column_at_reuse = line.segments.get(reuse).map(|s| s.source_column);
+        if invisible.is_some() {
+            let old_end = line.segments.get(reuse).map_or(old_len, |s| s.bytes.start);
+            self.wrap[row].edit_gaps(begin, old_end, at, new_gaps);
+        }
         let line = &mut self.lines[row];
         self.wrap[row].tail = if reuse < old_count {
             if cached_tail.0 == usize::MAX {
@@ -785,6 +909,13 @@ impl Layout {
         column
     }
     fn make_line(&self, text: &Text, row: usize) -> (Line, WrapCache) {
+        if self.invisible.is_some() {
+            self.make_line_impl::<true>(text, row)
+        } else {
+            self.make_line_impl::<false>(text, row)
+        }
+    }
+    fn make_line_impl<const GAPS: bool>(&self, text: &Text, row: usize) -> (Line, WrapCache) {
         let start = text.line_to_byte(row);
         let content = text.line(row).to_string();
         let len = content.trim_end_matches('\n').len();
@@ -817,6 +948,18 @@ impl Layout {
             .into_iter()
             .filter(|u| u.bytes.start >= visible_start)
             .collect();
+        let mut gaps = Vec::new();
+        if GAPS
+            && let Some(options) = self
+                .invisible
+                .filter(|_| len < crate::large::LONG_LINE)
+                .filter(|options| options.contains(&content[..len]))
+        {
+            gaps.extend(units.iter().filter_map(|u| {
+                let (_, gap) = options.cell(u.text, u.width)?;
+                (gap != 0).then_some((u.bytes.start, gap))
+            }));
+        }
         let indent = if self.options.indent && self.options.width > 1 {
             crate::editor::cells_with_tab(
                 &content[..content.len() - content.trim_start_matches([' ', '\t']).len()],
@@ -843,6 +986,11 @@ impl Layout {
             let left = if from == 0 { 0 } else { indent };
             let (end, lookahead) = wrap_end(&units, from, left, self.options.width, |at| {
                 self.phantom_gap(start + at)
+                    + if GAPS {
+                        Self::invisible_gap(&gaps, at)
+                    } else {
+                        0
+                    }
             });
             let columns = units[from..end].iter().map(|u| u.width).sum::<usize>();
             segments.push(Segment {
@@ -871,10 +1019,12 @@ impl Layout {
             WrapCache {
                 tail: (usize::MAX, 0),
                 dependencies: dependencies.into(),
+                invisible: (!gaps.is_empty()).then(|| Arc::new(gaps)),
             },
         )
     }
-    pub fn set_phantom_inline(&mut self, text: &Text, inline: Vec<(usize, usize)>) {
+    pub fn set_phantom_inline(&mut self, text: &Text, mut inline: Vec<(usize, usize)>) {
+        inline.sort_unstable();
         if self.phantom_inline == inline {
             return;
         }
@@ -896,11 +1046,44 @@ impl Layout {
     }
     #[inline]
     pub fn phantom_gap(&self, at: usize) -> usize {
-        self.phantom_inline
+        self.phantom_inline[self.phantom_inline.partition_point(|(p, _)| *p < at)..]
             .iter()
-            .filter(|(p, _)| *p == at)
+            .take_while(|(p, _)| *p == at)
             .map(|(_, n)| n)
             .sum()
+    }
+    pub fn set_invisibles(&mut self, options: Invisible) {
+        let options = (options != Invisible::default()).then_some(options);
+        if self.invisible != options {
+            self.invisible = options;
+            self.invalidate();
+        }
+    }
+
+    // Wrapped rows keep their ordered, line-relative gaps with the wrap cache.
+    // Unwrapped rows only need gaps for a visible row or a caret geometry query.
+    pub fn invisible_gaps(&self, row: usize, text: &str) -> Option<Arc<Vec<(usize, usize)>>> {
+        let options = self.invisible?;
+        if let Some(cache) = self.wrap.get(row) {
+            return cache.invisible.clone();
+        }
+        if text.len() >= crate::large::LONG_LINE || !options.contains(text) {
+            return None;
+        }
+        let gaps = units(text, self.hidden(row), self.options.tab)
+            .into_iter()
+            .filter_map(|u| {
+                let (_, gap) = options.cell(u.text, u.width)?;
+                (gap != 0).then_some((u.bytes.start, gap))
+            })
+            .collect::<Vec<_>>();
+        (!gaps.is_empty()).then(|| Arc::new(gaps))
+    }
+
+    #[inline]
+    pub fn invisible_gap(gaps: &[(usize, usize)], at: usize) -> usize {
+        gaps.binary_search_by_key(&at, |(p, _)| *p)
+            .map_or(0, |i| gaps[i].1)
     }
     /// Inserts read-only original lines before physical row boundaries.
     pub fn set_inline(&mut self, mut blocks: Vec<(usize, usize)>) {
@@ -1094,13 +1277,22 @@ impl Layout {
         let line = text.line(row).to_string();
         let (_, segment) = self.visual_at(text, byte);
         let start = text.line_to_byte(row);
-        let gaps: usize = self
+        let inline: usize = self.phantom_inline[self
             .phantom_inline
+            .partition_point(|(at, _)| *at < start + segment.bytes.start)..]
             .iter()
-            .filter(|(at, _)| *at >= start + segment.bytes.start && *at < byte)
+            .take_while(|(at, _)| *at < byte)
             .map(|(_, n)| n)
             .sum();
+        let gaps = self.invisible_gaps(row, &line).map_or(0, |gaps| {
+            gaps[gaps.partition_point(|(at, _)| *at < segment.bytes.start)..]
+                .iter()
+                .take_while(|(at, _)| *at < col)
+                .map(|(_, n)| n)
+                .sum()
+        });
         after_marker
+            + inline
             + gaps
             + segment.indent
             + units(&line, self.hidden(row), self.options.tab)
@@ -1125,25 +1317,34 @@ impl Layout {
                 });
         }
         let line = text.line(row).to_string();
+        let gaps = self.invisible_gaps(row, &line);
+        let start = text.line_to_byte(row);
         let mut col = segment.indent as f64;
         let x = if x.is_finite() { x.max(0.) } else { 0. };
         for unit in units(&line, self.hidden(row), self.options.tab)
             .iter()
             .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end)
         {
-            let gap = self.phantom_gap(text.line_to_byte(row) + unit.bytes.start) as f64;
+            let gap = self.phantom_gap(start + unit.bytes.start) as f64;
             if x <= col + gap {
                 return text.floor_char_boundary(
                     (text.line_to_byte(row) + unit.bytes.start).min(text.len_bytes()),
                 );
             }
             col += gap;
-            if x <= col + unit.width as f64 / 2. {
+            let extra = gaps
+                .as_ref()
+                .map_or(0, |g| Self::invisible_gap(g, unit.bytes.start));
+            let width = (unit.width + extra) as f64;
+            if x <= col + width / 2. {
                 return text.floor_char_boundary(
                     (text.line_to_byte(row) + unit.bytes.start).min(text.len_bytes()),
                 );
             }
-            col += unit.width as f64;
+            if extra != 0 && x < col + width {
+                return (start + unit.bytes.end).min(text.len_bytes());
+            }
+            col += width;
         }
         if let Some(end) = self.folded_segment_end(text, row, visual, &segment) {
             return end;
@@ -1587,6 +1788,14 @@ mod round20_tests {
             "dependency cache seed {seed}, step {step}, text {text}"
         );
         assert_eq!(actual.total(), model.total());
+        assert!(
+            actual
+                .wrap
+                .iter()
+                .map(|cache| &cache.invisible)
+                .eq(model.wrap.iter().map(|cache| &cache.invisible)),
+            "invisible gaps seed {seed}, step {step}, text {text}"
+        );
         if !actual.byte_rows.tree.is_empty() {
             for row in 0..text.len_lines() {
                 assert_eq!(
@@ -1669,6 +1878,13 @@ mod round20_tests {
     }
     #[test]
     fn incremental_unicode_wrap_matches_full_layout_over_2048_seeds() {
+        wrap_edit_sweep(false, 2048);
+    }
+    #[test]
+    fn incremental_invisible_wrap_matches_full_layout() {
+        wrap_edit_sweep(true, 256);
+    }
+    fn wrap_edit_sweep(invisible: bool, seeds: u64) {
         const TOKENS: &[&str] = &[
             "a",
             "let x = 1; ",
@@ -1684,9 +1900,14 @@ mod round20_tests {
             "\n",
             "",
             "  \t  ",
+            "\u{200b}",
+            "\u{a0}",
+            "\u{202e}",
+            "\u{1}",
+            "\u{a0}\u{301}",
         ];
         let id = BufferId(920);
-        for seed in (0..2048).chain([1000493, 23028]) {
+        for seed in (0..seeds).chain([1000493, 23028]) {
             for width in [1, 2, 7, 13, 80] {
                 for indent in [false, true] {
                     let mut rng = seed + 1;
@@ -1697,6 +1918,21 @@ mod round20_tests {
                         indent,
                     };
                     let mut actual = Layout::default();
+                    let marks = if invisible {
+                        Invisible {
+                            whitespace: vel_render::invisibles::WhiteSpace::All,
+                            bidi: true,
+                            control: true,
+                        }
+                    } else {
+                        Invisible::default()
+                    };
+                    let tokens = if invisible {
+                        TOKENS
+                    } else {
+                        &TOKENS[..TOKENS.len() - 5]
+                    };
+                    actual.set_invisibles(marks);
                     actual.configure(&source, (id, ChangeId(0)), options, &[]);
                     for step in 1..=24 {
                         let content = source.to_string();
@@ -1720,7 +1956,7 @@ mod round20_tests {
                             }) {
                                 continue;
                             }
-                            edits.push((range, TOKENS[random(&mut rng, TOKENS.len())]));
+                            edits.push((range, tokens[random(&mut rng, tokens.len())]));
                         }
                         edits.sort_by_key(|(r, _)| r.start);
                         let before = source.clone();
@@ -1738,6 +1974,7 @@ mod round20_tests {
                         );
                         actual.change(&before, &source, (id, ChangeId(step as u64)), &changes);
                         let mut model = Layout::default();
+                        model.set_invisibles(marks);
                         model.configure(&source, (id, ChangeId(step as u64)), options, &[]);
                         if actual.lines != model.lines {
                             eprintln!("before: {before}\nedits: {edits:?}");

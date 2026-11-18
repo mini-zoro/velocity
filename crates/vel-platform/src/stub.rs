@@ -4,6 +4,22 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Unsupported platforms have no native frame.
+    pub fn frame(&self) -> Option<crate::Rect> {
+        None
+    }
+    /// Unsupported platforms cannot restore a native frame.
+    pub fn restore_frame(&self, _frame: crate::Rect) {}
+    /// Unsupported platforms have no windowless application template.
+    pub fn is_closed(&self) -> bool {
+        false
+    }
+    /// Unsupported platforms have no native drop targets.
+    pub fn tab_drop_destination(&self) -> Option<(Self, u64, usize)> {
+        None
+    }
+    /// Unsupported platforms have no system document controller.
+    pub fn system_recent_document(&self, _path: Option<&std::path::Path>) {}
     /// Updates the native minimum content extent (unavailable on this platform).
     pub fn set_minimum_content_size(&self, _size: Size) {}
     /// Retains no factory on unsupported platforms; native windows require macOS.

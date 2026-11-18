@@ -84,6 +84,8 @@ pub struct Sessions {
     recent: [Vec<PathBuf>; 3],
     recent_heads: BTreeMap<u64, [Option<PathBuf>; 3]>,
     forgotten_recent: [BTreeSet<PathBuf>; 3],
+    recent_opened: Vec<PathBuf>,
+    system_recent_enabled: Option<bool>,
     hot: HotExit,
     remember: bool,
     pub messages: Vec<String>,
@@ -92,6 +94,8 @@ pub struct Sessions {
     writer: Option<Writer>,
     workspaces: BTreeMap<PathBuf, Writer>,
     next: u64,
+    live: BTreeSet<u64>,
+    transfers: BTreeMap<u64, Vec<(usize, crate::workspace::Tab)>>,
 }
 impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
@@ -115,6 +119,8 @@ impl Sessions {
             recent: Default::default(),
             recent_heads: BTreeMap::new(),
             forgotten_recent: Default::default(),
+            recent_opened: Vec::new(),
+            system_recent_enabled: None,
             hot: HotExit::Always,
             remember: true,
             messages,
@@ -123,13 +129,27 @@ impl Sessions {
             writer,
             workspaces: BTreeMap::new(),
             next: 1,
+            live: BTreeSet::new(),
+            transfers: BTreeMap::new(),
         }
     }
     pub fn register(&mut self) -> u64 {
         let id = self.next;
         self.next += 1;
         self.active_window = Some(id);
+        self.live.insert(id);
+        self.recent_heads
+            .insert(id, self.recent.each_ref().map(|p| p.first().cloned()));
         id
+    }
+    pub fn can_receive_tab(&self, id: u64) -> bool {
+        self.live.contains(&id) && self.transfers.get(&id).map_or(0, Vec::len) < 64
+    }
+    pub fn transfer_tab(&mut self, id: u64, group: usize, tab: crate::workspace::Tab) {
+        self.transfers.entry(id).or_default().push((group, tab));
+    }
+    pub fn take_tabs(&mut self, id: u64) -> Vec<(usize, crate::workspace::Tab)> {
+        self.transfers.remove(&id).unwrap_or_default()
     }
     /// Reserves recovered windows before any live window can replace their snapshot.
     ///
@@ -205,32 +225,7 @@ impl Sessions {
         self.remember = policy.remember;
         repair_window(&mut window, &documents);
         self.windows.insert(id, (window.clone(), documents.clone()));
-        let heads = std::array::from_fn(|index| recent[index].first().cloned());
-        let previous = self.recent_heads.insert(id, heads);
-        for (index, mut incoming) in recent.into_iter().enumerate() {
-            if let Some(head) = incoming.first()
-                && previous
-                    .as_ref()
-                    .is_some_and(|old| old[index].as_ref() != Some(head))
-            {
-                self.forgotten_recent[index].remove(head);
-            }
-            incoming.retain(|path| !self.forgotten_recent[index].contains(path));
-            for path in incoming.iter().rev() {
-                if !self.recent[index].contains(path) {
-                    self.recent[index].insert(0, path.clone());
-                }
-            }
-            if let Some(head) = incoming.first()
-                && previous
-                    .as_ref()
-                    .is_some_and(|p| p[index].as_ref() != Some(head))
-            {
-                self.recent[index].retain(|p| p != head);
-                self.recent[index].insert(0, head.clone());
-            }
-            self.recent[index].truncate(100);
-        }
+        self.record_recents(id, recent);
         let mut session = self.collect(self.recent.clone());
         let hot = if !policy.quitting && !policy.closing && policy.hot == HotExit::OnlyOnQuit {
             HotExit::Always
@@ -258,6 +253,84 @@ impl Sessions {
             self.workspaces[&path].changed(session)?;
         }
         Ok(())
+    }
+    // ST4 builds 4143 and 4152: application recents are global, closed views are local.
+    // https://www.sublimetext.com/download
+    pub fn sync_recents(&mut self, id: u64, lists: [&mut Vec<PathBuf>; 3]) {
+        if lists
+            .iter()
+            .zip(&self.recent)
+            .all(|(local, shared)| &***local == shared.as_slice())
+        {
+            return;
+        }
+        self.record_recents(id, std::array::from_fn(|i| lists[i].clone()));
+        for (local, shared) in lists.into_iter().zip(&self.recent) {
+            local.clone_from(shared);
+        }
+        self.recent_heads
+            .insert(id, self.recent.each_ref().map(|p| p.first().cloned()));
+    }
+    fn record_recents(&mut self, id: u64, recent: [Vec<PathBuf>; 3]) {
+        let heads = std::array::from_fn(|index| recent[index].first().cloned());
+        let previous = self.recent_heads.insert(id, heads);
+        for (index, mut incoming) in recent.into_iter().enumerate() {
+            if let Some(head) = incoming.first()
+                && previous
+                    .as_ref()
+                    .is_some_and(|old| old[index].as_ref() != Some(head))
+            {
+                self.forgotten_recent[index].remove(head);
+            }
+            incoming.retain(|path| !self.forgotten_recent[index].contains(path));
+            if index == 0 {
+                for path in incoming
+                    .iter()
+                    .rev()
+                    .filter(|p| !self.recent[0].contains(p))
+                {
+                    crate::workbench::remember(&mut self.recent_opened, path.clone());
+                }
+                if let Some(head) = incoming.first()
+                    && previous
+                        .as_ref()
+                        .is_some_and(|old| old[0].as_ref() != Some(head))
+                {
+                    crate::workbench::remember(&mut self.recent_opened, head.clone());
+                }
+            }
+            for path in incoming.iter().rev() {
+                if !self.recent[index].contains(path) {
+                    self.recent[index].insert(0, path.clone());
+                }
+            }
+            if let Some(head) = incoming.first()
+                && previous
+                    .as_ref()
+                    .is_some_and(|p| p[index].as_ref() != Some(head))
+            {
+                self.recent[index].retain(|p| p != head);
+                self.recent[index].insert(0, head.clone());
+            }
+            self.recent[index].truncate(100);
+        }
+    }
+    // ST4 4143, https://www.sublimetext.com/download: publish opened files and
+    // clear the OS list when update_system_recent_files is turned off.
+    pub fn update_system_recents(&mut self, enabled: bool, mut emit: impl FnMut(Option<&Path>)) {
+        let previous = self.system_recent_enabled.replace(enabled);
+        let opened = std::mem::take(&mut self.recent_opened);
+        if enabled {
+            for path in opened.iter().rev() {
+                emit(Some(path));
+            }
+        } else if previous != Some(false) {
+            emit(None);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(&self) -> Session {
+        self.collect(self.recent.clone())
     }
     fn collect(&self, recent: [Vec<PathBuf>; 3]) -> Session {
         let mut docs = BTreeMap::new();
@@ -306,6 +379,8 @@ impl Sessions {
         }
     }
     pub fn close(&mut self, id: u64, retain: bool) {
+        self.live.remove(&id);
+        self.recent_heads.remove(&id);
         if let Some(window) = self.windows.remove(&id)
             && retain
         {
@@ -353,13 +428,18 @@ impl Sessions {
         self.recent_heads.insert(id, Default::default());
     }
     pub fn flush(&self) -> Result<(), String> {
-        if let Some(writer) = &self.writer {
-            writer.flush()?;
+        // A broken project workspace must not suppress flushes for other windows.
+        let mut errors = Vec::new();
+        for writer in self.writer.iter().chain(self.workspaces.values()) {
+            if let Err(error) = writer.flush() {
+                errors.push(error);
+            }
         }
-        for writer in self.workspaces.values() {
-            writer.flush()?;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
         }
-        Ok(())
     }
     pub fn poll(&mut self) -> Vec<String> {
         let mut out = Vec::new();

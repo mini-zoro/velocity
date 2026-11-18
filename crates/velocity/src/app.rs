@@ -4,10 +4,16 @@ use crate::app_scene_translate as translate_scene;
 mod accessibility_adapter;
 #[path = "app_context.rs"]
 mod context_adapter;
+#[cfg(test)]
+#[path = "app_lane_c_round20_tests.rs"]
+mod lane_c_round20_tests;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
 #[path = "render_scenes.rs"]
 pub(crate) mod render_scenes;
+#[cfg(test)]
+#[path = "app_round20_invisible_perf.rs"]
+mod round20_invisible_perf;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_status.rs"]
@@ -25,7 +31,7 @@ use crate::{
 use serde::Serialize;
 use serde_json::json;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -38,6 +44,24 @@ use vel_render::scene::Layer as SceneLayer;
 use vel_render::{FrameTimes, Renderer, font::Fonts};
 
 type CommandState = (u64, vel_buffer::ChangeId, vel_buffer::Selection);
+const WINDOW_COMMANDS: &[&str] = &[
+    "refresh_folder_list",
+    "close_folder_list",
+    "toggle_show_open_files",
+    "move_tab_to_window",
+    "native_minimize",
+    "native_zoom",
+    "native_bring_all_to_front",
+];
+fn register_window_commands(editor: &mut crate::editor::Editor) {
+    for &name in WINDOW_COMMANDS {
+        if editor.registry.kind(name).is_none() {
+            editor
+                .registry
+                .register(name, vel_commands::Kind::WindowCommand, None);
+        }
+    }
+}
 enum CommandStates {
     Single(CommandState),
     Multiple(Vec<CommandState>),
@@ -88,6 +112,7 @@ pub struct App {
     window_size: Size,
     content: Rect,
     sheet_views: std::collections::BTreeMap<u64, View>,
+    inactive_image_decodes: std::collections::BTreeSet<u64>,
     sheet_bounds: std::collections::BTreeMap<u64, Rect>,
     group_bounds: Vec<Rect>,
     workbench_bounds: Rect,
@@ -120,6 +145,9 @@ pub struct App {
     normal_sidebar: bool,
     distraction_sidebar: Option<bool>,
     fullscreen_before_distraction: bool,
+    window_frame: Option<[f64; 4]>,
+    #[cfg(test)]
+    empty_close_requested: bool,
     sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     session_id: u64,
     session_due: Option<Instant>,
@@ -210,6 +238,9 @@ impl App {
         if options.mode == Mode::Typing {
             crate::install_carets(workspace.editor_mut(), options.carets);
         }
+        for tab in &mut workspace.tabs {
+            register_window_commands(&mut tab.editor);
+        }
         let view = View::new(
             Size {
                 width: options.width as f64,
@@ -267,6 +298,7 @@ impl App {
                 height: view.size.height,
             },
             sheet_views: Default::default(),
+            inactive_image_decodes: Default::default(),
             sheet_bounds: Default::default(),
             group_bounds: Vec::new(),
             workbench_bounds: Rect::default(),
@@ -293,6 +325,9 @@ impl App {
             normal_sidebar: true,
             distraction_sidebar: None,
             fullscreen_before_distraction: false,
+            window_frame: None,
+            #[cfg(test)]
+            empty_close_requested: false,
             view_buffer: None,
             options,
             clock,
@@ -320,6 +355,7 @@ impl App {
         self.normal_sidebar = window.normal_sidebar.unwrap_or(true);
         self.distraction_sidebar = window.distraction_sidebar;
         self.fullscreen_before_distraction = window.fullscreen_before_distraction;
+        self.window_frame = window.frame;
     }
     pub fn restore_session_id(&mut self, id: u64) {
         self.session_id = id;
@@ -333,7 +369,9 @@ impl App {
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(), String> {
-        crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths)
+        let result = crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths);
+        self.sync_recents();
+        result
     }
     pub fn set_crash(&mut self, crash: Option<crate::release::CrashStartup>) {
         self.releases.crash = crash;
@@ -348,6 +386,7 @@ impl App {
         self.checkpoint_reason(quitting, false)
     }
     fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
+        self.sync_recents();
         // Cache stdin clients' current contents before a project switch can replace
         // this window's documents. Completion still waits until their sheets close.
         self.waiters
@@ -360,6 +399,7 @@ impl App {
         window.normal_sidebar = Some(self.normal_sidebar);
         window.distraction_sidebar = self.distraction_sidebar;
         window.fullscreen_before_distraction = self.fullscreen_before_distraction;
+        window.frame = self.window_frame;
         let hot = self.hot_exit();
         let remember = self.workspace.global_bool("remember_open_files", true);
         self.sessions.borrow_mut().publish(
@@ -474,6 +514,12 @@ impl App {
         )
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
+        self.sync_recents();
+        self.sessions.borrow_mut().update_system_recents(
+            self.workspace
+                .global_bool("update_system_recent_files", true),
+            |path| w.system_recent_document(path),
+        );
         if self.workspace.refresh_file_menus() {
             w.set_menu(&self.application_menu());
         }
@@ -716,6 +762,11 @@ impl App {
             return false;
         }
         match name {
+            "native_minimize" | "native_zoom" | "native_bring_all_to_front" => return false,
+            "refresh_folder_list" | "close_folder_list" => {
+                return !self.workspace.folders.is_empty();
+            }
+            "toggle_show_open_files" | "move_tab_to_window" => return true,
             "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
             "reopen" | "reopen_encoding" if self.workspace.tabs[target].path.is_none() => {
                 return false;
@@ -888,11 +939,126 @@ impl App {
         }
     }
     fn application_menu(&mut self) -> Vec<MenuEntry> {
+        self.sync_recents();
+        self.workspace.refresh_file_menus();
         let macros = self
             .panels
             .macro_file_items(&self.workspace)
             .unwrap_or_default();
         native_menu(&self.workspace.menus, &macros)
+    }
+    fn sync_recents(&mut self) {
+        self.sessions.borrow_mut().sync_recents(
+            self.session_id,
+            [
+                &mut self.workspace.recent_files,
+                &mut self.workspace.recent_folders,
+                &mut self.workspace.recent_projects,
+            ],
+        );
+    }
+    // https://docs.sublimetext.io/reference/settings.html#application-behavior-settings
+    fn should_close_empty_window(&self) -> bool {
+        self.workspace.is_empty()
+            && self.workspace.folders.is_empty()
+            && self
+                .workspace
+                .editor()
+                .settings
+                .bool("close_windows_when_empty", false)
+    }
+    fn close_empty_window(&mut self, window: Option<&WindowHandle>) {
+        if self.should_close_empty_window() {
+            #[cfg(test)]
+            {
+                self.empty_close_requested = true;
+            }
+            if let Some(window) = window {
+                window.request_close();
+            }
+        }
+    }
+    fn move_tab_to_window(
+        &mut self,
+        window: Option<&WindowHandle>,
+        sheet: u64,
+        destination: u64,
+        group: usize,
+    ) -> Result<(), String> {
+        if destination == self.session_id || !self.sessions.borrow().can_receive_tab(destination) {
+            return Err("The destination window cannot accept the tab".into());
+        }
+        let index = self
+            .workspace
+            .sheet_index(sheet)
+            .ok_or("The tab is no longer open")?;
+        self.workspace.prepare_sheet(index)?;
+        let tab = &self.workspace.tabs[index];
+        if tab.loading.is_some()
+            || tab.binary_loading.is_some()
+            || self.workspace.stdout_sheets.contains(&sheet)
+            || self
+                .workspace
+                .tabs
+                .iter()
+                .filter(|t| t.session_document == tab.session_document)
+                .count()
+                > 1
+        {
+            return Err("Finish loading or close the other views before moving this tab".into());
+        }
+        if index == self.workspace.active {
+            self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
+            self.workspace.tabs[index].scroll_line_height = self.view.line_height;
+        }
+        let mut slot = crate::workspace::Tab::new(
+            vel_text::Text::new(),
+            &self.workspace.settings,
+            &self.workspace.keymap,
+        )?;
+        slot.sheet = sheet;
+        // close() chooses the same neighboring sheet as a normal close. Its temporary
+        // unnamed adapter does not contribute to this window's closed-file history.
+        let tab = std::mem::replace(&mut self.workspace.tabs[index], slot);
+        let result = self.workspace.close(index);
+        self.sessions
+            .borrow_mut()
+            .transfer_tab(destination, group, tab);
+        self.sheet_views.remove(&sheet);
+        if result.is_ok() {
+            self.close_empty_window(window);
+        }
+        result
+    }
+    fn poll_workspace_model(&mut self) -> bool {
+        let transferred = self.receive_tabs();
+        self.workspace.poll() || transferred
+    }
+    fn receive_tabs(&mut self) -> bool {
+        let incoming = self.sessions.borrow_mut().take_tabs(self.session_id);
+        let changed = !incoming.is_empty();
+        for (group, mut tab) in incoming {
+            self.workspace.adopt_transferred_settings(&mut tab);
+            tab.transient = false;
+            let sheet = tab.sheet;
+            if self.workspace.is_empty() {
+                let placeholder = self.workspace.tabs[0].sheet;
+                for group in &mut self.workspace.workbench.groups {
+                    group.remove(placeholder);
+                }
+                self.workspace.tabs.clear();
+                self.workspace.empty = false;
+            }
+            let group = if group < self.workspace.workbench.groups.len() {
+                group
+            } else {
+                self.workspace.workbench.active
+            };
+            self.workspace.workbench.groups[group].add(sheet, true);
+            self.workspace.tabs.push(tab);
+            self.workspace.select(self.workspace.tabs.len() - 1);
+        }
+        changed
     }
     // Early movement starts an ordinary selection and commits that gesture type.
     // https://macromates.com/manual/en/expert_preferences#nsdraganddroptextdelay
@@ -931,6 +1097,12 @@ impl App {
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
             self.named_error(window, &error);
+        }
+        if !self.workspace.recent_files.is_empty()
+            || !self.workspace.recent_folders.is_empty()
+            || !self.workspace.recent_projects.is_empty()
+        {
+            self.sync_recents();
         }
     }
     fn named_error(&mut self, window: Option<&WindowHandle>, message: &str) {
@@ -1018,6 +1190,23 @@ impl App {
             return Ok(());
         }
         if !palette_accept && !self.command_enabled_args(name, args) {
+            return Ok(());
+        }
+        if name == "reveal_in_side_bar" {
+            let path = crate::context_menu::one_path(args)?;
+            self.panels.reveal_sidebar_path(&mut self.workspace, path)?;
+            self.named_changed(window, false);
+            return Ok(());
+        }
+        if matches!(
+            name,
+            "refresh_folder_list"
+                | "close_folder_list"
+                | "toggle_show_open_files"
+                | "move_tab_to_window"
+        ) {
+            self.apply_named_action(window, name, args)?;
+            self.named_changed(window, false);
             return Ok(());
         }
         match window.map_or(Ok(false), |window| self.context_action(window, name, args)) {
@@ -1371,6 +1560,7 @@ impl App {
                 }
                 if saved && name == "save_and_close" {
                     self.workspace.close(active)?;
+                    self.close_empty_window(window);
                 }
             }
             _ => return Ok(false),
@@ -1559,13 +1749,34 @@ impl App {
         }
         // These actions need only the workspace/panels. Both native and headless named
         // dispatch finish them here before advancing to the next macro step.
-        if vel_commands::is_find_command(name) || name == "save_macro" {
+        if vel_commands::is_find_command(name)
+            || matches!(
+                name,
+                "save_macro"
+                    | "refresh_folder_list"
+                    | "close_folder_list"
+                    | "toggle_show_open_files"
+            )
+        {
             self.panels
                 .action(&mut self.workspace, name, args, viewport)?;
             return Ok(());
         }
         if name == "new_file" {
             return self.workspace.new_file();
+        }
+        if name == "move_tab_to_window" {
+            let sheet = args["sheet"]
+                .as_u64()
+                .unwrap_or(self.workspace.tabs[self.workspace.active].sheet);
+            return self.move_tab_to_window(
+                window,
+                sheet,
+                args["window"]
+                    .as_u64()
+                    .ok_or("Expected a destination window")?,
+                args["group"].as_u64().map_or(usize::MAX, |n| n as usize),
+            );
         }
         if name == "save_all" {
             let mut seen = std::collections::BTreeSet::new();
@@ -1586,35 +1797,6 @@ impl App {
         }
         if matches!(name, "save" | "save_and_close") {
             return self.apply_save_action(window, name, args);
-        }
-        if matches!(name, "close" | "close_file") {
-            let active = self.workspace.active;
-            let can_close = if args["force"].as_bool().unwrap_or(false) {
-                true
-            } else if let Some(window) = window {
-                self.can_close(window, active)
-            } else if !self.workspace.tabs[active].dirty() {
-                true
-            } else {
-                return Err(format!(
-                    "command {name} needs a native window to confirm unsaved changes"
-                ));
-            };
-            if can_close {
-                let last = self.workspace.tabs.len() == 1;
-                self.workspace.close(active)?;
-                if last
-                    && self
-                        .workspace
-                        .editor()
-                        .settings
-                        .bool("close_windows_when_empty", false)
-                    && let Some(window) = window
-                {
-                    window.request_close();
-                }
-            }
-            return Ok(());
         }
         if matches!(
             name,
@@ -1738,16 +1920,6 @@ impl App {
                         .settings
                         .bool("use_simple_full_screen", false),
                 );
-                return Ok(());
-            }
-            "close_selected_tabs" => {
-                let mut selected = self.workspace.selected_indices();
-                if self.can_close_many(w, &selected) {
-                    selected.sort_unstable();
-                    for index in selected.into_iter().rev() {
-                        self.workspace.close(index)?;
-                    }
-                }
                 return Ok(());
             }
             "next_result" | "prev_result" => {
@@ -2040,6 +2212,7 @@ impl App {
     fn sync_active_view(&mut self) {
         let current = self.workspace.tabs[self.workspace.active].sheet;
         if self.view_buffer != Some(current) {
+            register_window_commands(self.workspace.editor_mut());
             if let Some(old) = self.view_buffer {
                 self.save_on_focus_lost(Some(old));
                 if let Some(index) = self.workspace.sheet_index(old) {
@@ -2051,10 +2224,14 @@ impl App {
                     self.fonts.as_ref().map_or(8., |f| f.cell as f64),
                     self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
                 );
+                if self.view.image_preview.busy() {
+                    self.inactive_image_decodes.insert(old);
+                }
                 self.sheet_views
                     .insert(old, std::mem::replace(&mut self.view, replacement));
             }
             let existing = self.sheet_views.remove(&current);
+            self.inactive_image_decodes.remove(&current);
             let reused = existing.is_some();
             if let Some(view) = existing {
                 self.view = view;
@@ -2080,9 +2257,31 @@ impl App {
                 self.view.restore_scroll_position(&tab.editor, position);
             }
         }
+        self.inactive_image_decodes.retain(|&sheet| {
+            let Some(view) = self.sheet_views.get_mut(&sheet) else {
+                return false;
+            };
+            if self
+                .workspace
+                .workbench
+                .groups
+                .iter()
+                .any(|g| g.visible().contains(&sheet))
+            {
+                return view.image_preview.busy();
+            }
+            view.image_preview.suspend();
+            false
+        });
         self.initialize_view_metrics();
         self.view.apply_style(self.workspace.editor());
         let tab = &self.workspace.tabs[self.workspace.active];
+        if self.view.image_preview.sync(tab, &self.workspace.folders)
+            && let Some(image) = &self.view.image_preview.image
+        {
+            let [width, height] = image.logical_size;
+            self.panels.set_message(format!("{width} × {height}"));
+        }
         if tab.loading.is_none() && tab.binary_loading.is_none() {
             self.view.finish_scroll_restore(&tab.editor);
         }
@@ -2438,6 +2637,15 @@ impl App {
                     );
                 }
                 theme_animating |= self.workspace.themes.ui.borrow().animating();
+                if *sheet != focused {
+                    view.image_preview
+                        .sync(&self.workspace.tabs[index], &self.workspace.folders);
+                    if view.image_preview.busy() {
+                        self.inactive_image_decodes.insert(*sheet);
+                    } else {
+                        self.inactive_image_decodes.remove(sheet);
+                    }
+                }
                 let mut part = view.scene(&self.workspace.tabs[index].editor);
                 theme_animating |= self.workspace.themes.ui.borrow().animating();
                 exact &= view.exact(&self.workspace.tabs[index].editor)
@@ -3133,6 +3341,14 @@ impl AppHandler for App {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        if let Some([x, y, width, height]) = self.window_frame {
+            w.restore_frame(Rect {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
         self.panels.review.native_context = true;
         w.set_title(&self.workspace.window_title());
         w.set_menu(&self.application_menu());
@@ -3262,6 +3478,59 @@ impl AppHandler for App {
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {
+            if w.is_closed() {
+                // ST4 4131, https://www.sublimetext.com/download: File menu
+                // recents remain available when the last macOS window closes.
+                let parsed = serde_json::from_str::<Value>(args).unwrap_or_default();
+                let mut request = match crate::instance::Request::new(&Options::default(), None) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        self.show_error(w, &e);
+                        return;
+                    }
+                };
+                let paths: Vec<PathBuf> = match name {
+                    "new_window" => {
+                        self.run_named(Some(w), name, &parsed);
+                        return;
+                    }
+                    "clear_recent_items" => {
+                        self.run_named(Some(w), name, &parsed);
+                        w.set_menu(&self.application_menu());
+                        return;
+                    }
+                    "prompt_open_file" => w.open_files(),
+                    "open_recent_file" => parsed["file"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .into_iter()
+                        .collect(),
+                    "open_recent_folder" => parsed["dir"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .into_iter()
+                        .collect(),
+                    "open_project" => {
+                        request.project = parsed["file"].as_str().map(PathBuf::from);
+                        Vec::new()
+                    }
+                    _ => return,
+                };
+                request.files = paths
+                    .into_iter()
+                    .map(|path| crate::cli::FileLocation {
+                        path,
+                        line: 1,
+                        column: 1,
+                    })
+                    .collect();
+                if (request.project.is_some() || !request.files.is_empty())
+                    && let Err(e) = self.open_native_window_request(w, request)
+                {
+                    self.show_error(w, &e);
+                }
+                return;
+            }
             match serde_json::from_str(args) {
                 Ok(args) => self.run_named(Some(w), name, &args),
                 Err(e) => self.show_error(w, &e.to_string()),
@@ -3386,6 +3655,7 @@ impl AppHandler for App {
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),
             "toggle_side_bar" => self.panels.side_visible,
+            "toggle_show_open_files" => self.panels.open_files_visible,
             "toggle_minimap" => self.workspace.window_visible("show_minimap"),
             "toggle_tabs" => self.workspace.window_visible("show_tabs"),
             "toggle_status_bar" => self.workspace.window_visible("show_status_bar"),
@@ -3483,13 +3753,47 @@ impl AppHandler for App {
         self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
+        // https://www.sublimetext.com/download (4131): tabs can be dragged to a window.
+        if event.kind == MouseKind::Up
+            && event.button == 0
+            && let Some(index) = self.panels.dragging_tab
+            && !vel_ui::contains(
+                Rect {
+                    x: 0.,
+                    y: 0.,
+                    width: self.window_size.width,
+                    height: self.window_size.height,
+                },
+                event.position,
+            )
+            && let Some((target, destination, group)) = w.tab_drop_destination()
+            && let Some(sheet) = self.workspace.tabs.get(index).map(|tab| tab.sheet)
+        {
+            self.panels.dragging_tab = None;
+            self.run_named(
+                Some(w),
+                "move_tab_to_window",
+                &json!({"sheet":sheet,"window":destination,"group":group}),
+            );
+            target.request_frame();
+            return;
+        }
         self.handle_mouse_event(Some(w), event);
+    }
+    fn tab_drop_destination(&self, point: Point) -> Option<(u64, usize)> {
+        self.tab_bars
+            .iter()
+            .find(|(_, bounds, _)| vel_ui::contains(*bounds, point))
+            .map(|(group, _, _)| (self.session_id, *group))
     }
     // Native and headless events share UI hit testing, focus, binding lookup and gestures.
     fn on_scroll(&mut self, w: &WindowHandle, event: ScrollEvent) {
         self.handle_scroll_event(Some(w), event);
     }
     fn on_resize(&mut self, w: &WindowHandle, size: Size, scale: f64) {
+        if let Some(frame) = w.frame() {
+            self.window_frame = Some([frame.x, frame.y, frame.width, frame.height]);
+        }
         if self.options.mode == Mode::Interactive {
             self.workspace.fullscreen = w.is_full_screen();
         }
@@ -3581,7 +3885,7 @@ impl AppHandler for App {
                 .iter()
                 .any(|t| t.loading.is_some() || t.binary_loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
-            let mut changed = self.workspace.poll() || focus_changed;
+            let mut changed = self.poll_workspace_model() || focus_changed;
             self.publish_resource_reports();
             self.workspace
                 .themes
@@ -3626,6 +3930,8 @@ impl AppHandler for App {
             if self.releases.busy()
                 || self.workspace.resources_busy()
                 || self.panels.busy()
+                || self.view.image_preview.busy()
+                || !self.inactive_image_decodes.is_empty()
                 || self.workspace.editor().annotations.borrow().pending > 0
                 || self.workspace.editor().completion.busy()
                 || self.builds.task.is_some()
@@ -3974,10 +4280,12 @@ impl AppHandler for App {
         Ok(())
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
+        self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
         self.prepare_quit(Some(w))
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
         if self.options.mode != Mode::Interactive {
             return self.on_quit_requested(w);

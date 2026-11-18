@@ -1,3 +1,84 @@
+# Round 20 Lane C review (native verification pending)
+
+Use a separate test profile. Do not run a build or capture the login environment with
+the reviewer's real profile. The release tests exercise the filesystem, command
+dispatcher, menu model, image scene and two-window session state without AppKit.
+The following checks require a native macOS desktop and remain unchecked:
+
+- [ ] **File events and sidebar:** Open and expand a non-git folder. Create, rename,
+  and delete regular files (including ignored binary output) via Finder or a terminal.
+  Only the affected open listing should update. Repeat while an older listing is
+  in flight and with a followed symlink. Option+Right expands descendant folders;
+  Option+Left closes the subtree. Select a file, insert siblings earlier in the sort
+  order, then confirm Enter and Shift-click still act from the selected file. Reveal a
+  document outside a named project, then explicitly add its folder via a symlink.
+  Only the explicit add should edit the project; check that the symlink path and
+  project comments survive reopening. Hide Open Files, relaunch, and verify that
+  setting was remembered for that window only.
+- [ ] **Cascading and frames:** Open three windows. New Window should cascade from the
+  front window. Move and resize each window, quit, and relaunch. Repeat after changing
+  monitor resolution or disconnecting a display; frames should remain on-screen.
+  Restore a session fixture with one absurd frame and one valid frame; both windows
+  should open and quit normally.
+- [ ] **Window menu:** Check Minimize (Cmd+M), Zoom, Bring All to Front, selection
+  from the dynamic window list, and Cmd+` with several windows, including minimized
+  ones. Native macOS tab merging is still disabled. Drag a dirty tab onto another
+  Velocity window's tab strip and verify selection, Undo, and the destination's
+  tab size and wrapping. With `close_windows_when_empty` enabled, repeat with the
+  last tab in a folderless window, with Save and Close, and with Close Selected Tabs.
+  They should close the empty window; a window with project folders should remain.
+  Dragging onto the desktop to create a new window is unchanged and not implemented.
+- [ ] **System recents/windowless File menu:** Open regular documents and check the
+  Dock's recent documents. Set `update_system_recent_files` to false; the system list
+  should clear once and stay empty on later opens. After closing every window, test
+  File > New Window, Open and Open Recent, including canceling an Open dialog.
+- [ ] **Services and Edit menu (unchanged):** Record whether AppKit adds Emoji &
+  Symbols and Dictation when a Velocity window is active. Confirm the reference
+  editor's Services/Hide Others/Show All behavior before implementing parity.
+- [ ] **Proxy icon and edited dot (unchanged):** Confirm the reference editor's
+  Cmd-click path and edited-dot behavior before enabling native document state.
+- [ ] **Images and hex:** Open a transparent PNG, uppercase `.JPG` or `.PNG`, and GIF,
+  then resize the pane. Switch quickly between large images, then add a folder; the
+  folder edit should not wait for the decoder. Cmd+A on a hex or image tab, then open
+  a text file, switch tabs, and jump back.
+  Press Right, then Cmd+E, Cmd+Shift+E, Cmd+Option+G, and Cmd+Option+Shift+G.
+  These text-only commands should leave the byte selection unchanged and report
+  that text search is unavailable. From EOF, use Goto Line and enter a byte offset.
+  In Cmd+P, try `:5`, `@`, and `#word`; these local text targets should not move the
+  caret, but a regular file query should still work.
+  Check aspect ratio, dimensions, read-only behavior and the fallback to hex
+  with `image_file_patterns: []` or a damaged image.
+- [ ] **Invisible characters:** Set `draw_unicode_white_space` to `"all"` and enable
+  `draw_unicode_bidi` and `draw_control_characters`. Check hex labels for U+200B,
+  U+202E and U+0001. Arrow across, select and copy each placeholder; the clipboard
+  must contain the original character. Click on either side of a placeholder's midpoint:
+  the caret should land on the corresponding side. Repeat with wrapping and the settings
+  off, and compare NBSP and U+3000 under `"punctuation"` and `"all"`. With wrapping
+  on, type and delete at multiple carets on lines containing placeholders. Compare
+  the wrap breaks and tab alignment to those after reopening the same text.
+- [ ] **Find in Files Where:** Search a project with Where set to
+  `<project>, a/*/b/*.rs, -//vendor/`. The query should find `a/sub/b/main.rs`
+  but not `a/b/direct.rs`. Try `[ab].rs` and `"{a,b}.rs"`; those are literal names.
+
+Headless review timings (run sequentially with the fixture HOME/SHELL and no build
+running during measurement):
+
+```sh
+cargo test --release --locked -p vel-search --test round20_pattern_timing -- --ignored --nocapture
+cargo test --release --locked -p vel-search round20_random_file_pattern_comparison -- --ignored --nocapture
+cargo test --release --locked -p vel-index --test round20_cold_timing -- --ignored --nocapture
+cargo test --release --locked -p velocity round20_invisible_key_timing -- --ignored --nocapture
+cargo test --release --locked -p velocity round20_invisible_multicaret_timing -- --ignored --nocapture
+cargo test --release --locked -p velocity round20_hex_image_default_command_sweep -- --ignored --nocapture
+cargo test --release --locked -p velocity r20_recursive_sidebar_timing -- --ignored --nocapture
+```
+
+For follow-up paired runs, use the same timing harnesses in a temporary export of `1ed95d4`.
+Set `VELOCITY_INDEX_FIXTURE` to a disposable corpus path and reuse it for both
+measurements; each run uses a fresh index cache. Alternate baseline and candidate,
+check `uptime`, and compare CPU time or retired instructions when the machine is busy.
+Use `VELOCITY_INDEX_WATCH=0` for the no-watcher control.
+
 # Round 20 Lane A final review on b56986f
 
 These fixes remain uncommitted on `b56986f`. This section supersedes the earlier

@@ -9,6 +9,7 @@ pub mod font;
 #[cfg(target_os = "macos")]
 mod gpu;
 pub mod guides;
+pub mod invisibles;
 #[cfg(target_os = "macos")]
 mod native;
 pub mod nine_slice;

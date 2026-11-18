@@ -1,10 +1,14 @@
 //! Headless UI controller: navigation, panel focus, workers and project tree state.
 use crate::{cli::FileLocation, workspace::Workspace};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use vel_buffer::{Bias, BufferId, Region, Selection};
@@ -17,7 +21,7 @@ use vel_render::scene::{Layer, Scene};
 use vel_search::{
     files, fuzzy,
     goto::{Query, Target},
-    project::{Entry, Folder, Index, Rules},
+    project::{Entry, Folder, Index, Rules, sort_sidebar_entries},
     text::{self, Search},
 };
 mod appearance_selection;
@@ -27,6 +31,11 @@ mod macro_commands;
 #[cfg(test)]
 #[path = "panels_round19_tests.rs"]
 mod round19_tests;
+#[cfg(test)]
+#[path = "panels_round20_perf.rs"]
+mod round20_perf;
+#[path = "sidebar_folders.rs"]
+mod sidebar_folders;
 
 use vel_ui::{
     Focus, Item, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input, label,
@@ -107,6 +116,18 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
             .bool("show_line_endings", false)
             .then_some(tab.format.line_ending.display_name()),
     )
+}
+type DirectoryResult = (u64, PathBuf, Result<Vec<Entry>, String>);
+#[derive(Debug)]
+struct RecursiveExpansion {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    result: mpsc::Receiver<vel_search::project::SidebarSubtree>,
+}
+impl Drop for RecursiveExpansion {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
 }
 const PANEL_ROW: f64 = 34.;
 /// Side of the find-panel close button, in points.
@@ -201,6 +222,7 @@ struct FindSnapshot {
     buffer: BufferId,
     revision: u64,
     loading: bool,
+    binary: bool,
 }
 impl FindSnapshot {
     fn current(workspace: &Workspace) -> Self {
@@ -210,6 +232,7 @@ impl FindSnapshot {
             buffer: tab.editor.buffer.id(),
             revision: tab.editor.revision,
             loading: tab.loading.is_some() || tab.binary_loading.is_some(),
+            binary: tab.editor.binary.is_some(),
         }
     }
 }
@@ -289,9 +312,12 @@ pub struct Panels {
     pub focus: Focus,
     pub tree: Tree,
     pub side_visible: bool,
+    pub open_files_visible: bool,
     pub side_focused: bool,
     pub side_selected: usize,
+    side_selection: Option<PathBuf>,
     sidebar_reveal: Option<PathBuf>,
+    sidebar_aliases: BTreeMap<u64, PathBuf>,
     side_open: Option<usize>,
     pub side_scroll: Scroll,
     pub side_rows: Vec<SideRow>,
@@ -303,7 +329,7 @@ pub struct Panels {
     pub replace_history: Vec<String>,
     pub chrome: bool,
     choice_items: Vec<vel_config::ui::PaletteItem>,
-    side_anchor: Option<usize>,
+    side_anchor: Option<PathBuf>,
     pub dragging_tab: Option<usize>,
     pub options: text::Options,
     pub in_selection: bool,
@@ -352,17 +378,24 @@ pub struct Panels {
     file_paths: Arc<Vec<PathBuf>>,
     file_candidates: Arc<Vec<fuzzy::Candidate>>,
     index: Option<Index>,
-    folder_key: String,
+    folder_key: Vec<Folder>,
     recency: HashMap<PathBuf, u64>,
     palette_recent: HashMap<String, u64>,
     uses: u64,
     preview: Option<Preview>,
     last_preview: Option<(PathBuf, Target)>,
-    expanded: BTreeSet<PathBuf>,
-    children: BTreeMap<PathBuf, Vec<Entry>>,
-    directories: mpsc::Receiver<(PathBuf, Result<Vec<Entry>, String>)>,
-    directory_tx: mpsc::Sender<(PathBuf, Result<Vec<Entry>, String>)>,
+    expanded: HashSet<PathBuf>,
+    recursive_expansion: Option<RecursiveExpansion>,
+    children: HashMap<PathBuf, Vec<Entry>>,
+    directories: mpsc::Receiver<DirectoryResult>,
+    directory_tx: mpsc::Sender<DirectoryResult>,
     loading: BTreeSet<PathBuf>,
+    directory_pending: BTreeSet<PathBuf>,
+    directory_running: usize,
+    directory_generation: u64,
+    directory_cancel: Arc<AtomicBool>,
+    watched_expanded: bool,
+    folder_edits: Vec<sidebar_folders::Pending>,
     local: Option<mpsc::Receiver<Local>>,
     local_positions: Vec<usize>,
     local_generation: u64,
@@ -439,8 +472,11 @@ impl Default for Panels {
             tree: Tree::default(),
             side_visible: true,
             side_focused: false,
+            open_files_visible: true,
             side_selected: 0,
+            side_selection: None,
             sidebar_reveal: None,
+            sidebar_aliases: BTreeMap::new(),
             side_open: None,
             side_scroll: Scroll::default(),
             side_rows: vec![],
@@ -498,17 +534,24 @@ impl Default for Panels {
             file_paths: Arc::new(vec![]),
             file_candidates: Arc::new(vec![]),
             index: None,
-            folder_key: String::new(),
+            folder_key: Vec::new(),
             recency: HashMap::new(),
             palette_recent: HashMap::new(),
             uses: 0,
             preview: None,
             last_preview: None,
-            expanded: BTreeSet::new(),
-            children: BTreeMap::new(),
+            expanded: HashSet::new(),
+            recursive_expansion: None,
+            children: HashMap::new(),
             directories,
             directory_tx,
             loading: BTreeSet::new(),
+            directory_pending: BTreeSet::new(),
+            directory_running: 0,
+            directory_generation: 0,
+            directory_cancel: Arc::default(),
+            watched_expanded: false,
+            folder_edits: Vec::new(),
             local: None,
             local_positions: vec![],
             local_generation: 0,
@@ -540,11 +583,31 @@ impl Panels {
         ui
     }
     fn restart_index(&mut self, workspace: &Workspace) {
-        self.folder_key = format!("{:?}", workspace.folders);
-        self.index = (!workspace.folders.is_empty()).then(|| Index::new(workspace.folders.clone()));
+        self.folder_key.clone_from(&workspace.folders);
+        self.reset_index(workspace);
         self.children.clear();
-        self.loading.clear();
+        self.expanded.retain(|path| {
+            workspace
+                .folders
+                .iter()
+                .any(|f| path.starts_with(&f.path) && f.rules.allows(&f.path, path, true, false))
+        });
+        self.reload_expanded(workspace);
         self.rebuild_side(workspace);
+    }
+    fn reset_index(&mut self, workspace: &Workspace) {
+        self.recursive_expansion = None;
+        self.index = (!workspace.folders.is_empty()).then(|| Index::new(workspace.folders.clone()));
+        self.directory_cancel.store(true, Ordering::Release);
+        self.directory_cancel = Arc::default();
+        self.directory_generation = self.directory_generation.wrapping_add(1);
+        self.directory_pending.clear();
+        self.loading.clear();
+        self.watched_expanded = false;
+    }
+    fn reload_expanded(&mut self, workspace: &Workspace) {
+        self.directory_pending.extend(self.expanded.iter().cloned());
+        self.pump_directories(workspace);
     }
     pub fn configure_output(
         &mut self,
@@ -700,6 +763,7 @@ impl Panels {
     }
     pub fn capture_session(&mut self, window: &mut vel_session::Window) {
         window.sidebar_visible = self.side_visible;
+        window.sidebar_open_files = Some(self.open_files_visible);
         if window.distraction_free {
             window
                 .distraction_ui
@@ -710,13 +774,16 @@ impl Panels {
                 .insert("show_side_bar".into(), self.side_visible);
         }
         window.sidebar_expanded = self.expanded.iter().cloned().collect();
+        window.sidebar_expanded.sort_unstable();
         window.sidebar_scroll = self.side_scroll.offset;
         window.find_history = self.find_history.clone();
         window.replace_history = self.replace_history.clone();
     }
     pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
         self.side_visible = window.sidebar_visible;
+        self.open_files_visible = window.sidebar_open_files.unwrap_or(true);
         self.expanded = window.sidebar_expanded.iter().cloned().collect();
+        self.watched_expanded = false;
         self.side_scroll.offset = window.sidebar_scroll;
         self.find_history = window.find_history.clone();
         self.replace_history = window.replace_history.clone();
@@ -733,10 +800,9 @@ impl Panels {
         self.side_visible = workspace.window_visible("show_side_bar");
     }
     pub fn add_folder(&mut self, workspace: &mut Workspace, path: PathBuf) -> Result<(), String> {
-        let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-        if !path.is_dir() {
-            return Err("open_dir needs a directory".into());
-        }
+        self.edit_folders(workspace, sidebar_folders::Edit::Add(path))
+    }
+    fn install_folder(&mut self, workspace: &mut Workspace, path: PathBuf) -> Result<(), String> {
         if !workspace.folders.iter().any(|f| f.path == path) {
             let patterns = |key| {
                 workspace
@@ -770,32 +836,49 @@ impl Panels {
             self.restart_index(workspace);
             self.load_directory(workspace, &path);
         }
-        crate::workbench::remember(&mut workspace.recent_folders, path);
         self.side_visible = true;
         workspace.set_window_toggle("show_side_bar", true)?;
         Ok(())
     }
     fn load_directory(&mut self, workspace: &Workspace, path: &Path) {
+        self.watched_expanded = false;
         self.request_directory(workspace, path, false);
     }
     fn request_directory(&mut self, workspace: &Workspace, path: &Path, refresh: bool) {
-        if (!refresh && self.children.contains_key(path)) || !self.loading.insert(path.into()) {
+        if !refresh && (self.children.contains_key(path) || self.loading.contains(path)) {
             return;
         }
-        let Some(folder) = workspace
-            .folders
-            .iter()
-            .find(|f| path.starts_with(&f.path))
-            .cloned()
-        else {
-            return;
-        };
-        let path = path.to_owned();
-        let tx = self.directory_tx.clone();
-        std::thread::spawn(move || {
-            let children = sidebar_children(&folder, &path);
-            let _ = tx.send((path, children));
-        });
+        self.directory_pending.insert(path.to_owned());
+        self.pump_directories(workspace);
+    }
+    fn pump_directories(&mut self, workspace: &Workspace) {
+        while self.directory_running < 8 {
+            let Some(path) = self.directory_pending.pop_first() else {
+                break;
+            };
+            if self.loading.contains(&path) {
+                self.directory_pending.insert(path);
+                break;
+            }
+            let Some(folder) = workspace
+                .folders
+                .iter()
+                .filter(|f| path.starts_with(&f.path))
+                .max_by_key(|f| f.path.as_os_str().len())
+                .cloned()
+            else {
+                continue;
+            };
+            let tx = self.directory_tx.clone();
+            let cancel = self.directory_cancel.clone();
+            let generation = self.directory_generation;
+            self.loading.insert(path.clone());
+            self.directory_running += 1;
+            std::thread::spawn(move || {
+                let children = folder.sidebar_children(&path, &cancel);
+                let _ = tx.send((generation, path, children));
+            });
+        }
     }
     fn tree_row_position(&self, index: usize, now: Instant) -> f64 {
         let target = index as f64;
@@ -816,11 +899,44 @@ impl Panels {
         let t = (now.saturating_duration_since(*started).as_secs_f64() / 0.14).clamp(0., 1.);
         from + (target - from) * (1. - (1. - t).powi(3))
     }
+    fn visible_open_files(&self, workspace: &Workspace) -> usize {
+        if self.open_files_visible {
+            open_file_count(workspace)
+        } else {
+            0
+        }
+    }
+    fn folder_row_base(&self, workspace: &Workspace) -> usize {
+        self.visible_open_files(workspace) + 1 + usize::from(self.open_files_visible)
+    }
+    fn select_side(&mut self, index: usize) {
+        self.side_selected = index;
+        self.side_selection = self.side_rows.get(index).map(|row| row.path.clone());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_sidebar_point(&self, workspace: &Workspace, path: &Path) -> Point {
+        let index = self
+            .side_rows
+            .iter()
+            .position(|r| r.path == path)
+            .expect("visible sidebar row");
+        Point {
+            x: self.side_bounds.x + 8.,
+            y: self.side_bounds.y
+                + (self.folder_row_base(workspace) as f64
+                    + self.tree_row_position(index, Instant::now())
+                    + 0.5)
+                    * 24.
+                    * self.ui_scale
+                - self.side_scroll.offset,
+        }
+    }
     fn rebuild_side(&mut self, workspace: &Workspace) {
         fn visit(
             rows: &mut Vec<SideRow>,
-            children: &BTreeMap<PathBuf, Vec<Entry>>,
-            expanded: &BTreeSet<PathBuf>,
+            children: &HashMap<PathBuf, Vec<Entry>>,
+            expanded: &HashSet<PathBuf>,
             path: &Path,
             folder: usize,
             depth: usize,
@@ -832,7 +948,8 @@ impl Panels {
                 depth,
                 directory,
             });
-            if expanded.contains(path)
+            if directory
+                && expanded.contains(path)
                 && let Some(entries) = children.get(path)
             {
                 for entry in entries {
@@ -849,12 +966,29 @@ impl Panels {
             }
         }
         let now = Instant::now();
-        let old_rows = self
-            .side_rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| (row.path.clone(), self.tree_row_position(i, now)))
-            .collect::<BTreeMap<_, _>>();
+        let old_len = self.side_rows.len();
+        let animate = workspace
+            .editor()
+            .settings
+            .bool("tree_animation_enabled", true)
+            && workspace.editor().settings.bool("animation_enabled", true)
+            && !workspace.themes.ui.borrow().reduce_motion();
+        let in_view = self.side_scroll.visible();
+        let first_folder = self.folder_row_base(workspace);
+        let first = in_view.start.saturating_sub(first_folder).min(old_len);
+        let last = in_view.end.saturating_sub(first_folder).min(old_len);
+        let old_rows = if animate {
+            (first..last)
+                .map(|i| {
+                    (
+                        self.side_rows[i].path.clone(),
+                        self.tree_row_position(i, now),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        } else {
+            BTreeMap::new()
+        };
         self.side_rows.clear();
         for (i, folder) in workspace.folders.iter().enumerate() {
             visit(
@@ -870,53 +1004,69 @@ impl Panels {
         // A new event starts from the current drawn positions, so repeated expand/collapse
         // gestures converge without jumping or accumulating offsets.
         // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
-        let changed_rows = old_rows.len() != self.side_rows.len()
+        let changed_rows = old_len != self.side_rows.len()
             || self
                 .side_rows
                 .iter()
                 .enumerate()
+                .skip(first)
+                .take(last.saturating_sub(first))
                 .any(|(i, row)| old_rows.get(&row.path) != Some(&(i as f64)));
-        if !old_rows.is_empty()
-            && changed_rows
-            && workspace
-                .editor()
-                .settings
-                .bool("tree_animation_enabled", true)
-            && workspace.editor().settings.bool("animation_enabled", true)
-            && !workspace.themes.ui.borrow().reduce_motion()
-        {
+        if animate && !old_rows.is_empty() && changed_rows {
             self.tree_motion = Some((now, old_rows));
         } else if !changed_rows { /* retain an active transition */
         } else {
             self.tree_motion = None;
         }
         self.expire_message(now);
-        self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
+        self.side_scroll.rows = self.folder_row_base(workspace) + self.side_rows.len();
         self.side_scroll.row_height = 24. * self.ui_scale;
-        self.side_selected = self
-            .side_selected
-            .min(self.side_rows.len().saturating_sub(1));
+        self.side_selected = self.side_selection.as_ref().map_or(0, |path| {
+            self.side_rows
+                .iter()
+                .position(|row| &row.path == path)
+                .unwrap_or(self.side_rows.len())
+        });
         if let Some(index) = self
             .sidebar_reveal
             .as_ref()
             .and_then(|path| self.side_rows.iter().position(|row| &row.path == path))
         {
-            self.side_selected = index;
+            self.select_side(index);
             self.side_open = None;
             self.side_scroll
-                .reveal(open_file_count(workspace) + 2 + index);
+                .reveal(self.folder_row_base(workspace) + index);
             self.sidebar_reveal = None;
         }
     }
     /// Refreshes directory snapshots and indexes after an explicit filesystem operation.
     pub fn refresh_sidebar(&mut self, workspace: &mut Workspace) {
-        self.children.retain(|path, _| path.is_dir());
-        self.expanded.retain(|path| path.is_dir());
-        self.restart_index(workspace);
-        for path in self.expanded.clone() {
-            self.request_directory(workspace, &path, true);
+        self.reset_index(workspace);
+        self.reload_expanded(workspace);
+    }
+    fn close_folder_list(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        // https://docs.sublimetext.io/reference/commands.html#close-folder-list
+        self.edit_folders(workspace, sidebar_folders::Edit::Clear)
+    }
+    pub(crate) fn note_sidebar_spelling(&mut self, workspace: &Workspace, path: &Path) {
+        let tab = &workspace.tabs[workspace.active];
+        let Ok(path) = std::path::absolute(path) else {
+            return;
+        };
+        if tab
+            .path
+            .as_ref()
+            .is_some_and(|canonical| canonical != &path)
+            && workspace.folders.iter().any(|folder| {
+                folder.follow_links
+                    && path.starts_with(&folder.path)
+                    && folder.rules.allows(&folder.path, &path, false, false)
+            })
+        {
+            self.sidebar_aliases
+                .retain(|sheet, _| workspace.sheet_index(*sheet).is_some());
+            self.sidebar_aliases.insert(tab.sheet, path);
         }
-        self.rebuild_side(workspace);
     }
     /// Reveals a document by expanding its ancestors; directory reads stay on workers.
     pub fn reveal_sidebar_path(
@@ -924,20 +1074,33 @@ impl Panels {
         workspace: &mut Workspace,
         path: PathBuf,
     ) -> Result<(), String> {
-        let path = path
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // ST4 4126: https://www.sublimetext.com/download
+        // A project with follow_symlinks enabled shows the original path spelling.
+        let path = workspace
+            .tabs
+            .iter()
+            .find(|t| t.path.as_ref() == Some(&path))
+            .and_then(|t| self.sidebar_aliases.get(&t.sheet))
+            .filter(|p| {
+                workspace.folders.iter().any(|f| {
+                    f.follow_links
+                        && p.starts_with(&f.path)
+                        && f.rules.allows(&f.path, p, false, false)
+                })
+            })
+            .cloned()
+            .unwrap_or(path);
         if !workspace
             .folders
             .iter()
             .any(|folder| path.starts_with(&folder.path))
         {
-            self.add_folder(
-                workspace,
-                path.parent()
-                    .ok_or("document has no parent folder")?
-                    .to_owned(),
-            )?;
+            let parent = path
+                .parent()
+                .ok_or("document has no parent folder")?
+                .to_owned();
+            self.sidebar_reveal = Some(path);
+            return self.edit_folders(workspace, sidebar_folders::Edit::Reveal(parent));
         }
         let root = workspace
             .folders
@@ -992,60 +1155,7 @@ impl Panels {
         workspace: &mut Workspace,
         path: &Path,
     ) -> Result<(), String> {
-        let previous_folders = workspace.folders.clone();
-        let previous_model = workspace.project_model.clone();
-        let project = workspace.project_path().map(Path::to_owned);
-        if let Some(project) = &project {
-            // Edit the project file as written on disk: the other entries keep their
-            // relative paths, names and keys.
-            workspace.project_model = vel_session::project::Project::load(project)?;
-        }
-        crate::context_menu::apply_remove_folder(workspace, path);
-        if let Some(project) = &project {
-            // Folders added to this project window belong to the project; append them.
-            let base = project.parent().unwrap_or(Path::new("."));
-            let same = |a: &Path, b: &Path| {
-                a == b
-                    || std::fs::canonicalize(a)
-                        .is_ok_and(|a| std::fs::canonicalize(b).ok() == Some(a))
-            };
-            for folder in &workspace.folders {
-                if !workspace
-                    .project_model
-                    .folders
-                    .iter()
-                    .any(|entry| same(&base.join(&entry.path), &folder.path))
-                {
-                    workspace
-                        .project_model
-                        .folders
-                        .push(vel_session::project::Folder {
-                            path: folder.path.clone(),
-                            name: Some(folder.name.clone()),
-                            folder_exclude_patterns: vec![],
-                            file_exclude_patterns: vec![],
-                            binary_file_patterns: vec![],
-                            follow_symlinks: (!folder.follow_links).then_some(false),
-                            ..Default::default()
-                        });
-                }
-            }
-        }
-        if let Some(project) = project
-            && let Err(error) = workspace.project_model.save(&project)
-        {
-            workspace.folders = previous_folders;
-            workspace.project_model = previous_model;
-            return Err(error);
-        }
-        // An already-running worker may have read the previous project. Follow it
-        // with an explicit reload so it cannot leave a detached root installed.
-        workspace.request_resource_reload();
-        self.children.retain(|folder, _| !folder.starts_with(path));
-        self.expanded.retain(|folder| !folder.starts_with(path));
-        self.restart_index(workspace);
-        self.rebuild_side(workspace);
-        Ok(())
+        self.edit_folders(workspace, sidebar_folders::Edit::Remove(path.to_owned()))
     }
     /// Shared native/headless keyboard route: focused widgets, Vintage, then the keymap.
     pub fn resolve_key(
@@ -1252,6 +1362,12 @@ impl Panels {
         self.input_changed(workspace, viewport);
     }
     pub fn busy(&self) -> bool {
+        if !self.folder_edits.is_empty()
+            || self.directory_running > 0
+            || self.recursive_expansion.is_some()
+        {
+            return true;
+        }
         self.review_busy()
             || self.overlay.is_some()
             || self.intel.busy()
@@ -1559,6 +1675,23 @@ impl Panels {
         if name == "save_macro" || (name == "run_macro_file" && args.get("file").is_none()) {
             return self.macro_action(workspace, name, args, viewport);
         }
+        if workspace.editor().binary.is_some()
+            && matches!(
+                name,
+                "slurp_find_string"
+                    | "slurp_replace_string"
+                    | "find_under"
+                    | "find_under_prev"
+                    | "find_next"
+                    | "find_prev"
+                    | "find_all"
+                    | "replace_next"
+                    | "replace_all"
+            )
+        {
+            self.set_message("Text search is unavailable in hex and image tabs.".into());
+            return Ok(true);
+        }
         // Record the document find operation at the interception boundary. Query-field
         // typing remains a panel edit and never enters the application macro buffer.
         if vel_commands::is_find_command(name) {
@@ -1818,6 +1951,7 @@ impl Panels {
                     if let Some(query) = args["text"].as_str() {
                         self.query.set(query);
                     } else if workspace.editor().settings.bool("find_selected_text", true)
+                        && workspace.editor().binary.is_none()
                         && !workspace.editor().selection().is_empty()
                     {
                         let selected = workspace
@@ -1856,7 +1990,18 @@ impl Panels {
                 self.side_visible = true;
                 workspace.set_window_toggle("show_side_bar", true)?;
                 self.side_focused = true;
-                self.side_open = Some(workspace.active);
+                self.side_open = self.open_files_visible.then_some(workspace.active);
+                self.rebuild_side(workspace);
+            }
+            // https://docs.sublimetext.io/reference/commands.html#refresh-folder-list
+            "refresh_folder_list" => {
+                self.refresh_sidebar(workspace);
+                self.intel.rescan();
+            }
+            "close_folder_list" => self.close_folder_list(workspace)?,
+            "toggle_show_open_files" => {
+                self.open_files_visible = !self.open_files_visible;
+                self.side_open = None;
                 self.rebuild_side(workspace);
             }
             "open_dir" | "add_folder" => {
@@ -2082,10 +2227,11 @@ impl Panels {
     }
     fn capture_find_scope(&mut self, workspace: &Workspace) {
         let editor = workspace.editor();
+        // Hex/binary views have no text offsets for a find scope (lane C round 20, H4).
         self.selection_scope = editor
             .regions()
             .iter()
-            .filter(|r| !r.empty())
+            .filter(|r| editor.binary.is_none() && !r.empty())
             .map(|r| r.to_range())
             .collect();
         self.scope_revision = Some((editor.buffer.id(), editor.buffer.change_id()));
@@ -2198,8 +2344,8 @@ impl Panels {
                 .find_origin
                 .map_or(workspace.editor().caret, |(_, at)| at);
         }
-        let result = Search::new(&key.query, key.options);
-        let loading = key.snapshot.loading;
+        let snapshot = key.snapshot;
+        let result = (!snapshot.binary).then(|| Search::new(&key.query, key.options));
         self.search_identity = Some(key);
         if self.find_error.take().as_ref() == Some(&self.message)
             || (!self.find_status.is_empty() && self.find_status == self.message)
@@ -2211,12 +2357,12 @@ impl Panels {
         self.all_matches_ready = false;
         self.find_status.clear();
         match result {
-            Ok(search) => {
+            Some(Ok(search)) => {
                 let editor = workspace.editor();
                 if search.query.is_empty() || (self.in_selection && self.selection_scope.is_empty())
                 {
                     self.all_matches_ready = true;
-                } else if loading {
+                } else if snapshot.loading {
                     self.find_status = "Waiting for file to load…".into();
                 } else if editor.text.len_bytes() <= 4096 && !search.options.regex {
                     // Keep tiny literal searches immediate. A viewport may include
@@ -2237,12 +2383,18 @@ impl Panels {
                     self.update_find_status();
                 }
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 self.find_error = Some(error.clone());
                 self.find_status.clone_from(&error);
                 self.set_message(error);
                 self.search = None;
                 self.all_matches_ready = true;
+            }
+            None => {
+                self.pending_navigation.clear();
+                self.search = None;
+                self.all_matches_ready = true;
+                self.find_status = "Text search is unavailable in hex and image tabs.".into();
             }
         }
     }
@@ -2494,6 +2646,12 @@ impl Panels {
             self.quick.set_items(Vec::new());
         }
         self.quick_query = value;
+        if workspace.editor().binary.is_some() && matches!(target, "line" | "symbol" | "word") {
+            self.fuzzy_worker.cancel();
+            self.quick_pending = false;
+            self.set_message("Text navigation is unavailable in hex and image tabs.".into());
+            return;
+        }
         // Symbol sources change on an edit or when analysis publishes, not on every frame.
         if self.overlay == Some(Overlay::Goto) {
             let query = Query::parse(&self.quick_input.value());
@@ -2919,7 +3077,7 @@ impl Panels {
         let Some(preview) = &self.preview else {
             return;
         };
-        for index in (0..open_file_count(workspace)).rev() {
+        for index in (0..self.visible_open_files(workspace)).rev() {
             let tab = &workspace.tabs[index];
             if (!keep_active || index != workspace.active)
                 && tab.transient
@@ -3005,6 +3163,12 @@ impl Panels {
         }
         if self.overlay == Some(Overlay::Goto) {
             let query = Query::parse(&self.quick_input.value());
+            if workspace.editor().binary.is_some()
+                && query.file.is_empty()
+                && !matches!(query.target, Target::File)
+            {
+                return Ok(None);
+            }
             if query.file.is_empty() && matches!(query.target, Target::Symbol(_) | Target::Word(_))
             {
                 self.query_quick(workspace);
@@ -3226,15 +3390,17 @@ impl Panels {
             if let Some(index) = self.side_open {
                 match key.name.as_str() {
                     "up" => self.side_open = Some(index.saturating_sub(1)),
-                    "down" if index + 1 < open_file_count(workspace) => {
+                    "down" if index + 1 < self.visible_open_files(workspace) => {
                         self.side_open = Some(index + 1)
                     }
                     "down" => {
                         self.side_open = None;
-                        self.side_selected = 0;
+                        self.select_side(0);
                     }
                     "enter" | "right" => {
-                        workspace.select(index.min(open_file_count(workspace).saturating_sub(1)));
+                        workspace.select(
+                            index.min(self.visible_open_files(workspace).saturating_sub(1)),
+                        );
                         workspace.make_permanent(workspace.active);
                     }
                     _ if key.modifiers & 9 != 0 => return Ok((false, None)),
@@ -3242,20 +3408,45 @@ impl Panels {
                 }
                 self.side_scroll.reveal(
                     self.side_open
-                        .map_or(open_file_count(workspace) + 2, |i| i + 1),
+                        .map_or(self.folder_row_base(workspace), |i| i + 1),
                 );
                 return Ok((true, None));
             }
             match key.name.as_str() {
-                "up" if self.side_selected == 0 && open_file_count(workspace) > 0 => {
-                    self.side_open = Some(open_file_count(workspace) - 1)
+                "up" if self.side_selected == 0 && self.visible_open_files(workspace) > 0 => {
+                    self.side_open = Some(self.visible_open_files(workspace) - 1)
                 }
-                "up" => self.side_selected = self.side_selected.saturating_sub(1),
+                "up" => self.select_side(self.side_selected.saturating_sub(1)),
                 "down" => {
-                    self.side_selected =
-                        (self.side_selected + 1).min(self.side_rows.len().saturating_sub(1))
+                    let next = if self.side_selected >= self.side_rows.len() {
+                        0
+                    } else {
+                        (self.side_selected + 1).min(self.side_rows.len() - 1)
+                    };
+                    self.select_side(next);
                 }
                 "enter" => self.activate_side(workspace, true)?,
+                // https://www.sublimetext.com/download (4050): Alt+Arrow applies recursively.
+                "right" if key.modifiers == 2 => {
+                    if let Some(path) = self
+                        .side_rows
+                        .get(self.side_selected)
+                        .filter(|row| row.directory)
+                        .map(|row| row.path.clone())
+                    {
+                        self.expand_recursively(workspace, path);
+                    }
+                }
+                "left" if key.modifiers == 2 => {
+                    if let Some(row) = self.side_rows.get(self.side_selected) {
+                        let path = row.path.clone();
+                        self.expanded.retain(|p| !p.starts_with(&path));
+                        self.cancel_recursive(&path);
+                        self.directory_pending.retain(|p| !p.starts_with(&path));
+                        self.watched_expanded = false;
+                        self.rebuild_side(workspace);
+                    }
+                }
                 "right" => {
                     if self
                         .side_rows
@@ -3264,18 +3455,25 @@ impl Panels {
                     {
                         self.activate_side(workspace, true)?;
                     } else {
-                        self.side_selected =
-                            (self.side_selected + 1).min(self.side_rows.len().saturating_sub(1));
+                        self.select_side(
+                            (self.side_selected + 1).min(self.side_rows.len().saturating_sub(1)),
+                        );
                     }
                 }
                 "left" => {
-                    if let Some(row) = self.side_rows.get(self.side_selected) {
-                        if !self.expanded.remove(&row.path)
-                            && let Some(parent) = row.path.parent()
+                    if let Some(path) = self
+                        .side_rows
+                        .get(self.side_selected)
+                        .map(|r| r.path.clone())
+                    {
+                        self.cancel_recursive(&path);
+                        self.watched_expanded = false;
+                        if !self.expanded.remove(&path)
+                            && let Some(parent) = path.parent()
                             && let Some(index) =
                                 self.side_rows.iter().position(|r| r.path == parent)
                         {
-                            self.side_selected = index;
+                            self.select_side(index);
                         }
                         self.rebuild_side(workspace);
                     }
@@ -3285,7 +3483,7 @@ impl Panels {
             }
             self.side_scroll.reveal(
                 self.side_open
-                    .map_or(open_file_count(workspace) + 2 + self.side_selected, |i| {
+                    .map_or(self.folder_row_base(workspace) + self.side_selected, |i| {
                         i + 1
                     }),
             );
@@ -3577,9 +3775,13 @@ impl Panels {
             return Ok(());
         };
         if row.directory {
+            self.watched_expanded = false;
             if !self.expanded.remove(&row.path) {
                 self.expanded.insert(row.path.clone());
                 self.load_directory(workspace, &row.path);
+            } else {
+                self.cancel_recursive(&row.path);
+                self.directory_pending.retain(|p| !p.starts_with(&row.path));
             }
             self.rebuild_side(workspace);
         } else {
@@ -3589,18 +3791,56 @@ impl Panels {
                 column: 1,
             };
             if permanent {
+                let spelling = location.path.clone();
                 workspace.open(location)?;
+                self.note_sidebar_spelling(workspace, &spelling);
             } else {
                 workspace.preview(location)?;
             }
         }
         Ok(())
     }
+    fn expand_recursively(&mut self, workspace: &Workspace, path: PathBuf) {
+        let Some(folder) = workspace
+            .folders
+            .iter()
+            .filter(|f| path.starts_with(&f.path))
+            .max_by_key(|f| f.path.as_os_str().len())
+            .cloned()
+        else {
+            return;
+        };
+        let roots: Vec<_> = workspace.folders.iter().map(|f| f.path.clone()).collect();
+        let (tx, result) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        self.recursive_expansion = Some(RecursiveExpansion {
+            path: path.clone(),
+            stop: stop.clone(),
+            result,
+        });
+        std::thread::spawn(move || {
+            let subtree = folder.sidebar_subtree(&path, &roots, 5000, &stop);
+            if !stop.load(Ordering::Acquire) {
+                let _ = tx.send(subtree);
+            }
+        });
+    }
+
+    fn cancel_recursive(&mut self, path: &Path) {
+        if self
+            .recursive_expansion
+            .as_ref()
+            .is_some_and(|r| r.path.starts_with(path) || path.starts_with(&r.path))
+        {
+            self.recursive_expansion = None;
+        }
+    }
     pub fn poll(&mut self, workspace: &mut Workspace, viewport: Range<usize>) -> bool {
         let load_notice = !workspace.load_notices.is_empty();
         if load_notice {
             self.set_message(std::mem::take(&mut workspace.load_notices).join("; "));
         }
+        let folder_edit_changed = self.poll_folder_edits(workspace);
         if let Some(message) = workspace.appearance_notice.take() {
             self.set_message(message);
         }
@@ -3617,7 +3857,8 @@ impl Panels {
         {
             self.message = error;
         }
-        let intelligence_changed = self.intel.poll(workspace)
+        let intelligence_changed = folder_edit_changed
+            | self.intel.poll(workspace)
             | self.review_poll(workspace)
             | self.merge_git_tree(workspace);
         if self.intel.busy()
@@ -3782,6 +4023,7 @@ impl Panels {
             self.query_quick(workspace);
         }
         if self.overlay == Some(Overlay::Goto)
+            && workspace.editor().binary.is_none()
             && matches!(
                 Query::parse(&self.quick_input.value()).target,
                 Target::Symbol(_)
@@ -3810,7 +4052,7 @@ impl Panels {
             }
             changed = true;
         }
-        if self.folder_key != format!("{:?}", workspace.folders) {
+        if self.folder_key != workspace.folders {
             self.restart_index(workspace);
             changed = true;
         }
@@ -3824,18 +4066,80 @@ impl Panels {
             }
             changed = true;
         }
+        if let Some(index) = &self.index {
+            if !self.watched_expanded {
+                index.watch_directories(Arc::new(self.expanded.clone()));
+                self.watched_expanded = true;
+            }
+            let listings = index.directory_changes();
+            if listings.all {
+                self.directory_pending.extend(self.expanded.iter().cloned());
+            } else {
+                self.directory_pending.extend(
+                    listings
+                        .paths
+                        .into_iter()
+                        .filter(|p| self.expanded.contains(p)),
+                );
+            }
+        }
         let directories: Vec<_> = self.directories.try_iter().collect();
-        for (path, children) in directories {
+        let mut rows_changed = false;
+        for (generation, path, children) in directories {
+            self.directory_running -= 1;
+            if generation != self.directory_generation {
+                continue;
+            }
             self.loading.remove(&path);
+            if !self.expanded.contains(&path) {
+                continue;
+            }
             match children {
                 Ok(children) => {
+                    if self.children.get(&path) == Some(&children) {
+                        continue;
+                    }
                     self.git_tree_dirty = true;
                     self.git_virtual
                         .retain(|p| p.parent() != Some(path.as_path()));
-                    self.children.insert(path, children);
+                    self.children.insert(path.clone(), children);
+                    rows_changed = true;
                 }
-                Err(error) => self.message = error,
+                Err(error) => {
+                    rows_changed |= self.children.remove(&path).is_some();
+                    // Missing children disappear through their parent's listing.
+                    if workspace.folders.iter().any(|folder| folder.path == path) {
+                        self.message = error;
+                        changed = true;
+                    }
+                }
             }
+        }
+        if let Some(result) = self
+            .recursive_expansion
+            .as_ref()
+            .map(|r| r.result.try_recv())
+        {
+            match result {
+                Ok(subtree) => {
+                    self.recursive_expansion = None;
+                    if !subtree.listings.is_empty() {
+                        self.expanded.extend(subtree.listings.keys().cloned());
+                        self.children.extend(subtree.listings);
+                        self.watched_expanded = false;
+                        self.git_tree_dirty = true;
+                        rows_changed = true;
+                    }
+                    if subtree.limited {
+                        self.set_message("Recursive expansion stopped at 5,000 directories".into());
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.recursive_expansion = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        self.pump_directories(workspace);
+        if rows_changed {
             self.rebuild_side(workspace);
             changed = true;
         }
@@ -4330,9 +4634,12 @@ impl Panels {
         }
         if self.side_visible {
             let first = self.side_scroll.visible();
-            let base = open_file_count(workspace) + 2;
+            let base = self.folder_row_base(workspace);
             for i in first.start.saturating_sub(1)
-                ..first.end.saturating_sub(1).min(open_file_count(workspace))
+                ..first
+                    .end
+                    .saturating_sub(1)
+                    .min(self.visible_open_files(workspace))
             {
                 let tab = &workspace.tabs[i];
                 let mut attrs = Vec::new();
@@ -4432,7 +4739,7 @@ impl Panels {
         self.tree.index_ancestry();
     }
     pub fn paint(&mut self, workspace: &Workspace, scene: &mut Scene) {
-        self.side_scroll.rows = open_file_count(workspace) + self.side_rows.len() + 2;
+        self.side_scroll.rows = self.folder_row_base(workspace) + self.side_rows.len();
         if !workspace
             .editor()
             .settings
@@ -4471,8 +4778,11 @@ impl Panels {
             let heading = style(3, Some("sidebar_heading"), &mut theme);
             for (caption, row) in [
                 ("Open Files", 0),
-                ("Folders", open_file_count(workspace) + 1),
-            ] {
+                ("Folders", self.folder_row_base(workspace) - 1),
+            ]
+            .into_iter()
+            .skip(usize::from(!self.open_files_visible))
+            {
                 theme.text(
                     &mut layer,
                     &heading,
@@ -4488,7 +4798,7 @@ impl Panels {
                 ..visible
                     .end
                     .saturating_sub(1)
-                    .min(open_file_count(workspace))
+                    .min(self.visible_open_files(workspace))
             {
                 let tab = &workspace.tabs[i];
                 let id = (2 << 40) + i as u64;
@@ -4544,7 +4854,7 @@ impl Panels {
                     clip,
                 );
             }
-            let base = open_file_count(workspace) + 2;
+            let base = self.folder_row_base(workspace);
             for i in visible.start.saturating_sub(base)
                 ..visible.end.saturating_sub(base).min(self.side_rows.len())
             {
@@ -5389,29 +5699,35 @@ impl Panels {
             if down {
                 let row = ((point.y - self.side_bounds.y + self.side_scroll.offset)
                     / (24. * self.ui_scale)) as usize;
-                if (1..=open_file_count(workspace)).contains(&row) {
+                if (1..=self.visible_open_files(workspace)).contains(&row) {
                     workspace.click_sheet(row - 1, self.primary_click, extend);
                     self.side_open = Some(row - 1);
                     if double {
                         workspace.make_permanent(workspace.active);
                     }
-                } else if row >= open_file_count(workspace) + 2 {
+                } else if row >= self.folder_row_base(workspace) {
                     self.side_open = None;
                     let at = (point.y - self.side_bounds.y + self.side_scroll.offset)
                         / (24. * self.ui_scale)
-                        - (open_file_count(workspace) + 2) as f64;
+                        - self.folder_row_base(workspace) as f64;
                     let now = Instant::now();
-                    self.side_selected = (0..self.side_rows.len())
+                    let index = (0..self.side_rows.len())
                         .rev()
                         .find(|&i| {
                             let y = self.tree_row_position(i, now);
                             at >= y && at < y + 1.
                         })
                         .unwrap_or_else(|| {
-                            (row - open_file_count(workspace) - 2)
+                            (row - self.folder_row_base(workspace))
                                 .min(self.side_rows.len().saturating_sub(1))
                         });
-                    if extend && let Some(anchor) = self.side_anchor {
+                    self.select_side(index);
+                    if extend
+                        && let Some(anchor) = self
+                            .side_anchor
+                            .as_ref()
+                            .and_then(|p| self.side_rows.iter().position(|r| &r.path == p))
+                    {
                         for index in anchor.min(self.side_selected)..=anchor.max(self.side_selected)
                         {
                             if let Some(row) = self.side_rows.get(index)
@@ -5444,7 +5760,7 @@ impl Panels {
                         } else {
                             self.activate_side(workspace, double)?;
                         }
-                        self.side_anchor = Some(self.side_selected);
+                        self.side_anchor = self.side_selection.clone();
                     } else {
                         // Single clicks select only when preview is disabled. Double click
                         // always opens permanently, including with preview_on_click=false.
@@ -5462,7 +5778,7 @@ impl Panels {
                         {
                             self.activate_side(workspace, double)?;
                         }
-                        self.side_anchor = Some(self.side_selected);
+                        self.side_anchor = self.side_selection.clone();
                     }
                 }
                 self.side_focused = true;
@@ -6100,10 +6416,10 @@ impl Panels {
         }
         let row = ((point.y - self.side_bounds.y + self.side_scroll.offset) / (24. * self.ui_scale))
             as usize;
-        if row > 0 && row <= open_file_count(workspace) {
+        if row > 0 && row <= self.visible_open_files(workspace) {
             return workspace.tabs[row - 1].path.clone().map(|p| (p, false));
         }
-        row.checked_sub(open_file_count(workspace) + 2)
+        row.checked_sub(self.folder_row_base(workspace))
             .and_then(|i| self.side_rows.get(i))
             .map(|r| (r.path.clone(), r.directory))
     }
@@ -6177,27 +6493,6 @@ impl Panels {
     }
 }
 
-fn sidebar_children(folder: &Folder, path: &Path) -> Result<Vec<Entry>, String> {
-    // The sidebar shows ignored entries dimmed; search/index walkers retain ignore filtering.
-    let mut walker = folder.walker(path, Some(1), false);
-    walker
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .ignore(false);
-    let mut entries = Vec::new();
-    for result in walker.build() {
-        let entry = result.map_err(|e| e.to_string())?;
-        if entry.depth() > 0 {
-            entries.push(Entry {
-                path: entry.path().into(),
-                directory: entry.file_type().is_some_and(|t| t.is_dir()),
-            });
-        }
-    }
-    entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
-    Ok(entries)
-}
 impl Panels {
     fn merge_git_tree(&mut self, workspace: &Workspace) -> bool {
         let key: Vec<_> = workspace
@@ -6209,14 +6504,10 @@ impl Panels {
         if key == self.git_tree_key && !self.git_tree_dirty {
             return false;
         }
-        let refresh = key != self.git_tree_key;
         self.git_tree_key = key;
         self.git_tree_dirty = false;
-        if refresh {
-            let parents: Vec<_> = self.children.keys().cloned().collect();
-            for parent in parents {
-                self.request_directory(workspace, &parent, true);
-            }
+        if workspace.git.snapshots.is_empty() && self.git_virtual.is_empty() {
+            return false;
         }
         for children in self.children.values_mut() {
             children.retain(|e| !self.git_virtual.contains(&e.path));
@@ -6230,6 +6521,7 @@ impl Panels {
             else {
                 continue;
             };
+            let mut added = false;
             for snapshot in workspace.git.snapshots.values() {
                 for (relative, status) in &snapshot.files {
                     if !status.statuses.iter().any(|b| {
@@ -6252,10 +6544,13 @@ impl Panels {
                     {
                         self.git_virtual.insert(path.clone());
                         children.push(Entry { path, directory });
+                        added = true;
                     }
                 }
             }
-            children.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
+            if added {
+                sort_sidebar_entries(children);
+            }
         }
         self.rebuild_side(workspace);
         true

@@ -93,7 +93,7 @@ fn sidebar_root_removal_updates_project_and_survives_resource_reload() {
     // The remaining entry keeps its relative spelling; no default keys are pinned.
     assert_eq!(saved.folders[0].path, std::path::Path::new("kept"));
     assert_eq!(saved.folders[0].name.as_deref(), Some("Kept"));
-    assert_eq!(saved.folders[1].path, added);
+    assert_eq!(saved.folders[1].path, std::path::Path::new("runtime"));
     assert_eq!(saved.extra["future"]["keep"], true);
     let raw = std::fs::read_to_string(&project).unwrap();
     assert!(

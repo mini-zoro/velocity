@@ -2,11 +2,12 @@ use crate::{
     Error, FileAnalysis, Index, SymbolLocation, SymbolMatch, analyze,
     store::{Journal, Stamp},
 };
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use hashlink::LinkedHashMap;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -17,6 +18,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use vel_search::project::{Folder, Patterns};
 use vel_syntax::{MetadataSet, SyntaxSet};
 use vel_text::Text;
 /// Project indexing settings; field names mirror the public editor settings.
@@ -24,8 +26,11 @@ use vel_text::Text;
 pub struct IndexOptions {
     /// Worker count; zero chooses at most eight available cores.
     pub index_workers: usize,
-    /// File/directory glob exclusions, matched against relative paths and basenames.
+    /// File patterns excluded from indexing.
     pub index_exclude_patterns: Vec<String>,
+    /// File patterns admitted before exclusions; empty admits every project file.
+    #[serde(default)]
+    pub index_include_patterns: Vec<String>,
     /// Respect .gitignore/global git excludes, even outside a git repository.
     pub index_exclude_gitignore: bool,
     /// Skip files whose filename and first line do not identify a syntax.
@@ -44,6 +49,7 @@ impl Default for IndexOptions {
         Self {
             index_workers: 0,
             index_exclude_patterns: vec!["*.log".into()],
+            index_include_patterns: Vec::new(),
             index_exclude_gitignore: true,
             index_skip_unknown_extensions: true,
             max_file_size: 2 * 1024 * 1024,
@@ -56,7 +62,7 @@ impl Default for IndexOptions {
 /// Bounded status/log data for an Indexing Status window.
 #[derive(Debug, Clone, Default)]
 pub struct IndexStatus {
-    /// Files found in the latest scan.
+    /// Regular files admitted across the project, including files skipped by analysis.
     pub total_files: usize,
     /// Successful analyses applied this session, including incremental updates.
     pub indexed_files: usize,
@@ -126,13 +132,35 @@ impl ProjectIndex {
         metadata: Arc<MetadataSet>,
         options: IndexOptions,
     ) -> Result<Self, Error> {
-        let source_root = if root.as_ref().is_absolute() {
-            root.as_ref().to_path_buf()
-        } else {
-            std::env::current_dir()?.join(root.as_ref())
+        Self::open_folder(
+            Folder {
+                path: root.as_ref().into(),
+                name: String::new(),
+                rules: Default::default(),
+                follow_links: false,
+            },
+            syntaxes,
+            metadata,
+            options,
+        )
+    }
+
+    /// Opens the symbol index using the same project filters as file navigation.
+    pub fn open_folder(
+        mut folder: Folder,
+        syntaxes: Arc<SyntaxSet>,
+        metadata: Arc<MetadataSet>,
+        options: IndexOptions,
+    ) -> Result<Self, Error> {
+        let source_root = std::path::absolute(&folder.path)?;
+        let root = source_root.canonicalize()?;
+        // Keep paths under the original project spelling for absolute patterns.
+        folder.path.clone_from(&source_root);
+        let filter = Filter {
+            folder,
+            includes: Patterns::new(&options.index_include_patterns),
+            excludes: Patterns::new(&options.index_exclude_patterns),
         };
-        let root = root.as_ref().canonicalize()?;
-        let excludes = excludes(&options)?;
         let shared = Arc::new(RwLock::new(Index::new()));
         let status = Arc::new(Mutex::new(IndexStatus {
             active: true,
@@ -142,6 +170,7 @@ impl ProjectIndex {
         let (tx, rx) = mpsc::channel();
         let mut hash = blake3::Hasher::new();
         hash.update(root.to_string_lossy().as_bytes());
+        hash.update(format!("{:?}", filter.folder).as_bytes());
         hash.update(&metadata.fingerprint());
         hash.update(&bincode::serialize(&*syntaxes).map_err(|e| Error::Analysis(e.to_string()))?);
         hash.update(&bincode::serialize(&options).map_err(|e| Error::Analysis(e.to_string()))?);
@@ -158,12 +187,11 @@ impl ProjectIndex {
             syntaxes,
             metadata,
             options,
-            excludes,
+            filter,
             index: shared.clone(),
             status: status.clone(),
             cancelled: cancelled.clone(),
             commands: rx,
-            event_tx: tx.clone(),
             cache,
         };
         thread::Builder::new()
@@ -286,58 +314,267 @@ fn cache_dir() -> PathBuf {
         base.join(".cache")
     }
 }
-fn excludes(options: &IndexOptions) -> Result<GlobSet, Error> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in &options.index_exclude_patterns {
-        builder.add(
-            GlobBuilder::new(pattern.trim_end_matches('/'))
-                .literal_separator(true)
-                .build()
-                .map_err(|e| Error::Analysis(e.to_string()))?,
-        );
-    }
-    builder.build().map_err(|e| Error::Analysis(e.to_string()))
+#[derive(Clone, Debug)]
+struct Filter {
+    folder: Folder,
+    includes: Patterns,
+    excludes: Patterns,
 }
-fn excluded(root: &Path, path: &Path, patterns: &GlobSet) -> bool {
-    let Ok(relative) = path.strip_prefix(root) else {
-        return true;
+impl Filter {
+    fn admits(&self, path: &Path, directory: bool) -> bool {
+        let root = &self.folder.path;
+        self.folder.rules.allows(root, path, directory, true)
+            && (path == root || !self.excludes.excludes_index_path(root, path, directory))
+            && (directory || self.includes.is_empty() || self.includes.matches(root, path, false))
+    }
+
+    fn admits_entry(&self, path: &Path, directory: bool) -> bool {
+        let root = &self.folder.path;
+        path == root
+            || (self.folder.rules.allows_entry(root, path, directory, true)
+            // Bare exclusions also prune directory names (the old default used
+            // entries like "vendor" and "target"), not just file names.
+            && !self.excludes.matches(root, path, directory)
+            && (directory || self.includes.is_empty() || self.includes.matches(root, path, false)))
+    }
+}
+fn read_small(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read;
+    let file = vel_fileio::regular::read(path).ok()?;
+    if file.metadata().ok()?.len() > limit {
+        return None;
+    }
+    let mut source = String::new();
+    file.take(limit + 1).read_to_string(&mut source).ok()?;
+    (source.len() as u64 <= limit).then_some(source)
+}
+
+fn local_ignore(root: &Path, path: &Path) -> Gitignore {
+    let Some(source) = read_small(path, 4 * 1024 * 1024) else {
+        return Gitignore::empty();
     };
-    relative
-        .components()
-        .any(|part| matches!(part, std::path::Component::ParentDir))
-        || patterns.is_match(relative)
-        || relative
-            .ancestors()
-            .take_while(|p| !p.as_os_str().is_empty())
-            .any(|p| {
-                patterns.is_match(p) || p.file_name().is_some_and(|name| patterns.is_match(name))
-            })
+    let mut builder = GitignoreBuilder::new(root);
+    for line in source.trim_start_matches('\u{feff}').lines() {
+        let _ = builder.add_line(None, line);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
-fn ignored(root: &Path, path: &Path, git: bool) -> bool {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    if git {
-        let (global, _) = ignore::gitignore::GitignoreBuilder::new(root).build_global();
-        if global.matched_path_or_any_parents(path, false).is_ignore() {
-            return true;
-        }
-        let _ = builder.add(root.join(".git/info/exclude"));
+
+fn git_directory(root: &Path) -> Option<PathBuf> {
+    let marker = root.join(".git");
+    if marker.is_dir() {
+        return Some(marker);
     }
-    let mut parents: Vec<_> = path
-        .parent()
-        .into_iter()
-        .flat_map(Path::ancestors)
-        .take_while(|parent| parent.starts_with(root))
-        .collect();
-    parents.reverse();
-    for parent in parents {
-        let _ = builder.add(parent.join(".ignore"));
-        if git {
-            let _ = builder.add(parent.join(".gitignore"));
+    let source = read_small(&marker, 4096)?;
+    let git = root.join(source.trim().strip_prefix("gitdir: ")?);
+    if let Some(common) = read_small(&git.join("commondir"), 4096) {
+        Some(git.join(common.trim()))
+    } else {
+        Some(git)
+    }
+}
+
+struct IgnoreLayer {
+    rules: [Gitignore; 2],
+    parent: Option<Arc<Self>>,
+}
+
+struct IgnoreFiles {
+    project: PathBuf,
+    boundary: PathBuf,
+    git: bool,
+    dirs: LinkedHashMap<PathBuf, Option<Arc<IgnoreLayer>>>,
+    global: Gitignore,
+    repository: Gitignore,
+    exclude_file: Option<PathBuf>,
+}
+impl IgnoreFiles {
+    fn new(root: &Path, git: bool) -> Self {
+        // Like parents(true), load rules between the repository and a project
+        // opened on one of its subdirectories. Keep no-repository projects local.
+        let repo = git
+            .then(|| {
+                root.ancestors()
+                    .find_map(|p| git_directory(p).map(|dir| (p, dir)))
+            })
+            .flatten();
+        let boundary = repo.as_ref().map_or(root, |(p, _)| *p);
+        let exclude_file = repo.map(|(_, dir)| dir.join("info/exclude"));
+        Self {
+            project: root.into(),
+            boundary: boundary.into(),
+            git,
+            dirs: LinkedHashMap::new(),
+            global: if git {
+                ignore::gitignore::gitconfig_excludes_path()
+                    .map_or_else(Gitignore::empty, |path| local_ignore(boundary, &path))
+            } else {
+                Gitignore::empty()
+            },
+            repository: exclude_file
+                .as_ref()
+                .map_or_else(Gitignore::empty, |path| local_ignore(boundary, path)),
+            exclude_file,
         }
     }
-    builder
-        .build()
-        .is_ok_and(|rules| rules.matched_path_or_any_parents(path, false).is_ignore())
+    fn refresh(&mut self, dir: &Path) {
+        if dir == self.project {
+            self.dirs.clear();
+            if let Some(path) = &self.exclude_file {
+                self.repository = local_ignore(&self.boundary, path);
+            }
+        } else {
+            self.dirs.retain(|key, _| !key.starts_with(dir));
+        }
+    }
+    fn layer(&mut self, dir: &Path) -> Option<Arc<IgnoreLayer>> {
+        if let Some(layer) = self.dirs.to_back(dir) {
+            return layer.clone();
+        }
+        let parent = if dir == self.boundary {
+            None
+        } else {
+            dir.parent().and_then(|p| self.layer(p))
+        };
+        let rules = [
+            local_ignore(dir, &dir.join(".ignore")),
+            if self.git {
+                local_ignore(dir, &dir.join(".gitignore"))
+            } else {
+                Gitignore::empty()
+            },
+        ];
+        let layer = if rules.iter().all(Gitignore::is_empty) {
+            parent
+        } else {
+            Some(Arc::new(IgnoreLayer { rules, parent }))
+        };
+        if self.dirs.len() == 4096 {
+            self.dirs.pop_front();
+        }
+        self.dirs.insert(dir.to_owned(), layer.clone());
+        layer
+    }
+    fn matches(&mut self, path: &Path, directory: bool) -> bool {
+        let layers = path
+            .parent()
+            .filter(|p| p.starts_with(&self.boundary))
+            .and_then(|p| self.layer(p));
+        let mut next = layers.as_deref();
+        while let Some(layer) = next {
+            for rule in &layer.rules {
+                let result = rule.matched(path, directory);
+                if !result.is_none() {
+                    return result.is_ignore();
+                }
+            }
+            next = layer.parent.as_deref();
+        }
+        let result = self.repository.matched(path, directory);
+        if result.is_none() {
+            self.global.matched(path, directory).is_ignore()
+        } else {
+            result.is_ignore()
+        }
+    }
+    fn pruned(&mut self, path: &Path, directory: bool) -> bool {
+        let mut directory = directory;
+        for p in path.ancestors() {
+            if !p.starts_with(&self.project) || p == self.project {
+                break;
+            }
+            if self.matches(p, directory) {
+                return true;
+            }
+            directory = true;
+        }
+        false
+    }
+
+    fn inherited_stamps(&self) -> Vec<(PathBuf, Option<Stamp>)> {
+        let mut paths = Vec::new();
+        if self.git {
+            for dir in self
+                .project
+                .ancestors()
+                .skip(1)
+                .take_while(|p| p.starts_with(&self.boundary))
+            {
+                paths.extend([dir.join(".ignore"), dir.join(".gitignore")]);
+            }
+            paths.extend(self.exclude_file.iter().cloned());
+        }
+        paths
+            .into_iter()
+            .map(|p| {
+                let stamp = Stamp::read(&p).ok();
+                (p, stamp)
+            })
+            .collect()
+    }
+}
+
+/// Only paths reached through a link need a canonical lookup. Ordinary files
+/// already have canonical names because the walk starts at the canonical root.
+#[derive(Default)]
+struct Aliases {
+    paths: BTreeMap<PathBuf, PathBuf>,
+    preferred: HashMap<PathBuf, PathBuf>,
+}
+impl Aliases {
+    fn has_descendants(&self, path: &Path) -> bool {
+        self.paths
+            .range::<Path, _>((std::ops::Bound::Excluded(path), std::ops::Bound::Unbounded))
+            .next()
+            .is_some_and(|(alias, _)| alias.starts_with(path))
+    }
+
+    fn primary<'a>(&'a self, path: &'a Path) -> &'a Path {
+        let target = self.paths.get(path).map_or(path, PathBuf::as_path);
+        self.preferred.get(target).map_or(path, PathBuf::as_path)
+    }
+
+    fn reconcile(
+        &mut self,
+        seen: &mut HashSet<PathBuf>,
+        mut usable: impl FnMut(&Path) -> bool,
+    ) -> HashSet<PathBuf> {
+        let mut choices = HashMap::<&Path, &Path>::new();
+        for (path, target) in &self.paths {
+            choices
+                .entry(target)
+                .and_modify(|choice| *choice = (*choice).min(path))
+                .or_insert(path);
+        }
+        let preferred: HashMap<_, _> = choices
+            .into_iter()
+            .map(|(target, alias)| {
+                (
+                    target.to_owned(),
+                    if seen.contains(target) || usable(target) {
+                        target
+                    } else {
+                        alias
+                    }
+                    .to_owned(),
+                )
+            })
+            .collect();
+        let mut retired = HashSet::new();
+        for (target, path) in &preferred {
+            if let Some(old) = self.preferred.get(target).filter(|&old| old != path) {
+                retired.insert(old.clone());
+                seen.insert(path.clone());
+            }
+        }
+        seen.retain(|path| {
+            self.paths
+                .get(path)
+                .is_none_or(|target| preferred.get(target) == Some(path))
+        });
+        self.preferred = preferred;
+        retired
+    }
 }
 fn priority() {
     #[cfg(target_os = "macos")]
@@ -351,12 +588,11 @@ struct Coordinator {
     syntaxes: Arc<SyntaxSet>,
     metadata: Arc<MetadataSet>,
     options: IndexOptions,
-    excludes: GlobSet,
+    filter: Filter,
     index: Arc<RwLock<Index>>,
     status: Arc<Mutex<IndexStatus>>,
     cancelled: Arc<AtomicBool>,
     commands: mpsc::Receiver<Command>,
-    event_tx: mpsc::Sender<Command>,
     cache: PathBuf,
 }
 impl Coordinator {
@@ -364,7 +600,18 @@ impl Coordinator {
         self.cache
             .parent()
             .is_some_and(|cache| path.starts_with(cache))
-            || excluded(&self.root, path, &self.excludes)
+            || path.strip_prefix(&self.root).map_or(true, |relative| {
+                relative
+                    .components()
+                    .any(|p| p == std::path::Component::ParentDir)
+                    || if self.filter.folder.path == self.root {
+                        !self.filter.admits(path, false)
+                    } else {
+                        !self
+                            .filter
+                            .admits(&self.filter.folder.path.join(relative), false)
+                    }
+            })
     }
     fn log(&self, line: impl Into<String>) {
         let mut status = self.status.lock().unwrap();
@@ -450,35 +697,24 @@ impl Coordinator {
             }
         }
         drop(completed);
+        let notices = Arc::new(Mutex::new((false, HashSet::<PathBuf>::new())));
         let mut watcher = if self.options.watch {
-            let sender = self.event_tx.clone();
+            let notices = notices.clone();
             match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                match event {
-                    Ok(event) => {
-                        if matches!(
-                            event.kind,
-                            notify::EventKind::Create(_)
-                                | notify::EventKind::Remove(_)
-                                | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                        ) {
-                            let _ = sender.send(Command::Rescan);
-                        }
-                        for path in event.paths {
-                            let path = path.canonicalize().unwrap_or_else(|_| {
-                                path.parent()
-                                    .and_then(|parent| parent.canonicalize().ok())
-                                    .zip(path.file_name())
-                                    .map_or_else(
-                                        || path.clone(),
-                                        |(parent, name)| parent.join(name),
-                                    )
-                            });
-                            let _ = sender.send(Command::Disk(path));
-                        }
+                let mut changes = notices.lock().unwrap();
+                if changes.0 {
+                    return;
+                }
+                if let Ok(event) = event
+                    && !event.need_rescan()
+                    && event.paths.len() <= 4096usize.saturating_sub(changes.1.len())
+                {
+                    if !event.kind.is_access() {
+                        changes.1.extend(event.paths);
                     }
-                    Err(_) => {
-                        let _ = sender.send(Command::Rescan);
-                    }
+                } else {
+                    changes.0 = true;
+                    changes.1.clear();
                 }
             }) {
                 Ok(mut watcher) => {
@@ -506,9 +742,25 @@ impl Coordinator {
         let mut observed_directories: HashMap<PathBuf, Option<Stamp>> = HashMap::new();
         let mut next_poll = Instant::now() + Duration::from_millis(500);
         let mut scan = true;
+        let mut subtrees = BTreeSet::new();
+        let ignores = Arc::new(Mutex::new(IgnoreFiles::new(
+            &self.root,
+            self.options.index_exclude_gitignore,
+        )));
+        let mut inherited = ignores.lock().unwrap().inherited_stamps();
+        let mut aliases = Aliases::default();
         let mut flushes = Vec::new();
         while !self.cancelled.load(Ordering::Acquire) {
-            while let Ok(command) = self.commands.try_recv() {
+            let (overflow, events) = std::mem::take(&mut *notices.lock().unwrap());
+            scan |= overflow;
+            let events = events
+                .into_iter()
+                .filter(|path| path.starts_with(&self.root))
+                .map(Command::Disk);
+            for command in self.commands.try_iter().take(8192).chain(events) {
+                if self.cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
                 match command {
                     Command::Stop => {
                         self.cancelled.store(true, Ordering::Release);
@@ -517,8 +769,9 @@ impl Coordinator {
                     Command::Rescan => scan = true,
                     Command::Flush(reply) => flushes.push(reply),
                     Command::Analyzed(path, revision, text, analysis) => {
+                        let path = aliases.primary(&path).to_owned();
                         if self.excluded(&path)
-                            || ignored(&self.root, &path, self.options.index_exclude_gitignore)
+                            || ignores.lock().unwrap().pruned(&path, false)
                             || overlays.get(&path).is_some_and(|(old, _)| *old >= revision)
                         {
                             continue;
@@ -537,8 +790,9 @@ impl Coordinator {
                         );
                     }
                     Command::Buffer(path, revision, text) => {
+                        let path = aliases.primary(&path).to_owned();
                         if self.excluded(&path)
-                            || ignored(&self.root, &path, self.options.index_exclude_gitignore)
+                            || ignores.lock().unwrap().pruned(&path, false)
                             || overlays.get(&path).is_some_and(|(old, _)| *old >= revision)
                         {
                             continue;
@@ -557,6 +811,7 @@ impl Coordinator {
                         );
                     }
                     Command::Close(path) => {
+                        let path = aliases.primary(&path).to_owned();
                         overlays.remove(&path);
                         prepared.remove(&path);
                         generation += 1;
@@ -564,6 +819,13 @@ impl Coordinator {
                         pending.insert(path, (Instant::now(), generation, None));
                     }
                     Command::Disk(path) => {
+                        if inherited.iter().any(|(p, _)| p == &path) {
+                            scan = true;
+                            continue;
+                        }
+                        if !path.starts_with(&self.root) {
+                            continue;
+                        }
                         if self
                             .cache
                             .parent()
@@ -571,26 +833,51 @@ impl Coordinator {
                         {
                             continue;
                         }
-                        if ignored(&self.root, &path, self.options.index_exclude_gitignore)
-                            || self.excluded(&path)
+                        if path
+                            .file_name()
+                            .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+                            && let Some(parent) = path.parent()
                         {
+                            subtrees.insert(parent.to_owned());
+                            continue;
+                        }
+                        if path.is_dir()
+                            || observed_directories.contains_key(&path)
+                            || aliases.has_descendants(&path)
+                        {
+                            subtrees.insert(path);
+                            continue;
+                        }
+                        let path = if let Some(primary) = aliases.paths.get(&path) {
+                            aliases.primary(primary).to_owned()
+                        } else if self.filter.folder.follow_links
+                            && path.canonicalize().is_ok_and(|p| p != path)
+                        {
+                            if let Some(parent) = path.parent() {
+                                subtrees.insert(parent.to_owned());
+                            }
+                            continue;
+                        } else {
+                            path
+                        };
+                        let path = aliases.primary(&path).to_owned();
+                        if self.options.watch
+                            && let Some(parent) = path.parent()
+                            && let Some(stamp) = observed_directories.get_mut(parent)
+                        {
+                            *stamp = Stamp::read(parent).ok();
+                        }
+                        if self.excluded(&path) || ignores.lock().unwrap().pruned(&path, false) {
                             generation += 1;
                             desired.insert(path.clone(), generation);
                             pending.remove(&path);
                             prepared.remove(&path);
+                            observed_files.remove(&path);
                             self.index.write().unwrap().remove_file(&path);
                             stamps.remove(&path);
                             if let Err(e) = journal.append(path, None, None) {
                                 self.log(format!("persist: {e}"));
                             }
-                            continue;
-                        }
-                        if path.is_dir()
-                            || path
-                                .file_name()
-                                .is_some_and(|name| name == ".gitignore" || name == ".ignore")
-                        {
-                            scan = true;
                             continue;
                         }
                         if overlays.contains_key(&path) {
@@ -607,11 +894,21 @@ impl Coordinator {
             }
             if self.options.watch && Instant::now() >= next_poll {
                 next_poll = Instant::now() + Duration::from_millis(500);
-                if observed_directories
+                scan |= inherited
                     .iter()
-                    .any(|(path, stamp)| Stamp::read(path).ok() != *stamp)
-                {
-                    scan = true;
+                    .any(|(path, stamp)| Stamp::read(path).ok() != *stamp);
+                for (path, stamp) in &observed_directories {
+                    if Stamp::read(path).ok() != *stamp {
+                        let directory = if path
+                            .file_name()
+                            .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+                        {
+                            path.parent().unwrap_or(path)
+                        } else {
+                            path.as_path()
+                        };
+                        subtrees.insert(directory.to_owned());
+                    }
                 }
                 for (path, stamp) in &observed_files {
                     if overlays.contains_key(path)
@@ -627,83 +924,164 @@ impl Coordinator {
                     }
                 }
             }
-            if scan {
+            if scan || !subtrees.is_empty() {
                 self.status.lock().unwrap().active = true;
-                observed_files.clear();
-                observed_directories.clear();
-                if self.options.watch {
-                    observed_directories.insert(self.root.clone(), Stamp::read(&self.root).ok());
+                let mut roots = Vec::<PathBuf>::new();
+                if scan {
+                    roots.push(self.root.clone());
+                    subtrees.clear();
+                    inherited = ignores.lock().unwrap().inherited_stamps();
+                } else {
+                    for path in std::mem::take(&mut subtrees) {
+                        if roots.last().is_none_or(|root| !path.starts_with(root)) {
+                            roots.push(path);
+                        }
+                    }
                 }
-                let mut walker = ignore::WalkBuilder::new(&self.root);
-                walker
-                    .hidden(false)
-                    .follow_links(false)
-                    .git_ignore(self.options.index_exclude_gitignore)
-                    .git_global(self.options.index_exclude_gitignore)
-                    .git_exclude(self.options.index_exclude_gitignore)
-                    .require_git(false);
+                let under_scan = |path: &Path| {
+                    roots
+                        .binary_search_by(|root| root.as_path().cmp(path))
+                        .map_or_else(|pos| pos > 0 && path.starts_with(&roots[pos - 1]), |_| true)
+                };
+                observed_files.retain(|p, _| !under_scan(p));
+                observed_directories.retain(|p, _| !under_scan(p));
+                aliases.paths.retain(|p, _| !under_scan(p));
                 let mut seen = HashSet::new();
-                let filter_root = self.root.clone();
-                let filter_patterns = self.excludes.clone();
-                let filter_cache = self.cache.parent().unwrap().to_path_buf();
-                walker.filter_entry(move |entry| {
-                    !entry.path().starts_with(&filter_cache)
-                        && !excluded(&filter_root, entry.path(), &filter_patterns)
-                });
-                for entry in walker.build() {
-                    if self.cancelled.load(Ordering::Acquire) {
+                for start in &roots {
+                    if self.cancelled.load(Ordering::Relaxed) {
                         break;
                     }
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(e) => {
-                            self.log(e.to_string());
+                    ignores.lock().unwrap().refresh(start);
+                    let filter_allows = if self.filter.folder.path == self.root {
+                        self.filter.admits(start, true)
+                    } else {
+                        start.strip_prefix(&self.root).is_ok_and(|rel| {
+                            self.filter.admits(&self.filter.folder.path.join(rel), true)
+                        })
+                    };
+                    if !filter_allows
+                        || !start.is_dir()
+                        || ignores.lock().unwrap().pruned(start, true)
+                    {
+                        continue;
+                    }
+                    if self.options.watch {
+                        observed_directories.insert(start.clone(), Stamp::read(start).ok());
+                    }
+                    let mut walker = ignore::WalkBuilder::new(start);
+                    walker
+                        .hidden(false)
+                        .follow_links(self.filter.folder.follow_links)
+                        .git_ignore(false)
+                        .git_global(false)
+                        .git_exclude(false)
+                        .ignore(false)
+                        .parents(false)
+                        .require_git(false);
+                    let filter_root = self.root.clone();
+                    let filter = self.filter.clone();
+                    let filter_cache = self.cache.parent().unwrap().to_path_buf();
+                    let ignores = ignores.clone();
+                    walker.filter_entry(move |entry| {
+                        let path = entry.path();
+                        let directory = entry.file_type().is_some_and(|kind| kind.is_dir());
+                        !path.starts_with(&filter_cache)
+                            && !ignores.lock().unwrap().matches(path, directory)
+                            && if filter_root == filter.folder.path {
+                                filter.admits_entry(path, directory)
+                            } else {
+                                path.strip_prefix(&filter_root).is_ok_and(|relative| {
+                                    filter
+                                        .admits_entry(&filter.folder.path.join(relative), directory)
+                                })
+                            }
+                    });
+                    let mut linked = (self.filter.folder.follow_links
+                        && start.canonicalize().is_ok_and(|p| p != *start))
+                    .then_some(0);
+                    for entry in walker.build() {
+                        if self.cancelled.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(e) => {
+                                self.log(e.to_string());
+                                continue;
+                            }
+                        };
+                        if linked.is_some_and(|depth| depth >= entry.depth()) && entry.depth() != 0
+                        {
+                            linked = None;
+                        }
+                        if entry.path_is_symlink() && linked.is_none() {
+                            linked = Some(entry.depth());
+                        }
+                        if self.options.watch && entry.file_type().is_some_and(|ty| ty.is_dir()) {
+                            observed_directories
+                                .insert(entry.path().into(), Stamp::read(entry.path()).ok());
+                            for name in [".gitignore", ".ignore"] {
+                                let path = entry.path().join(name);
+                                observed_directories.insert(path.clone(), Stamp::read(&path).ok());
+                            }
+                        }
+                        if !entry.file_type().is_some_and(|ty| ty.is_file()) {
                             continue;
                         }
-                    };
-                    if self.options.watch && entry.file_type().is_some_and(|ty| ty.is_dir()) {
-                        observed_directories
-                            .insert(entry.path().into(), Stamp::read(entry.path()).ok());
-                        for name in [".gitignore", ".ignore"] {
-                            let path = entry.path().join(name);
-                            observed_directories.insert(path.clone(), Stamp::read(&path).ok());
+                        let path = entry.into_path();
+                        if linked.is_some()
+                            && let Ok(target) = path.canonicalize()
+                            && target != path
+                        {
+                            aliases.paths.insert(path.clone(), target);
                         }
+                        seen.insert(path);
                     }
-                    if !entry.file_type().is_some_and(|ty| ty.is_file())
-                        || self.excluded(entry.path())
-                    {
+                }
+                let retired = aliases.reconcile(&mut seen, |target| {
+                    !self.excluded(target)
+                        && target.is_file()
+                        && !ignores.lock().unwrap().pruned(target, false)
+                });
+                for path in &retired {
+                    observed_files.remove(path);
+                }
+                for path in &seen {
+                    let stamp = (self.options.watch || stamps.contains_key(path))
+                        .then(|| Stamp::read(path).ok())
+                        .flatten();
+                    // Keep membership even without watching. A subtree scan only
+                    // replaces the entries it visited, not the project's total.
+                    observed_files.insert(path.clone(), stamp);
+                    if overlays.contains_key(path) {
                         continue;
                     }
-                    let path = entry.into_path();
-                    seen.insert(path.clone());
-                    if self.options.watch {
-                        observed_files.insert(path.clone(), Stamp::read(&path).ok());
-                    }
-                    if overlays.contains_key(&path) {
-                        continue;
-                    }
-                    if Stamp::read(&path)
-                        .ok()
-                        .is_some_and(|stamp| stamps.get(&path) == Some(&stamp))
-                    {
+                    if stamp.is_some_and(|stamp| stamps.get(path) == Some(&stamp)) {
                         self.status.lock().unwrap().cached_files += 1;
                         continue;
                     }
                     generation += 1;
                     desired.insert(path.clone(), generation);
-                    pending.insert(path, (Instant::now(), generation, None));
+                    pending.insert(path.clone(), (Instant::now(), generation, None));
                 }
                 for path in stamps
                     .keys()
-                    .filter(|path| !seen.contains(*path) && !overlays.contains_key(*path))
+                    .chain(desired.keys())
+                    .filter(|path| {
+                        (under_scan(path) || retired.contains(*path))
+                            && !seen.contains(*path)
+                            && !overlays.contains_key(*path)
+                    })
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect::<HashSet<_>>()
                 {
+                    desired.remove(&path);
+                    pending.remove(&path);
+                    observed_files.remove(&path);
                     self.index.write().unwrap().remove_file(&path);
                     stamps.remove(&path);
                     let _ = journal.append(path, None, None);
                 }
-                self.status.lock().unwrap().total_files = seen.len();
                 scan = false;
             }
             for result in result_rx.try_iter() {
@@ -714,8 +1092,16 @@ impl Coordinator {
                 if desired.get(&result.path) != Some(&result.generation) {
                     continue;
                 }
-                if result.disk && self.options.watch {
-                    observed_files.insert(result.path.clone(), result.stamp);
+                if result.disk && result.analysis.is_ok() {
+                    if result.stamp.is_some() {
+                        if let Some(stamp) = observed_files.get_mut(&result.path) {
+                            *stamp = result.stamp;
+                        } else {
+                            observed_files.insert(result.path.clone(), result.stamp);
+                        }
+                    } else {
+                        observed_files.remove(&result.path);
+                    }
                 }
                 match result.analysis {
                     Ok(analysis) => {
@@ -768,9 +1154,6 @@ impl Coordinator {
                 .collect();
             for path in due {
                 let (_, generation, overlay) = pending.remove(&path).unwrap();
-                if self.excluded(&path) {
-                    continue;
-                }
                 let task_path = path.clone();
                 let analysis = prepared.remove(&path);
                 match tasks.try_send(Task {
@@ -800,6 +1183,7 @@ impl Coordinator {
             let active = !pending.is_empty() || inflight > 0;
             {
                 let mut status = self.status.lock().unwrap();
+                status.total_files = observed_files.len();
                 status.pending_files = pending.len() + inflight;
                 status.active = active;
             }
@@ -840,12 +1224,10 @@ fn analyze_task(
         if stamp.len > options.max_file_size {
             return Ok((Some(stamp), None));
         }
-        if fs::symlink_metadata(&task.path)?.file_type().is_symlink() {
-            return Ok((Some(stamp), None));
-        }
         use std::io::Read;
         let mut bytes = Vec::new();
-        fs::File::open(&task.path)?
+        vel_fileio::regular::read(&task.path)
+            .map_err(Error::Analysis)?
             .take(options.max_file_size.saturating_add(1))
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 > options.max_file_size || bytes.contains(&0) {

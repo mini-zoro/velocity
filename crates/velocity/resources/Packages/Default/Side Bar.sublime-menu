@@ -1,5 +1,6 @@
 // Original Velocity menu captions and layout; authored from public behavior.
 [
+  {"caption": "Refresh Folders", "command": "refresh_folder_list"},
   {
     "caption": "Open Selected Entry",
     "command": "side_bar_open"

@@ -1,13 +1,13 @@
 //! Shared ignore-aware project traversal for the index, side bar and file search.
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{WalkBuilder, WalkState};
 use notify::{RecursiveMode, Watcher};
 use std::{
-    collections::BTreeSet,
+    cell::OnceCell,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Bound,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -16,94 +16,415 @@ use std::{
 };
 
 /// Exclusion patterns shared by every project surface.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rules {
-    files: GlobSet,
-    folders: GlobSet,
-    binary: GlobSet,
-    include_files: GlobSet,
-    include_folders: GlobSet,
+    files: Patterns,
+    folders: Patterns,
+    binary: Patterns,
+    include_files: Patterns,
+    include_folders: Patterns,
 }
-fn globs(patterns: &[String]) -> Result<GlobSet, String> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(
-            GlobBuilder::new(pattern)
-                .literal_separator(false)
-                .backslash_escape(false)
-                .build()
-                .map_err(|e| e.to_string())?,
+
+/// The editor's file patterns are not shell globs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Patterns(Vec<Pattern>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Name,
+    Suffix,
+    Absolute,
+    Project,
+}
+
+#[derive(Clone, Debug)]
+struct Pattern {
+    body: String,
+    scope: Scope,
+    directory: bool,
+    wildcard: bool,
+}
+
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        (self.scope, &self.body, self.directory) == (other.scope, &other.body, other.directory)
+    }
+}
+impl Eq for Pattern {}
+
+struct MatchPath<'a> {
+    root: &'a Path,
+    path: &'a Path,
+    name: &'a [u8],
+    relative: OnceCell<Option<&'a [u8]>>,
+    directory: bool,
+}
+
+impl<'a> MatchPath<'a> {
+    fn new(root: &'a Path, path: &'a Path, directory: bool) -> Self {
+        Self {
+            root,
+            path,
+            name: path.file_name().unwrap_or_default().as_encoded_bytes(),
+            relative: OnceCell::new(),
+            directory,
+        }
+    }
+
+    fn relative(&self) -> Option<&'a [u8]> {
+        *self.relative.get_or_init(|| {
+            self.path
+                .strip_prefix(self.root)
+                .ok()
+                .map(|path| path.as_os_str().as_encoded_bytes())
+        })
+    }
+}
+
+fn note_pattern(pattern: &str) {
+    static NOTED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    if (pattern.contains(['{', '[']) || pattern.contains("**"))
+        && NOTED
+            .get_or_init(Mutex::default)
+            .lock()
+            .expect("pattern notes")
+            .insert(pattern.to_owned())
+    {
+        eprintln!(
+            "File pattern {pattern:?}: brackets and braces are literal; consecutive stars act as one '*'."
         );
     }
-    builder.build().map_err(|e| e.to_string())
 }
+
+impl Patterns {
+    /// Compiles literal patterns and the two wildcard operators; no pattern is an error.
+    pub fn new(patterns: &[String]) -> Self {
+        use Scope::*;
+        Self(
+            patterns
+                .iter()
+                .map(|p| {
+                    note_pattern(p);
+                    let (scope, body) = if let Some(rest) = p.strip_prefix("//") {
+                        (Project, rest)
+                    } else if p.starts_with('/') {
+                        (Absolute, p.as_str())
+                    } else if p.contains('/') {
+                        (Suffix, p.as_str())
+                    } else {
+                        (Name, p.as_str())
+                    };
+                    let directory = p.ends_with('/');
+                    let body = if body == "/" {
+                        body
+                    } else {
+                        body.strip_suffix('/').unwrap_or(body)
+                    };
+                    let mut collapsed = String::with_capacity(body.len());
+                    for c in body.chars() {
+                        if c != '*' || !collapsed.ends_with('*') {
+                            collapsed.push(c);
+                        }
+                    }
+                    let wildcard = body.contains(['*', '?']);
+                    Pattern {
+                        body: collapsed,
+                        scope,
+                        directory,
+                        wildcard,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// True when there is no configured constraint.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Matches a project path, using the lexical spelling reached by the walker.
+    pub fn matches(&self, root: &Path, path: &Path, directory: bool) -> bool {
+        !self.is_empty() && self.matches_path(&MatchPath::new(root, path, directory))
+    }
+
+    fn matches_path(&self, path: &MatchPath<'_>) -> bool {
+        self.0.iter().any(|p| p.matches(path))
+    }
+
+    // Where filters also treat directory basenames as subtree filters, but the
+    // chosen search root itself is not a basename candidate.
+    pub(crate) fn matches_within(
+        &self,
+        project: &Path,
+        root: &Path,
+        path: &Path,
+        directory: bool,
+    ) -> bool {
+        path != root
+            && (self.matches(project, path, directory) || self.matches_parent_name(root, path))
+    }
+
+    /// Evaluates index exclusions on a standalone path whose ancestors were not walked.
+    pub fn excludes_index_path(&self, root: &Path, path: &Path, directory: bool) -> bool {
+        !self.is_empty()
+            && (self.matches(root, path, directory) || self.excludes_parents(root, path, directory))
+    }
+
+    fn excludes_parents(&self, root: &Path, path: &Path, directory: bool) -> bool {
+        let Some(parent) = path.parent().filter(|p| *p != root && p.starts_with(root)) else {
+            return false;
+        };
+        // Path rules already match descendants. When checking a file, test its
+        // parent once to include directory-only rules. Bare names need each component.
+        (!directory && {
+            let parent = MatchPath::new(root, parent, true);
+            self.0
+                .iter()
+                .any(|p| p.scope != Scope::Name && p.matches(&parent))
+        }) || self.matches_parent_name(root, path)
+    }
+
+    fn matches_parent_name(&self, root: &Path, path: &Path) -> bool {
+        self.0.iter().any(|p| p.scope == Scope::Name)
+            && path
+                .parent()
+                .and_then(|parent| parent.strip_prefix(root).ok())
+                .is_some_and(|relative| {
+                    relative.iter().any(|name| {
+                        self.0.iter().any(|p| {
+                            p.scope == Scope::Name && p.matches_name(name.as_encoded_bytes())
+                        })
+                    })
+                })
+    }
+}
+
+impl Pattern {
+    // https://www.sublimetext.com/docs/file_patterns.html#path-rules (4066+):
+    // suffixes start at a component boundary and match descendants, not name prefixes.
+    fn matches(&self, path: &MatchPath<'_>) -> bool {
+        if self.scope == Scope::Name {
+            return !path.name.is_empty() && self.matches_name(path.name);
+        }
+        let mut bytes = if self.scope == Scope::Project {
+            let Some(relative) = path.relative() else {
+                return false;
+            };
+            relative
+        } else {
+            path.path.as_os_str().as_encoded_bytes()
+        };
+        // A directory-only rule cannot match the file component, but can match
+        // any of the containing directories. No ancestor strings are constructed.
+        if self.directory && !path.directory {
+            bytes = match bytes.iter().rposition(|&b| b == b'/') {
+                Some(0) if bytes.starts_with(b"/") => &bytes[..1],
+                Some(at) => &bytes[..at],
+                None => return false,
+            };
+        }
+        // The empty project-relative path is the root, not a child entry.
+        if self.scope == Scope::Project && bytes.is_empty() {
+            return false;
+        }
+        if self.wildcard {
+            return path_glob(self.body.as_bytes(), bytes, self.scope == Scope::Suffix);
+        }
+        if self.scope == Scope::Suffix {
+            let body = self.body.as_bytes();
+            // An unanchored literal starts at a component and may end at any
+            // following boundary, including a directory with descendants.
+            let mut tail = bytes;
+            loop {
+                if tail.strip_prefix(body).is_some_and(at_component_end) {
+                    return true;
+                }
+                let Some(slash) = tail.iter().position(|&b| b == b'/') else {
+                    return false;
+                };
+                tail = &tail[slash + 1..];
+            }
+        }
+        let Some(rest) = bytes.strip_prefix(self.body.as_bytes()) else {
+            return false;
+        };
+        rest.is_empty()
+            || rest.starts_with(b"/")
+            || self.scope == Scope::Absolute && self.body == "/"
+            || self.scope == Scope::Project && self.body.is_empty()
+    }
+
+    fn matches_name(&self, name: &[u8]) -> bool {
+        let body = self.body.as_bytes();
+        if !self.wildcard {
+            return body == name;
+        }
+        // Most settings are *.extension. Avoid walking the name in that case.
+        if let Some(suffix) = body.strip_prefix(b"*")
+            && !suffix.contains(&b'*')
+            && !suffix.contains(&b'?')
+        {
+            return name.ends_with(suffix);
+        }
+        let next = |at: usize| {
+            let mut end = at + 1;
+            while end < name.len() && name[end] & 0xc0 == 0x80 {
+                end += 1;
+            }
+            end
+        };
+        let (mut p, mut n) = (0, 0);
+        let mut retry = None;
+        while p < body.len() || n < name.len() {
+            match body.get(p) {
+                Some(b'*') => {
+                    p += 1;
+                    retry = Some((p, n));
+                    continue;
+                }
+                Some(b'?') if name.get(n).is_some_and(|b| *b != b'/') => {
+                    n = next(n);
+                    p += 1;
+                    continue;
+                }
+                Some(b) if *b != b'?' && name.get(n) == Some(b) => {
+                    n += 1;
+                    p += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            let Some((pattern, consumed)) = retry else {
+                return false;
+            };
+            if consumed == name.len() {
+                return false;
+            }
+            n = next(consumed);
+            p = pattern;
+            retry = Some((p, n));
+        }
+        true
+    }
+}
+
+fn at_component_end(rest: &[u8]) -> bool {
+    rest.is_empty() || rest[0] == b'/'
+}
+
+fn path_glob(body: &[u8], path: &[u8], suffix: bool) -> bool {
+    let (mut p, mut n, mut start) = (0, 0, 0);
+    let mut retry = None;
+    loop {
+        match body.get(p) {
+            None if at_component_end(&path[n..]) => return true,
+            Some(b'*') => {
+                p += 1;
+                retry = Some((p, n));
+                continue;
+            }
+            Some(b'?') => {
+                if let Some(width) = scalar_width(&path[n..]) {
+                    p += 1;
+                    n += width;
+                    continue;
+                }
+            }
+            Some(byte) if path.get(n) == Some(byte) => {
+                p += 1;
+                n += 1;
+                continue;
+            }
+            _ => {}
+        }
+        // A path star can consume any byte. Once we reach the first real
+        // star, its earliest possible start covers all later suffix starts.
+        if let Some((pattern, consumed)) = retry {
+            if consumed == path.len() {
+                return false;
+            }
+            p = pattern;
+            n = consumed + 1;
+            retry = Some((p, n));
+        } else if suffix && let Some(slash) = path[start..].iter().position(|&b| b == b'/') {
+            start += slash + 1;
+            n = start;
+            p = 0;
+        } else {
+            return false;
+        }
+    }
+}
+
+fn scalar_width(bytes: &[u8]) -> Option<usize> {
+    let width = match *bytes.first()? {
+        b'/' => return None,
+        0..=0x7f => return Some(1),
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    std::str::from_utf8(bytes.get(..width)?).ok().map(|_| width)
+}
+
 impl Rules {
-    /// Compiles global + per-folder exclusion arrays. Malformed patterns are errors.
+    /// Compiles global and per-folder exclusion arrays.
     pub fn new(files: &[String], folders: &[String], binary: &[String]) -> Result<Self, String> {
         Ok(Self {
-            files: globs(files)?,
-            folders: globs(folders)?,
-            binary: globs(binary)?,
+            files: Patterns::new(files),
+            folders: Patterns::new(folders),
+            binary: Patterns::new(binary),
             ..Self::default()
         })
     }
     /// Adds folder-local include patterns; exclusions still take precedence.
     pub fn with_includes(mut self, files: &[String], folders: &[String]) -> Result<Self, String> {
-        self.include_files = globs(files)?;
-        self.include_folders = globs(folders)?;
+        self.include_files = Patterns::new(files);
+        self.include_folders = Patterns::new(folders);
         Ok(self)
     }
     /// Tests relative names and every ancestor folder; binary exclusions apply to searchable files.
     pub fn allows(&self, root: &Path, path: &Path, directory: bool, searchable: bool) -> bool {
-        let relative = path.strip_prefix(root).unwrap_or(path);
-        if relative.as_os_str().is_empty() && directory {
-            return true;
-        }
-        let relative = if relative.as_os_str().is_empty() {
-            Path::new(path.file_name().unwrap_or_default())
-        } else {
-            relative
-        };
-        let name = relative.file_name().unwrap_or_default();
-        // Replace in Files owns these recovery artifacts. Never search or replace them,
-        // even when a project explicitly includes all files and excludes nothing.
-        if !directory && name.to_string_lossy().contains(".velocity-backup-") {
-            return false;
-        }
-        let admitted = |patterns: &GlobSet, path: &Path| {
-            patterns.is_empty()
-                || patterns.is_match(path)
+        self.allows_entry(root, path, directory, searchable)
+            && (self.folders.is_empty() || !self.folders.excludes_parents(root, path, directory))
+            && (self.include_folders.is_empty()
                 || path
-                    .file_name()
-                    .is_some_and(|n| patterns.is_match(Path::new(n)))
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|p| *p != root && p.starts_with(root))
+                    .all(|parent| self.include_folders.matches(root, parent, true)))
+    }
+
+    /// Checks one entry in a traversal that has already pruned its parents.
+    pub fn allows_entry(
+        &self,
+        root: &Path,
+        path: &Path,
+        directory: bool,
+        searchable: bool,
+    ) -> bool {
+        let matches = MatchPath::new(root, path, directory);
+        let admitted = |includes: &Patterns, excludes: &Patterns| {
+            (includes.is_empty() || includes.matches_path(&matches))
+                && !excludes.matches_path(&matches)
         };
         if directory {
-            return admitted(&self.include_folders, relative)
-                && !self.folders.is_match(relative)
-                && !self.folders.is_match(Path::new(name));
+            return path == root || admitted(&self.include_folders, &self.folders);
         }
-        // https://www.sublimetext.com/docs/projects.html and file_patterns.html:
-        // unmatched folders are excluded; slash-free patterns match names at any depth.
-        // Prune an unmatched ancestor too, just as the walker and Folder::admits do.
-        for parent in relative.ancestors().skip(1) {
-            if (!parent.as_os_str().is_empty() && !admitted(&self.include_folders, parent))
-                || self.folders.is_match(parent)
-                || parent
-                    .file_name()
-                    .is_some_and(|n| self.folders.is_match(Path::new(n)))
-            {
-                return false;
-            }
-        }
-        admitted(&self.include_files, relative)
-            && !self.files.is_match(relative)
-            && !self.files.is_match(Path::new(name))
-            && (!searchable
-                || (!self.binary.is_match(relative) && !self.binary.is_match(Path::new(name))))
+        // Replace in Files owns these recovery artifacts. Never search or replace them,
+        // even when a project explicitly includes all files and excludes nothing.
+        !matches
+            .name
+            .windows(b".velocity-backup-".len())
+            .any(|part| part == b".velocity-backup-")
+            && admitted(&self.include_files, &self.files)
+            && (!searchable || !self.binary.matches_path(&matches))
     }
 }
 /// Project folder, with settings resolved by the application.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Folder {
     /// Absolute root.
     pub path: PathBuf,
@@ -120,6 +441,7 @@ impl Folder {
         let mut walk = WalkBuilder::new(start);
         let root = self.path.clone();
         let rules = self.rules.clone();
+        let admits_start = self.admits(start);
         // https://www.sublimetext.com/docs/indexing.html: index_exclude_gitignore
         // controls symbol indexing, not Goto Anything / Find in Files. Preserve the
         // side bar's ignore policy; searchable file lists use explicit project rules.
@@ -134,8 +456,8 @@ impl Folder {
             .max_depth(depth)
             .threads(thread::available_parallelism().map_or(1, |n| n.get().min(4)))
             .filter_entry(move |entry| {
-                entry.file_name() != ".git"
-                    && rules.allows(
+                admits_start
+                    && rules.allows_entry(
                         &root,
                         entry.path(),
                         entry.file_type().is_some_and(|t| t.is_dir()),
@@ -144,33 +466,125 @@ impl Folder {
             });
         walk
     }
-    /// Whether the searchable walk would descend to `path`: it lies below the root, outside `.git`,
+    /// Whether the searchable walk would descend to `path`: it lies below the root,
     /// and every folder between the root and it passes the folder rules. The entry's own rule is
     /// checked by the caller once its type is known.
     fn admits(&self, path: &Path) -> bool {
-        let Ok(relative) = path.strip_prefix(&self.path) else {
-            return false;
-        };
-        if relative.components().any(|c| c.as_os_str() == ".git") {
-            return false;
+        path == self.path
+            || (path.starts_with(&self.path)
+                && path
+                    .parent()
+                    .is_none_or(|parent| self.rules.allows(&self.path, parent, true, true)))
+    }
+    /// Lazy one-level load with ignore files.
+    pub fn children(&self, path: &Path) -> Result<Vec<Entry>, String> {
+        self.read_children(path, true, &AtomicBool::new(false))
+    }
+    /// Side-bar listing; ignored entries are visible, with badges supplied separately.
+    pub fn sidebar_children(&self, path: &Path, stop: &AtomicBool) -> Result<Vec<Entry>, String> {
+        self.read_children(path, false, stop)
+    }
+
+    /// Collects a capped recursive expansion using the walker's bounded thread pool.
+    /// External symlink directories remain visible but are not expanded by this action.
+    pub fn sidebar_subtree(
+        &self,
+        path: &Path,
+        roots: &[PathBuf],
+        limit: usize,
+        stop: &AtomicBool,
+    ) -> SidebarSubtree {
+        let roots: Vec<_> = roots.iter().filter_map(|p| p.canonicalize().ok()).collect();
+        let out = Mutex::new(SidebarSubtree::default());
+        let mut walker = self.walker(path, None, false);
+        walker
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false)
+            .parents(false);
+        if path
+            .canonicalize()
+            .is_ok_and(|target| roots.iter().all(|p| !target.starts_with(p)))
+        {
+            return SidebarSubtree::default();
         }
-        let mut current = self.path.clone();
-        let mut parts = relative.components().peekable();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_none() {
+        walker.build_parallel().run(|| {
+            Box::new(|entry| {
+                if stop.load(Ordering::Relaxed) {
+                    return WalkState::Quit;
+                }
+                let Ok(entry) = entry else {
+                    return WalkState::Continue;
+                };
+                let Some(kind) = entry.file_type() else {
+                    return WalkState::Continue;
+                };
+                let directory = kind.is_dir();
+                if !directory && !kind.is_file() {
+                    return WalkState::Continue;
+                }
+                let external = directory
+                    && entry.path_is_symlink()
+                    && entry
+                        .path()
+                        .canonicalize()
+                        .is_ok_and(|target| roots.iter().all(|p| !target.starts_with(p)));
+                let mut out = out.lock().expect("sidebar subtree");
+                if entry.depth() > 0
+                    && let Some(parent) = entry.path().parent()
+                    && let Some(parent_entries) = out.listings.get_mut(parent)
+                {
+                    parent_entries.push(Entry {
+                        path: entry.path().to_owned(),
+                        directory,
+                    });
+                }
+                if !directory {
+                    return WalkState::Continue;
+                }
+                if external || out.listings.len() >= limit {
+                    out.limited |= !external;
+                    return WalkState::Skip;
+                }
+                out.listings.entry(entry.into_path()).or_default();
+                WalkState::Continue
+            })
+        });
+        let mut out = out.into_inner().expect("sidebar subtree");
+        for entries in out.listings.values_mut() {
+            sort_sidebar_entries(entries);
+        }
+        out
+    }
+    fn read_children(
+        &self,
+        path: &Path,
+        ignored: bool,
+        stop: &AtomicBool,
+    ) -> Result<Vec<Entry>, String> {
+        let mut entries = Vec::new();
+        let ancestors: Vec<_> = if self.follow_links {
+            path.ancestors()
+                .take_while(|p| p.starts_with(&self.path))
+                .filter_map(|p| std::fs::canonicalize(p).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut walker = self.walker(path, Some(1), false);
+        if !ignored {
+            walker
+                .git_ignore(false)
+                .git_global(false)
+                .git_exclude(false)
+                .ignore(false)
+                .parents(false);
+        }
+        for result in walker.build() {
+            if stop.load(Ordering::Relaxed) {
                 break;
             }
-            current.push(part);
-            if !self.rules.allows(&self.path, &current, true, true) {
-                return false;
-            }
-        }
-        true
-    }
-    /// Lazy one-level side-bar load; no descendants are enumerated until expanded.
-    pub fn children(&self, path: &Path) -> Result<Vec<Entry>, String> {
-        let mut entries = Vec::new();
-        for result in self.walker(path, Some(1), false).build() {
             let entry = match result {
                 Ok(entry) => entry,
                 Err(error) if child_entry_error(&error, path) => continue,
@@ -179,17 +593,19 @@ impl Folder {
             if entry.depth() == 0 {
                 continue;
             }
-            let directory = entry.file_type().is_some_and(|t| t.is_dir());
-            if directory && self.follow_links {
+            let Some(kind) = entry.file_type() else {
+                continue;
+            };
+            let directory = kind.is_dir();
+            if !(directory || kind.is_file()) {
+                continue;
+            }
+            if directory && entry.path_is_symlink() {
                 let Ok(canonical) = std::fs::canonicalize(entry.path()) else {
                     // A link may disappear between directory enumeration and expansion.
                     continue;
                 };
-                let cyclic = path
-                    .ancestors()
-                    .take_while(|p| p.starts_with(&self.path))
-                    .any(|parent| std::fs::canonicalize(parent).ok().as_ref() == Some(&canonical));
-                if cyclic {
+                if ancestors.contains(&canonical) {
                     continue;
                 }
             }
@@ -198,7 +614,9 @@ impl Folder {
                 directory,
             });
         }
-        entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
+        if !stop.load(Ordering::Relaxed) {
+            sort_sidebar_entries(&mut entries);
+        }
         Ok(entries)
     }
 }
@@ -230,6 +648,28 @@ pub struct Entry {
     pub path: PathBuf,
     /// Whether expanding is meaningful.
     pub directory: bool,
+}
+
+/// Listings for the directories expanded by a single recursive side-bar action.
+#[derive(Debug, Default)]
+pub struct SidebarSubtree {
+    /// Expanded directories and their immediate children.
+    pub listings: HashMap<PathBuf, Vec<Entry>>,
+    /// Whether the directory budget prevented further expansion.
+    pub limited: bool,
+}
+
+/// The side bar groups directories first and folds case (original spelling breaks ties).
+/// The public docs do not specify a numeric collation; keep lexical number ordering.
+pub fn sort_sidebar_entries(entries: &mut [Entry]) {
+    entries.sort_by_cached_key(|e| {
+        let name = e.path.file_name().unwrap_or_default();
+        (
+            !e.directory,
+            name.to_string_lossy().to_lowercase(),
+            name.to_owned(),
+        )
+    });
 }
 /// Complete, sorted project snapshot. Partial traversals are never published.
 #[derive(Debug, Default)]
@@ -268,7 +708,7 @@ fn walk(folder: &Folder, start: &Path, stop: &AtomicBool) -> Walked {
                     }
                     out.directories.push(entry.into_path());
                 }
-                Err(e) => out.errors.push(e.to_string()),
+                Err(e) if out.errors.len() < 64 => out.errors.push(e.to_string()),
                 _ => {}
             }
             WalkState::Continue
@@ -324,7 +764,13 @@ impl Tree {
         };
         let mut files = Vec::new();
         for folder in folders {
+            if stop.load(Ordering::Relaxed) {
+                return tree;
+            }
             files.append(&mut tree.absorb(walk(folder, &folder.path, stop)));
+        }
+        if stop.load(Ordering::Relaxed) {
+            return tree;
         }
         files.sort();
         files.dedup();
@@ -336,7 +782,12 @@ impl Tree {
     fn absorb(&mut self, walked: Walked) -> Vec<PathBuf> {
         self.directories.extend(walked.directories);
         self.linked.extend(walked.linked);
-        self.errors.extend(walked.errors);
+        self.errors.extend(
+            walked
+                .errors
+                .into_iter()
+                .take(64usize.saturating_sub(self.errors.len())),
+        );
         walked.files
     }
     fn snapshot(&mut self) -> Snapshot {
@@ -471,13 +922,39 @@ fn change(event: notify::Result<notify::Event>) -> Option<Change> {
 }
 /// More changed paths than this in one burst re-walk the project instead.
 const INCREMENTAL_LIMIT: usize = 20_000;
+
+/// Coalesced listing invalidations independent of the searchable file set.
+#[derive(Default, Debug)]
+pub struct DirectoryChanges {
+    /// A watcher overflow invalidated every expanded listing.
+    pub all: bool,
+    /// Exact expanded directories that may have changed.
+    pub paths: BTreeSet<PathBuf>,
+}
+impl DirectoryChanges {
+    fn mark(&mut self, path: PathBuf) {
+        if !self.all {
+            self.paths.insert(path);
+            if self.paths.len() > INCREMENTAL_LIMIT {
+                self.invalidate();
+            }
+        }
+    }
+    fn invalidate(&mut self) {
+        self.paths.clear();
+        self.all = true;
+    }
+}
+
+type Expanded = Arc<Mutex<Arc<HashSet<PathBuf>>>>;
 /// Background parallel index, updated from file events, with a directory-mtime fallback for
 /// symlinked folders and for volumes without file events.
 #[derive(Debug)]
 pub struct Index {
-    rx: mpsc::Receiver<Snapshot>,
+    latest: Arc<Mutex<Option<Snapshot>>>,
+    directory_changes: Arc<Mutex<DirectoryChanges>>,
+    expanded: Expanded,
     stop: Arc<AtomicBool>,
-    join: Option<thread::JoinHandle<()>>,
 }
 impl Index {
     /// Starts indexing immediately. Edits/replacements/renames invalidate the file list.
@@ -487,16 +964,25 @@ impl Index {
     // A constructor seam lets headless tests exercise unavailable-watcher polling
     // without depending on delivery from the host's native filesystem event service.
     fn start(folders: Vec<Folder>, watch: bool) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let latest = Arc::new(Mutex::new(None));
+        let published = latest.clone();
+        let directory_changes = Arc::new(Mutex::new(DirectoryChanges::default()));
+        let listings = directory_changes.clone();
+        let expanded: Expanded = Arc::default();
+        let directories = expanded.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = stop.clone();
-        let join = thread::spawn(move || {
-            let (events, changed) = mpsc::channel();
+        thread::spawn(move || {
+            let (events, changed) = mpsc::sync_channel(256);
+            let overflow = Arc::new(AtomicBool::new(false));
             let mut watch_errors = Vec::new();
             let mut watcher = if watch {
+                let overflow = overflow.clone();
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if let Some(change) = change(event) {
-                        let _ = events.send(change);
+                    if let Some(change) = change(event)
+                        && events.try_send(change).is_err()
+                    {
+                        overflow.store(true, Ordering::Release);
                     }
                 })
                 .map_err(|e| watch_errors.push(e.to_string()))
@@ -516,23 +1002,32 @@ impl Index {
             let mut tree = Tree::scan(&folders, &cancelled);
             tree.errors.append(&mut watch_errors);
             let mut stamps = tree.polled(poll_everything);
-            if cancelled.load(Ordering::Acquire) || tx.send(tree.snapshot()).is_err() {
+            if cancelled.load(Ordering::Acquire) {
                 return;
             }
+            *published.lock().expect("snapshot") = Some(tree.snapshot());
             let mut ticks = 0u32;
+            let mut directory_stamps = BTreeMap::new();
             while !cancelled.load(Ordering::Acquire) {
-                let mut rescan = false;
+                let mut rescan = overflow.swap(false, Ordering::AcqRel);
                 let mut paths = Vec::new();
                 let mut take = |change: Change| match change {
                     Change::Rescan => rescan = true,
-                    Change::Paths(mut p) => paths.append(&mut p),
+                    Change::Paths(mut p)
+                        if p.len() <= INCREMENTAL_LIMIT.saturating_sub(paths.len()) =>
+                    {
+                        paths.append(&mut p)
+                    }
+                    Change::Paths(_) => rescan = true,
                 };
                 match changed.recv_timeout(Duration::from_millis(100)) {
                     Ok(first) => {
                         take(first);
                         // Coalesce a burst: wait for a short quiet period, at most 250 ms.
                         let start = Instant::now();
-                        while start.elapsed() < Duration::from_millis(250) {
+                        while !cancelled.load(Ordering::Relaxed)
+                            && start.elapsed() < Duration::from_millis(250)
+                        {
                             match changed.recv_timeout(Duration::from_millis(50)) {
                                 Ok(next) => take(next),
                                 Err(_) => break,
@@ -544,11 +1039,50 @@ impl Index {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                paths = paths.iter().filter_map(|path| tree.resolve(path)).collect();
+                let expanded = directories.lock().expect("expanded directories").clone();
+                directory_stamps.retain(|path, _| expanded.contains(path));
+                let mut changed_dirs = DirectoryChanges::default();
+                if rescan {
+                    changed_dirs.invalidate();
+                }
+                for path in &paths {
+                    if expanded.contains(path) {
+                        changed_dirs.mark(path.clone());
+                    }
+                    if let Some(parent) = path.parent().filter(|p| expanded.contains(*p)) {
+                        changed_dirs.mark(parent.to_owned());
+                    }
+                }
+                // FSEvents may not cross links. This also covers a sandbox or volume
+                // that registers a watcher but delivers no events.
+                for path in expanded.iter() {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let stamp = stamp(path);
+                    if directory_stamps.insert(path.clone(), stamp) != Some(stamp) {
+                        changed_dirs.mark(path.clone());
+                    }
+                }
+                if changed_dirs.all || !changed_dirs.paths.is_empty() {
+                    let mut listings = listings.lock().expect("listing changes");
+                    if changed_dirs.all {
+                        listings.invalidate();
+                    } else {
+                        for path in changed_dirs.paths {
+                            listings.mark(path);
+                        }
+                    }
+                }
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(20) && stamps.iter().any(|(p, old)| stamp(p) != *old) {
                     rescan = true;
                 }
-                let publish = if rescan || paths.len() > INCREMENTAL_LIMIT {
+                let publish = if rescan {
                     tree = Tree::scan(&folders, &cancelled);
                     true
                 } else if paths.is_empty() {
@@ -564,35 +1098,266 @@ impl Index {
                 };
                 if publish {
                     stamps = tree.polled(poll_everything);
-                    if cancelled.load(Ordering::Acquire) || tx.send(tree.snapshot()).is_err() {
+                    if cancelled.load(Ordering::Acquire) {
                         break;
                     }
+                    *published.lock().expect("snapshot") = Some(tree.snapshot());
                 }
             }
         });
         Self {
-            rx,
+            latest,
+            directory_changes,
+            expanded,
             stop,
-            join: Some(join),
         }
     }
     /// Returns the newest complete snapshot without waiting.
     pub fn poll(&self) -> Option<Snapshot> {
-        self.rx.try_iter().last()
+        self.latest.lock().expect("snapshot").take()
+    }
+    /// Tracks only the directories whose listings may need updating.
+    pub fn watch_directories(&self, paths: Arc<HashSet<PathBuf>>) {
+        *self.expanded.lock().expect("expanded directories") = paths;
+    }
+    /// Drains listing invalidations even when the searchable paths haven't changed.
+    pub fn directory_changes(&self) -> DirectoryChanges {
+        self.directory_changes.try_lock().map_or_else(
+            |_| DirectoryChanges::default(),
+            |mut changes| std::mem::take(&mut *changes),
+        )
     }
 }
 impl Drop for Index {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_pattern_reference_table() {
+        // https://www.sublimetext.com/docs/file_patterns.html (current, 4066+ examples).
+        for (pattern, path, directory, expected) in [
+            ("abc", "/p/abc", false, true),
+            ("abc", "/p/abcd", false, false),
+            ("a?c", "/p/abc", false, true),
+            ("a?c", "/p/ac", false, false),
+            ("a*c", "/p/abc", false, true),
+            ("a*c", "/p/ac", false, true),
+            ("a*c", "/p/abdc", false, true),
+            ("mydir/one", "/parent/mydir/one", false, true),
+            ("mydir/one", "/mydir/one", true, true),
+            ("mydir/one", "/mydir/one/sub", false, true),
+            ("mydir/two", "/parent/mydir/two", false, true),
+            ("mydir/two", "/parent/mydir/two_sub", false, false),
+            ("/mydir/three", "/mydir/three", false, true),
+            ("/mydir/three", "/nested/mydir/three", false, false),
+            ("mydir/three/", "/parent/mydir/three/sub", false, true),
+            ("mydir/three/", "/parent/mydir/three", false, false),
+            ("mydir/four/", "/parent/mydir/four", true, true),
+            ("mydir/four/", "/parent/mydir/four/sub", false, true),
+            ("//mydir/five", "/project1/mydir/five", false, true),
+            ("//mydir/five", "/project2/mydir/five", false, true),
+            ("//mydir/five", "/project1/nested/mydir/five", false, false),
+            ("foo*", "/root/foo/bar/x.txt", false, false),
+            ("a/*/z", "/root/a/b/c/z", false, true),
+            ("a/*/z", "/root/a/z", true, false),
+            ("a*/*/a*", "/repo/[a]/x/a\nb/a", false, false),
+            ("x/**/gen", "/root/x/gen", true, false),
+            ("a/?/z", "/root/a/b/c/z", false, false),
+            ("?", "/root/好", false, true),
+            ("[abc]", "/root/[abc]", false, true),
+            ("{a,b}", "/root/a", false, false),
+            ("a/**/z", "/root/a/b/z", false, true),
+            ("a/**/z", "/root/a/**/z", false, true),
+            ("**/node_modules", "/project1/node_modules", true, true),
+            ("**/*.min.js", "/project1/public/app.min.js", false, true),
+        ] {
+            let root = if path.starts_with("/project2/") {
+                "/project2"
+            } else {
+                "/project1"
+            };
+            assert_eq!(
+                Patterns::new(&[pattern.into()]).matches(
+                    Path::new(root),
+                    Path::new(path),
+                    directory
+                ),
+                expected,
+                "{pattern:?} {path:?}"
+            );
+        }
+    }
+    #[test]
+    #[ignore = "400,000 deterministic comparisons against the scalar oracle"]
+    fn round20_random_file_pattern_comparison() {
+        // Test every candidate component substring using simple wildcard DP,
+        // independently of the production regex or greedy basename matcher.
+        fn whole(pattern: &str, candidate: &str, path: bool) -> bool {
+            let chars: Vec<_> = candidate.chars().collect();
+            let mut reachable = vec![false; chars.len() + 1];
+            reachable[0] = true;
+            for token in pattern.chars() {
+                if token == '*' {
+                    for (i, &c) in chars.iter().enumerate() {
+                        reachable[i + 1] |= reachable[i] && (path || c != '/');
+                    }
+                } else {
+                    for (i, &c) in chars.iter().enumerate().rev() {
+                        reachable[i + 1] = reachable[i] && (token == c || token == '?' && c != '/');
+                    }
+                    reachable[0] = false;
+                }
+            }
+            reachable[chars.len()]
+        }
+        fn oracle(pattern: &str, path: &str, directory: bool) -> bool {
+            if !pattern.contains('/') {
+                let name = path.rsplit('/').next().unwrap();
+                return !name.is_empty() && whole(pattern, name, false);
+            }
+            let relative = pattern.starts_with("//");
+            let anchored = pattern.starts_with('/');
+            let mut path = if relative {
+                let Some(path) = path.strip_prefix("/repo/") else {
+                    return false;
+                };
+                path
+            } else {
+                path
+            };
+            if pattern.ends_with('/') && !directory {
+                let Some((parent, _)) = path.rsplit_once('/') else {
+                    return false;
+                };
+                path = if parent.is_empty() && !relative {
+                    "/"
+                } else {
+                    parent
+                };
+            }
+            let body = pattern.strip_prefix("//").unwrap_or(pattern);
+            let body = if body == "/" {
+                body
+            } else {
+                body.strip_suffix('/').unwrap_or(body)
+            };
+            if body.is_empty() && relative || body == "/" && path.starts_with('/') {
+                return true;
+            }
+            for start in std::iter::once(0).chain(
+                path.match_indices('/')
+                    .map(|(i, _)| i + 1)
+                    .filter(|_| !anchored),
+            ) {
+                for end in path.match_indices('/').map(|(i, _)| i).chain([path.len()]) {
+                    if end >= start && whole(body, &path[start..end], true) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        let mut seed = 0x2a7f_32c6_a021_4badu64;
+        let mut random = |n| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize % n
+        };
+        let components = [
+            "a", "b", "c", "ab", "世", "x", "[a]", "{a,b}", "gen", "b.c", "a\nb",
+        ];
+        let source = [
+            "a", "b", "a*", "**", "*?", "?", "[a]", "{a,b}", "世?", "gen", "x",
+        ];
+        for p in 0..800 {
+            let pattern = match p % 8 {
+                0 => format!(
+                    "{}/{}*/{}",
+                    source[random(3)],
+                    ["", "*"][random(2)],
+                    source[random(3)]
+                ),
+                1 => format!("//{}", source[random(source.len())]),
+                2 => format!(
+                    "//{}/{}",
+                    source[random(source.len())],
+                    source[random(source.len())]
+                ),
+                3 => format!("/repo/{}/", source[random(source.len())]),
+                4 => source[random(source.len())].to_string(),
+                5 => format!("//{}/", source[random(source.len())]),
+                6 => format!(
+                    "{}/{}/",
+                    source[random(source.len())],
+                    source[random(source.len())]
+                ),
+                _ => format!(
+                    "{}/{}/{}",
+                    source[random(source.len())],
+                    source[random(source.len())],
+                    source[random(source.len())]
+                ),
+            };
+            let compiled = Patterns::new(std::slice::from_ref(&pattern));
+            for _ in 0..500 {
+                let mut path = if random(5) == 0 { "/outer" } else { "/repo" }.to_owned();
+                for _ in 0..random(6) {
+                    path.push('/');
+                    path.push_str(components[random(components.len())]);
+                }
+                let directory = random(2) == 0;
+                assert_eq!(
+                    compiled.matches(Path::new("/repo"), Path::new(&path), directory),
+                    oracle(&pattern, &path, directory),
+                    "{pattern:?}, {path:?}, directory={directory}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn sidebar_sort_directories_then_folded_names() {
+        let mut entries = [
+            ("README.md", false),
+            ("a.txt", false),
+            ("z", true),
+            ("A.txt", false),
+            ("file2", false),
+            ("file10", false),
+            ("A", true),
+        ]
+        .map(|(p, directory)| Entry {
+            path: p.into(),
+            directory,
+        });
+        sort_sidebar_entries(&mut entries);
+        assert_eq!(
+            entries.map(|e| e.path),
+            ["A", "z", "A.txt", "a.txt", "file10", "file2", "README.md"].map(PathBuf::from)
+        );
+    }
+    #[test]
+    fn dot_git_visibility_is_a_folder_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir(&git).unwrap();
+        std::fs::write(git.join("hello"), "allowed by explicit empty rules").unwrap();
+        let mut folder = Folder {
+            path: dir.path().into(),
+            name: "root".into(),
+            follow_links: false,
+            rules: Rules::default(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(build(&[folder.clone()], &stop).0.files.len(), 1);
+        folder.rules = Rules::new(&[], &[".git".into()], &[]).unwrap();
+        assert!(build(&[folder], &stop).0.files.is_empty());
+    }
     #[test]
     fn sidebar_and_index_share_exclusions_and_lazy_loading() {
         let dir = tempfile::tempdir().unwrap();

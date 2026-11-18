@@ -13,8 +13,23 @@ use std::{
 };
 use vel_color_scheme::{ColorScheme, DecorationOptions, FontStyle as Decoration};
 use vel_platform::{Appearance, Point, Rect, Size, Utf16Range};
+use vel_render::invisibles::{Invisible, WhiteSpace};
 use vel_render::scene::*;
 use vel_text::Text;
+
+fn invisible_settings(e: &Editor) -> Invisible {
+    // ST4 builds 4107 and 4126: https://www.sublimetext.com/download
+    Invisible {
+        whitespace: match e.settings.string("draw_unicode_white_space", "none") {
+            "all" => WhiteSpace::All,
+            "punctuation" => WhiteSpace::Punctuation,
+            _ => WhiteSpace::None,
+        },
+        bidi: e.settings.bool("draw_unicode_bidi", false),
+        control: e.settings.bool("draw_control_characters", false),
+    }
+}
+
 /// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
 /// Hard line commands bypass this function and retain the buffer's logical behavior.
 pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: bool) -> usize {
@@ -177,6 +192,7 @@ struct SelectionCache {
 }
 #[derive(Debug)]
 pub struct View {
+    pub(crate) image_preview: crate::open_requests::ImagePreview,
     pub profile: Option<SceneProfile>,
     units: HashMap<u64, CachedLine>,
     selection_cache: Option<SelectionCache>,
@@ -589,6 +605,7 @@ impl View {
     }
     pub fn new(size: Size, cell: f64, ascent: f64) -> Self {
         Self {
+            image_preview: Default::default(),
             profile: std::env::var_os("VELOCITY_REVIEW_PROFILE").map(|_| SceneProfile::default()),
             units: HashMap::new(),
             selection_cache: None,
@@ -892,12 +909,16 @@ impl View {
                 self.transform_text_anchor(e, state, point, &mut was_visible);
             }
         }
-        e.layout.borrow_mut().configure(
-            &e.text,
-            (e.buffer.id(), vel_buffer::ChangeId(e.revision)),
-            options,
-            &folds,
-        );
+        {
+            let mut layout = e.layout.borrow_mut();
+            layout.set_invisibles(invisible_settings(e));
+            layout.configure(
+                &e.text,
+                (e.buffer.id(), vel_buffer::ChangeId(e.revision)),
+                options,
+                &folds,
+            );
+        }
         let annotations = e.annotations.borrow();
         let mut blocks: Vec<(usize, usize)> = annotations
             .current
@@ -986,7 +1007,7 @@ impl View {
         });
         // User scrolling records only a row/segment boundary; no caret or line
         // shaping. Painted rows below also supply this bookmark at no extra query.
-        if self.reflow_anchor.as_ref().unwrap().mark.is_none() && parked {
+        if parked && mark.is_none() {
             self.record_reading_mark(e);
         }
         self.style_inputs = self.style_input_key(e);
@@ -1325,7 +1346,10 @@ impl View {
     #[cfg(test)]
     pub(crate) fn text_scroll_anchor(&mut self, e: &Editor) -> TextScrollAnchor {
         self.apply_style(e);
-        self.capture_text_anchor(e, self.reflow_anchor.as_ref().unwrap().geometry)
+        self.reflow_anchor.as_ref().map_or_else(
+            || self.reading_mark(e),
+            |state| self.capture_text_anchor(e, state.geometry),
+        )
     }
     fn remember_scroll(&mut self, e: &Editor) {
         let pixels = (self.scroll_x, self.scroll_y);
@@ -1412,11 +1436,16 @@ impl View {
         let speed = e.settings.number("scroll_speed", 1.);
         let to = self.scroll_position();
         self.scroll_animation = None;
-        if !reduce_motion && speed.is_finite() && speed > 0. && from != to {
+        if !reduce_motion
+            && speed.is_finite()
+            && speed > 0.
+            && from != to
+            && let Some(state) = &self.reflow_anchor
+        {
             self.scroll_animation = Some(ScrollAnimation {
                 from,
                 to,
-                target: self.capture_text_anchor(e, self.reflow_anchor.as_ref().unwrap().geometry),
+                target: self.capture_text_anchor(e, state.geometry),
                 started: now,
                 duration: (0.18 / speed).clamp(0.01, 2.),
             });
@@ -1570,14 +1599,19 @@ impl View {
             layout.column(&e.text, end)
         } else {
             let line = e.text.line(row).to_string();
+            let gaps = layout.invisible_gaps(row, &line);
+            let start = e.text.line_to_byte(row);
             segment.indent
                 + layout::units(&line, layout.hidden(row), e.preferences.tab_size)
                     .iter()
-                    .filter(|u| {
-                        u.bytes.start >= segment.bytes.start
-                            && u.bytes.end <= end - e.text.line_to_byte(row)
+                    .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= end - start)
+                    .map(|u| {
+                        u.width
+                            + layout.phantom_gap(start + u.bytes.start)
+                            + gaps
+                                .as_ref()
+                                .map_or(0, |g| layout::Layout::invisible_gap(g, u.bytes.start))
                     })
-                    .map(|u| u.width)
                     .sum::<usize>()
         };
         r.width =
@@ -1798,6 +1832,53 @@ impl View {
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
         let mut phase = self.profile.as_ref().map(|_| Instant::now());
+        if let Some(image) = &self.image_preview.image {
+            let scheme = fallback_scheme(self.appearance);
+            let clip = Rect {
+                x: 0.,
+                y: self.tab_height,
+                width: self.size.width,
+                height: (self.size.height - self.tab_height).max(0.),
+            };
+            let [w, h] = image.logical_size.map(f64::from);
+            let scale = (clip.width / w)
+                .min((clip.height - 24.).max(0.) / h)
+                .min(1.);
+            let rect = Rect {
+                x: (clip.width - w * scale) * 0.5,
+                y: clip.y + ((clip.height - 24.).max(0.) - h * scale) * 0.5,
+                width: w * scale,
+                height: h * scale,
+            };
+            let mut layer = Layer::default();
+            layer.surfaces.push(Surface::Fill(SolidRect {
+                rect: clip,
+                clip,
+                color: color(scheme, "background"),
+                radius: 0.,
+            }));
+            layer.surfaces.push(Surface::Image(ImageQuad {
+                image: image.clone(),
+                source: [0., 0., image.width as f32, image.height as f32],
+                rect,
+                clip,
+                color: [1.; 4],
+            }));
+            text_run(
+                &mut layer,
+                &format!("{} × {}", w, h),
+                12.,
+                clip.y + clip.height - 8.,
+                e.preferences.font_size,
+                color(scheme, "foreground"),
+                FontStyle::default(),
+                clip,
+            );
+            return Scene {
+                layers: vec![layer],
+                ..Scene::default()
+            };
+        }
         if e.binary.is_some() {
             return self.hex_scene(e);
         }
@@ -2047,6 +2128,8 @@ impl View {
         let no_bold = font_options.is_some_and(|a| a.iter().any(|s| s == "no_bold"));
         let no_italic = font_options.is_some_and(|a| a.iter().any(|s| s == "no_italic"));
         let indent_guides = e.settings.bool("draw_indent_guides", true);
+        let invisible = invisible_settings(e);
+        let draw_invisible = invisible != Invisible::default();
         let guide_options = e
             .settings
             .get("indent_guide_options")
@@ -2321,11 +2404,30 @@ impl View {
                 }
             }
             let display = self.line_units(&line, layout.hidden(row), e.preferences.tab_size);
+            let gaps = draw_invisible
+                .then(|| layout.invisible_gaps(row, &line))
+                .flatten();
+            let invisible_gap = |at: usize| {
+                gaps.as_ref()
+                    .map_or(0, |g| layout::Layout::invisible_gap(g, at))
+            };
+            let inline_phantoms = layout.has_phantom_inline() || gaps.is_some();
+            let display_gap = |at: usize| layout.phantom_gap(start + at) + invisible_gap(at);
             if !layout.wrapped() {
-                let width = segment.indent + display.iter().map(|u| u.width).sum::<usize>();
+                let width = segment.indent
+                    + display
+                        .iter()
+                        .map(|u| {
+                            u.width
+                                + if inline_phantoms {
+                                    display_gap(u.bytes.start)
+                                } else {
+                                    0
+                                }
+                        })
+                        .sum::<usize>();
                 self.note_width(e, Some(width));
             }
-            let inline_phantoms = layout.has_phantom_inline();
             let column_at = |byte: usize| {
                 if inline_phantoms {
                     return layout.column(&e.text, byte);
@@ -2505,7 +2607,7 @@ impl View {
                 let width = |u: &CachedUnit| {
                     u.width
                         + if inline_phantoms {
-                            layout.phantom_gap(start + u.bytes.start)
+                            display_gap(u.bytes.start)
                         } else {
                             0
                         }
@@ -2577,7 +2679,7 @@ impl View {
             let mut span = spans.partition_point(|s| s.range.end <= segment.bytes.start);
             for unit in relevant {
                 let gap = if inline_phantoms {
-                    layout.phantom_gap(start + unit.bytes.start)
+                    display_gap(unit.bytes.start)
                 } else {
                     0
                 };
@@ -2647,6 +2749,49 @@ impl View {
                 };
                 let signature = (fg, font, style.font_style);
                 let visible = x + unit.width as f64 * self.cell >= gutter && x < right;
+                if draw_invisible
+                    && let Some((c, extra)) = invisible.cell(text, unit.width)
+                    && (gap >= extra && extra != 0)
+                {
+                    if let Some((fg, font, decoration)) = run_style.take() {
+                        self.flush(
+                            &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                        );
+                    }
+                    let x = x - extra as f64 * self.cell;
+                    let width = (unit.width + extra) as f64 * self.cell;
+                    if x + width >= gutter && x < right {
+                        let color = if selected || found {
+                            fg
+                        } else {
+                            global("invisibles")
+                        };
+                        border(
+                            &mut layer,
+                            Rect {
+                                x,
+                                y: y + 1.,
+                                width,
+                                height: self.line_height - 2.,
+                            },
+                            clip,
+                            color,
+                        );
+                        text_run(
+                            &mut layer,
+                            &vel_render::invisibles::label(c),
+                            x,
+                            baseline,
+                            e.preferences.font_size,
+                            color,
+                            FontStyle::default(),
+                            clip,
+                        );
+                    }
+                    column += unit.width;
+                    previous_span = None;
+                    continue;
+                }
                 if (run_style != Some(signature)
                     || (self.ligatures && previous_span != Some(span))
                     || text == "\t"

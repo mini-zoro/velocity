@@ -44,6 +44,8 @@
   // Write through a temporary file and rename it over the original. Even when true, files with
   // hard links, another owner, extended attributes or a read-only mode are written in place.
   "atomic_save": false,
+  // https://docs.sublimetext.io/reference/settings.html#global-settings
+  // User arrays replace this list, including the .git exclusion.
   "folder_exclude_patterns": [
     ".svn", ".git", ".hg", "CVS", ".Trash", ".Trash-*"
   ],
@@ -142,15 +144,22 @@
   "close_deleted_files": false,
   "set_unsaved_view_name": true,
   "open_files_in_new_window": false,
+  // ST4 4143: https://www.sublimetext.com/download
+  "update_system_recent_files": true,
+  // ST4 4107 and 4126: https://www.sublimetext.com/download
+  // Keep the new display modes opt-in in Velocity.
+  "draw_unicode_white_space": "none",
+  "draw_unicode_bidi": false,
+  "draw_control_characters": false,
+  // ST4 image selection setting: https://www.sublimetext.com/download
+  // These are the formats supported by Velocity's decoder.
+  "image_file_patterns": ["*.png", "*.jpg", "*.jpeg", "*.gif"],
   "show_errors_inline": true,
   "index_files": true,
   "index_workers": 0,
-  "index_exclude_patterns": [
-    "*.log",
-    "target",
-    "node_modules",
-    ".git"
-  ],
+  // https://www.sublimetext.com/docs/indexing.html#settings
+  "index_exclude_patterns": ["*.log"],
+  "index_include_patterns": [],
   "index_exclude_gitignore": true,
   "index_skip_unknown_extensions": true,
   "show_definitions": true,

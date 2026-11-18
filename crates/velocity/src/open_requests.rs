@@ -6,11 +6,257 @@ use crate::{
     panels::Panels,
     workspace::Workspace,
 };
+#[cfg(test)]
+use std::fs::File;
 use std::{
     collections::VecDeque,
-    fs::{self, File},
+    fs,
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
 };
+
+/// Read-only image representation of a named binary document.
+type ImageResult = Option<Arc<vel_render::scene::Image>>;
+#[derive(Debug)]
+struct PendingImage {
+    cancelled: Arc<AtomicBool>,
+    result: mpsc::Receiver<ImageResult>,
+}
+impl Drop for PendingImage {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+struct ImageJob {
+    path: PathBuf,
+    cancelled: Arc<AtomicBool>,
+    result: mpsc::SyncSender<ImageResult>,
+}
+#[derive(Default)]
+struct ImageQueue {
+    jobs: Mutex<VecDeque<ImageJob>>,
+    ready: Condvar,
+}
+impl ImageQueue {
+    fn submit(path: &Path) -> PendingImage {
+        static QUEUE: OnceLock<Arc<ImageQueue>> = OnceLock::new();
+        let queue = QUEUE.get_or_init(|| {
+            let queue = Arc::new(Self::default());
+            let worker = queue.clone();
+            std::thread::spawn(move || worker.run());
+            queue
+        });
+        let (tx, result) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut jobs = queue.jobs.lock().expect("image queue");
+        jobs.retain(|job| !job.cancelled.load(Ordering::Acquire));
+        if jobs.len() == 32 {
+            jobs.pop_front();
+        }
+        jobs.push_back(ImageJob {
+            path: path.to_owned(),
+            cancelled: cancelled.clone(),
+            result: tx,
+        });
+        queue.ready.notify_one();
+        PendingImage { cancelled, result }
+    }
+
+    fn run(&self) {
+        loop {
+            let job = {
+                let jobs = self.jobs.lock().expect("image queue");
+                let mut jobs = self
+                    .ready
+                    .wait_while(jobs, |jobs| jobs.is_empty())
+                    .expect("image queue");
+                jobs.pop_front().expect("ready image")
+            };
+            if !job.cancelled.load(Ordering::Acquire) {
+                let image = decode_image(&job.path, &job.cancelled);
+                let _ = job.result.send(image);
+            }
+        }
+    }
+}
+
+fn image_matches(tab: &crate::workspace::Tab, root: &Path, path: &Path) -> bool {
+    let patterns = tab
+        .editor
+        .settings
+        .get("image_file_patterns")
+        .and_then(vel_config::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(vel_config::Value::as_str)
+        .map(|pattern| {
+            let mut folded = pattern.to_owned();
+            if let Some(dot) = folded
+                .rfind('.')
+                .filter(|&dot| !folded[dot..].contains('/'))
+            {
+                folded[dot..].make_ascii_lowercase();
+            }
+            folded
+        })
+        .collect::<Vec<_>>();
+    let folded = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| ext.bytes().any(|b| b.is_ascii_uppercase()))
+        .map(|ext| path.with_extension(ext.to_ascii_lowercase()));
+    vel_search::project::Patterns::new(&patterns).matches(
+        root,
+        folded.as_deref().unwrap_or(path),
+        false,
+    )
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ImagePreview {
+    path: Option<PathBuf>,
+    revision: u64,
+    epoch: u64,
+    pending: Option<PendingImage>,
+    pub image: Option<Arc<vel_render::scene::Image>>,
+}
+impl ImagePreview {
+    pub fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub fn suspend(&mut self) {
+        if self.pending.take().is_some() {
+            // Returning to this tab should request a new decode.
+            self.path = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.pending.as_ref().map(|p| p.cancelled.clone())
+    }
+    pub fn sync(
+        &mut self,
+        tab: &crate::workspace::Tab,
+        folders: &[vel_search::project::Folder],
+    ) -> bool {
+        let path = tab.path.as_deref().filter(|_| tab.editor.binary.is_some());
+        if path.is_none() && self.path.is_none() {
+            return false;
+        }
+        let revision = tab.editor.settings.revision();
+        let epoch = tab.editor.revision;
+        let mut changed = false;
+        if (path, revision, epoch) != (self.path.as_deref(), self.revision, self.epoch) {
+            self.path = path.map(Path::to_owned);
+            self.revision = revision;
+            self.epoch = epoch;
+            changed = self.image.take().is_some();
+            self.pending = None;
+            if let Some(path) = path {
+                let root = folders
+                    .iter()
+                    .filter(|f| path.starts_with(&f.path))
+                    .max_by_key(|f| f.path.as_os_str().len())
+                    .map_or_else(|| path.parent().unwrap_or(path), |f| f.path.as_path());
+                if image_matches(tab, root, path) {
+                    self.pending = Some(ImageQueue::submit(path));
+                }
+            }
+        }
+        if let Some(pending) = &self.pending {
+            match pending.result.try_recv() {
+                Ok(image) => {
+                    self.image = image;
+                    changed |= self.image.is_some();
+                    self.pending = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.pending = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        changed
+    }
+}
+struct CancelRead<'a, R> {
+    input: R,
+    cancelled: &'a AtomicBool,
+}
+impl<R> CancelRead<'_, R> {
+    fn check(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(io::Error::other("image no longer visible"))
+        } else {
+            Ok(())
+        }
+    }
+}
+impl<R: Read> Read for CancelRead<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.check()?;
+        self.input.read(buf)
+    }
+}
+impl<R: Seek> Seek for CancelRead<'_, R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.check()?;
+        self.input.seek(pos)
+    }
+}
+impl<R: BufRead> BufRead for CancelRead<'_, R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.check()?;
+        self.input.fill_buf()
+    }
+    fn consume(&mut self, amount: usize) {
+        self.input.consume(amount);
+    }
+}
+
+fn decode_image(path: &Path, cancelled: &AtomicBool) -> ImageResult {
+    let file = vel_fileio::regular::read(path).ok()?;
+    if file.metadata().ok()?.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(CancelRead {
+        input: BufReader::new(file),
+        cancelled,
+    })
+    .with_guessed_format()
+    .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    let logical_size = [image.width() as f32, image.height() as f32];
+    let image = if image.width().max(image.height()) > 2048 {
+        image.thumbnail(2048, 2048)
+    } else {
+        image
+    };
+    let image = image.into_rgba8();
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    Some(Arc::new(vel_render::scene::Image {
+        logical_size,
+        id: NEXT.fetch_add(1, Ordering::Relaxed) | (1 << 63),
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw().into(),
+    }))
+}
 
 /// Chooses an already recovered window for an explicit project or directory launch.
 /// An explicit new-window request always creates an additional window.
@@ -233,7 +479,9 @@ pub fn open_locations(
         let result = if path.is_dir() {
             panels.add_folder(workspace, path.clone())
         } else {
-            workspace.open(location)
+            workspace
+                .open(location)
+                .map(|()| panels.note_sidebar_spelling(workspace, &path))
         };
         if let Err(error) = result {
             errors.push(vel_fileio::regular::error(&path, error));
@@ -283,6 +531,7 @@ pub fn open_paths(
 fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Result<(), String> {
     // Validate before selecting existing tabs too: missing or unreadable native requests
     // must report their path rather than silently succeeding against an old buffer.
+    let spelling = path;
     let path = match fs::canonicalize(path) {
         Ok(path) => path,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -304,7 +553,7 @@ fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Res
             .map_err(|e| e.to_string())?;
         panels.add_folder(workspace, path)
     } else if metadata.is_file() {
-        File::open(&path).map_err(|e| e.to_string())?;
+        vel_fileio::regular::read(&path)?;
         if let Some(index) = workspace
             .tabs
             .iter()
@@ -315,13 +564,16 @@ fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Res
             let _request = workspace.navigation_request();
             workspace.select(index);
             workspace.tabs[index].transient = false;
+            panels.note_sidebar_spelling(workspace, spelling);
             return Ok(());
         }
-        workspace.open(FileLocation {
-            path,
-            line: 1,
-            column: 1,
-        })
+        workspace
+            .open(FileLocation {
+                path,
+                line: 1,
+                column: 1,
+            })
+            .map(|()| panels.note_sidebar_spelling(workspace, spelling))
     } else {
         Err("only regular files and folders can be opened".into())
     }

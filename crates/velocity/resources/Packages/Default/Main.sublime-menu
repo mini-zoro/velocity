@@ -704,7 +704,10 @@
       },
       {
         "caption": "Side Bar",
-        "command": "toggle_side_bar"
+        "children": [
+          {"caption": "Show/Hide Side Bar", "command": "toggle_side_bar"},
+          {"caption": "Show/Hide Open Files", "command": "toggle_show_open_files"}
+        ]
       },
       {
         "caption": "Tabs",
@@ -1161,6 +1164,8 @@
         "caption": "Add Folder…",
         "command": "add_folder"
       },
+      {"caption": "Refresh Folders", "command": "refresh_folder_list"},
+      {"caption": "Remove All Folders from Project", "command": "close_folder_list"},
       {
         "caption": "Edit Project",
         "command": "edit_project"
@@ -1173,6 +1178,16 @@
         "caption": "Quick Switch Project…",
         "command": "quick_switch_project"
       }
+    ]
+  },
+  {
+    "caption": "Window",
+    "id": "window",
+    "children": [
+      {"caption": "Minimize", "command": "native_minimize"},
+      {"caption": "Zoom", "command": "native_zoom"},
+      {"caption": "-", "command": null},
+      {"caption": "Bring All to Front", "command": "native_bring_all_to_front"}
     ]
   },
   {

@@ -24,6 +24,7 @@ impl App {
         };
         if saved && name == "save_and_close" {
             self.workspace.close(index)?;
+            self.close_empty_window(window);
         }
         Ok(())
     }
@@ -174,16 +175,7 @@ impl App {
             // operation, preserving every tab that has not yet been prompted.
             self.workspace.close(index)?;
         }
-        if self.workspace.is_empty()
-            && self
-                .workspace
-                .editor()
-                .settings
-                .bool("close_windows_when_empty", false)
-            && let Some(window) = window
-        {
-            window.request_close();
-        }
+        self.close_empty_window(window);
         Ok(true)
     }
 }

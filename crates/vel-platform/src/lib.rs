@@ -97,6 +97,105 @@ impl Default for WindowOptions {
         }
     }
 }
+/// Clamps a saved frame onto the visible portion of the screen it overlaps most.
+/// If no current screen overlaps, the first (primary) screen is the fallback.
+pub fn clamp_window_frame(frame: Rect, screens: &[Rect]) -> Option<Rect> {
+    if ![frame.x, frame.y, frame.width, frame.height]
+        .into_iter()
+        .all(f64::is_finite)
+        || frame.width <= 0.
+        || frame.height <= 0.
+    {
+        return None;
+    }
+    let area = |screen: Rect| {
+        let width =
+            ((frame.x + frame.width).min(screen.x + screen.width) - frame.x.max(screen.x)).max(0.);
+        let height = ((frame.y + frame.height).min(screen.y + screen.height)
+            - frame.y.max(screen.y))
+        .max(0.);
+        width * height
+    };
+    let mut candidates = screens
+        .iter()
+        .copied()
+        .filter(|s| s.width > 0. && s.height > 0.);
+    let screen = candidates.next()?;
+    let screen = candidates.fold(
+        screen,
+        |best, next| if area(next) > area(best) { next } else { best },
+    );
+    let width = frame.width.min(screen.width);
+    let height = frame.height.min(screen.height);
+    Some(Rect {
+        x: frame
+            .x
+            .clamp(screen.x, (screen.x + screen.width - width).max(screen.x)),
+        y: frame
+            .y
+            .clamp(screen.y, (screen.y + screen.height - height).max(screen.y)),
+        width,
+        height,
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn saved_frame_is_clamped_to_current_screens() {
+    let primary = Rect {
+        x: 0.,
+        y: 25.,
+        width: 1000.,
+        height: 800.,
+    };
+    let second = Rect {
+        x: -1300.,
+        y: -100.,
+        width: 1300.,
+        height: 900.,
+    };
+    let partly_on_second = Rect {
+        x: -400.,
+        y: -200.,
+        width: 500.,
+        height: 450.,
+    };
+    let result = clamp_window_frame(partly_on_second, &[primary, second]).unwrap();
+    assert_eq!(
+        result,
+        Rect {
+            x: -500.,
+            y: -100.,
+            ..partly_on_second
+        }
+    );
+    let offscreen = Rect {
+        x: 1500.,
+        y: 1500.,
+        width: 1200.,
+        height: 600.,
+    };
+    let result = clamp_window_frame(offscreen, &[primary]).unwrap();
+    assert_eq!(
+        result,
+        Rect {
+            x: 0.,
+            y: 225.,
+            width: 1000.,
+            height: 600.
+        }
+    );
+    assert!(
+        clamp_window_frame(
+            Rect {
+                x: f64::NAN,
+                ..offscreen
+            },
+            &[primary]
+        )
+        .is_none()
+    );
+}
 /// Why a synchronous frame was requested.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameReason {
@@ -190,6 +289,10 @@ pub trait AppHandler: 'static {
     fn on_command(&mut self, _window: &WindowHandle, _command: Command) {}
     /// Receive mouse button/drag events.
     fn on_mouse(&mut self, _window: &WindowHandle, _event: MouseEvent) {}
+    /// Returns a window token and tab group when a tab may be dropped at this point.
+    fn tab_drop_destination(&self, _point: Point) -> Option<(u64, usize)> {
+        None
+    }
     /// Receive precise scroll deltas and both gesture and momentum phases.
     fn on_scroll(&mut self, _window: &WindowHandle, _event: ScrollEvent) {}
     /// Update geometry on resize and backing changes.

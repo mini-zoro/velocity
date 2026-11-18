@@ -374,13 +374,6 @@ impl Workspace {
     pub fn sheet_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.sheet == id)
     }
-    pub fn selected_indices(&self) -> Vec<usize> {
-        self.workbench.groups[self.workbench.active]
-            .visible()
-            .iter()
-            .filter_map(|id| self.sheet_index(*id))
-            .collect()
-    }
     pub fn focus_current_group(&mut self) -> Result<(), String> {
         let group = &self.workbench.groups[self.workbench.active];
         if let Some(index) = group.focused.and_then(|id| self.sheet_index(id)) {
@@ -1332,7 +1325,12 @@ impl Workspace {
         Ok((
             Window {
                 project: self.project.clone(),
-                folders: self.folders.iter().map(|f| f.path.clone()).collect(),
+                folders: self
+                    .folders
+                    .iter()
+                    .filter(|f| !self.transient_folders.contains(&f.path))
+                    .map(|f| f.path.clone())
+                    .collect(),
                 workbench,
                 sheets,
                 distraction_free: self.distraction_free,
