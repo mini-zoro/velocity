@@ -171,6 +171,9 @@ pub fn load_texture(
 #[derive(Debug, Clone, Default)]
 pub struct FileIcons {
     icons: BTreeMap<String, String>,
+    /// Keys that are relative paths (contain '/'); most icon themes have none, and resolving
+    /// runs for every visible row each frame.
+    path_keys: Vec<String>,
 }
 impl FileIcons {
     /// Parses lenient JSON mapping extensions, file names and relative paths to icon identifiers.
@@ -189,11 +192,25 @@ impl FileIcons {
                 .ok_or_else(|| Error::Format("file icon must be string".into()))?;
             icons.insert(key.clone(), value.into());
         }
-        Ok(Self { icons })
+        let mut icons = Self {
+            icons,
+            path_keys: Vec::new(),
+        };
+        icons.index_paths();
+        Ok(icons)
     }
     /// Appends an icon theme, replacing existing identifiers by key.
     pub fn merge(&mut self, overlay: &Self) {
         self.icons.extend(overlay.icons.clone());
+        self.index_paths();
+    }
+    fn index_paths(&mut self) {
+        self.path_keys = self
+            .icons
+            .keys()
+            .filter(|key| key.contains('/'))
+            .cloned()
+            .collect();
     }
     /// Resolves the longest path mapping, exact filename, then longest compound extension.
     /// Returns the icon's identifier without `.png`; package resource lookup belongs to the host.
@@ -206,16 +223,16 @@ impl FileIcons {
         }
     }
     fn resolve_str(&self, path: &str) -> Option<&str> {
-        if let Some((_, icon)) = self
-            .icons
+        if let Some(icon) = self
+            .path_keys
             .iter()
-            .filter(|(key, _)| {
-                key.contains('/')
-                    && path.ends_with(key.as_str())
+            .filter(|key| {
+                path.ends_with(key.as_str())
                     && (path.len() == key.len()
                         || path.as_bytes()[path.len() - key.len() - 1] == b'/')
             })
-            .max_by_key(|(key, _)| key.len())
+            .max_by_key(|key| key.len())
+            .and_then(|key| self.icons.get(key))
         {
             return Some(icon);
         }

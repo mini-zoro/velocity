@@ -161,10 +161,15 @@ impl App {
                 x: event.position.x - self.content.x,
                 y: event.position.y - self.content.y,
             };
-            if self.workspace.editor_mut().completion.hit(point) {
-                let _ = self.workspace.editor_mut().commit_completion();
-                self.named_changed(w, true);
-                return;
+            match self.workspace.editor_mut().completion.hit(point) {
+                crate::completion::PopupHit::Row => {
+                    let _ = self.workspace.editor_mut().commit_completion();
+                    self.named_changed(w, true);
+                    return;
+                }
+                // Padding and footer belong to the popup, not to the text below it.
+                crate::completion::PopupHit::Chrome => return,
+                crate::completion::PopupHit::Outside => {}
             }
             if self
                 .panels

@@ -1612,9 +1612,15 @@ fn fixed_user_json_reloads_after_an_in_place_repair() {
 fn status_bar_syntax_picker_preserves_the_scrolled_view_on_press_and_release() {
     let mut app = app(&"line\n".repeat(10_000), None);
     app.view.scroll_y = 5000. * app.view.line_height;
+    // Status items are hit where the last frame painted them.
+    app.scene();
     let position = app.view.scroll_position();
+    let item = app
+        .panels
+        .status_item(crate::panels::StatusItem::Syntax)
+        .expect("syntax item painted");
     let status = Point {
-        x: app.window_size.width - 90. - app.content.x,
+        x: item.x + item.width / 2. - app.content.x,
         y: app.window_size.height - 1. - app.content.y,
     };
     mouse(&mut app, status, MouseKind::Down);

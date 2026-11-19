@@ -13,6 +13,14 @@ const BUTTON_MIN: f64 = 56.;
 const BUTTON_GAP: f64 = 6.;
 const MESSAGE_MIN: f64 = 96.;
 
+/// Right-hand status-bar items, in placement priority (right to left).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusItem {
+    Syntax,
+    Indentation,
+    Git,
+    Indexing,
+}
 /// Laid-out find-panel controls; toggles follow [`Panels::find_toggle_options`] order.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FindControls {
@@ -636,13 +644,19 @@ impl Panels {
             )
         })
     }
+    /// Where the last paint placed a status-bar item, as its full-height click target (None
+    /// before the first paint, and when it did not fit or is absent).
+    pub(crate) fn status_item(&self, item: StatusItem) -> Option<Rect> {
+        self.status_items
+            .as_ref()?
+            .iter()
+            .find(|(i, _)| *i == item)
+            .map(|(_, rect)| *rect)
+    }
+    /// The indentation item's click target (empty when it is not shown).
     pub(super) fn indentation_rect(&self) -> Rect {
-        Rect {
-            x: (self.size.width - 300. * self.ui_scale).max(0.),
-            y: self.size.height - STATUS * self.ui_scale,
-            width: 120. * self.ui_scale,
-            height: STATUS * self.ui_scale,
-        }
+        self.status_item(StatusItem::Indentation)
+            .unwrap_or_default()
     }
     pub(super) fn indentation_choices(&mut self, workspace: &mut Workspace) {
         let mut items = Vec::new();
@@ -1772,7 +1786,10 @@ mod tests {
     fn indentation_status_click_switches_width_and_converts_in_one_undo() {
         let (mut w, mut p) = setup("\t  code\n  \tmore\n");
         p.layout(size());
+        // Status items are hit where the last paint placed them.
+        p.paint(&w, &mut vel_render::scene::Scene::default());
         let rect = p.indentation_rect();
+        assert!(rect.width > 0., "indentation item painted");
         p.mouse(
             &mut w,
             Point {

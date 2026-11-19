@@ -15,6 +15,7 @@
     "red": "#ff9b93",
     "selection": "#304e63",
     "line": "#1d303d",
+    "guide": "#253949",
     "border": "#486777"
   },
   "globals": {
@@ -37,7 +38,7 @@
     "find_highlight_foreground": "var(bg)",
     "minimap_border": "var(border)",
     "rulers": "var(border)",
-    "guide": "var(line)",
+    "guide": "var(guide)",
     "active_guide": "var(border)",
     "stack_guide": "var(border)",
     "brackets_options": "underline",

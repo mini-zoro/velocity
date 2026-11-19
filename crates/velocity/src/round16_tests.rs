@@ -225,8 +225,9 @@ fn fold_marker_mouse_unfolds_and_bookmarks_have_a_gutter_symbol() {
             scene
                 .layers
                 .iter()
-                .flat_map(|l| &l.text)
-                .filter(|r| r.text == "◆")
+                .flat_map(|l| &l.rects)
+                // Bookmarks are round dots at the gutter's left edge.
+                .filter(|r| r.rect.x == 3. && r.rect.width == r.rect.height && r.radius > 0.)
                 .count(),
             2
         );

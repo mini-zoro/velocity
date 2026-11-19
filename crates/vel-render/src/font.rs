@@ -33,6 +33,8 @@ struct Face {
     path: PathBuf,
     name: String,
     native: Option<native::NativeFont>,
+    /// Variation instance CoreText resolved for this face (empty for static faces).
+    coords: Vec<swash::NormalizedCoord>,
 }
 impl Face {
     fn load(
@@ -88,6 +90,18 @@ impl Face {
         let color_glyphs = [b"sbix", b"COLR", b"CBDT"]
             .iter()
             .any(|tag| font.table(swash::tag_from_bytes(tag)).is_some());
+        let coords: Vec<swash::NormalizedCoord> = match &native {
+            Some(native) if font.variations().len() > 0 => font
+                .variations()
+                .normalized_coords(native::font_variation(native))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let coords = if coords.iter().all(|c| *c == 0) {
+            Vec::new()
+        } else {
+            coords
+        };
         Ok(Self {
             bytes,
             ligatures,
@@ -97,6 +111,7 @@ impl Face {
             path: path.into(),
             name: actual,
             native,
+            coords,
         })
     }
     fn reference(&self) -> FontRef<'_> {
@@ -200,10 +215,12 @@ impl Fonts {
         files: HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
     ) -> Result<Self, String> {
         let font = face.reference();
-        let metrics = font.metrics(&[]).scale(13.);
+        // A variable primary face is measured at the instance it is shaped and rasterized
+        // with (CoreText's optical size and weight); static faces have no coordinates.
+        let metrics = font.metrics(&face.coords).scale(13.);
         let ascii = std::array::from_fn(|i| font.charmap().map(char::from(i as u8)));
         let cell = font
-            .glyph_metrics(&[])
+            .glyph_metrics(&face.coords)
             .scale(13.)
             .advance_width(ascii[b'M' as usize]);
         Ok(Self {
@@ -508,7 +525,12 @@ impl Fonts {
                     features.push((swash::tag_from_bytes(&tag), 1));
                 }
             }
-            let mut builder = self.shaper.builder(reference).size(px).features(features);
+            let mut builder = self
+                .shaper
+                .builder(reference)
+                .size(px)
+                .features(features)
+                .normalized_coords(&self.faces[face as usize].coords);
             if let Some(c) = run
                 .chars()
                 .find(|c| !c.is_ascii_punctuation() && !c.is_whitespace())
@@ -604,11 +626,16 @@ impl Fonts {
         };
         for (start, end, face) in runs {
             let reference = self.faces[face as usize].reference();
-            let metrics = reference.metrics(&[]).scale(px);
+            let coords = &self.faces[face as usize].coords;
+            let metrics = reference.metrics(coords).scale(px);
             out.ascent = out.ascent.max(metrics.ascent);
             out.descent = out.descent.max(metrics.descent.abs());
             let run = &text[start..end];
-            let mut builder = self.shaper.builder(reference).size(px);
+            let mut builder = self
+                .shaper
+                .builder(reference)
+                .size(px)
+                .normalized_coords(coords);
             if let Some(c) = run
                 .chars()
                 .find(|c| !c.is_ascii_punctuation() && !c.is_whitespace())
@@ -639,7 +666,13 @@ impl Fonts {
         if id != 0 && id == font.charmap().map(' ') {
             return None;
         }
-        let mut scaler = self.scaler.builder(font).size(px).hint(true).build();
+        let mut scaler = self
+            .scaler
+            .builder(font)
+            .size(px)
+            .hint(true)
+            .normalized_coords(&self.faces[face as usize].coords)
+            .build();
         let image = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),
@@ -748,6 +781,76 @@ mod tests {
             );
         }
         assert_eq!(faces.len(), 4);
+    }
+    /// The grid is measured at the instance glyphs are shaped with: static Menlo exactly as
+    /// its default instance, a variable primary face at CoreText's coordinates.
+    #[test]
+    fn primary_grid_matches_the_shaped_instance() {
+        let menlo = super::Fonts::load().unwrap();
+        assert!(menlo.faces[0].coords.is_empty());
+        let face = menlo.faces[0].reference();
+        let m = menlo.ascii[b'M' as usize];
+        let cell = face.glyph_metrics(&[]).scale(13.).advance_width(m);
+        assert_eq!(menlo.cell.to_bits(), cell.to_bits());
+        let metrics = face.metrics(&[]).scale(13.);
+        assert_eq!(menlo.ascent.to_bits(), metrics.ascent.to_bits());
+        assert_eq!(menlo.metrics.descent, f64::from(metrics.descent.abs()));
+        #[cfg(target_os = "macos")]
+        {
+            let mut system = super::Fonts::load_named(".AppleSystemUIFont").unwrap();
+            if !system.faces[0].coords.is_empty() {
+                let run = system.shape_ui(
+                    "M",
+                    ".AppleSystemUIFont",
+                    13.,
+                    crate::scene::FontStyle::default(),
+                );
+                assert_eq!(run.glyphs[0].face, 0);
+                assert!(
+                    (run.advance - system.cell).abs() < 0.01,
+                    "cell {} vs shaped M {}",
+                    system.cell,
+                    run.advance
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn variable_system_font_bold_and_text_cut_follow_coretext() {
+        // The system UI font is one variable file: CoreText's bold face is that file at
+        // wght 700 and small text uses the opsz 17 cut. Both must reach the rasterizer.
+        let mut fonts = super::Fonts::load().unwrap();
+        let regular = fonts.shape_ui("Folders", "system", 13., crate::scene::FontStyle::default());
+        let bold = fonts.shape_ui(
+            "Folders",
+            "system",
+            13.,
+            crate::scene::FontStyle {
+                bold: true,
+                italic: false,
+            },
+        );
+        let (r, b) = (regular.glyphs[0].face, bold.glyphs[0].face);
+        if fonts.faces[r as usize].path != fonts.faces[b as usize].path {
+            return; // A static family: real faces, nothing to apply.
+        }
+        assert!(!fonts.faces[b as usize].coords.is_empty(), "bold instance");
+        assert!(
+            !fonts.faces[r as usize].coords.is_empty(),
+            "text optical size"
+        );
+        assert!(bold.advance > regular.advance + 0.5);
+        let ink = |face: u16, id: u16, fonts: &mut super::Fonts| {
+            let image = fonts.rasterize(face, id, 13., 0).unwrap();
+            image.data.iter().map(|a| u32::from(*a)).sum::<u32>()
+        };
+        let regular_ink = ink(r, regular.glyphs[0].id, &mut fonts);
+        let bold_ink = ink(b, bold.glyphs[0].id, &mut fonts);
+        assert!(
+            bold_ink > regular_ink * 11 / 10,
+            "{bold_ink} vs {regular_ink}"
+        );
     }
     use super::*;
     #[test]

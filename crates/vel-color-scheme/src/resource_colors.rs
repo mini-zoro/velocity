@@ -45,5 +45,9 @@ fn shipped_scheme_compiled_colors_stay_identical() {
     }
     let actual = serde_json::to_string(&colors).unwrap() + "\n";
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/resource-colors.json");
+    // Deliberate scheme changes regenerate the fixture, like the other structural goldens.
+    if std::env::var_os("VEL_UPDATE_GOLDENS").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap());
 }

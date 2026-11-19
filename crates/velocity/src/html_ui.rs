@@ -345,9 +345,14 @@ pub fn options(editor: &Editor, width: f64, popup: bool) -> LayoutOptions {
         .unwrap_or("")
         .to_owned();
     if popup {
-        // Default inset so popup text never touches the popup edge; the scheme's
-        // popup_css (appended after) can still override it.
-        css.insert_str(0, "html{padding:5px 8px}");
+        // Default inset so popup text never touches the popup edge, and a faint chip
+        // behind inline code so it reads apart from prose; the scheme's popup_css
+        // (appended after) can still override both.
+        css.insert_str(
+            0,
+            "html{padding:5px 8px}code,tt{background-color:color(var(--foreground) alpha(0.08));\
+             border-radius:3px;padding:0 3px}",
+        );
     } else {
         css.push_str("html{background-color:transparent}body{margin:0;padding:0}");
     }

@@ -575,9 +575,15 @@ fn round18_goto_line_keyboard_animation_keeps_the_final_center_and_selection() {
 fn round18_accepting_a_status_bar_syntax_row_preserves_the_parked_scroll() {
     let mut a = app(&"line\n".repeat(6000), None);
     a.view.scroll_y = 5000. * a.view.line_height;
+    // Status items are hit where the last frame painted them.
+    a.scene();
     let before = a.view.scroll_position();
+    let item = a
+        .panels
+        .status_item(crate::panels::StatusItem::Syntax)
+        .expect("syntax item painted");
     let status = Point {
-        x: a.window_size.width - 90.,
+        x: item.x + item.width / 2.,
         y: a.window_size.height - 1.,
     };
     mouse(&mut a, status, 1);

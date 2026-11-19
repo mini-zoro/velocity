@@ -337,16 +337,47 @@ fn editor_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     named(&mut app, "fold", json!({}));
     select(&mut app, &[(39, 0, 39, 0)]);
     named(&mut app, "toggle_bookmark", json!({}));
-    // Show fold buttons without depending on the gutter-hover fade.
-    app.workspace.editor_mut().settings.set(
-        vel_config::settings::Layer::View,
-        "fade_fold_buttons",
-        json!(false),
+    // Unsaved edits against the file on disk give added, modified and deleted diff marks.
+    select(&mut app, &[(33, 0, 33, 0)]);
+    named(
+        &mut app,
+        "insert",
+        json!({"characters": "// TODO: report cycles with their path\n"}),
     );
+    let end = MAIN_RS.lines().nth(37).map_or(0, str::len);
+    select(&mut app, &[(38, end, 38, end)]);
+    named(
+        &mut app,
+        "insert",
+        json!({"characters": " // depth-first order"}),
+    );
+    select(&mut app, &[(41, 0, 42, 0)]);
+    named(&mut app, "left_delete", json!({}));
+    settle(&mut app);
     select(
         &mut app,
         &[(44, 12, 44, 20), (45, 8, 45, 8), (46, 8, 46, 8)],
     );
+    Ok(app)
+}
+
+fn minimap_scrollbar_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = editor_scene(fixture, dark)?;
+    select(&mut app, &[(60, 0, 60, 0)]);
+    Ok(app)
+}
+
+fn editor_hover_scrollbar(app: &mut App) {
+    // Rest the pointer on the overlay scroll bar (left of the minimap).
+    let editor = app.workspace.editor();
+    let x = app.content.x + app.view.right(editor) - 4.;
+    let y = app.content.y + app.content.height / 2.;
+    pointer(app, MouseKind::Move, x, y);
+}
+
+fn sidebar_focused_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = sidebar_scene(fixture, dark)?;
+    named(&mut app, "focus_side_bar", json!({}));
     Ok(app)
 }
 
@@ -691,6 +722,16 @@ const SCENARIOS: &[Scenario] = &[
         build: editor_scene,
     },
     Scenario {
+        name: "minimap_scrollbar",
+        size: (1200., 800.),
+        build: minimap_scrollbar_scene,
+    },
+    Scenario {
+        name: "minimap_hover",
+        size: (1200., 800.),
+        build: minimap_scrollbar_scene,
+    },
+    Scenario {
         name: "tabs",
         size: (1200., 800.),
         build: tabs_scene,
@@ -714,6 +755,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "sidebar",
         size: (1200., 800.),
         build: sidebar_scene,
+    },
+    Scenario {
+        name: "sidebar_focused",
+        size: (1200., 800.),
+        build: sidebar_focused_scene,
     },
     Scenario {
         name: "find",
@@ -852,6 +898,21 @@ const SCENARIOS: &[Scenario] = &[
         build: status_scene,
     },
     Scenario {
+        name: "status_narrow",
+        size: (520., 340.),
+        build: status_scene,
+    },
+    Scenario {
+        name: "quick_panel_many",
+        size: (1200., 800.),
+        build: |f, d| overlay_scene(f, d, "command_palette", ""),
+    },
+    Scenario {
+        name: "overlay_small",
+        size: (420., 300.),
+        build: |f, d| overlay_scene(f, d, "goto", "rs"),
+    },
+    Scenario {
         name: "build_output",
         size: (1200., 800.),
         build: output_scene,
@@ -891,6 +952,21 @@ const SCENARIOS: &[Scenario] = &[
 fn after_layout(name: &str, app: &mut App) {
     match name {
         "editor" => editor_hover_gutter(app),
+        "minimap_scrollbar" => editor_hover_scrollbar(app),
+        "minimap_hover" => {
+            // Rest the pointer on the minimap so its viewport box shows.
+            let editor = app.workspace.editor();
+            let x = app.content.x + app.view.right(editor) + app.view.minimap_width(editor) / 2.;
+            pointer(app, MouseKind::Move, x, app.content.y + 60.);
+        }
+        "status_bar" | "status_narrow" => {
+            // Hover the syntax item (the rightmost one): status items are buttons and
+            // must look clickable.
+            // Their widgets come from the previous frame's measured layout.
+            let _ = app.scene();
+            let size = app.window_size;
+            pointer(app, MouseKind::Move, size.width - 24., size.height - 12.);
+        }
         "tabs" | "large_1920x1200" => {
             // Hover an inactive tab, then rest the pointer on another tab's close button.
             let hits: Vec<_> = app.tab_hits.clone();
@@ -1203,8 +1279,18 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     None => renderer.insert(Renderer::offscreen(width, height)?),
                 };
                 let (pixels, scene) = render(&mut app, renderer, scale)?;
-                // VELOCITY_RENDER_DEBUG=1 lists every painted text run for geometry checks.
+                // VELOCITY_RENDER_DEBUG=1 lists every painted icon and text run for geometry checks.
                 if std::env::var_os("VELOCITY_RENDER_DEBUG").is_some() {
+                    for (i, layer) in scene.layers.iter().enumerate() {
+                        for surface in &layer.surfaces {
+                            if let vel_render::scene::Surface::Image(q) = surface {
+                                eprintln!(
+                                    "layer {i} image {:?} clip {:?} color {:?} src {:?}",
+                                    q.rect, q.clip, q.color, q.source
+                                );
+                            }
+                        }
+                    }
                     for (i, layer) in scene.layers.iter().enumerate() {
                         for run in &layer.text {
                             eprintln!(

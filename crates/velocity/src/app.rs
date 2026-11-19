@@ -2798,10 +2798,7 @@ impl App {
                         &vel_theme::ElementPath(&label_path),
                         settings,
                     );
-                    let icon = tab
-                        .path
-                        .as_deref()
-                        .and_then(|p| self.workspace.themes.file_icon(p));
+                    let icon = crate::panels::tab_icon(&self.workspace, tab);
                     let narrow = rect.width < 48.;
                     // Close buttons follow show_tab_close_buttons; narrow fitted tabs keep
                     // their entire target for selecting the tab.
@@ -2885,15 +2882,11 @@ impl App {
                     } else {
                         label_end
                     };
-                    theme.text_fit(
-                        &mut chrome,
-                        &label,
-                        &caption,
-                        label_x,
-                        baseline,
-                        label_end - label_x,
-                        label_clip,
-                    );
+                    // "Preferences.sublime-settings (Default)" keeps its "(Default)".
+                    let shown = theme.fit_label(&label, &caption, label_end - label_x);
+                    if !shown.is_empty() {
+                        theme.text(&mut chrome, &label, &shown, label_x, baseline, label_clip);
+                    }
                     let close_path = [
                         path[0],
                         path[1],

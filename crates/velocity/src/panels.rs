@@ -26,6 +26,8 @@ use vel_search::{
 };
 mod appearance_selection;
 mod details;
+#[cfg(test)]
+pub(crate) use details::StatusItem;
 #[path = "text_ops.rs"]
 mod macro_commands;
 #[cfg(test)]
@@ -47,6 +49,22 @@ fn open_file_count(workspace: &Workspace) -> usize {
         0
     } else {
         workspace.tabs.len()
+    }
+}
+
+/// File-type icon of a tab. Views without a path (default settings, untitled buffers) are
+/// typed by their name, without a trailing " (Default)"-style qualifier.
+pub(crate) fn tab_icon<'a>(
+    workspace: &'a Workspace,
+    tab: &crate::workspace::Tab,
+) -> Option<&'a str> {
+    match tab.path.as_deref() {
+        Some(path) => workspace.themes.file_icon(path),
+        None => {
+            let name = tab.name();
+            let name = name.split(" (").next().unwrap_or_default();
+            workspace.themes.file_icon(Path::new(name))
+        }
     }
 }
 
@@ -158,6 +176,8 @@ pub(crate) enum StyleId {
     TitleBar,
     ReviewMenu,
     HoverPopup,
+    QuickScroll,
+    StatusButton,
 }
 impl StyleId {
     pub(crate) const fn at(self, index: u64) -> u64 {
@@ -352,6 +372,9 @@ pub struct Panels {
     output_trim: Option<(usize, usize)>,
     /// Overlay in a window too short for its footer (see `quick_chrome`).
     quick_tight: bool,
+    /// Status-bar items placed by the last paint, right to left; clicks use these rects.
+    /// None until the first paint.
+    status_items: Option<Vec<(details::StatusItem, Rect)>>,
     /// Find-panel controls laid out for (panel, bounds, scale); see `find_controls`.
     find_layout: Option<(Panel, Rect, f64, details::FindControls)>,
     /// State the shown tool tip was last derived from (control, options, panel).
@@ -511,6 +534,7 @@ impl Default for Panels {
             output_trim: None,
             find_layout: None,
             quick_tight: false,
+            status_items: None,
             tooltip_key: 0,
             output_mirrored: 0,
             input_caption: String::new(),
@@ -4402,6 +4426,9 @@ impl Panels {
     }
     fn paint_input(layer: &mut Layer, input: &Input, focused: bool) {
         let rect = input.bounds;
+        // Inputs shrunk by a very short panel scale their vertical offsets with the box, so
+        // the glyphs (cap height to descender) stay inside it instead of sinking out.
+        let k = (rect.height / (28. * input.scale)).clamp(0., 1.);
         fill(
             layer,
             rect,
@@ -4423,9 +4450,9 @@ impl Panels {
                 layer,
                 Rect {
                     x: a,
-                    y: rect.y + (5. * input.scale),
+                    y: rect.y + (5. * input.scale * k),
                     width: b - a,
-                    height: (19. * input.scale),
+                    height: (19. * input.scale * k),
                 },
                 rect,
                 [0.23, 0.35, 0.5, 1.],
@@ -4435,12 +4462,17 @@ impl Panels {
             layer,
             &shown,
             input.x_for_byte(&value, 0),
-            rect.y + (20. * input.scale),
+            rect.y + (20. * input.scale * k),
             rect,
             [0.9, 0.92, 0.95, 1.],
         );
         if focused {
-            fill(layer, state.caret, rect, [0.9, 0.92, 0.97, 1.]);
+            let caret = Rect {
+                y: rect.y + (state.caret.y - rect.y) * k,
+                height: state.caret.height * k,
+                ..state.caret
+            };
+            fill(layer, caret, rect, [0.9, 0.92, 0.97, 1.]);
         }
         if let Some(marked) = state.marked {
             let range = marked.bytes(&state.text);
@@ -4450,7 +4482,7 @@ impl Panels {
                 layer,
                 Rect {
                     x: a,
-                    y: rect.y + (24. * input.scale),
+                    y: rect.y + (24. * input.scale * k),
                     width: b - a,
                     height: 1.,
                 },
@@ -4700,6 +4732,14 @@ impl Panels {
                     .push((3 << 40) + i as u64);
             }
         }
+        // Selection in a focused side bar uses the stronger focus colour (theme).
+        if let Some(node) = self.tree.nodes.get_mut(&3) {
+            if self.side_focused {
+                node.attributes.insert("focused");
+            } else {
+                node.attributes.remove("focused");
+            }
+        }
         self.widget(
             4,
             "status_bar",
@@ -4722,6 +4762,22 @@ impl Panels {
             .expect("status")
             .children
             .push(6);
+        // The syntax and Git items are clickable too; they get hover feedback like it.
+        for (id, item, label) in [
+            (7, details::StatusItem::Syntax, "Syntax"),
+            (8, details::StatusItem::Git, "Git status"),
+        ] {
+            if let Some(rect) = self.status_item(item) {
+                self.widget(id, "status_button", rect, &[]);
+                self.tree.nodes.get_mut(&id).expect("status item").label = label.into();
+                self.tree
+                    .nodes
+                    .get_mut(&4)
+                    .expect("status")
+                    .children
+                    .push(id);
+            }
+        }
         self.widget(
             5,
             "text_area",
@@ -4793,6 +4849,27 @@ impl Panels {
                     clip,
                 );
             }
+            if workspace.folders.is_empty() {
+                // Empty state under FOLDERS: say how to add one instead of a blank list.
+                let hint = style(3, Some("label_control"), &mut theme);
+                // First row under the FOLDERS heading, wherever Open Files left it.
+                let top = clip.y + self.folder_row_base(workspace) as f64 * (24. * self.ui_scale)
+                    - self.side_scroll.offset;
+                for (line, caption) in ["No folders open", "Project \u{203a} Add Folder\u{2026}"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    theme.text_fit(
+                        &mut layer,
+                        &hint,
+                        caption,
+                        16. * self.ui_scale,
+                        top + (17. + line as f64 * 18.) * self.ui_scale,
+                        clip.width - 26. * self.ui_scale,
+                        clip,
+                    );
+                }
+            }
             let visible = self.side_scroll.visible();
             for i in visible.start.saturating_sub(1)
                 ..visible
@@ -4819,11 +4896,7 @@ impl Panels {
                 {
                     label_style.foreground[3] *= 0.4;
                 }
-                if let Some(icon) = tab
-                    .path
-                    .as_deref()
-                    .and_then(|p| workspace.themes.file_icon(p))
-                {
+                if let Some(icon) = tab_icon(workspace, tab) {
                     theme.icon(
                         &mut layer,
                         icon,
@@ -4844,15 +4917,18 @@ impl Panels {
                 let label_end =
                     self.paint_badge(&mut theme, &mut layer, settings, badge, node.rect, clip);
                 let label_x = (34. * self.ui_scale) + f64::from(label_style.margin.left);
-                theme.text_fit(
-                    &mut layer,
-                    &label_style,
-                    &tab.label(),
-                    label_x,
-                    node.rect.y + (17. * self.ui_scale),
-                    label_end - label_x,
-                    clip,
-                );
+                let label = tab.label();
+                let shown = theme.fit_label(&label_style, &label, label_end - label_x);
+                if !shown.is_empty() {
+                    theme.text(
+                        &mut layer,
+                        &label_style,
+                        &shown,
+                        label_x,
+                        node.rect.y + (17. * self.ui_scale),
+                        clip,
+                    );
+                }
             }
             let base = self.folder_row_base(workspace);
             for i in visible.start.saturating_sub(base)
@@ -5137,11 +5213,135 @@ impl Panels {
                     format!("{hint} · ")
                 }
             };
-            theme.text(
-                &mut layer,
-                &text,
-                // The find panels show their own message; do not repeat it here.
-                &if self.status_message(workspace).is_empty() || self.message_in_find_panel() {
+            // Right-hand items, laid out right to left with measured widths. Lower-priority
+            // items drop out before they would crowd the position text, so nothing overlaps
+            // at narrow widths; the left text is ellipsized to the room that remains.
+            let s = self.ui_scale;
+            let git_text = (editor.settings.bool("show_git_status_in_status_bar", true))
+                .then(|| tab.path.as_deref().and_then(|p| workspace.git.status(p)))
+                .flatten()
+                .map(str::to_owned);
+            let language = editor
+                .language
+                .borrow()
+                .as_ref()
+                .map(|l| l.name.clone())
+                .unwrap_or_else(|| "Plain Text".into());
+            let candidates = [
+                (details::StatusItem::Syntax, language, 0.),
+                (
+                    details::StatusItem::Indentation,
+                    vel_ui::status::indentation(
+                        editor.preferences.translate_tabs_to_spaces,
+                        editor.preferences.tab_size,
+                    ),
+                    0.,
+                ),
+                (
+                    details::StatusItem::Git,
+                    git_text.clone().unwrap_or_default(),
+                    20.,
+                ),
+                (
+                    details::StatusItem::Indexing,
+                    self.intel
+                        .percentage
+                        .map(|p| format!("Indexing {p}%"))
+                        .unwrap_or_default(),
+                    0.,
+                ),
+            ];
+            let left = 10. * s;
+            let mut right = status.x + status.width - 6. * s;
+            let mut status_items = Vec::new();
+            // Item padding comes from the theme's status_button content margin (already
+            // UI-scaled); labels are measured with the style they are painted with.
+            let button = theme.style(
+                StyleId::StatusButton.at(0),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("status_bar", &[]),
+                    vel_theme::Element::new("status_button", &[]),
+                ]),
+                settings,
+            );
+            let (pad_left, pad_right) = (
+                f64::from(button.margin.left).max(4. * s),
+                f64::from(button.margin.right).max(4. * s),
+            );
+            // Candidates are in priority order and placed right to left in that order, so
+            // the first one that does not fit ends the row: a lower-priority item never
+            // takes the place of a higher-priority one.
+            for (item, label, icon) in candidates {
+                if label.is_empty() {
+                    continue;
+                }
+                let label_style = if item == details::StatusItem::Git {
+                    style(4, Some("vcs_status"), &mut theme)
+                } else {
+                    text.clone()
+                };
+                let width = theme.advance(&label_style, &label) + pad_left + pad_right + icon * s;
+                // Keep at least 140 DIPs for the position (or message) text.
+                if right - width - left < 140. * s {
+                    break;
+                }
+                let rect = Rect {
+                    x: (right - width).round(),
+                    y: status.y + 2. * s,
+                    width: width.round(),
+                    height: status.height - 4. * s,
+                };
+                right = rect.x - 2. * s;
+                let id = match item {
+                    details::StatusItem::Indentation => Some(6),
+                    details::StatusItem::Syntax => Some(7),
+                    details::StatusItem::Git => Some(8),
+                    details::StatusItem::Indexing => None,
+                };
+                let item_style = id.map(|id| style(id, None, &mut theme));
+                if let Some(button) = &item_style {
+                    theme.surface(&mut layer, button, rect, status);
+                }
+                let mut x = rect.x + pad_left;
+                if item == details::StatusItem::Git {
+                    let branch = style(4, Some("vcs_branch_icon"), &mut theme);
+                    theme.icon_surface(
+                        &mut layer,
+                        &branch,
+                        Rect {
+                            x: x - 2. * s,
+                            y: status.y + 4. * s,
+                            width: 16. * s,
+                            height: 16. * s,
+                        },
+                        status,
+                    );
+                    x += icon * s;
+                }
+                theme.text(
+                    &mut layer,
+                    &label_style,
+                    &label,
+                    x,
+                    status.y + 17. * s,
+                    rect,
+                );
+                // The click target spans the bar's full height (the window edge stays
+                // clickable); the drawn button is inset within it.
+                status_items.push((
+                    item,
+                    Rect {
+                        y: status.y,
+                        height: status.height,
+                        ..rect
+                    },
+                ));
+            }
+            self.status_items = Some(status_items);
+            let message =
+                if self.status_message(workspace).is_empty() || self.message_in_find_panel() {
+                    // The find panels show their own message; do not repeat it here.
                     format!(
                         "{}{}{}",
                         document_hint,
@@ -5154,91 +5354,18 @@ impl Panels {
                     )
                 } else {
                     self.status_message(workspace).to_owned()
-                },
-                10. * self.ui_scale,
-                status.y + (17. * self.ui_scale),
+                };
+            theme.text_fit(
+                &mut layer,
+                &text,
+                &message,
+                left,
+                status.y + (17. * s),
+                right - 8. * s - left,
                 Rect {
-                    width: (status.width
-                        - (if tab
-                            .path
-                            .as_deref()
-                            .and_then(|p| workspace.git.status(p))
-                            .is_some()
-                            && editor.settings.bool("show_git_status_in_status_bar", true)
-                        {
-                            600.
-                        } else {
-                            300.
-                        }) * self.ui_scale)
-                        .max(0.),
+                    width: (right - 8. * s).max(0.),
                     ..status
                 },
-            );
-            if editor.settings.bool("show_git_status_in_status_bar", true)
-                && let Some(git) = tab.path.as_deref().and_then(|p| workspace.git.status(p))
-            {
-                let git_style = style(4, Some("vcs_status"), &mut theme);
-                let x = (status.width - (595. * self.ui_scale)).max(10. * self.ui_scale);
-                let branch = style(4, Some("vcs_branch_icon"), &mut theme);
-                theme.icon_surface(
-                    &mut layer,
-                    &branch,
-                    Rect {
-                        x,
-                        y: status.y + 4. * self.ui_scale,
-                        width: 16. * self.ui_scale,
-                        height: 16. * self.ui_scale,
-                    },
-                    status,
-                );
-                theme.text(
-                    &mut layer,
-                    &git_style,
-                    git,
-                    x + 20. * self.ui_scale,
-                    status.y + (17. * self.ui_scale),
-                    Rect {
-                        x: (status.width - (600. * self.ui_scale)).max(0.),
-                        width: (300. * self.ui_scale),
-                        ..status
-                    },
-                );
-            }
-            if let Some(percent) = self.intel.percentage {
-                theme.text(
-                    &mut layer,
-                    &text,
-                    &format!("Indexing {percent}%"),
-                    (status.width - (310. * self.ui_scale)).max(10. * self.ui_scale),
-                    status.y + (17. * self.ui_scale),
-                    status,
-                );
-            }
-            let indentation = self.indentation_rect();
-            theme.text(
-                &mut layer,
-                &text,
-                &vel_ui::status::indentation(
-                    editor.preferences.translate_tabs_to_spaces,
-                    editor.preferences.tab_size,
-                ),
-                indentation.x + 6. * self.ui_scale,
-                status.y + 17. * self.ui_scale,
-                indentation,
-            );
-            let name = editor
-                .language
-                .borrow()
-                .as_ref()
-                .map(|l| l.name.clone())
-                .unwrap_or_else(|| "Plain Text".into());
-            theme.text(
-                &mut layer,
-                &text,
-                &name,
-                (status.width - (170. * self.ui_scale)).max(10. * self.ui_scale),
-                status.y + (17. * self.ui_scale),
-                status,
             );
         }
         scene.layers.push(layer);
@@ -5500,7 +5627,9 @@ impl Panels {
                         );
                         palette
                     },
-                    extra_css: String::new(),
+                    // One detail line per row: a long path is clipped at the row edge
+                    // instead of wrapping into a second, half-hidden line.
+                    extra_css: "html{white-space:nowrap}".into(),
                 };
                 scene.layers.push(std::mem::take(&mut overlay));
                 if let Ok(html) = workspace
@@ -5523,6 +5652,33 @@ impl Panels {
                         ),
                     );
                 }
+            }
+            // More results than rows: a slim scroll indicator at the list's right edge.
+            let content = self.quick.items.len() as f64 * self.quick.scroll.row_height;
+            if content > rows.height + 0.5 && rows.height > 0. {
+                let thumb_height = (rows.height * rows.height / content).max(20. * s);
+                let travel = (rows.height - thumb_height).max(0.);
+                let progress = self.quick.scroll.offset / (content - rows.height).max(1.);
+                let puck = theme.style(
+                    StyleId::QuickScroll.at(0),
+                    &vel_theme::ElementPath(&[
+                        vel_theme::Element::new("window", &[]),
+                        vel_theme::Element::new("quick_panel", &[]),
+                        vel_theme::Element::new("puck_control", &[]),
+                    ]),
+                    settings,
+                );
+                theme.surface(
+                    &mut overlay,
+                    &puck,
+                    Rect {
+                        x: rows.x + rows.width - 7. * s,
+                        y: rows.y + travel * progress.clamp(0., 1.),
+                        width: 4. * s,
+                        height: thumb_height,
+                    },
+                    rows,
+                );
             }
             if !self.quick_tight {
                 let footer = hint_footer(&mut theme, settings);
@@ -5595,9 +5751,9 @@ impl Panels {
         if down
             && self.overlay.is_none()
             && self.chrome
-            && point.y >= self.size.height - (STATUS * self.ui_scale)
-            && point.x >= (self.size.width - (600. * self.ui_scale)).max(0.)
-            && point.x < self.size.width - (300. * self.ui_scale)
+            && self
+                .status_item(details::StatusItem::Git)
+                .is_some_and(|rect| contains(rect, point))
             && workspace
                 .editor()
                 .settings
@@ -5616,8 +5772,9 @@ impl Panels {
         if down
             && self.overlay.is_none()
             && self.chrome
-            && point.y >= self.size.height - (STATUS * self.ui_scale)
-            && point.x >= self.size.width - (180. * self.ui_scale)
+            && self
+                .status_item(details::StatusItem::Syntax)
+                .is_some_and(|rect| contains(rect, point))
         {
             self.action(
                 workspace,
@@ -6153,6 +6310,249 @@ mod tests {
         assert_eq!(workspace.editor().buffer.id(), source);
         assert!(workspace.tabs[workspace.active].transient);
         assert_eq!(panels.restore_scroll, Some((12., 80.)));
+    }
+    /// Status-bar items never overlap each other or the position text: at every width and UI
+    /// scale they are laid out right to left, and the ones that do not fit are left out.
+    #[test]
+    fn status_items_never_overlap_at_narrow_widths() {
+        let mut workspace = workspace();
+        workspace.set_file_type("Rust").unwrap();
+        for scale in [1., 2.] {
+            workspace.editor_mut().settings.set(
+                vel_config::settings::Layer::View,
+                "ui_scale",
+                json!(scale),
+            );
+            for width in [1200., 900., 640., 520., 420., 300., 220.] {
+                let mut panels = Panels::new(&workspace, false);
+                panels.side_visible = false;
+                panels.layout(Size {
+                    width,
+                    height: 400.,
+                });
+                let mut scene = Scene::default();
+                panels.paint(&workspace, &mut scene);
+                let s = panels.ui_scale;
+                let items = panels.status_items.clone().expect("painted");
+                if width >= 640. * s {
+                    assert_eq!(items.len(), 2, "{width} @{scale}: syntax and indentation");
+                }
+                let status_top = 400. - STATUS * s;
+                for (i, (item, rect)) in items.iter().enumerate() {
+                    assert!(
+                        rect.x >= 0. && rect.x + rect.width <= width,
+                        "{item:?} {rect:?}"
+                    );
+                    assert_eq!((rect.y, rect.height), (status_top, STATUS * s));
+                    // Right to left, with a gap, and room left for the position text.
+                    if let Some((_, previous)) = i.checked_sub(1).map(|p| &items[p]) {
+                        assert!(
+                            rect.x + rect.width < previous.x,
+                            "{width} @{scale}: {items:?}"
+                        );
+                    }
+                    assert!(
+                        rect.x >= 140. * s,
+                        "{width} @{scale}: {item:?} crowds the text"
+                    );
+                }
+                let leftmost = items.iter().map(|(_, r)| r.x).fold(width, f64::min);
+                let position = scene
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.text)
+                    .find(|r| f64::from(r.baseline) > status_top && r.text.starts_with("Line"))
+                    .or_else(|| {
+                        scene
+                            .layers
+                            .iter()
+                            .flat_map(|l| &l.text)
+                            .find(|r| f64::from(r.baseline) > status_top && r.clip.x == 0.)
+                    })
+                    .expect("position text");
+                assert!(
+                    position.clip.x + position.clip.width <= leftmost,
+                    "{width} @{scale}: position text runs under the items"
+                );
+                // Each label is measured with the style it is painted with: it ends inside
+                // its item.
+                for (item, rect) in &items {
+                    for run in status_runs(&workspace, &scene, status_top) {
+                        let (x, end) = run;
+                        if x >= rect.x && x < rect.x + rect.width {
+                            assert!(end <= rect.x + rect.width + 0.01, "{item:?} {rect:?}");
+                        }
+                    }
+                }
+            }
+        }
+        // Priority: a long syntax name that does not fit never lets the indentation item
+        // take its place; lower-priority items drop first.
+        workspace.editor_mut().settings.set(
+            vel_config::settings::Layer::View,
+            "ui_scale",
+            json!(1.),
+        );
+        workspace
+            .editor()
+            .language
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .name = "A Rather Long Syntax Name For The Status Bar".into();
+        let mut dropped = 0;
+        for width in (220..=900).step_by(20) {
+            let mut panels = Panels::new(&workspace, false);
+            panels.side_visible = false;
+            panels.layout(Size {
+                width: f64::from(width),
+                height: 400.,
+            });
+            panels.paint(&workspace, &mut Scene::default());
+            let shown: Vec<_> = panels
+                .status_items
+                .clone()
+                .expect("painted")
+                .into_iter()
+                .map(|(item, _)| item)
+                .collect();
+            let order = [
+                details::StatusItem::Syntax,
+                details::StatusItem::Indentation,
+            ];
+            assert_eq!(shown, order[..shown.len()], "{width}");
+            dropped += usize::from(shown.len() < 2);
+        }
+        assert!(dropped > 0);
+    }
+    /// Left and right ends of the text runs painted in the status bar.
+    fn status_runs(workspace: &Workspace, scene: &Scene, top: f64) -> Vec<(f64, f64)> {
+        let metrics = workspace.themes.ui.borrow().metrics.clone();
+        scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .filter(|r| f64::from(r.baseline) > top && !r.text.is_empty())
+            .map(|r| (f64::from(r.x), f64::from(r.x) + run_width(&*metrics, r)))
+            .collect()
+    }
+    /// Measured advance of a painted text run.
+    fn run_width(metrics: &dyn vel_minihtml::FontMetrics, run: &vel_render::scene::TextRun) -> f64 {
+        let style = vel_minihtml::TextStyle {
+            font_family: run.family.clone().unwrap_or_else(|| "monospace".into()),
+            font_size: run.size,
+            font_weight: if run.style.bold { 700 } else { 400 },
+            italic: run.style.italic,
+            underline: false,
+            color: vel_minihtml::Color::rgb(255, 255, 255),
+        };
+        f64::from(metrics.measure(&run.text, &style).advance)
+    }
+    /// The empty-state hint sits directly under the FOLDERS heading, with or without the
+    /// Open Files group above it.
+    #[test]
+    fn empty_folder_hint_follows_the_folders_heading() {
+        let workspace = workspace();
+        for open_files in [true, false] {
+            let mut panels = Panels::new(&workspace, false);
+            panels.side_visible = true;
+            panels.open_files_visible = open_files;
+            panels.layout(Size {
+                width: 900.,
+                height: 400.,
+            });
+            let mut scene = Scene::default();
+            panels.paint(&workspace, &mut scene);
+            let baseline = |text: &str| {
+                scene
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.text)
+                    .find(|r| r.text == text)
+                    .map(|r| f64::from(r.baseline))
+                    .unwrap_or_else(|| panic!("{text} not painted"))
+            };
+            let heading = baseline("FOLDERS");
+            let hint = baseline("No folders open");
+            assert_eq!(
+                hint - heading,
+                24. * panels.ui_scale,
+                "open files {open_files}"
+            );
+        }
+    }
+    /// Labels in a narrow side bar never spill over the Git badges: when not even an ellipsis
+    /// fits, no label glyph is drawn at all.
+    #[test]
+    fn narrow_side_bar_labels_never_draw_over_git_badges() {
+        use vel_git::{Badge, FileStatus, Head, StatusSnapshot};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut workspace = workspace();
+        let mut files = std::collections::BTreeMap::new();
+        for name in ["first_rather_long_name.rs", "second_rather_long_name.rs"] {
+            let path = root.join(name);
+            std::fs::write(&path, "x\n").unwrap();
+            workspace
+                .open(crate::cli::FileLocation {
+                    path,
+                    line: 1,
+                    column: 1,
+                })
+                .unwrap();
+            files.insert(
+                PathBuf::from(name),
+                FileStatus {
+                    statuses: [Badge::Modified].into_iter().collect(),
+                },
+            );
+        }
+        workspace.git.insert_snapshot(StatusSnapshot {
+            root,
+            generation: 1,
+            head: Head::Branch {
+                name: "main".into(),
+                unborn: false,
+            },
+            ahead_behind: None,
+            files,
+            folders: std::collections::BTreeMap::new(),
+        });
+        let metrics = workspace.themes.ui.borrow().metrics.clone();
+        let mut badges = 0;
+        for width in (120..=500).step_by(10) {
+            let mut panels = Panels::new(&workspace, false);
+            panels.side_visible = true;
+            panels.layout(Size {
+                width: f64::from(width),
+                height: 400.,
+            });
+            let mut scene = Scene::default();
+            panels.paint(&workspace, &mut scene);
+            let side = panels.side_bounds;
+            let runs: Vec<_> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|r| !r.text.is_empty() && f64::from(r.x) < side.x + side.width)
+                .collect();
+            for badge in runs.iter().filter(|r| r.text == "M") {
+                badges += 1;
+                for label in runs
+                    .iter()
+                    .filter(|r| r.baseline == badge.baseline && r.x < badge.x)
+                {
+                    let end = f64::from(label.x) + run_width(&*metrics, label);
+                    assert!(
+                        end <= f64::from(badge.x) + 0.01,
+                        "{width}: {:?} runs into the badge at {}",
+                        label.text,
+                        badge.x
+                    );
+                }
+            }
+        }
+        assert!(badges > 0, "no badges painted");
     }
 }
 

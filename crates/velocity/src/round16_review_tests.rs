@@ -303,8 +303,9 @@ fn bookmark_gutter_borrows_visible_regions_and_follows_mapped_edits() {
         v.scene(&e)
             .layers
             .iter()
-            .flat_map(|l| &l.text)
-            .filter(|r| r.text == "◆")
+            .flat_map(|l| &l.rects)
+            // Bookmarks are round dots at the gutter's left edge.
+            .filter(|r| r.rect.x == 3. && r.rect.width == r.rect.height && r.radius > 0.)
             .count(),
         3
     );

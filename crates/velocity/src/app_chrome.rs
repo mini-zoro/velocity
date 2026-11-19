@@ -243,6 +243,48 @@ mod tests {
         assert!(checked > 100);
     }
     /// Tabs too narrow for a close button still show that they are dirty.
+    /// Tab labels never spill over close buttons: a label with no room for even an ellipsis
+    /// is left out.
+    #[test]
+    fn narrow_tab_labels_never_draw_over_close_buttons() {
+        use vel_minihtml::FontMetrics;
+        let mut checked = 0;
+        for tabs in [12, 14, 16, 18, 20] {
+            let mut a = app(tabs);
+            set(&mut a, "enable_tab_scrolling", json!(false));
+            let scene = a.scene();
+            let metrics = a.workspace.themes.ui.borrow().metrics.clone();
+            for (sheet, close) in &a.tab_close_hits {
+                let tab = a.tab_hits.iter().find(|(s, _)| s == sheet).unwrap().1;
+                for run in scene.layers.iter().flat_map(|l| &l.text).filter(|r| {
+                    !r.text.is_empty()
+                        && f64::from(r.x) >= tab.x
+                        && f64::from(r.x) < close.x
+                        && f64::from(r.baseline) > tab.y
+                        && f64::from(r.baseline) < tab.y + tab.height
+                }) {
+                    let style = vel_minihtml::TextStyle {
+                        font_family: run.family.clone().unwrap_or_else(|| "monospace".into()),
+                        font_size: run.size,
+                        font_weight: if run.style.bold { 700 } else { 400 },
+                        italic: run.style.italic,
+                        underline: false,
+                        color: vel_minihtml::Color::rgb(255, 255, 255),
+                    };
+                    let end = f64::from(run.x + metrics.measure(&run.text, &style).advance);
+                    assert!(
+                        end <= close.x + 0.01,
+                        "{tabs} tabs: {:?} at {} runs into the close button at {}",
+                        run.text,
+                        run.x,
+                        close.x
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
     #[test]
     fn narrow_fitted_tabs_keep_the_dirty_marker() {
         let mut a = app(80);

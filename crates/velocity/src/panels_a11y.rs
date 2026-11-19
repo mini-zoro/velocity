@@ -166,14 +166,11 @@ impl Panels {
         for root in &self.tree.roots {
             visit(self, workspace, *root, None, &mut out);
         }
-        // Syntax status popup has the exact hit area used by mouse dispatch.
-        if self.chrome && self.overlay.is_none() {
-            let frame = Rect {
-                x: (self.size.width - 180. * self.ui_scale).max(0.),
-                y: self.size.height - STATUS * self.ui_scale,
-                width: 180. * self.ui_scale,
-                height: STATUS * self.ui_scale,
-            };
+        // Syntax status popup has the exact hit area used by mouse dispatch (as painted).
+        if self.chrome
+            && self.overlay.is_none()
+            && let Some(frame) = self.status_item(super::details::StatusItem::Syntax)
+        {
             let mut node = AxNode::new(
                 ax_id(99),
                 None,

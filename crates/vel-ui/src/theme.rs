@@ -903,11 +903,43 @@ impl ThemeUi {
         if max_width <= 0. {
             return;
         }
+        let shown = self.fitted(style, text, max_width);
+        let shown = shown.as_deref().unwrap_or(text);
+        if !shown.is_empty() {
+            self.text(layer, style, shown, x, baseline, clip);
+        }
+    }
+    /// The label as [`ThemeUi::text_fit`] would paint it, keeping a trailing parenthesized
+    /// qualifier such as " (Default)" or " (User)" and shortening the part before it.
+    /// Empty when not even an ellipsis fits.
+    pub fn fit_label<'a>(
+        &self,
+        style: &Style,
+        text: &'a str,
+        max_width: f64,
+    ) -> std::borrow::Cow<'a, str> {
+        if max_width <= 0. {
+            return "".into();
+        }
+        let Some(fitted) = self.fitted(style, text, max_width) else {
+            return text.into();
+        };
+        if let Some(at) = text.rfind(" (").filter(|_| text.ends_with(')')) {
+            let (stem, suffix) = text.split_at(at);
+            let room = max_width - self.advance(style, suffix);
+            if room >= 3. * f64::from(style.size) {
+                let stem_shown = self.fitted(style, stem, room);
+                return format!("{}{suffix}", stem_shown.as_deref().unwrap_or(stem)).into();
+            }
+        }
+        fitted.to_string().into()
+    }
+    /// Cached fitting decision: None when `text` fits `max_width` as is.
+    fn fitted(&self, style: &Style, text: &str, max_width: f64) -> Option<Arc<str>> {
         // UI glyphs (including colour emoji) stay below 1.4 em, so short labels fit unmeasured.
         let bound = text.chars().count() as f64 * f64::from(style.size) * 1.4;
         if text.len() <= 2 || bound <= max_width {
-            self.text(layer, style, text, x, baseline, clip);
-            return;
+            return None;
         }
         // Labels are painted every frame; remember each fitting decision.
         let key = {
@@ -923,7 +955,7 @@ impl ThemeUi {
             h.finish()
         };
         let cached = self.fitted.borrow().get(&key).cloned();
-        let shown = match cached {
+        match cached {
             Some(shown) => shown,
             None => {
                 let shown = self.fit(style, text, max_width);
@@ -934,15 +966,7 @@ impl ThemeUi {
                 fitted.insert(key, shown.clone());
                 shown
             }
-        };
-        self.text(
-            layer,
-            style,
-            shown.as_deref().unwrap_or(text),
-            x,
-            baseline,
-            clip,
-        );
+        }
     }
     /// The ellipsized form of `text` that fits `max_width`, or None if it fits as is.
     fn fit(&self, style: &Style, text: &str, max_width: f64) -> Option<Arc<str>> {
@@ -962,7 +986,13 @@ impl ThemeUi {
             }
         }
         Some(if low == 0 {
-            Arc::from("\u{2026}")
+            // Not even one character: an ellipsis if it fits, otherwise nothing at all
+            // (never a glyph spilling over a neighbouring button or badge).
+            if self.advance(style, "\u{2026}") <= max_width {
+                Arc::from("\u{2026}")
+            } else {
+                Arc::from("")
+            }
         } else {
             Arc::from(format!("{}\u{2026}", text[..bounds[low - 1]].trim_end()))
         })

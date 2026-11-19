@@ -263,10 +263,16 @@ fn syntax_detection_settings_status_picker_and_auto_scheme_live_switch() {
         width: 800.,
         height: 600.,
     });
-    assert!(
-        p.mouse(&mut w, Point { x: 750., y: 590. }, true, false, false, 0..0)
-            .unwrap()
-    );
+    // Status items are hit where the last paint placed them.
+    p.paint(&w, &mut vel_render::scene::Scene::default());
+    let item = p
+        .status_item(crate::panels::StatusItem::Syntax)
+        .expect("syntax item painted");
+    let click = Point {
+        x: item.x + item.width / 2.,
+        y: 590.,
+    };
+    assert!(p.mouse(&mut w, click, true, false, false, 0..0).unwrap());
     assert_eq!(p.overlay, Some(crate::panels::Overlay::Syntax));
     assert!(w.palette.iter().any(|p| p.caption == "Set Syntax: Rust"));
 }

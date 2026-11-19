@@ -72,6 +72,34 @@ pub fn font_variant(
     Ok((path, name, font))
 }
 
+/// Non-default variation coordinates CoreText applies to a face, as (axis tag, value) pairs.
+/// The system UI font is one variable file: its bold face is the regular file at `wght` 700,
+/// and text sizes use the `opsz` 17 cut, so the rasterizer must apply these to match CoreText.
+#[cfg(target_os = "macos")]
+pub fn font_variation(font: &NativeFont) -> Vec<(u32, f32)> {
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained};
+    // SAFETY: reads an immutable dictionary copied from a live retained CTFont.
+    let Some(variation) = (unsafe { font.variation() }) else {
+        return Vec::new();
+    };
+    // SAFETY: CTFontCopyVariation returns axis identifier numbers mapped to number values.
+    let variation: CFRetained<CFDictionary<CFNumber, CFNumber>> =
+        unsafe { CFRetained::cast_unchecked(variation) };
+    let (axes, values) = variation.to_vecs();
+    axes.iter()
+        .zip(&values)
+        .filter_map(|(axis, value)| {
+            Some((u32::try_from(axis.as_i64()?).ok()?, value.as_f64()? as f32))
+        })
+        .collect()
+}
+
+/// Variable faces resolve to their default instance without CoreText.
+#[cfg(not(target_os = "macos"))]
+pub fn font_variation(_: &NativeFont) -> Vec<(u32, f32)> {
+    Vec::new()
+}
+
 /// Font variants require CoreText on the native platform.
 #[cfg(not(target_os = "macos"))]
 pub fn font_variant(

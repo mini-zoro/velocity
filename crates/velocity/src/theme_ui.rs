@@ -617,6 +617,54 @@ const BUNDLED: &[(&str, &[u8])] = &[
         include_bytes!("../resources/Packages/Theme - Velocity/edge-top@3x.png"),
     ),
     (
+        "file-code.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-code.png"),
+    ),
+    (
+        "file-code@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-code@2x.png"),
+    ),
+    (
+        "file-code@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-code@3x.png"),
+    ),
+    (
+        "file-config.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-config.png"),
+    ),
+    (
+        "file-config@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-config@2x.png"),
+    ),
+    (
+        "file-config@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-config@3x.png"),
+    ),
+    (
+        "file-image.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-image.png"),
+    ),
+    (
+        "file-image@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-image@2x.png"),
+    ),
+    (
+        "file-image@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-image@3x.png"),
+    ),
+    (
+        "file-text.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-text.png"),
+    ),
+    (
+        "file-text@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-text@2x.png"),
+    ),
+    (
+        "file-text@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/file-text@3x.png"),
+    ),
+    (
         "folder.png",
         include_bytes!("../resources/Packages/Theme - Velocity/folder.png"),
     ),

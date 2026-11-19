@@ -315,7 +315,11 @@ The remaining +30K instructions (≈ 3 µs) in side-bar scenes come from the ext
 
 ## Images
 
-`before/` and `after/` (same names; 1x images are native 1x renders, 2x crops are scaled to 60–70%):
+Round 2 replaced these images to stay within the 40-image budget; the round-1 set is in git
+history (`git show f5f0f8a:docs/design/after/01-window-tabs-dark.png`, and likewise for every
+name below). The current `before/`/`after/` images belong to `ui-audit-r2.md`.
+
+Round-1 names, `before/` and `after/` (1x images are native 1x renders, 2x crops are scaled to 60–70%):
 `01-window-tabs-dark`, `02-window-tabs-light`, `03-command-palette-dark`,
 `04-goto-anything-light`, `05-find-panels-dark@2x`, `06-find-panels-light@2x`,
 `07-find-panels-dark@1x`, `08-find-panels-light@1x` (each stacks find with hover + tool tip,

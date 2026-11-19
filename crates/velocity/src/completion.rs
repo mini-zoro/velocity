@@ -90,6 +90,8 @@ pub struct Completion {
     pub list: Option<CompletionList>,
     pub selected: usize,
     pub bounds: std::cell::Cell<Rect>,
+    /// First item and row count as painted; clicks map through the same rows.
+    painted_rows: std::cell::Cell<(usize, usize)>,
     requested_carets: Vec<usize>,
     pending: Option<Invocation>,
     since: Instant,
@@ -108,6 +110,7 @@ impl Default for Completion {
             list: None,
             selected: 0,
             bounds: Default::default(),
+            painted_rows: Default::default(),
             requested_carets: Vec::new(),
             pending: None,
             since: Instant::now(),
@@ -324,8 +327,12 @@ impl Completion {
         };
         use vel_theme::{Element, ElementPath};
         let mut theme = editor.theme.borrow_mut();
-        let n = popup_rows(list.items.len(), view.size.height);
-        let height = n as f64 * 24. + 50.;
+        // 4 points of padding above the rows (so the selected row clears the rounded
+        // border) and a footer with a details line when any item has details: the height
+        // stays put while the selection moves, so a popup above the caret does not jump.
+        let details = list.items.iter().any(|item| !item.details.is_empty());
+        let n = popup_rows(list.items.len(), view.size.height, details);
+        let height = ROWS_TOP + n as f64 * 24. + popup_footer(details);
         let rect = popup_bounds(view.rect_at(editor, editor.caret), view.size, height);
         self.bounds.set(rect);
         let popup_path = [
@@ -340,6 +347,7 @@ impl Completion {
         let mut layer = Layer::default();
         theme.surface(&mut layer, &popup, rect, rect);
         let first = self.selected.saturating_sub(n.saturating_sub(1));
+        self.painted_rows.set((first, n));
         for (row, item) in list.items.iter().skip(first).take(n).enumerate() {
             let attrs = if first + row == self.selected {
                 &["selected"][..]
@@ -358,9 +366,10 @@ impl Completion {
                 &editor.settings,
             );
             let r = Rect {
-                y: rect.y + row as f64 * 24.,
+                x: rect.x + 4.,
+                y: rect.y + ROWS_TOP + row as f64 * 24.,
+                width: rect.width - 8.,
                 height: 24.,
-                ..rect
             };
             theme.surface(&mut layer, &row_style, r, rect);
             let label_path = [
@@ -394,10 +403,10 @@ impl Completion {
                 &editor.settings,
             );
             let badge_rect = Rect {
-                x: r.x + 5.,
-                y: r.y + 2.,
-                width: 22.,
-                height: 20.,
+                x: r.x + 4.,
+                y: r.y + 3.,
+                width: 18.,
+                height: 18.,
             };
             theme.surface(&mut layer, &kind, badge_rect, r);
             let label_path = [
@@ -413,15 +422,16 @@ impl Completion {
                 &ElementPath(&label_path),
                 &editor.settings,
             );
+            let badge_width = theme.advance(&kind_label, &badge);
             theme.text(
                 &mut layer,
                 &kind_label,
                 &badge,
-                r.x + 10.,
-                r.y + 17.,
+                (badge_rect.x + (badge_rect.width - badge_width) / 2.).round(),
+                r.y + 16.,
                 badge_rect,
             );
-            theme.text(&mut layer, &text, &item.trigger, r.x + 34., r.y + 17., r);
+            theme.text(&mut layer, &text, &item.trigger, r.x + 30., r.y + 17., r);
             let prefix = list
                 .replace_ranges
                 .first()
@@ -436,7 +446,7 @@ impl Completion {
             let mut matched = text.clone();
             matched.foreground = text.matched;
             for range in matched_ranges(&item.trigger, &prefix) {
-                let x = r.x + 34. + theme.advance(&text, &item.trigger[..range.start]);
+                let x = r.x + 30. + theme.advance(&text, &item.trigger[..range.start]);
                 theme.text(&mut layer, &matched, &item.trigger[range], x, r.y + 17., r);
             }
             if !item.annotation.is_empty() {
@@ -472,12 +482,29 @@ impl Completion {
             ];
             let detail = theme.style(editor.ui_id(0xC400), &ElementPath(&path), &editor.settings);
             let mut footer = Layer::default();
+            // A hairline separates the footer (kind name, then details) from the rows.
+            let separator = rect.y + ROWS_TOP + n as f64 * 24. + 2.;
+            if let Some((color, width)) = popup.border() {
+                footer.surfaces.push(vel_render::scene::Surface::Fill(
+                    vel_render::scene::SolidRect {
+                        rect: Rect {
+                            x: rect.x + 1.,
+                            y: separator,
+                            width: rect.width - 2.,
+                            height: f64::from(width),
+                        },
+                        clip: rect,
+                        color,
+                        radius: 0.,
+                    },
+                ));
+            }
             theme.text(
                 &mut footer,
                 &detail,
                 &item.kind.name,
-                rect.x + 8.,
-                rect.y + n as f64 * 24. + 18.,
+                rect.x + 10.,
+                separator + 17.,
                 rect,
             );
             scene.layers.push(footer);
@@ -508,30 +535,43 @@ impl Completion {
                 html.paint(
                     scene,
                     Rect {
-                        x: rect.x + 8.,
-                        y: rect.y + n as f64 * 24. + 24.,
-                        width: rect.width - 16.,
+                        x: rect.x + 10.,
+                        y: separator + 22.,
+                        width: rect.width - 20.,
                         height: 26.,
                     },
                 );
             }
         }
     }
-    pub fn hit(&mut self, point: Point) -> bool {
+    /// Maps a click to the painted popup: a row selects that item, anything else inside the
+    /// popup (padding, footer) is swallowed so it never reaches the text underneath.
+    pub fn hit(&mut self, point: Point) -> PopupHit {
         let rect = self.bounds.get();
         if !self.visible() || !vel_ui::contains(rect, point) {
-            return false;
+            return PopupHit::Outside;
         }
-        let n = popup_rows(self.list.as_ref().unwrap().items.len(), rect.height);
-        let first = self.selected.saturating_sub(n.saturating_sub(1));
-        let row = ((point.y - rect.y) / 24.) as usize;
-        if row < n {
-            self.selected = first + row;
-            true
+        let (first, n) = self.painted_rows.get();
+        let count = self.list.as_ref().map_or(0, |list| list.items.len());
+        let offset = point.y - rect.y - ROWS_TOP;
+        let row = (offset / 24.).floor();
+        if offset >= 0. && row < n as f64 && first + (row as usize) < count {
+            self.selected = first + row as usize;
+            PopupHit::Row
         } else {
-            false
+            PopupHit::Chrome
         }
     }
+}
+/// Where a click landed relative to the completion popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupHit {
+    /// Outside the popup: the click belongs to whatever is underneath.
+    Outside,
+    /// On a row: that item is selected.
+    Row,
+    /// Inside the popup but not on a row (padding, footer): ignored.
+    Chrome,
 }
 fn kind_class(kind: vel_complete::KindId) -> &'static str {
     use vel_complete::KindId::*;
@@ -588,10 +628,19 @@ fn system_fullname() -> &'static str {
         std::env::var("USER").unwrap_or_default()
     })
 }
-fn popup_rows(count: usize, height: f64) -> usize {
-    count
-        .min(8)
-        .min(((height - 30.) / 24.).floor().max(1.) as usize)
+/// Padding above the completion rows.
+const ROWS_TOP: f64 = 4.;
+/// Footer below the rows: the kind name, plus a details line when there are details.
+fn popup_footer(details: bool) -> f64 {
+    if details { 52. } else { 28. }
+}
+/// Rows that fit in a view `height` together with the padding and the footer (at least one).
+fn popup_rows(count: usize, height: f64, details: bool) -> usize {
+    count.min(8).min(
+        ((height - ROWS_TOP - popup_footer(details)) / 24.)
+            .floor()
+            .max(1.) as usize,
+    )
 }
 pub fn popup_bounds(caret: Rect, size: vel_platform::Size, height: f64) -> Rect {
     let width = 460f64.min(size.width.max(0.));
@@ -1264,10 +1313,13 @@ mod tests {
         let scene = view.scene(&e);
         assert!(!scene.layers.last().unwrap().text.is_empty());
         let rect = e.completion.bounds.get();
-        assert!(e.completion.hit(Point {
-            x: rect.x + 10.,
-            y: rect.y + 5.
-        }));
+        assert_eq!(
+            e.completion.hit(Point {
+                x: rect.x + 10.,
+                y: rect.y + 5.
+            }),
+            PopupHit::Row
+        );
         e.run("commit_completion", &json!({})).unwrap();
         assert_eq!(e.text.to_string(), "alpha");
         e.run("replace_completion_with_next_completion", &json!({}))
@@ -1486,6 +1538,115 @@ mod tests {
             .unwrap();
         workspace.select(source);
         assert!(workspace.editor().fields.is_none());
+    }
+    /// Clicks map through the rows as painted, in every view height and on both sides of the
+    /// caret; padding and footer clicks stay in the popup; arrowing never resizes it.
+    #[test]
+    fn popup_clicks_follow_painted_rows_and_its_height_is_stable() {
+        let completions = r#"{"scope":"source.rust","completions":[{"trigger":"alpha","contents":"alpha","kind":"function","details":"<b>detail</b>"},"alpine","alps","altitude","alto"]}"#;
+        for above in [false, true] {
+            let source = if above {
+                format!("{}al", "\n".repeat(60))
+            } else {
+                "al".to_owned()
+            };
+            let mut e = editor(&source);
+            let mut engine = CompletionEngine::new();
+            engine.add_completions(completions).unwrap();
+            e.completion.set_engine(Arc::new(engine));
+            e.sync();
+            e.run("auto_complete", &json!({})).unwrap();
+            ready(&mut e, true);
+            let triggers: Vec<String> = e
+                .completion
+                .list
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.trigger.clone())
+                .collect();
+            assert!(triggers.len() >= 2, "{triggers:?}");
+            let mut placed_above = 0;
+            for height in (60..=260).step_by(5) {
+                let mut view = crate::view::View::new(
+                    vel_platform::Size {
+                        width: 400.,
+                        height: f64::from(height),
+                    },
+                    8.,
+                    12.,
+                );
+                if above {
+                    // Put the caret on the view's last line so the popup opens above it.
+                    view.scene(&e);
+                    let caret = view.rect_at(&e, e.caret);
+                    view.scroll_y = (caret.y + caret.height + 2. - f64::from(height)).max(0.);
+                }
+                for selected in 0..triggers.len() {
+                    e.completion.selected = selected;
+                    let scene = view.scene(&e);
+                    let rect = e.completion.bounds.get();
+                    let caret = view.rect_at(&e, e.caret);
+                    if above && caret.y >= rect.height {
+                        // Room above the caret: the popup opens there.
+                        assert!(rect.y + rect.height <= caret.y + 0.01, "{height}: {rect:?}");
+                        placed_above += 1;
+                    }
+                    // Rows as drawn: each trigger label sits 30 points into its row.
+                    let rows: Vec<(String, f64)> = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.text)
+                        .filter(|run| {
+                            (f64::from(run.x) - (rect.x + 34.)).abs() < 0.01
+                                && triggers.contains(&run.text)
+                        })
+                        .map(|run| (run.text.clone(), f64::from(run.baseline) - 5.))
+                        .collect();
+                    assert!(!rows.is_empty(), "{height}: no rows painted");
+                    for (trigger, centre) in &rows {
+                        assert!(
+                            centre - 12. >= rect.y && centre + 12. <= rect.y + rect.height,
+                            "{height}: row {trigger} outside the popup {rect:?}"
+                        );
+                        let hit = e.completion.hit(Point {
+                            x: rect.x + 60.,
+                            y: *centre,
+                        });
+                        assert_eq!(hit, PopupHit::Row, "{height}: {trigger}");
+                        assert_eq!(&triggers[e.completion.selected], trigger, "{height}");
+                        e.completion.selected = selected;
+                    }
+                    // Padding above the rows and the footer below them are part of the popup.
+                    for y in [rect.y + 1., rect.y + rect.height - 2.] {
+                        assert_eq!(
+                            e.completion.hit(Point { x: rect.x + 60., y }),
+                            PopupHit::Chrome,
+                            "{height}: y {y} in {rect:?}"
+                        );
+                        assert_eq!(e.completion.selected, selected);
+                    }
+                    assert_eq!(
+                        e.completion.hit(Point {
+                            x: rect.x + 60.,
+                            y: rect.y + rect.height + 1.,
+                        }),
+                        PopupHit::Outside
+                    );
+                }
+                // The selection moved through items with and without details: one height
+                // and one position for the whole list.
+                let mut seen = Vec::new();
+                for selected in 0..triggers.len() {
+                    e.completion.selected = selected;
+                    view.scene(&e);
+                    seen.push(e.completion.bounds.get());
+                }
+                assert!(seen.windows(2).all(|w| w[0] == w[1]), "{height}: {seen:?}");
+            }
+            assert_eq!(placed_above > 0, above);
+        }
     }
     #[test]
     fn popup_flips_and_clamps() {

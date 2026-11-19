@@ -21,8 +21,10 @@ contrast. Error underlines remain distinguishable without relying on hue alone.
 
 Ratios use WCAG sRGB relative luminance against the scheme background. Every normal token
 exceeds 4.5:1, and comments exceed 3:1; tests verify these thresholds through the actual style
-resolver. Selection uses a separate blue-grey surface and explicit foreground. Low-contrast
-surfaces and guides are decoration rather than normal text.
+resolver. Selection uses a separate blue-grey surface and explicit foreground (Light: #c9dbe7, 1.30:1
+against the paper, text on it 8.6:1). Indent guides have their own colour (Dark #253949, 1.34:1;
+Light #dddbcf, 1.27:1), lighter than the active guide and separate from the line highlight.
+Low-contrast surfaces and guides are decoration rather than normal text.
 
 The rules use the public scope naming families (comment, constant, entity, invalid, keyword,
 markup, punctuation, storage, string, support, variable). Source/text/meta containers inherit

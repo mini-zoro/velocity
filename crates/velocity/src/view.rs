@@ -336,7 +336,7 @@ impl View {
             text_run(
                 layer,
                 &number,
-                self.gutter(e) - 12. - number.len() as f64 * self.cell,
+                self.line_number_x(self.gutter(e), &number),
                 baseline,
                 e.preferences.font_size,
                 self.line_number_color(scheme, row),
@@ -736,10 +736,20 @@ impl View {
         if !e.preferences.gutter {
             0.
         } else if !e.preferences.line_numbers {
-            16.
+            // Bookmark and diff marks; the fold column follows them, clear of the dots.
+            if e.settings.bool("fold_buttons", true) {
+                GUTTER_MARKS + GUTTER_FOLD
+            } else {
+                16.
+            }
         } else {
-            (e.text.len_lines().max(1).ilog10() + 1) as f64 * self.cell + 24.
+            // 12 left (bookmark marks), the numbers, 4 of space and a 12-point fold column.
+            (e.text.len_lines().max(1).ilog10() + 1) as f64 * self.cell + GUTTER_MARKS + GUTTER_FOLD
         }
+    }
+    /// Left edge of a right-aligned line number; every row shape (wrapped, long line) uses it.
+    fn line_number_x(&self, gutter: f64, number: &str) -> f64 {
+        gutter - GUTTER_FOLD - number.len() as f64 * self.cell
     }
     pub fn rows(&self) -> usize {
         ((self.size.height - self.tab_height - 8.).max(1.) / self.line_height)
@@ -1767,7 +1777,7 @@ impl View {
         if down
             && self.gutter_hover
             && e.settings.bool("fold_buttons", true)
-            && point.x >= self.gutter(e) - 14.
+            && point.x >= self.gutter(e) - GUTTER_FOLD
             && point.y >= self.tab_height
         {
             let visual = ((point.y - self.tab_height - 4. + self.scroll_y) / self.line_height)
@@ -2323,19 +2333,25 @@ impl View {
                         },
                     )
                 {
-                    text_run(
-                        &mut layer,
-                        "◆",
-                        3.,
-                        baseline,
-                        e.preferences.font_size,
-                        global("gutter_foreground"),
-                        FontStyle::default(),
-                        Rect {
+                    // A round mark in the scheme's accent, centred in the left gutter padding.
+                    let mark = 6f64.min(self.line_height - 4.).max(2.);
+                    layer.rects.push(SolidRect {
+                        rect: Rect {
+                            x: 3.,
+                            y: y + ((self.line_height - mark) / 2.).round(),
+                            width: mark,
+                            height: mark,
+                        },
+                        radius: (mark / 2.) as f32,
+                        color: scheme
+                            .globals
+                            .color("accent")
+                            .map_or_else(|| global("gutter_foreground"), rgba),
+                        clip: Rect {
                             width: gutter,
                             ..all
                         },
-                    );
+                    });
                 }
                 if e.preferences.line_numbers {
                     let number =
@@ -2347,7 +2363,7 @@ impl View {
                     text_run(
                         &mut layer,
                         &number,
-                        gutter - 12. - number.len() as f64 * self.cell,
+                        self.line_number_x(gutter, &number),
                         baseline,
                         e.preferences.font_size,
                         self.line_number_color(scheme, row),
@@ -2358,20 +2374,24 @@ impl View {
                         },
                     );
                 }
-                if e.settings.bool("fold_buttons", true)
-                    && (!e.settings.bool("fade_fold_buttons", true) || self.gutter_hover)
-                {
+                if e.settings.bool("fold_buttons", true) {
                     let header_end = start + line.trim_end_matches('\n').len();
                     let is_folded = folded
                         .get(folded.partition_point(|r| r.begin() < start))
                         .is_some_and(|r| r.begin() <= header_end);
-                    let candidate = language.and_then(|l| l.analysis.as_ref()).is_some_and(|a| {
-                        let at = a.folds.partition_point(|f| f.range.start < start);
-                        a.folds[at..]
-                            .iter()
-                            .take_while(|f| f.range.start <= header_end)
-                            .any(|f| !f.attributes)
-                    });
+                    // Faded buttons appear with the pointer over the gutter; a collapsed fold
+                    // keeps its button so hidden lines stay discoverable.
+                    let shown = is_folded
+                        || !e.settings.bool("fade_fold_buttons", true)
+                        || self.gutter_hover;
+                    let candidate = shown
+                        && language.and_then(|l| l.analysis.as_ref()).is_some_and(|a| {
+                            let at = a.folds.partition_point(|f| f.range.start < start);
+                            a.folds[at..]
+                                .iter()
+                                .take_while(|f| f.range.start <= header_end)
+                                .any(|f| !f.attributes)
+                        });
                     if is_folded || candidate {
                         let mut theme = e.theme.borrow_mut();
                         let attrs = if is_folded {
@@ -2389,14 +2409,18 @@ impl View {
                             &vel_theme::ElementPath(&path),
                             &e.settings,
                         );
-                        theme.surface(
-                            &mut layer,
+                        // Theme surfaces of this layer draw beneath its solid fills (the
+                        // gutter and editor backgrounds), so gutter marks go to the next one.
+                        // The 16-point glyph at its own size, centred on the line; its strokes
+                        // stay inside the fold column, clear of numbers and diff marks.
+                        theme.icon_surface(
+                            &mut carets,
                             &style,
                             Rect {
-                                x: gutter - 12.,
-                                y: baseline - 10.,
-                                width: 10.,
-                                height: 10.,
+                                x: gutter - 17.,
+                                y: y + ((self.line_height - 16.) / 2.).round(),
+                                width: 16.,
+                                height: 16.,
                             },
                             all,
                         );
@@ -3575,6 +3599,11 @@ fn whitespace(e: &Editor, line: &str, byte: usize, selected: bool) -> bool {
         },
     }
 }
+/// Gutter space left of the line numbers, holding the bookmark dots.
+const GUTTER_MARKS: f64 = 12.;
+/// Gutter space right of the line numbers: 4 of gap and the 12-point fold column, whose
+/// 16-point buttons end 1 point before the gutter edge.
+const GUTTER_FOLD: f64 = 16.;
 pub fn caret_alpha(style: &str, seconds: f64) -> f32 {
     let phase = seconds.rem_euclid(1.);
     match style {
@@ -3589,6 +3618,183 @@ pub fn caret_alpha(style: &str, seconds: f64) -> f32 {
 mod tests {
     use super::*;
     use vel_text::Text;
+    /// Long lines (painted by their own path) put their numbers where every other row does.
+    #[test]
+    fn long_line_numbers_align_with_the_other_rows() {
+        let text = format!("a\n{}\nb\n", "x".repeat(crate::large::LONG_LINE + 10));
+        let mut e = Editor::new(Text::from(text.as_str()));
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "word_wrap",
+            vel_config::json!(false),
+        );
+        e.sync();
+        let mut v = View::new(
+            Size {
+                width: 600.,
+                height: 200.,
+            },
+            8.,
+            12.,
+        );
+        let scene = v.scene(&e);
+        let gutter = v.gutter(&e);
+        let numbers: Vec<(String, f32)> = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .filter(|r| ["1", "2", "3"].contains(&r.text.as_str()) && f64::from(r.x) < gutter)
+            .map(|r| (r.text.clone(), r.x))
+            .collect();
+        assert_eq!(numbers.len(), 3, "{numbers:?}");
+        assert!(
+            numbers.iter().all(|(_, x)| *x == numbers[0].1),
+            "{numbers:?}"
+        );
+        // Right-aligned before the 16-point fold column.
+        let right = f64::from(numbers[0].1) + v.cell;
+        assert!(
+            (gutter - GUTTER_FOLD - right).abs() < 0.01,
+            "{numbers:?} gutter {gutter}"
+        );
+    }
+    /// Without line numbers the fold column still clears the bookmark dots and stays inside
+    /// the gutter.
+    #[test]
+    fn gutter_without_numbers_keeps_fold_buttons_clear_of_bookmarks() {
+        let mut w = crate::workspace::Workspace::new(
+            Text::from("fn a() {\n    one();\n}\n"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        w.set_file_type("Rust").unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(20);
+        while !w.editor().language.borrow().as_ref().unwrap().ready()
+            || w.themes.ui.borrow().metrics.images_pending()
+        {
+            w.editor_mut().poll_language();
+            w.themes.ui.borrow().metrics.poll_images();
+            assert!(Instant::now() < until);
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        let e = w.editor_mut();
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "line_numbers",
+            vel_config::json!(false),
+        );
+        e.sync();
+        e.run("toggle_bookmark", &vel_config::json!({})).unwrap();
+        let mut v = View::new(
+            Size {
+                width: 600.,
+                height: 260.,
+            },
+            8.,
+            12.,
+        );
+        v.apply_style(e);
+        v.gutter_hover = true;
+        let scene = v.scene(e);
+        let gutter = v.gutter(e);
+        let dot = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.rects)
+            .find(|r| r.rect.x == 3. && r.rect.width == r.rect.height && r.radius > 0.)
+            .expect("bookmark dot")
+            .rect;
+        let button = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.surfaces)
+            .find_map(|s| match s {
+                vel_render::scene::Surface::Image(q) if q.rect.x < gutter => Some(q.rect),
+                _ => None,
+            })
+            .expect("fold button");
+        assert!(
+            button.x >= 0. && button.x + button.width <= gutter,
+            "{button:?} in {gutter}"
+        );
+        assert!(
+            dot.x + dot.width <= button.x,
+            "dot {dot:?} under button {button:?}"
+        );
+        // Without fold buttons the gutter keeps its narrow width.
+        e.settings.set(
+            vel_config::settings::Layer::View,
+            "fold_buttons",
+            vel_config::json!(false),
+        );
+        assert_eq!(v.gutter(e), 16.);
+    }
+    /// Fold buttons are drawn above the gutter background (a layer's surfaces draw before its
+    /// fills, so a button in the background's layer would be invisible), and a collapsed fold
+    /// keeps its button while the others are faded out.
+    #[test]
+    fn fold_buttons_draw_above_the_gutter_and_collapsed_ones_stay_visible() {
+        let mut w = crate::workspace::Workspace::new(
+            Text::from("fn a() {\n    one();\n}\nfn b() {\n    two();\n}\n"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        w.set_file_type("Rust").unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(20);
+        while !w.editor().language.borrow().as_ref().unwrap().ready()
+            || w.themes.ui.borrow().metrics.images_pending()
+        {
+            w.editor_mut().poll_language();
+            w.themes.ui.borrow().metrics.poll_images();
+            assert!(Instant::now() < until);
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        let e = w.editor_mut();
+        e.set_folded(vec![vel_buffer::Region::new(8, 20)]);
+        let mut v = View::new(
+            Size {
+                width: 600.,
+                height: 260.,
+            },
+            8.,
+            12.,
+        );
+        v.apply_style(e);
+        let buttons = |v: &mut View, e: &Editor| {
+            let scene = v.scene(e);
+            let gutter = v.gutter(e);
+            let background = scene
+                .layers
+                .iter()
+                .position(|l| {
+                    l.rects
+                        .iter()
+                        .any(|r| r.rect.x <= 0. && r.rect.width >= gutter)
+                })
+                .expect("gutter background");
+            scene
+                .layers
+                .iter()
+                .enumerate()
+                .flat_map(|(i, l)| l.surfaces.iter().map(move |s| (i, s)))
+                .filter_map(|(i, s)| match s {
+                    vel_render::scene::Surface::Image(q) if q.rect.x >= gutter - 17. - 0.5 => {
+                        Some((i, q.rect.y))
+                    }
+                    _ => None,
+                })
+                .inspect(|(i, _)| assert!(*i > background, "button under the gutter fill"))
+                .count()
+        };
+        v.gutter_hover = false;
+        assert_eq!(buttons(&mut v, e), 1, "only the collapsed fold while faded");
+        v.gutter_hover = true;
+        assert_eq!(buttons(&mut v, e), 2, "both folds on gutter hover");
+    }
     #[test]
     fn horizontal_scroll_stops_at_the_widest_line() {
         let size = Size {
