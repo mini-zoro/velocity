@@ -74,6 +74,16 @@ def validate_document_types(plist):
                     assert set(EXTENSIONS) <= set(entry.get("CFBundleTypeExtensions", [])), uti
 
 
+def build_number(epoch):
+    """CFBundleVersion: the source commit time. LaunchServices prefers the bundle with the
+    highest CFBundleVersion when several copies share an identifier, so every package must
+    carry a larger number than older ones (a constant 0.0.0 let it launch a stale copy
+    that predates Finder open support)."""
+    epoch = int(epoch)
+    assert epoch >= 0, epoch
+    return str(epoch)
+
+
 def assemble(args):
     repo, app = Path(args.repo), Path(args.app)
     metadata = json.loads(Path(args.metadata).read_text())
@@ -88,7 +98,7 @@ def assemble(args):
         "CFBundleExecutable": "velocity", "CFBundleIconFile": "Velocity.icns",
         "CFBundleIdentifier": "dev.velocity.Velocity", "CFBundleName": "Velocity",
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": numeric_version,
-        "CFBundleVersion": numeric_version, "NSHighResolutionCapable": True,
+        "CFBundleVersion": build_number(args.epoch), "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "14.0", "NSPrincipalClass": "NSApplication",
         "NSRequiresAquaSystemAppearance": False, "NSSupportsAutomaticTermination": False,
         "CFBundleDocumentTypes": document_types(),
@@ -132,7 +142,7 @@ def validate(args):
     assert plist["CFBundleIdentifier"] == "dev.velocity.Velocity"
     assert plist["CFBundleExecutable"] == "velocity" and plist["CFBundlePackageType"] == "APPL"
     assert plist["CFBundleShortVersionString"] == info["version"].split("-")[0].split("+")[0]
-    assert plist["CFBundleVersion"] == plist["CFBundleShortVersionString"]
+    assert plist["CFBundleVersion"] == build_number(info["source_date_epoch"])
     assert plist["NSHighResolutionCapable"] is True
     assert plist["LSMinimumSystemVersion"] == "14.0"
     assert plist["NSRequiresAquaSystemAppearance"] is False

@@ -14,7 +14,16 @@ VELOCITY_OUTPUT=${1:-"$VELOCITY_REPO/target/package-macos"}
 mkdir -p "$VELOCITY_OUTPUT"
 VELOCITY_OUTPUT=$(CDPATH= cd -- "$VELOCITY_OUTPUT" && pwd -P)
 VELOCITY_STAGE=$(mktemp -d "$VELOCITY_OUTPUT/.package.XXXXXX")
+VELOCITY_LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+unregister() {
+    # Staging and backup copies share the bundle identifier; keep them out of
+    # LaunchServices so Finder's Open With never picks one of them.
+    if [ -x "$VELOCITY_LSREGISTER" ] && [ -e "$1" ]; then
+        "$VELOCITY_LSREGISTER" -u "$1" >/dev/null 2>&1 || true
+    fi
+}
 cleanup() {
+    unregister "$VELOCITY_STAGE/Velocity.app"
     rm -rf "$VELOCITY_STAGE"
 }
 trap cleanup EXIT
@@ -170,8 +179,14 @@ report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 PY
 for VELOCITY_ARTIFACT in Velocity.app "$VELOCITY_BASENAME.dmg" "$VELOCITY_BASENAME.app.zip" SHA256SUMS packaging-report.json; do
     if [ -e "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT" ] || [ -L "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT" ]; then
-        mv "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT" "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT.backup.$(date +%Y%m%d%H%M%S).$$"
+        VELOCITY_BACKUP="$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT.backup.$(date +%Y%m%d%H%M%S).$$"
+        mv "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT" "$VELOCITY_BACKUP"
+        if [ "$VELOCITY_ARTIFACT" = Velocity.app ]; then unregister "$VELOCITY_BACKUP"; fi
     fi
+    if [ "$VELOCITY_ARTIFACT" = Velocity.app ]; then unregister "$VELOCITY_STAGE/$VELOCITY_ARTIFACT"; fi
     mv "$VELOCITY_STAGE/$VELOCITY_ARTIFACT" "$VELOCITY_OUTPUT/$VELOCITY_ARTIFACT"
 done
+if [ -x "$VELOCITY_LSREGISTER" ]; then
+    "$VELOCITY_LSREGISTER" -f "$VELOCITY_OUTPUT/Velocity.app" >/dev/null 2>&1 || true
+fi
 cat "$VELOCITY_OUTPUT/packaging-report.json"

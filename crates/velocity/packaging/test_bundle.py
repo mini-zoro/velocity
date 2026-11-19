@@ -58,3 +58,13 @@ class DocumentTypes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildNumber(unittest.TestCase):
+    def test_build_number_grows_with_the_source_commit_time(self):
+        # LaunchServices launches the copy with the highest CFBundleVersion.
+        self.assertEqual(bundle.build_number("1795070000"), "1795070000")
+        self.assertGreater(int(bundle.build_number(1795070001)), int(bundle.build_number(1795070000)))
+        self.assertEqual(bundle.build_number(0), "0")
+        with self.assertRaises(AssertionError):
+            bundle.build_number(-1)
