@@ -374,7 +374,10 @@ fn collect_login(
         }
     };
     crate::process::kill_tree(child.id());
-    let grace = deadline.min(Instant::now() + Duration::from_millis(200));
+    // The shell has exited; only its output is left to drain. The grace is bounded
+    // (a detached descendant holding the pipe must not hang the caller) but long
+    // enough for the reader thread to be scheduled on a heavily loaded machine.
+    let grace = deadline.min(Instant::now() + Duration::from_secs(1));
     let bytes = loop {
         if stop.load(Ordering::Acquire) || Instant::now() >= grace {
             return Err("login pipe did not close before deadline".into());
