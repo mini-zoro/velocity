@@ -70,6 +70,9 @@ pub struct Tab {
     pub(crate) image_failed: bool,
     /// Whether the path matches `image_file_patterns`, with what that decision depends on.
     image_file: std::cell::RefCell<Option<ImageFile>>,
+    /// The project folder the patterns match against; the file's own folder until a frame
+    /// has supplied it.
+    pub(crate) image_root: std::cell::RefCell<Option<PathBuf>>,
     /// The source could not load. Never persist an empty error placeholder as
     /// if it were recovered user text; retained dirty contents still survive.
     pub(crate) load_failed: bool,
@@ -194,6 +197,7 @@ impl Tab {
             binary_document: false,
             image_failed: false,
             image_file: std::cell::RefCell::new(None),
+            image_root: std::cell::RefCell::new(None),
             load_failed: false,
             pending_restore: None,
             pending_center: false,
@@ -278,13 +282,23 @@ impl Tab {
             return false;
         };
         let revision = self.editor.settings.revision();
+        let owned = self.image_root.borrow().clone();
+        // Project-relative `//` rules need the project folder, which a frame supplies; until
+        // then the file's own folder cannot answer them, and a picture is shown as one.
+        if owned.is_none() && self.has_project_image_patterns() {
+            return true;
+        }
+        let root = owned
+            .as_deref()
+            .unwrap_or_else(|| path.parent().unwrap_or(path));
         if let Some(known) = self.image_file.borrow().as_ref()
             && known.revision == revision
             && known.path == path
+            && known.root == root
         {
             return known.image;
         }
-        self.classify_image_file(revision, path, path.parent().unwrap_or(path))
+        self.classify_image_file(revision, path, root)
     }
     fn classify_image_file(&self, revision: u64, path: &Path, root: &Path) -> bool {
         let image = crate::open_requests::image_matches(self, root, path);
@@ -296,14 +310,30 @@ impl Tab {
         });
         image
     }
+    /// Whether any `image_file_patterns` rule is relative to the project folder.
+    fn has_project_image_patterns(&self) -> bool {
+        self.editor
+            .settings
+            .get("image_file_patterns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|pattern| pattern.starts_with("//"))
+    }
     /// Matches a byte document's path against `image_file_patterns` relative to its project
     /// folder (project-relative `//` rules need it), when anything it depends on changed.
     pub(crate) fn sync_image_file(&self, folders: &[vel_search::project::Folder]) {
-        let Some(path) = self.path.as_deref().filter(|_| self.editor.binary.is_some()) else {
+        let Some(path) = self
+            .path
+            .as_deref()
+            .filter(|_| self.editor.binary.is_some())
+        else {
             return;
         };
         let revision = self.editor.settings.revision();
         let root = crate::open_requests::image_root(folders, path);
+        *self.image_root.borrow_mut() = Some(root.to_owned());
         if self.image_file.borrow().as_ref().is_some_and(|known| {
             known.revision == revision && known.path == path && known.root == root
         }) {

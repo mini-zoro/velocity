@@ -1158,6 +1158,50 @@ const SCENARIOS: &[Scenario] = &[
         build: sidebar_folders_only_scene,
     },
     Scenario {
+        name: "r4_multiline_replace",
+        size: (1200., 800.),
+        build: |f, d| {
+            // Six pasted lines in the field: four rows, the rest behind a scroll cue.
+            let mut app = find_scene(f, d, "replace", "task")?;
+            if let Some(input) = app.panels.input_mut() {
+                input.set("task\nvisit\nrender\ncanvas\nparse\nwrite");
+            }
+            let viewport = app.viewport();
+            app.panels.edited(&mut app.workspace, viewport);
+            Ok(app)
+        },
+    },
+    Scenario {
+        name: "r4_multiline_replace_ui2",
+        size: (1400., 900.),
+        build: |f, d| {
+            let mut app = find_scene(f, d, "replace", "task")?;
+            named(
+                &mut app,
+                "set_setting",
+                json!({"setting": "ui_scale", "value": 2}),
+            );
+            if let Some(input) = app.panels.input_mut() {
+                input.set("task\nvisit\nrender\ncanvas\nparse\nwrite");
+            }
+            let viewport = app.viewport();
+            app.panels.edited(&mut app.workspace, viewport);
+            Ok(app)
+        },
+    },
+    Scenario {
+        name: "r4_region_focus",
+        size: (1200., 800.),
+        build: |f, d| {
+            let mut app = sidebar_scene(f, d)?;
+            app.panels.side_visible = true;
+            app.scene();
+            let sheet = app.workspace.tabs[app.workspace.active].sheet;
+            app.set_region_focus(None, 1000 + sheet * 2);
+            Ok(app)
+        },
+    },
+    Scenario {
         name: "selections_3000",
         size: (1200., 800.),
         build: selections_3000_scene,

@@ -1443,15 +1443,13 @@ impl Layout {
         });
         // Units are ordered and contiguous: those starting in the segment and ending by the
         // column form one run, summed through the prefix widths.
-        let first = cache.bounds.partition_point(|(a, _)| *a < segment.bytes.start);
+        let first = cache
+            .bounds
+            .partition_point(|(a, _)| *a < segment.bytes.start);
         let past = cache
             .bounds
             .partition_point(|(_, b)| *b <= col.min(segment.bytes.end));
-        after_marker
-            + inline
-            + gaps
-            + segment.indent
-            + cache.widths[past.max(first)]
+        after_marker + inline + gaps + segment.indent + cache.widths[past.max(first)]
             - cache.widths[first]
     }
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
@@ -1793,7 +1791,6 @@ fn wrap_end(
     (end, lookahead)
 }
 
-/// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
 /// One row's (or wrapped segment's) display units, for repeated [`Layout::column_in`]
 /// queries.
 #[derive(Debug)]
@@ -1808,6 +1805,7 @@ pub struct RowColumns {
     widths: Vec<usize>,
     gaps: Option<Arc<Vec<(usize, usize)>>>,
 }
+/// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
 pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit<'a>> {
     units_from(line, hidden, tab, 0)
 }

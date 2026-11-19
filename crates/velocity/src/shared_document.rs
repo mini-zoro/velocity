@@ -18,6 +18,7 @@ impl Tab {
         self.load_failed = source.load_failed;
         self.shared_dirty = source.shared_dirty || source.editor.buffer.is_dirty();
         self.path = source.path.clone();
+        self.image_root = source.image_root.clone();
         self.format = source.format.clone();
         self.saved_format = source.saved_format.clone();
         self.tracker = source.tracker.clone();

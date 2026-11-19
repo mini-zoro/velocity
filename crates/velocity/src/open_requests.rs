@@ -119,7 +119,10 @@ pub(crate) fn image_matches(tab: &crate::workspace::Tab, root: &Path, path: &Pat
 
 /// The folder `image_file_patterns` are matched against for `path`: its project folder (the
 /// deepest one containing it), else its own folder. Decoding and tab labels share it.
-pub(crate) fn image_root<'a>(folders: &'a [vel_search::project::Folder], path: &'a Path) -> &'a Path {
+pub(crate) fn image_root<'a>(
+    folders: &'a [vel_search::project::Folder],
+    path: &'a Path,
+) -> &'a Path {
     folders
         .iter()
         .filter(|f| path.starts_with(&f.path))
@@ -172,7 +175,12 @@ impl ImagePreview {
             .map_or(0, |b| Arc::as_ptr(b) as usize);
         let mut changed = false;
         if (path, revision, epoch, snapshot)
-            != (self.path.as_deref(), self.revision, self.epoch, self.snapshot)
+            != (
+                self.path.as_deref(),
+                self.revision,
+                self.epoch,
+                self.snapshot,
+            )
         {
             // The same file decoded again (settings, zoom, a reload from disk) keeps showing
             // its last result until the new one arrives: no frame without the picture or
@@ -183,7 +191,8 @@ impl ImagePreview {
             self.epoch = epoch;
             self.snapshot = snapshot;
             self.pending = None;
-            let image_file = path.is_some_and(|path| image_matches(tab, image_root(folders, path), path));
+            let image_file =
+                path.is_some_and(|path| image_matches(tab, image_root(folders, path), path));
             if !same_file || !image_file {
                 changed = self.image.take().is_some() || self.failed;
                 self.failed = false;

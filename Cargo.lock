@@ -3109,7 +3109,7 @@ version = "0.0.0"
 dependencies = [
  "bincode",
  "blake3",
- "hashlink",
+ "hashlink 0.12.2",
  "ignore",
  "libc",
  "notify",
