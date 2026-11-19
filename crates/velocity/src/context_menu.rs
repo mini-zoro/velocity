@@ -39,6 +39,12 @@ pub enum ContextMenuKind {
     Tab,
     /// A file or directory in the sidebar.
     SideBar,
+    /// A mounted project root.
+    MountPoint,
+    /// An input field in a panel.
+    Widget,
+    /// Options for Find in Files.
+    FindInFiles,
 }
 
 impl ContextMenuKind {
@@ -48,6 +54,9 @@ impl ContextMenuKind {
             Self::Editor => "Context.sublime-menu",
             Self::Tab => "Tab Context.sublime-menu",
             Self::SideBar => "Side Bar.sublime-menu",
+            Self::MountPoint => "Side Bar Mount Point.sublime-menu",
+            Self::Widget => "Widget Context.sublime-menu",
+            Self::FindInFiles => "Find in Files.sublime-menu",
         }
     }
 }
@@ -118,7 +127,13 @@ pub fn with_dynamic(items: &[MenuItem], dynamic: &[PaletteItem]) -> Vec<MenuItem
         for item in items {
             if item.id == "velocity_dynamic" {
                 *found = true;
-                out.extend_from_slice(dynamic);
+                if item.caption.is_empty() {
+                    out.extend_from_slice(dynamic);
+                } else if !dynamic.is_empty() {
+                    let mut parent = item.clone();
+                    parent.children = dynamic.to_vec();
+                    out.push(parent);
+                }
             } else {
                 let mut item = item.clone();
                 item.children = expand(&item.children, dynamic, found);
@@ -137,6 +152,7 @@ pub fn with_dynamic(items: &[MenuItem], dynamic: &[PaletteItem]) -> Vec<MenuItem
             children: Vec::new(),
             platform: None,
             mnemonic: None,
+            shortcut: None,
         })
         .collect();
     let mut found = false;
@@ -150,6 +166,7 @@ pub fn with_dynamic(items: &[MenuItem], dynamic: &[PaletteItem]) -> Vec<MenuItem
             children: Vec::new(),
             platform: None,
             mnemonic: None,
+            shortcut: None,
         });
         out.extend(dynamic);
     }

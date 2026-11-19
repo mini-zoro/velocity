@@ -158,7 +158,7 @@ fn b19_restored_lazy_clone_attaches_rebased_selection_and_folds() {
 }
 
 #[test]
-fn r19_verify_close_all_is_registered_in_file_menu_and_stops_on_cancel() {
+fn r19_verify_close_all_is_palette_only_and_stops_on_cancel() {
     let data = tempfile::tempdir().unwrap();
     let mut a = app(None);
     for n in 0..3 {
@@ -172,12 +172,19 @@ fn r19_verify_close_all_is_registered_in_file_menu_and_stops_on_cancel() {
         .iter()
         .find(|m| m.caption == "File")
         .unwrap();
-    let close = file
-        .children
+    assert!(
+        !file
+            .children
+            .iter()
+            .any(|m| m.command.as_deref() == Some("close_all"))
+    );
+    let close = a
+        .workspace
+        .palette
         .iter()
-        .find(|m| m.command.as_deref() == Some("close_all"))
+        .find(|item| item.invocation.command == "close_all")
         .unwrap();
-    let command = close.command.clone().unwrap();
+    let command = close.invocation.command.clone();
     assert!(a.workspace.editor().registry.kind(&command).is_some());
     let saved = data.path().join("last.txt");
     a.close_decisions.extend([
@@ -230,7 +237,11 @@ fn r19_verify_preference_writers_report_broken_file_nonmodally_once_per_revision
             "{command}: {}",
             a.panels.message
         );
-        assert!(a.panels.message.contains("line 3"), "{}", a.panels.message);
+        assert!(
+            a.panels.message.contains(".sublime-settings:3:"),
+            "{}",
+            a.panels.message
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
         a.panels.message.clear();
         named(&mut a, command, json!({"setting":"save_all_on_build"}));
@@ -239,7 +250,7 @@ fn r19_verify_preference_writers_report_broken_file_nonmodally_once_per_revision
         std::fs::write(&path, "{\n\"font_size\":?\n}").unwrap();
         named(&mut a, command, json!({"setting":"save_all_on_build"}));
         settled(&mut a);
-        assert!(a.panels.message.contains("line 2"));
+        assert!(a.panels.message.contains(".sublime-settings:2:"));
     }
 }
 
@@ -267,7 +278,7 @@ fn r19_verify_settings_errors_report_only_in_initiating_window_and_not_on_unrela
     b.workspace.request_resource_reload();
     settled(&mut b);
     assert!(b.panels.message.contains("Preferences.sublime-settings"));
-    assert!(b.panels.message.contains("line 2"));
+    assert!(b.panels.message.contains(".sublime-settings:2:"));
     assert_eq!(a.workspace.editor().preferences.font_size, 19.);
     assert_eq!(b.workspace.editor().preferences.font_size, 19.);
     a.panels.message.clear();

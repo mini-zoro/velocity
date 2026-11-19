@@ -1,3 +1,35 @@
+# Round 23 Lane B (native checks pending)
+
+Use fixture HOME/SHELL and a temporary data directory. No native window was run
+for the headless review.
+
+- [ ] App menu order and Settings ⌘,; Services shows the system submenu;
+  Hide, Hide Others, Show All, and Quit behave like other Mac apps. Verify
+  Window's automatic list and Help's system search in both languages.
+- [ ] Verify the standard command glyphs on US and non-US layouts, especially
+  ⌘,, ⌥⌘F, and ⇧⌘W. Confirm no shortcut for bare F5, ⌃G, or the Side Bar
+  chord. Change a User key binding with the app open, then try a Vintage-mode
+  override of ⌘S, an active palette, and marked IME text.
+- [ ] Untitled Save, Save As, and Save with Encoding present the same chooser.
+  Check `default_dir`, cancellation, and Add Folder with no arguments.
+- [ ] Move a dirty tab to a new window and merge windows with the same
+  project and roots. Check ordering, undo, and unsaved contents. Incompatible
+  project windows and tabs that cannot be transferred stay open.
+- [ ] Right-click or Control-click a project root, a child folder, a file,
+  and the Find/Replace inputs. Check input history, clipboard, and selection
+  target. Open the Find in Files options from the ellipsis and check Preserve
+  Case. In Selection and Use .gitignore in that popup are reserved.
+- [ ] Switch Preferences > Language in an open palette and with two windows.
+  Try `save` and `保存`, change back to English, then test Follow System with
+  Chinese first in macOS Preferred Languages. Check CJK fitting at UI scale
+  1 and 2 in light and dark appearance. Panel labels are still English.
+
+Headless scene: `velocity --render-scenes "$OUT" --only zh_hans,zh_hans_ui2 --scale 1,2`.
+This renders the palette and Find in Files panel and exports the menu model and
+text bounds. If no offscreen graphics adapter is available, append
+`--bench-scene 1` to check the same layout with native font metrics and no PNG
+output. Neither path exercises AppKit menu sizing or input routing.
+
 # Round 21 Lane B (native checks pending)
 
 Use a temporary profile, document tree, HOME, and `VELOCITY_LOG_DIR` /

@@ -33,16 +33,12 @@
     "command": "copy_relative_path"
   },
   {
-    "caption": "Show in File Browser",
+    "caption": "Reveal in Finder",
     "command": "reveal_in_finder"
   },
   {
-    "caption": "Search This Folder…",
+    "caption": "Find in This Folder…",
     "command": "side_bar_find_in_folder"
-  },
-  {
-    "caption": "Detach Project Folder",
-    "command": "side_bar_remove_folder"
   },
   {
     "caption": "-"

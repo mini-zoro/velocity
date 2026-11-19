@@ -178,8 +178,7 @@ fn launch_with_nonexistent_readonly_and_corrupt_data_roots() {
     assert!(
         w.resource_reports
             .iter()
-            .any(|message| message.contains("Preferences.sublime-settings")
-                && message.contains("line 1")),
+            .any(|message| message.contains("Preferences.sublime-settings:1:")),
         "{:?}",
         w.resource_reports
     );

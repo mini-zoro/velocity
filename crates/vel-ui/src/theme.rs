@@ -422,7 +422,15 @@ impl ThemeUi {
     /// Supplies selector setting names collected from all loaded theme fragments. Projection is
     /// cached per immutable settings value identity; unchanged widget inputs reuse their paint style.
     pub fn set_setting_keys(&mut self, mut keys: Vec<String>) {
-        keys.extend(["ui_scale", "ui_font_size", "animation_enabled"].map(str::to_owned));
+        keys.extend(
+            [
+                "ui_scale",
+                "ui_font_size",
+                "ui_font_face",
+                "animation_enabled",
+            ]
+            .map(str::to_owned),
+        );
         keys.sort();
         keys.dedup();
         self.setting_keys = Some(keys);
@@ -581,36 +589,36 @@ impl ThemeUi {
             self.widgets.clear();
             self.states.clear();
         }
+        // A UI font override is prepared with the style (not on each paint). Editor
+        // text keeps its separate font_face: https://www.sublimetext.com/docs/settings.html
+        let prepare = || {
+            // Scale the theme's fixed and relative label sizes together without
+            // scaling the controls themselves. The default root remains 12 pt.
+            let mut style = prepare_style(
+                resolved,
+                scale,
+                12.,
+                selected,
+                self.scheme_color,
+                self.accent_color,
+            );
+            style.size *= root / 12.;
+            let face = settings.string("ui_font_face", "");
+            if !face.is_empty() {
+                style.family = Some(Arc::from(face));
+            }
+            Prepared::new(&path, style)
+        };
         let cached = self.prepared.entry(key).or_insert_with(|| {
             self.misses += 1;
-            Prepared::new(
-                &path,
-                prepare_style(
-                    resolved,
-                    scale,
-                    root,
-                    selected,
-                    self.scheme_color,
-                    self.accent_color,
-                ),
-            )
+            prepare()
         });
         // The borrowed engine address can be reused after eviction. Check complete input paths;
         // settings have a unique immutable value identity and theme replacement clears this cache.
         if !cached.matches(&path) {
             self.states.clear();
             self.misses += 1;
-            *cached = Prepared::new(
-                &path,
-                prepare_style(
-                    resolved,
-                    scale,
-                    root,
-                    selected,
-                    self.scheme_color,
-                    self.accent_color,
-                ),
-            );
+            *cached = prepare();
         }
         let style = cached.style.clone();
         let enabled = snapshot.animations;

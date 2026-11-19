@@ -421,7 +421,6 @@ impl WindowHandle {
         }
         w.setTitle(&NSString::from_str(title));
     }
-    /// Installs resource-defined menus, retaining the standard application menu.
     /// Installs the application menu. Identical requests from the window that installed the
     /// current menu are ignored: rebuilding NSMenu forces AppKit to relayout and redraw the
     /// menu bar, which dominated main-thread time while background results streamed in.
@@ -430,55 +429,19 @@ impl WindowHandle {
             return;
         }
         let app = NSApplication::sharedApplication(self.0.mtm);
-        let main = app.mainMenu().expect("application menu");
-        while main.numberOfItems() > 1 {
-            main.removeItemAtIndex(1);
-        }
+        let main = NSMenu::new(self.0.mtm);
         self.0.menu_commands.borrow_mut().clear();
-        if let Some(application) = main.itemAtIndex(0).and_then(|item| item.submenu()) {
-            for index in (0..application.numberOfItems()).rev() {
-                if application.itemAtIndex(index).is_some_and(|item| {
-                    matches!(
-                        item.title().to_string().as_str(),
-                        "Install Command Line Tool…" | "Settings…" | "Preferences"
-                    )
-                }) {
-                    application.removeItemAtIndex(index);
-                }
-            }
-            // Preferences edits defaults beside User settings:
-            // https://www.sublimetext.com/docs/settings.html
-            // Keep the native app-menu entry and the full resource-defined submenu.
-            if let Some(preferences) = entries.iter().find(|entry| entry.caption == "Preferences") {
-                if let Some(settings) = preferences.children.first() {
-                    append_menu(&self.0, &application, std::slice::from_ref(settings));
-                    if let Some(item) = application.itemAtIndex(application.numberOfItems() - 1) {
-                        application.removeItem(&item);
-                        application.insertItem_atIndex(&item, 1);
-                    }
-                }
-                append_menu(&self.0, &application, std::slice::from_ref(preferences));
-            }
-            append_menu(
-                &self.0,
-                &application,
-                &[MenuEntry {
-                    caption: "Install Command Line Tool…".into(),
-                    command: Some("install_cli".into()),
-                    args: "{}".into(),
-                    children: vec![],
-                }],
-            );
-        }
-        let entries = entries
-            .iter()
-            .filter(|entry| entry.caption != "Preferences")
-            .cloned()
-            .collect::<Vec<_>>();
-        append_menu(&self.0, &main, &entries);
-        let windows = main
-            .itemWithTitle(&NSString::from_str("Window"))
-            .and_then(|item| item.submenu());
+        append_menu(&self.0, &main, entries);
+        app.setMainMenu(Some(&main));
+        let submenu = |id: &str| {
+            let index = entries.iter().position(|entry| entry.id == id)?;
+            main.itemAtIndex(index as isize)?.submenu()
+        };
+        // Assign AppKit's Window list and Help search by role, never by title.
+        // https://developer.apple.com/documentation/appkit/nsapplication/helpmenu
+        // https://developer.apple.com/documentation/appkit/nsapplication/windowsmenu
+        app.setHelpMenu(submenu("help").as_deref());
+        let windows = submenu("window");
         app.setWindowsMenu(windows.as_deref());
         if windows.is_some() {
             for window in lifecycle::live_hosts()
@@ -580,8 +543,19 @@ impl WindowHandle {
     }
     /// Chooses a destination; cancellation leaves the document untouched.
     pub fn save_file(&self, suggested: &str) -> Option<std::path::PathBuf> {
+        self.save_file_in(suggested, None)
+    }
+    /// Chooses a save destination with an optional initial directory.
+    pub fn save_file_in(
+        &self,
+        suggested: &str,
+        directory: Option<&Path>,
+    ) -> Option<std::path::PathBuf> {
         let panel = NSSavePanel::savePanel(self.0.mtm);
         panel.setNameFieldStringValue(&NSString::from_str(suggested));
+        if let Some(url) = directory.and_then(|path| file_url(path).ok()) {
+            panel.setDirectoryURL(Some(&url));
+        }
         if panel.runModal() != NSModalResponseOK {
             return None;
         }
@@ -1140,6 +1114,18 @@ define_class!(
         #[unsafe(method(velocityCommand:))]
         fn named_command(&self, item: &NSMenuItem) {
             if let Some(h) = self.ivars().host.upgrade() {
+                // The key window gets performKeyEquivalent: before the menu bar.
+                // If the editor declines a chord (e.g. during composition), don't
+                // execute the display shortcut as a fallback menu action.
+                // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/HandlingKeyEvents/HandlingKeyEvents.html
+                if !h.stopped.get() && !item.keyEquivalent().is_empty()
+                    && NSApplication::sharedApplication(h.mtm).currentEvent().is_some_and(|event| {
+                        event.r#type() == NSEventType::KeyDown
+                            && event.modifierFlags().contains(NSEventModifierFlags::Command)
+                    })
+                {
+                    return;
+                }
                 let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
                 if let Some((name,args)) = command {
                     if h.stopped.get() && lifecycle::is_template(h.id) {
@@ -1745,6 +1731,9 @@ fn windowless_command(name: &str) -> bool {
     matches!(
         name,
         "new_window"
+            | "edit_settings"
+            | "open_url"
+            | "open_crash_reports"
             | "prompt_open_file"
             | "open_recent_file"
             | "open_recent_folder"
@@ -1815,30 +1804,42 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
             menu.addItem(&NSMenuItem::separatorItem(host.mtm));
             continue;
         }
+        let services = entry.command.as_deref() == Some("native_services");
+        // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar
         let native = match entry.command.as_deref() {
-            Some("native_minimize") => Some((sel!(performMiniaturize:), "m")),
-            Some("native_zoom") => Some((sel!(performZoom:), "")),
-            Some("native_bring_all_to_front") => Some((sel!(arrangeInFront:), "")),
+            Some("native_minimize") => Some(sel!(performMiniaturize:)),
+            Some("native_zoom") => Some(sel!(performZoom:)),
+            Some("native_bring_all_to_front") => Some(sel!(arrangeInFront:)),
+            Some("native_about") => Some(sel!(orderFrontStandardAboutPanel:)),
+            Some("native_hide") => Some(sel!(hide:)),
+            Some("native_hide_others") => Some(sel!(hideOtherApplications:)),
+            Some("native_show_all") => Some(sel!(unhideAllApplications:)),
+            Some("native_quit") => Some(sel!(terminate:)),
             _ => None,
         };
         // SAFETY: These selectors all take one optional sender.
         let item = unsafe {
             menu.addItemWithTitle_action_keyEquivalent(
                 &NSString::from_str(&entry.caption),
-                native
-                    .map(|(selector, _)| selector)
-                    .or_else(|| entry.command.as_ref().map(|_| sel!(velocityCommand:))),
-                &NSString::from_str(native.map_or("", |(_, key)| key)),
+                native.or_else(|| {
+                    (!services && entry.command.is_some()).then(|| sel!(velocityCommand:))
+                }),
+                &NSString::from_str(""),
             )
         };
+        if let Some((key, modifiers)) = entry.shortcut.as_deref().and_then(menu_key_equivalent) {
+            item.setKeyEquivalent(&NSString::from_str(&key.to_string()));
+            item.setKeyEquivalentModifierMask(modifiers);
+        }
         if native.is_some() {
             continue;
         }
-        if entry.command.as_deref() == Some("edit_settings")
-            && entry.args.contains("/Preferences.sublime-settings")
-        {
-            item.setKeyEquivalent(&NSString::from_str(","));
-            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        if services {
+            // https://developer.apple.com/documentation/appkit/nsapplication/servicesmenu
+            let child = NSMenu::initWithTitle(NSMenu::alloc(host.mtm), &item.title());
+            item.setSubmenu(Some(&child));
+            NSApplication::sharedApplication(host.mtm).setServicesMenu(Some(&child));
+            continue;
         }
         if let Some(command) = &entry.command {
             let mut commands = host.menu_commands.borrow_mut();
@@ -1852,11 +1853,74 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
             }
         }
         if !entry.children.is_empty() {
-            let child = NSMenu::new(host.mtm);
+            let child = NSMenu::initWithTitle(NSMenu::alloc(host.mtm), &item.title());
             append_menu(host, &child, &entry.children);
             item.setSubmenu(Some(&child));
         }
     }
+}
+
+fn menu_key_equivalent(chord: &str) -> Option<(char, NSEventModifierFlags)> {
+    use NSEventModifierFlags as Flags;
+    let (modifiers, name) = chord.rsplit_once('+')?;
+    let mut mask = Flags::empty();
+    for modifier in modifiers.split('+') {
+        mask |= match modifier {
+            "super" => Flags::Command,
+            "alt" => Flags::Option,
+            "ctrl" => Flags::Control,
+            "shift" => Flags::Shift,
+            _ => return None,
+        };
+    }
+    if !mask.contains(Flags::Command) {
+        return None;
+    }
+    // AppKit wants the unmodified character, including US punctuation, with
+    // Shift/Option supplied independently, not the current keyboard's text.
+    // https://developer.apple.com/documentation/appkit/nsmenuitem/keyequivalent
+    let key = match name {
+        "space" => ' ',
+        "tab" => '\t',
+        "enter" => '\r',
+        "escape" => '\u{1b}',
+        "backspace" => '\u{08}',
+        "delete" => '\u{f728}',
+        "left" => '\u{f702}',
+        "right" => '\u{f703}',
+        "up" => '\u{f700}',
+        "down" => '\u{f701}',
+        _ => match name.as_bytes() {
+            [byte] if byte.is_ascii_graphic() => *byte as char,
+            _ => char::from_u32(
+                0xf703
+                    + name
+                        .strip_prefix('f')?
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| (1..=35).contains(n))?,
+            )?,
+        },
+    };
+    Some((key, mask))
+}
+
+#[cfg(test)]
+#[test]
+fn menu_equivalents_use_unmodified_glyphs_and_require_command() {
+    use NSEventModifierFlags as Flags;
+    for key in [",", ".", ";", "/", "[", "]", "-", "=", "1", "s"] {
+        assert_eq!(
+            menu_key_equivalent(&format!("super+{key}")),
+            Some((key.chars().next().unwrap(), Flags::Command))
+        );
+    }
+    assert_eq!(
+        menu_key_equivalent("alt+shift+super+["),
+        Some(('[', Flags::Command | Flags::Option | Flags::Shift))
+    );
+    assert_eq!(menu_key_equivalent("ctrl+g"), None);
+    assert_eq!(menu_key_equivalent("f5"), None);
 }
 pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("Platform::run must be called on the main thread")?;

@@ -547,7 +547,7 @@ fn r19_bad_user_json_reports_file_and_line_without_modal() {
                 .workspace
                 .resource_reports
                 .iter()
-                .any(|m| m.contains("Preferences.sublime-settings") && m.contains("line 2"));
+                .any(|m| m.contains("Preferences.sublime-settings:2:"));
             if a.workspace.resource_revision > revision
                 && (!error || reported)
                 && a.workspace.editor().preferences.font_size == expected
@@ -565,8 +565,12 @@ fn r19_bad_user_json_reports_file_and_line_without_modal() {
         assert_eq!(a.workspace.editor().preferences.font_size, expected);
         if error {
             a.publish_resource_reports();
-            assert!(!a.panels.message.contains("line 2"));
-            assert!(w.take_resource_reports().join("; ").contains("line 2"));
+            assert!(!a.panels.message.contains(".sublime-settings:2:"));
+            assert!(
+                w.take_resource_reports()
+                    .join("; ")
+                    .contains(".sublime-settings:2:")
+            );
             assert!(a.workspace.messages.is_empty());
         }
     }

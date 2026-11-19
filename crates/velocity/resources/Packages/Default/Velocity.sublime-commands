@@ -12,6 +12,14 @@
   {"caption": "Project: Refresh Folders", "command": "refresh_folder_list"},
   {"caption": "Project: Remove All Folders", "command": "close_folder_list"},
   {"caption": "View: Show/Hide Open Files", "command": "toggle_show_open_files"},
+  {"caption":"Preferences: Language: English","command":"set_ui_language","args":{"language":"en"}},
+  {"caption":"Preferences: Language: Simplified Chinese","command":"set_ui_language","args":{"language":"zh-Hans"}},
+  {"caption":"Preferences: Language: Follow System","command":"set_ui_language","args":{"language":"auto"}},
+  {"caption":"File: Save","command":"save"},
+  {"caption":"File: Close All Files","command":"close_all"},
+  {"caption":"Tools: New Snippet","command":"new_snippet"},
+  {"caption":"Find: In Selection","command":"toggle_find_option","args":{"option":"in_selection"}},
+  {"caption":"Find: Preserve Case","command":"toggle_find_option","args":{"option":"preserve_case"}},
   {
     "caption": "Accessibility: Focus Next Region",
     "command": "focus_next_control"
@@ -80,21 +88,21 @@
     "caption": "Find: Find",
     "command": "show_panel",
     "args": {
-      "panel": "find"
+      "panel": "find", "toggle": true
     }
   },
   {
     "caption": "Find: Replace",
     "command": "show_panel",
     "args": {
-      "panel": "replace"
+      "panel": "replace", "toggle": true
     }
   },
   {
     "caption": "Find: Find in Files",
     "command": "show_panel",
     "args": {
-      "panel": "find_in_files"
+      "panel": "find_in_files", "toggle": true
     }
   },
   {
@@ -660,7 +668,7 @@
     "caption": "Find: Incremental Search",
     "command": "show_panel",
     "args": {
-      "panel": "incremental_find"
+      "panel": "incremental_find", "toggle": true
     }
   },
   {

@@ -98,6 +98,7 @@ pub struct Sessions {
     transfers: BTreeMap<u64, Vec<(usize, crate::workspace::Tab)>>,
     pub(crate) open_windows: BTreeMap<u64, crate::open_requests::WindowRoute>,
     pub(crate) open_inbox: BTreeMap<u64, Vec<crate::instance::Incoming>>,
+    pub(crate) menu_merges: BTreeMap<u64, u64>,
     pub(crate) persist_project_workspaces: bool,
     // Drop all writers before releasing the per-profile lock.
     pub instance: Option<crate::instance::Instance>,
@@ -147,6 +148,7 @@ impl Sessions {
             transfers: BTreeMap::new(),
             open_windows: BTreeMap::new(),
             open_inbox: BTreeMap::new(),
+            menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
         }
     }
@@ -160,7 +162,16 @@ impl Sessions {
         id
     }
     pub fn can_receive_tab(&self, id: u64) -> bool {
-        self.live.contains(&id) && self.transfers.get(&id).map_or(0, Vec::len) < 64
+        self.can_receive_tabs(id, 1)
+    }
+    pub fn can_receive_tabs(&self, id: u64, count: usize) -> bool {
+        self.live.contains(&id)
+            && self
+                .transfers
+                .get(&id)
+                .map_or(0, Vec::len)
+                .saturating_add(count)
+                <= 64
     }
     pub fn transfer_tab(&mut self, id: u64, group: usize, tab: crate::workspace::Tab) {
         self.transfers.entry(id).or_default().push((group, tab));
@@ -405,6 +416,8 @@ impl Sessions {
         self.live.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
+        self.menu_merges
+            .retain(|source, destination| *source != id && *destination != id);
         self.recent_heads.remove(&id);
         if let Some(window) = self.windows.remove(&id)
             && retain

@@ -85,7 +85,7 @@ pub fn extend_commands(
 ) {
     for (caption, command) in [
         ("Install Command Line Tool…", "install_cli"),
-        ("Open Crash Reports Folder", "open_crash_reports"),
+        ("Open Crash Reports", "open_crash_reports"),
         ("Package: Install from File…", "package_install_file"),
         ("Package: Install from URL…", "package_install_url"),
         ("Package: Remove", "package_remove"),
@@ -105,13 +105,10 @@ pub fn extend_commands(
             json!({}),
         ));
     }
-    if let Some(help) = menus
-        .iter_mut()
-        .find(|m| m.id == "help" || m.caption == "Help")
-    {
+    if let Some(help) = menus.iter_mut().find(|m| m.id == "help") {
         help.children.push(
             serde_json::from_value(
-                json!({"caption":"Open Crash Reports Folder","command":"open_crash_reports"}),
+                json!({"caption":"Open Crash Reports","command":"open_crash_reports"}),
             )
             .expect("menu"),
         );

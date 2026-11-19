@@ -16,6 +16,8 @@ pub struct MenuItem {
     pub id: String,
     /// Optional command.
     pub command: Option<String>,
+    /// Single key chord for a native key equivalent, if one is available.
+    pub shortcut: Option<String>,
     /// JSON arguments.
     #[serde(default = "empty_args")]
     pub args: Value,
@@ -28,7 +30,7 @@ pub struct MenuItem {
     pub mnemonic: Option<String>,
 }
 /// Palette command entry, consumed by vel-ui's quick panel.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PaletteItem {
     /// Display caption.
     pub caption: String,
@@ -144,6 +146,9 @@ pub fn merge_menu(target: &mut Vec<MenuItem>, source: Vec<MenuItem>) {
             }
             if item.platform.is_some() {
                 existing.platform = item.platform;
+            }
+            if item.shortcut.is_some() {
+                existing.shortcut = item.shortcut;
             }
             if item.mnemonic.is_some() {
                 existing.mnemonic = item.mnemonic;

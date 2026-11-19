@@ -249,6 +249,61 @@ pub struct EditorSettings {
     /// Copy / cut with only empty selections take the caret lines.
     pub copy_with_empty_selection: bool,
 }
+/// Rejects malformed values of known keys before they can mask lower layers.
+/// Unknown keys are retained for packages and forward compatibility.
+/// <https://www.sublimetext.com/docs/settings.html>
+pub fn validate_layer(
+    settings: &mut serde_json::Map<String, Value>,
+    defaults: &serde_json::Map<String, Value>,
+) -> Vec<String> {
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "a boolean",
+            Value::Number(_) => "a number",
+            Value::String(_) => "a string",
+            Value::Array(_) => "an array",
+            Value::Object(_) => "an object",
+        }
+    }
+    let mut issues = Vec::new();
+    settings.retain(|key, value| {
+        let actual = kind(value);
+        let Some(default) = defaults.get(key) else {
+            return true;
+        };
+        let primary = [kind(default)];
+        let expected: &[&str] = match key.as_str() {
+            // These readers deliberately accept the documented legacy forms.
+            "word_wrap"
+            | "auto_find_in_selection"
+            | "open_files_in_new_window"
+            | "hot_exit"
+            | "auto_complete_preserve_order"
+            | "preview_on_click"
+            | "trim_trailing_white_space_on_save" => &["a boolean", "a string"],
+            "scroll_past_end" => &["a boolean", "a number"],
+            "rulers" => &["an array", "a number"],
+            "draw_white_space" | "default_completions_selector" | "auto_complete_selector" => {
+                &["a string", "an array", "null"]
+            }
+            "vintage_ctrl_keys" => &["a boolean", "null"],
+            "package_index_url" => &["a string", "null"],
+            _ => &primary,
+        };
+        if expected.contains(&actual) {
+            true
+        } else {
+            issues.push(format!(
+                "{key}: expected {}, got {actual}",
+                expected.join(" or ")
+            ));
+            false
+        }
+    });
+    issues
+}
+
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {

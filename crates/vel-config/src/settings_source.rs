@@ -26,7 +26,7 @@ pub(crate) fn retain_valid(
                 if doc.value.is_object() {
                     Ok(())
                 } else {
-                    Err("settings must be an object at line 1".into())
+                    Err("1:1: settings must be an object".into())
                 }
             });
             (
@@ -57,15 +57,9 @@ pub(crate) fn retain_valid(
     };
     for ((_, path), error, previous) in replacements {
         let resource = entries.get_mut(&path).expect("loaded settings resource");
-        // The application's resource report summarizes the origin before ": ".
-        // Include the parse location there so the non-modal summary retains it.
-        let location = error
-            .split_once(" at line ")
-            .map(|(_, rest)| format!("line {rest}"))
-            .unwrap_or_else(|| "line 1".into());
-        warnings.push(format!(
-            "{} ({location}): {error}",
-            resource.origin.display()
+        warnings.push(crate::json::source_diagnostic(
+            &resource.origin.to_string_lossy(),
+            &error,
         ));
         resource.bytes = previous
             .map_or_else(|| b"{}".to_vec(), |bytes| (*bytes).clone())

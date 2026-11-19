@@ -337,6 +337,7 @@ struct Node {
 #[derive(Clone, Default, Debug)]
 pub struct Keymap {
     bindings: Arc<Vec<Binding>>,
+    layers: Arc<Vec<usize>>,
     nodes: Arc<Vec<Node>>,
     pending: usize,
     app_context: HashMap<String, Value>,
@@ -377,6 +378,44 @@ impl Keymap {
                     .collect::<Vec<_>>()
                     .join(", ")
             })
+    }
+    /// Display an effective single Command chord. Unlike the palette, a native
+    /// menu cannot describe a sequence. Resource and argument precedence follows
+    /// <https://www.sublimetext.com/docs/key_bindings.html>.
+    pub fn menu_shortcut(&self, command: &str, args: &Value) -> Option<String> {
+        let matches = |binding: &Binding| {
+            binding.invocation.command == command && binding.invocation.args == *args
+        };
+        let mut end = self.bindings.len();
+        let mut conditional = None;
+        let mut count = 0;
+        // Prefer a User/package override over a default, then the first
+        // unconditional binding within the effective resource.
+        for &start in self.layers.iter().rev() {
+            for index in start..end {
+                let binding = &self.bindings[index];
+                if !matches(binding) {
+                    continue;
+                }
+                count += 1;
+                let [key] = binding.keys.as_slice() else {
+                    continue;
+                };
+                if key.modifiers & 8 == 0
+                    || self.bindings[index + 1..].iter().any(|later| {
+                        later.context.is_empty() && later.keys == binding.keys && !matches(later)
+                    })
+                {
+                    continue;
+                }
+                if binding.context.is_empty() {
+                    return Some(menu_chord(key));
+                }
+                conditional = Some(key);
+            }
+            end = start;
+        }
+        conditional.filter(|_| count == 1).map(menu_chord)
     }
     /// Appends one resource; subsequent resources have higher precedence.
     pub fn append(&mut self, source: &str) -> Result<(), String> {
@@ -428,6 +467,9 @@ impl Keymap {
     }
     fn add(&mut self, parsed: Vec<Binding>) {
         let bindings = Arc::make_mut(&mut self.bindings);
+        if !parsed.is_empty() {
+            Arc::make_mut(&mut self.layers).push(bindings.len());
+        }
         let nodes = Arc::make_mut(&mut self.nodes);
         if nodes.is_empty() {
             nodes.push(Node::default());
@@ -523,6 +565,17 @@ impl Keymap {
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
+}
+
+fn menu_chord(key: &Key) -> String {
+    let mut chord = String::new();
+    for (bit, name) in [(1, "ctrl+"), (2, "alt+"), (4, "shift+"), (8, "super+")] {
+        if key.modifiers & bit != 0 {
+            chord.push_str(name);
+        }
+    }
+    chord.push_str(&key.name);
+    chord
 }
 
 #[cfg(test)]

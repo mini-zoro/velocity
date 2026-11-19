@@ -1,0 +1,9 @@
+// https://www.sublimetext.com/docs/menus.html#available-menus
+[
+  {"caption":"Cut","command":"cut"},
+  {"caption":"Copy","command":"copy"},
+  {"caption":"Paste","command":"paste"},
+  {"caption":"Select All","command":"select_all"},
+  {"caption":"-"},
+  {"caption":"Input History","id":"velocity_dynamic"}
+]

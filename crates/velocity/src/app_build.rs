@@ -21,6 +21,17 @@ impl App {
                     .set_file_type("Packages/JSON/JSON.sublime-syntax")?;
                 self.workspace.editor_mut().run("insert", &json!({"characters":"{\n    \"shell_cmd\": \"echo Build command\",\n    \"selector\": \"source\"\n}\n"}))?;
             }
+            "new_snippet" => {
+                // A snippet is an editable XML resource.
+                // https://www.sublimetext.com/docs/completions.html#snippets
+                self.workspace.new_file()?;
+                let active = self.workspace.active;
+                self.workspace.tabs[active].suggested_name =
+                    Some("untitled.sublime-snippet".into());
+                self.workspace
+                    .set_file_type("Packages/XML/XML.sublime-syntax")?;
+                self.workspace.editor_mut().run("insert", &json!({"characters":"<snippet>\n    <content><![CDATA[\n$0\n]]></content>\n    <tabTrigger>example</tabTrigger>\n</snippet>\n"}))?;
+            }
             "set_build_system" => {
                 vel_build::warm_login_environment();
                 self.workspace.workbench_action(name, args)?;
@@ -58,9 +69,18 @@ impl App {
                         );
                     }
                     if automatic && !choose {
-                        let (name, variant) = remembered
-                            .or_else(|| matching.first().map(|b| (b.name.clone(), None)))
-                            .ok_or("No matching build system; choose Tools > Build System")?;
+                        let Some((name, variant)) =
+                            remembered.or_else(|| matching.first().map(|b| (b.name.clone(), None)))
+                        else {
+                            // An automatic build needs a matching definition; the
+                            // absence of one isn't a failure of a running build.
+                            // https://www.sublimetext.com/docs/build_systems.html#usage
+                            self.panels.set_message(
+                                "No matching build system. Choose one from Tools > Build System."
+                                    .into(),
+                            );
+                            return Ok(true);
+                        };
                         resolved["build_system"] = json!(name);
                         resolved["variant"] = json!(variant);
                     }

@@ -3104,12 +3104,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vel-i18n"
+version = "0.0.0"
+dependencies = [
+ "objc2-foundation",
+ "vel-config",
+]
+
+[[package]]
 name = "vel-index"
 version = "0.0.0"
 dependencies = [
  "bincode",
  "blake3",
- "hashlink 0.12.2",
+ "hashlink",
  "ignore",
  "libc",
  "notify",
@@ -3409,6 +3417,7 @@ dependencies = [
  "vel-fileio",
  "vel-git",
  "vel-highlight",
+ "vel-i18n",
  "vel-index",
  "vel-largefile",
  "vel-minihtml",

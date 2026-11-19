@@ -128,11 +128,11 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
         selected,
         editor
             .settings
-            .bool("show_encoding", false)
+            .bool("show_encoding", true)
             .then_some(tab.format.display_encoding()),
         editor
             .settings
-            .bool("show_line_endings", false)
+            .bool("show_line_endings", true)
             .then_some(tab.format.line_ending.display_name()),
     )
 }
@@ -195,6 +195,17 @@ pub enum Panel {
     Input,
     Output,
     Results,
+}
+fn symbol_kind_caption(kind: vel_index::SymbolKind) -> &'static str {
+    // Human-facing labels, not Rust enum identifiers.
+    match kind {
+        vel_index::SymbolKind::Function => "Function",
+        vel_index::SymbolKind::Type => "Type",
+        vel_index::SymbolKind::Namespace => "Namespace",
+        vel_index::SymbolKind::Variable => "Variable",
+        vel_index::SymbolKind::Markup => "Markup",
+        vel_index::SymbolKind::Other => "Symbol",
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -367,6 +378,8 @@ pub struct Panels {
     replace_signature: Option<(String, text::Options, String, String)>,
     pub replacement_plan: Option<Vec<files::FileChange>>,
     pub output: String,
+    show_console: bool,
+    console_messages: std::collections::VecDeque<String>,
     pub output_editor: Option<crate::editor::Editor>,
     pub output_view: crate::view::View,
     pub output_reset: bool,
@@ -399,6 +412,9 @@ pub struct Panels {
     fuzzy_worker: fuzzy::Worker,
     candidates: Arc<Vec<fuzzy::Candidate>>,
     palette_indices: Vec<usize>,
+    // For a bilingual palette, each searchable caption points to its displayed
+    // (primary) candidate. Empty for all other overlays.
+    palette_primary: Vec<usize>,
     paths: Arc<Vec<PathBuf>>,
     file_paths: Arc<Vec<PathBuf>>,
     file_candidates: Arc<Vec<fuzzy::Candidate>>,
@@ -535,6 +551,8 @@ impl Default for Panels {
             replace_signature: None,
             replacement_plan: None,
             output: String::new(),
+            show_console: false,
+            console_messages: std::collections::VecDeque::new(),
             output_editor: None,
             output_view: crate::view::View::new(Size::default(), 7.8, 12.),
             output_reset: false,
@@ -561,6 +579,7 @@ impl Default for Panels {
             fuzzy_worker: fuzzy::Worker::new(),
             candidates: Arc::new(vec![]),
             palette_indices: Vec::new(),
+            palette_primary: Vec::new(),
             paths: Arc::new(vec![]),
             file_paths: Arc::new(vec![]),
             file_candidates: Arc::new(vec![]),
@@ -651,6 +670,7 @@ impl Panels {
         syntax: Option<&str>,
         word_wrap: bool,
     ) {
+        self.show_console = false;
         let mut editor = crate::editor::Editor::new(vel_text::Text::new());
         editor.theme = workspace.themes.ui.clone();
         editor.settings = workspace.editor().settings.clone();
@@ -1330,6 +1350,97 @@ impl Panels {
             None
         }
     }
+    pub(crate) fn focus_context_input(&mut self, point: Point) -> bool {
+        if self.overlay.is_some() {
+            return contains(self.quick_input.bounds, point);
+        }
+        let Some(panel) = self.panel else {
+            return false;
+        };
+        let Some(index) = [&self.query, &self.replace, &self.where_input]
+            .iter()
+            .take(Self::find_fields(panel))
+            .position(|input| contains(input.bounds, point))
+        else {
+            return false;
+        };
+        self.focus_input = index;
+        self.panel_focused = true;
+        self.side_focused = false;
+        self.focus.set(Surface::Panel, 2);
+        true
+    }
+    pub(crate) fn widget_history_menu(&self) -> Vec<vel_config::ui::PaletteItem> {
+        // Use the same history as Up/Down; the Where and overlay fields have no
+        // history in Velocity. https://www.sublimetext.com/docs/menus.html
+        if self.overlay.is_some() || !self.find_panel_visible() || self.focus_input > 1 {
+            return Vec::new();
+        }
+        let history = if self.focus_input == 0 {
+            &self.find_history
+        } else {
+            &self.replace_history
+        };
+        history
+            .iter()
+            .rev()
+            .take(20)
+            .map(|value| vel_config::ui::PaletteItem {
+                caption: if value.is_empty() {
+                    "Empty Replacement".into()
+                } else {
+                    value.replace('\n', " ↵ ")
+                },
+                invocation: vel_config::keymap::Invocation {
+                    command: "widget_history".into(),
+                    args: json!({"text":value,"field":self.focus_input}),
+                },
+            })
+            .collect()
+    }
+    pub(crate) fn restore_widget_history(&mut self, args: &Value) -> bool {
+        if self.overlay.is_some()
+            || !self.find_panel_visible()
+            || args["field"].as_u64() != Some(self.focus_input as u64)
+        {
+            return false;
+        }
+        if let Some(input) = self.input_mut() {
+            input.set(args["text"].as_str().unwrap_or_default());
+            return true;
+        }
+        false
+    }
+    pub(crate) fn console_visible(&self) -> bool {
+        self.show_console && self.panel == Some(Panel::Output)
+    }
+    pub(crate) fn toggle_console(&mut self, workspace: &mut Workspace) {
+        if self.console_visible() {
+            self.close_panel(workspace);
+            return;
+        }
+        self.cancel_overlay(workspace);
+        self.finish_find_navigation(workspace);
+        let message = self.message.clone();
+        self.note_console(&message);
+        self.show_console = true;
+        self.panel = Some(Panel::Output);
+        self.panel_focused = true;
+        self.focus.show(Surface::Panel, true);
+        self.focus.set(Surface::Panel, 2);
+    }
+    pub(crate) fn note_console(&mut self, message: &str) {
+        // Diagnostic console only; Velocity does not expose a Python command console.
+        for line in message.lines().filter(|line| !line.is_empty()).take(80) {
+            if self.console_messages.back().is_none_or(|last| last != line) {
+                if self.console_messages.len() == 80 {
+                    self.console_messages.pop_front();
+                }
+                self.console_messages
+                    .push_back(line.chars().take(2048).collect());
+            }
+        }
+    }
     fn captured(&self) -> bool {
         self.overlay.is_some() || self.panel_focused || self.side_focused
     }
@@ -1513,7 +1624,7 @@ impl Panels {
     fn decorate_locations(&mut self) {
         for item in &mut self.quick.items {
             if let Some(location) = self.locations.get(item.value) {
-                item.kind = format!("{:?}", location.kind);
+                item.kind = symbol_kind_caption(location.kind).into();
                 item.annotation = format!(
                     "{}:{}",
                     location
@@ -1548,7 +1659,7 @@ impl Panels {
                     Item {
                         caption: l.name.clone(),
                         value: i,
-                        kind: format!("{:?}", l.kind),
+                        kind: symbol_kind_caption(l.kind).into(),
                         annotation: format!(
                             "{}:{}",
                             l.file.file_name().unwrap_or_default().to_string_lossy(),
@@ -1927,6 +2038,7 @@ impl Panels {
                 self.query_quick(workspace);
             }
             "show_panel" | "find_in_files" | "show_input_panel" | "show_output_panel" => {
+                self.show_console = false;
                 if name == "show_panel"
                     && args["toggle"].as_bool() == Some(true)
                     && self.panel_focused
@@ -2226,6 +2338,28 @@ impl Panels {
             height,
         }
     }
+    fn find_options_rect(&self) -> Rect {
+        let close = self.close_button_rect();
+        Rect {
+            x: close.x - close.width - 4. * self.ui_scale,
+            ..close
+        }
+    }
+    fn show_find_options_button(&self) -> bool {
+        self.panel == Some(Panel::Files) && self.panel_bounds.width >= 272. * self.ui_scale
+    }
+    pub(crate) fn hit_find_options(&self, point: Point) -> bool {
+        self.overlay.is_none()
+            && self.show_find_options_button()
+            && contains(self.find_options_rect(), point)
+    }
+    pub(crate) fn find_option_checked(&self, option: &str) -> bool {
+        match option {
+            "in_selection" => self.in_selection,
+            "preserve_case" => self.options.preserve_case,
+            _ => false,
+        }
+    }
     fn panel_kind(panel: &str) -> Panel {
         match panel {
             "replace" => Panel::Replace,
@@ -2268,6 +2402,7 @@ impl Panels {
         }
     }
     fn close_panel(&mut self, workspace: &mut Workspace) {
+        self.show_console = false;
         self.finish_find_navigation(workspace);
         if self.panel == Some(Panel::Results) && self.file_task.take().is_some() {
             self.file_complete = false;
@@ -2693,6 +2828,19 @@ impl Panels {
         ));
         Ok(())
     }
+    pub(crate) fn refresh_localized_palette(&mut self, workspace: &mut Workspace) {
+        if self.overlay == Some(Overlay::Palette) {
+            self.prepared.clear();
+            self.query_quick(workspace);
+        }
+    }
+    fn palette_match_limit(&self) -> usize {
+        if self.overlay == Some(Overlay::Palette) && !self.palette_primary.is_empty() {
+            200
+        } else {
+            100
+        }
+    }
     fn query_quick(&mut self, workspace: &mut Workspace) {
         if self.overlay == Some(Overlay::Appearance) {
             self.query_appearance(workspace, true);
@@ -2788,7 +2936,8 @@ impl Panels {
                 "palette"
             };
             if self.prepared == source {
-                self.fuzzy_worker.query(self.quick_input.value(), 100);
+                self.fuzzy_worker
+                    .query(self.quick_input.value(), self.palette_match_limit());
                 return;
             }
             self.prepared = source.into();
@@ -2851,24 +3000,48 @@ impl Panels {
                 })
                 .map(|(i, _)| i)
                 .collect();
-            self.candidates = Arc::new(
-                self.palette_indices
-                    .iter()
-                    .map(|i| {
-                        let p = &palette[*i];
-                        let mut c = fuzzy::Candidate::new(&p.caption);
-                        c.recent = self
-                            .palette_recent
-                            .get(&format!("{}:{}", p.invocation.command, p.invocation.args))
-                            .copied()
-                            .unwrap_or(0);
-                        c
-                    })
-                    .collect(),
-            );
+            // Score both labels with the same worker and recency. Ranking the
+            // aliases independently and keeping the highest-ranked hit per row
+            // leaves the file/symbol matcher and its fast path untouched.
+            let mut aliases = Vec::new();
+            let mut candidates = Vec::with_capacity(self.palette_indices.len());
+            for (primary, &index) in self.palette_indices.iter().enumerate() {
+                let item = &palette[index];
+                let caption = (self.overlay == Some(Overlay::Palette)
+                    && item.invocation.command != "set_file_type")
+                    .then(|| workspace.translations.palette_caption(&item.caption))
+                    .flatten();
+                let recent = self
+                    .palette_recent
+                    .get(&format!(
+                        "{}:{}",
+                        item.invocation.command, item.invocation.args
+                    ))
+                    .copied()
+                    .unwrap_or(0);
+                let mut candidate =
+                    fuzzy::Candidate::new(caption.as_deref().unwrap_or(&item.caption));
+                candidate.recent = recent;
+                candidates.push(candidate);
+                if caption.is_some() {
+                    let mut alias = fuzzy::Candidate::new(&item.caption);
+                    alias.recent = recent;
+                    aliases.push((primary, alias));
+                }
+            }
+            self.palette_primary.clear();
+            if !aliases.is_empty() {
+                self.palette_primary.extend(0..candidates.len());
+                for (primary, alias) in aliases {
+                    self.palette_primary.push(primary);
+                    candidates.push(alias);
+                }
+            }
+            self.candidates = Arc::new(candidates);
             self.local_positions.clear();
             self.fuzzy_worker.set_items(self.candidates.clone());
-            self.fuzzy_worker.query(self.quick_input.value(), 100);
+            self.fuzzy_worker
+                .query(self.quick_input.value(), self.palette_match_limit());
             return;
         }
         let query = Query::parse(&self.quick_input.value());
@@ -3040,31 +3213,48 @@ impl Panels {
         } else {
             &workspace.palette
         };
+        let bilingual = self.overlay == Some(Overlay::Palette) && !self.palette_primary.is_empty();
+        let mut seen = BTreeSet::new();
         let items = hits
             .into_iter()
-            .map(|hit| {
-                let index = if palette {
-                    self.palette_indices[hit.index]
+            .filter_map(|hit| {
+                let shown = if bilingual {
+                    let shown = *self.palette_primary.get(hit.index)?;
+                    if !seen.insert(shown) {
+                        return None;
+                    }
+                    shown
                 } else {
                     hit.index
                 };
-                Item {
+                let index = if palette {
+                    *self.palette_indices.get(shown)?
+                } else {
+                    hit.index
+                };
+                Some(Item {
                     caption: self
                         .candidates
-                        .get(hit.index)
+                        .get(shown)
                         .unwrap_or_else(|| {
                             &self.extra_candidates[hit.index - self.candidates.len()]
                         })
                         .label
                         .clone(),
-                    highlights: hit.positions,
+                    // English match positions are not offsets into the Chinese
+                    // glyphs. Only paint highlights in the displayed caption.
+                    highlights: if shown == hit.index {
+                        hit.positions
+                    } else {
+                        Vec::new()
+                    },
                     value: index,
                     kind: if let Some(kind) = self
                         .local_kinds
                         .get(hit.index)
                         .filter(|_| !self.local_positions.is_empty())
                     {
-                        format!("{kind:?}")
+                        symbol_kind_caption(*kind).into()
                     } else if palette {
                         "command".into()
                     } else if !self.local_positions.is_empty() {
@@ -3090,8 +3280,9 @@ impl Panels {
                             .map(|p| p.display().to_string())
                             .unwrap_or_default()
                     },
-                }
+                })
             })
+            .take(100)
             .collect();
         self.quick.set_items(items);
         if self.overlay == Some(Overlay::Locations) {
@@ -3366,7 +3557,7 @@ impl Panels {
                 &self.extra_candidates,
                 &self.file_recency,
                 term,
-                100,
+                self.palette_match_limit(),
             );
             self.publish_quick(workspace, hits);
             self.quick_pending = false;
@@ -3956,6 +4147,17 @@ impl Panels {
         self.replace_rx = Some(rx);
         self.message = "Preparing replacement preview…".into();
         Ok(())
+    }
+    pub(crate) fn file_replace_ready(&self) -> bool {
+        self.file_complete
+            && self
+                .file_signature
+                .as_ref()
+                .is_some_and(|(query, options, where_)| {
+                    *query == self.query.value()
+                        && *options == self.options
+                        && *where_ == self.where_input.value()
+                })
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
         workspace.observe_navigation();
@@ -4566,11 +4768,14 @@ impl Panels {
         self.quick
             .scroll
             .set_viewport((self.quick_bounds.height - ((header + footer) * self.ui_scale)).max(1.));
-        let close = if self.find_panel_visible() {
+        let mut close = if self.find_panel_visible() {
             CLOSE_BUTTON + 6.
         } else {
             0.
         };
+        if self.show_find_options_button() {
+            close += CLOSE_BUTTON + 4.;
+        }
         let v = self.find_vertical_scale();
         // Narrow panels give the input room first: the label column shrinks, then the labels
         // are dropped, before the input would collapse under the close button.
@@ -5307,6 +5512,8 @@ impl Panels {
                     &text_style,
                     &if panel == Panel::Results {
                         format!("Find Results · {}", self.result_status)
+                    } else if self.console_visible() {
+                        "Console".into()
                     } else {
                         "Output".into()
                     },
@@ -5314,7 +5521,29 @@ impl Panels {
                     clip.y + (20. * self.ui_scale),
                     clip,
                 );
-                if panel == Panel::Results {
+                if self.console_visible() {
+                    let pad = 10. * self.ui_scale;
+                    let height = 18. * self.ui_scale;
+                    let count = ((clip.height - 40. * self.ui_scale) / height).max(0.) as usize + 1;
+                    for (row, line) in self
+                        .console_messages
+                        .iter()
+                        .rev()
+                        .take(count)
+                        .rev()
+                        .enumerate()
+                    {
+                        theme.text_fit(
+                            &mut layer,
+                            &text_style,
+                            line,
+                            clip.x + pad,
+                            clip.y + (40. * self.ui_scale) + row as f64 * height,
+                            clip.width - 2. * pad,
+                            clip,
+                        );
+                    }
+                } else if panel == Panel::Results {
                     let body = Rect {
                         y: clip.y + (30. * self.ui_scale),
                         height: (clip.height - (30. * self.ui_scale)).max(1.),
@@ -5457,6 +5686,18 @@ impl Panels {
                             settings,
                         );
                         theme.icon_surface(&mut layer, &close, node.rect, clip);
+                    }
+                    if self.show_find_options_button() {
+                        let more = self.find_options_rect();
+                        theme.text_fit(
+                            &mut layer,
+                            &text_style,
+                            "…",
+                            more.x + 5. * self.ui_scale,
+                            more.y + more.height * 0.7,
+                            more.width - 5. * self.ui_scale,
+                            more,
+                        );
                     }
                     let message_style = if self.find_error.is_some() {
                         self.tree.style_child(
@@ -5697,6 +5938,7 @@ impl Panels {
         let theme_animating = theme.animating();
         drop(theme);
         if self.panel == Some(Panel::Output)
+            && !self.show_console
             && let Some(editor) = &mut self.output_editor
         {
             editor.theme = workspace.themes.ui.clone();

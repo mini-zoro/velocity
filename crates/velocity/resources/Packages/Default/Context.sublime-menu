@@ -1,22 +1,22 @@
-// Original Velocity menu captions and layout; authored from public behavior.
+// Original captions; standard edit actions: https://developer.apple.com/design/human-interface-guidelines/the-menu-bar
 [
   {
-    "caption": "Cut Selection",
+    "caption": "Cut",
     "command": "cut",
     "id": "velocity_cut"
   },
   {
-    "caption": "Copy Selection",
+    "caption": "Copy",
     "command": "copy",
     "id": "velocity_copy"
   },
   {
-    "caption": "Paste Clipboard",
+    "caption": "Paste",
     "command": "paste",
     "id": "velocity_paste"
   },
   {
-    "caption": "Select Document",
+    "caption": "Select All",
     "command": "select_all",
     "id": "velocity_select_all"
   },
@@ -38,7 +38,7 @@
     "command": "reveal_in_side_bar"
   },
   {
-    "caption": "Show in File Browser",
+    "caption": "Reveal in Finder",
     "command": "reveal_in_finder"
   }
 ]

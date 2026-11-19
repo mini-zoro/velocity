@@ -299,6 +299,7 @@ fn r20_two_windows_recents_frame_and_close_rule() {
             .children
             .iter()
             .flat_map(|m| &m.children)
+            .flat_map(|m| &m.children)
             .any(|m| m.command.as_deref() == Some("open_recent_file")
                 && m.caption == file.display().to_string())
     );

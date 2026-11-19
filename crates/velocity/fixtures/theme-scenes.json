@@ -69,7 +69,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": "Ln 3, Col 1",
+            "text": "Ln 3, Col 1 · UTF-8 · Unix",
             "x": 10.0
           }
         ],
@@ -14073,7 +14073,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 12.0,
-            "text": "Ln 3, Col 1",
+            "text": "Ln 3, Col 1 · UTF-8 · Unix",
             "x": 10.0
           }
         ],

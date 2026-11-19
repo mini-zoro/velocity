@@ -85,6 +85,16 @@ struct Fixture {
     project: PathBuf,
     file: PathBuf,
 }
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            eprintln!(
+                "velocity: could not remove {}: {error}",
+                self.root.display()
+            );
+        }
+    }
+}
 
 const MAIN_RS: &str = r#"//! Tiny task runner used by the renderer's design scenes.
 use std::collections::BTreeMap;
@@ -589,6 +599,29 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
     Ok(app)
 }
 
+fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64) -> Result<App, String> {
+    let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
+    // Scene input, not a CLI switch or a persisted profile setting. Panel labels
+    // intentionally stay English in localization phase 1.
+    app.workspace.settings.set(
+        vel_config::settings::Layer::User,
+        "ui_language",
+        json!("zh-Hans"),
+    );
+    app.workspace.sync_ui_language();
+    app.workspace.editor_mut().settings.set(
+        vel_config::settings::Layer::View,
+        "ui_scale",
+        json!(scale),
+    );
+    named(
+        &mut app,
+        "show_overlay",
+        json!({"overlay":"command_palette","text":"保存"}),
+    );
+    Ok(app)
+}
+
 fn picker_scene(fixture: &Fixture, dark: bool, command: &str) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     open(&mut app, &fixture.file)?;
@@ -1053,6 +1086,16 @@ const SCENARIOS: &[Scenario] = &[
         build: |f, d| overlay_scene(f, d, "command_palette", "toggle"),
     },
     Scenario {
+        name: "zh_hans",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 1.),
+    },
+    Scenario {
+        name: "zh_hans_ui2",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 2.),
+    },
+    Scenario {
         name: "goto_anything",
         size: (1200., 800.),
         build: |f, d| overlay_scene(f, d, "goto", "rs"),
@@ -1457,6 +1500,92 @@ fn bench_scene(app: &mut App, name: &str, dark: bool, scale: f32, count: usize) 
     );
 }
 
+fn capture_chinese_layout(
+    app: &mut App,
+    out: &Path,
+    variant: &str,
+    dark: bool,
+    scale: f32,
+) -> Result<(), String> {
+    use vel_minihtml::FontMetrics;
+    fn model(rows: &[vel_platform::MenuEntry]) -> Vec<vel_config::Value> {
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "id":row.id, "caption":row.caption, "command":row.command,
+                    "shortcut":row.shortcut, "children":model(&row.children)
+                })
+            })
+            .collect()
+    }
+    let menus = model(&app.application_menu());
+    std::fs::write(
+        out.join("zh_hans-menu.json"),
+        serde_json::to_vec_pretty(&menus).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let scene = app.scene();
+    let theme = app.workspace.themes.ui.borrow();
+    let mut layout = Vec::new();
+    for run in scene
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.text)
+        .filter(|run| {
+            run.text
+                .chars()
+                .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+        })
+    {
+        let style = vel_minihtml::TextStyle {
+            font_family: run.family.clone().unwrap_or_else(|| Arc::from("monospace")),
+            font_size: run.size,
+            font_weight: if run.style.bold { 700 } else { 400 },
+            italic: run.style.italic,
+            underline: false,
+            color: vel_minihtml::Color::rgb(0, 0, 0),
+        };
+        let metrics = theme.metrics.measure(&run.text, &style);
+        let bounds = [
+            run.x,
+            run.baseline - metrics.ascent,
+            run.x + metrics.advance,
+            run.baseline + metrics.descent,
+        ];
+        let clip = [
+            run.clip.x,
+            run.clip.y,
+            run.clip.x + run.clip.width,
+            run.clip.y + run.clip.height,
+        ];
+        // The quick list prepares an extra row just outside the scrolling
+        // viewport. A completely invisible run is not a clipped caption.
+        if f64::from(bounds[1]) >= clip[3] || f64::from(bounds[3]) <= clip[1] {
+            continue;
+        }
+        let tolerance = 1. / f64::from(scale);
+        let fits = f64::from(bounds[0]) + tolerance >= clip[0]
+            && f64::from(bounds[1]) + tolerance >= clip[1]
+            && f64::from(bounds[2]) <= clip[2] + tolerance
+            && f64::from(bounds[3]) <= clip[3] + tolerance;
+        layout.push(json!({"text":run.text, "bounds":bounds, "clip":clip, "fits":fits}));
+    }
+    let appearance = if dark { "dark" } else { "light" };
+    let report = out.join(format!("{variant}-{appearance}@{scale}x-layout.json"));
+    std::fs::write(
+        &report,
+        serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if layout.is_empty() || layout.iter().any(|row| row["fits"] != true) {
+        return Err(format!(
+            "Chinese scene has missing or clipped text: {}",
+            report.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Entry point for `velocity --render-scenes`.
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let request = Request::parse(args)?;
@@ -1521,6 +1650,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     hover_definition(&mut app);
                     settle(&mut app);
                 }
+                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2") {
+                    capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
+                }
                 if request.bench > 0 {
                     bench_scene(&mut app, scenario.name, dark, scale, request.bench);
                     continue;
@@ -1575,9 +1707,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 println!("{}", file.display());
             }
         }
-    }
-    if let Err(e) = std::fs::remove_dir_all(&fixture.root) {
-        eprintln!("velocity: could not remove {}: {e}", fixture.root.display());
     }
     eprintln!("velocity: rendered {written} scenes");
     Ok(())

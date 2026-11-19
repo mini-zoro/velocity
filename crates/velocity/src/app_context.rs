@@ -67,12 +67,16 @@ impl App {
     }
     /// Collects context without opening AppKit's nested tracking loop while borrowed.
     pub(super) fn begin_context_menu(&mut self, w: &WindowHandle, point: Point) {
+        self.collect_context_menu(point);
+        if self.pending_menu.is_some() {
+            self.changed(w, Instant::now(), false);
+            self.flush_context_menu(w);
+        }
+    }
+    fn collect_context_menu(&mut self, point: Point) {
         self.panels.review.native_context = true;
         self.panels.cancel_review_menu();
         self.pending_menu = None;
-        if self.panels.overlay.is_some() {
-            return;
-        }
         let group = self.workspace.workbench.active;
         let mut context = MenuContext {
             event: point,
@@ -81,7 +85,14 @@ impl App {
         };
         let kind;
         let sheet;
-        if let Some((id, _)) = self
+        // The menu resource is chosen by the hit surface, not by current focus:
+        // https://www.sublimetext.com/docs/menus.html#available-menus
+        if self.panels.focus_context_input(point) {
+            kind = ContextMenuKind::Widget;
+            sheet = None;
+        } else if self.panels.overlay.is_some() {
+            return;
+        } else if let Some((id, _)) = self
             .tab_hits
             .iter()
             .find(|(_, rect)| vel_ui::contains(*rect, point))
@@ -102,7 +113,7 @@ impl App {
                 .into_iter()
                 .collect();
         } else if let Some((path, folder)) = self.panels.review_side_path(&self.workspace, point) {
-            kind = ContextMenuKind::SideBar;
+            kind = self.sidebar_menu_kind(&path);
             sheet = None;
             context.paths.push(path.clone());
             self.panels
@@ -151,8 +162,6 @@ impl App {
                 .map(|i| self.workspace.tabs[i].editor.revision),
             started: Instant::now(),
         });
-        self.changed(w, Instant::now(), false);
-        self.flush_context_menu(w);
     }
     pub(super) fn flush_context_menu(&mut self, w: &WindowHandle) {
         let Some(pending) = &self.pending_menu else {
@@ -175,21 +184,69 @@ impl App {
             w.request_frame_at(Instant::now() + Duration::from_millis(8));
             return;
         }
-        let pending = self.pending_menu.take().expect("pending context menu");
-        let dynamic = std::mem::take(&mut self.panels.review.items);
+        w.show_context_menu(&self.take_context_entries());
+    }
+    fn take_context_entries(&mut self) -> Vec<MenuEntry> {
+        let Some(pending) = self.pending_menu.take() else {
+            return Vec::new();
+        };
+        let dynamic = if pending.kind == ContextMenuKind::Widget {
+            self.panels.widget_history_menu()
+        } else {
+            std::mem::take(&mut self.panels.review.items)
+        };
         self.panels.cancel_review_menu();
+        self.context_entries(&pending, &dynamic)
+    }
+    #[cfg(test)]
+    pub(super) fn headless_context_menu(&mut self, point: Point) -> Vec<MenuEntry> {
+        self.collect_context_menu(point);
+        self.take_context_entries()
+    }
+    pub(super) fn sidebar_menu_kind(&self, path: &Path) -> ContextMenuKind {
+        if self
+            .workspace
+            .folders
+            .iter()
+            .any(|folder| folder.path == path)
+        {
+            ContextMenuKind::MountPoint
+        } else {
+            ContextMenuKind::SideBar
+        }
+    }
+    pub(super) fn show_find_options(&mut self, w: &WindowHandle, point: Point) {
+        let pending = PendingMenu {
+            kind: ContextMenuKind::FindInFiles,
+            context: MenuContext {
+                event: point,
+                ..Default::default()
+            },
+            sheet: None,
+            revision: None,
+            started: Instant::now(),
+        };
+        w.show_context_menu(&self.context_entries(&pending, &[]));
+    }
+    fn context_entries(
+        &self,
+        pending: &PendingMenu,
+        dynamic: &[vel_config::ui::PaletteItem],
+    ) -> Vec<MenuEntry> {
         let resources = self
             .workspace
             .context_menus
             .get(pending.kind.resource_name())
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let menu = menus::with_dynamic(resources, &dynamic);
+        let menu = menus::with_dynamic(resources, dynamic);
         let mut context = pending.context.arguments();
         context["_context_menu"] = json!(match pending.kind {
             ContextMenuKind::Editor => "editor",
             ContextMenuKind::Tab => "tab",
-            ContextMenuKind::SideBar => "sidebar",
+            ContextMenuKind::SideBar | ContextMenuKind::MountPoint => "sidebar",
+            ContextMenuKind::Widget => "widget",
+            ContextMenuKind::FindInFiles => "find_in_files",
         });
         if let Some(sheet) = pending.sheet {
             context["_context_sheet"] = json!(sheet);
@@ -202,19 +259,30 @@ impl App {
                 checked: self.command_checked(&invocation.command, &args),
             }
         });
-        fn native(rows: Vec<vel_config::ui::ResolvedMenuItem>) -> Vec<MenuEntry> {
+        fn native(
+            rows: Vec<vel_config::ui::ResolvedMenuItem>,
+            tr: &vel_i18n::Translator,
+        ) -> Vec<MenuEntry> {
             rows.into_iter()
                 .map(|row| MenuEntry {
-                    caption: row.caption,
+                    caption: if row.invocation.as_ref().is_some_and(|i| {
+                        i.command == "replace_misspelling"
+                            || (i.command == "widget_history" && i.args["text"] != "")
+                    }) {
+                        row.caption
+                    } else {
+                        tr.caption(&row.caption).to_owned()
+                    },
                     command: row.invocation.as_ref().map(|i| i.command.clone()),
                     args: row
                         .invocation
                         .map_or_else(|| "{}".into(), |i| i.args.to_string()),
-                    children: native(row.children),
+                    children: native(row.children, tr),
+                    ..Default::default()
                 })
                 .collect()
         }
-        w.show_context_menu(&native(rows));
+        native(rows, &self.workspace.translations)
     }
     /// Returns true only for a command fully handled at window scope.
     pub(super) fn context_action(
