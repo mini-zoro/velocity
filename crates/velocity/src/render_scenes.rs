@@ -599,7 +599,7 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
     Ok(app)
 }
 
-fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64) -> Result<App, String> {
+fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64, query: &str) -> Result<App, String> {
     let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
     // Scene input, not a CLI switch or a persisted profile setting. Panel labels
     // intentionally stay English in localization phase 1.
@@ -617,7 +617,7 @@ fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64) -> Result<App, Strin
     named(
         &mut app,
         "show_overlay",
-        json!({"overlay":"command_palette","text":"保存"}),
+        json!({"overlay":"command_palette","text":query}),
     );
     Ok(app)
 }
@@ -1088,12 +1088,17 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "zh_hans",
         size: (1200., 800.),
-        build: |f, d| chinese_scene(f, d, 1.),
+        build: |f, d| chinese_scene(f, d, 1., "保存"),
     },
     Scenario {
         name: "zh_hans_ui2",
         size: (1200., 800.),
-        build: |f, d| chinese_scene(f, d, 2.),
+        build: |f, d| chinese_scene(f, d, 2., "保存"),
+    },
+    Scenario {
+        name: "zh_hans_mixed",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 2., "UTF-8"),
     },
     Scenario {
         name: "goto_anything",
@@ -1527,6 +1532,7 @@ fn capture_chinese_layout(
     let scene = app.scene();
     let theme = app.workspace.themes.ui.borrow();
     let mut layout = Vec::new();
+    let mut mixed_checked = false;
     for run in scene
         .layers
         .iter()
@@ -1568,7 +1574,31 @@ fn capture_chinese_layout(
             && f64::from(bounds[1]) + tolerance >= clip[1]
             && f64::from(bounds[2]) <= clip[2] + tolerance
             && f64::from(bounds[3]) <= clip[3] + tolerance;
-        layout.push(json!({"text":run.text, "bounds":bounds, "clip":clip, "fits":fits}));
+        let mut record = json!({"text":run.text, "bounds":bounds, "clip":clip, "fits":fits});
+        if variant == "zh_hans_mixed"
+            && run.text == "文件：以指定编码保存：UTF-8"
+            && let Some(highlight) = &run.highlight
+        {
+            let spans: Vec<_> = highlight
+                .ranges
+                .iter()
+                .map(|range| &run.text[range.clone()])
+                .collect();
+            if spans != ["UTF-8"] {
+                return Err(format!("unexpected mixed-caption highlights: {spans:?}"));
+            }
+            let fonts = app.fonts.as_mut().ok_or("fonts missing")?;
+            let ink = caption_ink(fonts, run, scale)?;
+            // Raster bounds, not just the scissored pixels or measured advance.
+            record["ink_bounds"] = json!(ink);
+            record["fits"] = json!(
+                fits && (0..2).all(|i| {
+                    ink[i] >= clip[i] - tolerance && ink[i + 2] <= clip[i + 2] + tolerance
+                })
+            );
+            mixed_checked = true;
+        }
+        layout.push(record);
     }
     let appearance = if dark { "dark" } else { "light" };
     let report = out.join(format!("{variant}-{appearance}@{scale}x-layout.json"));
@@ -1577,13 +1607,58 @@ fn capture_chinese_layout(
         serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    if layout.is_empty() || layout.iter().any(|row| row["fits"] != true) {
+    if layout.is_empty()
+        || (variant == "zh_hans_mixed" && !mixed_checked)
+        || layout.iter().any(|row| row["fits"] != true)
+    {
         return Err(format!(
             "Chinese scene has missing or clipped text: {}",
             report.display()
         ));
     }
     Ok(())
+}
+
+fn caption_ink(
+    fonts: &mut Fonts,
+    run: &vel_render::scene::TextRun,
+    scale: f32,
+) -> Result<[f64; 4], String> {
+    let family = run.family.as_deref().ok_or("caption has no UI font")?;
+    let px = (run.size * scale * 64.).round() / 64.;
+    let mut shaped = fonts.shape_ui(&run.text, family, px, run.style);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fonts.fallback_pending() {
+        if Instant::now() >= deadline {
+            return Err("caption font fallback did not settle".into());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        if fonts.poll_fallbacks() {
+            shaped = fonts.shape_ui(&run.text, family, px, run.style);
+        }
+    }
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for glyph in shaped.glyphs {
+        let (x, bucket) = vel_render::atlas::subpixel_x(run.x * scale + glyph.x);
+        if let Some(raster) = fonts.rasterize(glyph.face, glyph.id, px, bucket) {
+            let placement = raster.placement;
+            let left = x + placement.left as f32;
+            let top = (run.baseline * scale).round() - placement.top as f32 - glyph.y;
+            bounds[0] = bounds[0].min(left);
+            bounds[1] = bounds[1].min(top);
+            bounds[2] = bounds[2].max(left + placement.width as f32);
+            bounds[3] = bounds[3].max(top + placement.height as f32);
+        }
+    }
+    if !bounds.iter().all(|b| b.is_finite()) {
+        return Err("mixed caption rendered no ink".into());
+    }
+    Ok(bounds.map(|b| f64::from(b / scale)))
 }
 
 /// Entry point for `velocity --render-scenes`.
@@ -1650,7 +1725,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     hover_definition(&mut app);
                     settle(&mut app);
                 }
-                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2") {
+                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed") {
                     capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
                 }
                 if request.bench > 0 {

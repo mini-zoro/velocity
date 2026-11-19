@@ -378,6 +378,7 @@ impl Html {
                         baseline: rect.y as f32 + *baseline,
                         size: style.font_size,
                         color: rgba(style.color),
+                        highlight: None,
                         clip,
                     });
                     if style.underline {

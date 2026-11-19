@@ -422,7 +422,7 @@ impl Panels {
             _ => "",
         };
         Some(match workspace.editor().keymap.hint(&invocation) {
-            Some(keys) => format!("{name}{state} ({})", super::mac_key_equivalents(&keys)),
+            Some(keys) => format!("{name}{state} ({keys})"),
             None => format!("{name}{state}"),
         })
     }

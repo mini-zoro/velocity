@@ -639,13 +639,12 @@ impl App {
         {
             self.panels.message = error;
         }
-        self.sync_recents();
+        self.install_native_menu(w, false);
         self.sessions.borrow_mut().update_system_recents(
             self.workspace
                 .global_bool("update_system_recent_files", true),
             |path| w.system_recent_document(path),
         );
-        self.install_native_menu(w, false);
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
             let id = self.restored_reserved_ids.pop_front();
@@ -995,6 +994,27 @@ impl App {
             {
                 return false;
             }
+            "toggle_find_option" if args["option"] == "in_selection" => {
+                // This scope belongs to Find/Replace in the current document.
+                // https://docs.sublimetext.io/reference/commands.html
+                let editor = &self.workspace.tabs[target].editor;
+                return editor.binary.is_none()
+                    && self.panels.panel != Some(crate::panels::Panel::Files)
+                    && (matches!(
+                        self.panels.panel,
+                        Some(
+                            crate::panels::Panel::Find
+                                | crate::panels::Panel::Replace
+                                | crate::panels::Panel::Incremental
+                        )
+                    ) || !editor.selection().is_empty()
+                        || editor
+                            .buffer
+                            .view(editor.id)
+                            .sel()
+                            .iter()
+                            .any(|r| !r.empty()));
+            }
             "run_macro" if self.workspace.editor().registry.is_recording() => {
                 return false;
             }
@@ -1162,9 +1182,7 @@ impl App {
             }
         }
     }
-    fn application_menu(&mut self) -> Vec<MenuEntry> {
-        self.sync_recents();
-        self.workspace.refresh_file_menus();
+    fn build_application_menu(&mut self) -> Vec<MenuEntry> {
         let macros = self
             .panels
             .macro_file_items(&self.workspace)
@@ -1186,21 +1204,31 @@ impl App {
         prune_empty_menus(&mut entries);
         entries
     }
+    fn application_menu(&mut self) -> Vec<MenuEntry> {
+        self.sync_recents();
+        self.workspace.refresh_file_menus();
+        self.build_application_menu()
+    }
     fn install_native_menu(&mut self, window: &WindowHandle, focus_changed: bool) {
+        let rebuild = self.refresh_native_menu_model();
+        if rebuild || focus_changed {
+            window.set_menu(&self.menu_cache.as_ref().expect("installed menu").1);
+        }
+    }
+    fn refresh_native_menu_model(&mut self) -> bool {
+        self.sync_recents();
         self.workspace.refresh_file_menus();
         let key = (
             self.workspace.resource_revision,
             self.workspace.menu_revision,
             self.workspace.translations.revision(),
         );
-        let rebuild = self.menu_cache.as_ref().is_none_or(|(old, _)| *old != key);
-        if rebuild {
-            let entries = self.application_menu();
-            self.menu_cache = Some(((key.0, self.workspace.menu_revision, key.2), entries));
+        if self.menu_cache.as_ref().is_some_and(|(old, _)| *old == key) {
+            return false;
         }
-        if rebuild || focus_changed {
-            window.set_menu(&self.menu_cache.as_ref().expect("installed menu").1);
-        }
+        let entries = self.build_application_menu();
+        self.menu_cache = Some((key, entries));
+        true
     }
     fn syntax_menu(&self) -> Vec<MenuEntry> {
         let mut packages = std::collections::BTreeMap::<_, Vec<MenuEntry>>::new();
@@ -1380,15 +1408,13 @@ impl App {
             self.workspace.palette_revision,
         );
         let changed = self.workspace.poll();
-        if self.panels.overlay == Some(crate::panels::Overlay::Palette)
-            && before
-                != (
-                    self.workspace.translations.revision(),
-                    self.workspace.palette_revision,
-                )
+        if before
+            != (
+                self.workspace.translations.revision(),
+                self.workspace.palette_revision,
+            )
         {
-            self.sync_palette_enabled();
-            self.panels.refresh_localized_palette(&mut self.workspace);
+            self.refresh_open_palette();
         }
         changed || transferred
     }
@@ -1584,6 +1610,7 @@ impl App {
                 | "set_ui_language"
                 | "open_url"
                 | "add_folder"
+                | "clear_recent_items"
         ) {
             self.apply_named_action(window, name, args)?;
             self.named_changed(window, false);
@@ -2131,17 +2158,26 @@ impl App {
         if name == "set_ui_language" {
             // The preference is app-wide; the ordinary User writer also updates
             // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
-            let requested = args["language"].as_str().unwrap_or("en");
-            let language = match requested {
-                "en" | "zh-Hans" | "auto" => requested,
-                _ => "en",
+            let (language, note) = match args["language"].as_str() {
+                Some(requested @ ("en" | "zh-Hans" | "auto")) => (requested, None),
+                _ => (
+                    "en",
+                    Some(
+                        self.workspace
+                            .translations
+                            .tr("Unsupported UI language; using English"),
+                    ),
+                ),
             };
             if self.workspace.global_string("ui_language", "en") != language {
                 self.workspace
                     .set_user_preference("ui_language", json!(language))?;
                 if self.workspace.sync_ui_language() {
-                    self.panels.refresh_localized_palette(&mut self.workspace);
+                    self.refresh_open_palette();
                 }
+            }
+            if let Some(note) = note {
+                self.panels.set_message(note.into_owned());
             }
             return Ok(());
         }
@@ -2321,6 +2357,18 @@ impl App {
         }
         if name == "switch_file" {
             return self.workspace.switch_file(&args["extensions"]);
+        }
+        if name == "clear_recent_items" {
+            self.sync_recents();
+            self.workspace.recent_files.clear();
+            self.workspace.recent_folders.clear();
+            self.workspace.recent_projects.clear();
+            self.workspace.goto_recent_files.clear();
+            self.sessions.borrow_mut().clear_recent(self.session_id);
+            if let Some(window) = window {
+                self.install_native_menu(window, false);
+            }
+            return Ok(());
         }
         if matches!(name, "clear_recent_files" | "clear_recent_projects") {
             let kind = if name == "clear_recent_files" {
@@ -2564,12 +2612,6 @@ impl App {
         match name {
             "new_file" => self.workspace.new_file()?,
             "reopen_last_file" => self.workspace.reopen_last_file()?,
-            "clear_recent_items" => {
-                self.workspace.recent_files.clear();
-                self.workspace.recent_folders.clear();
-                self.workspace.recent_projects.clear();
-                self.sessions.borrow_mut().clear_recent(self.session_id);
-            }
             "exit" => w.request_app_quit(),
             "open_recent_file" => {
                 self.workspace.open(crate::cli::FileLocation {
@@ -2898,6 +2940,12 @@ impl App {
             })
             .collect();
         self.panels.set_palette_enabled(enabled);
+    }
+    fn refresh_open_palette(&mut self) {
+        if self.panels.overlay == Some(crate::panels::Overlay::Palette) {
+            self.sync_palette_enabled();
+            self.panels.refresh_localized_palette(&mut self.workspace);
+        }
     }
     fn accept_palette_command(&mut self, name: &str, args: &Value) -> bool {
         let enabled = self.command_enabled(name, &args.to_string());
@@ -4135,7 +4183,6 @@ impl AppHandler for App {
                     }
                     "clear_recent_items" => {
                         self.run_named(Some(w), name, &parsed);
-                        self.install_native_menu(w, false);
                         return;
                     }
                     "prompt_open_file" => w.open_files(),

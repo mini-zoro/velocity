@@ -1807,7 +1807,7 @@ impl Workspace {
             .recent_menu_state
             .as_ref()
             .is_some_and(|(old, revision)| {
-                *revision == self.resource_revision && old.iter().zip(recent).all(|(a, b)| a == b)
+                *revision == self.resource_revision && old.iter().eq(recent)
             })
         {
             return false;
@@ -1860,6 +1860,12 @@ impl Workspace {
     pub(crate) fn sync_ui_language(&mut self) -> bool {
         let language = vel_i18n::Language::from_setting(self.global_string("ui_language", "en"));
         self.translations.select(language)
+    }
+    pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
+        if item.invocation.command == "set_file_type" {
+            return None;
+        }
+        self.translations.palette_caption(&item.caption)
     }
     pub fn track_settings_write(
         &mut self,
@@ -4273,6 +4279,18 @@ mod round15_tests {
                 .unwrap();
             assert_eq!(submenu.children.len(), vel_fileio::ENCODINGS.len());
         }
+        w.recent_files.push("/tmp/b.txt".into());
+        assert!(w.refresh_file_menus());
+        w.recent_files.pop();
+        assert!(w.refresh_file_menus(), "a shorter list is not its prefix");
+        let file = w.menus.iter().find(|menu| menu.id == "file").unwrap();
+        let recent = file
+            .children
+            .iter()
+            .find(|item| item.id == "open_recent")
+            .unwrap();
+        assert_eq!(recent.children[0].children.len(), 1);
+        assert!(!w.refresh_file_menus());
     }
 }
 

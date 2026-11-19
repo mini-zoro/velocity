@@ -191,7 +191,6 @@ selection or text changes. Explicit recenter/find/result navigation keeps its re
 The appearance menu/palette entries reference Lane A's `select_color_scheme` and `select_theme`;
 those implementations are not yet present at baseline `dad6e3d`. Menu contract tests register
 those declared WindowCommand names only, without implementing the pickers in this lane.
-<<<<<<< HEAD
 ## Round 22 compatibility
 
 - `atomic_save` defaults to `false`, as documented in the [Sublime Text 3 changelog](https://www.sublimetext.com/3).
@@ -214,7 +213,6 @@ those declared WindowCommand names only, without implementing the pickers in thi
 - Preferences › Key Bindings opens `Packages/User/Default (OSX).sublime-keymap`. Velocity also reads
   `Default.sublime-keymap` and the older `Velocity.sublime-keymap`, with the legacy bindings applied first.
   Other User keymap names produce a notice and are ignored. `Packages/User` may be a directory symlink.
-=======
 
 <!-- BEGIN GENERATED SETTINGS -->
 ## Shipped and recognized settings
@@ -422,4 +420,3 @@ retained for compatibility, used indirectly, or not yet implemented.
 | `wrap_width` | `` 0 `` |  |  [velocity/editor.rs](../crates/velocity/src/editor.rs), [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `wrap_width_style` | `` "auto" `` |  |  [velocity/view.rs](../crates/velocity/src/view.rs) |
 <!-- END GENERATED SETTINGS -->
->>>>>>> c5c65aa (WIP round 23 lane B)

@@ -2222,9 +2222,20 @@ impl Panels {
                     "wrap" => self.options.wrap = !self.options.wrap,
                     "preserve_case" => self.options.preserve_case = !self.options.preserve_case,
                     "in_selection" => {
-                        self.sync_find_scope(workspace);
+                        if !self.document_find_visible() {
+                            // From the palette, open Find and retain the editor's scope.
+                            self.action(
+                                workspace,
+                                "show_panel",
+                                &json!({"panel": "find"}),
+                                viewport.clone(),
+                            )?;
+                            self.in_selection = true;
+                        } else {
+                            self.sync_find_scope(workspace);
+                            self.in_selection = !self.in_selection;
+                        }
                         self.scope_manual = true;
-                        self.in_selection = !self.in_selection;
                     }
                     _ => return Err("unknown find option".into()),
                 }
@@ -3007,9 +3018,8 @@ impl Panels {
             let mut candidates = Vec::with_capacity(self.palette_indices.len());
             for (primary, &index) in self.palette_indices.iter().enumerate() {
                 let item = &palette[index];
-                let caption = (self.overlay == Some(Overlay::Palette)
-                    && item.invocation.command != "set_file_type")
-                    .then(|| workspace.translations.palette_caption(&item.caption))
+                let caption = (self.overlay == Some(Overlay::Palette))
+                    .then(|| workspace.palette_caption(item))
                     .flatten();
                 let recent = self
                     .palette_recent
@@ -3023,7 +3033,10 @@ impl Panels {
                     fuzzy::Candidate::new(caption.as_deref().unwrap_or(&item.caption));
                 candidate.recent = recent;
                 candidates.push(candidate);
-                if caption.is_some() {
+                if caption
+                    .as_deref()
+                    .is_some_and(|label| label != item.caption)
+                {
                     let mut alias = fuzzy::Candidate::new(&item.caption);
                     alias.recent = recent;
                     aliases.push((primary, alias));
@@ -3232,21 +3245,19 @@ impl Panels {
                 } else {
                     hit.index
                 };
+                let caption = &self
+                    .candidates
+                    .get(shown)
+                    .unwrap_or_else(|| &self.extra_candidates[hit.index - self.candidates.len()])
+                    .label;
                 Some(Item {
-                    caption: self
-                        .candidates
-                        .get(shown)
-                        .unwrap_or_else(|| {
-                            &self.extra_candidates[hit.index - self.candidates.len()]
-                        })
-                        .label
-                        .clone(),
-                    // English match positions are not offsets into the Chinese
-                    // glyphs. Only paint highlights in the displayed caption.
+                    caption: caption.clone(),
+                    // An alias match applies to the whole shown label; its byte
+                    // positions are not offsets into the translation.
                     highlights: if shown == hit.index {
                         hit.positions
                     } else {
-                        Vec::new()
+                        caption.char_indices().map(|(byte, _)| byte).collect()
                     },
                     value: index,
                     kind: if let Some(kind) = self
@@ -6050,8 +6061,8 @@ impl Panels {
                 let hint =
                     self.tree
                         .style(id, Some("quick_panel_label hint"), &mut theme, settings);
-                let annotation = mac_key_equivalents(&item.annotation);
-                let annotation_width = theme.advance(&hint, &annotation);
+                let annotation = &item.annotation;
+                let annotation_width = theme.advance(&hint, annotation);
                 let text_x = rect.x + if badges { 36. } else { 12. } * s;
                 // Rows without a details line centre their caption and badge vertically.
                 let show_details = !compact && !item.details.is_empty();
@@ -6066,72 +6077,22 @@ impl Panels {
                 } else {
                     rect.x + rect.width - annotation_width - 24. * s
                 };
-                if item.highlights.is_empty() {
-                    theme.text_fit(
-                        &mut overlay,
-                        &caption,
-                        &item.caption,
-                        text_x,
-                        baseline,
-                        caption_end - text_x,
-                        rows,
-                    );
-                } else {
-                    // Matched characters are separate runs in the match colour; each glyph
-                    // is drawn once, never overprinted on the unmatched caption.
-                    let mut matched = caption.clone();
-                    matched.foreground = matched.matched;
-                    let clip = Rect {
-                        width: (caption_end - rows.x).max(0.),
-                        ..rows
-                    };
-                    // A caption too long for the row keeps its matched runs up to the cut
-                    // and ends in an ellipsis, like unmatched captions.
-                    let fitted = theme.fit_text(&caption, &item.caption, caption_end - text_x);
-                    // Borrowed means it fits as is (a cut may be exactly as long as "…").
-                    let shown = if matches!(fitted, std::borrow::Cow::Borrowed(_)) {
-                        item.caption.len()
-                    } else {
-                        fitted
-                            .strip_suffix('\u{2026}')
-                            .map_or(0, str::len)
-                            .min(item.caption.len())
-                    };
-                    let mut runs = Vec::new();
-                    let mut start = 0;
-                    let mut highlighted = item.highlights.contains(&0);
-                    for (byte, _) in item.caption[..shown].char_indices().skip(1) {
-                        let next = item.highlights.contains(&byte);
-                        if next != highlighted {
-                            runs.push((start, byte, highlighted));
-                            start = byte;
-                            highlighted = next;
-                        }
-                    }
-                    if shown > start {
-                        runs.push((start, shown, highlighted));
-                    }
-                    for (start, end, highlighted) in runs {
-                        theme.text(
-                            &mut overlay,
-                            if highlighted { &matched } else { &caption },
-                            &item.caption[start..end],
-                            text_x + theme.advance(&caption, &item.caption[..start]),
-                            baseline,
-                            clip,
-                        );
-                    }
-                    if shown < item.caption.len() && !fitted.is_empty() {
-                        theme.text(
-                            &mut overlay,
-                            &caption,
-                            "\u{2026}",
-                            text_x + theme.advance(&caption, &item.caption[..shown]),
-                            baseline,
-                            clip,
-                        );
-                    }
-                }
+                theme.text_fit_highlighted(
+                    &mut overlay,
+                    &caption,
+                    &item.caption,
+                    &item.highlights,
+                    text_x,
+                    baseline,
+                    caption_end - text_x,
+                    vel_ui::minihtml::intersection(
+                        rect,
+                        Rect {
+                            width: (caption_end - rows.x).max(0.),
+                            ..rows
+                        },
+                    ),
+                );
                 let badge = Rect {
                     x: rect.x + 10. * s,
                     y: rect.y
@@ -6190,7 +6151,7 @@ impl Panels {
                 theme.text(
                     &mut overlay,
                     &hint,
-                    &annotation,
+                    annotation,
                     (rect.x + rect.width - annotation_width - 12. * s).max(text_x),
                     baseline,
                     rows,
@@ -7041,8 +7002,7 @@ mod tests {
         };
         f64::from(metrics.measure(&run.text, &style).advance)
     }
-    /// A matched caption too long for its row is cut with an ellipsis: matched runs stop at
-    /// the cut and nothing is drawn past the row's text column.
+    /// The whole fitted run ends with an unhighlighted ellipsis and stays in the caption column.
     #[test]
     fn long_matched_captions_end_in_an_ellipsis() {
         let workspace = workspace();
@@ -7069,35 +7029,34 @@ mod tests {
             });
             let mut scene = Scene::default();
             panels.paint(&workspace, &mut scene);
-            let first = scene
+            let mut runs = scene
                 .layers
                 .iter()
                 .flat_map(|l| &l.text)
-                .find(|r| r.text == "\u{2026}")
-                .unwrap_or_else(|| panic!("{width}: no ellipsis"))
-                .baseline;
-            let runs: Vec<_> = scene
-                .layers
-                .iter()
-                .flat_map(|l| &l.text)
-                .filter(|r| r.baseline == first && !r.text.is_empty())
-                .collect();
-            let shown: String = runs.iter().map(|r| r.text.as_str()).collect();
-            assert!(shown.ends_with('\u{2026}'), "{width}: {shown}");
+                .filter(|r| r.highlight.is_some());
+            let run = runs.next().expect("one highlighted caption");
+            assert!(runs.next().is_none());
+            let prefix = run
+                .text
+                .strip_suffix('…')
+                .expect("caption ends in ellipsis");
             assert!(
-                caption.starts_with(shown.trim_end_matches('\u{2026}')),
-                "{shown}"
+                !prefix.is_empty() && caption.starts_with(prefix),
+                "{width}: {}",
+                run.text
             );
-            let list = panels.quick_bounds;
-            for run in &runs {
-                let end = f64::from(run.x) + run_width(&*workspace.themes.ui.borrow().metrics, run);
-                assert!(
-                    end <= list.x + list.width,
-                    "{width}: {:?} at {}",
-                    run.text,
-                    run.x
-                );
-            }
+            let ranges = &run.highlight.as_ref().unwrap().ranges;
+            assert_eq!(
+                ranges.iter().flat_map(|r| r.clone()).collect::<Vec<_>>(),
+                highlights
+                    .iter()
+                    .copied()
+                    .filter(|&at| at < prefix.len())
+                    .collect::<Vec<_>>(),
+                "only the visible matched text is highlighted"
+            );
+            let end = f64::from(run.x) + run_width(&*workspace.themes.ui.borrow().metrics, run);
+            assert!(end <= run.clip.x + run.clip.width, "{width}: {}", run.text);
         }
     }
     /// The empty-state hint sits directly under the FOLDERS heading, with or without the
@@ -7894,44 +7853,6 @@ impl Panels {
         theme.text(layer, &style, text, x, row.y + 17. * self.ui_scale, clip);
         x - 6. * self.ui_scale
     }
-}
-/// Shows key binding hints ("Ctrl+Shift+Cmd+F, Cmd+B") the way macOS menus do ("⌃⇧⌘F ⌘B").
-/// Display only; anything that is not a binding is returned unchanged.
-fn mac_key_equivalents(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains('+') {
-        return text.into();
-    }
-    let mut out = Vec::new();
-    for chord in text.split(", ") {
-        let mut parts: Vec<&str> = chord.split('+').collect();
-        let Some(key) = parts.pop().filter(|k| !k.is_empty()) else {
-            return text.into();
-        };
-        let mut symbols = String::new();
-        for (name, symbol) in [("Ctrl", '⌃'), ("Alt", '⌥'), ("Shift", '⇧'), ("Cmd", '⌘')] {
-            if parts.contains(&name) {
-                symbols.push(symbol);
-            }
-        }
-        if symbols.chars().count() != parts.len() {
-            return text.into();
-        }
-        symbols.push_str(match key {
-            "UP" => "↑",
-            "DOWN" => "↓",
-            "LEFT" => "←",
-            "RIGHT" => "→",
-            "ENTER" => "↩",
-            "TAB" => "⇥",
-            "ESCAPE" => "⎋",
-            "BACKSPACE" => "⌫",
-            "DELETE" => "⌦",
-            "SPACE" => "Space",
-            other => other,
-        });
-        out.push(symbols);
-    }
-    out.join(" ").into()
 }
 /// Secondary text style for the overlay footer.
 fn hint_footer(

@@ -1,5 +1,5 @@
 //! Scene primitives in logical points, grouped by kind within explicit layers.
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 use vel_platform::Rect;
 
 /// Straight-alpha linear RGBA.
@@ -81,8 +81,28 @@ pub struct TextRun {
     pub size: f32,
     /// Foreground; color emoji retain their original pixels.
     pub color: Color,
+    /// Optional foreground ranges applied after shaping, without moving glyphs.
+    pub highlight: Option<Box<TextHighlight>>,
     /// Scissor bounds.
     pub clip: Rect,
+}
+/// Alternate color for sorted, disjoint UTF-8 ranges of one text run.
+#[derive(Clone, Debug)]
+pub struct TextHighlight {
+    /// Byte ranges in the text passed to the shaper.
+    pub ranges: Vec<Range<usize>>,
+    /// Foreground for matched clusters.
+    pub color: Color,
+}
+impl TextHighlight {
+    /// Paint the entire shaped cluster when it intersects a match (e.g. a ligature).
+    pub fn color_at(&self, [start, end]: [usize; 2]) -> Option<Color> {
+        let at = self.ranges.partition_point(|range| range.end <= start);
+        self.ranges
+            .get(at)
+            .filter(|range| range.start < end)
+            .map(|_| self.color)
+    }
 }
 /// Straight underline or sinusoidal diagnostic squiggle.
 #[derive(Clone, Debug)]

@@ -3,6 +3,18 @@ use std::{collections::BTreeSet, fs};
 use vel_config::keymap::Key;
 
 fn fixture(data: Option<&Path>) -> App {
+    fixture_with_session(
+        data,
+        std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
+        false,
+    )
+}
+
+fn fixture_with_session(
+    data: Option<&Path>,
+    sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
+    watch: bool,
+) -> App {
     let options = Options::default();
     let start = Instant::now();
     App::new(
@@ -13,11 +25,11 @@ fn fixture(data: Option<&Path>) -> App {
             vel_text::Text::from("plain text\n"),
             data.map(Path::to_owned),
             None,
-            false,
+            watch,
         )
         .unwrap(),
         Arc::new(AtomicBool::new(false)),
-        std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
+        sessions,
     )
 }
 
@@ -225,13 +237,19 @@ fn enabled_menu_rows_are_safe_to_dispatch() {
 
 #[test]
 fn live_language_switch_and_bilingual_palette() {
+    const SAVE: &str = "File: Save";
     let data = tempfile::tempdir().unwrap();
-    let mut app = fixture(Some(data.path()));
-    app.run_named(
-        None,
-        "show_overlay",
-        &json!({"overlay":"command_palette","text":"save"}),
+    let sessions = std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None)));
+    let mut app = fixture_with_session(Some(data.path()), sessions.clone(), true);
+    let mut second = fixture_with_session(Some(data.path()), sessions, true);
+    open_palette(&mut app, "save");
+    open_palette(&mut second, "save");
+    assert_eq!(
+        palette_row(&mut app, SAVE).annotation,
+        palette_row(&mut second, SAVE).annotation
     );
+    let hint = palette_row(&mut app, SAVE).annotation.clone();
+    assert!(!hint.is_empty());
     app.run_named(None, "set_ui_language", &json!({"language":"zh-Hans"}));
     let menu = app.application_menu();
     assert_eq!(role(&menu, "view").caption, "显示");
@@ -244,31 +262,27 @@ fn live_language_switch_and_bilingual_palette() {
         "设置…"
     );
     assert!(app.command_checked("set_ui_language", r#"{"language":"zh-Hans"}"#));
-    fn matches(app: &mut App, query: &str, highlighted: bool) {
-        app.run_named(
-            None,
-            "show_overlay",
-            &json!({"overlay":"command_palette","text":query}),
+    // English alias: highlight the entire shown label, not English byte positions.
+    for window in [&mut app, &mut second] {
+        wait_language(window, "zh-Hans");
+        let row = palette_row(window, "保存");
+        assert_eq!(row.annotation, hint);
+        assert_eq!(row.highlights, [0, "保".len()]);
+        assert!(!row.highlights.is_empty());
+        assert!(
+            row.highlights
+                .iter()
+                .all(|&at| at < row.caption.len() && row.caption.is_char_boundary(at))
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while app.panels.ranking_pending() {
-            let viewport = app.viewport();
-            app.panels.poll(&mut app.workspace, viewport);
-            assert!(Instant::now() < deadline, "No palette results for {query}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let hits: Vec<_> = app
-            .panels
-            .quick
-            .items
-            .iter()
-            .filter(|i| i.caption == "保存")
-            .collect();
-        assert_eq!(hits.len(), 1, "{query}");
-        assert_eq!(!hits[0].highlights.is_empty(), highlighted);
     }
-    matches(&mut app, "save", false);
-    matches(&mut app, "保存", true);
+    open_palette(&mut app, "保");
+    assert_eq!(
+        palette_row(&mut app, "保存").highlights,
+        [0],
+        "direct match stays precise"
+    );
+    open_palette(&mut app, "保存");
+    assert_eq!(palette_row(&mut app, "保存").highlights, [0, "保".len()]);
     app.workspace.wait_resources();
     assert!(
         fs::read_to_string(
@@ -278,9 +292,159 @@ fn live_language_switch_and_bilingual_palette() {
         .unwrap()
         .contains("zh-Hans")
     );
+    open_palette(&mut app, "save");
     app.run_named(None, "set_ui_language", &json!({"language":"en"}));
     assert_eq!(role(&app.application_menu(), "view").caption, "View");
+    assert_eq!(palette_row(&mut app, SAVE).annotation, hint);
+    wait_language(&mut second, "en");
+    assert_eq!(palette_row(&mut second, SAVE).annotation, hint);
     app.workspace.wait_resources();
+}
+
+fn open_palette(app: &mut App, query: &str) {
+    app.run_named(
+        None,
+        "show_overlay",
+        &json!({"overlay":"command_palette","text":query}),
+    );
+}
+
+fn wait_language(app: &mut App, language: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.workspace.global_string("ui_language", "en") != language {
+        app.poll_workspace_model();
+        assert!(
+            Instant::now() < deadline,
+            "language reload to {language} timed out"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn palette_row<'a>(app: &'a mut App, caption: &str) -> &'a vel_ui::Item {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.panels.ranking_pending() {
+        let viewport = app.viewport();
+        app.panels.poll(&mut app.workspace, viewport);
+        assert!(
+            Instant::now() < deadline,
+            "No palette results for {caption}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(app.panels.overlay, Some(crate::panels::Overlay::Palette));
+    let mut hits = app
+        .panels
+        .quick
+        .items
+        .iter()
+        .filter(|row| row.caption == caption);
+    let result = hits
+        .next()
+        .unwrap_or_else(|| panic!("Missing palette row {caption}"));
+    assert!(hits.next().is_none(), "Duplicate palette row {caption}");
+    result
+}
+
+#[test]
+fn unsupported_language_explains_the_fallback_in_the_previous_language() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(None, "set_ui_language", &json!({"language":"fr"}));
+    assert_eq!(app.panels.message, "Unsupported UI language; using English");
+    app.panels.message.clear();
+    app.run_named(None, "set_ui_language", &json!({"language":"zh-Hans"}));
+    assert!(
+        app.panels.message.is_empty(),
+        "known language should switch silently"
+    );
+    app.run_named(None, "set_ui_language", &json!({"language":"fr"}));
+    assert_eq!(app.panels.message, "不支持此界面语言，已改用英语");
+    assert_eq!(app.workspace.global_string("ui_language", "zh-Hans"), "en");
+    assert_eq!(role(&app.application_menu(), "view").caption, "View");
+    app.workspace.wait_resources();
+    let settings = fs::read_to_string(
+        data.path()
+            .join("Packages/User/Preferences.sublime-settings"),
+    )
+    .unwrap();
+    assert_eq!(
+        vel_config::json::Document::parse(&settings).unwrap().value["ui_language"],
+        "en"
+    );
+}
+
+#[test]
+fn clear_recent_items_removes_the_cached_submenu_in_both_apps() {
+    let sessions = std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None)));
+    let mut a = fixture_with_session(None, sessions.clone(), false);
+    let mut b = fixture_with_session(None, sessions, false);
+    fn has_recent(app: &App) -> bool {
+        let (_, menu) = app.menu_cache.as_ref().unwrap();
+        role(menu, "file")
+            .children
+            .iter()
+            .any(|item| item.id == "open_recent")
+    }
+    assert!(a.refresh_native_menu_model());
+    assert!(!has_recent(&a));
+    a.workspace
+        .recent_files
+        .extend(["/tmp/newer.txt".into(), "/tmp/older.txt".into()]);
+    a.workspace.recent_folders.push("/tmp/folder".into());
+    a.workspace
+        .recent_projects
+        .push("/tmp/example.sublime-project".into());
+    assert!(a.refresh_native_menu_model());
+    assert!(b.refresh_native_menu_model());
+    assert!(has_recent(&a) && has_recent(&b));
+    assert!(
+        !b.refresh_native_menu_model(),
+        "unchanged history keeps the model"
+    );
+
+    let (_, menu) = a.menu_cache.as_ref().unwrap();
+    let recent = role(&role(menu, "file").children, "open_recent");
+    let clear = recent
+        .children
+        .iter()
+        .find(|i| i.command.as_deref() == Some("clear_recent_items"))
+        .unwrap();
+    let args = serde_json::from_str(&clear.args).unwrap();
+    a.run_named(None, "clear_recent_items", &args);
+    assert!(a.refresh_native_menu_model());
+    assert!(b.refresh_native_menu_model());
+    assert!(!has_recent(&a) && !has_recent(&b));
+    assert!(a.panels.message.is_empty());
+    assert!(!a.refresh_native_menu_model());
+}
+
+#[test]
+fn in_selection_is_enabled_for_document_find_and_disabled_in_files() {
+    let mut app = fixture(None);
+    let args = json!({"option":"in_selection"});
+    let enabled = |app: &App| app.command_enabled("toggle_find_option", &args.to_string());
+    assert!(!enabled(&app));
+    app.workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::new(0, 11),
+            vel_buffer::Region::new(11, 11),
+        ]));
+    assert!(
+        enabled(&app),
+        "any non-empty region, even with a primary caret"
+    );
+    app.run_named(None, "toggle_find_option", &args);
+    assert_eq!(app.panels.panel, Some(crate::panels::Panel::Find));
+    assert!(app.command_checked("toggle_find_option", &args.to_string()));
+    let files = json!({"option":"in_selection","_context_menu":"find_in_files"});
+    assert!(!app.command_enabled("toggle_find_option", &files.to_string()));
+    app.run_named(None, "show_panel", &json!({"panel":"find_in_files"}));
+    assert!(
+        !enabled(&app),
+        "the Files panel does not implement a selection scope"
+    );
 }
 
 #[test]
@@ -327,6 +491,79 @@ fn shipped_catalog_has_all_static_ui_captions() {
         .filter(|key| !catalog.strings.contains_key(*key))
         .collect();
     assert!(missing.is_empty(), "missing: {missing:?}");
+}
+
+#[test]
+fn assembled_palette_has_complete_translations_and_preserves_invocations() {
+    let mut app = fixture(None);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("resources/Packages/Default/Localization/zh-Hans.sublime-localization");
+    let catalog = vel_i18n::Catalog::load(&fs::read_to_string(path).unwrap()).unwrap();
+    let before = app.workspace.palette.clone();
+    app.workspace
+        .translations
+        .select(vel_i18n::Language::ZhHans);
+    let mut missing = BTreeSet::new();
+    for item in &app.workspace.palette {
+        let Some(localized) = app.workspace.palette_caption(item) else {
+            if item.invocation.command != "set_file_type" {
+                missing.insert(&item.caption);
+            } else {
+                assert!(item.caption.starts_with("Set Syntax: "));
+            }
+            continue;
+        };
+        assert!(
+            localized
+                .chars()
+                .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+            "{localized:?}"
+        );
+        if !catalog.strings.contains_key(&item.caption) {
+            assert_eq!(
+                localized.split('：').count(),
+                item.caption.split(": ").count(),
+                "{item:?}"
+            );
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "Untranslated assembled palette rows: {missing:#?}"
+    );
+    assert_eq!(app.workspace.palette, before);
+    assert_eq!(
+        before
+            .iter()
+            .filter(|item| item.invocation.command == "goto_line"
+                || item.caption.contains("Jump to Line"))
+            .map(|item| (item.caption.as_str(), app.workspace.palette_caption(item)))
+            .collect::<Vec<_>>(),
+        [("Goto Line…", Some("前往行…".into()))]
+    );
+    for (source, translated, command) in [
+        (
+            "Selection: Add Selection on Previous Line",
+            "选区：在上一行添加选区",
+            "select_lines",
+        ),
+        (
+            "Goto: Bookmarks: Clear Every Bookmark",
+            "前往：书签：清除所有书签",
+            "clear_bookmarks",
+        ),
+    ] {
+        let item = before.iter().find(|i| i.caption == source).unwrap();
+        assert_eq!(item.invocation.command, command);
+        assert_eq!(
+            app.workspace.palette_caption(item).as_deref(),
+            Some(translated)
+        );
+        let hint = app.workspace.editor().keymap.hint(&item.invocation);
+        open_palette(&mut app, source);
+        let row = palette_row(&mut app, translated);
+        assert_eq!(row.annotation, hint.unwrap_or_default());
+    }
 }
 
 #[test]

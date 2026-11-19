@@ -1,10 +1,11 @@
 //! Cached theme resolution, finite transitions and CPU/GPU-independent widget painting.
 use std::{sync::Arc, time::Instant};
+use unicode_segmentation::UnicodeSegmentation;
 use vel_config::settings::Settings;
 use vel_platform::Rect;
 use vel_render::{
     nine_slice::{self, Slices},
-    scene::{self, FontStyle, Image, Layer, Shadow, SolidRect, Surface, TextRun},
+    scene::{self, FontStyle, Image, Layer, Shadow, SolidRect, Surface, TextHighlight, TextRun},
 };
 use vel_theme::{
     Animated, Appearance, Color, DecodedTexture, ElementPath, Insets, Keyword, LayerProperty as L,
@@ -917,6 +918,71 @@ impl ThemeUi {
             self.text(layer, style, shown, x, baseline, clip);
         }
     }
+    /// Fits and paints one shaped label, using the match color for the graphemes
+    /// that intersect the original label's UTF-8 match positions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_fit_highlighted(
+        &self,
+        layer: &mut Layer,
+        style: &Style,
+        text: &str,
+        matches: &[usize],
+        x: f64,
+        baseline: f64,
+        max_width: f64,
+        clip: Rect,
+    ) {
+        if matches.is_empty() {
+            self.text_fit(layer, style, text, x, baseline, max_width, clip);
+            return;
+        }
+        if max_width <= 0. {
+            return;
+        }
+        let fitted = self.fitted(style, text, max_width);
+        let shown = fitted.as_deref().unwrap_or(text);
+        if shown.is_empty() {
+            return;
+        }
+        let visible = fitted
+            .as_deref()
+            .and_then(|s| s.strip_suffix('…'))
+            .unwrap_or(text);
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut offset = 0;
+        for (start, cluster) in visible.grapheme_indices(true) {
+            let source = start..start + cluster.len();
+            let next = offset
+                + match style.case {
+                    Some(Keyword::Upper) => cluster
+                        .chars()
+                        .flat_map(char::to_uppercase)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+                    Some(Keyword::Lower) => cluster
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+                    _ => cluster.len(),
+                };
+            if matches.iter().any(|byte| source.contains(byte)) {
+                if let Some(last) = ranges.last_mut().filter(|range| range.end == offset) {
+                    last.end = next;
+                } else {
+                    ranges.push(offset..next);
+                }
+            }
+            offset = next;
+        }
+        let highlight = (!ranges.is_empty()).then(|| {
+            Box::new(TextHighlight {
+                ranges,
+                color: style.matched,
+            })
+        });
+        self.draw_text(layer, style, shown, [x, baseline], clip, highlight);
+    }
     /// The label as [`ThemeUi::text_fit`] would paint it, keeping a trailing parenthesized
     /// qualifier such as " (Default)" or " (User)" and shortening the part before it.
     /// Empty when not even an ellipsis fits.
@@ -999,8 +1065,12 @@ impl ThemeUi {
         if self.advance(style, text) <= max_width {
             return None;
         }
-        // Largest char-boundary prefix whose ellipsized form fits; O(log n) measurements.
-        let bounds: Vec<usize> = text.char_indices().map(|(i, _)| i).skip(1).collect();
+        // Keep the longest complete grapheme prefix that fits with an ellipsis.
+        let bounds: Vec<usize> = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .skip(1)
+            .collect();
         let (mut low, mut high) = (0, bounds.len());
         while low < high {
             let mid = (low + high).div_ceil(2);
@@ -1033,6 +1103,17 @@ impl ThemeUi {
         baseline: f64,
         clip: Rect,
     ) {
+        self.draw_text(layer, style, text, [x, baseline], clip, None);
+    }
+    fn draw_text(
+        &self,
+        layer: &mut Layer,
+        style: &Style,
+        text: &str,
+        [x, baseline]: [f64; 2],
+        clip: Rect,
+        highlight: Option<Box<TextHighlight>>,
+    ) {
         let text = match style.case {
             Some(Keyword::Upper) => text.to_uppercase(),
             Some(Keyword::Lower) => text.to_lowercase(),
@@ -1047,6 +1128,7 @@ impl ThemeUi {
                 baseline: baseline as f32 + style.shadow_offset[1],
                 size: style.size,
                 color,
+                highlight: None,
                 clip,
             });
         }
@@ -1058,6 +1140,7 @@ impl ThemeUi {
             baseline: baseline as f32,
             size: style.size,
             color: style.foreground,
+            highlight,
             clip,
         });
     }
@@ -1336,6 +1419,95 @@ fn sample_alpha(
 mod tests {
     use super::*;
     use vel_theme::Element;
+
+    #[test]
+    fn mixed_caption_highlighting_preserves_one_run_and_whole_graphemes() {
+        let mut theme = ThemeUi::default();
+        let mut style = theme.style(
+            1,
+            &ElementPath(&[Element::new("quick_panel_label", &[])]),
+            &Settings::default(),
+        );
+        style.family = Some(Arc::from("system-ui"));
+        style.shadow = None;
+        let mut plain = Layer::default();
+        let mut matched = Layer::default();
+        let row = Rect {
+            x: 12.,
+            y: 10.,
+            width: 450.,
+            height: 32.,
+        };
+        let text = "文件：Cafe\u{301} 保存：UTF-8";
+        theme.text_fit(&mut plain, &style, text, 15., 30., 440., row);
+        theme.text_fit_highlighted(
+            &mut matched,
+            &style,
+            text,
+            &[
+                text.find('\u{301}').unwrap(),
+                text.find("保存").unwrap(),
+                text.find("UTF-8").unwrap(),
+            ],
+            15.,
+            30.,
+            440.,
+            row,
+        );
+        assert_eq!(plain.text.len(), 1);
+        assert_eq!(matched.text.len(), 1);
+        let (plain, matched) = (&plain.text[0], &matched.text[0]);
+        assert_eq!(
+            (&plain.text, plain.x, plain.baseline, plain.clip),
+            (&matched.text, matched.x, matched.baseline, matched.clip)
+        );
+        let highlight = matched.highlight.as_ref().unwrap();
+        assert_eq!(
+            highlight
+                .ranges
+                .iter()
+                .map(|span| &text[span.clone()])
+                .collect::<Vec<_>>(),
+            ["e\u{301}", "保", "U"]
+        );
+        #[cfg(target_os = "macos")]
+        {
+            use vel_render::font::Fonts;
+            let mut fonts = Fonts::load().unwrap();
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            for scale in [1., 2.] {
+                let shape = |fonts: &mut Fonts, run: &TextRun| {
+                    fonts.shape_ui(
+                        &run.text,
+                        run.family.as_deref().unwrap(),
+                        run.size * scale,
+                        run.style,
+                    )
+                };
+                let mut a = shape(&mut fonts, plain);
+                while fonts.fallback_pending() {
+                    assert!(Instant::now() < deadline, "font fallback did not settle");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    fonts.poll_fallbacks();
+                    a = shape(&mut fonts, plain);
+                }
+                let b = shape(&mut fonts, matched);
+                assert_eq!(a.advance.to_bits(), b.advance.to_bits());
+                assert_eq!(a.glyphs.len(), b.glyphs.len());
+                for (a, b) in a.glyphs.iter().zip(&b.glyphs) {
+                    assert_eq!((a.face, a.id, a.x, a.y), (b.face, b.id, b.x, b.y));
+                    let [start, end] = b.source;
+                    assert!(text.get(start..end).is_some());
+                }
+                assert!(
+                    b.glyphs
+                        .iter()
+                        .any(|g| highlight.color_at(g.source).is_some())
+                );
+                assert!(f64::from(b.advance / scale + matched.x) < row.x + row.width);
+            }
+        }
+    }
     #[test]
     fn settings_free_route_matches_full_engine_for_states_parents_aliases_and_settings() {
         let mut source = serde_json::json!({"rules":[

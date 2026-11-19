@@ -3642,6 +3642,7 @@ impl View {
             baseline: baseline as f32,
             size: e.preferences.font_size as f32,
             color,
+            highlight: None,
             style: font,
             clip,
         };
@@ -4045,6 +4046,7 @@ fn text_run(
         baseline: baseline as f32,
         size: size as f32,
         color,
+        highlight: None,
         style,
         clip,
     });

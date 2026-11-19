@@ -89,10 +89,16 @@ pub fn extend_commands(
         ("Package: Install from File…", "package_install_file"),
         ("Package: Install from URL…", "package_install_url"),
         ("Package: Remove", "package_remove"),
-        ("Package: Disable/Enable", "package_toggle"),
         ("Package: List", "package_list"),
     ] {
         palette.push(choice(caption.into(), command, json!({})));
+    }
+    for (caption, enabled) in [("Package: Disable", false), ("Package: Enable", true)] {
+        palette.push(choice(
+            caption.into(),
+            "package_toggle",
+            json!({"enabled":enabled}),
+        ));
     }
     if settings
         .get("package_index_url")
@@ -548,6 +554,12 @@ fn package_job(
             let mut choices = packages
                 .into_iter()
                 .filter(|p| p.name != "User" || command == "package_list")
+                .filter(|p| {
+                    command != "package_toggle"
+                        || args["enabled"]
+                            .as_bool()
+                            .is_none_or(|enable| enable == ignored.contains(&p.name))
+                })
                 .map(|p| {
                     let disabled = ignored.contains(&p.name);
                     let prefix = format!("Packages/{}/", p.name);
@@ -629,6 +641,14 @@ fn package_job(
                 for name in extra
                     .into_iter()
                     .filter(|p| p != "User" && known.insert(p.clone()))
+                    // Shipped and ignored packages follow the same rule as
+                    // installed ones: a toggle picker only offers what the
+                    // requested direction would actually change.
+                    .filter(|name| {
+                        args["enabled"]
+                            .as_bool()
+                            .is_none_or(|enable| enable == ignored.contains(name))
+                    })
                 {
                     let disabled = ignored.contains(&name);
                     let support = plugins
@@ -719,6 +739,42 @@ mod tests {
                 .unwrap()
                 .contains("Vintage")
         );
+    }
+    #[test]
+    fn package_enable_and_disable_offer_only_applicable_packages() {
+        let data = tempfile::tempdir().unwrap();
+        for name in ["Active", "Inactive"] {
+            let dir = data.path().join("Packages").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("fixture.sublime-build"), "{}").unwrap();
+        }
+        for (enabled, expected) in [(true, "Inactive"), (false, "Active")] {
+            let reply = package_job(
+                data.path(),
+                "package_toggle",
+                &json!({"enabled": enabled}),
+                ["Inactive".into()].into(),
+                None,
+            )
+            .unwrap();
+            let Reply::Choices(items) = reply else {
+                panic!("expected a package picker");
+            };
+            // Shipped packages are real, disable-able packages, so the picker
+            // may also offer them; what matters is that every row would
+            // actually change state in the requested direction.
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.invocation.args["enabled"] == json!(enabled))
+            );
+            let names: Vec<_> = items
+                .iter()
+                .map(|item| item.invocation.args["name"].as_str().unwrap_or(""))
+                .collect();
+            assert!(names.contains(&expected), "{enabled}: {names:?}");
+            assert!(!names.contains(&if enabled { "Active" } else { "Inactive" }));
+        }
     }
     #[test]
     fn list_reports_plugins_and_effective_disabled_state_without_network_or_execution() {
@@ -841,5 +897,33 @@ mod tests {
             .unwrap(),
             Path::new("/Applications/Velocity.app")
         );
+    }
+}
+#[cfg(test)]
+mod dbg_package {
+    use super::*;
+    #[test]
+    fn dbg_toggle_names() {
+        let data = tempfile::tempdir().unwrap();
+        for name in ["Active", "Inactive"] {
+            let dir = data.path().join("Packages").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("fixture.sublime-build"), "{}").unwrap();
+        }
+        let reply = package_job(
+            data.path(),
+            "package_toggle",
+            &json!({"enabled": true}),
+            ["Inactive".into()].into(),
+            None,
+        )
+        .unwrap();
+        let Reply::Choices(items) = reply else {
+            panic!()
+        };
+        eprintln!("items={}", items.len());
+        for i in items.iter().take(8) {
+            eprintln!("{:?} | {:?}", i.caption, i.invocation.args);
+        }
     }
 }

@@ -410,7 +410,14 @@ mod tests {
         let mut keys = crate::keymap::Keymap::default();
         keys.append(r#"[{"keys":["super+f"],"command":"show_panel","args":{"panel":"find"}}]"#)
             .unwrap();
-        assert_eq!(keys.hint(&palette[0].invocation).as_deref(), Some("Cmd+F"));
+        assert_eq!(
+            keys.hint(&palette[0].invocation).as_deref(),
+            Some(if cfg!(target_os = "macos") {
+                "⌘F"
+            } else {
+                "Cmd+F"
+            })
+        );
         keys.append(r#"[{"keys":["super+f"],"command":"save"}]"#)
             .unwrap();
         assert!(keys.hint(&palette[0].invocation).is_none());

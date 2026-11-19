@@ -715,14 +715,6 @@
     }
   },
   {
-    "caption": "Goto: Jump to Line…",
-    "command": "show_overlay",
-    "args": {
-      "overlay": "goto",
-      "text": ":"
-    }
-  },
-  {
     "caption": "Goto: Bookmarks: Toggle Selection Bookmark",
     "command": "toggle_bookmark"
   },
@@ -804,7 +796,7 @@
     "command": "select_theme"
   },
   {
-    "caption": "Goto: Goto Line…",
+    "caption": "Goto Line…",
     "command": "goto_line"
   },
   {

@@ -821,6 +821,11 @@ impl Renderer {
                     if let Some((entry, raster)) = self.glyph(fonts, key)? {
                         let s = entry.slot;
                         let side = ATLAS_SIDE as f32;
+                        let color = run
+                            .highlight
+                            .as_ref()
+                            .and_then(|highlight| highlight.color_at(g.source))
+                            .unwrap_or(run.color);
                         let mut q = quad(
                             Rect {
                                 x: (x + raster.left as f32) as f64,
@@ -831,9 +836,9 @@ impl Renderer {
                             },
                             run.clip,
                             if raster.color {
-                                [1., 1., 1., run.color[3]]
+                                [1., 1., 1., color[3]]
                             } else {
-                                run.color
+                                color
                             },
                             1.,
                             [0.; 4],

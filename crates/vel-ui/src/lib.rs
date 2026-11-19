@@ -413,30 +413,16 @@ impl QuickPanel {
                 Element::new("quick_panel_label", &[]),
             ];
             let caption = theme.style(0x1000 + row as u64, &ElementPath(&label_path), settings);
-            theme.text(
+            theme.text_fit_highlighted(
                 layer,
                 &caption,
                 &item.caption,
+                &item.highlights,
                 rect.x + 12.,
                 rect.y + 18.,
-                bounds,
+                rect.width - 24.,
+                minihtml::intersection(rect, bounds),
             );
-            for (byte, c) in item
-                .caption
-                .char_indices()
-                .filter(|(i, _)| item.highlights.contains(i))
-            {
-                let mut matched = caption.clone();
-                matched.foreground = matched.matched;
-                theme.text(
-                    layer,
-                    &matched,
-                    &c.to_string(),
-                    rect.x + 12. + theme.advance(&caption, &item.caption[..byte]),
-                    rect.y + 18.,
-                    bounds,
-                );
-            }
             let detail_path = [
                 path[0],
                 path[1],
@@ -490,6 +476,7 @@ pub fn label(layer: &mut Layer, text: &str, x: f64, baseline: f64, clip: Rect, c
         baseline: baseline as f32,
         size: 12.,
         color,
+        highlight: None,
         clip,
     });
 }

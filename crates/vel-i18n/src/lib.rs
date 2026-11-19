@@ -132,22 +132,17 @@ impl Translator {
         if self.language == Language::En {
             return None;
         }
-        let direct = self.caption(source);
-        if direct != source {
-            return Some(direct.to_owned());
+        let strings = &self.chinese.strings;
+        if let Some(direct) = strings.get(source) {
+            return Some(direct.clone());
         }
         let mut parts = source.split(": ");
-        let first = parts.next()?;
-        let first_localized = self.caption(first);
-        let mut output = first_localized.to_owned();
-        let mut changed = first != first_localized;
+        let mut output = strings.get(parts.next()?)?.clone();
         for part in parts {
-            let caption = self.caption(part);
-            changed |= caption != part;
             output.push('：');
-            output.push_str(caption);
+            output.push_str(strings.get(part)?);
         }
-        changed.then_some(output)
+        Some(output)
     }
 
     /// Looks up a UI literal, borrowing the English fallback.
@@ -220,5 +215,39 @@ mod tests {
         assert_eq!(tr.tr("Save"), "Save");
         assert_eq!(Language::from_preferred("zh-CN"), Language::ZhHans);
         assert_eq!(Language::from_preferred("ja-JP"), Language::En);
+    }
+
+    #[test]
+    fn palette_uses_a_whole_entry_or_only_complete_compositions() {
+        let mut tr = Translator::default();
+        tr.replace(
+            Catalog::load(
+                r#"{"strings":{
+            "Goto":"前往", "Bookmarks":"书签", "Clear":"清除",
+            "Goto: Lines: Clear":"清除行", "Goto: Bookmarks: Plain":"Goto: Bookmarks: Plain"
+        }}"#,
+            )
+            .unwrap(),
+        );
+        tr.select(Language::ZhHans);
+        assert_eq!(
+            tr.palette_caption("Goto: Bookmarks: Clear").as_deref(),
+            Some("前往：书签：清除")
+        );
+        for missing in [
+            "Other: Bookmarks: Clear",
+            "Goto: Scope: Clear",
+            "Goto: Bookmarks: Clear All",
+        ] {
+            assert_eq!(tr.palette_caption(missing), None, "{missing}");
+        }
+        assert_eq!(
+            tr.palette_caption("Goto: Lines: Clear").as_deref(),
+            Some("清除行")
+        );
+        assert_eq!(
+            tr.palette_caption("Goto: Bookmarks: Plain").as_deref(),
+            Some("Goto: Bookmarks: Plain")
+        );
     }
 }

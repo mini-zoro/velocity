@@ -370,6 +370,13 @@ fn snapshot(scene: &Scene) -> serde_json::Value {
         if !layer.contours.is_empty() {
             snapshot["layers"][i]["selection_contours"] = json!(layer.contours.iter().map(|c|json!({"points":c.points.iter().map(|p|[p.x+c.offset.x,p.y+c.offset.y]).collect::<Vec<_>>(),"triangles":c.triangles.as_ref(),"fill":c.fill,"border":c.border,"clip":rect(c.clip)})).collect::<Vec<_>>());
         }
+        for (j, run) in layer.text.iter().enumerate() {
+            if let Some(highlight) = &run.highlight {
+                let ranges: Vec<_> = highlight.ranges.iter().map(|r| [r.start, r.end]).collect();
+                snapshot["layers"][i]["glyph_runs"][j]["highlight"] =
+                    json!({"ranges":ranges,"color":highlight.color});
+            }
+        }
     }
     snapshot
 }
