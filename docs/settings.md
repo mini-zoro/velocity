@@ -300,7 +300,7 @@ retained for compatibility, used indirectly, or not yet implemented.
 | `hot_exit` | `` "always" `` |  |  No direct reader found. |
 | `ignored_packages` | `` ["Vintage"] `` |  | https://www.sublimetext.com/docs/vintage.html#enabling-vintage [vel-packages/lib.rs](../crates/vel-packages/src/lib.rs), [velocity/vintage.rs](../crates/velocity/src/vintage.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `ignored_words` | `` [] `` |  |  No direct reader found. |
-| `image_file_patterns` | `` ["*.png", "*.jpg", "*.jpeg", "*.gif"] `` |  | ST4 image selection setting: https://www.sublimetext.com/download These are the formats supported by Velocity's decoder. [velocity/open_requests.rs](../crates/velocity/src/open_requests.rs) |
+| `image_file_patterns` | `` ["*.png", "*.jpg", "*.jpeg", "*.gif"] `` |  | ST4 image selection setting: https://www.sublimetext.com/download These are the formats supported by Velocity's decoder. [velocity/open_requests.rs](../crates/velocity/src/open_requests.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `indent_guide_options` | `` ["draw_normal"] `` |  | Active guides disabled by default: https://www.sublimetext.com/updates/2/stable/release_notes.html [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `indent_subsequent_lines` | `` true `` |  |  [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `indent_to_bracket` | `` false `` |  | Lane A round 18: editing, find and completion preferences. Align a new line with the column just after an unmatched parenthesis or bracket. [velocity/editing.rs](../crates/velocity/src/editing.rs) |
