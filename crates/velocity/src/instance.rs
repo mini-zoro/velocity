@@ -957,26 +957,40 @@ impl Instance {
                 ));
             }
             let until = Instant::now() + timeout;
+            let busy = || io::Error::other("the editor is busy; request was not accepted");
+            // Once the primary has explicitly answered BUSY, a later timeout or
+            // failed reconnect still means "busy", not an opaque I/O error.
+            let mut was_busy = false;
             loop {
-                let remaining = until
-                    .saturating_duration_since(Instant::now())
-                    .max(Duration::from_millis(1));
-                stream.set_read_timeout(Some(remaining))?;
-                stream.set_write_timeout(Some(remaining))?;
-                stream.write_all(&(bytes.len() as u64).to_le_bytes())?;
-                stream.write_all(&bytes)?;
-                let mut ack = [0];
-                stream.read_exact(&mut ack)?;
-                match ack[0] {
+                let attempt = (|| {
+                    let remaining = until
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1));
+                    stream.set_read_timeout(Some(remaining))?;
+                    stream.set_write_timeout(Some(remaining))?;
+                    stream.write_all(&(bytes.len() as u64).to_le_bytes())?;
+                    stream.write_all(&bytes)?;
+                    let mut ack = [0];
+                    stream.read_exact(&mut ack)?;
+                    Ok::<u8, io::Error>(ack[0])
+                })();
+                let ack = match attempt {
+                    Ok(ack) => ack,
+                    Err(_) if was_busy => return Err(busy()),
+                    Err(error) => return Err(error),
+                };
+                match ack {
                     ENQUEUED => break,
                     BUSY => {
-                        let busy =
-                            || io::Error::other("the editor is busy; request was not accepted");
+                        was_busy = true;
                         let remaining = until.saturating_duration_since(Instant::now());
                         if remaining.is_zero() {
                             return Err(busy());
                         }
                         std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                        if Instant::now() >= until {
+                            return Err(busy());
+                        }
                         stream = reopen().ok_or_else(busy)?;
                     }
                     _ => return Err(io::Error::other("invalid enqueue acknowledgement")),
