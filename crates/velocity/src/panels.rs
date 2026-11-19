@@ -196,6 +196,34 @@ pub enum Panel {
     Output,
     Results,
 }
+/// Whether a match in a palette row's English caption (the alias of a translated row) reads
+/// as the user's words: every run of matched characters starts a word — "save" in "File: Save
+/// All", "enc" in "Save with Encoding", "utf8" in "UTF-8" — rather than letters scattered
+/// through other words ("rust" in "Preferences: Customize Theme"). `positions` are the
+/// matched characters' byte offsets in `label`, in order.
+fn alias_matches_word_starts(label: &str, positions: &[usize]) -> bool {
+    let word_start = |at: usize| {
+        let Some(current) = label.get(at..).and_then(|rest| rest.chars().next()) else {
+            return false;
+        };
+        label[..at].chars().next_back().is_none_or(|previous| {
+            !previous.is_alphanumeric() || (previous.is_lowercase() && current.is_uppercase())
+        })
+    };
+    let mut previous: Option<usize> = None;
+    !positions.is_empty()
+        && positions.iter().all(|&at| {
+            // A run continues when this character directly follows the previous match.
+            let continues = previous.is_some_and(|before| {
+                label[before..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| before + c.len_utf8() == at)
+            });
+            previous = Some(at);
+            continues || word_start(at)
+        })
+}
 fn symbol_kind_caption(kind: vel_index::SymbolKind) -> &'static str {
     // Badge names, lowercase like file kinds.
     match kind {
@@ -396,6 +424,9 @@ pub struct Panels {
     tooltip_key: u64,
     output_mirrored: usize,
     pub input_caption: String,
+    /// The input panel caption's measured width in DIPs, from the last paint (see
+    /// `fit_input_caption`); `None` until it has been measured.
+    input_caption_advance: Option<f64>,
     pub input_done: Option<Invocation>,
     focus_input: usize,
     selection_scope: Vec<Range<usize>>,
@@ -563,6 +594,7 @@ impl Default for Panels {
             tooltip_key: 0,
             output_mirrored: 0,
             input_caption: String::new(),
+            input_caption_advance: None,
             input_done: None,
             focus_input: 0,
             selection_scope: vec![],
@@ -3252,12 +3284,18 @@ impl Panels {
                     .label;
                 Some(Item {
                     caption: caption.clone(),
-                    // An alias match applies to the whole shown label; its byte
-                    // positions are not offsets into the translation.
+                    // An alias match applies to the whole shown label (its byte positions
+                    // are not offsets into the translation), but only when it reads as the
+                    // user's words; letters scattered through other words highlight nothing
+                    // rather than a whole row that looks like the best match.
                     highlights: if shown == hit.index {
                         hit.positions
-                    } else {
+                    } else if self.candidates.get(hit.index).is_some_and(|alias| {
+                        alias_matches_word_starts(&alias.label, &hit.positions)
+                    }) {
                         caption.char_indices().map(|(byte, _)| byte).collect()
+                    } else {
+                        Vec::new()
                     },
                     value: index,
                     kind: if let Some(kind) = self
@@ -4789,8 +4827,17 @@ impl Panels {
         }
         let v = self.find_vertical_scale();
         // Narrow panels give the input room first: the label column shrinks, then the labels
-        // are dropped, before the input would collapse under the close button.
-        let label = Self::find_label_column(self.panel_bounds.width, self.ui_scale, close);
+        // are dropped, before the input would collapse under the close button. The input
+        // panel's caption column follows its measured caption.
+        let label = if self.panel == Some(Panel::Input) {
+            Self::input_label_column(
+                self.panel_bounds.width,
+                self.ui_scale,
+                self.input_caption_advance,
+            )
+        } else {
+            Self::find_label_column(self.panel_bounds.width, self.ui_scale, close)
+        };
         let extras = self
             .panel
             .map_or([0.; 3], |panel| self.find_input_extras(panel));
@@ -5325,6 +5372,7 @@ impl Panels {
             workspace.themes.ui.borrow_mut().request_animation();
         }
         self.sync_widgets(workspace);
+        self.fit_input_caption(workspace);
         let mut theme = workspace.themes.ui.borrow_mut();
 
         let settings = &workspace.editor().settings;
@@ -5643,9 +5691,10 @@ impl Panels {
                         2 => &mut self.where_input,
                         _ => &mut self.query,
                     };
-                    // No label column in very narrow panels (see `find_label_column`).
+                    // No label column in very narrow panels (see `find_label_column`). The
+                    // input panel's caption is fitted to its column, 8 DIPs before the field.
                     if input.bounds.x - clip.x >= 64. * self.ui_scale {
-                        theme.text(
+                        theme.text_fit(
                             &mut layer,
                             &text_style,
                             if panel == Panel::Input {
@@ -5655,6 +5704,7 @@ impl Panels {
                             },
                             clip.x + (8. * self.ui_scale),
                             input.bounds.y + (20. * self.ui_scale),
+                            input.bounds.x - clip.x - 16. * self.ui_scale,
                             clip,
                         );
                     }
@@ -6097,11 +6147,18 @@ impl Panels {
                 } else {
                     rect.x + rect.width - annotation_width - 24. * s
                 };
-                theme.text_fit_highlighted(
+                // A command caption that does not fit keeps its last segment ("…：上",
+                // "…: UTF-8"): it is what tells sibling rows apart.
+                theme.text_fit_highlighted_keeping(
                     &mut overlay,
                     &caption,
                     &item.caption,
                     &item.highlights,
+                    if self.overlay == Some(Overlay::Palette) {
+                        &["：", ": "]
+                    } else {
+                        &[]
+                    },
                     text_x,
                     baseline,
                     caption_end - text_x,
@@ -7183,6 +7240,273 @@ mod tests {
             }
         }
         assert!(cut > 100, "{cut}");
+    }
+    /// An English alias hit highlights the whole translated caption only when its matched
+    /// letters start words; letters scattered through other words do not.
+    #[test]
+    fn alias_hits_must_start_words() {
+        let at = |label: &str, parts: &[&str]| -> Vec<usize> {
+            // Byte offsets of each part's characters, searched left to right.
+            let mut from = 0;
+            let mut out = Vec::new();
+            for part in parts {
+                let start = from + label[from..].find(part).expect(part);
+                out.extend(part.char_indices().map(|(i, _)| start + i));
+                from = start + part.len();
+            }
+            out
+        };
+        for (label, parts) in [
+            ("File: Save", &["Save"][..]),
+            ("File: Save All", &["Sa"][..]),
+            ("File: Save with Encoding: UTF-8", &["Save", "Enc"][..]),
+            ("File: Save with Encoding: UTF-8", &["UTF", "8"][..]),
+            ("Goto: Bookmarks: Clear", &["G", "B", "C"][..]),
+            ("Preferences: setUiLanguage", &["Ui", "Lang"][..]),
+        ] {
+            assert!(
+                alias_matches_word_starts(label, &at(label, parts)),
+                "{label} {parts:?}"
+            );
+        }
+        for (label, parts) in [
+            ("Preferences: Customize Theme", &["r", "u", "st"][..]),
+            ("Previous Modification", &["r", "u", "s", "t"][..]),
+            ("File: Save", &["S", "v"][..]),
+            ("File: Save", &["ave"][..]),
+        ] {
+            assert!(
+                !alias_matches_word_starts(label, &at(label, parts)),
+                "{label} {parts:?}"
+            );
+        }
+        assert!(!alias_matches_word_starts("File: Save", &[]));
+        assert!(!alias_matches_word_starts("File: Save", &[99]));
+        assert!(!alias_matches_word_starts("文件", &[1]));
+    }
+    /// In the Chinese palette an English query that finds a row through its English caption
+    /// highlights the whole Chinese caption when the query starts words there ("save" →
+    /// 保存), and nothing when it only hits scattered letters ("rust" in "Preferences:
+    /// Customize Theme" → 偏好设置：自定主题); direct hits keep their own positions (主题).
+    #[test]
+    fn chinese_palette_highlights_only_word_aligned_alias_hits() {
+        let mut workspace = workspace();
+        workspace.settings.set(
+            vel_config::settings::Layer::User,
+            "ui_language",
+            json!("zh-Hans"),
+        );
+        assert!(workspace.sync_ui_language());
+        let mut panels = Panels::new(&workspace, false);
+        let mut rows = |query: &str| {
+            panels
+                .action(
+                    &mut workspace,
+                    "show_overlay",
+                    &json!({"overlay": "command_palette", "text": query}),
+                    0..10,
+                )
+                .unwrap();
+            let until = Instant::now() + Duration::from_secs(15);
+            while panels.ranking_pending() {
+                assert!(Instant::now() < until, "no palette results for {query}");
+                workspace.poll();
+                panels.poll(&mut workspace, 0..10);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            panels
+                .quick
+                .items
+                .iter()
+                .map(|item| (item.caption.clone(), item.highlights.clone()))
+                .collect::<Vec<_>>()
+        };
+        let whole = |caption: &str| caption.char_indices().map(|(i, _)| i).collect::<Vec<_>>();
+        let save = rows("save");
+        let hit = save
+            .iter()
+            .find(|(caption, _)| caption == "保存")
+            .expect("保存 for save");
+        assert_eq!(hit.1, whole("保存"));
+        let rust = rows("rust");
+        let weak = rust
+            .iter()
+            .find(|(caption, _)| caption == "偏好设置：自定主题")
+            .expect("a scattered alias hit for rust");
+        assert!(weak.1.is_empty(), "{weak:?}");
+        // A direct hit on the shown caption keeps its precise highlight.
+        let theme = rows("主题");
+        let direct = theme
+            .iter()
+            .find(|(caption, _)| caption == "偏好设置：自定主题")
+            .expect("a direct hit for 主题");
+        let start = direct.0.find("主题").unwrap();
+        assert_eq!(direct.1, [start, start + "主".len()]);
+    }
+    /// The input panel's caption is free text: its column follows the measured caption, so the
+    /// caption ends before the field instead of running under it, a caption longer than half
+    /// the panel ends in an ellipsis, and the panel is one row tall — at UI scale 1 and 2.
+    #[test]
+    fn input_panel_captions_end_before_their_field() {
+        for ui in [1., 2.] {
+            let mut workspace = workspace();
+            workspace
+                .settings
+                .set(vel_config::settings::Layer::User, "ui_scale", json!(ui));
+            for (width, caption) in [
+                (900., "New name for this entry"),
+                (900., "此项的新名称"),
+                (900., ":"),
+                (900., "Goto byte offset (decimal or 0x hex)"),
+                (420., "HTTPS URL of a .sublime-package archive"),
+                (420., "此项的新名称（不能包含斜杠）"),
+            ] {
+                let mut panels = Panels::new(&workspace, true);
+                panels
+                    .action(
+                        &mut workspace,
+                        "show_input_panel",
+                        &json!({"caption": caption, "initial_text": "说明.md"}),
+                        0..10,
+                    )
+                    .unwrap();
+                panels.layout(Size {
+                    width,
+                    height: 600.,
+                });
+                let mut scene = Scene::default();
+                panels.paint(&workspace, &mut scene);
+                let s = panels.ui_scale;
+                assert_eq!(panels.panel_bounds.height, 44. * s, "{ui} {caption}");
+                let field = panels.query.bounds;
+                // The field keeps at least half the panel and the find panels' margins.
+                assert!(field.width >= (panels.panel_bounds.width - 12. * s) / 2. - 0.01);
+                assert_eq!(field.y, panels.panel_bounds.y + 8. * s);
+                let metrics = workspace.themes.ui.borrow().metrics.clone();
+                let run = scene
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.text)
+                    .find(|r| {
+                        let shown = r.text.trim_end_matches('…');
+                        !shown.is_empty()
+                            && caption.starts_with(shown)
+                            && f64::from(r.x) < field.x
+                            && f64::from(r.baseline) > field.y
+                            && f64::from(r.baseline) < field.y + field.height
+                    })
+                    .unwrap_or_else(|| panic!("{ui} {width} {caption}: no caption"));
+                let end = f64::from(run.x) + run_width(&*metrics, run);
+                assert!(
+                    end <= field.x - 8. * s + 0.01,
+                    "{ui} {width} {caption}: caption ends at {end}, field at {}",
+                    field.x
+                );
+                // Short captions line up with the find panels' labels; the rest is whole
+                // unless it needs more than half the panel.
+                if caption == ":" {
+                    assert_eq!(field.x - panels.panel_bounds.x, 80. * s);
+                }
+                let room = (panels.panel_bounds.width - 12. * s) / 2. - 16. * s;
+                let needed = run_width(
+                    &*metrics,
+                    &vel_render::scene::TextRun {
+                        text: caption.into(),
+                        ..run.clone()
+                    },
+                );
+                if needed <= room {
+                    assert_eq!(run.text, caption, "{ui} {width}");
+                } else {
+                    assert!(run.text.ends_with('…'), "{ui} {width}: {}", run.text);
+                }
+            }
+        }
+    }
+    /// Command rows that differ only in their last segment stay distinguishable when a narrow
+    /// palette cuts them: each keeps "：上" / ": Up" and shortens the part before it, in
+    /// Chinese and English, with and without a shortcut hint. Goto rows are cut at the end.
+    #[test]
+    fn narrow_palette_rows_keep_their_last_segment() {
+        let workspace = workspace();
+        let rows = |prefix: &str, separator: &str, ends: [&str; 4]| -> Vec<String> {
+            ends.iter()
+                .map(|end| format!("{prefix}{separator}{end}"))
+                .collect()
+        };
+        for (captions, separator) in [
+            (
+                rows(
+                    "显示：编辑组：将所选选项卡移至相邻编辑组",
+                    "：",
+                    ["上", "下", "左", "右"],
+                ),
+                "：",
+            ),
+            (
+                rows(
+                    "View: Groups: Move Selection to Neighboring Group",
+                    ": ",
+                    ["Up", "Down", "Left", "Right"],
+                ),
+                ": ",
+            ),
+        ] {
+            for width in [300., 360., 440.] {
+                let mut panels = Panels::new(&workspace, false);
+                panels.side_visible = false;
+                panels.overlay = Some(Overlay::Palette);
+                panels.quick.set_items(
+                    captions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, caption)| vel_ui::Item {
+                            caption: caption.clone(),
+                            kind: "command".into(),
+                            annotation: if i % 2 == 0 {
+                                "⌃⇧1".into()
+                            } else {
+                                String::new()
+                            },
+                            ..Default::default()
+                        })
+                        .collect(),
+                );
+                panels.layout(Size {
+                    width,
+                    height: 400.,
+                });
+                let mut scene = Scene::default();
+                panels.paint(&workspace, &mut scene);
+                let metrics = workspace.themes.ui.borrow().metrics.clone();
+                let mut shown = Vec::new();
+                for caption in &captions {
+                    let end = &caption[caption.rfind(separator).unwrap()..];
+                    let run = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.text)
+                        .find(|r| {
+                            r.text == *caption || (r.text.contains('…') && r.text.ends_with(end))
+                        })
+                        .unwrap_or_else(|| panic!("{width}: {caption} lost {end}"));
+                    let right = f64::from(run.x) + run_width(&*metrics, run);
+                    assert!(
+                        right <= run.clip.x + run.clip.width + 0.01,
+                        "{width}: {}",
+                        run.text
+                    );
+                    shown.push(run.text.clone());
+                }
+                assert!(
+                    shown.iter().any(|s| s.contains('…')),
+                    "{width}: nothing was cut"
+                );
+                shown.sort();
+                shown.dedup();
+                assert_eq!(shown.len(), 4, "{width}: {shown:?}");
+            }
+        }
     }
     /// The empty-state hint sits directly under the FOLDERS heading, with or without the
     /// Open Files group above it.

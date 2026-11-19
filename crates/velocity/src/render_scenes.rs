@@ -1,6 +1,7 @@
 //! Developer tool: renders real application states offscreen to PNG files.
 //!
-//! `velocity --render-scenes <out-dir> [--scale 1|2] [--appearance dark|light] [--only a,b]`
+//! `velocity --render-scenes <out-dir> [--scale 1|2] [--appearance dark|light] [--only a,b]
+//! [--language en|zh-Hans]`
 //!
 //! Each scenario builds an actual [`App`] around a [`Workspace`] with synthetic files in a
 //! temporary directory, drives it through the same command, panel and pointer paths as the
@@ -24,6 +25,9 @@ struct Request {
     /// `--first-frames N`: render the first N frames as the native loop produces them
     /// (one worker poll per frame, no settling), e.g. an overlay before ranking finishes.
     first_frames: usize,
+    /// `--language en|zh-Hans`: the `ui_language` of the fixture's User preferences, so every
+    /// scene starts in that language exactly as a user's setting would make it.
+    language: Option<&'static str>,
 }
 
 impl Request {
@@ -40,6 +44,7 @@ impl Request {
             only: None,
             bench: 0,
             first_frames: 0,
+            language: None,
         };
         while let Some(arg) = args.next() {
             let value = args.next().ok_or_else(|| format!("{arg} needs a value"))?;
@@ -71,6 +76,13 @@ impl Request {
                 "--bench-scene" => {
                     request.bench = value.parse().map_err(|_| "invalid --bench-scene count")?
                 }
+                "--language" => {
+                    request.language = Some(match value.as_str() {
+                        "en" => "en",
+                        "zh-Hans" => "zh-Hans",
+                        _ => return Err("--language must be en or zh-Hans".into()),
+                    });
+                }
                 _ => return Err(format!("unknown --render-scenes option {arg}")),
             }
         }
@@ -84,6 +96,8 @@ struct Fixture {
     data: PathBuf,
     project: PathBuf,
     file: PathBuf,
+    /// Round 5: the sample folder plus a folder of documents with Chinese names (`文档`).
+    r5_project: PathBuf,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -184,8 +198,20 @@ fn main() {
 /// terminator, a bell control character.
 const INVISIBLE_RS: &str = "// Characters that are easy to miss.\nlet joined = \"zero\u{200b}width\";\nlet spaced = \"no\u{a0}break\";\nlet flipped = \"\u{202e}reversed\u{202c}\";\nlet bell = \"ding\u{7}\";\nlet plain = \"nothing hidden\";\n";
 
+/// Documents with Chinese names for the round-5 scenes, in their own project folder (`文档`)
+/// so the side bar and Goto results of the other scenes stay as they were.
+const R5_DOCS: &[(&str, &str)] = &[
+    (
+        "说明.md",
+        "# 示例项目\n\n一个小型任务调度器，用于渲染界面场景。\n",
+    ),
+    ("更新日志.md", "## 0.1.0\n\n- 第一个版本。\n"),
+    ("配置.toml", "[editor]\nfont_size = 13\n"),
+    ("设计/界面草图说明（第二版）.md", "# 界面草图\n"),
+];
+
 impl Fixture {
-    fn create() -> Result<Self, String> {
+    fn create(language: Option<&str>) -> Result<Self, String> {
         let root = std::env::temp_dir().join("velocity-render-scenes");
         if root.exists() {
             std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
@@ -236,10 +262,27 @@ impl Fixture {
         }
         std::fs::create_dir_all(project_dir.join("target/debug")).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(data.join("Packages/User")).map_err(|e| e.to_string())?;
-        // Deterministic chrome: no tree/hover animations, no blinking.
+        // Deterministic chrome: no tree/hover animations, no blinking; the UI language as a
+        // user's preference would set it.
+        let language = language.map_or(String::new(), |language| {
+            format!(",\n\t\"ui_language\": \"{language}\"")
+        });
         std::fs::write(
             data.join("Packages/User/Preferences.sublime-settings"),
-            "{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"\n}\n",
+            format!(
+                "{{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"{language}\n}}\n"
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        for (name, contents) in R5_DOCS {
+            let path = root.join("文档").join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).map_err(|e| e.to_string())?;
+            std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+        }
+        let r5_project = root.join("r5.sublime-project");
+        std::fs::write(
+            &r5_project,
+            r#"{"folders":[{"path":"project"},{"path":"文档"}]}"#,
         )
         .map_err(|e| e.to_string())?;
         // Files outside the project folder (so the side bar and Goto stay unchanged): an image
@@ -279,10 +322,14 @@ impl Fixture {
             root,
             data,
             project,
+            r5_project,
         })
     }
     fn path(&self, name: &str) -> PathBuf {
         self.root.join("project").join(name)
+    }
+    fn docs(&self, name: &str) -> PathBuf {
+        self.root.join("文档").join(name)
     }
     fn scratch(&self, name: &str) -> PathBuf {
         self.root.join("scratch").join(name)
@@ -943,6 +990,132 @@ fn narrow_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     Ok(app)
 }
 
+/// Round 5: the sample folder and the Chinese-named documents in one project.
+fn r5_app(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut workspace = Workspace::new(
+        vel_text::Text::new(),
+        Some(fixture.data.clone()),
+        Some(fixture.r5_project.clone()),
+        false,
+    )?;
+    workspace.set_appearance(dark)?;
+    let mut app = new_app(workspace)?;
+    app.panels.side_visible = true;
+    Ok(app)
+}
+
+/// Two Chinese-named documents and `main.rs` in front, caret on line 41.
+fn r5_editor(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_app(fixture, dark)?;
+    for name in ["说明.md", "更新日志.md"] {
+        open(&mut app, &fixture.docs(name))?;
+    }
+    open(&mut app, &fixture.file)?;
+    settle(&mut app);
+    select(&mut app, &[(40, 0, 40, 0)]);
+    Ok(app)
+}
+
+fn r5_overlay(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    named(
+        &mut app,
+        "show_overlay",
+        json!({"overlay": overlay, "text": text}),
+    );
+    Ok(app)
+}
+
+fn r5_find(fixture: &Fixture, dark: bool, panel: &str) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    named(&mut app, "show_panel", json!({"panel": panel}));
+    if let Some(input) = app.panels.input_mut() {
+        input.set("task");
+    }
+    let viewport = app.viewport();
+    app.panels.edited(&mut app.workspace, viewport);
+    if panel == "find_in_files" {
+        app.panels.where_input.set("<project>, *.rs");
+    }
+    Ok(app)
+}
+
+/// Side bar with the Chinese documents expanded, an unsaved Chinese document and the
+/// status bar.
+fn r5_sidebar(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    open(&mut app, &fixture.docs("说明.md"))?;
+    named(&mut app, "insert", json!({"characters": "草稿\n"}));
+    settle(&mut app);
+    app.panels.reveal_sidebar_path(
+        &mut app.workspace,
+        fixture.docs("设计/界面草图说明（第二版）.md"),
+    )?;
+    settle(&mut app);
+    Ok(app)
+}
+
+/// The input panel (Side Bar › Rename…) for a Chinese file name, through the side bar's own
+/// command (its caption and initial text); the scene has no window for the native parts.
+fn r5_input_panel(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    struct NoPlatform;
+    impl crate::context_menu::SidebarPlatform for NoPlatform {
+        fn trash(&mut self, _: &Path) -> Result<(), String> {
+            Err("no trash in scenes".into())
+        }
+        fn copy_text(&mut self, _: &str) -> Result<(), String> {
+            Err("no clipboard in scenes".into())
+        }
+        fn reveal(&mut self, _: &Path) -> Result<(), String> {
+            Err("no file browser in scenes".into())
+        }
+    }
+    let mut app = r5_editor(fixture, dark)?;
+    let path = fixture.docs("说明.md");
+    let roots: Vec<PathBuf> = app
+        .workspace
+        .folders
+        .iter()
+        .map(|folder| folder.path.clone())
+        .collect();
+    let effect = crate::context_menu::sidebar_command(
+        "side_bar_rename",
+        &json!({"paths": [path.display().to_string()]}),
+        &roots,
+        &mut NoPlatform,
+    )?;
+    let Some(crate::context_menu::SidebarEffect::Input(invocation)) = effect else {
+        return Err("side_bar_rename did not ask for a name".into());
+    };
+    let viewport = app.viewport();
+    app.panels.action(
+        &mut app.workspace,
+        &invocation.command,
+        &invocation.args,
+        viewport,
+    )?;
+    Ok(app)
+}
+
+/// A 440 × 360 window: eight tabs (four Chinese names), the command palette on long rows.
+fn r5_narrow(fixture: &Fixture, dark: bool, query: &str) -> Result<App, String> {
+    let mut app = r5_app(fixture, dark)?;
+    for name in ["src/lib.rs", "README.md", "Cargo.toml"] {
+        open(&mut app, &fixture.path(name))?;
+    }
+    for (name, _) in R5_DOCS {
+        open(&mut app, &fixture.docs(name))?;
+    }
+    open(&mut app, &fixture.file)?;
+    settle(&mut app);
+    named(
+        &mut app,
+        "show_overlay",
+        json!({"overlay": "command_palette", "text": query}),
+    );
+    Ok(app)
+}
+
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "editor",
@@ -1292,6 +1465,56 @@ const SCENARIOS: &[Scenario] = &[
             app.panels.side_visible = true;
             Ok(app)
         },
+    },
+    Scenario {
+        name: "r5_palette",
+        size: (1200., 800.),
+        build: |f, d| r5_overlay(f, d, "command_palette", "save"),
+    },
+    Scenario {
+        name: "r5_palette_mixed",
+        size: (1200., 800.),
+        build: |f, d| r5_overlay(f, d, "command_palette", "rust"),
+    },
+    Scenario {
+        name: "r5_palette_all",
+        size: (1200., 800.),
+        build: |f, d| r5_overlay(f, d, "command_palette", ""),
+    },
+    Scenario {
+        name: "r5_find",
+        size: (1200., 800.),
+        build: |f, d| r5_find(f, d, "find"),
+    },
+    Scenario {
+        name: "r5_find_in_files",
+        size: (1200., 800.),
+        build: |f, d| r5_find(f, d, "find_in_files"),
+    },
+    Scenario {
+        name: "r5_goto_anything",
+        size: (1200., 800.),
+        build: |f, d| r5_overlay(f, d, "goto", "说明"),
+    },
+    Scenario {
+        name: "r5_goto_symbol",
+        size: (1200., 800.),
+        build: |f, d| r5_overlay(f, d, "goto", "@"),
+    },
+    Scenario {
+        name: "r5_sidebar",
+        size: (1200., 800.),
+        build: r5_sidebar,
+    },
+    Scenario {
+        name: "r5_input_panel",
+        size: (1200., 800.),
+        build: r5_input_panel,
+    },
+    Scenario {
+        name: "r5_narrow",
+        size: (440., 360.),
+        build: |f, d| r5_narrow(f, d, "neighbor"),
     },
 ];
 
@@ -1651,6 +1874,17 @@ fn capture_chinese_layout(
         serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    if variant.starts_with("r5_") {
+        // Round-5 scenes under `--language zh-Hans` only report: a scrolled tab or a list row
+        // half out of view is clipped on purpose.
+        for row in layout.iter().filter(|row| row["fits"] != true) {
+            eprintln!(
+                "velocity: {variant}: Chinese text outside its clip: {}",
+                row["text"]
+            );
+        }
+        return Ok(());
+    }
     if layout.is_empty()
         || (variant == "zh_hans_mixed" && !mixed_checked)
         || layout.iter().any(|row| row["fits"] != true)
@@ -1709,7 +1943,7 @@ fn caption_ink(
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let request = Request::parse(args)?;
     std::fs::create_dir_all(&request.out).map_err(|e| e.to_string())?;
-    let fixture = Fixture::create()?;
+    let fixture = Fixture::create(request.language)?;
     let mut renderer: Option<Renderer> = None;
     let mut written = 0;
     for scenario in SCENARIOS {
@@ -1769,7 +2003,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     hover_definition(&mut app);
                     settle(&mut app);
                 }
-                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed") {
+                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
+                    || (request.language == Some("zh-Hans") && scenario.name.starts_with("r5_"))
+                {
                     capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
                 }
                 if request.bench > 0 {

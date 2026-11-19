@@ -948,40 +948,66 @@ impl ThemeUi {
             .as_deref()
             .and_then(|s| s.strip_suffix('…'))
             .unwrap_or(text);
-        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut offset = 0;
-        for (start, cluster) in visible.grapheme_indices(true) {
-            let source = start..start + cluster.len();
-            let next = offset
-                + match style.case {
-                    Some(Keyword::Upper) => cluster
-                        .chars()
-                        .flat_map(char::to_uppercase)
-                        .map(char::len_utf8)
-                        .sum::<usize>(),
-                    Some(Keyword::Lower) => cluster
-                        .chars()
-                        .flat_map(char::to_lowercase)
-                        .map(char::len_utf8)
-                        .sum::<usize>(),
-                    _ => cluster.len(),
-                };
-            if matches.iter().any(|byte| source.contains(byte)) {
-                if let Some(last) = ranges.last_mut().filter(|range| range.end == offset) {
-                    last.end = next;
-                } else {
-                    ranges.push(offset..next);
-                }
-            }
-            offset = next;
-        }
-        let highlight = (!ranges.is_empty()).then(|| {
-            Box::new(TextHighlight {
-                ranges,
-                color: style.matched,
-            })
-        });
+        let highlight = highlight_ranges(style, &[(0, visible)], matches);
         self.draw_text(layer, style, shown, [x, baseline], clip, highlight);
+    }
+    /// Like [`ThemeUi::text_fit_highlighted`], but a label too long for `max_width` keeps its
+    /// last segment — from the last of `separators` on, such as "：上" or ": UTF-8", the
+    /// argument that tells sibling command rows apart — and shortens the part before it, the
+    /// way [`ThemeUi::fit_label`] keeps a qualifier. When the segment would leave the rest
+    /// less than three ems, or there is none, the end is cut as usual. Labels that fit are
+    /// painted exactly as [`ThemeUi::text_fit_highlighted`] paints them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_fit_highlighted_keeping(
+        &self,
+        layer: &mut Layer,
+        style: &Style,
+        text: &str,
+        matches: &[usize],
+        separators: &[&str],
+        x: f64,
+        baseline: f64,
+        max_width: f64,
+        clip: Rect,
+    ) {
+        let plain = |layer: &mut Layer| {
+            self.text_fit_highlighted(layer, style, text, matches, x, baseline, max_width, clip)
+        };
+        if max_width <= 0. || separators.is_empty() || self.fitted(style, text, max_width).is_none()
+        {
+            return plain(layer);
+        }
+        let Some(tail) = separators
+            .iter()
+            .filter_map(|separator| text.rfind(separator))
+            .max()
+            .filter(|&tail| tail > 0)
+        else {
+            return plain(layer);
+        };
+        let (stem, segment) = text.split_at(tail);
+        let room = max_width - self.advance(style, segment);
+        if room < 3. * f64::from(style.size) {
+            return plain(layer);
+        }
+        let Some(stem_shown) = self
+            .fitted(style, stem, room)
+            .filter(|s| s.len() > '…'.len_utf8())
+        else {
+            return plain(layer);
+        };
+        let shown = format!("{stem_shown}{segment}");
+        // Shaped as one run the pieces may kern differently; never let that overflow.
+        if self.advance(style, &shown) > max_width {
+            return plain(layer);
+        }
+        let visible = stem_shown.strip_suffix('…').unwrap_or(&stem_shown);
+        let highlight = highlight_ranges(
+            style,
+            &[(0, visible), (usize::MAX, "…"), (tail, segment)],
+            matches,
+        );
+        self.draw_text(layer, style, &shown, [x, baseline], clip, highlight);
     }
     /// The label as [`ThemeUi::text_fit`] would paint it, keeping a trailing parenthesized
     /// qualifier such as " (Default)" or " (User)" and shortening the part before it.
@@ -1415,11 +1441,144 @@ fn sample_alpha(
     }
 }
 
+/// Match-colour ranges, in bytes of the text as painted (after the style's case transform),
+/// for `pieces` painted one after another: each is `(start, text)` where `start` is the
+/// piece's byte offset in the original label (`usize::MAX` for inserted text such as an
+/// ellipsis) and `matches` are byte offsets of matched characters in that label. A grapheme
+/// is matched as a whole when any of its bytes is.
+fn highlight_ranges(
+    style: &Style,
+    pieces: &[(usize, &str)],
+    matches: &[usize],
+) -> Option<Box<TextHighlight>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut offset = 0;
+    for &(base, piece) in pieces {
+        for (start, cluster) in piece.grapheme_indices(true) {
+            let next = offset
+                + match style.case {
+                    Some(Keyword::Upper) => cluster
+                        .chars()
+                        .flat_map(char::to_uppercase)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+                    Some(Keyword::Lower) => cluster
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .map(char::len_utf8)
+                        .sum::<usize>(),
+                    _ => cluster.len(),
+                };
+            let matched = base != usize::MAX && {
+                let source = base + start..base + start + cluster.len();
+                matches.iter().any(|byte| source.contains(byte))
+            };
+            if matched {
+                if let Some(last) = ranges.last_mut().filter(|range| range.end == offset) {
+                    last.end = next;
+                } else {
+                    ranges.push(offset..next);
+                }
+            }
+            offset = next;
+        }
+    }
+    (!ranges.is_empty()).then(|| {
+        Box::new(TextHighlight {
+            ranges,
+            color: style.matched,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use vel_theme::Element;
 
+    /// A command caption too long for its row keeps its last segment and shortens the part
+    /// before it, with the match colour on the right characters of both parts; one that fits
+    /// is unchanged, and one whose segment would crowd out the rest is cut at the end.
+    #[test]
+    fn fitted_captions_keep_their_last_segment() {
+        let mut theme = ThemeUi::default();
+        let mut style = theme.style(
+            1,
+            &ElementPath(&[Element::new("quick_panel_label", &[])]),
+            &Settings::default(),
+        );
+        style.family = Some(Arc::from("system-ui"));
+        style.shadow = None;
+        let row = Rect {
+            x: 0.,
+            y: 0.,
+            width: 600.,
+            height: 32.,
+        };
+        let separators = ["：", ": "];
+        let paint = |text: &str, matches: &[usize], width: f64| {
+            let mut layer = Layer::default();
+            theme.text_fit_highlighted_keeping(
+                &mut layer,
+                &style,
+                text,
+                matches,
+                &separators,
+                10.,
+                20.,
+                width,
+                row,
+            );
+            let run = layer.text.pop().expect("a caption");
+            let ranges = run
+                .highlight
+                .as_ref()
+                .map(|h| h.ranges.clone())
+                .unwrap_or_default();
+            (run.text, ranges)
+        };
+        for (text, separator) in [
+            ("显示：编辑组：切换到相邻编辑组：上", "：上"),
+            ("View: Groups: Focus Neighboring Group: Up", ": Up"),
+        ] {
+            let tail = text.rfind(separator).unwrap();
+            // The segment's first letter ("上", "U").
+            let last = tail + separator.find(char::is_alphanumeric).unwrap();
+            let full = theme.advance(&style, text);
+            // Fits: painted as is, matches where they are.
+            let (shown, ranges) = paint(text, &[0, last], full + 1.);
+            assert_eq!(shown, text);
+            assert_eq!(ranges.first().map(|r| r.start), Some(0));
+            // Too long: the stem is cut, the segment stays, both matches keep their colour.
+            let width = full * 0.7;
+            let (shown, ranges) = paint(text, &[0, last], width);
+            let stem = shown.strip_suffix(separator).expect(&shown);
+            let cut = stem.strip_suffix('…').expect(&shown);
+            assert!(!cut.is_empty() && text.starts_with(cut), "{shown}");
+            assert!(theme.advance(&style, &shown) <= width, "{shown}");
+            let painted_last = shown.len() - (text.len() - last);
+            assert_eq!(ranges.len(), 2, "{shown}: {ranges:?}");
+            assert_eq!(ranges[0].start, 0);
+            assert_eq!(ranges[1].start, painted_last, "{shown}: {ranges:?}");
+            // The ellipsis itself is never in the match colour.
+            let dots = stem.len() - '…'.len_utf8();
+            assert!(
+                ranges
+                    .iter()
+                    .all(|r| r.end <= dots || r.start >= stem.len())
+            );
+            // Room for the segment but not three ems before it: the end is cut instead.
+            let segment = theme.advance(&style, separator);
+            let (shown, _) = paint(text, &[], segment + 2. * f64::from(style.size));
+            assert!(
+                shown.ends_with('…') && !shown.ends_with(separator),
+                "{shown}"
+            );
+        }
+        // No segment to keep: the usual cut.
+        let (shown, _) = paint("保存录制的宏以便稍后再次运行", &[], 60.);
+        assert!(shown.ends_with('…'), "{shown}");
+    }
     #[test]
     fn mixed_caption_highlighting_preserves_one_run_and_whole_graphemes() {
         let mut theme = ThemeUi::default();

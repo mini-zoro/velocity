@@ -83,6 +83,42 @@ impl Panels {
             8.
         }
     }
+    /// Width (DIPs) left of the input panel's field for its caption. Unlike the find panels'
+    /// one-word labels the caption is free text from the command ("New name for this entry",
+    /// a translation, a Vintage prompt), so the column follows the caption's measured width
+    /// (`caption`, DIPs) plus 8 on each side: at least the find panels' 80 so short captions
+    /// line up with them, at most half the panel so the field keeps the other half (a longer
+    /// caption ends in an ellipsis), and 8 (no caption) below 64. Before the caption has been
+    /// measured, the find panels' column.
+    pub(super) fn input_label_column(width: f64, s: f64, caption: Option<f64>) -> f64 {
+        let Some(caption) = caption else {
+            return Self::find_label_column(width, s, 0.);
+        };
+        let label = (caption + 16.).max(80.).min((width / s - 12.) / 2.);
+        if label >= 64. { label } else { 8. }
+    }
+    /// Measures the input panel's caption with the style it is painted with. When that changed
+    /// (a new caption, theme, font or UI scale) the panel is laid out again before it is
+    /// painted, so the field never starts under its caption, not even on the first frame.
+    pub(super) fn fit_input_caption(&mut self, workspace: &Workspace) {
+        if self.panel != Some(Panel::Input) {
+            return;
+        }
+        let advance = {
+            let mut theme = workspace.themes.ui.borrow_mut();
+            let style = self.tree.style(
+                2,
+                Some("label_control"),
+                &mut theme,
+                &workspace.editor().settings,
+            );
+            theme.advance(&style, &self.input_caption) / self.ui_scale
+        };
+        if self.input_caption_advance != Some(advance) {
+            self.input_caption_advance = Some(advance);
+            self.layout(self.size);
+        }
+    }
     /// Height a find panel needs at its natural size, in DIPs, for a panel of `width` pixels.
     pub(super) fn find_panel_height(panel: Panel, width: f64, s: f64) -> f64 {
         let rows = if Self::find_toggle_options(panel).is_empty() {
@@ -96,7 +132,8 @@ impl Panels {
             rows as f64 * (ACTION_HEIGHT + ACTION_ROW_GAP) - ACTION_ROW_GAP
         };
         if panel == Panel::Input {
-            return 68.;
+            // One row: the caption and its field, with the find panels' 8-DIP margins.
+            return 8. + 28. + 8.;
         }
         8. + Self::find_fields(panel) as f64 * PANEL_ROW + actions + 8.
     }
