@@ -2788,20 +2788,23 @@ impl App {
         }
         size
     }
-    fn reload_font_views(&mut self, fonts: Fonts, scale: f64) {
+    fn reload_font_views(&mut self, mut fonts: Fonts, scale: f64) {
+        let advances = fonts.wide_advances();
         for view in std::iter::once(&mut self.view).chain(self.sheet_views.values_mut()) {
             view.set_font_grid(fonts.cell as f64, fonts.ascent as f64);
             view.set_font_metrics(fonts.metrics, scale);
+            view.set_wide_advances(advances);
             view.ligatures = fonts.has_ligatures();
         }
         self.fonts = Some(fonts);
         self.initialize_view_metrics();
     }
     fn initialize_view_metrics(&mut self) {
-        if let Some(fonts) = &self.fonts {
+        if let Some(fonts) = &mut self.fonts {
             let scale = self.workspace.themes.ui.borrow().density as f64;
             self.view.set_font_metrics(fonts.metrics, scale);
             self.view.ligatures = fonts.has_ligatures();
+            self.view.set_wide_advances(fonts.wide_advances());
             self.panels
                 .output_view
                 .set_font_metrics(fonts.metrics, scale);
@@ -3237,6 +3240,7 @@ impl App {
                     None
                 };
                 let view = if let Some(view) = other.as_mut() {
+                    view.set_wide_advances(self.view.wide_advances);
                     view
                 } else {
                     self.content = rect;

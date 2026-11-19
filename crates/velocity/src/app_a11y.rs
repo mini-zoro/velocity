@@ -909,6 +909,31 @@ mod tests {
         assert!(results.lines().count() <= 48);
     }
     #[test]
+    fn cjk_accessibility_range_uses_measured_cell_extents() {
+        use vel_render::typography::WideAdvances;
+        for (text, cells) in [("中文", 3.), ("A中", 2.5), ("👩‍💻🦀", 4.5)] {
+            let mut a = app(text);
+            a.view.set_wide_advances(WideAdvances::new([
+                1.5, 1.5, 1.5, 1.5, 1.5, 2.25, 2.25, 1.5,
+            ]));
+            a.scene();
+            let range = Utf16Range::new(0, text.encode_utf16().count());
+            let r = a.accessible_range_rect(EDITOR, range);
+            assert_eq!(
+                vel_platform::AppHandler::text_input_rect(&a, range),
+                (r, range)
+            );
+            assert!(
+                (r.width - cells * a.view.cell).abs() < 0.02,
+                "{text}: {r:?}"
+            );
+            let mut begin = a.view.rect_at(a.workspace.editor(), 0);
+            begin.x += a.content.x;
+            begin.y += a.content.y;
+            assert_eq!((r.x, r.y), (begin.x, begin.y));
+        }
+    }
+    #[test]
     fn editor_primary_selection_bounds_and_tabs_use_the_actual_layout() {
         let mut a = app("a😀é\n你好\nlast line");
         a.workspace

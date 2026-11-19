@@ -1055,6 +1055,34 @@ fn r5_sidebar(fixture: &Fixture, dark: bool) -> Result<App, String> {
     Ok(app)
 }
 
+fn r6_cjk(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_app(fixture, dark)?;
+    named(&mut app, "new_file", json!({}));
+    let paragraph = "小雨已经停了，街角的书店亮起了灯。路过的人推开门，在窗前读完了这一页。";
+    let text = format!(
+        "雨后的书店\n\n{paragraph}\n\n读者 reader 说：東京、서울，明天见！\n书架\t索引  index\n新书 📚、咖啡 ☕、散步 👩‍💻\n\n    {paragraph}{paragraph}{paragraph}\n"
+    );
+    named(&mut app, "insert", json!({"characters": text}));
+    for (key, value) in [
+        ("word_wrap", json!(true)),
+        ("wrap_width", json!(72)),
+        ("indent_subsequent_lines", json!(true)),
+        ("draw_white_space", json!("all")),
+        ("rulers", json!([72])),
+    ] {
+        set_view(&mut app, key, value);
+    }
+    let a = text.find("東京").expect("fixture");
+    let b = text.find("明天").expect("fixture");
+    app.workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::new(a, b),
+        ]));
+    settle(&mut app);
+    Ok(app)
+}
+
 /// The input panel (Side Bar › Rename…) for a Chinese file name, through the side bar's own
 /// command (its caption and initial text); the scene has no window for the native parts.
 fn r5_input_panel(fixture: &Fixture, dark: bool) -> Result<App, String> {
@@ -1515,6 +1543,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "r5_narrow",
         size: (440., 360.),
         build: |f, d| r5_narrow(f, d, "neighbor"),
+    },
+    Scenario {
+        name: "r6-cjk-zh",
+        size: (800., 360.),
+        build: r6_cjk,
     },
 ];
 
@@ -2014,16 +2047,31 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 }
                 let width = (size.width * f64::from(scale)).round() as u32;
                 let height = (size.height * f64::from(scale)).round() as u32;
-                let renderer = match renderer.as_mut() {
+                let available = match renderer.as_mut() {
                     Some(r) => {
                         // Glyph and layout caches are keyed by this scene's font faces.
                         r.reset_fonts();
                         r.resize(width, height);
-                        r
+                        Some(r)
                     }
-                    None => renderer.insert(Renderer::offscreen(width, height)?),
+                    None => match Renderer::offscreen(width, height) {
+                        Ok(r) => Some(renderer.insert(r)),
+                        Err(error) if scenario.name == "r6-cjk-zh" => {
+                            eprintln!("velocity: {error}; using flat software text snapshot");
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    },
                 };
-                let (pixels, scene) = render(&mut app, renderer, scale)?;
+                let (pixels, scene) = if let Some(renderer) = available {
+                    render(&mut app, renderer, scale)?
+                } else {
+                    let scene = app.scene();
+                    let fonts = app.fonts.as_mut().ok_or("fonts missing")?;
+                    let pixels =
+                        vel_render::snapshot::text_rgba(&scene, fonts, width, height, scale)?;
+                    (pixels, scene)
+                };
                 // VELOCITY_RENDER_DEBUG=1 lists every painted icon and text run for geometry checks.
                 if std::env::var_os("VELOCITY_RENDER_DEBUG").is_some() {
                     for (i, layer) in scene.layers.iter().enumerate() {

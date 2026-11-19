@@ -1,6 +1,6 @@
 //! Adapted from Velocity’s MIT OR Apache-2.0 P0 prototype.
 //! Menlo's ASCII fast path, lazy system fallbacks, swash shaping and rasterization.
-use crate::native;
+use crate::{native, typography::WideAdvances};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -18,7 +18,7 @@ use swash::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use vel_platform::fonts::cluster_characters;
+use vel_platform::fonts::{FontFallback, SystemFontFallback, cluster_characters};
 
 #[path = "emoji_presentation.rs"]
 mod emoji;
@@ -161,6 +161,7 @@ pub struct Fonts {
     emoji_choices: HashMap<(u16, String), u16>,
     text_choices: HashMap<(u16, String), u16>,
     options: crate::typography::FontOptions,
+    wide_advances: Option<WideAdvances>,
     /// Primary metrics; no fallback face changes the editor grid.
     pub metrics: crate::typography::FontMetrics,
     /// Missing-face/glyph diagnostics.
@@ -175,6 +176,7 @@ pub struct Fonts {
             u32,
             crate::scene::FontStyle,
             crate::typography::FontOptions,
+            u64,
         ),
         Vec<ShapedGlyph>,
     >,
@@ -236,6 +238,7 @@ impl Fonts {
             emoji_choices: HashMap::new(),
             text_choices: HashMap::new(),
             options: Default::default(),
+            wide_advances: None,
             metrics: crate::typography::FontMetrics {
                 ascent: metrics.ascent as f64,
                 descent: metrics.descent.abs() as f64,
@@ -421,12 +424,70 @@ impl Fonts {
         self.variants.insert((base, style), face);
         face
     }
+    /// Measures representative glyphs using the editor's cascade, not a Unicode
+    /// column estimate. Keep the measurement faces out of the raster cascade.
+    pub fn wide_advances(&mut self) -> WideAdvances {
+        if let Some(advances) = self.wide_advances {
+            return advances;
+        }
+        let primary = &self.faces[0];
+        let cells = WideAdvances::SAMPLES.map(|cluster| {
+            let first = cluster.chars().next().expect("sample");
+            let emoji = emoji_presentation(cluster);
+            let resolved = if emoji {
+                SystemFontFallback.resolve_cluster(&primary.name, cluster)
+            } else if primary.reference().charmap().map(first) == 0 {
+                SystemFontFallback.resolve(&primary.name, first)
+            } else {
+                None
+            };
+            let face = resolved.and_then(|d| {
+                Face::load(
+                    &d.path,
+                    &d.postscript_name,
+                    d.native.map(vel_platform::fonts::CascadeFont::into_native),
+                    &mut self.files,
+                )
+                .ok()
+            });
+            let face = face.as_ref().unwrap_or(primary);
+            let font = face.reference();
+            if font.charmap().map(first) == 0 {
+                return 0.;
+            }
+            let mut shaper = self
+                .shaper
+                .builder(font)
+                .size(13.)
+                .script(first.script())
+                .normalized_coords(&face.coords)
+                .build();
+            shaper.add_str(cluster);
+            let mut advance = 0.;
+            shaper.shape_with(|g| advance += g.advance());
+            f64::from(advance) / f64::from(self.cell)
+        });
+        let advances = WideAdvances::new(cells);
+        self.wide_advances = Some(advances);
+        advances
+    }
     /// Shapes using actual face variants, including each non-ASCII fallback family.
     pub fn shape_styled(
         &mut self,
         text: &str,
         px: f32,
         style: crate::scene::FontStyle,
+    ) -> Vec<ShapedGlyph> {
+        self.shape_editor(text, px, style, WideAdvances::default())
+    }
+
+    /// Shapes an editor run using the same width classes as row geometry.
+    pub fn shape_editor(
+        &mut self,
+        text: &str,
+        px: f32,
+        style: crate::scene::FontStyle,
+        advances: WideAdvances,
     ) -> Vec<ShapedGlyph> {
         let primary = self.variant(0, style);
         let shape_ascii = self.options.stylistic_sets != 0
@@ -465,6 +526,7 @@ impl Fonts {
             (px * 64.).round() as u32,
             style,
             self.options,
+            advances.identity(),
         );
         if let Some(g) = self.shaped.get(&key) {
             return g.clone();
@@ -496,11 +558,14 @@ impl Fonts {
         let cell = self.cell * px / 13.;
         let mut offsets = vec![0.; text.len() + 1];
         let mut column = 0;
+        let mut adjustment = 0.;
         for (at, g) in text.grapheme_indices(true) {
-            let x = crate::typography::grid_x(column, cell as f64) as f32;
+            let x = ((column as f64 + adjustment) * f64::from(cell)) as f32;
             offsets[at..at + g.len()].fill(x);
-            column += g.width().max(1);
-            offsets[at + g.len()] = crate::typography::grid_x(column, cell as f64) as f32;
+            let width = g.width().max(1);
+            column += width;
+            adjustment += advances.adjustment(g, width);
+            offsets[at + g.len()] = ((column as f64 + adjustment) * f64::from(cell)) as f32;
         }
         let mut glyphs = Vec::new();
         for (start, end, face) in runs {
@@ -1084,7 +1149,7 @@ mod fallback_mock_tests {
 
 // Unicode presentation sequences are resolved as a unit, before primary coverage.
 // https://www.unicode.org/reports/tr51/#Emoji_Sequences
-fn emoji_presentation(cluster: &str) -> bool {
+pub(crate) fn emoji_presentation(cluster: &str) -> bool {
     if cluster.contains('\u{fe0e}') {
         return false;
     }

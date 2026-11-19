@@ -771,17 +771,20 @@ impl Renderer {
             self.batch(layer_index, PrimitiveKind::Rect, first);
             let first = self.data.len() as u32;
             fonts.set_options(layer.font_options);
-            for (run, glow) in layer
+            for (index, run, glow) in layer
                 .glow
                 .iter()
-                .map(|r| (r, true))
-                .chain(layer.text.iter().map(|r| (r, false)))
+                .enumerate()
+                .map(|(i, r)| (i, r, true))
+                .chain(layer.text.iter().enumerate().map(|(i, r)| (i, r, false)))
             {
+                let advances = layer.wide_run_advances(index, glow);
                 let px64 = (run.size * scale * 64.).round() as u32;
                 let style = LayoutStyle {
                     font_style: run.style,
                     px64,
                     font_epoch: layer.font_options.identity()
+                        ^ advances.identity()
                         ^ run.family.as_ref().map_or(0, |family| {
                             use std::hash::{Hash, Hasher};
                             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -799,7 +802,7 @@ impl Renderer {
                             .into()
                     } else {
                         fonts
-                            .shape_styled(&run.text, px64 as f32 / 64., run.style)
+                            .shape_editor(&run.text, px64 as f32 / 64., run.style, advances)
                             .into()
                     };
                     self.layouts.insert(&run.text, style, Arc::clone(&g));

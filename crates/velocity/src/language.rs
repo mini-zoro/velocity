@@ -460,6 +460,7 @@ pub struct MiniToken {
 pub struct MiniLine {
     pub row: usize,
     pub tokens: Vec<MiniToken>,
+    pub non_ascii: bool,
 }
 #[derive(Debug)]
 pub struct Analysis {
@@ -741,6 +742,7 @@ impl Language {
                 }
                 if touched {
                     let line = text.line(sample.row).to_string();
+                    sample.non_ascii = !line.is_ascii();
                     sample.tokens = vec![MiniToken {
                         column: 0,
                         width: crate::editor::cells_with_tab(line.trim_end_matches('\n'), tab),
@@ -1151,7 +1153,11 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
             spans.push((start + range.start..start + range.end, run.stack));
         }
         if row % step == 0 {
-            minimap.push(MiniLine { row, tokens });
+            minimap.push(MiniLine {
+                row,
+                tokens,
+                non_ascii: !line.is_ascii(),
+            });
         }
     }
     let source = text.to_string();

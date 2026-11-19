@@ -48,6 +48,7 @@ pub struct DragSelect {
     origin: Region,
     /// Column selection anchor in document coordinates (x and y include the scroll offset).
     anchor: Point,
+    anchor_column: f64,
     /// Last pointer position in view coordinates, re-applied while auto-scrolling.
     pointer: Point,
     /// Last auto-scroll step, for frame-rate independent scrolling.
@@ -62,7 +63,12 @@ fn under_pointer(view: &View, editor: &Editor, point: Point, at: usize) -> usize
     }
     let prev = editor.text.prev_grapheme_boundary(at);
     let (here, before) = (view.rect_at(editor, at), view.rect_at(editor, prev));
-    if before.y == here.y && here.x > point.x {
+    if (before.y == here.y && here.x > point.x)
+        || (before.y < here.y
+            && point.y >= before.y
+            && point.y < before.y + before.height
+            && point.x >= before.x)
+    {
         prev
     } else {
         at
@@ -119,6 +125,11 @@ impl DragSelect {
             anchor: Point {
                 x: point.x + view.scroll_x,
                 y: point.y + view.scroll_y,
+            },
+            anchor_column: if column {
+                view.logical_column_at(editor, point)
+            } else {
+                0.
             },
             pointer: point,
             scrolled: None,
@@ -177,7 +188,9 @@ impl DragSelect {
         let last = row_of(point.y + view.scroll_y) as usize;
         let total = view.total(editor).max(1);
         let (first, last) = (first.min(total - 1), last.min(total - 1));
-        let (anchor_x, pointer_x) = (self.anchor.x - view.scroll_x, point.x);
+        let a_col = self.anchor_column;
+        let b_col = view.logical_column_at(editor, point);
+        let layout = editor.layout.borrow();
         let mut inside = Vec::new();
         let mut past_end = Vec::new();
         let rows: Box<dyn Iterator<Item = usize>> = if last >= first {
@@ -186,14 +199,10 @@ impl DragSelect {
             Box::new((last..=first).rev())
         };
         for row in rows {
-            let y = view.tab_height + 4. + (row as f64 + 0.5) * view.line_height - view.scroll_y;
-            let a = view.hit_test(editor, Point { x: anchor_x, y });
-            let b = view.hit_test(editor, Point { x: pointer_x, y });
-            let line = editor.text.byte_to_line(a);
-            let end = editor.text.line_to_byte(line) + editor.text.line_len_bytes(line);
-            let end_x = view.rect_at(editor, end).x;
+            let a = layout.offset(&editor.text, row, a_col);
+            let b = layout.offset(&editor.text, row, b_col);
             let region = Region::new(a, b);
-            if anchor_x.min(pointer_x) > end_x + view.cell / 2. {
+            if a_col.min(b_col) > layout.visual_end_column(&editor.text, row) as f64 + 0.5 {
                 past_end.push(region);
             } else {
                 inside.push(region);

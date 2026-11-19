@@ -16,6 +16,8 @@ pub mod nine_slice;
 pub mod scene;
 pub mod selection;
 #[cfg(target_os = "macos")]
+pub mod snapshot;
+#[cfg(target_os = "macos")]
 mod timing;
 pub mod typography;
 #[cfg(target_os = "macos")]

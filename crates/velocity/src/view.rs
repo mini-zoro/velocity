@@ -15,7 +15,12 @@ use vel_color_scheme::{ColorScheme, DecorationOptions, FontStyle as Decoration};
 use vel_platform::{Appearance, Point, Rect, Size, Utf16Range};
 use vel_render::invisibles::{Invisible, WhiteSpace};
 use vel_render::scene::*;
+use vel_render::typography::{WideAdvances, WideColumns};
 use vel_text::Text;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "view_cjk_tests.rs"]
+mod cjk_tests;
 
 fn invisible_settings(e: &Editor) -> Invisible {
     // ST4 builds 4107 and 4126: https://www.sublimetext.com/download
@@ -112,6 +117,7 @@ pub const TAB_HEIGHT: f64 = 30.;
 struct CachedUnit {
     bytes: Range<usize>,
     width: usize,
+    adjustment: f32,
     marker: bool,
 }
 impl CachedUnit {
@@ -129,6 +135,8 @@ struct CachedLine {
     hidden: Vec<Range<usize>>,
     tab: usize,
     units: Arc<[CachedUnit]>,
+    measured: bool,
+    wide: Option<Arc<WideColumns>>,
 }
 #[derive(Debug)]
 struct WrappedRow {
@@ -170,6 +178,7 @@ struct DeletedAnchor {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ReflowGeometry {
     options: Options,
+    advances: WideAdvances,
     width: f64,
     height: f64,
     cell: f64,
@@ -245,7 +254,8 @@ pub struct View {
     pub drop_caret: Option<usize>,
     /// Widest line drawn so far for the shown buffer (cells), bounding horizontal scrolling;
     /// `None` width once a windowed long line was drawn (no bound).
-    widest: (Option<vel_buffer::BufferId>, Option<usize>),
+    widest: (Option<vel_buffer::BufferId>, Option<f64>),
+    pub(crate) wide_advances: WideAdvances,
     scroll_bar: Rect,
     scroll_puck: Rect,
     scroll_bar_drag: bool,
@@ -902,6 +912,14 @@ impl View {
         self.units.clear();
         self.selection_cache = None;
     }
+    pub(crate) fn set_wide_advances(&mut self, advances: WideAdvances) {
+        if self.wide_advances != advances {
+            self.wide_advances = advances;
+            self.units.clear();
+            self.font_revision = self.font_revision.wrapping_add(1);
+            self.widest = (None, Some(0.));
+        }
+    }
     fn baseline(&self, e: &Editor, y: f64) -> f64 {
         y + self.ascent
             + e.settings.number("line_padding_top", 0.).max(0.)
@@ -940,7 +958,8 @@ impl View {
             #[cfg(test)]
             anchor_queries: Default::default(),
             mouse_preferences: Default::default(),
-            widest: (None, Some(0)),
+            widest: (None, Some(0.)),
+            wide_advances: WideAdvances::default(),
             drop_caret: None,
             gutter_hover: false,
             tab_height: TAB_HEIGHT,
@@ -965,27 +984,50 @@ impl View {
             font_revision: 0,
         }
     }
-    fn line_units(&mut self, line: &str, hidden: &[Range<usize>], tab: usize) -> Arc<[CachedUnit]> {
+    fn line_units(
+        &mut self,
+        line: &str,
+        hidden: &[Range<usize>],
+        tab: usize,
+        advances: &WideAdvances,
+    ) -> (Arc<[CachedUnit]>, Option<Arc<WideColumns>>) {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         line.hash(&mut hash);
         hidden.hash(&mut hash);
         tab.hash(&mut hash);
         let key = hash.finish();
+        let measured = advances.enabled() && !line.is_ascii();
         if let Some(cached) = self.units.get(&key)
             && cached.text == line
             && cached.hidden == hidden
             && cached.tab == tab
+            && cached.measured == measured
         {
-            return cached.units.clone();
+            return (cached.units.clone(), cached.wide.clone());
         }
+        let mut col = 0;
+        let mut wide = WideColumns::default();
         let units: Arc<[_]> = layout::units(line, hidden, tab)
             .into_iter()
-            .map(|u| CachedUnit {
-                marker: hidden.contains(&u.bytes),
-                bytes: u.bytes,
-                width: u.width,
+            .map(|u| {
+                let adjustment = if measured {
+                    advances.adjustment(u.text, u.width)
+                } else {
+                    0.
+                };
+                if measured {
+                    wide.push(col, u.width, adjustment);
+                    col += u.width;
+                }
+                CachedUnit {
+                    marker: hidden.contains(&u.bytes),
+                    bytes: u.bytes,
+                    width: u.width,
+                    adjustment: adjustment as f32,
+                }
             })
             .collect();
+        let wide = (!wide.is_grid()).then(|| Arc::new(wide));
         if line.len() <= 8192 {
             if self.units.len() >= 1024 {
                 self.units.clear();
@@ -997,10 +1039,12 @@ impl View {
                     hidden: hidden.to_vec(),
                     tab,
                     units: units.clone(),
+                    measured,
+                    wide: wide.clone(),
                 },
             );
         }
-        units
+        (units, wide)
     }
     fn wrapped_row(
         &mut self,
@@ -1075,6 +1119,7 @@ impl View {
                 marker: u.text == "…" && hidden.contains(&u.bytes),
                 bytes: u.bytes,
                 width: u.width,
+                adjustment: 0.,
             })
             .collect();
         // A single pathological grapheme or folded span may exceed the byte cap.
@@ -1269,8 +1314,16 @@ impl View {
             .floor() as usize;
         e.layout.borrow_mut().viewport_width = width;
         let options = motion_layout_options(e);
+        let advances = if e.features.highlighting == vel_largefile::HighlightMode::Viewport
+            || !e.features.indexing
+        {
+            WideAdvances::default()
+        } else {
+            self.wide_advances
+        };
         let geometry = ReflowGeometry {
             options,
+            advances,
             width: self.size.width,
             height: self.size.height,
             cell: self.cell,
@@ -1332,6 +1385,7 @@ impl View {
         {
             let mut layout = e.layout.borrow_mut();
             layout.set_invisibles(invisible_settings(e));
+            layout.set_wide_advances(advances);
             layout.configure(
                 &e.text,
                 (e.buffer.id(), vel_buffer::ChangeId(e.revision)),
@@ -1462,6 +1516,7 @@ impl View {
             }
         }
         let mut layout = crate::layout::Layout::default();
+        layout.set_wide_advances(state.geometry.advances);
         layout.configure(
             text,
             (state.identity.0, vel_buffer::ChangeId(state.identity.1)),
@@ -1611,9 +1666,9 @@ impl View {
         touched || version != e.revision
     }
     /// Records the width of a drawn line for the horizontal scroll bound.
-    fn note_width(&mut self, e: &Editor, width: Option<usize>) {
+    fn note_width(&mut self, e: &Editor, width: Option<f64>) {
         if self.widest.0 != Some(e.buffer.id()) {
-            self.widest = (Some(e.buffer.id()), Some(0));
+            self.widest = (Some(e.buffer.id()), Some(0.));
         }
         self.widest.1 = match (self.widest.1, width) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -1629,15 +1684,20 @@ impl View {
         }
         let row = e.text.byte_to_line(e.caret);
         let len = e.text.line_len_bytes(row);
-        let caret_line = (len < crate::large::LONG_LINE)
-            .then(|| layout.column(&e.text, e.text.line_to_byte(row) + len));
+        let caret_line = (len < crate::large::LONG_LINE).then(|| {
+            layout.x(
+                &e.text,
+                e.text.line_to_byte(row) + layout::body_len(&e.text, row),
+                1.,
+            )
+        });
         drop(layout);
         self.note_width(e, caret_line);
         let Some(widest) = self.widest.1 else {
             return f64::INFINITY;
         };
         let visible = self.right(e) - self.gutter(e) - self.margin(e) * 2.;
-        (widest as f64 * self.cell + self.cell - visible).max(0.)
+        (widest * self.cell + self.cell - visible).max(0.)
     }
     fn max_scroll_y(&self, e: &Editor) -> f64 {
         // The empty margin leaves the last line visible, including at fraction 1.
@@ -1680,7 +1740,7 @@ impl View {
         if y < g.tab_height + 4. - 1e-7 || y + g.line_height > g.height - 4. + 1e-7 {
             return false;
         }
-        let x = g.gutter + g.margin + layout.column(text, caret) as f64 * g.cell - self.scroll_x;
+        let x = g.gutter + g.margin + layout.x(text, caret, g.cell) - self.scroll_x;
         x >= g.gutter + g.margin - 1e-7 && x + 1. <= g.right - g.margin + 1e-7
     }
     fn capture_text_anchor(&self, e: &Editor, g: ReflowGeometry) -> TextScrollAnchor {
@@ -1701,11 +1761,11 @@ impl View {
             y
         };
         let visual = y.floor().max(0.) as usize;
-        let byte = layout.offset(text, visual, self.scroll_x / g.cell.max(0.001));
+        let byte = layout.offset_x(text, visual, self.scroll_x, g.cell.max(0.001));
         let x = if layout.wrapped() {
             0.
         } else {
-            self.scroll_x / g.cell.max(0.001) - layout.column(text, byte) as f64
+            self.scroll_x / g.cell.max(0.001) - layout.x(text, byte, 1.)
         };
         TextScrollAnchor {
             byte,
@@ -1752,7 +1812,7 @@ impl View {
         } else if anchor.line_start {
             anchor.x * self.cell
         } else {
-            (layout.column(&e.text, byte) as f64 + anchor.x) * self.cell
+            (layout.x(&e.text, byte, 1.) + anchor.x) * self.cell
         };
         drop(layout);
         let before = (self.scroll_x, self.scroll_y);
@@ -1889,12 +1949,29 @@ impl View {
             || e.settings.bool("block_caret", false)
             || e.preferences.caret_style == "block";
         caret.width += e.settings.number("caret_extra_width", 0.).max(0.);
-        if block {
+        let underline = e.preferences.caret_style == "underline";
+        if block || underline {
             caret.width = self.cell;
-        } else if e.preferences.caret_style == "underline" {
-            caret.y += caret.height - 2.;
-            caret.height = 2.;
-            caret.width = self.cell;
+            if self.wide_advances.enabled() && e.binary.is_none() && byte < e.text.len_bytes() {
+                use unicode_width::UnicodeWidthStr;
+                let row = e.text.byte_to_line(byte);
+                let advances = e.layout.borrow().advances_for(e.text.line_len_bytes(row));
+                if advances.enabled() {
+                    let cluster = e
+                        .text
+                        .slice(byte..e.text.next_grapheme_boundary(byte))
+                        .to_string();
+                    let columns = cluster.width();
+                    if columns >= 2 {
+                        caret.width =
+                            (columns as f64 + advances.adjustment(&cluster, columns)) * self.cell;
+                    }
+                }
+            }
+            if underline && !block {
+                caret.y += caret.height - 2.;
+                caret.height = 2.;
+            }
         }
         let top = e.settings.number("caret_extra_top", 0.).max(0.);
         caret.y -= top;
@@ -1939,9 +2016,7 @@ impl View {
         let layout = e.layout.borrow();
         let (visual, _) = layout.visual_at(&e.text, byte);
         Rect {
-            x: self.gutter(e)
-                + self.margin(e)
-                + vel_render::typography::grid_x(layout.column_in(&e.text, byte, row), self.cell)
+            x: self.gutter(e) + self.margin(e) + layout.x_in(&e.text, byte, self.cell, row)
                 - self.scroll_x,
             y: self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y,
             width: 1.,
@@ -2002,18 +2077,29 @@ impl View {
             };
             return (row.saturating_mul(16) + cell).min(binary.view.len_bytes() as usize);
         }
-        let row = ((p.y - self.tab_height - 4. + self.scroll_y) / self.line_height + 1e-8)
-            .floor()
-            .max(0.) as usize;
+        let row = self.visual_row(p.y);
         if let Some((boundary, _)) = e.layout.borrow().inline_at(row)
             && let Some(publication) = e.annotations.borrow().current.as_ref()
             && let Some(hunk) = publication.hunks.iter().find(|h| h.new.end == boundary)
         {
             return crate::annotation_commands::line_byte(&e.text, hunk.new.start);
         }
-        let col = ((p.x - self.gutter(e) - self.margin(e) + self.scroll_x) / self.cell).max(0.);
-        e.layout.borrow().offset(&e.text, row, col)
+        let x = (p.x - self.gutter(e) - self.margin(e) + self.scroll_x).max(0.);
+        e.layout.borrow().offset_x(&e.text, row, x, self.cell)
     }
+    pub(crate) fn visual_row(&self, y: f64) -> usize {
+        ((y - self.tab_height - 4. + self.scroll_y) / self.line_height + 1e-8)
+            .floor()
+            .max(0.) as usize
+    }
+
+    pub(crate) fn logical_column_at(&self, e: &Editor, p: Point) -> f64 {
+        let x = (p.x - self.gutter(e) - self.margin(e) + self.scroll_x) / self.cell;
+        e.layout
+            .borrow()
+            .column_at_x(&e.text, self.visual_row(p.y), x)
+    }
+
     pub fn range_rect(&self, e: &Editor, range: Utf16Range) -> (Rect, Utf16Range) {
         if e.binary.is_some() {
             return (self.rect_at(e, e.caret), Utf16Range::default());
@@ -2025,38 +2111,34 @@ impl View {
                 Utf16Range::from_bytes(&e.text, bytes),
             );
         }
-        let row = e.text.byte_to_line(bytes.start);
-        let (_, segment) = e.layout.borrow().visual_at(&e.text, bytes.start);
-        let end = bytes.end.min(e.text.line_to_byte(row) + segment.bytes.end);
-        let mut r = self.rect_at(e, bytes.start);
         let layout = e.layout.borrow();
-        let end_col = if e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
-            layout.column(&e.text, end)
+        let (visual, segment) = layout.visual_at(&e.text, bytes.start);
+        let row = layout.locate(visual).0;
+        let start = e.text.line_to_byte(row);
+        let end = bytes.end.min(start + segment.bytes.end).max(bytes.start);
+        let mut cache = None;
+        let mut r = self.rect_at_in(e, bytes.start, &mut cache);
+        let end_boundary = if layout.advances_for(e.text.line_len_bytes(row)).enabled()
+            && end < e.text.len_bytes()
+            && end > bytes.start
+        {
+            let prev = e.text.prev_grapheme_boundary(end);
+            e.text
+                .next_grapheme_boundary(prev)
+                .min(start + segment.bytes.end)
         } else {
-            let start = e.text.line_to_byte(row);
-            let (line, base, source_column) = layout.unit_window(&e.text, row, start, &segment);
-            let gaps = layout.invisible_gaps(row, &line, base, source_column);
-            segment.indent
-                + layout::units_in(
-                    &line,
-                    base,
-                    layout.hidden(row),
-                    e.preferences.tab_size,
-                    source_column,
-                )
-                .iter()
-                .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= end - start)
-                .map(|u| {
-                    u.width
-                        + layout.phantom_gap(start + u.bytes.start)
-                        + gaps
-                            .as_ref()
-                            .map_or(0, |g| layout::Layout::invisible_gap(g, u.bytes.start))
-                })
-                .sum::<usize>()
+            end
         };
-        r.width =
-            ((end_col as f64 - layout.column(&e.text, bytes.start) as f64) * self.cell).max(1.);
+        let end_x = layout.segment_x(
+            &e.text,
+            row,
+            &segment,
+            end_boundary - start,
+            self.cell,
+            &mut cache,
+        );
+        let begin_x = r.x - self.gutter(e) - self.margin(e) + self.scroll_x;
+        r.width = (end_x - begin_x).max(1.);
         (r, Utf16Range::from_bytes(&e.text, bytes.start..end))
     }
     pub fn viewport(&self, e: &Editor) -> Range<usize> {
@@ -2257,10 +2339,9 @@ impl View {
                     if layout.visual_at(&e.text, f.begin()).0 != visual {
                         return false;
                     }
-                    let x = self.gutter(e)
-                        + self.margin(e)
-                        + layout.column(&e.text, f.begin()) as f64 * self.cell
-                        - self.scroll_x;
+                    let x =
+                        self.gutter(e) + self.margin(e) + layout.x(&e.text, f.begin(), self.cell)
+                            - self.scroll_x;
                     point.x >= x && point.x < x + self.cell
                 })
                 .copied();
@@ -2581,31 +2662,36 @@ impl View {
                     } else {
                         p.reference.line(hunk.old.start + offset).to_string()
                     };
+                    let original = original.trim_end_matches('\n');
+                    let advances = layout.advances_for(original.len());
+                    let units = layout::units(original, &[], e.preferences.tab_size);
+                    let x_at = |end: usize| {
+                        (2. + units
+                            .iter()
+                            .take_while(|u| u.bytes.start < end)
+                            .map(|u| u.width as f64 + advances.adjustment(u.text, u.width))
+                            .sum::<f64>())
+                            * self.cell
+                    };
                     if let Some(changes) = p.inline_spans.get(&hunk.new.start) {
                         let row = hunk.old.start + offset;
                         if row < p.reference.len_lines() {
                             let start = p.reference.line_to_byte(row);
-                            let end = start + original.trim_end_matches('\n').len();
+                            let end = start + original.len();
                             for change in changes
                                 .iter()
                                 .filter(|c| c.old.start < end && c.old.end > start)
                             {
-                                let a = crate::editor::cells_with_tab(
-                                    &original[..change.old.start.max(start) - start],
-                                    e.preferences.tab_size,
-                                );
-                                let b = crate::editor::cells_with_tab(
-                                    &original[..change.old.end.min(end) - start],
-                                    e.preferences.tab_size,
-                                );
+                                let a = x_at(change.old.start.max(start) - start);
+                                let b = x_at(change.old.end.min(end) - start);
                                 let mut color = global("line_diff_deleted");
                                 color[3] = 0.35;
                                 fill(
                                     &mut layer,
                                     Rect {
-                                        x: left + (a + 2) as f64 * self.cell - self.scroll_x,
+                                        x: left + a - self.scroll_x,
                                         y,
-                                        width: b.saturating_sub(a) as f64 * self.cell,
+                                        width: b - a,
                                         height: self.line_height,
                                     },
                                     clip,
@@ -2614,9 +2700,17 @@ impl View {
                             }
                         }
                     }
+                    let mut text = String::from("− ");
+                    for unit in &units {
+                        if unit.text == "\t" {
+                            text.extend(std::iter::repeat_n(' ', unit.width));
+                        } else {
+                            text.push_str(unit.text);
+                        }
+                    }
                     text_run(
                         &mut layer,
-                        &format!("− {}", original.trim_end_matches('\n')),
+                        &text,
                         left - self.scroll_x,
                         self.baseline(e, y),
                         e.preferences.font_size,
@@ -2624,6 +2718,9 @@ impl View {
                         FontStyle::default(),
                         clip,
                     );
+                    if advances.enabled() && !original.is_ascii() {
+                        layer.mark_wide_run(advances, false);
+                    }
                 }
                 continue;
             }
@@ -2833,25 +2930,34 @@ impl View {
                     }
                 }
             }
-            let display = if let Some(wrapped) = &wrapped {
-                wrapped.units.clone()
-            } else if base == 0 {
-                self.line_units(line, layout.hidden(row), e.preferences.tab_size)
+            let advances = layout.advances_for(if long_wrap {
+                crate::large::LONG_LINE
             } else {
-                layout::units_in(
-                    line,
-                    base,
-                    layout.hidden(row),
-                    e.preferences.tab_size,
-                    segment.source_column,
+                line.len()
+            });
+            let (display, cached_wide) = if let Some(wrapped) = &wrapped {
+                (wrapped.units.clone(), None)
+            } else if base == 0 {
+                self.line_units(line, layout.hidden(row), e.preferences.tab_size, &advances)
+            } else {
+                (
+                    layout::units_in(
+                        line,
+                        base,
+                        layout.hidden(row),
+                        e.preferences.tab_size,
+                        segment.source_column,
+                    )
+                    .into_iter()
+                    .map(|u| CachedUnit {
+                        marker: layout.hidden(row).contains(&u.bytes),
+                        adjustment: advances.adjustment(u.text, u.width) as f32,
+                        bytes: u.bytes,
+                        width: u.width,
+                    })
+                    .collect(),
+                    None,
                 )
-                .into_iter()
-                .map(|u| CachedUnit {
-                    marker: layout.hidden(row).contains(&u.bytes),
-                    bytes: u.bytes,
-                    width: u.width,
-                })
-                .collect()
             };
             let gaps = draw_invisible
                 .then(|| {
@@ -2869,6 +2975,47 @@ impl View {
             };
             let inline_phantoms = layout.has_phantom_inline() || gaps.is_some();
             let display_gap = |at: usize| layout.phantom_gap(start + at) + invisible_gap(at);
+            let relevant: Vec<_> = display
+                .iter()
+                .filter(|u| {
+                    u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end
+                })
+                .collect();
+            let owned_wide;
+            let (wide, origin, prior) =
+                if let Some(wide) = cached_wide.as_deref().filter(|_| !inline_phantoms) {
+                    (
+                        wide,
+                        segment.source_column,
+                        wide.adjustment(segment.source_column),
+                    )
+                } else {
+                    owned_wide = if advances.enabled() && (base != 0 || cached_wide.is_some()) {
+                        let mut w = WideColumns::default();
+                        let mut col = segment.indent;
+                        for u in &relevant {
+                            if inline_phantoms {
+                                col += display_gap(u.bytes.start);
+                            }
+                            w.push(col, u.width, f64::from(u.adjustment));
+                            col += u.width;
+                        }
+                        w
+                    } else {
+                        WideColumns::default()
+                    };
+                    (&owned_wide, segment.indent, 0.)
+                };
+            let cell = self.cell;
+            let px = |col: usize| {
+                if wide.is_grid() {
+                    col as f64 * cell
+                } else {
+                    (col as f64 + wide.adjustment(origin + col.saturating_sub(segment.indent))
+                        - prior)
+                        * cell
+                }
+            };
             if !layout.wrapped() {
                 let width = segment.indent
                     + display
@@ -2882,19 +3029,21 @@ impl View {
                                 }
                         })
                         .sum::<usize>();
-                self.note_width(e, Some(width));
+                self.note_width(e, Some(wide.x(width, 1.)));
             }
             let column_at = |byte: usize| {
-                if inline_phantoms {
-                    return layout.column(&e.text, byte);
-                }
                 segment.indent
-                    + display
+                    + relevant
                         .iter()
-                        .filter(|u| {
-                            u.bytes.start >= segment.bytes.start && u.bytes.end <= byte - start
+                        .take_while(|u| u.bytes.end <= byte - start)
+                        .map(|u| {
+                            u.width
+                                + if inline_phantoms {
+                                    display_gap(u.bytes.start)
+                                } else {
+                                    0
+                                }
                         })
-                        .map(|u| u.width)
                         .sum::<usize>()
             };
             if let Some(p) = publication {
@@ -2915,9 +3064,9 @@ impl View {
                         fill(
                             &mut layer,
                             Rect {
-                                x: left + a as f64 * self.cell - self.scroll_x,
+                                x: left + px(a) - self.scroll_x,
                                 y,
-                                width: b.saturating_sub(a) as f64 * self.cell,
+                                width: px(b) - px(a),
                                 height: self.line_height,
                             },
                             clip,
@@ -2939,8 +3088,8 @@ impl View {
                 {
                     let a = column_at(error.range.start.max(begin));
                     let b = column_at(error.range.end.min(end));
-                    let x = left + a as f64 * self.cell - self.scroll_x;
-                    let width = b.saturating_sub(a) as f64 * self.cell;
+                    let x = left + px(a) - self.scroll_x;
+                    let width = px(b) - px(a);
                     layer.underlines.push(vel_render::scene::Underline {
                         rect: Rect {
                             x,
@@ -2956,12 +3105,6 @@ impl View {
                     });
                 }
             }
-            let relevant: Vec<_> = display
-                .iter()
-                .filter(|u| {
-                    u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end
-                })
-                .collect();
             let mut column = segment.indent;
             let range_start = start + segment.bytes.start;
             let range_end = start + segment.bytes.end;
@@ -2996,9 +3139,9 @@ impl View {
             {
                 let (a, b) = band(selection.begin(), selection.end());
                 let rect = Rect {
-                    x: left + (segment.indent + a) as f64 * self.cell - self.scroll_x,
+                    x: left + px(segment.indent + a) - self.scroll_x,
                     y,
-                    width: (b.saturating_sub(a) as f64 * self.cell).max(1.),
+                    width: (px(segment.indent + b) - px(segment.indent + a)).max(1.),
                     height: self.line_height,
                 };
                 if !shaped_selection {
@@ -3021,9 +3164,9 @@ impl View {
                     border(
                         &mut layer,
                         Rect {
-                            x: left + (segment.indent + a) as f64 * self.cell - self.scroll_x,
+                            x: left + px(segment.indent + a) - self.scroll_x,
                             y,
-                            width: (b.saturating_sub(a) as f64 * self.cell).max(2.),
+                            width: (px(segment.indent + b) - px(segment.indent + a)).max(2.),
                             height: self.line_height,
                         },
                         clip,
@@ -3114,11 +3257,11 @@ impl View {
                     while units.peek().is_some_and(|u| u.bytes.start < range.end) {
                         col += width(units.next().expect("peeked unit"));
                     }
-                    let x = left + a as f64 * self.cell - self.scroll_x;
+                    let x = left + px(a) - self.scroll_x;
                     if x >= right {
                         break;
                     }
-                    if x + (col - a) as f64 * self.cell < gutter {
+                    if left + px(col) - self.scroll_x < gutter {
                         continue;
                     }
                     if regions
@@ -3136,7 +3279,7 @@ impl View {
                         Rect {
                             x,
                             y,
-                            width: ((col - a) as f64 * self.cell).max(1.),
+                            width: (px(col) - px(a)).max(1.),
                             height: self.line_height,
                         },
                         clip,
@@ -3164,7 +3307,8 @@ impl View {
             );
             let mut previous_span = None;
             let mut span = spans.partition_point(|s| s.range.end <= segment.bytes.start);
-            for unit in relevant {
+            let mut adjustment = 0.;
+            for unit in &relevant {
                 let gap = if inline_phantoms {
                     display_gap(unit.bytes.start)
                 } else {
@@ -3174,12 +3318,15 @@ impl View {
                     if let Some((fg, font, decoration)) = run_style.take() {
                         self.flush(
                             &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                            advances,
                         );
                     }
                     column += gap;
                 }
                 let text = unit.text(line, base);
-                let x = left + column as f64 * self.cell - self.scroll_x;
+                let x = left + (column as f64 + adjustment) * cell - self.scroll_x;
+                let width = (unit.width as f64 + f64::from(unit.adjustment)) * cell;
+                adjustment += f64::from(unit.adjustment);
                 let at = start + unit.bytes.start;
                 let selected = has_selection
                     && regions
@@ -3235,7 +3382,7 @@ impl View {
                         && !no_italic,
                 };
                 let signature = (fg, font, style.font_style);
-                let visible = x + unit.width as f64 * self.cell >= gutter && x < right;
+                let visible = x + width >= gutter && x < right;
                 if draw_invisible
                     && let Some((c, extra)) = invisible.cell(text, unit.width)
                     && (gap >= extra && extra != 0)
@@ -3243,10 +3390,11 @@ impl View {
                     if let Some((fg, font, decoration)) = run_style.take() {
                         self.flush(
                             &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                            advances,
                         );
                     }
                     let x = x - extra as f64 * self.cell;
-                    let width = (unit.width + extra) as f64 * self.cell;
+                    let width = width + extra as f64 * self.cell;
                     if x + width >= gutter && x < right {
                         let color = if selected || found {
                             fg
@@ -3269,6 +3417,7 @@ impl View {
                 {
                     self.flush(
                         &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                        advances,
                     );
                 }
                 previous_span = Some(span);
@@ -3285,7 +3434,7 @@ impl View {
                         Rect {
                             x,
                             y,
-                            width: unit.width as f64 * self.cell,
+                            width,
                             height: self.line_height,
                         },
                         clip,
@@ -3327,16 +3476,17 @@ impl View {
             }
             if let Some((fg, font, decoration)) = run_style {
                 self.flush(
-                    &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e,
+                    &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e, advances,
                 );
             }
             if let Some(marked) = &e.marked {
                 let a = marked.start.max(range_start);
                 let b = marked.end.min(range_end);
                 if a < b {
-                    let x = left + layout.column(&e.text, a) as f64 * self.cell - self.scroll_x;
-                    let width =
-                        (layout.column(&e.text, b) - layout.column(&e.text, a)) as f64 * self.cell;
+                    let a = px(column_at(a));
+                    let b = px(column_at(b));
+                    let x = left + a - self.scroll_x;
+                    let width = b - a;
                     underline(
                         &mut layer,
                         Rect {
@@ -3437,7 +3587,7 @@ impl View {
                     || e.settings.bool("block_caret", false)
                     || e.preferences.caret_style == "block";
                 if block && !e.command_mode() && alpha > 0. {
-                    for run in layer.text.iter().filter(|run| {
+                    for (i, run) in layer.text.iter().enumerate().filter(|(_, run)| {
                         run.baseline as f64 >= caret.y
                             && run.baseline as f64 <= caret.y + caret.height
                     }) {
@@ -3446,6 +3596,10 @@ impl View {
                         glyph.color[3] *= alpha;
                         glyph.clip = vel_ui::minihtml::intersection(glyph.clip, caret);
                         carets.text.push(glyph);
+                        let advances = layer.wide_run_advances(i, false);
+                        if advances.enabled() {
+                            carets.mark_wide_run(advances, false);
+                        }
                     }
                 }
                 let target = if block && !e.command_mode() {
@@ -3623,10 +3777,12 @@ impl View {
         decoration: Decoration,
         clip: Rect,
         e: &Editor,
+        advances: WideAdvances,
     ) {
         if run.is_empty() {
             return;
         }
+        let measured = advances.enabled() && !run.is_ascii();
         if decoration.contains(Decoration::UNDERLINE)
             || decoration.contains(Decoration::STIPPLED_UNDERLINE)
             || decoration.contains(Decoration::SQUIGGLY_UNDERLINE)
@@ -3643,8 +3799,16 @@ impl View {
                 Rect {
                     x,
                     y: baseline + 2.,
-                    width: crate::editor::cells_with_tab(run, e.preferences.tab_size) as f64
-                        * self.cell,
+                    width: if measured {
+                        layout::units(run, &[], e.preferences.tab_size)
+                            .iter()
+                            .map(|u| u.width as f64 + advances.adjustment(u.text, u.width))
+                            .sum::<f64>()
+                            * self.cell
+                    } else {
+                        crate::editor::cells_with_tab(run, e.preferences.tab_size) as f64
+                            * self.cell
+                    },
                     height: 3.,
                 },
                 color,
@@ -3664,10 +3828,14 @@ impl View {
             clip,
         };
         // https://www.sublimetext.com/docs/color_schemes.html#style-rules
-        if decoration.contains(Decoration::GLOW) {
+        let glow = decoration.contains(Decoration::GLOW);
+        if glow {
             layer.glow.push(text.clone());
         }
         layer.text.push(text);
+        if measured {
+            layer.mark_wide_run(advances, glow);
+        }
     }
     fn bracket_glyph_styles(
         &self,
@@ -3768,15 +3936,14 @@ impl View {
                     continue;
                 };
                 for range in [&pair.open, &pair.close] {
-                    let a = self.rect_at(e, range.start);
-                    let b = self.rect_at(e, range.end);
+                    let (a, _) = self.range_rect(e, Utf16Range::from_bytes(&e.text, range.clone()));
                     if a.y >= self.tab_height - self.line_height && a.y <= self.size.height {
                         underline(
                             layer,
                             Rect {
                                 x: a.x,
                                 y: a.y + self.line_height - 3.,
-                                width: (b.x - a.x).max(self.cell),
+                                width: a.width,
                                 height: 3.,
                             },
                             fg,
@@ -3869,6 +4036,33 @@ impl View {
                 let segment_column = segment.source_column;
                 let segment_columns = segment.columns;
                 if let Some(line) = styled {
+                    let mut wide = WideColumns::default();
+                    if line.non_ascii {
+                        let advances = layout.advances_for(e.text.line_len_bytes(row));
+                        if advances.enabled() {
+                            let start = e.text.line_to_byte(row);
+                            let (text, base, col) =
+                                layout.unit_window(&e.text, row, start, &segment);
+                            let units = layout::units_in(
+                                &text,
+                                base,
+                                layout.hidden(row),
+                                e.preferences.tab_size,
+                                col,
+                            );
+                            wide = WideColumns::from_units(
+                                &advances,
+                                segment.indent,
+                                units
+                                    .iter()
+                                    .filter(|u| {
+                                        u.bytes.start >= segment.bytes.start
+                                            && u.bytes.end <= segment.bytes.end
+                                    })
+                                    .map(|u| (u.text, u.width, 0)),
+                            );
+                        }
+                    }
                     for token in &line.tokens {
                         let from = token.column.max(segment_column);
                         let to = (token.column + token.width)
@@ -3876,12 +4070,13 @@ impl View {
                         if to <= from {
                             continue;
                         }
-                        let x = bounds.x + (segment.indent + from - segment_column) as f64 * 0.65
-                            - horizontal;
+                        let a = wide.x(segment.indent + from - segment_column, 0.65);
+                        let b = wide.x(segment.indent + to - segment_column, 0.65);
+                        let x = bounds.x + a - horizontal;
                         if x >= bounds.x + width {
                             break;
                         }
-                        if x + (to - from) as f64 * 0.65 < bounds.x {
+                        if x + b - a < bounds.x {
                             continue;
                         }
                         fill(
@@ -3889,7 +4084,7 @@ impl View {
                             Rect {
                                 x,
                                 y,
-                                width: (to - from) as f64 * 0.65,
+                                width: b - a,
                                 height: map.pitch.min(1.5),
                             },
                             bounds,
@@ -5413,6 +5608,7 @@ mod round17_scene_timing {
                     decoration,
                     clip,
                     &editor,
+                    WideAdvances::default(),
                 );
                 assert_eq!(layer.glow.len(), usize::from(glow));
                 std::hint::black_box(layer);

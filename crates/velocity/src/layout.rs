@@ -1,9 +1,10 @@
 //! Incremental grapheme wrapping and fold projection with logarithmic row lookup.
-use std::{ops::Range, sync::Arc};
+use std::{cell::RefCell, ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vel_buffer::{BufferId, ChangeId, ChangeSet, Region, VerticalLayout};
 use vel_render::invisibles::Invisible;
+use vel_render::typography::{WideAdvances, WideColumns};
 use vel_text::Text;
 
 pub const FOLDS: &str = "velocity.folds";
@@ -82,6 +83,7 @@ struct WrapCache {
     tail: (usize, usize),
     dependencies: Dependencies,
     invisible: Option<Arc<Vec<(usize, usize)>>>,
+    measured: bool,
 }
 impl WrapCache {
     /// Replace gaps in the rewrapped section and rebase the untouched suffix.
@@ -120,6 +122,7 @@ impl Default for WrapCache {
             tail: (usize::MAX, 0),
             dependencies: Dependencies::Empty,
             invisible: None,
+            measured: false,
         }
     }
 }
@@ -192,12 +195,29 @@ pub struct Layout {
     inline: Vec<(usize, usize)>,
     phantom_inline: Vec<(usize, usize)>,
     invisible: Option<Invisible>,
+    advances: WideAdvances,
+    pixel_cache: RefCell<Option<RowColumns>>,
     pub rewrapped: usize,
     pub page: usize,
     /// Last viewport width in cells, also used for commands between frames.
     pub viewport_width: usize,
 }
 impl Layout {
+    pub fn set_wide_advances(&mut self, advances: WideAdvances) {
+        if self.advances != advances {
+            self.advances = advances;
+            self.invalidate();
+        }
+    }
+
+    /// Large-file views and windowed long rows must not require a line-wide scan.
+    pub fn advances_for(&self, line_len: usize) -> WideAdvances {
+        if line_len < crate::large::LONG_LINE {
+            self.advances
+        } else {
+            WideAdvances::default()
+        }
+    }
     pub fn current(&self, identity: (BufferId, ChangeId), options: Options) -> bool {
         self.identity == Some(identity) && self.options == options
     }
@@ -553,6 +573,19 @@ impl Layout {
             return false;
         };
         let short = len < crate::large::LONG_LINE;
+        if self.advances.enabled()
+            && (self.wrap[row].measured
+                || short != (old_len < crate::large::LONG_LINE)
+                || short
+                    && edits.iter().any(|edit| {
+                        let at = map.transform_point(edit.old_range.start, vel_buffer::Bias::Left);
+                        !reader.is_ascii(at..at + edit.new_len)
+                    }))
+        {
+            // A measured row uses the full geometry oracle. It is bounded by
+            // LONG_LINE; the incremental grid path still owns huge paragraphs.
+            return false;
+        }
         if GAPS && short != (old_len < crate::large::LONG_LINE) {
             // Crossing the drawing cutoff changes gaps throughout the row.
             return false;
@@ -1071,16 +1104,23 @@ impl Layout {
             dependencies.push(Dependency::default());
         }
         let mut source_column = 0;
+        let advances = self.advances_for(len);
+        let measured = advances.enabled() && !content.is_ascii();
         while from < units.len() {
             let left = if from == 0 { 0 } else { indent };
-            let (end, lookahead) = wrap_end(&units, from, left, self.options.width, |at| {
+            let gap = |at| {
                 self.phantom_gap(start + at)
                     + if GAPS {
                         Self::invisible_gap(&gaps, at)
                     } else {
                         0
                     }
-            });
+            };
+            let (end, lookahead) = if measured {
+                wrap_end_measured(&units, from, left, self.options.width, advances, gap)
+            } else {
+                wrap_end(&units, from, left, self.options.width, gap)
+            };
             let columns = units[from..end].iter().map(|u| u.width).sum::<usize>();
             segments.push(Segment {
                 bytes: units[from].bytes.start..units[end - 1].bytes.end,
@@ -1109,6 +1149,7 @@ impl Layout {
                 tail: (usize::MAX, 0),
                 dependencies: dependencies.into(),
                 invisible: (!gaps.is_empty()).then(|| Arc::new(gaps)),
+                measured,
             },
         )
     }
@@ -1355,6 +1396,54 @@ impl Layout {
     /// or folded rows, one segment) share its display units and gaps through `row_cache`,
     /// instead of rebuilding the whole line each time.
     pub fn column_in(&self, text: &Text, byte: usize, row_cache: &mut Option<RowColumns>) -> usize {
+        self.position_in::<false>(text, byte, row_cache).0
+    }
+
+    pub fn x_in(
+        &self,
+        text: &Text,
+        byte: usize,
+        cell: f64,
+        row_cache: &mut Option<RowColumns>,
+    ) -> f64 {
+        if !self.advances.enabled() {
+            return vel_render::typography::grid_x(self.column_in(text, byte, row_cache), cell);
+        }
+        let (column, adjustment) = self.position_in::<true>(text, byte, row_cache);
+        (column as f64 + adjustment) * cell
+    }
+
+    pub fn x(&self, text: &Text, byte: usize, cell: f64) -> f64 {
+        if !self.advances.enabled() {
+            return vel_render::typography::grid_x(self.column(text, byte), cell);
+        }
+        self.x_in(text, byte, cell, &mut self.pixel_cache.borrow_mut())
+    }
+
+    /// Range endpoints belong to the row being painted, even when that byte is
+    /// also the first caret position of the next visual row.
+    pub fn segment_x(
+        &self,
+        text: &Text,
+        row: usize,
+        segment: &Segment,
+        column_byte: usize,
+        cell: f64,
+        cache: &mut Option<RowColumns>,
+    ) -> f64 {
+        if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            return self.x_in(text, text.line_to_byte(row) + column_byte, cell, cache);
+        }
+        let (col, adjust) = self.segment_position::<true>(text, row, segment, column_byte, cache);
+        (col as f64 + adjust) * cell
+    }
+
+    fn position_in<const MEASURED: bool>(
+        &self,
+        text: &Text,
+        byte: usize,
+        row_cache: &mut Option<RowColumns>,
+    ) -> (usize, f64) {
         let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
         let fold = self
             .folds
@@ -1375,14 +1464,34 @@ impl Layout {
         });
         let row = text.byte_to_line(byte);
         let col = byte - text.line_to_byte(row);
+        if MEASURED && col == 0 && self.lines.is_empty() {
+            return (0, 0.);
+        }
         if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
-            return after_marker
-                + self.long_query(text, row, col, |i, a, c| {
-                    c + i.byte_to_column(col.saturating_sub(a))
-                });
+            return (
+                after_marker
+                    + self.long_query(text, row, col, |i, a, c| {
+                        c + i.byte_to_column(col.saturating_sub(a))
+                    }),
+                0.,
+            );
         }
         let (_, segment) = self.visual_at(text, byte);
+        let (column, adjustment) =
+            self.segment_position::<MEASURED>(text, row, &segment, col, row_cache);
+        (column + after_marker, adjustment)
+    }
+
+    fn segment_position<const MEASURED: bool>(
+        &self,
+        text: &Text,
+        row: usize,
+        segment: &Segment,
+        col: usize,
+        row_cache: &mut Option<RowColumns>,
+    ) -> (usize, f64) {
         let start = text.line_to_byte(row);
+        let byte = start + col;
         // [`Layout::unit_window`] measures a window for long wrapped rows and for folded rows
         // whose first segment starts inside a fold or that reach a segment behind a hidden
         // range; the cache then also depends on the segment's start and source column.
@@ -1397,12 +1506,16 @@ impl Layout {
                 });
         let stale = row_cache.as_ref().is_none_or(|cache| {
             cache.row != row
+                || MEASURED
+                    && (cache.wide.is_none()
+                        || cache.identity != self.identity
+                        || cache.geometry_revision != self.geometry_revision)
                 || window
                     && (cache.base != segment.bytes.start
                         || cache.source_column != segment.source_column)
         });
         if stale {
-            let (line, base, source_column) = self.unit_window(text, row, start, &segment);
+            let (line, base, source_column) = self.unit_window(text, row, start, segment);
             let units = units_in(
                 &line,
                 base,
@@ -1417,6 +1530,22 @@ impl Layout {
                 total += unit.width;
                 widths.push(total);
             }
+            let wide = MEASURED.then(|| {
+                let advances = self.advances_for(if window && self.long_wrapped(row) {
+                    crate::large::LONG_LINE
+                } else {
+                    line.len()
+                });
+                if advances.enabled() && !line.is_ascii() {
+                    WideColumns::from_units(
+                        &advances,
+                        0,
+                        units.iter().map(|u| (u.text, u.width, 0)),
+                    )
+                } else {
+                    WideColumns::default()
+                }
+            });
             *row_cache = Some(RowColumns {
                 row,
                 base,
@@ -1424,6 +1553,9 @@ impl Layout {
                 bounds: units.iter().map(|u| (u.bytes.start, u.bytes.end)).collect(),
                 widths,
                 gaps: self.invisible_gaps(row, &line, base, source_column),
+                wide,
+                identity: self.identity,
+                geometry_revision: self.geometry_revision,
             });
         }
         let cache = row_cache.as_ref().expect("row columns");
@@ -1449,10 +1581,75 @@ impl Layout {
         let past = cache
             .bounds
             .partition_point(|(_, b)| *b <= col.min(segment.bytes.end));
-        after_marker + inline + gaps + segment.indent + cache.widths[past.max(first)]
-            - cache.widths[first]
+        let a = cache.widths[first];
+        let b = cache.widths[past.max(first)];
+        let adjustment = if MEASURED {
+            cache
+                .wide
+                .as_ref()
+                .map_or(0., |wide| wide.adjustment(b) - wide.adjustment(a))
+        } else {
+            0.
+        };
+        (inline + gaps + segment.indent + b - a, adjustment)
+    }
+
+    /// Maps a box gesture's pixel position back to logical columns without
+    /// rounding away the side of a wide grapheme that was clicked.
+    pub fn column_at_x(&self, text: &Text, visual: usize, x: f64) -> f64 {
+        if !self.advances.enabled() {
+            return x;
+        }
+        let (row, n) = self.locate(visual);
+        let advances = self.advances_for(text.line_len_bytes(row));
+        if !advances.enabled() {
+            return x;
+        }
+        let segment = self.segment(text, row, n);
+        let start = text.line_to_byte(row);
+        let (line, base, source) = self.unit_window(text, row, start, &segment);
+        if line.is_ascii() {
+            return x;
+        }
+        let gaps = self.invisible_gaps(row, &line, base, source);
+        let units = units_in(&line, base, self.hidden(row), self.options.tab, source);
+        WideColumns::from_units(
+            &advances,
+            segment.indent,
+            units
+                .iter()
+                .filter(|u| {
+                    u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end
+                })
+                .map(|u| {
+                    let gap = self.phantom_gap(start + u.bytes.start)
+                        + gaps
+                            .as_ref()
+                            .map_or(0, |g| Self::invisible_gap(g, u.bytes.start));
+                    (u.text, u.width, gap)
+                }),
+        )
+        .column_at(x)
+    }
+
+    pub fn visual_end_column(&self, text: &Text, visual: usize) -> usize {
+        let (row, n) = self.locate(visual);
+        let segment = self.segment(text, row, n);
+        if self.options.width == 0 && text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            return self.column(text, text.line_to_byte(row) + body_len(text, row));
+        }
+        self.segment_position::<false>(text, row, &segment, segment.bytes.end, &mut None)
+            .0
     }
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
+        self.offset_in::<false>(text, visual, x)
+    }
+
+    pub fn offset_x(&self, text: &Text, visual: usize, x: f64, cell: f64) -> usize {
+        self.offset_in::<true>(text, visual, x / cell)
+    }
+
+    fn offset_in<const MEASURED: bool>(&self, text: &Text, visual: usize, x: f64) -> usize {
         let visual = visual.min(self.total().saturating_sub(1));
         let (row, n) = self.locate(visual);
         let row = row.min(text.len_lines().saturating_sub(1));
@@ -1466,6 +1663,15 @@ impl Layout {
         }
         let start = text.line_to_byte(row);
         let (line, base, source_column) = self.unit_window(text, row, start, &segment);
+        let advances = if MEASURED {
+            self.advances_for(if self.long_wrapped(row) {
+                crate::large::LONG_LINE
+            } else {
+                line.len()
+            })
+        } else {
+            WideAdvances::default()
+        };
         let gaps = self.invisible_gaps(row, &line, base, source_column);
         let mut col = segment.indent as f64;
         let x = if x.is_finite() { x.max(0.) } else { 0. };
@@ -1489,13 +1695,16 @@ impl Layout {
             let extra = gaps
                 .as_ref()
                 .map_or(0, |g| Self::invisible_gap(g, unit.bytes.start));
-            let width = (unit.width + extra) as f64;
+            let adjust = advances.adjustment(unit.text, unit.width);
+            let width = (unit.width + extra) as f64 + adjust;
             if x <= col + width / 2. {
                 return text.floor_char_boundary(
                     (text.line_to_byte(row) + unit.bytes.start).min(text.len_bytes()),
                 );
             }
-            if extra != 0 && x < col + width {
+            if extra != 0 && x < col + width
+                || adjust != 0. && unit.bytes.end == segment.bytes.end && x <= col + width + 1e-9
+            {
                 return (start + unit.bytes.end).min(text.len_bytes());
             }
             col += width;
@@ -1755,6 +1964,19 @@ impl<'a> ByteReader<'a> {
         }
         result
     }
+
+    fn is_ascii(&self, range: Range<usize>) -> bool {
+        let mut at = range.start;
+        while at < range.end {
+            let (chunk, base) = self.chunk_at_byte(at);
+            let end = range.end.min(base + chunk.len());
+            if !chunk.as_bytes()[at - base..end - base].is_ascii() {
+                return false;
+            }
+            at = end;
+        }
+        true
+    }
 }
 
 // The full and incremental paths use the same whitespace/fallback rule.
@@ -1791,6 +2013,44 @@ fn wrap_end(
     (end, lookahead)
 }
 
+fn wrap_end_measured(
+    units: &[Unit<'_>],
+    from: usize,
+    left: usize,
+    width: usize,
+    advances: WideAdvances,
+    gap: impl Fn(usize) -> usize,
+) -> (usize, usize) {
+    let mut x = left as f64;
+    let mut end = from;
+    let mut word = None;
+    let mut any_content = false;
+    while let Some(unit) = units.get(end) {
+        let next = x
+            + (unit.width + gap(unit.bytes.start)) as f64
+            + advances.adjustment(unit.text, unit.width);
+        if next > width as f64 + 1e-9 && end > from {
+            break;
+        }
+        x = next;
+        end += 1;
+        let whitespace = unit.text.chars().all(char::is_whitespace);
+        if whitespace && any_content
+            || (unit.width >= 2 && unit.text.chars().next().is_some_and(char::is_alphanumeric))
+        {
+            word = Some(end);
+        }
+        any_content |= !whitespace;
+    }
+    let lookahead = units[end.min(units.len() - 1)].bytes.end;
+    if end < units.len()
+        && let Some(boundary) = word
+    {
+        end = boundary;
+    }
+    (end, lookahead)
+}
+
 /// One row's (or wrapped segment's) display units, for repeated [`Layout::column_in`]
 /// queries.
 #[derive(Debug)]
@@ -1804,6 +2064,9 @@ pub struct RowColumns {
     /// Cells before each unit (and after the last).
     widths: Vec<usize>,
     gaps: Option<Arc<Vec<(usize, usize)>>>,
+    wide: Option<WideColumns>,
+    identity: Option<(BufferId, ChangeId)>,
+    geometry_revision: u64,
 }
 /// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
 pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit<'a>> {
@@ -1868,6 +2131,11 @@ fn units_from<'a>(
             && !(byte == b'\r' && next == Some(&b'\n'))
         {
             &line[at..at + 1]
+        } else if basic_han(&line.as_bytes()[at..])
+            && (line.as_bytes().get(at + 3).is_none_or(u8::is_ascii)
+                || basic_han(&line.as_bytes()[at + 3..]))
+        {
+            &line[at..at + 3]
         } else {
             line[at..].graphemes(true).next().expect("grapheme")
         };
@@ -1878,6 +2146,8 @@ fn units_from<'a>(
             tab - column % tab
         } else if g.len() == 1 && byte.is_ascii() {
             1
+        } else if g.len() == 3 && basic_han(g.as_bytes()) {
+            2
         } else {
             g.width().max(1)
         };
@@ -1899,6 +2169,14 @@ fn units_from<'a>(
         });
     }
     units
+}
+
+// U+4E00..=U+9FFF are standalone Other graphemes. Skip the segmenter only
+// when the next code point is also known not to extend the cluster; variation
+// selectors, combining marks and every other neighbor use the Unicode oracle.
+#[inline]
+fn basic_han(bytes: &[u8]) -> bool {
+    matches!(bytes, [0xe4, 0xb8..=0xbf, ..] | [0xe5..=0xe9, ..])
 }
 
 /// Physical line body length without allocating or scanning its contents.

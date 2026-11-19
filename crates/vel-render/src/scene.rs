@@ -142,6 +142,9 @@ pub struct Layer {
     pub surfaces: Vec<Surface>,
     /// Editor shaping/raster switches, absent for UI text.
     pub font_options: crate::typography::FontOptions,
+    /// Only regular editor text opts into measured spacing. Hex, long rows and
+    /// other text primitives in the same layer keep their original shaping.
+    pub wide_text: Option<Box<WideText>>,
     /// Text runs with glow, painted beneath normal glyphs only when present.
     pub glow: Vec<TextRun>,
     /// Connected selection fill and border; empty on the normal caret-only path.
@@ -156,6 +159,44 @@ pub struct Layer {
     pub text: Vec<TextRun>,
     /// Preedit and diagnostic decorations.
     pub underlines: Vec<Underline>,
+}
+
+/// Run indices with measured wide spacing, kept out of ordinary text runs.
+#[derive(Clone, Debug, Default)]
+pub struct WideText {
+    advances: crate::typography::WideAdvances,
+    text: Vec<usize>,
+    glow: Vec<usize>,
+}
+
+impl Layer {
+    /// Marks the just-appended text run (and its glow duplicate, if any).
+    pub fn mark_wide_run(&mut self, advances: crate::typography::WideAdvances, glow: bool) {
+        let wide = self.wide_text.get_or_insert_with(Default::default);
+        wide.advances = advances;
+        wide.text.push(self.text.len() - 1);
+        if glow {
+            wide.glow.push(self.glow.len() - 1);
+        }
+    }
+
+    /// Spacing of a text or glow run, also used when duplicating a clipped run.
+    pub fn wide_run_advances(&self, index: usize, glow: bool) -> crate::typography::WideAdvances {
+        self.wide_text
+            .as_ref()
+            .map_or_else(Default::default, |w| w.advances(index, glow))
+    }
+}
+
+impl WideText {
+    fn advances(&self, index: usize, glow: bool) -> crate::typography::WideAdvances {
+        let runs = if glow { &self.glow } else { &self.text };
+        if runs.binary_search(&index).is_ok() {
+            self.advances
+        } else {
+            Default::default()
+        }
+    }
 }
 /// A complete, reusable frame description in logical coordinates.
 #[derive(Clone, Debug)]

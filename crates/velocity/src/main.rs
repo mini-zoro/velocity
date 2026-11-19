@@ -6,6 +6,8 @@ mod app;
 mod bench;
 mod binary;
 mod build;
+#[cfg(target_os = "macos")]
+mod cjk_bench;
 mod cli;
 mod cli_stdin;
 mod completion;
@@ -168,6 +170,9 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.first().map(String::as_str) == Some("--render-scenes") {
             return app::render_scenes::run(&args[1..]);
+        }
+        if args.first().map(String::as_str) == Some("--headless-cjk") {
+            return cjk_bench::run();
         }
     }
     let Some(mut options) = Options::parse(std::env::args().skip(1))? else {
