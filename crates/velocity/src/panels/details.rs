@@ -422,7 +422,7 @@ impl Panels {
             _ => "",
         };
         Some(match workspace.editor().keymap.hint(&invocation) {
-            Some(keys) => format!("{name}{state} ({})", super::mac_key_equivalents(&keys)),
+            Some(keys) => format!("{name}{state} ({keys})"),
             None => format!("{name}{state}"),
         })
     }
@@ -1968,7 +1968,7 @@ mod publication_tests {
         assert_eq!(p.quick.items[p.quick.selected].caption, selected);
     }
     #[test]
-    fn actual_status_scene_hides_optional_formats_and_uses_feedback() {
+    fn actual_status_scene_shows_defaults_and_can_hide_formats() {
         let mut w = Workspace::new(vel_text::Text::from("你好"), None, None, false).unwrap();
         let mut p = Panels::new(&w, false);
         p.layout(Size {
@@ -1990,8 +1990,8 @@ mod publication_tests {
         let initial = text(&mut p, &w);
         assert!(initial.contains("Ln 1, Col 1"));
         assert!(!initial.contains("selected"));
-        assert!(!initial.contains("UTF-8"));
-        assert!(!initial.contains("Unix"));
+        assert!(initial.contains("UTF-8"));
+        assert!(initial.contains("Unix"));
         assert!(
             initial.contains(&vel_ui::status::indentation(
                 w.editor().preferences.translate_tabs_to_spaces,
@@ -2004,17 +2004,17 @@ mod publication_tests {
         w.editor_mut().settings.set(
             vel_config::settings::Layer::View,
             "show_encoding",
-            json!(true),
+            json!(false),
         );
         w.editor_mut().settings.set(
             vel_config::settings::Layer::View,
             "show_line_endings",
-            json!(true),
+            json!(false),
         );
         let selected = text(&mut p, &w);
         assert!(selected.contains("2 characters selected"));
-        assert!(selected.contains("UTF-8"));
-        assert!(selected.contains(w.tabs[w.active].format.line_ending.display_name()));
+        assert!(!selected.contains("UTF-8"));
+        assert!(!selected.contains(w.tabs[w.active].format.line_ending.display_name()));
         p.set_message("Unable to find missing".into());
         assert!(text(&mut p, &w).contains("Unable to find missing"));
     }

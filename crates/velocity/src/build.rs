@@ -9,6 +9,70 @@ use vel_config::{Value, json};
 thread_local! { pub(crate) static MATCHING_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 type BuildChoice = (String, Option<String>);
 type MatchingSet = Vec<(String, String)>;
+fn apply_build_settings(build: &mut BuildSystem, settings: &vel_config::settings::Settings) {
+    // Build systems override the view's fallback matchers and environment.
+    // https://www.sublimetext.com/docs/build_systems.html#exec-target-options
+    for (option, value) in [
+        ("file_regex", settings.string("result_file_regex", "")),
+        ("line_regex", settings.string("result_line_regex", "")),
+        ("result_base_dir", settings.string("result_base_dir", "")),
+    ] {
+        if !value.is_empty() {
+            build.options.entry(option).or_insert_with(|| json!(value));
+        }
+    }
+    if let Some(defaults) = settings.get("build_env").and_then(Value::as_object)
+        && !defaults.is_empty()
+    {
+        let env = build.options.entry("env").or_insert_with(|| json!({}));
+        if let Some(env) = env.as_object_mut() {
+            for (key, value) in defaults {
+                if value.is_string() {
+                    env.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn build_settings_supply_result_base_and_merge_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = vel_config::settings::Settings::default();
+    let layer = vel_config::settings::Layer::User;
+    for (key, value) in [
+        ("result_file_regex", json!(r"^file (.+)$")),
+        ("result_line_regex", json!(r"^line (\d+):(\d+) (.*)$")),
+        ("result_base_dir", json!(dir.path())),
+        (
+            "build_env",
+            json!({"LANE_DEFAULT":"yes","LANE_OVERRIDE":"default"}),
+        ),
+    ] {
+        settings.set(layer, key, value);
+    }
+    let mut build = BuildSystem::from_value(
+        "test",
+        json!({
+            "cmd":["true"], "env":{"LANE_OVERRIDE":"build"}
+        }),
+    )
+    .unwrap();
+    apply_build_settings(&mut build, &settings);
+    let mut exec = build
+        .resolve(&Variables::new(None, None, None, None))
+        .unwrap();
+    assert_eq!(exec.env["LANE_DEFAULT"], "yes");
+    assert_eq!(exec.env["LANE_OVERRIDE"], "build");
+    assert!(exec.parser.parse("file main.rs").is_none());
+    let result = exec.parser.parse("line 4:2 message").unwrap();
+    assert_eq!(
+        result.path,
+        dir.path().canonicalize().unwrap().join("main.rs")
+    );
+    assert_eq!((result.line, result.column), (4, 2));
+}
 #[derive(Debug, Default)]
 pub struct Builds {
     pub task: Option<Task>,
@@ -36,7 +100,7 @@ impl Builds {
         #[cfg(test)]
         crate::test_login::install();
         let direct = args.get("cmd").is_some() || args.get("shell_cmd").is_some();
-        let build = if direct {
+        let mut build = if direct {
             BuildSystem::from_value("exec", args.clone())?
         } else {
             // The app resolves Automatic exactly once per request. Explicit Tools
@@ -63,6 +127,7 @@ impl Builds {
             workspace.project_path(),
             packages.as_deref(),
         );
+        apply_build_settings(&mut build, &workspace.editor().settings);
         let exec = match build.resolve(&variables) {
             Ok(exec) => exec,
             Err(error) => {

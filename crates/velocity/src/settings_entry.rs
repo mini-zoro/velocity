@@ -77,6 +77,42 @@ fn create_user(path: &Path, template: &str) -> Result<(), String> {
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
+fn syntax_settings_args(
+    data: &Path,
+    name: &str,
+    syntax_path: &str,
+    stem: &str,
+    resources: &Resources,
+) -> Result<Value, String> {
+    // https://www.sublimetext.com/docs/settings.html#syntax-specific-settings
+    // The User file uses the grammar's file stem, as Sublime does; the package default
+    // is looked up by display name first, then by the same stem.
+    let file = format!("{name}.sublime-settings");
+    let stem_file = format!("{stem}.sublime-settings");
+    let user = data.join("Packages/User").join(&stem_file);
+    let package = syntax_path.split('/').nth(1).unwrap_or("Default");
+    let preferred = format!("Packages/{package}/{file}");
+    let source = resources
+        .get(&preferred)
+        .or_else(|| resources.get(&format!("Packages/{package}/{stem_file}")))
+        .or_else(|| {
+            resources.matching(&file).into_iter().find(|r| {
+                !r.path.starts_with("Packages/User/")
+                    && r.path.rsplit('/').next() == Some(file.as_str())
+            })
+        })
+        .or_else(|| {
+            resources.matching(&stem_file).into_iter().find(|r| {
+                !r.path.starts_with("Packages/User/")
+                    && r.path.rsplit('/').next() == Some(stem_file.as_str())
+            })
+        });
+    Ok(json!({
+        "base_file": source.map_or_else(|| format!("Generated/{file}"), |p| p.path.clone()),
+        "_generated_syntax_defaults": source.is_none(), "user_file":user,
+        "default":"{\n\t$0\n}\n"
+    }))
+}
 /// Preferences left/default, right/User, as documented at settings.html. The
 /// command's paths/variables follow reference/commands.html and the new-window
 /// edit_settings example in the public community customization guide.
@@ -90,7 +126,14 @@ fn settings_workspace(
     let base = args["base_file"]
         .as_str()
         .ok_or("edit_settings needs base_file")?;
-    let (resource, contents) = source(base, data, resources)?;
+    let (resource, contents) = if args["_generated_syntax_defaults"] == true {
+        (
+            base.to_owned(),
+            "// No package defaults for this syntax.\n{}\n".into(),
+        )
+    } else {
+        source(base, data, resources)?
+    };
     let name = Path::new(&resource)
         .file_name()
         .ok_or("base_file needs a filename")?
@@ -200,19 +243,18 @@ impl App {
                     l.name.as_str(),
                 )
             });
-            // Syntax-specific settings layer: https://www.sublimetext.com/docs/settings.html#syntax-specific-settings
+            let path = language.as_ref().map_or("", |l| l.syntax.as_str());
+            let mut args_value =
+                syntax_settings_args(&data, display, path, syntax, &self.workspace.resources)?;
+            // Prefer an existing display-name User file over an empty stem file.
             let user = format!("Packages/User/{syntax}.sublime-settings");
             let alias = format!("Packages/User/{display}.sublime-settings");
-            let user = data.join(
-                if self.workspace.resources.get(&user).is_none()
-                    && self.workspace.resources.get(&alias).is_some()
-                {
-                    alias
-                } else {
-                    user
-                },
-            );
-            args = json!({"base_file":"Packages/Default/Preferences.sublime-settings","user_file":user,"default":"{\n\t$0\n}\n"});
+            if self.workspace.resources.get(&user).is_none()
+                && self.workspace.resources.get(&alias).is_some()
+            {
+                args_value["user_file"] = json!(data.join(alias).to_string_lossy());
+            }
+            args = args_value;
         }
         if matches!(name, "customize_color_scheme" | "customize_theme") {
             let scheme = name == "customize_color_scheme";

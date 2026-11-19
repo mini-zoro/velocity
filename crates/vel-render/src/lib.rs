@@ -33,6 +33,8 @@ pub mod font {
         pub x: f32,
         /// Vertical offset in pixels.
         pub y: f32,
+        /// UTF-8 byte span of the shaped cluster.
+        pub source: [usize; 2],
     }
 }
 #[cfg(test)]

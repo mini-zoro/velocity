@@ -21,12 +21,12 @@ impl App {
         let fields = [
             (
                 FormatItem::Encoding,
-                editor.settings.bool("show_encoding", false),
+                editor.settings.bool("show_encoding", true),
                 tab.format.display_encoding(),
             ),
             (
                 FormatItem::LineEndings,
-                editor.settings.bool("show_line_endings", false),
+                editor.settings.bool("show_line_endings", true),
                 tab.format.line_ending.display_name(),
             ),
         ];
@@ -87,6 +87,7 @@ impl App {
                 command: row.command.map(str::to_owned),
                 args: row.args.to_string(),
                 children: row.children.into_iter().map(native).collect(),
+                ..Default::default()
             }
         }
         crate::panels::status_format_menu(&self.workspace, item)

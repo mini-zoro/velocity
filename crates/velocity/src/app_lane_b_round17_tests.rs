@@ -1593,7 +1593,7 @@ fn fixed_user_json_reloads_after_an_in_place_repair() {
         app.workspace
             .resource_reports
             .iter()
-            .any(|m| m.contains("Preferences.sublime-settings") && m.contains("line 1"))
+            .any(|m| m.contains("Preferences.sublime-settings:1:"))
     );
     assert_eq!(app.workspace.editor().preferences.font_size, 19.);
     let revision = app.workspace.resource_revision;

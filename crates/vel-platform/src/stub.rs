@@ -96,6 +96,14 @@ impl WindowHandle {
     pub fn save_file(&self, _suggested: &str) -> Option<std::path::PathBuf> {
         None
     }
+    /// No native chooser on this platform.
+    pub fn save_file_in(
+        &self,
+        _suggested: &str,
+        _directory: Option<&std::path::Path>,
+    ) -> Option<std::path::PathBuf> {
+        None
+    }
     /// No native alert on this platform.
     pub fn alert(&self, _message: &str, _detail: &str, _buttons: &[&str]) -> usize {
         0

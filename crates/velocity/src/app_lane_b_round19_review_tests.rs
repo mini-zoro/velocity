@@ -565,10 +565,7 @@ fn r19_review_settings_errors_retain_each_file_and_other_valid_changes_apply() {
     assert!(a.workspace.messages.is_empty());
     assert_eq!(a.workspace.editor().settings.usize("tab_size", 4), 7);
     a.publish_resource_reports();
-    assert!(
-        a.panels.message.contains("Plain Text.sublime-settings")
-            && a.panels.message.contains("line 2")
-    );
+    assert!(a.panels.message.contains("Plain Text.sublime-settings:2:"));
 }
 
 #[test]

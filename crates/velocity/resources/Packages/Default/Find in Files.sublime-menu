@@ -1,0 +1,6 @@
+// https://www.sublimetext.com/docs/menus.html#available-menus
+[
+  {"caption":"In Selection","command":"toggle_find_option","args":{"option":"in_selection"}},
+  {"caption":"Preserve Case","command":"toggle_find_option","args":{"option":"preserve_case"}},
+  {"caption":"Use .gitignore","command":"toggle_find_option","args":{"option":"use_gitignore"}}
+]

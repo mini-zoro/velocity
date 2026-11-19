@@ -360,10 +360,14 @@ pub trait AppHandler: 'static {
 pub struct MenuEntry {
     /// Visible caption, or "-" for a separator.
     pub caption: String,
+    /// Stable resource role, independent of the translated caption.
+    pub id: String,
     /// Command registry name, absent on submenu parents.
     pub command: Option<String>,
     /// Serialized keyword arguments.
     pub args: String,
+    /// Single Command chord (Sublime key syntax), or no native equivalent.
+    pub shortcut: Option<String>,
     /// Submenu contents.
     pub children: Vec<MenuEntry>,
 }

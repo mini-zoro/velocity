@@ -39,6 +39,8 @@
   // "system" (LF on macOS), "unix" or "windows".
   "default_line_ending": "system",
   "default_encoding": "UTF-8",
+  // Initial directory for Save As; empty uses the document directory or the system default.
+  "default_dir": "",
   "fallback_encoding": "Western (Windows 1252)",
   // Build 4107: opt out to ask before replacing even an unchanged buffer.
   // https://www.sublimetext.com/download
@@ -99,6 +101,9 @@
   "show_minimap": true,
   "show_tabs": true,
   "show_status_bar": true,
+  // Show the document's encoding and line-ending format in the status bar.
+  "show_encoding": true,
+  "show_line_endings": true,
   "minimap_horizontal_scrolling": false,
   "draw_minimap_border": false,
   // Visible default change; Visual Settings documents false (hover reveals it).
@@ -125,6 +130,9 @@
   "highlight_modified_tabs": false,
   // Scroll overflowing tabs; false fits all tabs into the strip.
   "enable_tab_scrolling": true,
+  // Use a vertical wheel over tabs to switch tabs instead of scrolling the strip.
+  // https://docs.sublimetext.io/reference/settings.html#global-settings
+  "mouse_wheel_switches_tabs": false,
   // Hide theme-provided tab-strip controls.
   "hide_new_tab_button": false,
   "hide_tab_scrolling_buttons": false,
@@ -137,6 +145,17 @@
   "show_panel_on_build": true,
   // Save dirty named files before invoking a build.
   "save_all_on_build": true,
+  // Fallback result matchers and relative path base for build output jumps.
+  // https://www.sublimetext.com/docs/build_systems.html#exec-target-options
+  "result_file_regex": "",
+  "result_line_regex": "",
+  "result_base_dir": "",
+  // Environment defaults; per-build env and path take precedence.
+  "build_env": {},
+  // Reserved. Velocity does not show a welcome page at startup.
+  "show_at_startup": false,
+  // Reserved. Velocity does not yet apply a dictionary of new-window overrides.
+  "new_window_settings": {},
   // "enabled" spells out the position; "compact" retains today's abbreviated item; "disabled" hides it.
   "show_line_column": "compact",
   // Animate folder rows unless Reduce Motion is enabled.
@@ -234,6 +253,10 @@
   "dark_theme": "Velocity.sublime-theme",
   "light_theme": "Velocity Light.sublime-theme",
   "ui_scale": 1.0,
+  // Language for menus and the command palette: en, zh-Hans, or auto (macOS preferred language).
+  "ui_language": "en",
+  // Empty uses the theme's UI font. A font family here overrides theme text only.
+  "ui_font_face": "",
   "ui_font_size": 12,
   "animation_enabled": true,
   // Explicit HTTPS index; no registry, timer or network request is enabled by default.

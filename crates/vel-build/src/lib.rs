@@ -208,7 +208,15 @@ impl BuildSystem {
         let parser = ResultParser::new(
             string("file_regex"),
             string("line_regex"),
-            working_dir.clone(),
+            string("result_base_dir")
+                .filter(|path| !path.is_empty())
+                .map(|path| {
+                    variables
+                        .expand(path)
+                        .map(|expanded| working_dir.join(expanded))
+                })
+                .transpose()?
+                .unwrap_or_else(|| working_dir.clone()),
         )?;
         Ok(Exec {
             cmd,

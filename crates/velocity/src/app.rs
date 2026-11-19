@@ -54,6 +54,13 @@ const WINDOW_COMMANDS: &[&str] = &[
     "close_folder_list",
     "toggle_show_open_files",
     "move_tab_to_window",
+    "move_tab_to_new_window",
+    "merge_all_windows",
+    "convert_to_encoding",
+    "show_console",
+    "new_snippet",
+    "widget_history",
+    "set_ui_language",
     "native_minimize",
     "native_zoom",
     "native_bring_all_to_front",
@@ -71,6 +78,9 @@ enum CommandStates {
     Single(CommandState),
     Multiple(Vec<CommandState>),
 }
+#[cfg(test)]
+#[path = "menu_settings_i18n_tests.rs"]
+mod menu_settings_i18n_tests;
 impl CommandStates {
     fn iter(&self) -> std::slice::Iter<'_, CommandState> {
         match self {
@@ -108,6 +118,7 @@ pub struct App {
     #[cfg(test)]
     overwrite_decisions: std::collections::VecDeque<bool>,
     pending_menu: Option<context_adapter::PendingMenu>,
+    menu_cache: Option<((u64, u64, u64), Vec<MenuEntry>)>,
     pending_utf8_saves: std::collections::VecDeque<(u64, Option<std::path::PathBuf>, String)>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_windows: std::cell::RefCell<std::collections::BTreeMap<u64, usize>>,
@@ -284,6 +295,7 @@ impl App {
             #[cfg(test)]
             overwrite_decisions: Default::default(),
             pending_menu: None,
+            menu_cache: None,
             pending_utf8_saves: Default::default(),
             accessibility_focus: None,
             accessibility_windows: Default::default(),
@@ -570,7 +582,7 @@ impl App {
         w: &WindowHandle,
         restored: Option<vel_session::Window>,
         reserved_id: Option<u64>,
-    ) -> Result<WindowHandle, String> {
+    ) -> Result<(WindowHandle, u64), String> {
         let project = restored.as_ref().and_then(|s| s.project.clone());
         let mut workspace = Workspace::new(
             vel_text::Text::new(),
@@ -605,6 +617,7 @@ impl App {
         if let Some(id) = reserved_id {
             app.restore_session_id(id);
         }
+        let id = app.session_id;
         w.new_window(
             WindowOptions {
                 title: "Velocity".into(),
@@ -615,19 +628,27 @@ impl App {
             },
             app,
         )
+        .map(|window| (window, id))
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         self.poll_restore_safety(w);
         self.publish_open_route();
-        self.sync_recents();
+        let merge = self
+            .sessions
+            .borrow_mut()
+            .menu_merges
+            .remove(&self.session_id);
+        if let Some(destination) = merge
+            && let Err(error) = self.merge_tabs_into(w, destination)
+        {
+            self.panels.message = error;
+        }
+        self.install_native_menu(w, false);
         self.sessions.borrow_mut().update_system_recents(
             self.workspace
                 .global_bool("update_system_recent_files", true),
             |path| w.system_recent_document(path),
         );
-        if self.workspace.refresh_file_menus() {
-            w.set_menu(&self.application_menu());
-        }
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
             let id = self.restored_reserved_ids.pop_front();
@@ -871,6 +892,7 @@ impl App {
         }
     }
     fn show_error(&mut self, w: &WindowHandle, message: &str) {
+        self.panels.note_console(message);
         let _ = self
             .reporter
             .emit(json!({"kind":"editor_error","message":message}));
@@ -884,6 +906,9 @@ impl App {
         let reports = self.workspace.take_resource_reports();
         if !reports.is_empty() {
             self.panels.message = reports.join("; ");
+            for report in &reports {
+                self.panels.note_console(report);
+            }
         }
     }
     fn save_status(&mut self, message: String) {
@@ -945,7 +970,11 @@ impl App {
             "refresh_folder_list" | "close_folder_list" => {
                 return !self.workspace.folders.is_empty();
             }
-            "toggle_show_open_files" | "move_tab_to_window" => return true,
+            "toggle_show_open_files" => return true,
+            "move_tab_to_window" | "move_tab_to_new_window" => {
+                return self.transferable_tab(target);
+            }
+            "merge_all_windows" => return !self.merge_sources().is_empty(),
             "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
             "reopen" | "reopen_encoding" | "revert"
                 if self.workspace.tabs[target].path.is_none() =>
@@ -959,6 +988,41 @@ impl App {
                 return false;
             }
             "save_all" => return self.workspace.tabs.iter().any(|tab| tab.dirty()),
+            // Search replacements are tied to a completed Find in Files request.
+            // https://docs.sublimetext.io/reference/commands.html
+            "replace_in_files" => return self.panels.file_replace_ready(),
+            "toggle_find_option"
+                if args["option"] == "use_gitignore"
+                    || (args["_context_menu"] == "find_in_files"
+                        && args["option"] == "in_selection") =>
+            {
+                return false;
+            }
+            "toggle_find_option" if args["option"] == "in_selection" => {
+                // This scope belongs to Find/Replace in the current document.
+                // https://docs.sublimetext.io/reference/commands.html
+                let editor = &self.workspace.tabs[target].editor;
+                return editor.binary.is_none()
+                    && self.panels.panel != Some(crate::panels::Panel::Files)
+                    && (matches!(
+                        self.panels.panel,
+                        Some(
+                            crate::panels::Panel::Find
+                                | crate::panels::Panel::Replace
+                                | crate::panels::Panel::Incremental
+                        )
+                    ) || !editor.selection().is_empty()
+                        || editor
+                            .buffer
+                            .view(editor.id)
+                            .sel()
+                            .iter()
+                            .any(|r| !r.empty()));
+            }
+            "run_macro" if self.workspace.editor().registry.is_recording() => {
+                return false;
+            }
+            "new_pane" => return self.workspace.split_workbench(args).is_ok(),
             "focus_group" | "move_to_group"
                 if args["group"]
                     .as_u64()
@@ -984,7 +1048,7 @@ impl App {
             }
             _ => {}
         }
-        if args["_context_menu"].is_null()
+        if (args["_context_menu"].is_null() || args["_context_menu"] == "widget")
             && self.panels.input().is_some()
             && !self.panels.palette_accept_pending(name, args)
             && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
@@ -1122,26 +1186,53 @@ impl App {
             }
         }
     }
-    fn application_menu(&mut self) -> Vec<MenuEntry> {
-        self.sync_recents();
-        self.workspace.refresh_file_menus();
+    fn build_application_menu(&mut self) -> Vec<MenuEntry> {
         let macros = self
             .panels
             .macro_file_items(&self.workspace)
             .unwrap_or_default();
-        let mut entries = native_menu(&self.workspace.menus, &macros);
+        let tr = &self.workspace.translations;
+        let mut entries = native_menu(&self.workspace.menus, &macros, &self.workspace.keymap, tr);
         if let Some(syntax) = entries
             .iter_mut()
-            .find(|item| item.caption == "View")
+            .find(|item| item.id == "view")
             .and_then(|view| {
                 view.children
                     .iter_mut()
-                    .find(|item| item.caption == "Syntax")
+                    .find(|item| item.id == "syntax_list")
             })
         {
             syntax.children.extend(self.syntax_menu());
         }
+        install_application_rows(&mut entries, tr);
+        prune_empty_menus(&mut entries);
         entries
+    }
+    fn application_menu(&mut self) -> Vec<MenuEntry> {
+        self.sync_recents();
+        self.workspace.refresh_file_menus();
+        self.build_application_menu()
+    }
+    fn install_native_menu(&mut self, window: &WindowHandle, focus_changed: bool) {
+        let rebuild = self.refresh_native_menu_model();
+        if rebuild || focus_changed {
+            window.set_menu(&self.menu_cache.as_ref().expect("installed menu").1);
+        }
+    }
+    fn refresh_native_menu_model(&mut self) -> bool {
+        self.sync_recents();
+        self.workspace.refresh_file_menus();
+        let key = (
+            self.workspace.resource_revision,
+            self.workspace.menu_revision,
+            self.workspace.translations.revision(),
+        );
+        if self.menu_cache.as_ref().is_some_and(|(old, _)| *old == key) {
+            return false;
+        }
+        let entries = self.build_application_menu();
+        self.menu_cache = Some((key, entries));
+        true
     }
     fn syntax_menu(&self) -> Vec<MenuEntry> {
         let mut packages = std::collections::BTreeMap::<_, Vec<MenuEntry>>::new();
@@ -1163,7 +1254,7 @@ impl App {
                 caption: syntax.name.clone(),
                 command: Some("set_file_type".into()),
                 args: json!({"syntax": syntax.path}).to_string(),
-                children: Vec::new(),
+                ..Default::default()
             });
         }
         packages
@@ -1172,9 +1263,8 @@ impl App {
                 children.sort_unstable_by(|a, b| a.caption.cmp(&b.caption));
                 MenuEntry {
                     caption: package.into(),
-                    command: None,
-                    args: "{}".into(),
                     children,
+                    ..Default::default()
                 }
             })
             .collect()
@@ -1225,18 +1315,7 @@ impl App {
             .sheet_index(sheet)
             .ok_or("The tab is no longer open")?;
         self.workspace.prepare_sheet(index)?;
-        let tab = &self.workspace.tabs[index];
-        if tab.loading.is_some()
-            || tab.binary_loading.is_some()
-            || self.workspace.stdout_sheets.contains(&sheet)
-            || self
-                .workspace
-                .tabs
-                .iter()
-                .filter(|t| t.session_document == tab.session_document)
-                .count()
-                > 1
-        {
+        if !self.transferable_tab(index) {
             return Err("Finish loading or close the other views before moving this tab".into());
         }
         if index == self.workspace.active {
@@ -1262,9 +1341,86 @@ impl App {
         }
         result
     }
+    fn transferable_tab(&self, index: usize) -> bool {
+        let tab = &self.workspace.tabs[index];
+        !self.workspace.is_empty()
+            && tab.loading.is_none()
+            && tab.binary_loading.is_none()
+            && !self.workspace.stdout_sheets.contains(&tab.sheet)
+            && self
+                .workspace
+                .tabs
+                .iter()
+                .filter(|t| t.session_document == tab.session_document)
+                .count()
+                == 1
+    }
+    fn merge_sources(&self) -> Vec<u64> {
+        let sessions = self.sessions.borrow();
+        let Some(active) = sessions.open_windows.get(&self.session_id) else {
+            return Vec::new();
+        };
+        // Preserve project roots and settings when merging editor tabs.
+        // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#Window-menu
+        sessions
+            .open_windows
+            .iter()
+            .filter_map(|(&id, route)| {
+                (id != self.session_id
+                    && route.project == active.project
+                    && route.folders == active.folders)
+                    .then_some(id)
+            })
+            .collect()
+    }
+    fn merge_tabs_into(&mut self, window: &WindowHandle, destination: u64) -> Result<(), String> {
+        let sheets: Vec<_> = self
+            .workspace
+            .workbench
+            .groups
+            .iter()
+            .flat_map(|group| group.sheets.iter().copied())
+            .collect();
+        if !self
+            .sessions
+            .borrow()
+            .can_receive_tabs(destination, sheets.len())
+            || (!self.workspace.is_empty()
+                && (0..self.workspace.tabs.len()).any(|index| !self.transferable_tab(index)))
+        {
+            return Err("This window has tabs that cannot be moved yet.".into());
+        }
+        if !self.workspace.is_empty() {
+            // Materialize before moving anything so errors cannot half-merge a window.
+            for index in 0..self.workspace.tabs.len() {
+                self.workspace.prepare_sheet(index)?;
+                if !self.transferable_tab(index) {
+                    return Err("Finish opening files before merging windows.".into());
+                }
+            }
+            for sheet in sheets {
+                self.move_tab_to_window(None, sheet, destination, usize::MAX)?;
+            }
+        }
+        window.request_close();
+        Ok(())
+    }
     fn poll_workspace_model(&mut self) -> bool {
         let transferred = self.receive_tabs();
-        self.workspace.poll() || transferred
+        let before = (
+            self.workspace.translations.revision(),
+            self.workspace.palette_revision,
+        );
+        let changed = self.workspace.poll();
+        if before
+            != (
+                self.workspace.translations.revision(),
+                self.workspace.palette_revision,
+            )
+        {
+            self.refresh_open_palette();
+        }
+        changed || transferred
     }
     fn receive_tabs(&mut self) -> bool {
         let incoming = self.sessions.borrow_mut().take_tabs(self.session_id);
@@ -1450,6 +1606,15 @@ impl App {
                 | "close_folder_list"
                 | "toggle_show_open_files"
                 | "move_tab_to_window"
+                | "move_tab_to_new_window"
+                | "merge_all_windows"
+                | "convert_to_encoding"
+                | "show_console"
+                | "widget_history"
+                | "set_ui_language"
+                | "open_url"
+                | "add_folder"
+                | "clear_recent_items"
         ) {
             self.apply_named_action(window, name, args)?;
             self.named_changed(window, false);
@@ -1597,8 +1762,11 @@ impl App {
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.workspace.tabs[index].name());
-            let window = window.ok_or("Saving an untitled document requires a file path")?;
-            let Some(path) = window.save_file(&suggested) else {
+            let Some(window) = window else {
+                return Ok(false);
+            };
+            let directory = self.save_dialog_directory(index);
+            let Some(path) = window.save_file_in(&suggested, directory.as_deref()) else {
                 return Ok(false);
             };
             Some(path)
@@ -1637,6 +1805,25 @@ impl App {
         }
         self.workspace.save(index, path)?;
         Ok(true)
+    }
+    fn save_dialog_directory(&self, index: usize) -> Option<PathBuf> {
+        // An empty default_dir preserves the current document directory.
+        // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html
+        let tab = &self.workspace.tabs[index];
+        let value = tab.editor.settings.string("default_dir", "");
+        let directory = match value.strip_prefix("~/") {
+            Some(rel) => std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rel)),
+            None if !value.is_empty() => Some(PathBuf::from(value)),
+            None => None,
+        };
+        directory
+            .filter(|path| path.is_absolute() && path.is_dir())
+            .or_else(|| {
+                tab.path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_owned)
+            })
     }
     /// Encoding failures keep the document/bytes intact and offer an explicit retry.
     fn offer_utf8_save(
@@ -1746,7 +1933,10 @@ impl App {
                     }
                     let path = if self.workspace.tabs[index].path.is_none() {
                         let Some(path) = window.and_then(|window| {
-                            window.save_file(&self.workspace.tabs[index].name())
+                            window.save_file_in(
+                                &self.workspace.tabs[index].name(),
+                                self.save_dialog_directory(index).as_deref(),
+                            )
                         }) else {
                             continue;
                         };
@@ -1789,12 +1979,6 @@ impl App {
                 }
                 let path = args["file"].as_str().map(std::path::PathBuf::from);
                 let save_as = matches!(name, "save_as" | "prompt_save_as");
-                if path.is_none()
-                    && (save_as || self.workspace.tabs[active].path.is_none())
-                    && window.is_none()
-                {
-                    return Err("Save requires a file path".into());
-                }
                 if let Some(encoding) = args["encoding"].as_str() {
                     self.workspace.tabs[active].format = vel_fileio::encoding_format(
                         encoding,
@@ -1805,7 +1989,9 @@ impl App {
                 }
                 let saved =
                     if path.is_none() && (save_as || self.workspace.tabs[active].path.is_none()) {
-                        self.save_tab(window.ok_or("Save requires a file path")?, active, save_as)
+                        // Save, Save As, and Save with Encoding all use the same panel
+                        // for unnamed files. https://docs.sublimetext.io/reference/commands.html#save
+                        window.is_some_and(|w| self.save_tab(w, active, save_as))
                     } else {
                         match self.save_tab_with_path(window, active, false, path.clone()) {
                             Ok(saved) => saved,
@@ -1973,7 +2159,92 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
+        if name == "set_ui_language" {
+            // The preference is app-wide; the ordinary User writer also updates
+            // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
+            let (language, note) = match args["language"].as_str() {
+                Some(requested @ ("en" | "zh-Hans" | "auto")) => (requested, None),
+                _ => (
+                    "en",
+                    Some(
+                        self.workspace
+                            .translations
+                            .tr("Unsupported UI language; using English"),
+                    ),
+                ),
+            };
+            if self.workspace.global_string("ui_language", "en") != language {
+                self.workspace
+                    .set_user_preference("ui_language", json!(language))?;
+                if self.workspace.sync_ui_language() {
+                    self.refresh_open_palette();
+                }
+            }
+            if let Some(note) = note {
+                self.panels.set_message(note.into_owned());
+            }
+            return Ok(());
+        }
+        if name == "command_note" {
+            self.panels.message = args["message"].as_str().unwrap_or_default().into();
+            return Ok(());
+        }
+        if name == "add_folder" && args["dir"].is_null() {
+            // Folder selection precedes the add_folder action.
+            // https://docs.sublimetext.io/reference/commands.html
+            if let Some(path) = window.and_then(WindowHandle::open_directory) {
+                self.panels.add_folder(&mut self.workspace, path)?;
+            }
+            return Ok(());
+        }
+        if name == "convert_to_encoding" {
+            let rows = vel_fileio::ENCODINGS
+                .iter()
+                .map(|&(encoding, _)| vel_config::ui::PaletteItem {
+                    caption: encoding.into(),
+                    invocation: vel_config::keymap::Invocation {
+                        command: "set_encoding".into(),
+                        args: json!({"encoding":encoding}),
+                    },
+                })
+                .collect();
+            self.panels.choices(&mut self.workspace, rows);
+            return Ok(());
+        }
+        if name == "show_console" {
+            self.panels.toggle_console(&mut self.workspace);
+            return Ok(());
+        }
+        if name == "widget_history" {
+            if self.panels.restore_widget_history(args) {
+                let viewport = self.viewport();
+                self.panels.edited(&mut self.workspace, viewport);
+            }
+            return Ok(());
+        }
+        if name == "move_tab_to_new_window" {
+            // Like the Window menu's tab operations in Apple's HIG, keep the
+            // document (and undo history) intact: transfer, don't save/reopen.
+            // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#Window-menu
+            if let Some(window) = window {
+                let sheet = self.workspace.tabs[self.workspace.active].sheet;
+                self.workspace.prepare_sheet(self.workspace.active)?;
+                if self.transferable_tab(self.workspace.active) {
+                    let (_, destination) = self.open_native_window(window, None, None)?;
+                    self.move_tab_to_window(Some(window), sheet, destination, 0)?;
+                }
+            }
+            return Ok(());
+        }
         if self.apply_tab_close_action(window, name, args)? {
+            return Ok(());
+        }
+        if name == "merge_all_windows" {
+            let sources = self.merge_sources();
+            self.sessions
+                .borrow_mut()
+                .menu_merges
+                .extend(sources.into_iter().map(|source| (source, self.session_id)));
             return Ok(());
         }
         if self.apply_settings_action(window, name, args)? {
@@ -2091,6 +2362,18 @@ impl App {
         if name == "switch_file" {
             return self.workspace.switch_file(&args["extensions"]);
         }
+        if name == "clear_recent_items" {
+            self.sync_recents();
+            self.workspace.recent_files.clear();
+            self.workspace.recent_folders.clear();
+            self.workspace.recent_projects.clear();
+            self.workspace.goto_recent_files.clear();
+            self.sessions.borrow_mut().clear_recent(self.session_id);
+            if let Some(window) = window {
+                self.install_native_menu(window, false);
+            }
+            return Ok(());
+        }
         if matches!(name, "clear_recent_files" | "clear_recent_projects") {
             let kind = if name == "clear_recent_files" {
                 self.workspace.recent_files.clear();
@@ -2122,7 +2405,8 @@ impl App {
         {
             return Ok(());
         }
-        Err(format!("command {name} needs a native window"))
+        self.panels.message = "This action is available in an editor window.".into();
+        Ok(())
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
         if self.apply_view_action(name, args)? {
@@ -2332,12 +2616,6 @@ impl App {
         match name {
             "new_file" => self.workspace.new_file()?,
             "reopen_last_file" => self.workspace.reopen_last_file()?,
-            "clear_recent_items" => {
-                self.workspace.recent_files.clear();
-                self.workspace.recent_folders.clear();
-                self.workspace.recent_projects.clear();
-                self.sessions.borrow_mut().clear_recent(self.session_id);
-            }
             "exit" => w.request_app_quit(),
             "open_recent_file" => {
                 self.workspace.open(crate::cli::FileLocation {
@@ -2678,6 +2956,12 @@ impl App {
             })
             .collect();
         self.panels.set_palette_enabled(enabled);
+    }
+    fn refresh_open_palette(&mut self) {
+        if self.panels.overlay == Some(crate::panels::Overlay::Palette) {
+            self.sync_palette_enabled();
+            self.panels.refresh_localized_palette(&mut self.workspace);
+        }
     }
     fn accept_palette_command(&mut self, name: &str, args: &Value) -> bool {
         let enabled = self.command_enabled(name, &args.to_string());
@@ -3789,7 +4073,7 @@ impl AppHandler for App {
         }
         self.panels.review.native_context = true;
         w.set_title(&self.workspace.window_title());
-        w.set_menu(&self.application_menu());
+        self.install_native_menu(w, true);
         self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":self.workspace.palette.len()}))?;
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
@@ -3917,13 +4201,12 @@ impl AppHandler for App {
                     }
                 };
                 let paths: Vec<PathBuf> = match name {
-                    "new_window" => {
+                    "new_window" | "edit_settings" | "open_url" | "open_crash_reports" => {
                         self.run_named(Some(w), name, &parsed);
                         return;
                     }
                     "clear_recent_items" => {
                         self.run_named(Some(w), name, &parsed);
-                        w.set_menu(&self.application_menu());
                         return;
                     }
                     "prompt_open_file" => w.open_files(),
@@ -4073,6 +4356,22 @@ impl AppHandler for App {
             "toggle_setting" => args["setting"]
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),
+            // Submenu checkmarks reflect the current state, not the action's label.
+            // https://developer.apple.com/design/human-interface-guidelines/menus
+            "set_layout" => crate::workbench::menu_layout(&args)
+                .is_ok_and(|layout| layout == self.workspace.workbench.layout),
+            "toggle_bookmark" => editor.bookmarks().iter().any(|mark| {
+                editor.text.byte_to_line(mark.begin()) == editor.text.byte_to_line(editor.caret)
+            }),
+            "expand_tabs" => editor.preferences.translate_tabs_to_spaces,
+            "unexpand_tabs" => !editor.preferences.translate_tabs_to_spaces,
+            "show_console" => self.panels.console_visible(),
+            "set_ui_language" => {
+                args["language"].as_str() == Some(self.workspace.global_string("ui_language", "en"))
+            }
+            "toggle_find_option" => args["option"]
+                .as_str()
+                .is_some_and(|option| self.panels.find_option_checked(option)),
             "toggle_side_bar" => self.panels.side_visible,
             "toggle_show_open_files" => self.panels.open_files_visible,
             "toggle_minimap" => self.workspace.window_visible("show_minimap"),
@@ -4306,7 +4605,7 @@ impl AppHandler for App {
                 self.poll_workbench(w)?;
             }
             if focus_changed {
-                w.set_menu(&self.application_menu());
+                self.install_native_menu(w, true);
             }
             let viewport = self.viewport();
             changed |= self.panels.poll(&mut self.workspace, viewport);
@@ -4344,7 +4643,7 @@ impl AppHandler for App {
                 self.view.reveal(self.workspace.editor());
             }
             if changed {
-                w.set_menu(&self.application_menu());
+                self.install_native_menu(w, false);
             }
             for record in std::mem::take(&mut self.workspace.telemetry) {
                 self.reporter.emit(record)?;
@@ -4805,6 +5104,8 @@ fn context_child_args(parent: &Value, child: &Value) -> Value {
 fn native_menu(
     items: &[vel_config::ui::MenuItem],
     macros: &[vel_config::ui::PaletteItem],
+    keymap: &vel_config::keymap::Keymap,
+    tr: &vel_i18n::Translator,
 ) -> Vec<MenuEntry> {
     items
         .iter()
@@ -4814,9 +5115,17 @@ fn native_menu(
                 && item.platform.as_deref() != Some("Linux")
         })
         .map(|item| MenuEntry {
-            caption: item.caption.clone(),
+            caption: localized_menu_caption(tr, &item.caption, item.command.as_deref()).to_owned(),
+            id: item.id.clone(),
             command: item.command.clone(),
             args: item.args.to_string(),
+            shortcut: item.command.as_ref().and_then(|command| {
+                if command.starts_with("native_") {
+                    item.shortcut.clone()
+                } else {
+                    keymap.menu_shortcut(command, &item.args)
+                }
+            }),
             children: if item.id == "macros" {
                 macros
                     .iter()
@@ -4824,14 +5133,112 @@ fn native_menu(
                         caption: row.caption.clone(),
                         command: Some(row.invocation.command.clone()),
                         args: row.invocation.args.to_string(),
-                        children: Vec::new(),
+                        shortcut: keymap
+                            .menu_shortcut(&row.invocation.command, &row.invocation.args),
+                        ..Default::default()
                     })
                     .collect()
             } else {
-                native_menu(&item.children, macros)
+                native_menu(&item.children, macros, keymap, tr)
             },
         })
         .collect()
+}
+
+fn localized_menu_caption<'a>(
+    tr: &'a vel_i18n::Translator,
+    caption: &'a str,
+    command: Option<&str>,
+) -> &'a str {
+    // Captions that are resource/data names are not UI strings.
+    if matches!(
+        command,
+        Some(
+            "reopen_encoding"
+                | "save_encoding"
+                | "open_recent_file"
+                | "open_recent_folder"
+                | "open_project"
+                | "run_macro_file"
+                | "set_file_type"
+        )
+    ) || (command == Some("set_build_system") && caption != "Automatic")
+    {
+        caption
+    } else {
+        tr.caption(caption)
+    }
+}
+
+fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Translator) {
+    // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#App-menu
+    // Settings edits defaults beside the User file: https://www.sublimetext.com/docs/settings.html.
+    let settings = entries
+        .iter_mut()
+        .find(|item| item.id == "preferences")
+        .and_then(|item| {
+            let index = item
+                .children
+                .iter()
+                .position(|entry| entry.id == "settings")?;
+            Some(item.children.remove(index))
+        });
+    let mut rows = Vec::new();
+    for (caption, command, shortcut) in [
+        ("About Velocity", "native_about", None),
+        ("-", "", None),
+        ("Settings…", "", None),
+        ("Services", "native_services", None),
+        ("-", "", None),
+        ("Hide Velocity", "native_hide", Some("super+h")),
+        ("Hide Others", "native_hide_others", Some("alt+super+h")),
+        ("Show All", "native_show_all", None),
+        ("-", "", None),
+        ("Quit Velocity", "native_quit", Some("super+q")),
+    ] {
+        match caption {
+            "Settings…" => rows.extend(settings.iter().cloned()),
+            _ => rows.push(MenuEntry {
+                caption: tr.tr(caption).into_owned(),
+                command: (!command.is_empty()).then(|| command.into()),
+                shortcut: shortcut.map(str::to_owned),
+                args: "{}".into(),
+                ..Default::default()
+            }),
+        }
+    }
+    // Keep the Preferences resource elsewhere in the bar without displacing Help
+    // from the trailing position or inserting non-system rows into the app menu.
+    if let Some(index) = entries.iter().position(|item| item.id == "preferences") {
+        let preferences = entries.remove(index);
+        let before = entries
+            .iter()
+            .position(|item| item.id == "window")
+            .unwrap_or(entries.len());
+        entries.insert(before, preferences);
+    }
+    if let Some(index) = entries.iter().position(|item| item.id == "help") {
+        let help = entries.remove(index);
+        entries.push(help);
+    }
+    entries.insert(
+        0,
+        MenuEntry {
+            caption: "Velocity".into(),
+            id: "application".into(),
+            children: rows,
+            ..Default::default()
+        },
+    );
+}
+
+fn prune_empty_menus(entries: &mut Vec<MenuEntry>) {
+    for entry in &mut *entries {
+        prune_empty_menus(&mut entry.children);
+    }
+    entries.retain(|entry| {
+        entry.caption == "-" || entry.command.is_some() || !entry.children.is_empty()
+    });
 }
 
 #[cfg(test)]

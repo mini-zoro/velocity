@@ -85,6 +85,16 @@ struct Fixture {
     project: PathBuf,
     file: PathBuf,
 }
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            eprintln!(
+                "velocity: could not remove {}: {error}",
+                self.root.display()
+            );
+        }
+    }
+}
 
 const MAIN_RS: &str = r#"//! Tiny task runner used by the renderer's design scenes.
 use std::collections::BTreeMap;
@@ -589,6 +599,29 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
     Ok(app)
 }
 
+fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64, query: &str) -> Result<App, String> {
+    let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
+    // Scene input, not a CLI switch or a persisted profile setting. Panel labels
+    // intentionally stay English in localization phase 1.
+    app.workspace.settings.set(
+        vel_config::settings::Layer::User,
+        "ui_language",
+        json!("zh-Hans"),
+    );
+    app.workspace.sync_ui_language();
+    app.workspace.editor_mut().settings.set(
+        vel_config::settings::Layer::View,
+        "ui_scale",
+        json!(scale),
+    );
+    named(
+        &mut app,
+        "show_overlay",
+        json!({"overlay":"command_palette","text":query}),
+    );
+    Ok(app)
+}
+
 fn picker_scene(fixture: &Fixture, dark: bool, command: &str) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     open(&mut app, &fixture.file)?;
@@ -1053,6 +1086,21 @@ const SCENARIOS: &[Scenario] = &[
         build: |f, d| overlay_scene(f, d, "command_palette", "toggle"),
     },
     Scenario {
+        name: "zh_hans",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 1., "保存"),
+    },
+    Scenario {
+        name: "zh_hans_ui2",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 2., "保存"),
+    },
+    Scenario {
+        name: "zh_hans_mixed",
+        size: (1200., 800.),
+        build: |f, d| chinese_scene(f, d, 2., "UTF-8"),
+    },
+    Scenario {
         name: "goto_anything",
         size: (1200., 800.),
         build: |f, d| overlay_scene(f, d, "goto", "rs"),
@@ -1501,6 +1549,162 @@ fn bench_scene(app: &mut App, name: &str, dark: bool, scale: f32, count: usize) 
     );
 }
 
+fn capture_chinese_layout(
+    app: &mut App,
+    out: &Path,
+    variant: &str,
+    dark: bool,
+    scale: f32,
+) -> Result<(), String> {
+    use vel_minihtml::FontMetrics;
+    fn model(rows: &[vel_platform::MenuEntry]) -> Vec<vel_config::Value> {
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "id":row.id, "caption":row.caption, "command":row.command,
+                    "shortcut":row.shortcut, "children":model(&row.children)
+                })
+            })
+            .collect()
+    }
+    let menus = model(&app.application_menu());
+    std::fs::write(
+        out.join("zh_hans-menu.json"),
+        serde_json::to_vec_pretty(&menus).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let scene = app.scene();
+    let theme = app.workspace.themes.ui.borrow();
+    let mut layout = Vec::new();
+    let mut mixed_checked = false;
+    for run in scene
+        .layers
+        .iter()
+        .flat_map(|layer| &layer.text)
+        .filter(|run| {
+            run.text
+                .chars()
+                .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+        })
+    {
+        let style = vel_minihtml::TextStyle {
+            font_family: run.family.clone().unwrap_or_else(|| Arc::from("monospace")),
+            font_size: run.size,
+            font_weight: if run.style.bold { 700 } else { 400 },
+            italic: run.style.italic,
+            underline: false,
+            color: vel_minihtml::Color::rgb(0, 0, 0),
+        };
+        let metrics = theme.metrics.measure(&run.text, &style);
+        let bounds = [
+            run.x,
+            run.baseline - metrics.ascent,
+            run.x + metrics.advance,
+            run.baseline + metrics.descent,
+        ];
+        let clip = [
+            run.clip.x,
+            run.clip.y,
+            run.clip.x + run.clip.width,
+            run.clip.y + run.clip.height,
+        ];
+        // The quick list prepares an extra row just outside the scrolling
+        // viewport. A completely invisible run is not a clipped caption.
+        if f64::from(bounds[1]) >= clip[3] || f64::from(bounds[3]) <= clip[1] {
+            continue;
+        }
+        let tolerance = 1. / f64::from(scale);
+        let fits = f64::from(bounds[0]) + tolerance >= clip[0]
+            && f64::from(bounds[1]) + tolerance >= clip[1]
+            && f64::from(bounds[2]) <= clip[2] + tolerance
+            && f64::from(bounds[3]) <= clip[3] + tolerance;
+        let mut record = json!({"text":run.text, "bounds":bounds, "clip":clip, "fits":fits});
+        if variant == "zh_hans_mixed"
+            && run.text == "文件：以指定编码保存：UTF-8"
+            && let Some(highlight) = &run.highlight
+        {
+            let spans: Vec<_> = highlight
+                .ranges
+                .iter()
+                .map(|range| &run.text[range.clone()])
+                .collect();
+            if spans != ["UTF-8"] {
+                return Err(format!("unexpected mixed-caption highlights: {spans:?}"));
+            }
+            let fonts = app.fonts.as_mut().ok_or("fonts missing")?;
+            let ink = caption_ink(fonts, run, scale)?;
+            // Raster bounds, not just the scissored pixels or measured advance.
+            record["ink_bounds"] = json!(ink);
+            record["fits"] = json!(
+                fits && (0..2).all(|i| {
+                    ink[i] >= clip[i] - tolerance && ink[i + 2] <= clip[i + 2] + tolerance
+                })
+            );
+            mixed_checked = true;
+        }
+        layout.push(record);
+    }
+    let appearance = if dark { "dark" } else { "light" };
+    let report = out.join(format!("{variant}-{appearance}@{scale}x-layout.json"));
+    std::fs::write(
+        &report,
+        serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if layout.is_empty()
+        || (variant == "zh_hans_mixed" && !mixed_checked)
+        || layout.iter().any(|row| row["fits"] != true)
+    {
+        return Err(format!(
+            "Chinese scene has missing or clipped text: {}",
+            report.display()
+        ));
+    }
+    Ok(())
+}
+
+fn caption_ink(
+    fonts: &mut Fonts,
+    run: &vel_render::scene::TextRun,
+    scale: f32,
+) -> Result<[f64; 4], String> {
+    let family = run.family.as_deref().ok_or("caption has no UI font")?;
+    let px = (run.size * scale * 64.).round() / 64.;
+    let mut shaped = fonts.shape_ui(&run.text, family, px, run.style);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fonts.fallback_pending() {
+        if Instant::now() >= deadline {
+            return Err("caption font fallback did not settle".into());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        if fonts.poll_fallbacks() {
+            shaped = fonts.shape_ui(&run.text, family, px, run.style);
+        }
+    }
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for glyph in shaped.glyphs {
+        let (x, bucket) = vel_render::atlas::subpixel_x(run.x * scale + glyph.x);
+        if let Some(raster) = fonts.rasterize(glyph.face, glyph.id, px, bucket) {
+            let placement = raster.placement;
+            let left = x + placement.left as f32;
+            let top = (run.baseline * scale).round() - placement.top as f32 - glyph.y;
+            bounds[0] = bounds[0].min(left);
+            bounds[1] = bounds[1].min(top);
+            bounds[2] = bounds[2].max(left + placement.width as f32);
+            bounds[3] = bounds[3].max(top + placement.height as f32);
+        }
+    }
+    if !bounds.iter().all(|b| b.is_finite()) {
+        return Err("mixed caption rendered no ink".into());
+    }
+    Ok(bounds.map(|b| f64::from(b / scale)))
+}
+
 /// Entry point for `velocity --render-scenes`.
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let request = Request::parse(args)?;
@@ -1565,6 +1769,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     hover_definition(&mut app);
                     settle(&mut app);
                 }
+                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed") {
+                    capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
+                }
                 if request.bench > 0 {
                     bench_scene(&mut app, scenario.name, dark, scale, request.bench);
                     continue;
@@ -1619,9 +1826,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                 println!("{}", file.display());
             }
         }
-    }
-    if let Err(e) = std::fs::remove_dir_all(&fixture.root) {
-        eprintln!("velocity: could not remove {}: {e}", fixture.root.display());
     }
     eprintln!("velocity: rendered {written} scenes");
     Ok(())

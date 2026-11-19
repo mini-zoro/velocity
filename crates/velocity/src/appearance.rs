@@ -335,7 +335,9 @@ impl Workspace {
                 for (key, value) in write_changes {
                     source = vel_config::json::Document::parse(&source)
                         .and_then(|document| document.set(key, &value))
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                        .map_err(|error| {
+                            vel_config::json::source_diagnostic(&path.to_string_lossy(), &error)
+                        })?;
                 }
                 vel_session::atomic_write(&path, |file| {
                     use std::io::Write;

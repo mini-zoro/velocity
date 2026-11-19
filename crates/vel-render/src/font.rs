@@ -133,6 +133,8 @@ pub struct ShapedGlyph {
     pub x: f32,
     /// Vertical baseline offset.
     pub y: f32,
+    /// UTF-8 byte span of the shaped cluster in the original text.
+    pub source: [usize; 2],
 }
 
 /// Proportional glyph positions and their measured baseline extents.
@@ -454,6 +456,7 @@ impl Fonts {
                     },
                     x: i as f32 * self.cell * px / 13.,
                     y: 0.,
+                    source: [i, i + 1],
                 })
                 .collect();
         }
@@ -553,6 +556,7 @@ impl Fonts {
                         id: g.id,
                         x: x + pen * factor + g.x,
                         y: g.y,
+                        source: [start + from, start + to],
                     });
                     pen += g.advance;
                 }
@@ -645,12 +649,17 @@ impl Fonts {
             let mut shaper = builder.build();
             shaper.add_str(run);
             shaper.shape_with(|cluster| {
+                let source = [
+                    start + cluster.source.start as usize,
+                    start + cluster.source.end as usize,
+                ];
                 for g in cluster.glyphs {
                     out.glyphs.push(ShapedGlyph {
                         face,
                         id: g.id,
                         x: out.advance + g.x,
                         y: g.y,
+                        source,
                     });
                     out.advance += g.advance;
                 }

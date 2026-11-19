@@ -1726,9 +1726,16 @@ impl Editor {
         let block = args["block"].as_bool().unwrap_or(false);
         let variant = args["variant"].as_u64().filter(|&n| n > 0);
         let language = self.language.borrow();
-        let l = language
-            .as_ref()
-            .ok_or("No syntax metadata for this document")?;
+        // Comment markers come from syntax metadata:
+        // https://docs.sublimetext.io/reference/comments.html
+        let Some(l) = language.as_ref() else {
+            drop(language);
+            self.actions.push((
+                "command_note".into(),
+                json!({"message":"Comments are not available in this syntax."}),
+            ));
+            return Ok(());
+        };
         let selection = self.buffer.view(self.id).sel();
         // Share the bounded prefix across carets instead of extending it once
         // for every stale line in a multi-caret command.
@@ -1816,11 +1823,12 @@ impl Editor {
                 }
             }
             let Some(preferred) = preferred else {
-                return Err(format!(
-                    "{} has no {}comment delimiter",
-                    l.name,
-                    if block { "block " } else { "" }
+                drop(language);
+                self.actions.push((
+                    "command_note".into(),
+                    json!({"message":"This syntax does not support that kind of comment."}),
                 ));
+                return Ok(());
             };
             let touched = || {
                 let first = self.text.byte_to_line(region.begin());
@@ -2000,7 +2008,7 @@ impl Editor {
         let size = self.preferences.tab_size.max(1);
         let language = self.language.borrow();
         if language.is_none() {
-            return Err("Syntax scopes are unavailable; indentation was not changed".into());
+            return Err("Could not convert indentation for this document.".into());
         }
         // Commands can precede the first highlight publication or follow an edit in
         // the same event turn. Parse this exact document version, as reindent does,
@@ -2167,10 +2175,20 @@ impl Editor {
             });
         } else {
             let language = self.language.borrow();
-            let analysis = language
-                .as_ref()
-                .and_then(|l| l.analysis.as_ref())
-                .ok_or("Syntax analysis is still running; retry folding shortly")?;
+            let Some(analysis) = language.as_ref().and_then(|l| l.analysis.as_ref()) else {
+                // Folding uses syntax-aware regions, not a guessed block.
+                // https://docs.sublimetext.io/reference/commands.html
+                drop(language);
+                if name == "fold" {
+                    current.extend(selections.iter().filter(|r| !r.empty()).copied());
+                }
+                self.set_folded(current);
+                self.actions.push((
+                    "command_note".into(),
+                    json!({"message":"Code folding is not ready yet."}),
+                ));
+                return Ok(());
+            };
             if name == "fold_by_level" || name == "fold_tag_attributes" {
                 let level = args["level"].as_u64().unwrap_or(1) as usize;
                 if name == "fold_by_level" {

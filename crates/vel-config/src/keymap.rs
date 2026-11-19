@@ -7,6 +7,15 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+// Keep menu chords and their displayed hints in the same macOS modifier order.
+// https://developer.apple.com/design/human-interface-guidelines/keyboards
+const MODIFIERS: [(u8, &str, char, &str); 4] = [
+    (1, "ctrl", '⌃', "Ctrl"),
+    (2, "alt", '⌥', "Alt"),
+    (4, "shift", '⇧', "Shift"),
+    (8, "super", '⌘', "Cmd"),
+];
+
 /// A normalized chord, including modifier-only taps and named/keypad keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -337,6 +346,7 @@ struct Node {
 #[derive(Clone, Default, Debug)]
 pub struct Keymap {
     bindings: Arc<Vec<Binding>>,
+    layers: Arc<Vec<usize>>,
     nodes: Arc<Vec<Node>>,
     pending: usize,
     app_context: HashMap<String, Value>,
@@ -349,6 +359,7 @@ impl Keymap {
         }
     }
     /// Most recent unconditional binding hint for an invocation (including arguments).
+    /// Uses native key glyphs on macOS and spelled-out modifiers elsewhere.
     pub fn hint(&self, invocation: &Invocation) -> Option<String> {
         self.bindings
             .iter()
@@ -361,22 +372,45 @@ impl Keymap {
                         .iter()
                         .any(|later| later.context.is_empty() && later.keys == b.keys)
             })
-            .map(|(_, b)| {
-                b.keys
-                    .iter()
-                    .map(|key| {
-                        let mut parts = Vec::new();
-                        for (bit, name) in [(1, "Ctrl"), (2, "Alt"), (4, "Shift"), (8, "Cmd")] {
-                            if key.modifiers & bit != 0 {
-                                parts.push(name.to_owned());
-                            }
-                        }
-                        parts.push(key.name.to_uppercase());
-                        parts.join("+")
+            .map(|(_, b)| format_hint(&b.keys, cfg!(target_os = "macos")))
+    }
+    /// Display an effective single Command chord. Unlike the palette, a native
+    /// menu cannot describe a sequence. Resource and argument precedence follows
+    /// <https://www.sublimetext.com/docs/key_bindings.html>.
+    pub fn menu_shortcut(&self, command: &str, args: &Value) -> Option<String> {
+        let matches = |binding: &Binding| {
+            binding.invocation.command == command && binding.invocation.args == *args
+        };
+        let mut end = self.bindings.len();
+        let mut conditional = None;
+        let mut count = 0;
+        // Prefer a User/package override over a default, then the first
+        // unconditional binding within the effective resource.
+        for &start in self.layers.iter().rev() {
+            for index in start..end {
+                let binding = &self.bindings[index];
+                if !matches(binding) {
+                    continue;
+                }
+                count += 1;
+                let [key] = binding.keys.as_slice() else {
+                    continue;
+                };
+                if key.modifiers & 8 == 0
+                    || self.bindings[index + 1..].iter().any(|later| {
+                        later.context.is_empty() && later.keys == binding.keys && !matches(later)
                     })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
+                {
+                    continue;
+                }
+                if binding.context.is_empty() {
+                    return Some(menu_chord(key));
+                }
+                conditional = Some(key);
+            }
+            end = start;
+        }
+        conditional.filter(|_| count == 1).map(menu_chord)
     }
     /// Appends one resource; subsequent resources have higher precedence.
     pub fn append(&mut self, source: &str) -> Result<(), String> {
@@ -428,6 +462,9 @@ impl Keymap {
     }
     fn add(&mut self, parsed: Vec<Binding>) {
         let bindings = Arc::make_mut(&mut self.bindings);
+        if !parsed.is_empty() {
+            Arc::make_mut(&mut self.layers).push(bindings.len());
+        }
         let nodes = Arc::make_mut(&mut self.nodes);
         if nodes.is_empty() {
             nodes.push(Node::default());
@@ -523,6 +560,88 @@ impl Keymap {
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
+}
+
+fn menu_chord(key: &Key) -> String {
+    let mut chord = String::new();
+    for (bit, name, _, _) in MODIFIERS {
+        if key.modifiers & bit != 0 {
+            chord.push_str(name);
+            chord.push('+');
+        }
+    }
+    chord.push_str(&key.name);
+    chord
+}
+
+fn format_hint(keys: &[Key], mac: bool) -> String {
+    let mut hint = String::new();
+    for (i, key) in keys.iter().enumerate() {
+        if i != 0 {
+            hint.push_str(if mac { " " } else { ", " });
+        }
+        for (bit, _, symbol, name) in MODIFIERS {
+            if key.modifiers & bit != 0 {
+                if mac {
+                    hint.push(symbol);
+                } else {
+                    hint.push_str(name);
+                    hint.push('+');
+                }
+            }
+        }
+        let symbol = if mac {
+            match key.name.as_str() {
+                "up" => "↑",
+                "down" => "↓",
+                "left" => "←",
+                "right" => "→",
+                "enter" => "↩",
+                "tab" => "⇥",
+                "escape" => "⎋",
+                "backspace" => "⌫",
+                "delete" => "⌦",
+                "space" => "Space",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        if symbol.is_empty() {
+            hint.extend(key.name.chars().flat_map(char::to_uppercase));
+        } else {
+            hint.push_str(symbol);
+        }
+    }
+    hint
+}
+
+#[cfg(test)]
+#[test]
+fn mac_hints_share_the_menu_modifier_order() {
+    for (binding, menu, hint) in [
+        ("super+shift+s", "shift+super+s", "⇧⌘S"),
+        ("super+alt+s", "alt+super+s", "⌥⌘S"),
+        ("shift+super+ctrl+f", "ctrl+shift+super+f", "⌃⇧⌘F"),
+        (
+            "super+shift+alt+ctrl+tab",
+            "ctrl+alt+shift+super+tab",
+            "⌃⌥⇧⌘⇥",
+        ),
+        ("alt+super+up", "alt+super+up", "⌥⌘↑"),
+        ("super+,", "super+,", "⌘,"),
+        ("super++", "shift+super+=", "⇧⌘="),
+        ("f5", "f5", "F5"),
+    ] {
+        let key = Key::parse(binding).unwrap();
+        assert_eq!(menu_chord(&key), menu);
+        assert_eq!(format_hint(&[key], true), hint);
+    }
+    let keys = [
+        Key::parse("super+k").unwrap(),
+        Key::parse("super+b").unwrap(),
+    ];
+    assert_eq!(format_hint(&keys, true), "⌘K ⌘B");
 }
 
 #[cfg(test)]

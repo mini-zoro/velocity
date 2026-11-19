@@ -70,7 +70,7 @@ impl App {
                 }
             }
         }
-        if self.panels.overlay.is_some() && !captured {
+        if self.panels.overlay.is_some() && !captured && !event.is_context_click() {
             if event.kind == MouseKind::Move {
                 self.panels.tree.pointer(event.position, None);
                 if let Some(w) = w {
@@ -95,6 +95,14 @@ impl App {
             }
             let moved = self.target_changed(&before);
             self.named_changed(w, moved);
+            return;
+        }
+        if event.kind == MouseKind::Down
+            && event.button == 0
+            && self.panels.hit_find_options(event.position)
+            && let Some(w) = w
+        {
+            self.show_find_options(w, event.position);
             return;
         }
         if event.is_context_click()
@@ -255,7 +263,7 @@ impl App {
                             caption: item.caption,
                             command: Some(item.invocation.command),
                             args: item.invocation.args.to_string(),
-                            children: vec![],
+                            ..Default::default()
                         })
                         .collect();
                     if let Some(w) = w {
@@ -566,6 +574,36 @@ impl App {
                 && event.position.y < r.y + crate::view::TAB_HEIGHT
                 && vel_ui::contains(*r, event.position)
         }) {
+            // https://docs.sublimetext.io/reference/settings.html#global-settings
+            if !event.precise
+                && event.delta_y != 0.
+                && self
+                    .workspace
+                    .global_bool("mouse_wheel_switches_tabs", false)
+            {
+                let group = &self.workspace.workbench.groups[group];
+                if let Some(at) = group
+                    .sheets
+                    .iter()
+                    .position(|sheet| Some(*sheet) == group.focused)
+                    && group.sheets.len() > 1
+                {
+                    let offset = if event.delta_y > 0. {
+                        group.sheets.len() - 1
+                    } else {
+                        1
+                    };
+                    if let Some(tab) = self
+                        .workspace
+                        .sheet_index(group.sheets[(at + offset) % group.sheets.len()])
+                    {
+                        self.workspace.select(tab);
+                        self.sync_active_view();
+                        self.named_changed(w, true);
+                    }
+                }
+                return;
+            }
             let max = self
                 .tab_bars
                 .iter()

@@ -15,6 +15,18 @@ use vel_session::{Document, Sheet, Window};
 use vel_text::Text;
 use vel_ui::workbench::{Direction, Layout};
 static SHEET: AtomicU64 = AtomicU64::new(1);
+pub(crate) fn menu_layout(args: &Value) -> Result<Layout, String> {
+    Ok(match args["preset"].as_str() {
+        Some("columns2") => Layout::grid(2, 1),
+        Some("columns3") => Layout::grid(3, 1),
+        Some("columns4") => Layout::grid(4, 1),
+        Some("rows2") => Layout::grid(1, 2),
+        Some("rows3") => Layout::grid(1, 3),
+        Some("grid4") => Layout::grid(2, 2),
+        Some(_) => Layout::default(),
+        None => serde_json::from_value(args.clone()).map_err(|_| "Invalid group layout.")?,
+    })
+}
 /// Keep new process-local identities above snapshots reserved from a previous process.
 pub fn reserve_sheet_ids(maximum: u64) {
     SHEET.fetch_max(maximum.saturating_add(1), Ordering::Relaxed);
@@ -198,7 +210,9 @@ impl Workspace {
                 };
                 let source = vel_config::json::Document::parse(&source)
                     .and_then(|doc| doc.set(&key, &value))
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                    .map_err(|e| {
+                        vel_config::json::source_diagnostic(&path.to_string_lossy(), &e)
+                    })?;
                 vel_session::atomic_write(&path, |file| {
                     use std::io::Write;
                     file.write_all(source.as_bytes()).map_err(|e| e.to_string())
@@ -364,8 +378,9 @@ impl Workspace {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
                     Err(e) => return Err(format!("{}: {e}", path.display())),
                 };
-                let document = vel_config::json::Document::parse(&source)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let document = vel_config::json::Document::parse(&source).map_err(|e| {
+                    vel_config::json::source_diagnostic(&path.to_string_lossy(), &e)
+                })?;
                 let source = if let Some(value) = value {
                     document.set("font_size", &value)?
                 } else {
@@ -1017,6 +1032,40 @@ impl Workspace {
         }
         Ok(())
     }
+    pub(crate) fn split_workbench(
+        &self,
+        args: &Value,
+    ) -> Result<vel_ui::workbench::Workbench, String> {
+        let active = self.workbench.active;
+        let cell = self.workbench.layout.cells[active];
+        let columns = self
+            .workbench
+            .layout
+            .cells
+            .iter()
+            .filter(|c| c[1] <= cell[1] && c[3] > cell[1])
+            .count();
+        let vertical = args["direction"]
+            .as_str()
+            .map_or(columns < self.workbench.max_columns, |direction| {
+                !matches!(direction, "up" | "down")
+            });
+        let mut next = self.workbench.clone();
+        next.new_pane(vertical)?;
+        let bounds = vel_platform::Rect {
+            x: 0.,
+            y: 0.,
+            width: self.pane_extent.0,
+            height: self.pane_extent.1,
+        };
+        if (0..next.groups.len())
+            .filter_map(|i| next.layout.rect(i, bounds))
+            .any(|r| r.width + 0.01 < self.pane_minimum.0 || r.height + 0.01 < self.pane_minimum.1)
+        {
+            return Err("Pane is too small to split further".into());
+        }
+        Ok(next)
+    }
     pub fn workbench_action(&mut self, name: &str, args: &Value) -> Result<bool, String> {
         match name {
             "new_html_sheet" => {
@@ -1043,20 +1092,7 @@ impl Workspace {
                 crate::theme_bench::demo(self)?;
             }
             "set_layout" => {
-                let layout = if let Some(preset) = args["preset"].as_str() {
-                    match preset {
-                        "columns2" => Layout::grid(2, 1),
-                        "columns3" => Layout::grid(3, 1),
-                        "columns4" => Layout::grid(4, 1),
-                        "rows2" => Layout::grid(1, 2),
-                        "rows3" => Layout::grid(1, 3),
-                        "grid4" => Layout::grid(2, 2),
-                        _ => Layout::default(),
-                    }
-                } else {
-                    serde_json::from_value(args.clone()).map_err(|e| e.to_string())?
-                };
-                self.workbench.set_layout(layout)?;
+                self.workbench.set_layout(menu_layout(args)?)?;
                 self.focus_current_group()?;
             }
             "focus_group" | "move_to_group" => {
@@ -1097,37 +1133,7 @@ impl Workspace {
                 // https://www.sublimetext.com/download. The direction and limit
                 // implement the round-19 window contract, without pixel state.
                 let active = self.workbench.active;
-                let cell = self.workbench.layout.cells[active];
-                let columns = self
-                    .workbench
-                    .layout
-                    .cells
-                    .iter()
-                    .filter(|c| c[1] <= cell[1] && c[3] > cell[1])
-                    .count();
-                let vertical = args["direction"]
-                    .as_str()
-                    .map_or(columns < self.workbench.max_columns, |direction| {
-                        !matches!(direction, "up" | "down")
-                    });
-                let mut next = self.workbench.clone();
-                next.new_pane(vertical)?;
-                let bounds = vel_platform::Rect {
-                    x: 0.,
-                    y: 0.,
-                    width: self.pane_extent.0,
-                    height: self.pane_extent.1,
-                };
-                if (0..next.groups.len())
-                    .filter_map(|i| next.layout.rect(i, bounds))
-                    .any(|r| {
-                        r.width + 0.01 < self.pane_minimum.0
-                            || r.height + 0.01 < self.pane_minimum.1
-                    })
-                {
-                    return Err("Pane is too small to split further".into());
-                }
-                self.workbench = next;
+                self.workbench = self.split_workbench(args)?;
                 let last = self.workbench.groups.len() - 1;
                 if matches!(args["direction"].as_str(), Some("left" | "up")) {
                     self.workbench.layout.cells.swap(active, last);

@@ -517,13 +517,13 @@ fn round18_menu_palette_rows_resolve_against_the_lane_a_command_contract() {
         ("Goto/Switch File/Next File", "next_view", json!({})),
         ("Goto/Switch File/Previous File", "prev_view", json!({})),
         (
-            "View/Preferences/Color Scheme…",
+            "Preferences/Color Scheme…",
             "select_color_scheme",
             json!({}),
         ),
-        ("View/Preferences/Theme…", "select_theme", json!({})),
+        ("Preferences/Theme…", "select_theme", json!({})),
         (
-            "Tools/Build System/New Build System…",
+            "Tools/Build System/New Build System",
             "new_build_system",
             json!({}),
         ),

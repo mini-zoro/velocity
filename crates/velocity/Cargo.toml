@@ -30,6 +30,7 @@ vel-color-scheme = { path = "../vel-color-scheme" }
 vel-largefile = { path = "../vel-largefile" }
 vel-buffer = { path = "../vel-buffer" }
 vel-config = { path = "../vel-config" }
+vel-i18n = { path = "../vel-i18n" }
 vel-commands = { path = "../vel-commands" }
 vel-fileio = { path = "../vel-fileio" }
 vel-ui = { path = "../vel-ui" }

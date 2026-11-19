@@ -680,6 +680,9 @@ pub struct Workspace {
     pub context_menus: BTreeMap<String, Vec<MenuItem>>,
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
+    pub(crate) translations: vel_i18n::Translator,
+    pub(crate) menu_revision: u64,
+    pub(crate) palette_revision: u64,
     /// Macro filenames from the background resource overlay; contents are loaded on demand.
     pub(crate) macro_paths: std::collections::BTreeSet<String>,
     pub(crate) resources: Resources,
@@ -833,6 +836,7 @@ struct Configuration {
     context_menus: BTreeMap<String, Vec<MenuItem>>,
     mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
+    translations: vel_i18n::Catalog,
     macro_paths: std::collections::BTreeSet<String>,
     folders: Vec<vel_search::project::Folder>,
     distraction_settings: serde_json::Map<String, Value>,
@@ -947,6 +951,10 @@ impl Configuration {
         crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
             (
+                "Distraction Free.sublime-settings",
+                include_str!("../resources/Packages/Default/Distraction Free.sublime-settings"),
+            ),
+            (
                 "Rust Function.sublime-snippet",
                 include_str!("../resources/Packages/Default/Rust Function.sublime-snippet"),
             ),
@@ -981,6 +989,24 @@ impl Configuration {
             (
                 "Side Bar.sublime-menu",
                 include_str!("../resources/Packages/Default/Side Bar.sublime-menu"),
+            ),
+            (
+                "Side Bar Mount Point.sublime-menu",
+                include_str!("../resources/Packages/Default/Side Bar Mount Point.sublime-menu"),
+            ),
+            (
+                "Widget Context.sublime-menu",
+                include_str!("../resources/Packages/Default/Widget Context.sublime-menu"),
+            ),
+            (
+                "Find in Files.sublime-menu",
+                include_str!("../resources/Packages/Default/Find in Files.sublime-menu"),
+            ),
+            (
+                "Localization/zh-Hans.sublime-localization",
+                include_str!(
+                    "../resources/Packages/Default/Localization/zh-Hans.sublime-localization"
+                ),
             ),
             (
                 "Velocity.sublime-mousemap",
@@ -1076,10 +1102,26 @@ impl Configuration {
         // Application-only: https://www.sublimetext.com/docs/settings.html
         // Project files cannot enable/disable packages, including Vintage.
         resources.set_ignored(ignored);
+        // Localizations follow the existing resource order: Default, packages, User.
+        // https://www.sublimetext.com/docs/menus.html#customization
+        let mut translations = vel_i18n::Catalog::default();
+        for resource in resources.matching("/Localization/zh-Hans.sublime-localization") {
+            match resource.text().and_then(vel_i18n::Catalog::load) {
+                Ok(catalog) => translations.merge(catalog),
+                Err(error) => resource_messages.push(format!("{}: {error}", resource.path)),
+            }
+        }
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
         let mut syntax_settings = crate::shipped::SyntaxSettings::default();
         let mut config_stamp = Vec::new();
+        // Derive known key types from our shipped settings, not from an
+        // installed package which might itself need validation.
+        let schema = Document::parse(include_str!(
+            "../resources/Packages/Default/Preferences.sublime-settings"
+        ))?
+        .value;
+        let schema = schema.as_object().expect("shipped settings object");
         for resource in resources.matching(".sublime-settings") {
             let file = resource.path.rsplit('/').next().unwrap_or("");
             // Invalid settings must remain watched: an in-place repair does not
@@ -1093,16 +1135,39 @@ impl Configuration {
                 syntax_settings.add(name, resource, &mut resource_messages);
                 continue;
             }
-            let doc = match resource.text().and_then(Document::parse) {
+            let source = if resource.origin.is_absolute()
+                && resource
+                    .origin
+                    .extension()
+                    .is_some_and(|ext| ext == "sublime-settings")
+            {
+                resource.origin.to_string_lossy()
+            } else {
+                std::borrow::Cow::Borrowed(resource.path.as_str())
+            };
+            let mut doc = match resource.text().and_then(Document::parse) {
                 Ok(doc) => doc,
                 Err(e) => {
-                    resource_messages.push(format!("{}: {e}", resource.path));
+                    let report = if e.starts_with(|ch: char| ch.is_ascii_digit()) {
+                        format!("{source}:{e}")
+                    } else {
+                        format!("{source}: {e}")
+                    };
+                    resource_reports.push(report.clone());
+                    resource_log.push(report.clone());
+                    resource_messages.push(report);
                     continue;
                 }
             };
-            if !doc.value.is_object() {
-                resource_messages.push(format!("{}: settings must be an object", resource.path));
+            let Some(values) = doc.value.as_object_mut() else {
+                resource_reports.push(format!("{source}: settings must be an object"));
                 continue;
+            };
+            let issues = vel_config::settings::validate_layer(values, schema);
+            if !issues.is_empty() {
+                let report = format!("{source}: {}", issues.join("; "));
+                resource_log.push(report.clone());
+                resource_reports.push(report);
             }
             match resource.path.as_str() {
                 "Packages/Default/Preferences.sublime-settings" => {
@@ -1163,6 +1228,10 @@ impl Configuration {
                 .unwrap_or(serde_json::json!({}));
             if let Some(values) = project_settings.as_object_mut() {
                 values.remove("ignored_packages");
+                let issues = vel_config::settings::validate_layer(values, schema);
+                if !issues.is_empty() {
+                    resource_reports.push(format!("{}: {}", path.display(), issues.join("; ")));
+                }
             }
             settings.replace(Layer::Project, project_settings)?;
             config_stamp.push((path.clone(), stamp(path)));
@@ -1251,7 +1320,7 @@ impl Configuration {
             keymaps[first_user..=i].rotate_right(1);
         }
         for resource in keymaps {
-            if user_resource(resource, data_dir.as_deref()) {
+            if resource.origin.exists() {
                 config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
             }
             let package = resource.path.split('/').nth(1).unwrap_or_default();
@@ -1310,9 +1379,12 @@ impl Configuration {
             let name = resource.path.rsplit('/').next().unwrap_or_default();
             let target = match name {
                 "Main.sublime-menu" => &mut menus,
-                "Context.sublime-menu" | "Tab Context.sublime-menu" | "Side Bar.sublime-menu" => {
-                    context_menus.entry(name.to_owned()).or_default()
-                }
+                "Context.sublime-menu"
+                | "Tab Context.sublime-menu"
+                | "Side Bar.sublime-menu"
+                | "Side Bar Mount Point.sublime-menu"
+                | "Widget Context.sublime-menu"
+                | "Find in Files.sublime-menu" => context_menus.entry(name.to_owned()).or_default(),
                 _ => continue,
             };
             match resource.text().and_then(ui::parse) {
@@ -1375,7 +1447,7 @@ impl Configuration {
                 item.children = serde_json::from_value(serde_json::json!(choices))
                     .map_err(|e| e.to_string())?;
                 item.children.extend(ui::parse::<MenuItem>(
-                    r#"[{"caption":"New Build System…","command":"new_build_system"}]"#,
+                    r#"[{"caption":"New Build System","command":"new_build_system"}]"#,
                 )?);
             }
         }
@@ -1645,6 +1717,7 @@ impl Configuration {
             context_menus,
             mousemap,
             palette,
+            translations,
             folders,
             distraction_settings,
             build_systems,
@@ -1675,6 +1748,7 @@ impl Workspace {
             context_menus,
             mousemap,
             palette,
+            translations,
             macro_paths,
             folders,
             distraction_settings,
@@ -1691,6 +1765,8 @@ impl Workspace {
             &mut resource_reports,
         );
         let tab = Tab::new(text, &settings, &keymap)?;
+        let mut localizer = vel_i18n::Translator::default();
+        localizer.replace(translations);
         let mut messages = resource_messages;
         let watcher = if watch {
             match Watcher::new() {
@@ -1747,6 +1823,9 @@ impl Workspace {
             context_menus,
             mousemap,
             palette,
+            translations: localizer,
+            menu_revision: 0,
+            palette_revision: 0,
             macro_paths,
             messages,
             resources,
@@ -1782,6 +1861,7 @@ impl Workspace {
         workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
         workspace.configure_language(0, None, true)?;
         workspace.observe_navigation();
+        workspace.sync_ui_language();
         Ok(workspace)
     }
     /// Refreshes the resource-defined recent submenu only when its source changes.
@@ -1795,22 +1875,32 @@ impl Workspace {
             .recent_menu_state
             .as_ref()
             .is_some_and(|(old, revision)| {
-                *revision == self.resource_revision && old.iter().zip(recent).all(|(a, b)| a == b)
+                *revision == self.resource_revision && old.iter().eq(recent)
             })
         {
             return false;
         }
         let mut children = Vec::new();
-        for (paths, command, key) in [
-            (&self.recent_files, "open_recent_file", "file"),
-            (&self.recent_folders, "open_recent_folder", "dir"),
-            (&self.recent_projects, "open_project", "file"),
+        // The documented Main menu allows named submenus; separate file, folder and
+        // project history without inserting a non-action when history is empty.
+        // https://www.sublimetext.com/docs/menus.html
+        for (caption, paths, command, key) in [
+            ("File", &self.recent_files, "open_recent_file", "file"),
+            ("Folder", &self.recent_folders, "open_recent_folder", "dir"),
+            ("Project", &self.recent_projects, "open_project", "file"),
         ] {
-            for path in paths.iter().take(20) {
-                children.push(serde_json::json!({"caption":path.display().to_string(), "command":command, "args":{key:path}}));
+            if !paths.is_empty() {
+                let entries: Vec<_> = paths.iter().take(20).map(|path| {
+                    serde_json::json!({"caption":path.display().to_string(), "command":command, "args":{key:path}})
+                }).collect();
+                children.push(serde_json::json!({"caption":caption,"children":entries}));
             }
         }
-        children.push(serde_json::json!({"caption":"Clear Items", "command":"clear_recent_items"}));
+        if !children.is_empty() {
+            children.push(serde_json::json!({"caption":"-"}));
+            children
+                .push(serde_json::json!({"caption":"Clear Items", "command":"clear_recent_items"}));
+        }
         if let Some(menu) = self
             .menus
             .iter_mut()
@@ -1832,7 +1922,23 @@ impl Workspace {
             ],
             self.resource_revision,
         ));
+        self.menu_revision = self.menu_revision.wrapping_add(1);
         true
+    }
+    pub(crate) fn sync_ui_language(&mut self) -> bool {
+        let language = vel_i18n::Language::from_setting(self.global_string("ui_language", "en"));
+        self.translations.select(language)
+    }
+    pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
+        // Rows whose caption is the user's data (a syntax name, a build
+        // system's name) stay as written: there is nothing to translate.
+        if matches!(
+            item.invocation.command.as_str(),
+            "set_file_type" | "set_build_system"
+        ) {
+            return None;
+        }
+        self.translations.palette_caption(&item.caption)
     }
     pub fn track_settings_write(
         &mut self,
@@ -2891,6 +2997,8 @@ impl Workspace {
                     self.build_systems = config.build_systems;
                     self.project_model = config.project_model;
                     self.settings = config.settings;
+                    self.translations.replace(config.translations);
+                    self.sync_ui_language();
                     if let Err(error) = self.refresh_window_layers() {
                         self.messages.push(error);
                     }
@@ -2924,6 +3032,9 @@ impl Workspace {
                     self.menus = config.menus;
                     self.context_menus = config.context_menus;
                     self.mousemap = config.mousemap;
+                    if self.palette != config.palette {
+                        self.palette_revision = self.palette_revision.wrapping_add(1);
+                    }
                     self.palette = config.palette;
                     self.macro_paths = config.macro_paths;
                     self.resources = config.resources;
@@ -4221,7 +4332,14 @@ mod round15_tests {
             .iter()
             .find(|m| m.id == "open_recent")
             .unwrap();
-        assert_eq!(recent.children.len(), 4);
+        assert_eq!(
+            recent
+                .children
+                .iter()
+                .map(|row| row.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["File", "Folder", "Project", "-", "Clear Items"]
+        );
         for command in ["reopen_encoding", "save_encoding"] {
             let submenu = file
                 .children
@@ -4234,6 +4352,18 @@ mod round15_tests {
                 .unwrap();
             assert_eq!(submenu.children.len(), vel_fileio::ENCODINGS.len());
         }
+        w.recent_files.push("/tmp/b.txt".into());
+        assert!(w.refresh_file_menus());
+        w.recent_files.pop();
+        assert!(w.refresh_file_menus(), "a shorter list is not its prefix");
+        let file = w.menus.iter().find(|menu| menu.id == "file").unwrap();
+        let recent = file
+            .children
+            .iter()
+            .find(|item| item.id == "open_recent")
+            .unwrap();
+        assert_eq!(recent.children[0].children.len(), 1);
+        assert!(!w.refresh_file_menus());
     }
 }
 

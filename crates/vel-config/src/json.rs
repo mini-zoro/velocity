@@ -2,6 +2,16 @@
 use serde_json::Value;
 use std::{collections::BTreeMap, ops::Range};
 
+/// Prefixes a JSON diagnostic with its source, preserving any line/column prefix.
+pub fn source_diagnostic(source: &str, detail: &str) -> String {
+    let separator = if detail.starts_with(|ch: char| ch.is_ascii_digit()) {
+        ":"
+    } else {
+        ": "
+    };
+    format!("{source}{separator}{detail}")
+}
+
 /// Parsed JSON value with source spans indexed by RFC 6901 JSON pointers.
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -42,11 +52,15 @@ impl Document {
                     i += 1;
                 }
             } else if bytes.get(i..i + 2) == Some(b"/*") {
+                let start = i;
                 bytes[i..i + 2].fill(b' ');
                 i += 2;
                 loop {
                     if i + 1 >= bytes.len() {
-                        return Err("unterminated block comment".into());
+                        let before = &source.as_bytes()[..start];
+                        let line = before.iter().filter(|&&b| b == b'\n').count() + 1;
+                        let col = before.iter().rev().take_while(|&&b| b != b'\n').count() + 1;
+                        return Err(format!("{line}:{col}: unterminated block comment"));
                     }
                     if bytes.get(i..i + 2) == Some(b"*/") {
                         bytes[i..i + 2].fill(b' ');
@@ -90,7 +104,18 @@ impl Document {
             i += 1;
         }
         let clean = String::from_utf8(bytes).map_err(|e| e.to_string())?;
-        let value: Value = serde_json::from_str(&clean).map_err(|e| e.to_string())?;
+        let value: Value = serde_json::from_str(&clean).map_err(|e| {
+            let detail = e.to_string();
+            let message = detail
+                .rsplit_once(" at line ")
+                .map_or(detail.as_str(), |pair| pair.0);
+            let message = if message == "expected value" {
+                "expected a value"
+            } else {
+                message
+            };
+            format!("{}:{}: {message}", e.line(), e.column())
+        })?;
         let mut spans = BTreeMap::new();
         scan(&clean, &mut 0, "", &mut spans)?;
         Ok(Self {

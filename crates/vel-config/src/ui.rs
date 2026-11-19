@@ -16,6 +16,8 @@ pub struct MenuItem {
     pub id: String,
     /// Optional command.
     pub command: Option<String>,
+    /// Single key chord for a native key equivalent, if one is available.
+    pub shortcut: Option<String>,
     /// JSON arguments.
     #[serde(default = "empty_args")]
     pub args: Value,
@@ -28,7 +30,7 @@ pub struct MenuItem {
     pub mnemonic: Option<String>,
 }
 /// Palette command entry, consumed by vel-ui's quick panel.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PaletteItem {
     /// Display caption.
     pub caption: String,
@@ -144,6 +146,9 @@ pub fn merge_menu(target: &mut Vec<MenuItem>, source: Vec<MenuItem>) {
             }
             if item.platform.is_some() {
                 existing.platform = item.platform;
+            }
+            if item.shortcut.is_some() {
+                existing.shortcut = item.shortcut;
             }
             if item.mnemonic.is_some() {
                 existing.mnemonic = item.mnemonic;
@@ -405,7 +410,14 @@ mod tests {
         let mut keys = crate::keymap::Keymap::default();
         keys.append(r#"[{"keys":["super+f"],"command":"show_panel","args":{"panel":"find"}}]"#)
             .unwrap();
-        assert_eq!(keys.hint(&palette[0].invocation).as_deref(), Some("Cmd+F"));
+        assert_eq!(
+            keys.hint(&palette[0].invocation).as_deref(),
+            Some(if cfg!(target_os = "macos") {
+                "⌘F"
+            } else {
+                "Cmd+F"
+            })
+        );
         keys.append(r#"[{"keys":["super+f"],"command":"save"}]"#)
             .unwrap();
         assert!(keys.hint(&palette[0].invocation).is_none());

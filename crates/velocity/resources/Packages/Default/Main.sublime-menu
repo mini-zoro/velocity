@@ -1,6 +1,9 @@
 // Settings: https://www.sublimetext.com/docs/settings.html
 // Groups/line endings: https://docs.sublimetext.io/reference/commands.html
 // Original Velocity captions, authored from public command behavior.
+// Stable top-level IDs (extension points, not captions): file, edit, selection,
+// find, goto, view, project, window, tools, help, preferences.
+// Apple menu roles/order: https://developer.apple.com/design/human-interface-guidelines/the-menu-bar
 [
   {
     "caption": "File",
@@ -14,9 +17,7 @@
         "caption": "Open…",
         "command": "prompt_open_file"
       },
-      { "caption": "Open Recent", "id": "open_recent", "children": [
-        { "caption": "Clear Items", "command": "clear_recent_items" }
-      ] },
+      { "caption": "Open Recent", "id": "open_recent" },
       { "caption": "Reopen Closed File", "command": "reopen_last_file" },
       { "caption": "Revert File", "command": "revert" },
       { "caption": "Reopen with Encoding", "children": [
@@ -105,6 +106,7 @@
         {"caption": "Chinese Simplified (GB18030)", "command": "save_encoding", "args": {"encoding": "Chinese Simplified (GB18030)"}},
         {"caption": "Chinese Traditional (Big5)", "command": "save_encoding", "args": {"encoding": "Chinese Traditional (Big5)"}}
       ] },
+      {"caption":"Convert to Encoding…","command":"convert_to_encoding"},
       {
         "caption": "Save",
         "command": "save"
@@ -121,15 +123,9 @@
         "caption": "Close File",
         "command": "close_file"
       },
-      {"caption":"Close All Files","command":"close_all"},
-      {"caption":"Split View","command":"split_view"},
       {
         "caption": "New Window",
         "command": "new_window"
-      },
-      {
-        "caption": "Close Window",
-        "command": "close_window"
       }
     ]
   },
@@ -166,7 +162,7 @@
         "command": "select_all"
       },
       {
-        "caption": "Select Next Match",
+        "caption": "Quick Add Next",
         "command": "find_under_expand"
       },
       {
@@ -539,31 +535,31 @@
     "id": "find",
     "children": [
       {
-        "caption": "Open Find",
+        "caption": "Find…",
         "command": "show_panel",
         "args": {
-          "panel": "find"
+          "panel": "find", "toggle": true
         }
       },
       {
-        "caption": "Open Replace",
+        "caption": "Replace…",
         "command": "show_panel",
         "args": {
-          "panel": "replace"
+          "panel": "replace", "toggle": true
         }
       },
       {
-        "caption": "Incremental Search",
+        "caption": "Incremental Find…",
         "command": "show_panel",
         "args": {
-          "panel": "incremental_find"
+          "panel": "incremental_find", "toggle": true
         }
       },
       {
-        "caption": "Search in Files",
+        "caption": "Find in Files…",
         "command": "show_panel",
         "args": {
-          "panel": "find_in_files"
+          "panel": "find_in_files", "toggle": true
         }
       },
       {
@@ -670,19 +666,8 @@
     "caption": "View",
     "id": "view",
     "children": [
-      {
-        "caption": "Preferences",
-        "children": [
-          {
-            "caption": "Color Scheme…",
-            "command": "select_color_scheme"
-          },
-          {
-            "caption": "Theme…",
-            "command": "select_theme"
-          }
-        ]
-      },
+      {"caption":"Word Wrap","command":"toggle_setting","args":{"setting":"word_wrap"}},
+      {"caption":"Show Console","command":"show_console"},
       {
         "caption": "Indentation",
         "children": [
@@ -707,14 +692,14 @@
         ]
       },
       {
-        "caption": "Minimap",
+        "caption": "Show Minimap",
         "command": "toggle_minimap"
       },
       {
         "caption": "Side Bar",
         "children": [
-          {"caption": "Show/Hide Side Bar", "command": "toggle_side_bar"},
-          {"caption": "Show/Hide Open Files", "command": "toggle_show_open_files"}
+          {"caption": "Show Side Bar", "command": "toggle_side_bar"},
+          {"caption": "Show Open Files", "command": "toggle_show_open_files"}
         ]
       },
       {
@@ -757,6 +742,7 @@
       {
         "caption": "Layout",
         "children": [
+          {"caption":"Split View","command":"split_view"},
           {
             "caption": "Single",
             "command": "set_layout",
@@ -986,7 +972,7 @@
         "command": "clone_file"
       },
       {
-        "caption": "Toggle Full Screen",
+        "caption": "Enter Full Screen",
         "command": "toggle_full_screen"
       },
       {
@@ -1206,8 +1192,12 @@
     "caption": "Window",
     "id": "window",
     "children": [
-      {"caption": "Minimize", "command": "native_minimize"},
+      {"caption": "Minimize", "command": "native_minimize", "shortcut": "super+m"},
       {"caption": "Zoom", "command": "native_zoom"},
+      {"caption": "-", "command": null},
+      {"caption": "Close Window", "command": "close_window"},
+      {"caption": "Move Tab to New Window", "command": "move_tab_to_new_window"},
+      {"caption": "Merge All Windows", "command": "merge_all_windows"},
       {"caption": "-", "command": null},
       {"caption": "Bring All to Front", "command": "native_bring_all_to_front"}
     ]
@@ -1282,13 +1272,18 @@
         ]
       },
       {"caption":"Developer","children":[
+        {"caption":"New Snippet","command":"new_snippet"},
+        {"caption":"New Build System","command":"new_build_system"},
         {"caption":"Show Scope Name","command":"show_scope_name"}
       ]}
     ]
   },
   {
     "caption": "Help",
+    "id": "help",
     "children": [
+      {"caption":"Velocity Documentation","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/blob/main/README.md"}},
+      {"caption":"Release Notes","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/releases"}},
       {
         "caption": "Indexing Status",
         "command": "show_indexing_status"
@@ -1297,9 +1292,11 @@
   },
   {
     "caption": "Preferences",
+    "id": "preferences",
     "children": [
       {
         "caption": "Settings…",
+        "id": "settings",
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Preferences.sublime-settings",
@@ -1343,6 +1340,11 @@
         "caption": "Theme…",
         "command": "select_theme"
       },
+      {"caption":"Language","id":"language","children":[
+        {"caption":"English","command":"set_ui_language","args":{"language":"en"}},
+        {"caption":"简体中文","command":"set_ui_language","args":{"language":"zh-Hans"}},
+        {"caption":"Follow System","command":"set_ui_language","args":{"language":"auto"}}
+      ]},
       {
         "caption": "Customize Color Scheme",
         "command": "customize_color_scheme"

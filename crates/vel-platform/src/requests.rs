@@ -360,7 +360,7 @@ mod tests {
             caption: name.into(),
             command: Some(name.into()),
             args: r#"{"paths":["/a"],"group":1,"index":2,"event":{"x":3,"y":4}}"#.into(),
-            children: vec![],
+            ..Default::default()
         }
     }
 
