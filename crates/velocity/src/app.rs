@@ -58,6 +58,7 @@ const WINDOW_COMMANDS: &[&str] = &[
     "merge_all_windows",
     "convert_to_encoding",
     "show_console",
+    "find_in_files_where",
     "new_snippet",
     "widget_history",
     "set_ui_language",
@@ -999,11 +1000,9 @@ impl App {
                 return false;
             }
             "toggle_find_option" if args["option"] == "in_selection" => {
-                // This scope belongs to Find/Replace in the current document.
-                // https://docs.sublimetext.io/reference/commands.html
-                let editor = &self.workspace.tabs[target].editor;
-                return editor.binary.is_none()
-                    && self.panels.panel != Some(crate::panels::Panel::Files)
+                // An explicit in-session command can select an empty scope.
+                // Menus and palette use the stricter check in command_enabled.
+                return self.workspace.tabs[target].editor.binary.is_none()
                     && (matches!(
                         self.panels.panel,
                         Some(
@@ -1011,16 +1010,24 @@ impl App {
                                 | crate::panels::Panel::Replace
                                 | crate::panels::Panel::Incremental
                         )
-                    ) || !editor.selection().is_empty()
-                        || editor
-                            .buffer
-                            .view(editor.id)
-                            .sel()
-                            .iter()
-                            .any(|r| !r.empty()));
+                    ) || self.panels.can_find_in_selection(&self.workspace));
+            }
+            "find_in_files_where" => {
+                return self.panels.panel == Some(crate::panels::Panel::Files);
             }
             "run_macro" if self.workspace.editor().registry.is_recording() => {
                 return false;
+            }
+            "insert_snippet" if args["require_selection"] == true => {
+                let editor = &self.workspace.tabs[target].editor;
+                return !editor.read_only
+                    && editor.binary.is_none()
+                    && editor
+                        .buffer
+                        .view(editor.id)
+                        .sel()
+                        .iter()
+                        .any(|region| !region.empty());
             }
             "new_pane" => return self.workspace.split_workbench(args).is_ok(),
             "focus_group" | "move_to_group"
@@ -1044,6 +1051,11 @@ impl App {
                 return false;
             }
             "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
+                return false;
+            }
+            "recent_projects" | "quick_switch_project"
+                if self.workspace.recent_projects.is_empty() =>
+            {
                 return false;
             }
             _ => {}
@@ -2960,8 +2972,8 @@ impl App {
     fn refresh_open_palette(&mut self) {
         if self.panels.overlay == Some(crate::panels::Overlay::Palette) {
             self.sync_palette_enabled();
-            self.panels.refresh_localized_palette(&mut self.workspace);
         }
+        self.panels.refresh_localized_palette(&mut self.workspace);
     }
     fn accept_palette_command(&mut self, name: &str, args: &Value) -> bool {
         let enabled = self.command_enabled(name, &args.to_string());
@@ -4293,6 +4305,12 @@ impl AppHandler for App {
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
+        if name == "toggle_find_option"
+            && args["option"] == "in_selection"
+            && !self.panels.can_find_in_selection(&self.workspace)
+        {
+            return false;
+        }
         self.command_enabled_args(name, &args)
     }
     fn command_visible(&self, name: &str, args: &str) -> bool {
@@ -4353,6 +4371,9 @@ impl AppHandler for App {
                 .as_str()
                 .and_then(|value| vel_fileio::LineEnding::parse(value).ok())
                 .is_some_and(|ending| ending == self.workspace.tabs[target].format.line_ending),
+            "toggle_setting" if args["setting"] == "word_wrap" => {
+                crate::view::motion_layout_options(editor).width != 0
+            }
             "toggle_setting" => args["setting"]
                 .as_str()
                 .is_some_and(|key| editor.settings.bool(key, false)),
@@ -5130,7 +5151,8 @@ fn native_menu(
                 macros
                     .iter()
                     .map(|row| MenuEntry {
-                        caption: row.caption.clone(),
+                        caption: crate::workspace::localized_macro_name(tr, &row.caption)
+                            .to_owned(),
                         command: Some(row.invocation.command.clone()),
                         args: row.invocation.args.to_string(),
                         shortcut: keymap
@@ -5154,9 +5176,7 @@ fn localized_menu_caption<'a>(
     if matches!(
         command,
         Some(
-            "reopen_encoding"
-                | "save_encoding"
-                | "open_recent_file"
+            "open_recent_file"
                 | "open_recent_folder"
                 | "open_project"
                 | "run_macro_file"
@@ -5188,6 +5208,7 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
         ("About Velocity", "native_about", None),
         ("-", "", None),
         ("Settings…", "", None),
+        ("-", "", None),
         ("Services", "native_services", None),
         ("-", "", None),
         ("Hide Velocity", "native_hide", Some("super+h")),
@@ -5207,20 +5228,21 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
             }),
         }
     }
-    // Keep the Preferences resource elsewhere in the bar without displacing Help
-    // from the trailing position or inserting non-system rows into the app menu.
-    if let Some(index) = entries.iter().position(|item| item.id == "preferences") {
-        let preferences = entries.remove(index);
-        let before = entries
-            .iter()
-            .position(|item| item.id == "window")
-            .unwrap_or(entries.len());
-        entries.insert(before, preferences);
-    }
-    if let Some(index) = entries.iter().position(|item| item.id == "help") {
-        let help = entries.remove(index);
-        entries.push(help);
-    }
+    // Unrecognized package menus keep relative order; Window and Help trail them.
+    entries.sort_by_key(|item| match item.id.as_str() {
+        "file" => 0,
+        "edit" => 1,
+        "selection" => 2,
+        "find" => 3,
+        "view" => 4,
+        "goto" => 5,
+        "tools" => 6,
+        "project" => 7,
+        "preferences" => 8,
+        "window" => 10,
+        "help" => 11,
+        _ => 9,
+    });
     entries.insert(
         0,
         MenuEntry {

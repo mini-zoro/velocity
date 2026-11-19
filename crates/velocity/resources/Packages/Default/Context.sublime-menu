@@ -15,6 +15,7 @@
     "command": "paste",
     "id": "velocity_paste"
   },
+  {"caption":"Paste and Indent","command":"paste_and_indent"},
   {
     "caption": "Select All",
     "command": "select_all",
@@ -30,11 +31,11 @@
     "caption": "-"
   },
   {
-    "caption": "Copy Full File Path",
+    "caption": "Copy File Path",
     "command": "copy_file_path"
   },
   {
-    "caption": "Locate in Project Tree",
+    "caption": "Reveal in Side Bar",
     "command": "reveal_in_side_bar"
   },
   {

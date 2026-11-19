@@ -99,6 +99,7 @@ fn menu_roles_and_exact_shortcuts_survive_renaming_and_reload() {
             (Some("native_about"), None),
             (None, None),
             (Some("edit_settings"), Some("super+,")),
+            (None, None),
             (Some("native_services"), None),
             (None, None),
             (Some("native_hide"), Some("super+h")),
@@ -175,6 +176,18 @@ fn checked_and_enabled_rows_follow_editor_state() {
     assert!(!app.command_enabled("replace_in_files", "{}"));
     assert!(app.command_enabled("save", "{}"));
     assert!(app.command_enabled("prompt_save_as", "{}"));
+    let menu = app.application_menu();
+    let wrap = rows(&menu)
+        .find(|row| row.caption == "Wrap Selection With Tag")
+        .unwrap();
+    assert!(!app.command_enabled("insert_snippet", &wrap.args));
+    app.workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::new(0, 5),
+            vel_buffer::Region::new(6, 6),
+        ]));
+    assert!(app.command_enabled("insert_snippet", &wrap.args));
     app.run_named(None, "toggle_bookmark", &json!({}));
     assert!(app.command_checked("toggle_bookmark", "{}"));
     app.run_named(None, "expand_tabs", &json!({"set_translate_tabs":true}));
@@ -186,6 +199,173 @@ fn checked_and_enabled_rows_follow_editor_state() {
     assert!(!app.command_enabled("run_macro", "{}"));
     app.workspace.pane_extent = (1., 1.);
     assert!(!app.command_enabled("new_pane", "{}"));
+}
+
+#[test]
+fn round24_menu_groups_and_prompt_captions() {
+    let menu = fixture(None).application_menu();
+    assert_eq!(
+        menu.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+        [
+            "application",
+            "file",
+            "edit",
+            "selection",
+            "find",
+            "view",
+            "goto",
+            "tools",
+            "project",
+            "preferences",
+            "window",
+            "help"
+        ]
+    );
+    for (group, command, caption) in [
+        ("file", "split_view", "Split View"),
+        ("edit", "paste_and_indent", "Paste and Indent"),
+        ("selection", "find_under_expand", "Quick Add Next"),
+        ("selection", "find_all_under", "Select All Matches"),
+        ("find", "toggle_find_option", "In Selection"),
+        ("goto", "next_view", "Next File"),
+        ("goto", "prev_view", "Previous File"),
+        ("goto", "next_result", "Next Result"),
+        ("goto", "prev_result", "Previous Result"),
+        ("tools", "new_build_system", "New Build System"),
+        ("file", "revert", "Revert File…"),
+        ("help", "show_indexing_status", "Indexing Status…"),
+        (
+            "preferences",
+            "edit_syntax_settings",
+            "Settings – Syntax Specific…",
+        ),
+        ("preferences", "customize_theme", "Customize Theme…"),
+    ] {
+        let matching = |row: &&MenuEntry| row.command.as_deref() == Some(command);
+        assert_eq!(rows(&menu).filter(matching).count(), 1, "{command}");
+        assert_eq!(
+            rows(&role(&menu, group).children)
+                .find(matching)
+                .unwrap()
+                .caption,
+            caption
+        );
+    }
+    assert!(!rows(&role(&menu, "view").children).any(|row| row.id == "tab_selection"));
+    assert_eq!(
+        role(&role(&menu, "selection").children, "tab_selection")
+            .children
+            .len(),
+        6
+    );
+    let view = &role(&menu, "view").children;
+    assert!(
+        !view
+            .iter()
+            .any(|row| matches!(row.command.as_deref(), Some("new_pane" | "close_pane")))
+    );
+    assert_eq!(
+        rows(view)
+            .filter(|row| row.command.as_deref() == Some("close_pane"))
+            .count(),
+        1
+    );
+    fn check_dividers(menu: &[MenuEntry]) {
+        assert!(menu.first().is_none_or(|row| row.caption != "-"));
+        assert!(menu.last().is_none_or(|row| row.caption != "-"));
+        assert!(
+            menu.windows(2)
+                .all(|pair| pair[0].caption != "-" || pair[1].caption != "-")
+        );
+        for row in menu {
+            check_dividers(&row.children);
+        }
+    }
+    check_dividers(&menu);
+}
+
+#[test]
+fn round24_view_checks_and_project_requirements() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    let wrap = json!({"setting":"word_wrap"});
+    let spelling = json!({"setting":"spell_check"});
+    for (command, args, before) in [
+        ("toggle_setting", wrap, true),
+        ("toggle_setting", spelling, false),
+        ("toggle_minimap", json!({}), true),
+        ("toggle_tabs", json!({}), true),
+        ("toggle_side_bar", json!({}), true),
+        ("toggle_status_bar", json!({}), true),
+    ] {
+        assert_eq!(
+            app.command_checked(command, &args.to_string()),
+            before,
+            "{command}: {args}"
+        );
+        app.run_named(None, command, &args);
+        assert_eq!(
+            app.command_checked(command, &args.to_string()),
+            !before,
+            "{command}: {args}"
+        );
+    }
+    for command in [
+        "edit_project",
+        "close_project",
+        "quick_switch_project",
+        "recent_projects",
+    ] {
+        assert!(!app.command_enabled(command, "{}"), "{command}");
+    }
+    let project = data.path().join("settings.sublime-project");
+    fs::write(&project, "{}").unwrap();
+    app.workspace.open_project(project).unwrap();
+    for command in [
+        "edit_project",
+        "close_project",
+        "quick_switch_project",
+        "recent_projects",
+    ] {
+        assert!(app.command_enabled(command, "{}"), "{command}");
+    }
+}
+
+#[test]
+fn find_in_files_where_menu_sets_scope_without_changing_the_query() {
+    let mut app = fixture(None);
+    app.workspace
+        .translations
+        .select(vel_i18n::Language::ZhHans);
+    app.run_named(
+        None,
+        "show_panel",
+        &json!({"panel":"find_in_files","text":"plain"}),
+    );
+    let options = app.find_options_menu(Point::default());
+    assert_eq!(
+        options
+            .iter()
+            .map(|row| row.caption.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "仅查找当前文件",
+            "仅查找打开的文件",
+            "仅查找打开的文件夹",
+            "-",
+            "保留大小写"
+        ]
+    );
+    for (row, scope) in options
+        .iter()
+        .zip(["<current file>", "<open files>", "<open folders>"])
+    {
+        let name = row.command.as_deref().unwrap();
+        assert!(app.command_enabled(name, &row.args));
+        app.run_named(None, name, &serde_json::from_str(&row.args).unwrap());
+        assert_eq!(app.panels.where_input.value(), scope);
+        assert_eq!(app.panels.query.value(), "plain");
+    }
 }
 
 #[test]
@@ -425,6 +605,8 @@ fn in_selection_is_enabled_for_document_find_and_disabled_in_files() {
     let args = json!({"option":"in_selection"});
     let enabled = |app: &App| app.command_enabled("toggle_find_option", &args.to_string());
     assert!(!enabled(&app));
+    app.run_named(None, "show_panel", &json!({"panel":"find"}));
+    assert!(!enabled(&app), "showing Find does not create a scope");
     app.workspace
         .editor_mut()
         .set_selection(vel_buffer::Selection::from_regions([
@@ -468,9 +650,6 @@ fn shipped_catalog_has_all_static_ui_captions() {
                 if let Some(caption) = entry["caption"].as_str()
                     && caption != "-"
                     && !caption.bytes().all(|b| b.is_ascii_digit())
-                    && !vel_fileio::ENCODINGS
-                        .iter()
-                        .any(|(name, _)| *name == caption)
                 {
                     out.insert(caption.to_owned());
                 }
@@ -506,15 +685,7 @@ fn assembled_palette_has_complete_translations_and_preserves_invocations() {
     let mut missing = BTreeSet::new();
     for item in &app.workspace.palette {
         let Some(localized) = app.workspace.palette_caption(item) else {
-            if item.invocation.command == "set_file_type" {
-                assert!(item.caption.starts_with("Set Syntax: "));
-            } else if item.invocation.command == "set_build_system" {
-                assert!(item.caption.starts_with("Tools: Build System: "));
-            } else if item.caption.starts_with("Snippet: ") {
-                // Snippet captions come from each snippet's first line.
-            } else {
-                missing.insert(&item.caption);
-            }
+            missing.insert(&item.caption);
             continue;
         };
         assert!(
@@ -523,7 +694,14 @@ fn assembled_palette_has_complete_translations_and_preserves_invocations() {
                 .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
             "{localized:?}"
         );
-        if !catalog.strings.contains_key(&item.caption) {
+        if let Some(data) = item.caption.strip_prefix("Set Syntax: ") {
+            assert_eq!(localized, format!("设置语法：{data}"));
+        } else if let Some(data) = item.caption.strip_prefix("Snippet: ") {
+            assert_eq!(localized, format!("代码片段：{data}"));
+        } else if let Some(data) = item.caption.strip_prefix("Tools: Build System: ") {
+            let shown = if data == "Automatic" { "自动" } else { data };
+            assert_eq!(localized, format!("工具：构建系统：{shown}"));
+        } else if !catalog.strings.contains_key(&item.caption) {
             assert_eq!(
                 localized.split('：').count(),
                 item.caption.split(": ").count(),
@@ -567,6 +745,109 @@ fn assembled_palette_has_complete_translations_and_preserves_invocations() {
         open_palette(&mut app, source);
         let row = palette_row(&mut app, translated);
         assert_eq!(row.annotation, hint.unwrap_or_default());
+    }
+}
+
+#[test]
+fn round24_localized_menu_walk_preserves_dispatch_and_data() {
+    let data = tempfile::tempdir().unwrap();
+    let user = data.path().join("Packages/User");
+    fs::create_dir_all(&user).unwrap();
+    fs::write(user.join("Save.sublime-build"), r#"{"cmd":["true"]}"#).unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.workspace.recent_files.push("/tmp/Save".into());
+    assert!(app.workspace.refresh_file_menus());
+    let english = app.application_menu();
+    app.workspace
+        .translations
+        .select(vel_i18n::Language::ZhHans);
+    let chinese = app.application_menu();
+
+    fn walk(en: &[MenuEntry], zh: &[MenuEntry], syntax: bool, depth: usize) {
+        assert_eq!(en.len(), zh.len());
+        for (before, after) in en.iter().zip(zh) {
+            assert_eq!(before.id, after.id);
+            assert_eq!(before.command, after.command);
+            assert_eq!(before.args, after.args);
+            assert_eq!(before.shortcut, after.shortcut);
+            if std::env::var_os("VELOCITY_R24_REVIEW").is_some() {
+                eprintln!(
+                    "{:indent$}{} | {}",
+                    "",
+                    before.caption,
+                    after.caption,
+                    indent = depth * 2
+                );
+            }
+            if syntax
+                || matches!(
+                    before.command.as_deref(),
+                    Some("open_recent_file" | "open_recent_folder" | "open_project")
+                )
+                || (before.command.as_deref() == Some("set_build_system")
+                    && before.caption != "Automatic")
+            {
+                assert_eq!(before.caption, after.caption);
+            } else if !(before.caption.bytes().all(|b| b.is_ascii_digit())
+                || matches!(
+                    before.caption.as_str(),
+                    "-" | "Velocity"
+                        | "Windows"
+                        | "Unix"
+                        | "Mac OS 9"
+                        | "UTF-8"
+                        | "UTF-16 LE"
+                        | "UTF-16 BE"
+                )
+                || (before.command.as_deref() == Some("run_macro_file")
+                    && !before.args.contains("Packages/Default/")))
+            {
+                assert!(
+                    after
+                        .caption
+                        .chars()
+                        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+                    "Untranslated assembled menu row: {before:?}"
+                );
+                assert_eq!(
+                    before.caption.ends_with('…'),
+                    after.caption.ends_with('…'),
+                    "{before:?}"
+                );
+            }
+            walk(
+                &before.children,
+                &after.children,
+                syntax || before.id == "syntax_list",
+                depth + 1,
+            );
+        }
+    }
+    walk(&english, &chinese, false, 0);
+    assert!(rows(&chinese).any(|row| row.caption == "自动"));
+    assert!(
+        rows(&chinese)
+            .any(|row| row.caption == "Save" && row.command.as_deref() == Some("set_build_system"))
+    );
+    assert!(
+        rows(&chinese).any(|row| row.caption == "简体中文（GB18030）"
+            && row.args.contains("Chinese Simplified (GB18030)"))
+    );
+    assert!(rows(&chinese).any(|row| row.caption == "在下方插入行" && row.args.contains("Add Line.sublime-macro")));
+}
+
+#[test]
+fn command_icon_does_not_change_when_a_different_caption_alias_wins() {
+    let mut app = fixture(None);
+    open_palette(&mut app, "toggle tabs");
+    let en = palette_row(&mut app, "View: Toggle Tabs").icon;
+    assert_eq!(en, vel_ui::ItemIcon::View);
+    app.workspace
+        .translations
+        .select(vel_i18n::Language::ZhHans);
+    for query in ["toggle tabs", "隐藏选项卡"] {
+        open_palette(&mut app, query);
+        assert_eq!(palette_row(&mut app, "显示：显示或隐藏选项卡").icon, en);
     }
 }
 

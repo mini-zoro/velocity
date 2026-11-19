@@ -783,7 +783,12 @@ impl App {
                 let key = args["setting"]
                     .as_str()
                     .ok_or("toggle_setting needs setting")?;
-                let value = self.workspace.editor().settings.bool(key, false);
+                let editor = self.workspace.editor();
+                let value = if key == "word_wrap" {
+                    crate::view::motion_layout_options(editor).width != 0
+                } else {
+                    editor.settings.bool(key, false)
+                };
                 if key == "save_all_on_build" {
                     self.workspace.set_user_preference(key, json!(!value))?;
                 } else {

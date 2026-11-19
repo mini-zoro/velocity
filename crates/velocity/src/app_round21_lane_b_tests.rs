@@ -314,7 +314,7 @@ fn switch_compound_file_and_round21_menu_rows_resolve() {
     assert_eq!(app.workspace.tabs[app.workspace.active].name(), "foo.pb.h");
     let menu = app.application_menu();
     for path in [
-        &["File", "Revert File"][..],
+        &["File", "Revert File…"][..],
         &["Edit", "Tag", "Close Tag"],
         &["Edit", "Tag", "Wrap Selection With Tag"],
         &["Tools", "Developer", "Show Scope Name"],

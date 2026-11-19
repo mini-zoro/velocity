@@ -306,13 +306,64 @@ impl Scroll {
         }
     }
 }
-/// Virtualized quick-panel row with independent caption, badge, annotation and details.
+/// Language-independent identity of a quick-panel row's icon.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ItemIcon {
+    /// Miscellaneous commands and fallback for unmapped items.
+    #[default]
+    Neutral,
+    /// View and layout commands.
+    View,
+    /// Selection commands.
+    Selection,
+    /// Navigation commands.
+    Goto,
+    /// Find and replace commands.
+    Find,
+    /// Project commands.
+    Project,
+    /// Tools and build commands.
+    Build,
+    /// Package management commands.
+    Package,
+    /// Preferences and settings commands.
+    Settings,
+    /// Syntax commands.
+    Syntax,
+    /// Snippet commands.
+    Snippet,
+    /// Bookmark commands.
+    Bookmarks,
+    /// File icon resolved from the row's path.
+    File,
+    /// A symbol's existing styled kind badge.
+    Symbol(SymbolBadge),
+}
+
+/// Display kinds for indexed symbols.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolBadge {
+    /// Functions and methods.
+    Function,
+    /// Types.
+    Type,
+    /// Namespaces.
+    Namespace,
+    /// Variables.
+    Variable,
+    /// Markup symbols.
+    Markup,
+    /// Symbols without a more specific kind.
+    Other,
+}
+
+/// Virtualized quick-panel row with independent caption, icon, annotation and details.
 #[derive(Clone, Debug, Default)]
 pub struct Item {
     /// Caption.
     pub caption: String,
-    /// Kind badge, e.g. file/command/symbol.
-    pub kind: String,
+    /// Icon identity, independent of the displayed caption and matched alias.
+    pub icon: ItemIcon,
     /// Right-hand hint, e.g. a key binding.
     pub annotation: String,
     /// Second-line path/help.
@@ -340,7 +391,7 @@ impl QuickPanel {
                 item.caption == old.caption
                     && item.details == old.details
                     && item.annotation == old.annotation
-                    && item.kind == old.kind
+                    && item.icon == old.icon
             })
         });
         self.items = items;
@@ -445,12 +496,12 @@ impl QuickPanel {
                 Element::new("quick_panel_label hint", &[]),
             ];
             let hint = theme.style(0x3000 + row as u64, &ElementPath(&hint_path), settings);
-            let text = format!("{}  {}", item.kind, item.annotation);
+            let text = &item.annotation;
             theme.text(
                 layer,
                 &hint,
-                &text,
-                (rect.x + rect.width - theme.advance(&hint, &text) - 12.).max(rect.x + 12.),
+                text,
+                (rect.x + rect.width - theme.advance(&hint, text) - 12.).max(rect.x + 12.),
                 rect.y + 35.,
                 bounds,
             );

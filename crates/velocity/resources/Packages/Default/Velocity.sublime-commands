@@ -2,10 +2,11 @@
 // Groups/commands and line-ending arguments: https://docs.sublimetext.io/reference/commands.html
 // Split View and selected sheets: https://www.sublimetext.com/download (4107, 4126).
 [
-  {"caption":"File: Revert File","command":"revert"},
+  {"caption":"File: Revert File…","command":"revert"},
   {"caption":"Edit: Close Tag","command":"close_tag"},
   {"caption":"Edit: Wrap Selection With Tag","command":"insert_snippet",
-    "args":{"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}},
+    "args":{"require_selection":true,"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}},
+  {"caption":"Edit: Paste and Indent","command":"paste_and_indent"},
   {"caption":"Developer: Show Scope Name","command":"show_scope_name"},
   {"caption":"Goto: Switch Header/Implementation","command":"switch_file",
     "args":{"extensions":["h","cpp","c","cc","mm","m"]}},
@@ -20,6 +21,12 @@
   {"caption":"Tools: New Snippet","command":"new_snippet"},
   {"caption":"Find: In Selection","command":"toggle_find_option","args":{"option":"in_selection"}},
   {"caption":"Find: Preserve Case","command":"toggle_find_option","args":{"option":"preserve_case"}},
+  {"caption":"Selection: Tab Selection: Select All Tabs","command":"select_all_tabs"},
+  {"caption":"Selection: Tab Selection: Select Focused Tab Only","command":"select_single_tab"},
+  {"caption":"Selection: Tab Selection: Add Tab to Left","command":"select_tab_to_left"},
+  {"caption":"Selection: Tab Selection: Add Tab to Right","command":"select_tab_to_right"},
+  {"caption":"Selection: Tab Selection: Focus Previous Selected Tab","command":"focus_selected_tab"},
+  {"caption":"Selection: Tab Selection: Close Selected Tabs","command":"close_selected_tabs"},
   {
     "caption": "Accessibility: Focus Next Region",
     "command": "focus_next_control"
@@ -834,7 +841,7 @@
     }
   },
   {
-    "caption": "Preferences: Key Bindings",
+    "caption": "Preferences: Key Bindings…",
     "command": "edit_settings",
     "args": {
       "base_file": "${packages}/Default/Velocity.sublime-keymap",
@@ -843,7 +850,7 @@
     }
   },
   {
-    "caption": "Preferences: Mouse Bindings",
+    "caption": "Preferences: Mouse Bindings…",
     "command": "edit_settings",
     "args": {
       "base_file": "${packages}/Default/Velocity.sublime-mousemap",
@@ -851,11 +858,11 @@
     }
   },
   {
-    "caption": "Preferences: Settings – Syntax Specific",
+    "caption": "Preferences: Settings – Syntax Specific…",
     "command": "edit_syntax_settings"
   },
   {
-    "caption": "Preferences: Settings – Distraction Free",
+    "caption": "Preferences: Settings – Distraction Free…",
     "command": "edit_settings",
     "args": {
       "base_file": "${packages}/Default/Distraction Free.sublime-settings",
@@ -871,11 +878,11 @@
     "command": "select_theme"
   },
   {
-    "caption": "Preferences: Customize Color Scheme",
+    "caption": "Preferences: Customize Color Scheme…",
     "command": "customize_color_scheme"
   },
   {
-    "caption": "Preferences: Customize Theme",
+    "caption": "Preferences: Customize Theme…",
     "command": "customize_theme"
   },
   {

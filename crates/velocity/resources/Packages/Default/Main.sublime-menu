@@ -13,13 +13,16 @@
         "caption": "New File",
         "command": "new_file"
       },
+      {"caption":"New Window","command":"new_window"},
+      {"caption":"Split View","command":"split_view"},
+      {"caption":"-"},
       {
         "caption": "Open…",
         "command": "prompt_open_file"
       },
       { "caption": "Open Recent", "id": "open_recent" },
       { "caption": "Reopen Closed File", "command": "reopen_last_file" },
-      { "caption": "Revert File", "command": "revert" },
+      { "caption": "Revert File…", "command": "revert" },
       { "caption": "Reopen with Encoding", "children": [
         {"caption": "UTF-8", "command": "reopen_encoding", "args": {"encoding": "UTF-8"}},
         {"caption": "UTF-8 with BOM", "command": "reopen_encoding", "args": {"encoding": "UTF-8 with BOM"}},
@@ -107,6 +110,7 @@
         {"caption": "Chinese Traditional (Big5)", "command": "save_encoding", "args": {"encoding": "Chinese Traditional (Big5)"}}
       ] },
       {"caption":"Convert to Encoding…","command":"convert_to_encoding"},
+      {"caption":"-"},
       {
         "caption": "Save",
         "command": "save"
@@ -119,13 +123,10 @@
         "caption": "Save All",
         "command": "save_all"
       },
+      {"caption":"-"},
       {
         "caption": "Close File",
         "command": "close_file"
-      },
-      {
-        "caption": "New Window",
-        "command": "new_window"
       }
     ]
   },
@@ -157,26 +158,12 @@
         "caption": "Paste",
         "command": "paste"
       },
+      {"caption":"Paste and Indent","command":"paste_and_indent"},
       {
         "caption": "Select All",
         "command": "select_all"
       },
-      {
-        "caption": "Quick Add Next",
-        "command": "find_under_expand"
-      },
-      {
-        "caption": "Select All Matches",
-        "command": "find_all_under"
-      },
-      {
-        "caption": "Indent",
-        "command": "indent"
-      },
-      {
-        "caption": "Unindent",
-        "command": "unindent"
-      },
+      {"caption":"-"},
       {
         "caption": "Text",
         "children": [
@@ -440,7 +427,7 @@
       {"caption":"Tag","children":[
         {"caption":"Close Tag","command":"close_tag"},
         {"caption":"Wrap Selection With Tag","command":"insert_snippet",
-          "args":{"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}}
+          "args":{"require_selection":true,"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}}
       ]}
     ]
   },
@@ -470,10 +457,8 @@
         "caption": "Keep Primary Selection",
         "command": "single_selection"
       },
-      {
-        "caption": "Select Entire Document",
-        "command": "select_all"
-      },
+      {"caption":"Quick Add Next","command":"find_under_expand"},
+      {"caption":"Select All Matches","command":"find_all_under"},
       {
         "caption": "Expand Selection",
         "children": [
@@ -527,7 +512,16 @@
             }
           }
         ]
-      }
+      },
+      {"caption":"-"},
+      {"caption":"Tab Selection","id":"tab_selection","children":[
+        {"caption":"Select All Tabs","command":"select_all_tabs"},
+        {"caption":"Select Focused Tab Only","command":"select_single_tab"},
+        {"caption":"Add Tab to Left","command":"select_tab_to_left"},
+        {"caption":"Add Tab to Right","command":"select_tab_to_right"},
+        {"caption":"Focus Previous Selected Tab","command":"focus_selected_tab"},
+        {"caption":"Close Selected Tabs","command":"close_selected_tabs"}
+      ]}
     ]
   },
   {
@@ -562,6 +556,8 @@
           "panel": "find_in_files", "toggle": true
         }
       },
+      {"caption":"In Selection","command":"toggle_find_option","args":{"option":"in_selection"}},
+      {"caption":"-"},
       {
         "caption": "Next Search Result",
         "command": "find_next"
@@ -583,17 +579,10 @@
         "command": "find_under_prev"
       },
       {
-        "caption": "Add Next Word Match",
-        "command": "find_under_expand"
-      },
-      {
         "caption": "Skip Word Match",
         "command": "find_under_expand_skip"
       },
-      {
-        "caption": "Add All Word Matches",
-        "command": "find_all_under"
-      },
+      {"caption":"-"},
       {
         "caption": "Use Selection for Search",
         "command": "slurp_find_string"
@@ -628,6 +617,7 @@
       {"caption":"Goto Line…","command":"goto_line"},
       {"caption":"Jump Back","command":"jump_back"},
       {"caption":"Jump Forward","command":"jump_forward"},
+      {"caption":"-"},
       {"caption":"Switch File","children":[
         {"caption":"Next File","command":"next_view"},
         {"caption":"Previous File","command":"prev_view"},
@@ -635,6 +625,10 @@
           "args":{"extensions":["h","cpp","c","cc","mm","m"]}}
       ]},
       {"caption":"Jump to Matching Bracket","command":"move_to","args":{"to":"brackets"}},
+      {"caption":"Results","children":[
+        {"caption":"Next Result","command":"next_result"},
+        {"caption":"Previous Result","command":"prev_result"}
+      ]},
       {
         "caption": "Bookmarks",
         "children": [
@@ -723,26 +717,10 @@
           }
         ]
       },
-      {
-        "caption": "Next Tab",
-        "command": "next_view"
-      },
-      {
-        "caption": "Previous Tab",
-        "command": "prev_view"
-      },
-      {
-        "caption": "Larger Font",
-        "command": "increase_font_size"
-      },
-      {
-        "caption": "Smaller Font",
-        "command": "decrease_font_size"
-      },
+      {"caption":"-"},
       {
         "caption": "Layout",
         "children": [
-          {"caption":"Split View","command":"split_view"},
           {
             "caption": "Single",
             "command": "set_layout",
@@ -791,35 +769,6 @@
             "args": {
               "preset": "grid4"
             }
-          }
-        ]
-      },
-      {
-        "caption": "Tab Selection",
-        "children": [
-          {
-            "caption": "Select All Tabs",
-            "command": "select_all_tabs"
-          },
-          {
-            "caption": "Select Focused Tab Only",
-            "command": "select_single_tab"
-          },
-          {
-            "caption": "Add Tab to Left",
-            "command": "select_tab_to_left"
-          },
-          {
-            "caption": "Add Tab to Right",
-            "command": "select_tab_to_right"
-          },
-          {
-            "caption": "Focus Previous Selected Tab",
-            "command": "focus_selected_tab"
-          },
-          {
-            "caption": "Close Selected Tabs",
-            "command": "close_selected_tabs"
           }
         ]
       },
@@ -958,14 +907,6 @@
             }
           }
         ]
-      },
-      {
-        "caption": "New Pane",
-        "command": "new_pane"
-      },
-      {
-        "caption": "Close Pane",
-        "command": "close_pane"
       },
       {
         "caption": "Clone File",
@@ -1215,11 +1156,6 @@
         "command": "build"
       },
       {"caption":"Save All on Build","command":"toggle_setting","args":{"setting":"save_all_on_build"}},
-      {"caption":"Build Results","children":[
-        {"caption":"Show","command":"show_panel","args":{"panel":"output.exec"}},
-        {"caption":"Next Result","command":"next_result"},
-        {"caption":"Previous Result","command":"prev_result"}
-      ]},
       {
         "caption": "Build With…",
         "command": "build",
@@ -1231,14 +1167,8 @@
         "caption": "Cancel Build",
         "command": "cancel_build"
       },
-      {
-        "caption": "Next Result",
-        "command": "next_result"
-      },
-      {
-        "caption": "Previous Result",
-        "command": "prev_result"
-      },
+      {"caption":"Show Build Results","command":"show_panel","args":{"panel":"output.exec"}},
+      {"caption":"-"},
       {
         "caption": "Start or Stop Macro Recording",
         "command": "toggle_record_macro"
@@ -1271,9 +1201,9 @@
           }
         ]
       },
+      {"caption":"-"},
       {"caption":"Developer","children":[
         {"caption":"New Snippet","command":"new_snippet"},
-        {"caption":"New Build System","command":"new_build_system"},
         {"caption":"Show Scope Name","command":"show_scope_name"}
       ]}
     ]
@@ -1285,7 +1215,7 @@
       {"caption":"Velocity Documentation","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/blob/main/README.md"}},
       {"caption":"Release Notes","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/releases"}},
       {
-        "caption": "Indexing Status",
+        "caption": "Indexing Status…",
         "command": "show_indexing_status"
       }
     ]
@@ -1304,7 +1234,7 @@
         }
       },
       {
-        "caption": "Key Bindings",
+        "caption": "Key Bindings…",
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Velocity.sublime-keymap",
@@ -1313,7 +1243,7 @@
         }
       },
       {
-        "caption": "Mouse Bindings",
+        "caption": "Mouse Bindings…",
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Velocity.sublime-mousemap",
@@ -1321,11 +1251,11 @@
         }
       },
       {
-        "caption": "Settings – Syntax Specific",
+        "caption": "Settings – Syntax Specific…",
         "command": "edit_syntax_settings"
       },
       {
-        "caption": "Settings – Distraction Free",
+        "caption": "Settings – Distraction Free…",
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Distraction Free.sublime-settings",
@@ -1346,11 +1276,11 @@
         {"caption":"Follow System","command":"set_ui_language","args":{"language":"auto"}}
       ]},
       {
-        "caption": "Customize Color Scheme",
+        "caption": "Customize Color Scheme…",
         "command": "customize_color_scheme"
       },
       {
-        "caption": "Customize Theme",
+        "caption": "Customize Theme…",
         "command": "customize_theme"
       },
       {

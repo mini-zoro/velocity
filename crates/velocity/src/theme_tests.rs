@@ -446,7 +446,7 @@ fn key_screens_match_structural_goldens() {
         panels.overlay = Some(Overlay::Goto);
         panels.quick.set_items(vec![vel_ui::Item {
             caption: "render_document.rs".into(),
-            kind: "file".into(),
+            icon: vel_ui::ItemIcon::File,
             annotation: "⌘P".into(),
             details: "<b>src/</b><i>render_document.rs</i>".into(),
             highlights: vec![0, 1, 2],

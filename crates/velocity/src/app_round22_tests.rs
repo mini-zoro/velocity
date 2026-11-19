@@ -888,14 +888,14 @@ fn preferences_key_bindings_creates_the_loaded_user_file_and_keeps_legacy() {
         .menus
         .iter()
         .flat_map(|item| &item.children)
-        .find(|item| item.caption == "Key Bindings")
+        .find(|item| item.caption == "Key Bindings…")
         .unwrap()
         .clone();
     let palette = a
         .workspace
         .palette
         .iter()
-        .find(|item| item.caption == "Preferences: Key Bindings")
+        .find(|item| item.caption == "Preferences: Key Bindings…")
         .unwrap();
     assert_eq!(menu.args, palette.invocation.args);
     a.run_named(None, menu.command.as_ref().unwrap(), &menu.args);

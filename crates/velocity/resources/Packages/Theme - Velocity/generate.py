@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import struct
+import sys
 import tempfile
 import zlib
 
@@ -82,6 +83,45 @@ def rounded_box(x, y, left, top, right, bottom, radius):
     cx = min(max(x, left + radius), right - radius)
     cy = min(max(y, top + radius), bottom - radius)
     return left <= x <= right and top <= y <= bottom and math.hypot(x - cx, y - cy) <= radius
+
+
+def palette_icons():
+    """Original 16-DIP quick-panel masks; the renderer supplies light/dark ink."""
+    paths = {
+        # Window, selection marquee, jump arrow, folder, hammer, shipping box.
+        "view": [[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5), (2.5, 3.5)],
+                 [(2.5, 6.5), (13.5, 6.5)]],
+        "selection": [[(5.5, 3.5), (3.5, 3.5), (3.5, 5.5)], [(10.5, 3.5), (12.5, 3.5), (12.5, 5.5)],
+                      [(3.5, 10.5), (3.5, 12.5), (5.5, 12.5)], [(12.5, 10.5), (12.5, 12.5), (10.5, 12.5)],
+                      [(6.5, 8.5), (9.5, 8.5)]],
+        "goto": [[(3.5, 12.5), (12.5, 3.5)], [(7.5, 3.5), (12.5, 3.5), (12.5, 8.5)]],
+        "project": [[(2.5, 12.5), (2.5, 4.5), (6.5, 4.5), (8.5, 6.5), (13.5, 6.5),
+                     (13.5, 12.5), (2.5, 12.5)]],
+        "build": [[(3.5, 4.5), (6, 2.5), (12.5, 2.5), (12.5, 6.5), (6, 6.5), (3.5, 4.5)],
+                  [(8, 6.5), (8, 13.5)]],
+        "package": [[(2.5, 5.5), (8, 2.5), (13.5, 5.5), (13.5, 10.5), (8, 13.5), (2.5, 10.5), (2.5, 5.5)],
+                    [(2.5, 5.5), (8, 8.5), (13.5, 5.5)], [(8, 8.5), (8, 13.5)]],
+        # Adjustment sliders, code brackets, reusable text block, bookmark ribbon.
+        "settings": [[(3.5, 4.5), (12.5, 4.5)], [(6.5, 3), (6.5, 6)],
+                     [(3.5, 8.5), (12.5, 8.5)], [(10.5, 7), (10.5, 10)],
+                     [(3.5, 12.5), (12.5, 12.5)], [(5.5, 11), (5.5, 14)]],
+        "syntax": [[(5, 5), (2.5, 8), (5, 11)], [(11, 5), (13.5, 8), (11, 11)], [(9.5, 4), (6.5, 12)]],
+        "snippet": [[(2.5, 4.5), (2.5, 12.5)], [(5.5, 4.5), (13.5, 4.5)],
+                    [(5.5, 8.5), (11.5, 8.5)], [(5.5, 12.5), (9.5, 12.5)]],
+        "bookmarks": [[(4.5, 3.5), (11.5, 3.5), (11.5, 13), (8, 10.5), (4.5, 13), (4.5, 3.5)]],
+    }
+    for name, paths_ in paths.items():
+        png(f"palette-{name}", lines([(a, b, c, d) for path in paths_
+                                       for (a, b), (c, d) in zip(path, path[1:])], snapped=True))
+    handle = lines([(9.4, 9.4, 13, 13)])
+    png("palette-find", lambda x, y, s: abs(math.hypot(x - 6.7, y - 6.7) - 3.7) <= STROKE / 2
+        or handle(x, y, s))
+    png("palette-neutral", lambda x, y, s: any(math.hypot(x - cx, y - 8) <= .8 for cx in (4, 8, 12)))
+
+
+palette_icons()
+if sys.argv[1:] == ["--palette-icons"]:
+    sys.exit(0)
 
 
 # Chrome glyphs on a 16-DIP grid, one consistent stroke weight.

@@ -439,7 +439,7 @@ fn settings_free_sources(sources: &[(String, String)]) -> (Option<Sources>, Vec<
 /// Inserts only original, redistributable Velocity resources; installed packages/User load later.
 pub fn bundled(resources: &mut Resources) {
     let origin = std::path::PathBuf::from("<embedded>");
-    for (name, bytes) in BUNDLED {
+    for (name, bytes) in BUNDLED.iter().chain(PALETTE_MASKS) {
         resources.insert(
             &format!("Packages/Theme - Velocity/{name}"),
             bytes.to_vec(),
@@ -447,6 +447,34 @@ pub fn bundled(resources: &mut Resources) {
         );
     }
 }
+
+macro_rules! palette_masks {
+    ($($id:literal),+ $(,)?) => {
+        &[$(
+            (concat!("palette-", $id, ".png"),
+                include_bytes!(concat!("../resources/Packages/Theme - Velocity/palette-", $id, ".png"))),
+            (concat!("palette-", $id, "@2x.png"),
+                include_bytes!(concat!("../resources/Packages/Theme - Velocity/palette-", $id, "@2x.png"))),
+            (concat!("palette-", $id, "@3x.png"),
+                include_bytes!(concat!("../resources/Packages/Theme - Velocity/palette-", $id, "@3x.png"))),
+        )+]
+    };
+}
+const PALETTE_MASKS: &[(&str, &[u8])] = palette_masks![
+    "view",
+    "selection",
+    "goto",
+    "find",
+    "project",
+    "build",
+    "package",
+    "settings",
+    "syntax",
+    "snippet",
+    "bookmarks",
+    "neutral",
+];
+
 const BUNDLED: &[(&str, &[u8])] = &[
     (
         "Velocity.sublime-theme",

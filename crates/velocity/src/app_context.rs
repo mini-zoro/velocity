@@ -216,6 +216,9 @@ impl App {
         }
     }
     pub(super) fn show_find_options(&mut self, w: &WindowHandle, point: Point) {
+        w.show_context_menu(&self.find_options_menu(point));
+    }
+    pub(super) fn find_options_menu(&self, point: Point) -> Vec<MenuEntry> {
         let pending = PendingMenu {
             kind: ContextMenuKind::FindInFiles,
             context: MenuContext {
@@ -226,7 +229,7 @@ impl App {
             revision: None,
             started: Instant::now(),
         };
-        w.show_context_menu(&self.context_entries(&pending, &[]));
+        self.context_entries(&pending, &[])
     }
     fn context_entries(
         &self,

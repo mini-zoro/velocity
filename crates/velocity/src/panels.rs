@@ -26,6 +26,7 @@ use vel_search::{
 };
 mod appearance_selection;
 mod details;
+mod quick_icons;
 #[cfg(test)]
 pub(crate) use details::StatusItem;
 #[path = "text_ops.rs"]
@@ -41,7 +42,8 @@ mod round20_perf;
 mod sidebar_folders;
 
 use vel_ui::{
-    Focus, Item, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input, label,
+    Focus, Item, ItemIcon, Node, QuickPanel, Scroll, Surface, Tree, contains, fill, input::Input,
+    label,
 };
 
 /// Rows of the side bar's "Open Files" list: none for the hidden input tab of an empty window.
@@ -223,17 +225,6 @@ fn alias_matches_word_starts(label: &str, positions: &[usize]) -> bool {
             previous = Some(at);
             continues || word_start(at)
         })
-}
-fn symbol_kind_caption(kind: vel_index::SymbolKind) -> &'static str {
-    // Badge names, lowercase like file kinds.
-    match kind {
-        vel_index::SymbolKind::Function => "function",
-        vel_index::SymbolKind::Type => "type",
-        vel_index::SymbolKind::Namespace => "namespace",
-        vel_index::SymbolKind::Variable => "variable",
-        vel_index::SymbolKind::Markup => "markup",
-        vel_index::SymbolKind::Other => "symbol",
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -1656,7 +1647,7 @@ impl Panels {
     fn decorate_locations(&mut self) {
         for item in &mut self.quick.items {
             if let Some(location) = self.locations.get(item.value) {
-                item.kind = symbol_kind_caption(location.kind).into();
+                item.icon = quick_icons::symbol(location.kind);
                 item.annotation = format!(
                     "{}:{}",
                     location
@@ -1691,7 +1682,7 @@ impl Panels {
                     Item {
                         caption: l.name.clone(),
                         value: i,
-                        kind: symbol_kind_caption(l.kind).into(),
+                        icon: quick_icons::symbol(l.kind),
                         annotation: format!(
                             "{}:{}",
                             l.file.file_name().unwrap_or_default().to_string_lossy(),
@@ -2345,6 +2336,16 @@ impl Panels {
             "find_in_files_start" => {
                 self.start_files(workspace)?;
             }
+            "find_in_files_where" => {
+                let scope = match args["scope"].as_str() {
+                    Some("current_file") => "<current file>",
+                    Some("open_files") => "<open files>",
+                    Some("open_folders") => "<open folders>",
+                    _ => return Err("Unknown Find in Files scope".into()),
+                };
+                self.where_input.set(scope);
+                self.input_changed(workspace, viewport);
+            }
             "set_indentation" => {
                 self.set_indentation(workspace, args)?;
             }
@@ -2402,6 +2403,27 @@ impl Panels {
             "preserve_case" => self.options.preserve_case,
             _ => false,
         }
+    }
+    pub(crate) fn can_find_in_selection(&self, workspace: &Workspace) -> bool {
+        let tab = &workspace.tabs[workspace.active];
+        let editor = &tab.editor;
+        if editor.binary.is_some() || self.panel == Some(Panel::Files) {
+            return false;
+        }
+        let current = editor.buffer.view(editor.id).sel();
+        if self.document_find_visible()
+            && self
+                .scope_selection
+                .as_ref()
+                .is_some_and(|(sheet, remembered)| {
+                    *sheet == tab.sheet
+                        && (remembered.same_snapshot(current) || remembered == current)
+                })
+        {
+            // A match selected by Find itself is not an editor selection scope.
+            return self.in_selection || !self.selection_scope.is_empty();
+        }
+        current.iter().any(|region| !region.empty())
     }
     fn panel_kind(panel: &str) -> Panel {
         match panel {
@@ -2872,13 +2894,16 @@ impl Panels {
         Ok(())
     }
     pub(crate) fn refresh_localized_palette(&mut self, workspace: &mut Workspace) {
-        if self.overlay == Some(Overlay::Palette) {
+        if matches!(
+            self.overlay,
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+        ) {
             self.prepared.clear();
             self.query_quick(workspace);
         }
     }
     fn palette_match_limit(&self) -> usize {
-        if self.overlay == Some(Overlay::Palette) && !self.palette_primary.is_empty() {
+        if !self.palette_primary.is_empty() {
             200
         } else {
             100
@@ -3050,9 +3075,7 @@ impl Panels {
             let mut candidates = Vec::with_capacity(self.palette_indices.len());
             for (primary, &index) in self.palette_indices.iter().enumerate() {
                 let item = &palette[index];
-                let caption = (self.overlay == Some(Overlay::Palette))
-                    .then(|| workspace.palette_caption(item))
-                    .flatten();
+                let caption = workspace.palette_caption(item);
                 let recent = self
                     .palette_recent
                     .get(&format!(
@@ -3258,7 +3281,7 @@ impl Panels {
         } else {
             &workspace.palette
         };
-        let bilingual = self.overlay == Some(Overlay::Palette) && !self.palette_primary.is_empty();
+        let bilingual = palette && !self.palette_primary.is_empty();
         let mut seen = BTreeSet::new();
         let items = hits
             .into_iter()
@@ -3298,18 +3321,18 @@ impl Panels {
                         Vec::new()
                     },
                     value: index,
-                    kind: if let Some(kind) = self
+                    icon: if palette {
+                        quick_icons::command(&palette_items[index])
+                    } else if let Some(kind) = self
                         .local_kinds
                         .get(hit.index)
                         .filter(|_| !self.local_positions.is_empty())
                     {
-                        symbol_kind_caption(*kind).into()
-                    } else if palette {
-                        "command".into()
+                        quick_icons::symbol(*kind)
                     } else if !self.local_positions.is_empty() {
-                        "word".into()
+                        ItemIcon::Neutral
                     } else {
-                        "file".into()
+                        ItemIcon::File
                     },
                     annotation: if palette {
                         workspace
@@ -3318,7 +3341,13 @@ impl Panels {
                             .hint(&palette_items[index].invocation)
                             .unwrap_or_default()
                     } else if let Some(at) = self.local_positions.get(hit.index) {
-                        format!("Line {}", workspace.editor().text.byte_to_line(*at) + 1)
+                        workspace.translations.tr_fmt(
+                            "Line {number}",
+                            &[(
+                                "number",
+                                (workspace.editor().text.byte_to_line(*at) + 1).to_string(),
+                            )],
+                        )
                     } else {
                         String::new()
                     },
@@ -6114,10 +6143,9 @@ impl Panels {
                 height: self.quick.scroll.viewport,
             };
             let s = self.ui_scale;
-            // Command lists show a caption and key binding only (the command name is not
-            // for users); kind badges appear where kinds differ (files, symbols).
+            // Appearance previews have their own row layout; other lists reserve the badge lane.
             let compact = self.quick_compact();
-            let badges = !compact && self.overlay != Some(Overlay::Appearance);
+            let badges = self.overlay != Some(Overlay::Appearance);
             let row_height = self.quick.scroll.row_height / s;
             for row in self.quick.scroll.visible() {
                 let item = &self.quick.items[row];
@@ -6181,35 +6209,10 @@ impl Panels {
                     width: 18. * s,
                     height: 18. * s,
                 };
-                let file_icon = (self.overlay == Some(Overlay::Goto) && item.kind == "file")
-                    .then(|| workspace.themes.file_icon(Path::new(&item.details)))
-                    .flatten();
-                if badges && let Some(icon) = file_icon {
-                    theme.icon(
-                        &mut overlay,
-                        icon,
-                        Rect {
-                            x: badge.x + 1. * s,
-                            y: badge.y + 1. * s,
-                            width: 16. * s,
-                            height: 16. * s,
-                        },
-                        rows,
-                        hint.foreground,
-                    );
-                } else if badges {
-                    let kind_class = match item.kind.as_str() {
-                        "function" => "kind_container kind_function",
-                        "command" => "kind_container kind_keyword",
-                        "type" => "kind_container kind_type",
-                        "namespace" => "kind_container kind_namespace",
-                        "variable" => "kind_container kind_variable",
-                        "markup" => "kind_container kind_markup",
-                        _ => "kind_container kind_navigation",
-                    };
+                if badges && let ItemIcon::Symbol(symbol) = item.icon {
+                    let (kind_class, letter) = quick_icons::symbol_style(symbol);
                     let kind = self.tree.style(id, Some(kind_class), &mut theme, settings);
                     theme.surface(&mut overlay, &kind, badge, rows);
-                    let letter = item.kind.chars().next().unwrap_or('·').to_string();
                     let label = theme.style(
                         StyleId::OverlayKindLabel.at(row as u64),
                         &vel_theme::ElementPath(&[
@@ -6219,14 +6222,24 @@ impl Panels {
                         ]),
                         settings,
                     );
-                    let width = theme.advance(&label, &letter);
+                    let width = theme.advance(&label, letter);
                     theme.text(
                         &mut overlay,
                         &label,
-                        &letter,
+                        letter,
                         (badge.x + (badge.width - width) / 2.).round(),
                         badge.y + 13. * s,
                         vel_ui::minihtml::intersection(badge, rows),
+                    );
+                } else if badges {
+                    quick_icons::paint(
+                        workspace,
+                        &theme,
+                        &mut overlay,
+                        item,
+                        badge,
+                        rows,
+                        hint.foreground,
                     );
                 }
                 theme.text(
@@ -7193,7 +7206,7 @@ mod tests {
             panels.overlay = Some(Overlay::Goto);
             panels.quick.set_items(vec![vel_ui::Item {
                 caption: caption.into(),
-                kind: "file".into(),
+                icon: ItemIcon::File,
                 details: "/tmp/project/src/render".into(),
                 highlights: highlights.clone(),
                 ..Default::default()
@@ -7331,14 +7344,14 @@ mod tests {
         let rust = rows("rust");
         let weak = rust
             .iter()
-            .find(|(caption, _)| caption == "偏好设置：自定主题")
+            .find(|(caption, _)| caption == "偏好设置：自定主题…")
             .expect("a scattered alias hit for rust");
         assert!(weak.1.is_empty(), "{weak:?}");
         // A direct hit on the shown caption keeps its precise highlight.
         let theme = rows("主题");
         let direct = theme
             .iter()
-            .find(|(caption, _)| caption == "偏好设置：自定主题")
+            .find(|(caption, _)| caption == "偏好设置：自定主题…")
             .expect("a direct hit for 主题");
         let start = direct.0.find("主题").unwrap();
         assert_eq!(direct.1, [start, start + "主".len()]);
@@ -7462,7 +7475,7 @@ mod tests {
                         .enumerate()
                         .map(|(i, caption)| vel_ui::Item {
                             caption: caption.clone(),
-                            kind: "command".into(),
+                            icon: ItemIcon::Neutral,
                             annotation: if i % 2 == 0 {
                                 "⌃⇧1".into()
                             } else {
@@ -7791,7 +7804,10 @@ mod intelligence_tests {
         wait(&mut workspace, &mut panels, |_, p| p.quick.items.len() == 2);
         assert!(panels.quick.items[0].caption.contains("extraordinary_name"));
         assert_eq!(panels.quick.items[1].annotation, "Line 2");
-        assert_eq!(panels.quick.items[0].kind, "function");
+        assert_eq!(
+            panels.quick.items[0].icon,
+            ItemIcon::Symbol(vel_ui::SymbolBadge::Function)
+        );
     }
     /// Project symbol rows carry the symbol's kind (function, type, ...) in its own badge
     /// class and letter, not the debug name of an internal enum.
@@ -7809,7 +7825,10 @@ mod intelligence_tests {
         wait(&mut w, &mut p, |_, p| {
             !p.quick_pending && !p.quick.items.is_empty()
         });
-        assert_eq!(p.quick.items[0].kind, "function");
+        assert_eq!(
+            p.quick.items[0].icon,
+            ItemIcon::Symbol(vel_ui::SymbolBadge::Function)
+        );
         p.layout(Size {
             width: 900.,
             height: 600.,

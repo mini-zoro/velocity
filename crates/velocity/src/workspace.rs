@@ -20,6 +20,14 @@ use vel_fileio::{self as fileio, ChangeTracker, Format, LoadTask, Loaded, Watche
 use vel_text::Text;
 #[path = "appearance.rs"]
 pub(crate) mod appearance;
+
+/// Built-in macro labels are UI strings; package and user macro names are data.
+pub(crate) fn localized_macro_name<'a>(tr: &'a vel_i18n::Translator, caption: &'a str) -> &'a str {
+    let name = caption.strip_prefix("Macro: ").unwrap_or(caption);
+    name.strip_prefix("Default/")
+        .map_or(name, |name| tr.caption(name))
+}
+
 #[derive(Debug)]
 pub struct Tab {
     pub shared_dirty: bool,
@@ -1930,15 +1938,39 @@ impl Workspace {
         self.translations.select(language)
     }
     pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
-        // Rows whose caption is the user's data (a syntax name, a build
-        // system's name) stay as written: there is nothing to translate.
-        if matches!(
-            item.invocation.command.as_str(),
-            "set_file_type" | "set_build_system"
-        ) {
-            return None;
+        let tr = &self.translations;
+        let caption = item.caption.as_str();
+        // Only the UI prefix is translated; names can contain colons and can
+        // even be identical to catalog keys.
+        let prefix = match item.invocation.command.as_str() {
+            "set_file_type" => Some("Set Syntax"),
+            "insert_snippet" if caption.starts_with("Snippet: ") => Some("Snippet"),
+            "set_build_system" if item.invocation.args["name"] != "Automatic" => {
+                Some("Tools: Build System")
+            }
+            "run_macro_file" if caption.starts_with("Macro: ") => {
+                let name = localized_macro_name(tr, caption);
+                return tr
+                    .palette_caption("Macro")
+                    .map(|prefix| format!("{prefix}：{name}"));
+            }
+            "set_indentation" if item.invocation.args["width"].is_u64() => Some("Tab Width"),
+            "set_dictionary" if caption.starts_with("System: ") => Some("System"),
+            "open_project" | "build"
+                if caption == item.invocation.args["file"]
+                    || item.invocation.args["_build_picker"] == true =>
+            {
+                return None;
+            }
+            _ => None,
+        };
+        if let Some(prefix) = prefix {
+            let name = caption.strip_prefix(prefix)?.strip_prefix(": ")?;
+            return tr
+                .palette_caption(prefix)
+                .map(|prefix| format!("{prefix}：{name}"));
         }
-        self.translations.palette_caption(&item.caption)
+        tr.palette_caption(caption)
     }
     pub fn track_settings_write(
         &mut self,

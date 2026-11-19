@@ -26,7 +26,10 @@ impl Panels {
             &workspace.appearance.schemes
         };
         let mut rows = vec![Row {
-            caption: "Automatic (follow system appearance)".into(),
+            caption: workspace
+                .translations
+                .tr("Automatic (follow system appearance)")
+                .into_owned(),
             key: root,
             value: "auto".into(),
             path: String::new(),
@@ -60,7 +63,14 @@ impl Panels {
                     ]
                 } {
                     rows.push(Row {
-                        caption: format!("{prefix}: {name} (applies in {prefix} mode)"),
+                        caption: workspace.translations.tr_fmt(
+                            if prefix == "Dark" {
+                                "Dark: {name} (applies in Dark mode)"
+                            } else {
+                                "Light: {name} (applies in Light mode)"
+                            },
+                            &[("name", name.into())],
+                        ),
                         key,
                         value: resource.value.clone(),
                         path: resource.path.clone(),
@@ -128,7 +138,7 @@ impl Panels {
                     Item {
                         caption: row.caption.clone(),
                         value: hit.index,
-                        kind: "appearance".into(),
+                        icon: vel_ui::ItemIcon::Settings,
                         annotation: row.key.into(),
                         details: row.path.clone(),
                         highlights: hit.positions,

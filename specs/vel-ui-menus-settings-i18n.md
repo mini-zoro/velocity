@@ -207,6 +207,40 @@ default and the fallback for anything untranslated.
    6. accessibility labels and alerts;
    7. Chinese render scenes and the design pass.
 
+## Review findings (round 24)
+
+Reviewed Velocity's expanded menu trees and context resources without opening
+windows. The comparison was behavioral and clean-room: [Sublime Text 4 release
+notes](https://www.sublimetext.com/blog/articles/sublime-text-4), [tab
+multi-select](https://www.sublimetext.com/docs/tab_multi-select.html), the
+[public changelog](https://www.sublimetext.com/download), and [Apple's
+menu guidelines](https://developer.apple.com/design/human-interface-guidelines/menus).
+No Sublime menu files or artwork were consulted.
+
+| Surface | Finding and disposition |
+| --- | --- |
+| Velocity / Window | Put a divider between Settings and Services; keep Hide, Hide Others and Show All together, with Quit in the last group. AppKit still owns Services, About, the Hide family, window-list rows, native window actions, and the Help search field. About and New Window retain the standard direct-action labels. |
+| File | Move Split View here, separate from layout presets. Group creation/opening, encoding, saving and closing. Revert warns when applicable; its label now has an ellipsis. Recent paths and standardized codec IDs are data. Print and Open Folder in New Window still need native workflows; there are no placeholder rows. |
+| Edit / Selection | Add Paste and Indent to Edit and the editor popup; leave Select All in Edit. Move match selection and the Tab Selection submenu into Selection. Keep indentation actions in Line; Wrap Selection With Tag requires a writable text selection. Copy as HTML remains a known gap: a rich clipboard export is a separate feature, not a mislabeled plain-text Copy. |
+| Find / Find in Files | Separate document-scoped In Selection from file search. It is disabled without an original scope, even if Find highlighted a match itself. The Where popup offers Current File, Open Files and Open Folders without altering the query. Direct scope choices replace Where; Preserve Case remains a toggle. The unsupported per-search Use .gitignore switch is not shown. |
+| View | Keep the layout presets, line endings, display toggles and syntax tree. New/Close Group live under Groups. Remove duplicate tab navigation and font controls; verify effective wrap (including auto), spell check, minimap, tabs, sidebar and status bar checkmarks. |
+| Goto / Tools | Keep next/previous file under Switch File and put next/previous search or build result under Goto > Results. Tools keeps Show Build Results and one New Build System row. Build System and Macros remain dynamic. |
+| Project | Edit/Close require an active project; Recent/Quick Switch require history. Add Folder and Save Project As can start a new project. |
+| Preferences / Help | Keep these in their macOS roles, with Window and Help trailing. Add ellipses to comparison-window and Indexing Status actions. The settings editors remain in Preferences apart from the app-menu Settings entry. |
+| Editor / sidebar / mount / tab popups | Match editor and tab labels for Copy File Path and Reveal in Side Bar. Keep folder-specific operations on the mount/sidebar, and close-by-target on the tab. Reveal in Finder is consistent across surfaces. Widget history, spelling suggestions and third-party labels still preserve user/package text. |
+
+The palette has 12 original 16-DIP command masks at 1×, 2× and 3×. Textures
+are tinted from the same theme ink as file icons. Command identity comes from
+the source command family, not the winning caption or alias. Existing typed
+file icons and explicit symbol badges are unchanged; a missing texture uses
+the neutral dots. Appearance previews retain their own row layout.
+
+The zh-Hans pass covers menu rows, built-in macro labels, encoding descriptions,
+palette commands and authored prefixes in dynamic pickers. Resource identifiers
+(including syntax, snippet, build-system, theme and dictionary names), paths,
+history and standardized codec labels are preserved verbatim. Panels, status
+bar, dialogs, window titles and accessibility remain out of scope for this pass.
+
 ## Rules
 
 - One codex lane implements A, B and D after lanes A and C merge (it touches many files). The design agent styles C
