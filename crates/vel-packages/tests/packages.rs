@@ -268,7 +268,7 @@ fn remove_covers_both_sources_preserves_recoverable_backups_and_is_idempotent() 
 
 #[cfg(unix)]
 #[test]
-fn symlinked_package_directories_and_preferences_never_redirect_writes_or_removal() {
+fn removal_moves_only_the_link_and_enablement_follows_the_user_folder() {
     use std::os::unix::fs::symlink;
     let (root, manager) = store();
     let source = root.path().join("source.sublime-package");
@@ -278,14 +278,53 @@ fn symlinked_package_directories_and_preferences_never_redirect_writes_or_remova
     fs::create_dir(&outside).unwrap();
     fs::create_dir_all(manager.data_dir().join("Packages")).unwrap();
     symlink(&outside, manager.data_dir().join("Packages/Example")).unwrap();
-    assert!(manager.remove("Example").is_err());
-    assert!(
-        installed.path.exists(),
-        "preflight must preserve the archive"
+    fs::write(outside.join("keep"), "untouched").unwrap();
+    assert_eq!(manager.remove("Example").unwrap().len(), 2);
+    assert!(!installed.path.exists());
+    assert_eq!(
+        fs::read_to_string(outside.join("keep")).unwrap(),
+        "untouched"
     );
     symlink(&outside, manager.data_dir().join("Packages/User")).unwrap();
-    assert!(manager.set_enabled("Example", false).is_err());
-    assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    manager.set_enabled("Example", false).unwrap();
+    assert!(
+        fs::read_to_string(outside.join("Preferences.sublime-settings"))
+            .unwrap()
+            .contains("Example")
+    );
+}
+
+#[test]
+fn bad_archives_stay_visible_and_zipballs_install_at_the_root() {
+    let (root, manager) = store();
+    let source = root.path().join("Foo-main.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&source).unwrap());
+    for (name, contents) in [
+        ("Foo-main/Snippet.sublime-snippet", "resource"),
+        ("Foo-main/.DS_Store", "junk"),
+        ("__MACOSX/._Foo", "junk"),
+    ] {
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(contents.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    let good = manager.install_local("Foo", &source).unwrap();
+    let mut zip = zip::ZipArchive::new(fs::File::open(&good.path).unwrap()).unwrap();
+    assert_eq!(zip.len(), 1);
+    assert!(zip.by_name("Snippet.sublime-snippet").is_ok());
+    let broken = good.path.with_file_name("Broken.sublime-package");
+    fs::write(&broken, "not a zip").unwrap();
+    let list = manager.list().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(
+        list.iter()
+            .find(|p| p.name == "Broken")
+            .unwrap()
+            .error
+            .is_some()
+    );
+    assert_eq!(manager.remove("Broken").unwrap().len(), 1);
+    assert!(good.path.exists() && !broken.exists());
 }
 
 #[test]

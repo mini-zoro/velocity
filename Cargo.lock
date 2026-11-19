@@ -3013,9 +3013,11 @@ dependencies = [
  "proptest",
  "regex",
  "regex-syntax",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
+ "vel-regex",
  "zip",
 ]
 
@@ -3060,11 +3062,13 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "encoding_rs",
+ "libc",
  "memchr",
  "notify",
  "proptest",
  "rustix",
  "serde",
+ "serde_json",
  "simdutf8",
  "tempfile",
  "vel-buffer",
@@ -3159,6 +3163,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "vel-config",
+ "vel-fileio",
  "zip",
 ]
 
@@ -3249,6 +3254,7 @@ dependencies = [
 name = "vel-session"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "libc",
  "serde",
  "serde_json",
@@ -3388,6 +3394,7 @@ dependencies = [
  "regex-automata",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "unicode-segmentation",
  "unicode-width",

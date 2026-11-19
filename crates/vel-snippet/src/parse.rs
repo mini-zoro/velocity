@@ -102,14 +102,21 @@ impl Parser<'_> {
                             let pattern = self.delimited()?;
                             let format = self.delimited()?;
                             let start = self.at;
-                            while self.peek().is_some_and(|c| c != '}') {
+                            while self.peek().is_some_and(|c| c != '}' && c != ':') {
                                 self.take();
                             }
                             let options = &self.source[start..self.at];
-                            if self.take() != Some('}') {
-                                return Err(Error::Parse("unterminated transformation".into()));
-                            }
                             transform = Some(Transform::new(&pattern, format, options)?);
+                            // Bundled C++ snippets combine a documented substitution
+                            // (https://www.sublimetext.com/docs/completions.html)
+                            // with a fallback after the flags.
+                            match self.take() {
+                                Some('}') => (),
+                                Some(':') => default = Some(self.nodes(true)?),
+                                _ => {
+                                    return Err(Error::Parse("unterminated transformation".into()));
+                                }
+                            }
                         }
                         _ => return Err(Error::Parse("invalid placeholder suffix".into())),
                     }

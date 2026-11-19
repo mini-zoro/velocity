@@ -105,10 +105,23 @@ impl Inventory {
         }
         (resources, plugins, version)
     }
+    pub fn has_resources(&self) -> bool {
+        self.paths.keys().any(|path| resource(path))
+    }
+}
+
+fn resource(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            ext.starts_with("sublime-") || matches!(ext, "tmLanguage" | "tmPreferences" | "tmTheme")
+        })
+        || name.ends_with(".tmLanguage.json")
 }
 
 pub(crate) fn inspect(path: &Path) -> Result<Inventory> {
-    let file = fs::File::open(path)?;
+    let file = vel_fileio::regular::read(path).map_err(invalid)?;
     if file.metadata()?.len() > MAX_ARCHIVE {
         return Err(invalid("archive exceeds 128 MiB"));
     }
@@ -187,16 +200,29 @@ pub(crate) fn inspect(path: &Path) -> Result<Inventory> {
     Ok(inventory)
 }
 pub(crate) fn inspect_loose(root: &Path) -> Result<Inventory> {
-    fn visit(root: &Path, dir: &Path, inventory: &mut Inventory, depth: usize) -> Result<()> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        inventory: &mut Inventory,
+        depth: usize,
+        visiting: &mut BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
         if depth > 64 {
             return Err(invalid("loose package nesting exceeds 64 directories"));
         }
+        let resolved = dir.canonicalize()?;
+        if !visiting.insert(resolved.clone()) {
+            return Ok(());
+        }
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
-            let ty = entry.file_type()?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let path = entry.path();
+            let ty = path.metadata()?;
             if ty.is_dir() {
-                visit(root, &path, inventory, depth + 1)?;
+                visit(root, &path, inventory, depth + 1, visiting)?;
             } else if ty.is_file() {
                 let relative = path
                     .strip_prefix(root)
@@ -205,21 +231,84 @@ pub(crate) fn inspect_loose(root: &Path) -> Result<Inventory> {
                     .ok_or_else(|| invalid("non-UTF8 resource path"))?
                     .to_owned();
                 if relative == "package-metadata.json" {
-                    if entry.metadata()?.len() > MAX_RESOURCE {
+                    let mut bytes = Vec::new();
+                    vel_fileio::regular::read(&path)
+                        .map_err(invalid)?
+                        .take(MAX_RESOURCE + 1)
+                        .read_to_end(&mut bytes)?;
+                    if bytes.len() as u64 > MAX_RESOURCE {
                         return Err(invalid("oversized metadata"));
                     }
-                    inventory.metadata = Some(fs::read(&path)?);
+                    inventory.metadata = Some(bytes);
                 }
-                inventory.paths.insert(relative, ());
+                if resource(&relative) || relative.ends_with(".py") {
+                    inventory.paths.insert(relative, ());
+                }
                 if inventory.paths.len() > MAX_ENTRIES {
                     return Err(invalid("too many loose resources"));
                 }
             }
-            // Symlinks are intentionally not traversed.
         }
+        visiting.remove(&resolved);
         Ok(())
     }
     let mut inventory = Inventory::default();
-    visit(root, root, &mut inventory, 0)?;
+    let mut visiting = root
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .into_iter()
+        .flat_map(|p| p.ancestors().map(Path::to_owned).collect::<Vec<_>>())
+        .collect();
+    visit(root, root, &mut inventory, 0, &mut visiting)?;
     Ok(inventory)
+}
+
+pub(crate) fn normalized(path: &Path, package: &str) -> Result<Option<vel_fileio::atomic::Stage>> {
+    use vel_fileio::atomic::{Stage, parent};
+    fn junk(name: &str) -> bool {
+        name.split('/')
+            .any(|c| matches!(c, "__MACOSX" | ".DS_Store") || c.starts_with("._"))
+    }
+    let mut source =
+        zip::ZipArchive::new(vel_fileio::regular::read(path).map_err(invalid)?).map_err(invalid)?;
+    let mut files = Vec::new();
+    for i in 0..source.len() {
+        let entry = source.by_index(i).map_err(invalid)?;
+        if !entry.is_dir() && !junk(entry.name()) {
+            files.push((i, entry.name().to_owned()));
+        }
+    }
+    if files.is_empty() {
+        return Ok(None); // Valid but unsupported, reported as such by the installer.
+    }
+    let wrapper = files[0]
+        .1
+        .split_once('/')
+        .map(|(head, _)| head)
+        .filter(|head| {
+            let repo_wrapper = *head == package
+                || head.ends_with("-main")
+                || head.ends_with("-master")
+                || head.rsplit_once('-').is_some_and(|(_, tail)| {
+                    tail.len() >= 7 && tail.bytes().all(|c| c.is_ascii_hexdigit())
+                });
+            repo_wrapper
+                && files
+                    .iter()
+                    .all(|(_, name)| name.split_once('/').is_some_and(|(part, _)| part == *head))
+        });
+    if wrapper.is_none() && !source.file_names().any(junk) {
+        return Ok(None);
+    }
+    let mut stage = Stage::new(parent(path), ".velocity-package-", None)?;
+    let mut zip = zip::ZipWriter::new(stage.file());
+    for (i, name) in &files {
+        let dest = wrapper
+            .and_then(|_| name.split_once('/'))
+            .map_or(name.as_str(), |(_, p)| p);
+        zip.raw_copy_file_rename(source.by_index(*i).map_err(invalid)?, dest)
+            .map_err(invalid)?;
+    }
+    zip.finish().map_err(invalid)?;
+    Ok(Some(stage))
 }

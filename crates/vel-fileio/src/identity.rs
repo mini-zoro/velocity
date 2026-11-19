@@ -7,7 +7,7 @@ pub(crate) struct Digest {
     bytes: u64,
 }
 impl Digest {
-    fn update(&mut self, bytes: &[u8]) {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
         self.hasher.update(bytes);
         self.bytes += bytes.len() as u64;
     }

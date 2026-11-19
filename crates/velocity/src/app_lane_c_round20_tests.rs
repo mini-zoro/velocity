@@ -399,7 +399,8 @@ fn r20_tab_transfer_keeps_dirty_selection_and_undo() {
             json!({"fixture_syntax":name}).to_string(),
         )
         .unwrap();
-        std::fs::write(user.join("Transfer.sublime-keymap"), keys).unwrap();
+        // Only the documented User keymap names are loaded (key_bindings docs).
+        std::fs::write(user.join("Default (OSX).sublime-keymap"), keys).unwrap();
         let project = profile.join("transfer.sublime-project");
         std::fs::write(
             &project,

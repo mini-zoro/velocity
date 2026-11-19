@@ -454,13 +454,8 @@ fn package_job(
                 .ok_or("missing archive path or URL")?;
             let name = args["name"]
                 .as_str()
-                .or_else(|| {
-                    source
-                        .rsplit('/')
-                        .next()
-                        .and_then(|s| s.strip_suffix(".sublime-package"))
-                })
-                .ok_or("archive must end in .sublime-package, or supply a name")?;
+                .or_else(|| suggested_package_name(source))
+                .ok_or("archive must end in .sublime-package or .zip, or supply a name")?;
             let installed = if command == "package_install_file" {
                 manager.install_local(name, Path::new(source))
             } else {
@@ -468,9 +463,10 @@ fn package_job(
             }
             .map_err(|e| e.to_string())?;
             Reply::Changed(format!(
-                "Installed {}. Backup: {}",
+                "Installed {}. Backup: {}{}",
                 installed.path.display(),
-                backup_text(installed.backup.as_deref())
+                backup_text(installed.backup.as_deref()),
+                warnings_text(&installed.warnings)
             ))
         }
         "package_remove" if args["name"].as_str().is_some() => {
@@ -538,9 +534,10 @@ fn package_job(
                 .install_release(&release, &client)
                 .map_err(|e| e.to_string())?;
             Reply::Changed(format!(
-                "Upgraded {}. Backup: {}",
+                "Upgraded {}. Backup: {}{}",
                 installed.path.display(),
-                backup_text(installed.backup.as_deref())
+                backup_text(installed.backup.as_deref()),
+                warnings_text(&installed.warnings)
             ))
         }
         _ => {
@@ -548,9 +545,10 @@ fn package_job(
             // The engine inventory covers seven resource families. Supplement
             // app-owned menu/palette/mouse/metadata resources without changing it.
             let mut resources = vel_config::resources::Resources::default();
-            resources.load(data)?;
+            let _warnings = resources.load_with_warnings(data);
+            let mut known: BTreeSet<_> = packages.iter().map(|p| p.name.clone()).collect();
 
-            let choices = packages
+            let mut choices = packages
                 .into_iter()
                 .filter(|p| p.name != "User" || command == "package_list")
                 .map(|p| {
@@ -595,6 +593,7 @@ fn package_job(
                                     .iter()
                                     .map(|p| format!("Python (not executed): {p}"))
                             )
+                            .chain(p.error.iter().cloned())
                             .collect::<Vec<_>>()
                             .join("\n")
                     );
@@ -603,7 +602,7 @@ fn package_job(
                         p.name,
                         if disabled { " (disabled)" } else { "" },
                         p.contributions.len() + extra.len(),
-                        p.support().label()
+                        p.error.as_deref().unwrap_or_else(|| p.support().label())
                     );
                     choice(
                         caption,
@@ -616,10 +615,63 @@ fn package_job(
                     )
                 })
                 .collect::<Vec<_>>();
+            if command == "package_toggle" {
+                let mut bundled = vel_config::resources::Resources::default();
+                crate::shipped::register(&crate::language::packages_root(), &mut bundled);
+                let plugins = bundled.plugins();
+                let shipped = std::fs::read_dir(crate::language::packages_root())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+                    .filter_map(|entry| entry.file_name().into_string().ok());
+                let extra: BTreeSet<_> = shipped
+                    .chain(std::iter::once("Vintage".into()))
+                    .chain(ignored.iter().cloned())
+                    .collect();
+                for name in extra
+                    .into_iter()
+                    .filter(|p| p != "User" && known.insert(p.clone()))
+                {
+                    let disabled = ignored.contains(&name);
+                    let support = plugins
+                        .get(name.as_str())
+                        .map_or_else(String::new, |(count, _)| {
+                            format!("; {count} Python files not run")
+                        });
+                    choices.push(choice(
+                        format!(
+                            "{name}{}{support}",
+                            if disabled { " (disabled)" } else { "" }
+                        ),
+                        command,
+                        json!({"name":name,"enabled":disabled}),
+                    ));
+                }
+            }
             Reply::Choices(choices)
         }
     };
     Ok(result)
+}
+fn suggested_package_name(source: &str) -> Option<&str> {
+    let filename = source.split(['?', '#']).next()?.rsplit('/').next()?;
+    let name = filename
+        .strip_suffix(".sublime-package")
+        .or_else(|| filename.strip_suffix(".zip"))?;
+    Some(
+        name.strip_suffix("-main")
+            .or_else(|| name.strip_suffix("-master"))
+            .unwrap_or(name),
+    )
+}
+
+fn warnings_text(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!(". {}", warnings.join("; "))
+    }
 }
 fn backup_text(path: Option<&Path>) -> String {
     path.map(|p| p.display().to_string())
@@ -629,6 +681,48 @@ fn backup_text(path: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_profile_can_enable_shipped_vintage_and_ignored_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let ignored = BTreeSet::from(["Vintage".to_owned(), "Not installed".to_owned()]);
+        let Reply::Choices(rows) = package_job(
+            temp.path(),
+            "package_toggle",
+            &json!({}),
+            ignored.clone(),
+            None,
+        )
+        .unwrap() else {
+            panic!("expected package choices");
+        };
+        assert!(
+            rows.iter()
+                .any(|row| row.invocation.args["name"] == "Vintage"
+                    && row.invocation.args["enabled"] == true)
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.invocation.args["name"] == "Not installed")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.invocation.args["name"] == "Python")
+        );
+        package_job(
+            temp.path(),
+            "package_toggle",
+            &json!({"name":"Vintage","enabled":true}),
+            ignored,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !PackageManager::new(temp.path())
+                .ignored_packages()
+                .unwrap()
+                .contains("Vintage")
+        );
+    }
     #[test]
     fn list_reports_plugins_and_effective_disabled_state_without_network_or_execution() {
         let temp = tempfile::tempdir().unwrap();

@@ -683,7 +683,9 @@ impl Renderer<'_> {
                         Key::Variable(name) => {
                             if let Some(value) = self.env.0.get(name).filter(|s| !s.is_empty()) {
                                 self.out.push_str(value);
-                            } else if let Some(default) = default {
+                            } else if transform.is_none()
+                                && let Some(default) = default
+                            {
                                 self.nodes(default, record);
                             }
                         }
@@ -701,7 +703,14 @@ impl Renderer<'_> {
                     if let Some(transform) = transform {
                         let value = transform.apply(&self.out[before..]);
                         self.out.truncate(before);
-                        self.out.push_str(&value);
+                        if value.is_empty()
+                            && matches!(key, Key::Variable(_))
+                            && let Some(default) = default
+                        {
+                            self.nodes(default, record);
+                        } else {
+                            self.out.push_str(&value);
+                        }
                     }
                     if let Some(number) = number
                         && record

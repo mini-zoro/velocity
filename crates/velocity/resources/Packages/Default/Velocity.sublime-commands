@@ -13,6 +13,14 @@
   {"caption": "Project: Remove All Folders", "command": "close_folder_list"},
   {"caption": "View: Show/Hide Open Files", "command": "toggle_show_open_files"},
   {
+    "caption": "Accessibility: Focus Next Region",
+    "command": "focus_next_control"
+  },
+  {
+    "caption": "Accessibility: Focus Previous Region",
+    "command": "focus_previous_control"
+  },
+  {
     "caption": "Indentation: Convert to Spaces",
     "command": "expand_tabs",
     "args": {
@@ -830,6 +838,7 @@
     "command": "edit_settings",
     "args": {
       "base_file": "${packages}/Default/Velocity.sublime-keymap",
+      "user_file": "${packages}/User/Default (OSX).sublime-keymap",
       "default": "[\n\t$0\n]\n"
     }
   },

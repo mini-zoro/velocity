@@ -91,6 +91,7 @@ pub struct Sessions {
     windows: BTreeMap<u64, (Window, Vec<Document>)>,
     closed: Vec<(Window, Vec<Document>)>,
     writer: Option<Writer>,
+    profile: Option<PathBuf>,
     workspaces: BTreeMap<PathBuf, Writer>,
     next: u64,
     live: BTreeSet<u64>,
@@ -103,11 +104,19 @@ pub struct Sessions {
 }
 impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
+        let mut messages = Vec::new();
+        #[cfg(unix)]
+        if data.is_some() {
+            messages.extend(vel_fileio::recover_saves(data));
+        }
         let path = data.map(|p| p.join("Sessions/Session.sublime-session"));
         let recovery = path.as_deref().map(vel_session::load).unwrap_or_default();
         // Every recovered window owns the launch snapshot independently of cache eviction.
-        let original = path.as_deref().and_then(crate::session_restore::original);
-        let mut messages = recovery.messages;
+        let original = recovery
+            .source
+            .as_deref()
+            .and_then(crate::session_restore::original);
+        messages.extend(recovery.messages);
         let writer = path.and_then(|p| match Writer::new(p, Duration::from_millis(400)) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -131,6 +140,7 @@ impl Sessions {
             windows: BTreeMap::new(),
             closed: vec![],
             writer,
+            profile: data.map(Path::to_owned),
             workspaces: BTreeMap::new(),
             next: 1,
             live: BTreeSet::new(),
@@ -250,7 +260,11 @@ impl Sessions {
             if !self.workspaces.contains_key(&path) {
                 self.workspaces.insert(
                     path.clone(),
-                    Writer::new(path.clone(), Duration::from_millis(400))?,
+                    Writer::for_project(
+                        project.clone(),
+                        self.profile.clone(),
+                        Duration::from_millis(400),
+                    )?,
                 );
             }
             let mut session = Session {
@@ -458,6 +472,7 @@ impl Sessions {
     pub fn poll(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         for writer in self.writer.iter().chain(self.workspaces.values()) {
+            out.extend(writer.warnings.try_iter());
             while let Ok(result) = writer.results.try_recv() {
                 if let Err(e) = result {
                     out.push(format!("Session save failed: {e}"));

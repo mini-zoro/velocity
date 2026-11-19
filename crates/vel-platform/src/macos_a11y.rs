@@ -1,7 +1,7 @@
 //! Public NSAccessibility getters/actions on virtual elements. No native objects in the model.
 use super::*;
 use crate::accessibility::{Id, Node, Preferences, Request, Tree};
-use objc2_foundation::{NSNumber, NSValue};
+use objc2_foundation::{NSDictionary, NSNumber, NSValue};
 
 pub(super) fn preferences() -> Preferences {
     let workspace = NSWorkspace::sharedWorkspace();
@@ -10,12 +10,17 @@ pub(super) fn preferences() -> Preferences {
         increase_contrast: workspace.accessibilityDisplayShouldIncreaseContrast(),
     }
 }
-fn tree(host: &Host) -> Tree {
-    host.app
-        .try_borrow()
-        .ok()
-        .and_then(|a| a.as_ref().map(|a| a.accessibility_tree()))
-        .unwrap_or_default()
+fn tree(host: &Host) -> Rc<Tree> {
+    host.ax_queried.set(Some(Instant::now()));
+    snapshot(host)
+}
+fn snapshot(host: &Host) -> Rc<Tree> {
+    host.ax_cache.get(|| {
+        host.app
+            .try_borrow()
+            .ok()
+            .and_then(|a| a.as_ref().map(|a| a.accessibility_tree()))
+    })
 }
 fn object(host: &Rc<Host>, id: Id) -> Retained<AnyObject> {
     let mut elements = host.ax_elements.borrow_mut();
@@ -72,16 +77,23 @@ fn screen_rect(host: &Host, rect: Rect) -> NSRect {
 }
 /// Post notifications only to queried accessibility clients. Ordinary editing keeps O(1) snapshots.
 pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextInputState) {
-    if !host.ax_queried.get() && !NSWorkspace::sharedWorkspace().isVoiceOverEnabled() {
+    host.ax_cache.invalidate();
+    if !host
+        .ax_queried
+        .get()
+        .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+    {
+        host.ax_queried.set(None);
         return;
     }
-    let current_tree = tree(host);
+    let current_tree = snapshot(host);
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     for node in &current_tree.nodes {
         node.id.hash(&mut hash);
         node.parent.hash(&mut hash);
         node.selected.hash(&mut hash);
+        node.checked.hash(&mut hash);
         node.role.native().hash(&mut hash);
         if node.role != crate::accessibility::Role::Status {
             node.label.hash(&mut hash);
@@ -95,8 +107,18 @@ pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextI
             coordinate.to_bits().hash(&mut hash);
         }
     }
-    let layout_changed = host.ax_layout.replace(hash.finish()) != hash.finish();
+    let revision = hash.finish();
+    let layout_changed = host.ax_layout.replace(revision) != revision;
     let focused = current_tree.focused();
+    let offset = focused.and_then(|id| {
+        current_tree
+            .node(id)?
+            .text
+            .as_ref()
+            .map(|model| (id, model.document_offset))
+    });
+    let window_moved = host.ax_window_offset.replace(offset) != offset;
+    let announcements = host.ax_announcements.borrow_mut().changes(&current_tree);
     if let Some(id) = focused {
         let element = object(host, id);
         // SAFETY: each constant is an immutable AppKit AX notification name; elements are retained.
@@ -107,13 +129,16 @@ pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextI
                     NSAccessibilityFocusedUIElementChangedNotification,
                 );
             }
-            if previous.selected != current.selected || previous.text != current.text {
+            if window_moved
+                || previous.selected != current.selected
+                || previous.text != current.text
+            {
                 NSAccessibilityPostNotification(
                     &element,
                     NSAccessibilitySelectedTextChangedNotification,
                 );
             }
-            if previous.text != current.text {
+            if window_moved || previous.text != current.text {
                 NSAccessibilityPostNotification(&element, NSAccessibilityValueChangedNotification);
             }
             if layout_changed {
@@ -138,6 +163,25 @@ pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextI
                         }
                     }
                 }
+            }
+        }
+    }
+    if let Some(view) = host.view.get() {
+        for message in announcements {
+            // https://developer.apple.com/documentation/appkit/nsaccessibility-swift.struct/notification/announcementrequested
+            // SAFETY: notification constants and keys are immutable AppKit exports.
+            unsafe {
+                let text = NSString::from_str(&message);
+                let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0);
+                let info = NSDictionary::from_slices(
+                    &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+                    &[text.as_ref() as &AnyObject, priority.as_ref() as &AnyObject],
+                );
+                NSAccessibilityPostNotificationWithUserInfo(
+                    view,
+                    NSAccessibilityAnnouncementRequestedNotification,
+                    Some(&info),
+                );
             }
         }
     }
@@ -206,7 +250,8 @@ define_class!(
         #[unsafe(method(accessibilityFrameForRange:))] fn range_frame(&self,range: NSRange) -> NSRect {
             let Some(range)=from_range(range) else{return NSRect::ZERO;};
             let Some(h)=self.ivars().host.upgrade() else { return NSRect::ZERO; };
-            let rect=h.app.try_borrow().ok().and_then(|a|a.as_ref().map(|a| a.accessibility_range_rect(self.ivars().id,range))).unwrap_or_default();
+            let Some(model)=tree(&h).node(self.ivars().id).and_then(|n| n.text.clone()) else { return NSRect::ZERO; };
+            let rect=h.app.try_borrow().ok().and_then(|a|a.as_ref().map(|a| a.accessibility_range_rect(self.ivars().id,model.document_range(range)))).unwrap_or_default();
             screen_rect(&h,rect)
         }
         #[unsafe(method(isAccessibilitySelectorAllowed:))] fn allowed(&self,selector: Sel) -> bool {
@@ -222,9 +267,11 @@ define_class!(
 impl AxElement {
     fn value_object(&self) -> Option<Retained<AnyObject>> {
         let node = self.node()?;
-        if node.role == crate::accessibility::Role::Tab {
+        if node.role == crate::accessibility::Role::Tab || node.checked.is_some() {
             // SAFETY: NSNumber inherits AnyObject; ownership is transferred without changing retain count.
-            Some(unsafe { Retained::cast_unchecked(NSNumber::new_bool(node.selected)) })
+            Some(unsafe {
+                Retained::cast_unchecked(NSNumber::new_bool(node.checked.unwrap_or(node.selected)))
+            })
         } else {
             let value = node.text.map_or(node.label, |text| text.value());
             // SAFETY: NSString inherits AnyObject; ownership is transferred unchanged.

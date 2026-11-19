@@ -3398,3 +3398,152 @@ python3 crates/velocity/scripts/compare-scroll.py \
 Run pairs sequentially with no concurrent compilation. Retain raw JSONL, binary hashes and
 summary confidence intervals. Typing and scrolling each have a **≤5% regression** budget;
 report CPU budgets separately from pending native measurements.
+# Round 22 Lane A: data safety, packages, and accessibility
+
+Native verification pending. Run with a throwaway `--data-dir` and disposable files;
+do not run these checks in the real user profile or on production network storage.
+
+- [ ] Save and Save All on APFS and a mounted test SMB/NFS volume and FAT/exFAT disk.
+  Confirm complete bytes, original symlink, mode, owner/group, Finder tags, ACL and creation date.
+  With either setting, save to a multiply linked file and to a writable file in a non-writable
+  directory: the inode and links should survive and the tab should be clean. A read-only file
+  should fail visibly and remain dirty. Disconnect a disposable network share while staging and
+  while writing in place. In the latter case reconnect and relaunch with the same profile; confirm
+  Velocity reports replay or names the retained recovery data and never overwrites a replacement inode.
+- [ ] From a disposable macOS account, Log Out, Restart, and Shut Down with dirty named/untitled
+  tabs and hidden restored tabs on a disconnected share. Verify the OS action completes after a
+  successful checkpoint, and dirty tabs restore. In a separate test, make the session directory
+  unwritable and confirm a failed Hot Exit with unsaved edits refuses quit and reports why.
+- [ ] Outside the coding sandbox, run `cargo test -p vel-crash --release --locked -- --ignored`.
+  Confirm SIGSEGV and worker stack overflow terminate by signal and leave reports; use Console
+  to check whether local diagnostics policy produces the matching system `.ips` file.
+- [ ] On a 200,000-line file near line 100,000, use VoiceOver and Accessibility Inspector.
+  Advance the caret by a character; the AX window should stay put, its relative selection should
+  advance, and AXRangeForLine at AXInsertionPointLineNumber should contain the caret. Cross a page
+  boundary and check for a value and selection update. Inspect split editors and read-only
+  Output, Find Results and Indexing Status. Confirm clean vs. edited tab labels.
+- [ ] In Goto, the palette, and completions, move the selected row. VoiceOver should speak the
+  caption, details and position once. Confirm a status message such as "No indexed locations" is
+  announced. Turn regex on and inspect an AXCheckBox with value 1.
+- [ ] With several tabs and dozens of side-bar rows, cycle Cmd+F6 / Cmd+Shift+F6 through regions,
+  move within a region with arrows, and activate with Return or Space. Verify the focus outline
+  at 1x and 2x and normal input after returning to the editor. Design handoff: the only paint
+  addition is the CSS-box border in `app_a11y.rs:paint_accessibility_focus`.
+
+### Headless verification
+
+- Fmt, strict release Clippy and rustdoc passed. Release workspace tests: 1,390 passed,
+  0 failed, 71 ignored. The independent syntax runner passed 126,600 assertions across
+  203 syntaxes and 242 files, with no failures or skips.
+- `bundled_resource_inventory_is_visible_to_the_real_loader`: 873 snippets, 61 completion
+  files, 39 settings files and 20 build files. The manifest excludes Sublime UI resources
+  and contains no Python bodies. First completion loaded 13 snippet bodies for Python and
+  two for HTML; exact Tab loaded one per language.
+- Retired instructions versus `569cc9c`, using Darwin `RUSAGE_INFO_V4` before reaping each child:
+  median within-pair changes were typing1 +0.34%, typing1000 +0.31%, and features +0.11%
+  (five alternating pairs each; 10 MB Rust fixture for features). These are headless results.
+- Local APFS full-overwrite medians (`569cc9c` to verified Lane A, in ms):
+
+  | Size | In place | Atomic |
+  | --- | ---: | ---: |
+  | 1 KB | 3.98 to 5.67 | 8.81 to 6.05 |
+  | 10 MB | 13.23 to 16.80 | 16.80 to 15.74 |
+  | 1 GB | 909.76 to 662.91 | 820.91 to 659.65 |
+
+  `vel-fileio/examples/save_latency.rs` times the overwrite including syncs, not fixture
+  setup. Five alternating pairs for 1 KB and 10 MB; three for 1 GB. At 1 GB, four additional
+  pairs under four concurrent 64 MiB write-and-fsync loops gave 6.88 s with `F_NOCACHE` and
+  4.37 s buffered (about 1.5 GiB/s of background writes). APFS uses an inline rollback
+  record for small documents, or a rollback clone for large ones, and one full target
+  sync. HFS+ and FAT-family volumes also verify the document's disk digest under the
+  lock before a save. Other volumes may need room for a complete staged revision.
+- Five warm alternating pairs versus `569cc9c`: `--headless-workbench` first-window CPU
+  ready, 107.96 to 88.80 ms; first CPU scene, 108.41 to 89.47 ms. Whole
+  `--headless-smoke --carets 1`: 39.88 to 41.53 ms. Earlier first completion / exact Tab
+  medians after scope publication: Python 1.44 / 0.97 ms; HTML 0.85 / 0.44 ms (five fresh runs).
+- Fourth review, APFS overwrite medians against `569cc9c`, without added I/O load
+  (11 alternating pairs for 1 KB, seven for 10 MB, three for 1 GB):
+
+  | Size | In place (ms) | Atomic (ms) |
+  | --- | ---: | ---: |
+  | 1 KB | 4.94 to 5.66 | 8.97 to 7.85 |
+  | 10 MB | 12.99 to 16.86 | 16.89 to 15.34 |
+  | 1 GB | 978.03 to 831.35 | 1174.56 to 908.37 |
+
+  With two concurrent 16 MiB write-and-fsync loops, the 1 KB in-place median was
+  17.37 to 14.98 ms; the 10 MB in-place median was 115.91 to 119.32 ms.
+  Small APFS saves use one directory sync, one rollback barrier, and one
+  full target sync. A process-kill test covers preparation and partial writes;
+  it is not a test of device power-loss ordering.
+- Fifth review, alternating APFS full-overwrite batches (median milliseconds):
+
+  | Size | In place: `96c44bb` / `6505bd0` / this pass | Atomic: `96c44bb` / `6505bd0` / this pass |
+  | --- | ---: | ---: |
+  | 1 KB | 4.09 / 5.02 / 5.24 | 9.91 / 8.44 / 6.47 |
+  | 100 KiB | 5.01 / 6.62 / 5.97 | 9.01 / 8.03 / 6.94 |
+  | 10 MB | 16.95 / 18.02 / 21.57 | 17.87 / 16.53 / 15.21 |
+  | 50 MB | 51.24 / 55.77 / 76.64 | 54.91 / 50.66 / 49.93 |
+
+  Inline rollback now covers revisions up to 256 KiB on non-cloning volumes
+  too, except the first write to an empty FAT/exFAT file, which still requires
+  the forward journal. The larger APFS rollback path stages the intended bytes
+  to distinguish a partial write from a later edit to the same inode.
+  The 1 KB in-place result missed the 20% budget. The trace put the ordering
+  barrier at 0.80 ms and the full target sync at 4.82 ms. Those calls remain.
+  Native HFS+ timing was unavailable in the sandbox. The same-device staged
+  path used one data fsync, one directory fsync, one barrier, and one full
+  flush; a separate profile device takes its own full flush in place of the
+  barrier. The 10 MB staged trace used three data writes and one journal write.
+
+### Round 22 Review
+
+- [ ] On exFAT and SMB fixture volumes, save an untitled file and Save As to a new name.
+  Verify the published file is complete, an existing destination isn't clobbered by a
+  raced create, and a failed rename leaves no empty claim. On SMB, disconnect during
+  an overwrite and verify the retained recovery path and the notice on the next launch.
+  Repeat with a hard link on HFS+ and APFS. The independent verification used APFS, HFS+,
+  FAT32 and exFAT images. On a host that allows attaching disk images, run
+  `cargo test -p vel-fileio --release --locked -j 6 -- native_fat_images --ignored`
+  and `cargo test -p vel-fileio --release --locked -j 6 -- native_hfs_remount --ignored`.
+  These use disposable images and exercise an empty-file save, a subsequent external write,
+  stale stage and AppleDouble cleanup, and recovery after a changed mount device number.
+- [ ] Run `cargo test -p vel-fileio --release --locked -j 6 -- native_hfs_concurrent --ignored`
+  on a host that can attach images. Two simultaneous saves of different revisions of the
+  same length must leave one complete winner and report a conflict to the other client.
+- [ ] Run `cargo test -p vel-fileio --release --locked -j 6 -- native_hfs_small --ignored`
+  on an image-capable host. Time 1 KB and 10 MB alternating with `96c44bb`
+  using `vel-fileio/examples/save_latency.rs` and a fresh temporary directory on
+  the mounted HFS+ image. For a cross-volume run, use the `save_report` probe
+  with its profile on the host volume and its target on the image.
+- [ ] Interrupt an APFS overwrite after the first partial write, then rewrite the
+  file via the same inode (both shorter and equal length). After relaunch the
+  later edit must be untouched, the rollback copy must be byte-exact in
+  `Recovery/Recovered-*`, and the notice must not repeat.
+- [ ] After interrupting a save on exFAT, replace the target with different content before
+  relaunch. Recovery must leave it untouched, move the complete staged revision to a
+  `Recovered-*` file in the profile's Recovery folder, remove its sidecars, and report
+  the recovered file's path only once.
+- [ ] Run `cargo test -p vel-fileio --release --locked -j 6 -- native_apfs_clone_saves_40_mib_with_45_mib_free --ignored`
+  on a host that can attach disk images. The full 40 MiB rewrite must fit with 45 MiB free,
+  preserve the inode and leave no recovery files. The APFS clone holds the old revision;
+  the digest sidecar verifies the new revision but cannot reconstruct it.
+- [ ] Interrupt a growing save, then interrupt its rollback after it has trimmed the file.
+  For a shrinking file, interrupt before the final flush and again while rebuilding the
+  original tail. Replay must eventually restore the original bytes. On a staged volume,
+  interrupt before the shrink's truncate: replay should finish it unless a later write
+  changed the boundary page. In that case, leave the target alone and archive every
+  complete revision held. A process kill does not test power-loss ordering.
+- [ ] On FAT/exFAT, overwrite and then empty a small file. If its synthetic ID changes
+  after a completed save, recovery should recognize the complete bytes and retire the
+  journal without a notice. After an unrelated same-inode edit, inspect the archived
+  revisions and verify that relaunch does not repeat the notice.
+- [ ] On a volume where `ditto --hfsCompression` produces `UF_COMPRESSED`, run
+  `first_write_to_a_native_compressed_file_keeps_the_document` with `--ignored`.
+  Confirm the first edit saves on the same inode without a spurious external-change alert.
+- [ ] With VoiceOver or Accessibility Inspector, focus a tab, button, or sidebar row.
+  Letters and IME input must not reach the editor; Escape, an editor click or cycling
+  back with Cmd+F6 restores normal typing. Inspect a long Output panel for the latest
+  lines and a long Find Results list near the selected match. Repeat with AX clients
+  closed: the focus ring must track geometry without building document values.
+  Design handoff: the only focus paint remains the existing border in
+  `app_a11y.rs:paint_accessibility_focus`.

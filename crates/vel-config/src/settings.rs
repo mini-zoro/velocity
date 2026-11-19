@@ -281,6 +281,7 @@ impl Default for EditorSettings {
             // https://www.sublimetext.com/3 (HTML and CSS default completion opt-out).
             disable_default_completions: false,
             default_completions_selector: None,
+            // ST3 disabled atomic_save by default: https://www.sublimetext.com/3
             atomic_save: false,
             use_tab_stops: true,
             copy_with_empty_selection: true,

@@ -136,12 +136,19 @@ pub struct Context {
 struct ContextRegex {
     pattern: String,
     compiled: OnceLock<Option<Regex>>,
+    onig: Option<vel_regex::Regex>,
 }
 impl ContextRegex {
     fn get(&self) -> Option<&Regex> {
         self.compiled
             .get_or_init(|| Regex::new(&self.pattern).ok())
             .as_ref()
+    }
+    fn matches(&self, value: &str) -> Option<bool> {
+        if let Some(onig) = &self.onig {
+            return Some(onig.is_match(value));
+        }
+        self.get().map(|regex| regex.is_match(value))
     }
 }
 fn equal() -> String {
@@ -151,7 +158,7 @@ fn truth() -> Value {
     Value::Bool(true)
 }
 impl Context {
-    /// Validates the context at load time without building its regex automata.
+    /// Validates the context at load time, including lookaround and backreferences.
     pub fn prepare(&mut self) -> Result<(), String> {
         match self.operator.as_str() {
             "equal" | "not_equal" => {}
@@ -165,12 +172,19 @@ impl Context {
                 } else {
                     pattern.into()
                 };
-                regex_syntax::Parser::new()
-                    .parse(&pattern)
-                    .map_err(|e| e.to_string())?;
+                let onig = if regex_syntax::Parser::new().parse(&pattern).is_ok() {
+                    None
+                } else {
+                    let regex = vel_regex::Regex::new(pattern.clone());
+                    if let Some(error) = regex.compile_error() {
+                        return Err(error.to_string());
+                    }
+                    Some(regex)
+                };
                 self.regex = Some(Arc::new(ContextRegex {
                     pattern,
                     compiled: OnceLock::new(),
+                    onig,
                 }));
             }
             _ => return Err(format!("unknown context operator {}", self.operator)),
@@ -197,11 +211,13 @@ impl Context {
             "equal" => v == &self.operand,
             "not_equal" => v != &self.operand,
             op => {
-                let Some(regex) = self.regex.as_ref().and_then(|r| r.get()) else {
-                    // Compile-size errors fail closed even for negated predicates.
+                let Some(matched) = self
+                    .regex
+                    .as_ref()
+                    .and_then(|r| r.matches(v.as_str().unwrap_or("")))
+                else {
                     return false;
                 };
-                let matched = regex.is_match(v.as_str().unwrap_or(""));
                 if op.starts_with("not_") {
                     !matched
                 } else {
@@ -271,6 +287,8 @@ pub struct Binding {
     pub invocation: Invocation,
     /// Contexts are ANDed.
     pub context: Vec<Context>,
+    /// Package resource path for diagnostics, absent for direct in-memory bindings.
+    pub origin: Option<Arc<str>>,
 }
 #[derive(Deserialize)]
 struct RawBinding {
@@ -279,6 +297,24 @@ struct RawBinding {
     invocation: Invocation,
     #[serde(default)]
     context: Vec<Context>,
+}
+fn parse_binding(mut raw: RawBinding, origin: Option<Arc<str>>) -> Result<Binding, String> {
+    if raw.keys.is_empty() {
+        return Err("key sequence may not be empty".into());
+    }
+    for context in &mut raw.context {
+        context.prepare()?;
+    }
+    Ok(Binding {
+        keys: raw
+            .keys
+            .iter()
+            .map(|k| Key::parse(k))
+            .collect::<Result<_, _>>()?,
+        invocation: raw.invocation,
+        context: raw.context,
+        origin,
+    })
 }
 /// Result of advancing a key sequence.
 #[derive(Clone, Debug, PartialEq)]
@@ -346,27 +382,51 @@ impl Keymap {
     pub fn append(&mut self, source: &str) -> Result<(), String> {
         let doc = Document::parse(source)?;
         let raw: Vec<RawBinding> = serde_json::from_value(doc.value).map_err(|e| e.to_string())?;
-        let parsed: Vec<_> = raw
+        let parsed = raw
             .into_iter()
-            .map(|r| {
-                if r.keys.is_empty() {
-                    return Err("key sequence may not be empty".into());
-                }
-                let mut context = r.context;
-                for c in &mut context {
-                    c.prepare()?;
-                }
-                Ok(Binding {
-                    keys: r
-                        .keys
-                        .iter()
-                        .map(|k| Key::parse(k))
-                        .collect::<Result<_, _>>()?,
-                    invocation: r.invocation,
-                    context,
-                })
-            })
-            .collect::<Result<_, String>>()?;
+            .map(|raw| parse_binding(raw, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.add(parsed);
+        Ok(())
+    }
+    /// Loads independent bindings with origin and one-based entry diagnostics.
+    /// Returns the count filtered out by the caller's command registry.
+    pub fn append_resource(
+        &mut self,
+        source: &str,
+        origin: &str,
+        allowed: impl Fn(&Invocation) -> bool,
+        warnings: &mut Vec<String>,
+    ) -> Result<usize, String> {
+        let doc = Document::parse(source)?;
+        let list = doc.value.as_array().ok_or("keymap must be an array")?;
+        let origin = Arc::<str>::from(origin);
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        for (n, value) in list.iter().enumerate() {
+            let binding = serde_json::from_value(value.clone())
+                .map_err(|e| e.to_string())
+                .and_then(|raw: RawBinding| parse_binding(raw, Some(origin.clone())));
+            match binding {
+                Ok(binding) if allowed(&binding.invocation) => entries.push(binding),
+                Ok(_) => skipped += 1,
+                Err(error) => warnings.push(format!("{origin}: binding {}: {error}", n + 1)),
+            }
+        }
+        self.add(entries);
+        Ok(skipped)
+    }
+    /// All accepted bindings, in dispatch precedence order.
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+    /// Builds a keymap from already parsed bindings.
+    pub fn from_bindings(bindings: Vec<Binding>) -> Self {
+        let mut map = Self::default();
+        map.add(bindings);
+        map
+    }
+    fn add(&mut self, parsed: Vec<Binding>) {
         let bindings = Arc::make_mut(&mut self.bindings);
         let nodes = Arc::make_mut(&mut self.nodes);
         if nodes.is_empty() {
@@ -390,7 +450,6 @@ impl Keymap {
             bindings.push(binding);
         }
         self.pending = 0;
-        Ok(())
     }
     /// Cancels a pending prefix (for focus/tab changes or explicit escape).
     pub fn cancel(&mut self) {

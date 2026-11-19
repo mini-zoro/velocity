@@ -74,7 +74,7 @@ pub struct Editor {
     pub completion: crate::completion::Completion,
     pub fields: Option<vel_snippet::Session>,
     pub fields_version: Option<(vel_buffer::BufferId, vel_buffer::ChangeId)>,
-    pub snippets: Arc<std::collections::BTreeMap<String, vel_snippet::SnippetFile>>,
+    pub snippets: Arc<std::collections::BTreeMap<String, crate::completion::SnippetEntry>>,
     pub snippet_path: Option<std::path::PathBuf>,
     pub language: crate::language::LanguageCell,
     pub layout: RefCell<crate::layout::Layout>,
@@ -130,7 +130,49 @@ thread_local! {
     // Every tab/window on the application UI thread shares this one macro and kill ring.
     static MACRO_STATE: std::rc::Rc<RefCell<vel_commands::MacroState>> = Default::default();
 }
+pub(crate) const DISPATCHED_WINDOW_COMMANDS: &[&str] =
+    include!(concat!(env!("OUT_DIR"), "/dispatched_commands.rs"));
+
 impl Editor {
+    pub(crate) fn command_registry() -> Registry {
+        let mut registry = Registry::standard();
+        for name in crate::context_menu::COMMANDS {
+            registry.register(name, vel_commands::Kind::WindowCommand, None);
+        }
+        for name in crate::html_ui::COMMANDS {
+            registry.register(name, vel_commands::Kind::TextCommand, None);
+        }
+        for name in [
+            "set_clipboard",
+            "set_indentation",
+            "save_and_close",
+            "new_html_sheet",
+            "open_url",
+            "minihtml_navigate",
+            "theme_demo",
+            "set_theme_appearance",
+        ] {
+            registry.register(name, vel_commands::Kind::WindowCommand, None);
+        }
+        for name in [
+            "set_clipboard",
+            "exit_insert_mode",
+            "vintage_submit_prompt",
+            "large_file_enable_feature",
+            "goto_hex_offset",
+            "copy_hex",
+            "copy_hex_text",
+        ] {
+            registry.register(name, vel_commands::Kind::TextCommand, None);
+        }
+        crate::workbench::register_commands(&mut registry);
+        for name in DISPATCHED_WINDOW_COMMANDS {
+            if registry.kind(name).is_none() {
+                registry.register(name, vel_commands::Kind::WindowCommand, None);
+            }
+        }
+        registry
+    }
     /// Namespaces paint state by view, including cloned views of a shared buffer.
     pub fn ui_id(&self, local: u32) -> u64 {
         (self.annotation_view.0 << 32) | u64::from(local)
@@ -165,37 +207,8 @@ impl Editor {
             .clone();
         let preferences = settings.editor();
         let settings_revision = settings.revision();
-        let mut registry = Registry::standard();
+        let mut registry = Self::command_registry();
         MACRO_STATE.with(|state| registry.share_macro_state(state.clone()));
-        for name in crate::context_menu::COMMANDS {
-            registry.register(name, vel_commands::Kind::WindowCommand, None);
-        }
-        for name in crate::html_ui::COMMANDS {
-            registry.register(name, vel_commands::Kind::TextCommand, None);
-        }
-        for name in [
-            "set_clipboard",
-            "set_indentation",
-            "save_and_close",
-            "new_html_sheet",
-            "open_url",
-            "minihtml_navigate",
-            "theme_demo",
-            "set_theme_appearance",
-        ] {
-            registry.register(name, vel_commands::Kind::WindowCommand, None);
-        }
-        for name in [
-            "set_clipboard",
-            "exit_insert_mode",
-            "vintage_submit_prompt",
-            "large_file_enable_feature",
-            "goto_hex_offset",
-            "copy_hex",
-            "copy_hex_text",
-        ] {
-            registry.register(name, vel_commands::Kind::TextCommand, None);
-        }
         let document_metrics = crate::large::metrics(&text, 0);
         let policy_config = crate::large::FeatureConfig::new(&settings);
         let features = policy_config.evaluate(document_metrics);

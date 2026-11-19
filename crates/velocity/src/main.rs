@@ -44,6 +44,7 @@ mod session;
 mod session_restore;
 mod settings_reports;
 mod shared_document;
+mod shipped;
 mod stats;
 #[cfg(test)]
 #[path = "../../vel-build/tests/support/mod.rs"]
@@ -522,13 +523,13 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                 && !options.safe_mode
                 && let Some(project) = &options.project
             {
-                let recovery = vel_session::load(&vel_session::project::workspace_path(project));
+                let recovery = vel_session::load_project_workspace(project, data_dir.as_deref());
                 workspace.messages.extend(recovery.messages);
                 if let Some(window) = recovery.session.windows.first() {
                     if let Err(e) = workspace.restore_window_from(
                         window,
                         &recovery.session.documents,
-                        Some(&vel_session::project::workspace_path(project)),
+                        recovery.source.as_deref(),
                     ) {
                         workspace.messages.push(e);
                     } else {

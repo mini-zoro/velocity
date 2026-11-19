@@ -464,14 +464,8 @@ impl Registry {
             "chain" => {
                 let commands = args["commands"].as_array().ok_or("chain needs commands")?;
                 for command in commands {
-                    let pair = command
-                        .as_array()
-                        .ok_or("chain entry must be [name, args]")?;
-                    let name = pair
-                        .first()
-                        .and_then(Value::as_str)
-                        .ok_or("chain command name")?;
-                    self.run_depth(name, pair.get(1).unwrap_or(&json!({})), host, depth + 1)?;
+                    let (name, args) = chain_entry(command)?;
+                    self.run_depth(name, args, host, depth + 1)?;
                 }
                 return Ok(());
             }
@@ -594,6 +588,25 @@ impl Registry {
         }
         Ok(())
     }
+}
+
+/// Normalizes both Sublime chain-entry forms, with optional arguments.
+/// <https://docs.sublimetext.io/reference/commands.html#chain>
+pub fn chain_entry(entry: &Value) -> Result<(&str, &Value), &'static str> {
+    static EMPTY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let (name, args) = if let Some(pair) = entry.as_array() {
+        (pair.first(), pair.get(1))
+    } else {
+        (entry.get("command"), entry.get("args"))
+    };
+    let name = name
+        .and_then(Value::as_str)
+        .ok_or("chain entry needs a command name")?;
+    let args = args.unwrap_or_else(|| EMPTY.get_or_init(|| json!({})));
+    if !args.is_object() {
+        return Err("chain command args must be an object");
+    }
+    Ok((name, args))
 }
 /// Line-editing macros that key bindings name by their Default package file name
 /// (`res://Packages/Default/<name>.sublime-macro`).

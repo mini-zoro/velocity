@@ -19,8 +19,11 @@ use std::{
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
-use tempfile::NamedTempFile;
 use vel_config::json::Document;
+use vel_fileio::{
+    atomic::{self, Durability, Stage},
+    regular,
+};
 
 /// Package operation failure. Invalid input never replaces an installed archive.
 #[derive(Debug)]
@@ -74,6 +77,8 @@ pub struct Package {
     pub contributions: Vec<Contribution>,
     /// Python paths, reported for compatibility only; never executed.
     pub python_plugins: Vec<String>,
+    /// A broken or unreadable source, shown without hiding other packages.
+    pub error: Option<String>,
 }
 impl Package {
     /// Describes support without rejecting packages that also contain Python plugins.
@@ -93,6 +98,8 @@ pub struct Installed {
     pub path: PathBuf,
     /// Previous archive, retained under `data/.velocity-backups` when replacing a package.
     pub backup: Option<PathBuf>,
+    /// Warnings that do not undo an installed package.
+    pub warnings: Vec<String>,
 }
 
 /// Package store for one app data directory. No writes occur during construction.
@@ -125,47 +132,55 @@ impl PackageManager {
     pub fn index_url(&self) -> Option<&str> {
         self.index_url.as_deref()
     }
-    /// Lists loose and archived packages in deterministic order without accessing the network.
-    /// Symlinks are not followed. Malformed archives are returned as errors with their paths.
+    /// Lists installed/loose packages independently, including invalid packages for removal.
     pub fn list(&self) -> Result<Vec<Package>> {
-        let ignored = self.ignored_packages()?;
-        let mut packages: BTreeMap<String, (Vec<Location>, archive::Inventory)> = BTreeMap::new();
+        let ignored = self.ignored_packages().unwrap_or_default();
+        let mut packages: BTreeMap<String, (Vec<Location>, archive::Inventory, Vec<String>)> =
+            BTreeMap::new();
         for entry in read_dir(&self.data.join("Installed Packages"))? {
             let path = entry.path();
-            if !entry.file_type()?.is_file()
-                || path.extension().is_none_or(|s| s != "sublime-package")
+            let Some(name) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|name| validate_name(name).is_ok())
+            else {
+                continue;
+            };
+            if path.extension().is_none_or(|s| s != "sublime-package") {
+                continue;
+            }
+            let (locations, inventory, errors) = packages.entry(name.into()).or_default();
+            match archive::inspect(&path) {
+                Ok(data) => inventory.overlay(data),
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
+            }
+            locations.push(Location::Archive(path));
+        }
+        for entry in read_dir(&self.data.join("Packages"))? {
+            let path = entry.path();
+            let Some(name) = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .filter(|name| validate_name(name).is_ok())
+            else {
+                continue;
+            };
+            if entry
+                .file_type()
+                .is_ok_and(|ty| !ty.is_dir() && !ty.is_symlink())
             {
                 continue;
             }
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| invalid("non-UTF8 package name"))?;
-            validate_name(name)?;
-            let inventory =
-                archive::inspect(&path).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
-            packages.insert(name.into(), (vec![Location::Archive(path)], inventory));
-        }
-        for entry in read_dir(&self.data.join("Packages"))? {
-            if !entry.file_type()?.is_dir() {
-                continue;
+            let (locations, inventory, errors) = packages.entry(name.into()).or_default();
+            match archive::inspect_loose(&path) {
+                Ok(loose) => inventory.overlay(loose),
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
             }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("non-UTF8 package name"))?;
-            if name.starts_with('.') {
-                continue;
-            }
-            validate_name(&name)?;
-            let (locations, inventory) = packages.entry(name).or_default();
-            let loose = archive::inspect_loose(&entry.path())?;
-            inventory.overlay(loose);
-            locations.push(Location::Loose(entry.path()));
+            locations.push(Location::Loose(path));
         }
         Ok(packages
             .into_iter()
-            .map(|(name, (locations, inventory))| {
+            .map(|(name, (locations, inventory, errors))| {
                 let (contributions, python_plugins, version) = inventory.finish();
                 Package {
                     disabled: ignored.contains(&name),
@@ -174,6 +189,7 @@ impl PackageManager {
                     version,
                     contributions,
                     python_plugins,
+                    error: (!errors.is_empty()).then(|| errors.join("; ")),
                 }
             })
             .collect())
@@ -185,8 +201,10 @@ impl PackageManager {
         let _lock = self.lock()?;
         let mut temp = self.staging()?;
         let copied = io::copy(
-            &mut fs::File::open(source)?.take(archive::MAX_ARCHIVE + 1),
-            &mut temp,
+            &mut regular::read(source)
+                .map_err(invalid)?
+                .take(archive::MAX_ARCHIVE + 1),
+            temp.file(),
         )?;
         if copied > archive::MAX_ARCHIVE {
             return Err(invalid("archive exceeds 128 MiB"));
@@ -220,28 +238,46 @@ impl PackageManager {
         if index::sha256(temp.path())? != release.sha256.to_ascii_lowercase() {
             return Err(invalid("package SHA-256 mismatch"));
         }
-        let inventory = archive::inspect(temp.path())?;
-        if inventory.version() != Some(release.version.clone()) {
-            return Err(invalid("package metadata version does not match index"));
-        }
-        self.commit_archive(&release.name, temp)
+        self.commit_archive_checked(&release.name, temp, Some(&release.version))
     }
-    fn staging(&self) -> Result<NamedTempFile> {
+    fn staging(&self) -> Result<Stage> {
         let dir = self.data.join("Installed Packages");
         ensure_dir(&dir)?;
-        Ok(NamedTempFile::new_in(dir)?)
+        Ok(Stage::new(&dir, ".velocity-package-", None)?)
     }
-    fn commit_archive(&self, name: &str, temp: NamedTempFile) -> Result<Installed> {
+    fn commit_archive(&self, name: &str, temp: Stage) -> Result<Installed> {
+        self.commit_archive_checked(name, temp, None)
+    }
+    fn commit_archive_checked(
+        &self,
+        name: &str,
+        temp: Stage,
+        version: Option<&Version>,
+    ) -> Result<Installed> {
         archive::inspect(temp.path())?;
+        let temp = archive::normalized(temp.path(), name)?.unwrap_or(temp);
+        let inventory = archive::inspect(temp.path())?;
+        if let Some(version) = version
+            && inventory.version().as_ref() != Some(version)
+        {
+            return Err(invalid("package metadata version does not match index"));
+        }
+        let mut warnings = Vec::new();
+        if !inventory.has_resources() {
+            warnings.push("The archive contains no supported resources".into());
+        }
         let path = self
             .data
             .join("Installed Packages")
             .join(format!("{name}.sublime-package"));
         let backup = backup_file(&path, &self.data.join(".velocity-backups"))?;
-        temp.as_file().sync_all()?;
-        temp.persist(&path).map_err(|e| Error::Io(e.error))?;
-        sync_dir(path.parent().expect("archive parent"))?;
-        Ok(Installed { path, backup })
+        temp.sync(Durability::Full)?;
+        warnings.extend(temp.publish(&path, backup.is_none())?.warning);
+        Ok(Installed {
+            path,
+            backup,
+            warnings,
+        })
     }
     /// Removes both archive and loose overrides from discovery by moving them to backups.
     /// Returns backup paths for undo. If a later move fails, earlier moves are rolled back.
@@ -257,14 +293,14 @@ impl PackageManager {
         ];
         let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
         for source in sources {
-            reject_symlink(&source)?;
+            reject_symlink(atomic::parent(&source))?;
             let metadata = match fs::symlink_metadata(&source) {
                 Ok(m) => m,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e.into()),
             };
-            if metadata.file_type().is_symlink() {
-                return Err(invalid("refusing to remove a symlink"));
+            if !metadata.is_file() && !metadata.is_dir() && !metadata.is_symlink() {
+                return Err(invalid("package path is not a file, directory, or symlink"));
             }
             // Preflight both sources before moving either one.
             moves.push((source, PathBuf::new()));
@@ -331,24 +367,37 @@ impl PackageManager {
         let updated = document
             .set("ignored_packages", &serde_json::json!(ignored))
             .map_err(invalid)?;
-        let path = self.settings_path();
+        let path = self.settings_path()?;
         ensure_dir(path.parent().expect("settings parent"))?;
         let backup = backup_file(&path, &self.data.join(".velocity-backups"))?;
-        let mut temp = NamedTempFile::new_in(path.parent().expect("settings parent"))?;
-        temp.write_all(updated.as_bytes())?;
-        temp.as_file().sync_all()?;
-        temp.persist(&path).map_err(|e| Error::Io(e.error))?;
-        sync_dir(path.parent().expect("settings parent"))?;
+        let mut stage = Stage::new(atomic::parent(&path), ".velocity-preferences-", None)?;
+        stage.file().write_all(updated.as_bytes())?;
+        stage.sync(Durability::Full)?;
+        if let Some(warning) = stage.publish(&path, backup.is_none())?.warning {
+            eprintln!("{warning}");
+        }
         Ok(backup)
     }
-    fn settings_path(&self) -> PathBuf {
-        self.data.join("Packages/User/Preferences.sublime-settings")
+    fn settings_path(&self) -> Result<PathBuf> {
+        let user = self.data.join("Packages/User");
+        let dir = match fs::canonicalize(&user) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => user,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(dir.join("Preferences.sublime-settings"))
     }
     fn settings(&self) -> Result<Document> {
-        let path = self.settings_path();
+        let path = self.settings_path()?;
         reject_symlink(&path)?;
-        let source = match fs::read_to_string(path) {
-            Ok(source) => source,
+        let source = match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let mut source = String::new();
+                regular::read(&path)
+                    .map_err(invalid)?
+                    .read_to_string(&mut source)?;
+                source
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => "{}\n".into(),
             Err(e) => return Err(e.into()),
         };
@@ -456,18 +505,18 @@ fn backup_file(path: &Path, backup_directory: &Path) -> Result<Option<PathBuf>> 
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_file() => {
             let backup = reserve_backup(path, backup_directory)?;
-            fs::copy(path, &backup)?;
-            fs::File::open(&backup)?.sync_all()?;
+            let mut stage = Stage::new(atomic::parent(&backup), ".velocity-backup-", None)?;
+            io::copy(&mut regular::read(path).map_err(invalid)?, stage.file())?;
+            stage.sync(Durability::Barrier)?;
+            if let Some(warning) = stage.publish(&backup, true)?.warning {
+                eprintln!("{warning}");
+            }
             Ok(Some(backup))
         }
         Ok(_) => Err(invalid("destination is not a regular file")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
-}
-fn sync_dir(path: &Path) -> Result<()> {
-    fs::File::open(path)?.sync_all()?;
-    Ok(())
 }
 
 fn resolve_root(path: PathBuf) -> PathBuf {

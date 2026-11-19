@@ -59,9 +59,14 @@ impl Server {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if ready.exists() {
-                break;
+        // The fixture creates the ready file before it writes the port, so wait until
+        // the content parses instead of only until the file exists.
+        let port: u16 = loop {
+            if let Some(port) = fs::read_to_string(&ready)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break port;
             }
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -70,8 +75,7 @@ impl Server {
             );
             assert!(Instant::now() < deadline, "TLS fixture did not bind");
             std::thread::sleep(Duration::from_millis(10));
-        }
-        let port: u16 = fs::read_to_string(ready).unwrap().parse().unwrap();
+        };
         Self {
             root,
             child,

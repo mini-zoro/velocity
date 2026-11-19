@@ -56,9 +56,11 @@ pub(crate) fn run<T: Send + 'static>(
                 }
                 return;
             }
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                vel_fileio::with_cancellation(cancelled.clone(), read)
-            }))
+            let result = vel_crash::recoverable(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    vel_fileio::with_cancellation(cancelled.clone(), read)
+                }))
+            })
             .unwrap_or_else(|_| Err("document restore reader failed".into()));
             if !cancelled.is_cancelled() {
                 let _ = tx.send(result);

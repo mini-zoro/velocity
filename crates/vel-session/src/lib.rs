@@ -1,6 +1,7 @@
 //! Atomic, debounced sessions and bounded undo reconstruction using vel-buffer's public API.
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+mod generations;
 pub mod history;
 // Legacy code is only a reader for existing round-seven profiles.
 mod legacy;
@@ -13,8 +14,9 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
+use vel_fileio::atomic::{self, Durability, Stage};
 use vel_ui::workbench::Workbench;
 
 /// Documented Hot Exit policies.
@@ -338,46 +340,16 @@ pub struct Recovery {
     pub session: Session,
     /// Human-readable diagnostics, including quarantine failures.
     pub messages: Vec<String>,
+    /// Validated source, if any.
+    pub source: Option<PathBuf>,
 }
 /// Reads a session without requiring any user directory to exist.
 pub fn load(path: &Path) -> Recovery {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Recovery::default(),
-        Err(e) => {
-            return Recovery {
-                messages: vec![format!("session {}: {e}", path.display())],
-                ..Recovery::default()
-            };
-        }
-    };
-    let parsed = serde_json::from_slice::<Session>(&bytes)
-        .map_err(|e| e.to_string())
-        .and_then(|s| s.validate().map(|()| s));
-    match parsed {
-        Ok(session) => Recovery {
-            session,
-            messages: vec![],
-        },
-        Err(e) => {
-            let suffix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let aside = path.with_extension(format!("corrupt-{suffix}"));
-            let message = match fs::rename(path, &aside) {
-                Ok(()) => format!("corrupt session kept at {}: {e}", aside.display()),
-                Err(io) => format!(
-                    "corrupt session {} (could not quarantine: {io}): {e}",
-                    path.display()
-                ),
-            };
-            Recovery {
-                messages: vec![message],
-                ..Recovery::default()
-            }
-        }
-    }
+    generations::load(path)
+}
+/// Loads the primary project workspace and falls back to its private previous generation.
+pub fn load_project_workspace(project: &Path, data: Option<&Path>) -> Recovery {
+    generations::Project::new(project, data).load(&project::workspace_path(project))
 }
 /// Writes a complete sibling temporary, fsyncs, and atomically replaces the destination.
 /// Existing sessions survive serialization/IO failure. Missing parent directories are created.
@@ -385,27 +357,29 @@ pub fn atomic_write(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> Result<(), String>,
 ) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let parent = atomic::parent(path);
     fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    write(temporary.as_file_mut())?;
-    temporary.as_file_mut().flush().map_err(|e| e.to_string())?;
-    sync_file(temporary.as_file())?;
-    temporary.persist(path).map_err(|e| e.to_string())?;
-    sync_file(&fs::File::open(parent).map_err(|e| e.to_string())?)?;
+    let mut stage = Stage::new(parent, ".velocity-session-", None).map_err(|e| e.to_string())?;
+    write(stage.file())?;
+    stage.file().flush().map_err(|e| e.to_string())?;
+    stage.sync(Durability::Barrier).map_err(|e| e.to_string())?;
+    if let Some(warning) = stage
+        .publish(path, false)
+        .map_err(|e| e.to_string())?
+        .warning
+    {
+        eprintln!("{warning}");
+    }
     Ok(())
 }
 /// Serializes and atomically saves one validated snapshot. Run this on a worker.
 pub fn save(path: &Path, session: &Session) -> Result<(), String> {
-    session.validate()?;
-    atomic_write(path, |file| {
-        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
-        serde_json::to_writer(&mut writer, session).map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())
-    })
+    let mut saved = generations::Saved::default();
+    let result = saved.write(path, session);
+    for warning in saved.warnings {
+        eprintln!("{warning}");
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -423,37 +397,91 @@ pub struct Writer {
     tx: mpsc::Sender<Request>,
     /// Completion times and errors from background autosaves.
     pub results: mpsc::Receiver<Result<Duration, String>>,
+    /// Nonfatal checkpoint notices (e.g. bypassing an unreadable old generation).
+    pub warnings: mpsc::Receiver<String>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Writer {
     /// Starts a worker without touching the data directory until its first save.
     pub fn new(path: PathBuf, debounce: Duration) -> Result<Self, String> {
+        Self::with_max_wait(path, debounce, Duration::from_secs(2))
+    }
+    /// Bounds how long a continuous stream of changes can postpone a checkpoint.
+    pub fn with_max_wait(
+        path: PathBuf,
+        debounce: Duration,
+        max_wait: Duration,
+    ) -> Result<Self, String> {
+        Self::start(path, debounce, max_wait, None)
+    }
+    /// Checkpoints the primary workspace beside the project; rotates previous
+    /// generations only in the profile. Without a profile, no rotation occurs.
+    pub fn for_project(
+        project: PathBuf,
+        profile: Option<PathBuf>,
+        debounce: Duration,
+    ) -> Result<Self, String> {
+        Self::start(
+            project::workspace_path(&project),
+            debounce,
+            Duration::from_secs(2),
+            Some((project, profile)),
+        )
+    }
+    fn start(
+        path: PathBuf,
+        debounce: Duration,
+        max_wait: Duration,
+        project: Option<(PathBuf, Option<PathBuf>)>,
+    ) -> Result<Self, String> {
         let latest = Arc::new(Mutex::new(None::<Session>));
         let copy = latest.clone();
         let (tx, rx) = mpsc::channel();
         let (report, results) = mpsc::channel();
+        let (warn, warnings) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("velocity-session".into())
             .spawn(move || {
-                let mut dirty = false;
+                let mut first = None;
+                let mut due: Option<Instant> = None;
+                let mut saved = generations::Saved::default();
+                saved.project = project
+                    .map(|(project, data)| generations::Project::new(&project, data.as_deref()));
                 loop {
-                    let request = if dirty {
-                        rx.recv_timeout(debounce)
+                    let request = if let Some(deadline) = due {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            Err(mpsc::RecvTimeoutError::Timeout)
+                        } else {
+                            rx.recv_timeout(deadline - now)
+                        }
                     } else {
                         rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
                     };
                     match request {
-                        Ok(Request::Changed) => dirty = true,
+                        Ok(Request::Changed) => {
+                            let now = Instant::now();
+                            let began = *first.get_or_insert(now);
+                            due = Some((now + debounce).min(began + max_wait));
+                        }
                         Ok(Request::Retire(old)) => drop(old),
                         Ok(Request::Flush(reply)) => {
-                            let result = write_latest(&path, &copy);
+                            let result = write_latest(&path, &copy, &mut saved);
+                            for warning in saved.warnings.drain(..) {
+                                let _ = warn.send(warning);
+                            }
                             let _ = reply.send(result);
-                            dirty = false;
+                            first = None;
+                            due = None;
                         }
                         Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            let _ = report.send(write_latest(&path, &copy));
-                            dirty = false;
+                            let _ = report.send(write_latest(&path, &copy, &mut saved));
+                            for warning in saved.warnings.drain(..) {
+                                let _ = warn.send(warning);
+                            }
+                            first = None;
+                            due = None;
                         }
                     }
                 }
@@ -463,6 +491,7 @@ impl Writer {
             latest,
             tx,
             results,
+            warnings,
             thread: Some(thread),
         })
     }
@@ -490,11 +519,15 @@ impl Writer {
         rx.recv().map_err(|e| e.to_string())?
     }
 }
-fn write_latest(path: &Path, latest: &Mutex<Option<Session>>) -> Result<Duration, String> {
+fn write_latest(
+    path: &Path,
+    latest: &Mutex<Option<Session>>,
+    saved: &mut generations::Saved,
+) -> Result<Duration, String> {
     let at = Instant::now();
     let session = latest.lock().map_err(|e| e.to_string())?.take();
     if let Some(session) = session
-        && let Err(error) = save(path, &session)
+        && let Err(error) = saved.write(path, &session)
     {
         let mut pending = latest.lock().map_err(|e| e.to_string())?;
         if pending.is_none() {
@@ -510,23 +543,5 @@ impl Drop for Writer {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-    }
-}
-
-fn sync_file(file: &fs::File) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        // SAFETY: the file owns a valid descriptor throughout this POSIX fsync.
-        // We require OS-crash ordering, not Apple's optional F_FULLFSYNC hardware barrier.
-        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error().to_string())
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        file.sync_all().map_err(|e| e.to_string())
     }
 }

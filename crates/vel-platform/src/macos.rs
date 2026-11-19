@@ -751,7 +751,10 @@ struct Host {
     context_tracking: Cell<bool>,
     input: RefCell<TextInputState>,
     ax_elements: RefCell<std::collections::HashMap<accessibility::Id, Retained<a11y::AxElement>>>,
-    ax_queried: Cell<bool>,
+    ax_cache: accessibility::TreeCache,
+    ax_queried: Cell<Option<Instant>>,
+    ax_window_offset: Cell<Option<(accessibility::Id, usize)>>,
+    ax_announcements: RefCell<accessibility::Announcements>,
     ax_focus: Cell<Option<accessibility::Id>>,
     ax_layout: Cell<u64>,
 }
@@ -1084,9 +1087,9 @@ define_class!(
         #[unsafe(method(isAccessibilityElement))] fn ax_element(&self) -> bool { true }
         #[unsafe(method_id(accessibilityRole))] fn ax_role(&self) -> Retained<NSString> { NSString::from_str("AXGroup") }
         #[unsafe(method_id(accessibilityLabel))] fn ax_label(&self) -> Retained<NSString> { NSString::from_str("Velocity workspace") }
-        #[unsafe(method_id(accessibilityChildren))] fn ax_children(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| { h.ax_queried.set(true); a11y::children(&h,None) }) }
-        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))] fn ax_navigation(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| { h.ax_queried.set(true); a11y::children(&h,None) }) }
-        #[unsafe(method_id(accessibilityFocusedUIElement))] fn ax_focused(&self) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| { h.ax_queried.set(true); a11y::focused(&h) }) }
+        #[unsafe(method_id(accessibilityChildren))] fn ax_children(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| a11y::children(&h,None)) }
+        #[unsafe(method_id(accessibilityChildrenInNavigationOrder))] fn ax_navigation(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| a11y::children(&h,None)) }
+        #[unsafe(method_id(accessibilityFocusedUIElement))] fn ax_focused(&self) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::focused(&h)) }
         #[unsafe(method_id(accessibilityHitTest:))] fn ax_hit(&self, point: NSPoint) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::hit(&h,point)) }
         #[unsafe(method(accessibilityDisplayOptionsChanged:))] fn ax_preferences(&self, _notification: &NSNotification) { if let Some(h)=self.ivars().host.upgrade() { h.dispatch(Event::AccessibilityPreferences); h.flush(); } }
         #[unsafe(method(isFlipped))] fn is_flipped(&self) -> bool { true }
@@ -1491,19 +1494,42 @@ define_class!(
                     continue;
                 }
                 let Ok(mut slot) = host.app.try_borrow_mut() else {
-                    return NSApplicationTerminateReply::TerminateCancel;
+                    return termination_reply(false);
                 };
                 if let Some(app) = slot.as_mut()
                     && !app.on_quit_requested(&host.handle())
                 {
-                    return NSApplicationTerminateReply::TerminateCancel;
+                    return termination_reply(false);
                 }
             }
-            self.ivars().host.handle().quit();
-            NSApplicationTerminateReply::TerminateCancel
+            // AppKit completes Quit and system logout only if the delegate
+            // approves. Do not stop the run loop and then tell loginwindow no.
+            // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/AppArchitecture/Tasks/GracefulAppTermination.html
+            termination_reply(true)
+        }
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _notification: &NSNotification) {
+            let app = NSApplication::sharedApplication(self.ivars().host.mtm);
+            if let Err(error) = teardown(&app) {
+                eprintln!("{error}");
+            }
         }
     }
     impl Delegate {
+        #[unsafe(method(velocitySessionEnding:))]
+        fn session_ending(&self, _notification: &NSNotification) {
+            let hosts = WINDOWS.with(|windows| {
+                windows.borrow().iter().map(|d| d.ivars().host.clone()).collect::<Vec<_>>()
+            });
+            for host in hosts {
+                if !host.stopped.get()
+                    && let Ok(mut slot) = host.app.try_borrow_mut()
+                    && let Some(app) = slot.as_mut()
+                {
+                    app.on_session_ending(&host.handle());
+                }
+            }
+        }
         #[unsafe(method(drainPlatformRequests:))]
         fn drain_platform_requests(&self, _sender: Option<&AnyObject>) { lifecycle::drain(); }
         #[unsafe(method(pollClosedWindow:))]
@@ -1852,7 +1878,32 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    // Apple's workspace notification is sent on this center, not the default.
+    // https://developer.apple.com/documentation/appkit/nsworkspace/willpoweroffnotification
+    // SAFETY: the delegate is retained while the app runs and implements the selector.
+    unsafe {
+        NSWorkspace::sharedWorkspace()
+            .notificationCenter()
+            .addObserver_selector_name_object(
+                &delegate,
+                sel!(velocitySessionEnding:),
+                Some(NSWorkspaceWillPowerOffNotification),
+                None,
+            );
+    }
     nsapp.run();
+    teardown(&nsapp)
+}
+
+fn termination_reply(approved: bool) -> NSApplicationTerminateReply {
+    if approved {
+        NSApplicationTerminateReply::TerminateNow
+    } else {
+        NSApplicationTerminateReply::TerminateCancel
+    }
+}
+
+fn teardown(nsapp: &NSApplication) -> Result<(), String> {
     let windows = WINDOWS.with(|windows| std::mem::take(&mut *windows.borrow_mut()));
     let mut error = None;
     for delegate in windows {
@@ -1878,6 +1929,19 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     lifecycle::reset();
     INSTALLED_MENU.with(|installed| *installed.borrow_mut() = MenuInstallation::default());
     error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+#[test]
+fn native_termination_approves_when_checkpoint_succeeds() {
+    assert_eq!(
+        termination_reply(true),
+        NSApplicationTerminateReply::TerminateNow
+    );
+    assert_eq!(
+        termination_reply(false),
+        NSApplicationTerminateReply::TerminateCancel
+    );
 }
 
 fn launch_window(
@@ -1958,7 +2022,10 @@ fn create_host(
         context_tracking: Cell::new(false),
         input: RefCell::new(TextInputState::default()),
         ax_elements: RefCell::new(Default::default()),
-        ax_queried: Cell::new(false),
+        ax_cache: Default::default(),
+        ax_queried: Cell::new(None),
+        ax_window_offset: Cell::new(None),
+        ax_announcements: Default::default(),
         ax_focus: Cell::new(None),
         ax_layout: Cell::new(0),
     });

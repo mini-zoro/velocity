@@ -306,12 +306,89 @@ impl ViewSnapshot {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Resource {
     selector: Selector,
     item: CompletionItem,
     snippet_resource: bool,
 }
+
+/// A shipped snippet whose trigger and selector were inventoried at build time.
+#[derive(Debug)]
+pub struct ShippedSnippet {
+    /// Caret selector.
+    pub scope: &'static str,
+    /// Exact Tab trigger, if present.
+    pub trigger: &'static str,
+    /// Palette and completion label.
+    pub description: &'static str,
+    xml: &'static [u8],
+    parsed: std::sync::OnceLock<Option<SnippetFile>>,
+}
+impl ShippedSnippet {
+    /// Registers metadata without parsing or touching the XML body.
+    pub fn new(
+        scope: &'static str,
+        trigger: &'static str,
+        description: &'static str,
+        xml: &'static [u8],
+    ) -> Self {
+        Self {
+            scope,
+            trigger,
+            description,
+            xml,
+            parsed: Default::default(),
+        }
+    }
+    /// Parses once, on an eligible request.
+    pub fn snippet(&self) -> Option<&SnippetFile> {
+        self.parsed
+            .get_or_init(|| SnippetFile::parse(std::str::from_utf8(self.xml).ok()?).ok())
+            .as_ref()
+    }
+    /// Whether a request has materialized the body.
+    pub fn loaded(&self) -> bool {
+        self.parsed.get().is_some()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ShippedSource {
+    Completions(&'static [u8]),
+    Snippet(Arc<ShippedSnippet>),
+}
+#[derive(Debug)]
+struct Deferred {
+    source: ShippedSource,
+    items: std::sync::OnceLock<Vec<Resource>>,
+}
+impl Deferred {
+    fn items(&self) -> &[Resource] {
+        self.items.get_or_init(|| {
+            let mut engine = CompletionEngine::new();
+            let result = match &self.source {
+                ShippedSource::Completions(bytes) => std::str::from_utf8(bytes)
+                    .ok()
+                    .map(|source| engine.add_shipped_completions(source)),
+                ShippedSource::Snippet(snippet) => {
+                    snippet.snippet().map(|s| engine.add_snippet(s.clone()))
+                }
+            };
+            if let Some(Err(e)) = result {
+                eprintln!("Invalid bundled completion resource: {e}");
+            }
+            Arc::unwrap_or_clone(engine.resources)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScopeGroup {
+    selectors: std::sync::OnceLock<Vec<Selector>>,
+    sources: Vec<Arc<Deferred>>,
+}
+
 #[derive(Debug, Default)]
 struct History {
     clock: u64,
@@ -320,7 +397,8 @@ struct History {
 /// Prepared sources shared by synchronous or asynchronous queries. Resource order is stable.
 #[derive(Debug, Default)]
 pub struct CompletionEngine {
-    resources: Vec<Resource>,
+    resources: Arc<Vec<Resource>>,
+    shipped: Arc<BTreeMap<Vec<&'static str>, ScopeGroup>>,
     open_buffers: RwLock<BTreeMap<u64, Arc<BufferWords>>>,
     index: Option<Arc<RwLock<Index>>>,
     history: Mutex<History>,
@@ -329,6 +407,62 @@ impl CompletionEngine {
     /// Empty engine; words in the supplied view are always a source.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Shares parsed resources, with independent word sources and history.
+    pub fn with_shared_resources(&self, index: Option<Arc<RwLock<Index>>>) -> Self {
+        Self {
+            resources: self.resources.clone(),
+            shipped: self.shipped.clone(),
+            index,
+            ..Self::default()
+        }
+    }
+    fn add_deferred(&mut self, selectors: Vec<&'static str>, source: ShippedSource) {
+        Arc::make_mut(&mut self.shipped)
+            .entry(selectors)
+            .or_default()
+            .sources
+            .push(Arc::new(Deferred {
+                source,
+                items: Default::default(),
+            }));
+    }
+    /// Registers a bundled completion file, gated by its file and per-item selectors.
+    pub fn defer_shipped_completions(&mut self, selectors: &[&'static str], source: &'static [u8]) {
+        self.add_deferred(selectors.to_vec(), ShippedSource::Completions(source));
+    }
+    /// Registers a bundled snippet with the same lazy body used by exact Tab and the palette.
+    pub fn defer_shipped_snippet(&mut self, snippet: Arc<ShippedSnippet>) {
+        if !snippet.trigger.is_empty() {
+            self.add_deferred(vec![snippet.scope], ShippedSource::Snippet(snippet));
+        }
+    }
+    fn resources_at<'a>(
+        &'a self,
+        stacks: &'a [&[vel_scope::Scope]],
+        include_snippets: bool,
+    ) -> impl Iterator<Item = &'a Resource> {
+        self.resources.iter().chain(
+            self.shipped
+                .iter()
+                .filter(move |(scopes, group)| {
+                    group
+                        .selectors
+                        .get_or_init(|| {
+                            scopes
+                                .iter()
+                                .filter_map(|s| Selector::parse(s).ok())
+                                .collect()
+                        })
+                        .iter()
+                        .any(|selector| stacks.iter().all(|stack| selector.matches(stack)))
+                })
+                .flat_map(|(_, group)| &group.sources)
+                .filter(move |entry| {
+                    include_snippets || !matches!(entry.source, ShippedSource::Snippet(_))
+                })
+                .flat_map(|entry| entry.items()),
+        )
     }
     /// Installs the project's live index; disabled per query by auto_complete_use_index.
     pub fn set_index(&mut self, index: Arc<RwLock<Index>>) {
@@ -344,6 +478,13 @@ impl CompletionEngine {
     }
     /// Loads .sublime-completions JSON/JSONC strings or rich items, validating selectors/snippets.
     pub fn add_completions(&mut self, json: &str) -> Result<(), Error> {
+        self.add_completion_file(json, false)
+    }
+    /// Loads bundled language completion files, accepting rich items with only a trigger.
+    pub fn add_shipped_completions(&mut self, json: &str) -> Result<(), Error> {
+        self.add_completion_file(json, true)
+    }
+    fn add_completion_file(&mut self, json: &str, shipped: bool) -> Result<(), Error> {
         let value: serde_json::Value =
             serde_json::from_str(&jsonc(json)?).map_err(|e| Error(e.to_string()))?;
         let scope = value.get("scope").and_then(|v| v.as_str()).unwrap_or("");
@@ -356,19 +497,34 @@ impl CompletionEngine {
             let (trigger, completion, format) = if let Some(text) = value.as_str() {
                 (text, text, CompletionFormat::Text)
             } else {
-                (
-                    value
-                        .get("trigger")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| Error("missing trigger".into()))?,
-                    value
-                        .get("contents")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| Error("missing contents".into()))?,
-                    CompletionFormat::Snippet,
-                )
+                let trigger = value
+                    .get("trigger")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| Error("missing trigger".into()))?;
+                match value.get("contents") {
+                    Some(contents) => (
+                        trigger,
+                        contents
+                            .as_str()
+                            .ok_or_else(|| Error("contents must be a string".into()))?,
+                        CompletionFormat::Snippet,
+                    ),
+                    // https://www.sublimetext.com/docs/completions.html requires
+                    // contents in rich entries. The shipped packages also use
+                    // an abbreviated entry that means insert the literal trigger.
+                    None if shipped => (
+                        trigger,
+                        trigger
+                            .split_once('\t')
+                            .map_or(trigger, |(trigger, _)| trigger),
+                        CompletionFormat::Text,
+                    ),
+                    None => return Err(Error("missing contents".into())),
+                }
             };
-            if format == CompletionFormat::Snippet {
+            // A bundled completion body is parsed only when selected. User
+            // resources still get validation and file diagnostics on reload.
+            if format == CompletionFormat::Snippet && !shipped {
                 Snippet::parse(completion).map_err(|e| Error(e.to_string()))?;
             }
             let (trigger, legacy) = trigger.split_once('\t').unwrap_or((trigger, ""));
@@ -396,7 +552,7 @@ impl CompletionEngine {
                 snippet_resource: false,
             });
         }
-        self.resources.extend(resources);
+        Arc::make_mut(&mut self.resources).extend(resources);
         Ok(())
     }
     /// Adds a parsed XML snippet as a scoped exact-Tab/interactive completion source.
@@ -404,7 +560,7 @@ impl CompletionEngine {
         if snippet.tab_trigger.is_empty() {
             return Ok(());
         }
-        self.resources.push(Resource {
+        Arc::make_mut(&mut self.resources).push(Resource {
             selector: Selector::parse(&snippet.scope).map_err(|e| Error(e.to_string()))?,
             item: CompletionItem {
                 trigger: snippet.tab_trigger,
@@ -497,8 +653,7 @@ impl CompletionEngine {
             }
             let tab_trigger = matches!(view.invocation, Invocation::Tab)
                 .then(|| {
-                    self.resources
-                        .iter()
+                    self.resources_at(&[stack], true)
                         .filter(|resource| {
                             resource.snippet_resource
                                 || resource.item.completion_format == CompletionFormat::Snippet
@@ -663,16 +818,15 @@ impl CompletionEngine {
                 add(item, 120, true, false);
             }
         }
-        for (i, resource) in self.resources.iter().enumerate() {
+        let include_snippets = settings.auto_complete_include_snippets
+            && (!matches!(view.invocation, Invocation::Typing { .. })
+                || settings.auto_complete_include_snippets_when_typing);
+        for (i, resource) in self.resources_at(&stacks, include_snippets).enumerate() {
             if i % 256 == 0 && cancel() {
                 list.cancelled = true;
                 return list;
             }
-            if resource.snippet_resource
-                && (!settings.auto_complete_include_snippets
-                    || matches!(view.invocation, Invocation::Typing { .. })
-                        && !settings.auto_complete_include_snippets_when_typing)
-            {
+            if resource.snippet_resource && !include_snippets {
                 continue;
             }
             if matches(&resource.selector) {

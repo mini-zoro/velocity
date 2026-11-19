@@ -9,7 +9,7 @@ use std::{
 use vel_buffer::{ChangeId, EditKind, Region, Selection};
 use vel_complete::{
     CompletionEngine, CompletionFormat, CompletionList, CompletionService, CompletionSettings,
-    CompletionTrigger, Invocation, ViewSnapshot,
+    CompletionTrigger, Invocation, ShippedSnippet, ViewSnapshot,
 };
 use vel_config::{Value, resources::Resources};
 use vel_highlight::ScopeProvider;
@@ -19,53 +19,118 @@ use vel_snippet::{Environment, ExpansionOptions, Snippet, SnippetFile};
 
 #[derive(Debug, Default)]
 pub struct Catalog {
-    pub snippets: BTreeMap<String, SnippetFile>,
-    completions: Vec<String>,
+    pub snippets: Arc<BTreeMap<String, SnippetEntry>>,
     pub engine: Arc<CompletionEngine>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SnippetEntry {
+    Parsed(SnippetFile),
+    Shipped(Arc<ShippedSnippet>),
+}
+impl SnippetEntry {
+    pub fn scope(&self) -> &str {
+        match self {
+            Self::Parsed(s) => &s.scope,
+            Self::Shipped(s) => s.scope,
+        }
+    }
+    pub fn trigger(&self) -> &str {
+        match self {
+            Self::Parsed(s) => &s.tab_trigger,
+            Self::Shipped(s) => s.trigger,
+        }
+    }
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Parsed(s) => &s.description,
+            Self::Shipped(s) => s.description,
+        }
+    }
+    pub fn parsed(&self) -> Option<&SnippetFile> {
+        match self {
+            Self::Parsed(s) => Some(s),
+            Self::Shipped(s) => s.snippet(),
+        }
+    }
 }
 impl Catalog {
     pub fn load(resources: &Resources, messages: &mut Vec<String>) -> Arc<Self> {
+        use crate::shipped::{Meta, metadata};
         let mut catalog = Self::default();
         for resource in resources.matching(".sublime-snippet") {
-            match resource
-                .text()
-                .and_then(|s| SnippetFile::parse(s).map_err(|e| e.to_string()))
-            {
+            let parsed = match metadata(resource) {
+                Some((
+                    Meta::Snippet {
+                        scope,
+                        trigger,
+                        description,
+                    },
+                    xml,
+                )) => Ok(SnippetEntry::Shipped(Arc::new(ShippedSnippet::new(
+                    scope,
+                    trigger,
+                    description,
+                    xml,
+                )))),
+                Some((Meta::Invalid(e), _)) => Err(e.to_owned()),
+                _ => resource.text().and_then(|s| {
+                    SnippetFile::parse(s)
+                        .map(SnippetEntry::Parsed)
+                        .map_err(|e| e.to_string())
+                }),
+            };
+            match parsed {
                 Ok(snippet) => {
-                    catalog.snippets.insert(resource.path.clone(), snippet);
+                    Arc::make_mut(&mut catalog.snippets).insert(resource.path.clone(), snippet);
                 }
                 Err(e) => messages.push(format!("{}: {e}", resource.path)),
             }
         }
+        let mut engine = CompletionEngine::new();
         for resource in resources.matching(".sublime-completions") {
-            match resource.text() {
-                Ok(s) => catalog.completions.push(s.into()),
-                Err(e) => messages.push(e),
+            match metadata(resource) {
+                Some((Meta::Completion(scopes), bytes)) => {
+                    engine.defer_shipped_completions(scopes, bytes);
+                    continue;
+                }
+                Some((Meta::Invalid(e), _)) => {
+                    messages.push(format!("{}: {e}", resource.path));
+                    continue;
+                }
+                _ => (),
+            }
+            let result = resource.text().and_then(|source| {
+                if resource.shipped() {
+                    engine.add_shipped_completions(source)
+                } else {
+                    engine.add_completions(source)
+                }
+                .map_err(|e| e.to_string())
+            });
+            if let Err(e) = result {
+                messages.push(format!("{}: {e}", resource.path));
             }
         }
-        catalog.engine = catalog.engine_for(None, messages);
+        for snippet in catalog.snippets.values() {
+            match snippet {
+                SnippetEntry::Shipped(s) => engine.defer_shipped_snippet(s.clone()),
+                SnippetEntry::Parsed(s) => {
+                    if let Err(e) = engine.add_snippet(s.clone()) {
+                        messages.push(e.to_string());
+                    }
+                }
+            }
+        }
+        catalog.engine = Arc::new(engine);
         Arc::new(catalog)
     }
     pub fn engine_for(
         &self,
         index: Option<Arc<std::sync::RwLock<vel_index::Index>>>,
-        messages: &mut Vec<String>,
+        _messages: &mut Vec<String>,
     ) -> Arc<CompletionEngine> {
-        let mut engine = CompletionEngine::new();
-        if let Some(index) = index {
-            engine.set_index(index);
-        }
-        for source in &self.completions {
-            if let Err(e) = engine.add_completions(source) {
-                messages.push(e.to_string());
-            }
-        }
-        for snippet in self.snippets.values() {
-            if let Err(e) = engine.add_snippet(snippet.clone()) {
-                messages.push(e.to_string());
-            }
-        }
-        Arc::new(engine)
+        Arc::new(self.engine.with_shared_resources(index))
     }
 }
 
@@ -875,7 +940,7 @@ impl Editor {
         let mut candidates = Vec::new();
         let mut width = 0;
         for (name, snippet) in self.snippets.iter() {
-            let trigger = &snippet.tab_trigger;
+            let trigger = snippet.trigger();
             if trigger.is_empty()
                 || trigger.len() < width
                 || trigger.chars().all(char::is_whitespace)
@@ -885,27 +950,28 @@ impl Editor {
             {
                 continue;
             }
-            if (!snippet.scope.is_empty() || snippet.snippet.uses_metadata_variables())
-                && scopes.is_none()
-            {
-                scopes =
-                    Some(self.snippet_scopes(&regions.iter().map(|r| r.b).collect::<Vec<_>>()));
+            let carets = || regions.iter().map(|r| r.b).collect::<Vec<_>>();
+            if !snippet.scope().is_empty() {
+                let Some(stacks) = scopes.get_or_insert_with(|| self.snippet_scopes(&carets()))
+                else {
+                    unavailable = true;
+                    continue;
+                };
+                if !vel_scope::Selector::parse(snippet.scope())
+                    .is_ok_and(|selector| stacks.iter().all(|s| selector.matches(s)))
+                {
+                    continue;
+                }
             }
-            if (!snippet.scope.is_empty() || snippet.snippet.uses_metadata_variables())
-                && scopes.as_ref().and_then(Option::as_ref).is_none()
+            let Some(snippet) = snippet.parsed() else {
+                continue;
+            };
+            if snippet.snippet.uses_metadata_variables()
+                && scopes
+                    .get_or_insert_with(|| self.snippet_scopes(&carets()))
+                    .is_none()
             {
                 unavailable = true;
-                continue;
-            }
-            if !snippet.scope.is_empty()
-                && !scopes
-                    .as_ref()
-                    .and_then(Option::as_ref)
-                    .is_some_and(|scopes| {
-                        vel_scope::Selector::parse(&snippet.scope)
-                            .is_ok_and(|selector| scopes.iter().all(|s| selector.matches(s)))
-                    })
-            {
                 continue;
             }
             if trigger.len() > width {
@@ -1233,7 +1299,9 @@ impl Editor {
                     .or_else(|| {
                         args["name"]
                             .as_str()
-                            .and_then(|n| self.snippets.get(n))
+                            .or_else(|| args["file"].as_str())
+                            .and_then(|n| self.snippets.get(n.strip_prefix("res://").unwrap_or(n)))
+                            .and_then(SnippetEntry::parsed)
                             .map(|s| s.content.clone())
                     })
                     .ok_or("snippet needs valid contents or name")?;

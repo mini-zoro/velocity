@@ -85,10 +85,7 @@ pub struct WindowLayers {
 }
 /// The sole tab-layer installation path, also called by `Tab::new`.
 /// The window's effective layer is published in its Settings, before tab creation.
-pub(crate) fn apply_window_layers(
-    tab: &mut Tab,
-    window: &vel_config::settings::Settings,
-) -> Result<(), String> {
+pub(crate) fn register_commands(registry: &mut vel_commands::Registry) {
     for name in [
         "edit_settings",
         "edit_syntax_settings",
@@ -107,12 +104,13 @@ pub(crate) fn apply_window_layers(
         "close_all",
         "split_view",
     ] {
-        if tab.editor.registry.kind(name).is_none() {
-            tab.editor
-                .registry
-                .register(name, vel_commands::Kind::WindowCommand, None);
-        }
+        registry.register(name, vel_commands::Kind::WindowCommand, None);
     }
+}
+pub(crate) fn apply_window_layers(
+    tab: &mut Tab,
+    window: &vel_config::settings::Settings,
+) -> Result<(), String> {
     let mut changed = false;
     let mut view = tab.editor.settings.layer(Layer::View).clone();
     let before = view.len();
@@ -188,10 +186,15 @@ impl Workspace {
             let pending = value.clone();
             let tracked = key.clone();
             let rx = crate::release::enqueue(move || {
-                let source = match std::fs::read_to_string(&path) {
-                    Ok(source) => source,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
-                    Err(e) => return Err(format!("{}: {e}", path.display())),
+                let source = if vel_fileio::regular::metadata(&path, true)?.is_some() {
+                    use std::io::Read;
+                    let mut source = String::new();
+                    vel_fileio::regular::read(&path)?
+                        .read_to_string(&mut source)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    source
+                } else {
+                    "{}".into()
                 };
                 let source = vel_config::json::Document::parse(&source)
                     .and_then(|doc| doc.set(&key, &value))
@@ -464,9 +467,11 @@ impl Workspace {
         let result = if self.tabs.get(index).is_some_and(|t| t.lazy.is_some())
             && !self.restore_in_progress
         {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.prepare_sheet_inner(index)
-            })) {
+            match vel_crash::recoverable(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.prepare_sheet_inner(index)
+                }))
+            }) {
                 Ok(result) => result,
                 Err(_) => {
                     self.report_restore_failure(None, &[], "lazy document restore panicked");
@@ -1495,6 +1500,11 @@ impl Workspace {
             // Even unopened siblings refer to one document, never independent buffers.
             tab.document = *buffer_ids.entry(document.id).or_insert(tab.document);
             tab.path = path;
+            tab.suggested_name = document
+                .history
+                .as_ref()
+                .and_then(vel_session::History::recovered_name)
+                .map(str::to_owned);
             // Missing files with retained contents must still prompt/save after restore.
             // Derive the marker from disk without extending the session wire format.
             tab.deleted = missing;
@@ -1547,9 +1557,7 @@ impl Workspace {
                         Layer::Syntax,
                         Value::Object(
                             self.syntax_settings
-                                .get(&reference.name)
-                                .cloned()
-                                .unwrap_or_default(),
+                                .values(&reference.path, &reference.name),
                         ),
                     )?;
                 }
@@ -1676,14 +1684,13 @@ impl Workspace {
         config.recent_projects = self.recent_projects.clone();
         remember(&mut config.recent_projects, path.clone());
         if restore {
-            let workspace = vel_session::project::workspace_path(&path);
-            let recovery = vel_session::load(&workspace);
+            let recovery = vel_session::load_project_workspace(&path, self.data_path());
             config.messages.extend(recovery.messages);
             if let Some(window) = recovery.session.windows.first() {
                 config.restore_window_from(
                     window,
                     &recovery.session.documents,
-                    Some(&workspace),
+                    recovery.source.as_deref(),
                 )?;
             }
         }

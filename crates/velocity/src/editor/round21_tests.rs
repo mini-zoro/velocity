@@ -1171,14 +1171,15 @@ fn round21_package_loader_keeps_good_resources_and_scope_override() {
         "source.python".parse().unwrap()
     );
     let warnings = std::fs::read_to_string(profile.path().join("Velocity.log")).unwrap();
-    for name in ["__MACOSX/._Comments.tmPreferences", "Oops.sublime-syntax"] {
-        assert!(warnings.contains(name), "{warnings}");
-        assert!(
-            w.resource_reports.iter().any(|r| r.contains(name)),
-            "{:?}",
-            w.resource_reports
-        );
-    }
+    assert!(warnings.contains("Oops.sublime-syntax"), "{warnings}");
+    assert!(!warnings.contains("._Comments.tmPreferences"), "{warnings}");
+    assert!(
+        w.resource_reports
+            .iter()
+            .any(|r| r.contains("Oops.sublime-syntax")),
+        "{:?}",
+        w.resource_reports
+    );
     let mut panels = Panels::new(&w, false);
     assert!(
         panels

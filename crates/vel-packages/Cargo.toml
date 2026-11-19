@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 vel-config = { path = "../vel-config" }
+vel-fileio = { path = "../vel-fileio" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 semver = { version = "=1.0.28", features = ["serde"] }

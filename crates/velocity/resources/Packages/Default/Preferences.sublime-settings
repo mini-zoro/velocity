@@ -48,7 +48,8 @@
   "highlight_line": false,
   "auto_match_enabled": true,
   // Write through a temporary file and rename it over the original. Even when true, files with
-  // hard links, another owner, extended attributes or a read-only mode are written in place.
+  // hard links, another owner, or metadata that cannot be preserved are saved in place.
+  // In-place saves keep a rollback clone or a full staged revision for recovery.
   "atomic_save": false,
   // https://docs.sublimetext.io/reference/settings.html#global-settings
   // User arrays replace this list, including the .git exclusion.
@@ -58,7 +59,7 @@
   "file_exclude_patterns": [
     "*.pyc", "*.pyo", "*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib",
     "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store",
-    "*.class", "*.psd", "*.db", "*.sublime-workspace"
+    "*.class", "*.psd", "*.db", "*.sublime-workspace", ".velocity-save-*"
   ],
   "show_side_bar": true,
   "color_scheme": "auto",

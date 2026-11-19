@@ -74,7 +74,15 @@ pub(crate) fn original(source: &Path) -> Option<std::sync::Arc<Original>> {
     struct SheetHeader {
         id: u64,
     }
-    let bytes = std::fs::read(source).ok();
+    let bytes = (|| {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        vel_fileio::regular::read(source)
+            .ok()?
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(bytes)
+    })();
     // Reading/parsing a session can be large; do it outside the shared cache lock.
     let windows = bytes
         .as_ref()
@@ -134,20 +142,28 @@ impl Workspace {
         source: Option<&Path>,
     ) -> Result<(), String> {
         self.restore_source = source.map(Path::to_owned);
-        self.restore_original = source.and_then(original).or_else(|| {
-            self.restore_original
-                .take()
-                .filter(|o| Some(o.source.as_path()) == source)
-        });
+        self.restore_original = self
+            .restore_original
+            .take()
+            .filter(|snapshot| {
+                source.is_some_and(|path| {
+                    let mut older = path.as_os_str().to_owned();
+                    older.push(".1");
+                    snapshot.source == path || snapshot.source.as_os_str() == older
+                })
+            })
+            .or_else(|| source.and_then(original));
         let settings = self.settings.clone();
         self.restore_in_progress = true;
         self.restore_deadline = Some(std::time::Instant::now() + crate::restore_io::BUDGET);
         // Each native/startup caller restores a window through this boundary.
         // Keep siblings consistent on ordinary IO errors; quarantine unexpected
         // failures before publishing recovered text so the next launch is safe.
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.restore_window_inner(window, documents)
-        }));
+        let result = vel_crash::recoverable(|| {
+            catch_unwind(AssertUnwindSafe(|| {
+                self.restore_window_inner(window, documents)
+            }))
+        });
         self.restore_in_progress = false;
         self.restore_deadline = None;
         let reason = match result {
@@ -187,13 +203,15 @@ impl Workspace {
         let referenced: BTreeSet<_> = window.sheets.iter().map(|s| s.document).collect();
         let mut tabs = Vec::new();
         for document in documents.iter().filter(|d| referenced.contains(&d.id)) {
-            let text = catch_unwind(AssertUnwindSafe(|| {
-                document
-                    .history
-                    .as_ref()
-                    .filter(|h| h.retains_text())
-                    .and_then(|h| h.current_text().ok())
-            }))
+            let text = vel_crash::recoverable(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    document
+                        .history
+                        .as_ref()
+                        .filter(|h| h.retains_text())
+                        .and_then(|h| h.current_text().ok())
+                }))
+            })
             .ok()
             .flatten();
             if let Some(text) = text {
@@ -247,62 +265,69 @@ fn backup(
         let name = source.file_name().unwrap_or_default().to_string_lossy();
         let count = original.windows.len().max(1);
         let mut paths = Vec::with_capacity(count);
-        // Prepare every window's original-byte backup before removing the source.
+        // Back up the launch snapshot without touching the live writer destination.
         // Later window failures use these same numbered backups, never a JSON copy.
         for number in 1..=count {
             let destination = source.with_file_name(format!(
                 "{name}.restore-failed-{}-{number}.bak",
                 original.stamp
             ));
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                // Like the session writer's temporary file, backups may contain
-                // unsaved private text and must be private from creation onward.
-                options.mode(0o600);
-            }
-            match options.open(&destination) {
-                Ok(mut file) => {
-                    file.write_all(&original.bytes).map_err(|e| e.to_string())?;
-                    file.sync_all().map_err(|e| e.to_string())?;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if std::fs::read(&destination).map_err(|e| e.to_string())? != original.bytes {
-                        return Err(format!(
-                            "incomplete session backup: {}",
-                            destination.display()
-                        ));
-                    }
-                }
-                Err(e) => return Err(e.to_string()),
+            if !destination.exists() {
+                vel_session::atomic_write(&destination, |file| {
+                    file.write_all(&original.bytes).map_err(|e| e.to_string())
+                })?;
             }
             paths.push(destination);
         }
-        let _ = std::fs::remove_file(source);
         let ids = window.map(|w| w.sheets.iter().map(|s| s.id).collect::<Vec<_>>());
         let index = ids
             .and_then(|ids| original.windows.iter().position(|saved| *saved == ids))
             .unwrap_or(0);
         return Ok(paths[index.min(paths.len() - 1)].clone());
     }
-    let bytes = source
-        .and_then(|p| std::fs::read(p).ok())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            let session = vel_session::Session {
-                windows: window.cloned().into_iter().collect(),
-                documents: documents.to_vec(),
-                ..Default::default()
-            };
-            serde_json::to_vec(&session).map_err(|e| e.to_string())
-        })?;
-    let file = tempfile::Builder::new()
-        .prefix(&format!("velocity-session-{stamp}-"))
-        .suffix(".bak")
-        .tempfile()
-        .map_err(|e| e.to_string())?;
-    std::fs::write(file.path(), bytes).map_err(|e| e.to_string())?;
-    file.keep().map(|(_, path)| path).map_err(|e| e.to_string())
+    let session = vel_session::Session {
+        windows: window.cloned().into_iter().collect(),
+        documents: documents.to_vec(),
+        ..Default::default()
+    };
+    let destination = std::env::temp_dir().join(format!(
+        "velocity-session-{}-{stamp}.bak",
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(&session).map_err(|e| e.to_string())?;
+    vel_session::atomic_write(&destination, |file| {
+        std::io::Write::write_all(file, &bytes).map_err(|e| e.to_string())
+    })?;
+    Ok(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_without_a_launch_snapshot_backs_up_dirty_text() {
+        let text = "uncheckpointed text\n".repeat(25_000);
+        let doc = Document {
+            history: Some(vel_session::History::capture(&vel_buffer::Buffer::new(
+                Text::from(text.as_str()),
+            ))),
+            ..serde_json::from_value(serde_json::json!({
+                "id": 1, "encoding": "UTF-8", "bom": false, "line_ending": "LF", "dirty": true,
+            }))
+            .unwrap()
+        };
+        let path = backup(None, None, None, &[doc]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let session: vel_session::Session =
+            serde_json::from_reader(std::io::BufReader::new(file)).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let (buffer, _) = session.documents[0]
+            .history
+            .as_ref()
+            .unwrap()
+            .restore(true, true)
+            .unwrap();
+        assert!(buffer.text() == &Text::from(text.as_str()));
+    }
 }

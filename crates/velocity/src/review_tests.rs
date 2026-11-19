@@ -94,7 +94,7 @@ fn native_context_keeps_multiple_selections_and_omits_custom_menu_accessibility(
     );
     assert!(
         !panels
-            .accessibility(&workspace)
+            .accessibility(&workspace, true)
             .nodes
             .iter()
             .any(|node| node.label == "Context menu")

@@ -288,3 +288,48 @@ fn syntax_specific_settings_override_project_settings() {
     assert_eq!(defaults.default_line_ending, "system");
     assert!(!defaults.atomic_save);
 }
+#[test]
+fn installed_archive_shadows_the_whole_shipped_package_and_osx_order_is_local() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let shipped = root.path().join("Shipped");
+    let profile = root.path().join("Profile");
+    let installer = profile.join("Installed Packages");
+    for path in [
+        shipped.join("Python"),
+        shipped.join("Alpha"),
+        shipped.join("Beta"),
+        installer.clone(),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(shipped.join("Python/Old.sublime-syntax"), "old").unwrap();
+    std::fs::write(shipped.join("Alpha/Default (OSX).sublime-keymap"), "[]").unwrap();
+    std::fs::write(shipped.join("Beta/Default.sublime-keymap"), "[]").unwrap();
+    let mut zip = zip::ZipWriter::new(
+        std::fs::File::create(installer.join("Python.sublime-package")).unwrap(),
+    );
+    zip.start_file(
+        "New.sublime-syntax",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    zip.write_all(b"new").unwrap();
+    zip.finish().unwrap();
+    let mut resources = vel_config::resources::Resources::default();
+    resources.load_shipped(&shipped).unwrap();
+    assert!(resources.load_with_warnings(&profile).is_empty());
+    assert!(
+        resources
+            .get("Packages/Python/Old.sublime-syntax")
+            .is_none()
+    );
+    assert!(
+        resources
+            .get("Packages/Python/New.sublime-syntax")
+            .is_some()
+    );
+    let keymaps = resources.matching(".sublime-keymap");
+    assert!(keymaps[0].path.contains("/Alpha/"));
+    assert!(keymaps[1].path.contains("/Beta/"));
+}

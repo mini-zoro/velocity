@@ -1,55 +1,13 @@
 //! Settings windows built from our resources and User files, through the normal editor/loaders.
 use crate::{app::App, cli::FileLocation, workbench::restore_settings_tab, workspace::Workspace};
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 use vel_config::{Value, json, resources::Resources};
 use vel_platform::{Size, WindowHandle, WindowOptions};
 use vel_text::Text;
 
-fn resources(data: &Path) -> Result<Resources, String> {
-    let mut resources = Resources::default();
-    crate::theme_ui::bundled(&mut resources);
-    for (path, source) in [
-        (
-            "Packages/Default/Preferences.sublime-settings",
-            include_str!("../resources/Packages/Default/Preferences.sublime-settings"),
-        ),
-        (
-            "Packages/Default/Preferences (OSX).sublime-settings",
-            include_str!("../resources/Packages/Default/Preferences (OSX).sublime-settings"),
-        ),
-        (
-            "Packages/Default/Distraction Free.sublime-settings",
-            include_str!("../resources/Packages/Default/Distraction Free.sublime-settings"),
-        ),
-        (
-            "Packages/Default/Velocity.sublime-keymap",
-            include_str!("../resources/Packages/Default/Velocity.sublime-keymap"),
-        ),
-        (
-            "Packages/Default/Velocity.sublime-mousemap",
-            include_str!("../resources/Packages/Default/Velocity.sublime-mousemap"),
-        ),
-        (
-            "Packages/Color Scheme - Velocity/Velocity Dark.sublime-color-scheme",
-            include_str!(
-                "../resources/Packages/Color Scheme - Velocity/Velocity Dark.sublime-color-scheme"
-            ),
-        ),
-        (
-            "Packages/Color Scheme - Velocity/Velocity Light.sublime-color-scheme",
-            include_str!(
-                "../resources/Packages/Color Scheme - Velocity/Velocity Light.sublime-color-scheme"
-            ),
-        ),
-    ] {
-        resources.insert(path, source.as_bytes().to_vec(), PathBuf::from(path));
-    }
-    resources.load(data)?;
-    Ok(resources)
-}
 fn expand(path: &str, data: &Path) -> String {
     // Public platform names: https://docs.sublimetext.io/guide/customization/settings.html
     path.replace("${platform}", "OSX")
@@ -57,16 +15,22 @@ fn expand(path: &str, data: &Path) -> String {
         .replace("${packages}", &data.join("Packages").to_string_lossy())
         .replace("$packages", &data.join("Packages").to_string_lossy())
 }
-fn source(base: &str, data: &Path) -> Result<(String, String), String> {
+fn source(base: &str, data: &Path, resources: &Resources) -> Result<(String, String), String> {
     let expanded = expand(base, data);
     let resource = Path::new(&expanded).strip_prefix(data).ok().map_or_else(
         || expanded.clone(),
         |p| p.to_string_lossy().replace('\\', "/"),
     );
-    if let Some(resource) = resources(data)?.get(&resource) {
+    if let Some(resource) = resources.get(&resource) {
         return Ok((resource.path.clone(), resource.text()?.to_owned()));
     }
-    let source = std::fs::read_to_string(&expanded).map_err(|e| format!("{expanded}: {e}"))?;
+    if resource.starts_with("res://") || resource.starts_with("Packages/") {
+        return Err(format!("settings resource {resource} is not available"));
+    }
+    let mut source = String::new();
+    vel_fileio::regular::read(Path::new(&expanded))?
+        .read_to_string(&mut source)
+        .map_err(|e| format!("{expanded}: {e}"))?;
     Ok((expanded, source))
 }
 fn create_user(path: &Path, template: &str) -> Result<(), String> {
@@ -80,7 +44,9 @@ fn create_user(path: &Path, template: &str) -> Result<(), String> {
     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     // A complete template is published atomically and only if absent. Opening
     // settings twice (including two windows) can never overwrite an existing file.
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    use vel_fileio::atomic::{Durability, Stage};
+    let mut temporary =
+        Stage::new(parent, ".velocity-settings-", None).map_err(|e| e.to_string())?;
     let expansion = vel_snippet::Snippet::parse(template)
         .map_err(|e| e.to_string())?
         .expand(
@@ -94,24 +60,37 @@ fn create_user(path: &Path, template: &str) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     temporary
+        .file()
         .write_all(expansion.edits[0].text.as_bytes())
         .map_err(|e| e.to_string())?;
-    match temporary.persist_noclobber(path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(format!("{}: {}", path.display(), e.error)),
+    temporary
+        .sync(Durability::Full)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    match temporary.publish(path, true) {
+        Ok(p) => {
+            if let Some(warning) = p.warning {
+                return Err(warning);
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 /// Preferences left/default, right/User, as documented at settings.html. The
 /// command's paths/variables follow reference/commands.html and the new-window
 /// edit_settings example in the public community customization guide.
-pub(crate) fn settings_workspace(data: &Path, args: &Value) -> Result<Workspace, String> {
+fn settings_workspace(
+    data: &Path,
+    args: &Value,
+    resources: &Resources,
+) -> Result<Workspace, String> {
     // https://www.sublimetext.com/docs/settings.html
     // https://docs.sublimetext.io/reference/commands.html
     let base = args["base_file"]
         .as_str()
         .ok_or("edit_settings needs base_file")?;
-    let (resource, contents) = source(base, data)?;
+    let (resource, contents) = source(base, data, resources)?;
     let name = Path::new(&resource)
         .file_name()
         .ok_or("base_file needs a filename")?
@@ -214,18 +193,25 @@ impl App {
         }
         let mut args = args.clone();
         if matches!(name, "edit_syntax_settings" | "open_file_settings") {
-            let syntax = self
-                .workspace
-                .editor()
-                .language
-                .borrow()
-                .as_ref()
-                .map(|l| l.name.clone())
-                .unwrap_or_else(|| "Plain Text".into());
-            // Syntax settings use the syntax's name (settings.html#syntax-specific-settings).
-            let user = data
-                .join("Packages/User")
-                .join(format!("{syntax}.sublime-settings"));
+            let language = self.workspace.editor().language.borrow();
+            let (syntax, display) = language.as_ref().map_or(("Plain Text", "Plain Text"), |l| {
+                (
+                    crate::workspace::syntax_setting_key(&l.syntax),
+                    l.name.as_str(),
+                )
+            });
+            // Syntax-specific settings layer: https://www.sublimetext.com/docs/settings.html#syntax-specific-settings
+            let user = format!("Packages/User/{syntax}.sublime-settings");
+            let alias = format!("Packages/User/{display}.sublime-settings");
+            let user = data.join(
+                if self.workspace.resources.get(&user).is_none()
+                    && self.workspace.resources.get(&alias).is_some()
+                {
+                    alias
+                } else {
+                    user
+                },
+            );
             args = json!({"base_file":"Packages/Default/Preferences.sublime-settings","user_file":user,"default":"{\n\t$0\n}\n"});
         }
         if matches!(name, "customize_color_scheme" | "customize_theme") {
@@ -291,7 +277,7 @@ impl App {
                 }
             );
         }
-        let workspace = settings_workspace(&data, &args)?;
+        let workspace = settings_workspace(&data, &args, &self.workspace.resources)?;
         let mut options = self.options.clone();
         options.files.clear();
         options.file = None;

@@ -191,3 +191,25 @@ selection or text changes. Explicit recenter/find/result navigation keeps its re
 The appearance menu/palette entries reference Lane A's `select_color_scheme` and `select_theme`;
 those implementations are not yet present at baseline `dad6e3d`. Menu contract tests register
 those declared WindowCommand names only, without implementing the pickers in this lane.
+## Round 22 compatibility
+
+- `atomic_save` defaults to `false`, as documented in the [Sublime Text 3 changelog](https://www.sublimetext.com/3).
+  In-place saves keep the inode, hard links, and metadata. Before writing to the inode, Velocity journals a
+  rollback clone on APFS where possible. Otherwise it keeps a complete staged revision. A failed write
+  restores the old bytes where possible; otherwise the error identifies the retained recovery data. On launch
+  Velocity recovers only the original inode and reports the result. Other processes may see an in-place write
+  in progress. Use `true` for atomic visibility where the filesystem and permissions allow it.
+- `atomic_save: true` syncs a staged file, preserves the existing metadata, and uses
+  [rename(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/rename.2.html).
+  It adapts to a journaled write if replacement would break a hard link, drop metadata, or cannot rename over
+  the target. Both modes save through symlinks and stage new files before publication. Interrupted stages
+  tracked in the profile's `Recovery` folder are cleaned on startup or on the next save in that folder.
+  The sidebar, Goto, and the index exclude the reserved `.velocity-save-*` names.
+- `ignored_packages` applies to shipped language snippets, settings, completions, builds and syntax definitions too.
+  Syntax settings use the grammar resource's basename, such as `DOT.sublime-settings` for Graphviz (DOT);
+  User display-name settings override package settings and are merged before User stem settings.
+  The optional `extensions` array takes precedence
+  over built-in extension associations, but does not override a manually chosen syntax.
+- Preferences › Key Bindings opens `Packages/User/Default (OSX).sublime-keymap`. Velocity also reads
+  `Default.sublime-keymap` and the older `Velocity.sublime-keymap`, with the legacy bindings applied first.
+  Other User keymap names produce a notice and are ignored. `Packages/User` may be a directory symlink.

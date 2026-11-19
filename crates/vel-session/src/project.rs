@@ -82,8 +82,10 @@ impl Project {
     }
     /// Saves without truncating an existing project on failure.
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         super::atomic_write(path, |f| {
-            serde_json::to_writer_pretty(f, self).map_err(|e| e.to_string())
+            use std::io::Write;
+            f.write_all(&bytes).map_err(|e| e.to_string())
         })
     }
 }

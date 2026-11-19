@@ -30,6 +30,7 @@ mod details;
 pub(crate) use details::StatusItem;
 #[path = "text_ops.rs"]
 mod macro_commands;
+pub(crate) use macro_commands::usable_package_binding;
 #[cfg(test)]
 #[path = "panels_round19_tests.rs"]
 mod round19_tests;
@@ -1715,10 +1716,10 @@ impl Panels {
                     let mut invocation_args = args.clone();
                     invocation_args["name"] = json!(name);
                     Some(vel_config::ui::PaletteItem {
-                        caption: if snippet.description.is_empty() {
+                        caption: if snippet.description().is_empty() {
                             name.into()
                         } else {
-                            snippet.description.clone()
+                            snippet.description().to_owned()
                         },
                         invocation: Invocation {
                             command: "insert_snippet".into(),
@@ -2832,9 +2833,9 @@ impl Panels {
                         && let Some(snippet) = p.invocation.args["name"]
                             .as_str()
                             .and_then(|name| workspace.editor().snippets.get(name))
-                        && !snippet.scope.is_empty()
+                        && !snippet.scope().is_empty()
                         && snippet_scopes.as_ref().is_some_and(|stack| {
-                            !vel_scope::Selector::parse(&snippet.scope)
+                            !vel_scope::Selector::parse(snippet.scope())
                                 .is_ok_and(|selector| selector.matches(stack.as_slice()))
                         })
                     {

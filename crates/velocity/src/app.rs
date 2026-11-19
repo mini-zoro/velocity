@@ -110,6 +110,7 @@ pub struct App {
     pending_menu: Option<context_adapter::PendingMenu>,
     pending_utf8_saves: std::collections::VecDeque<(u64, Option<std::path::PathBuf>, String)>,
     accessibility_focus: Option<accessibility::Id>,
+    accessibility_windows: std::cell::RefCell<std::collections::BTreeMap<u64, usize>>,
     accessibility_preferences: accessibility::Preferences,
     releases: crate::release::Actions,
     title_theme: Option<(u64, u64)>,
@@ -282,6 +283,7 @@ impl App {
             pending_menu: None,
             pending_utf8_saves: Default::default(),
             accessibility_focus: None,
+            accessibility_windows: Default::default(),
             accessibility_preferences: Default::default(),
             releases: Default::default(),
             title_theme: None,
@@ -392,6 +394,9 @@ impl App {
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(), String> {
+        if !paths.is_empty() && self.accessibility_focus.is_some() {
+            self.leave_region_focus();
+        }
         // A secondary native recipient can become primary if the old GUI
         // exits. Normalize project paths just as for any other forwarded open.
         let mut request = crate::open_requests::native_request(paths)?;
@@ -519,11 +524,11 @@ impl App {
             let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
             return true;
         }
-        for index in 0..self.workspace.tabs.len() {
-            let _ = self.workspace.prepare_sheet(index);
-            self.workspace.tabs[index].editor.unmark();
+        for tab in &mut self.workspace.tabs {
+            if tab.lazy.is_none() {
+                tab.editor.unmark();
+            }
         }
-        let _ = self.workspace.prepare_sheet(self.workspace.active);
         if self.hot_exit().retain(true) {
             if let Err(error) = self.save_workspace_checkpoint() {
                 if self
@@ -532,7 +537,7 @@ impl App {
                     .iter()
                     .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
                 {
-                    self.named_error(window,&format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
+                    self.save_status(format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
                     return false;
                 }
                 self.panels.message = error;
@@ -764,6 +769,11 @@ impl App {
     }
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
         let request = &incoming.request;
+        if self.accessibility_focus.is_some()
+            && (!request.files.is_empty() || request.project.is_some() || request.stdin.is_some())
+        {
+            self.leave_region_focus();
+        }
         let mut ids = std::collections::BTreeSet::new();
         let mut errors = Vec::new();
         if let Some(project) = request.project.clone().filter(|p| {
@@ -871,6 +881,12 @@ impl App {
         if !reports.is_empty() {
             self.panels.message = reports.join("; ");
         }
+    }
+    fn save_status(&mut self, message: String) {
+        let _ = self
+            .reporter
+            .emit(json!({"kind":"save_diagnostic","message":message}));
+        self.panels.set_message(message);
     }
     fn sync_workspace_after_panels(&mut self) {
         // Panels temporarily protect a sidebar preview by clearing transient.
@@ -1039,6 +1055,9 @@ impl App {
     ) -> bool {
         if key.name == "escape" {
             self.keyboard_center = None;
+        }
+        if self.dispatch_region_key(window, key) {
+            return true;
         }
         let context = (
             self.workspace.tabs[self.workspace.active].sheet,
@@ -1304,8 +1323,14 @@ impl App {
         }
     }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
+        let overlay = self.panels.overlay;
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
             self.named_error(window, &error);
+        }
+        if self.panels.overlay.is_some() && self.panels.overlay != overlay {
+            self.accessibility_focus = None;
+        } else {
+            self.validate_region_focus();
         }
         if !self.workspace.recent_files.is_empty()
             || !self.workspace.recent_folders.is_empty()
@@ -1346,6 +1371,11 @@ impl App {
         if !self.macro_view_active() {
             return Ok(());
         }
+        if self.region_blocks_text()
+            && self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+        {
+            return Ok(());
+        }
         if depth >= 32 {
             return Err("command chain exceeds 32 levels".into());
         }
@@ -1377,15 +1407,10 @@ impl App {
         if name == "chain" {
             let commands = args["commands"].as_array().ok_or("chain needs commands")?;
             for command in commands {
-                let name = command[0]
-                    .as_str()
-                    .ok_or("chain entry needs [name, args]")?;
-                if let Err(error) = self.run_named_depth(
-                    window,
-                    name,
-                    &context_child_args(args, command.get(1).unwrap_or(&json!({}))),
-                    depth + 1,
-                ) {
+                let (name, child) = vel_commands::chain_entry(command)?;
+                if let Err(error) =
+                    self.run_named_depth(window, name, &context_child_args(args, child), depth + 1)
+                {
                     if self.workspace.editor().registry.playback_depth() > 0 {
                         return Err(error);
                     }
@@ -1502,6 +1527,12 @@ impl App {
             window.set_clipboard_text(&self.workspace.editor().clipboard);
         }
         let actions = self.handle_named_actions(window);
+        if self.accessibility_focus.is_some()
+            && matches!(name, "open_file" | "open_project")
+            && actions.is_ok()
+        {
+            self.leave_region_focus();
+        }
         let changed = self.target_changed(&document_before);
         let explicit = name.starts_with("goto_")
             || matches!(
@@ -1540,7 +1571,7 @@ impl App {
             Ok(saved) => saved,
             Err(error) => {
                 if !self.offer_utf8_save(index, None, &error) {
-                    self.panels.set_message(error);
+                    self.save_status(error);
                 }
                 false
             }
@@ -1572,7 +1603,10 @@ impl App {
         };
         if !self.workspace.tabs[index].editor.read_only
             && !self.workspace.tabs[index].binary_document
-            && self.workspace.save_conflict(index, path.as_deref())?
+            && self
+                .workspace
+                .resolve_save_conflict(index, path.as_deref())?
+                .0
         {
             let overwrite = if let Some(window) = window {
                 window.alert(
@@ -1737,7 +1771,7 @@ impl App {
                 }
                 self.next_utf8_save();
                 if !failures.is_empty() {
-                    self.panels.set_message(failures.join("\n"));
+                    self.save_status(failures.join("\n"));
                 }
             }
             "save" | "save_encoding" | "save_and_close" | "save_as" | "prompt_save_as" => {
@@ -1778,7 +1812,7 @@ impl App {
                                 self.workspace.tabs[active].encoding_chosen = previous.1;
                                 self.workspace.tabs[active].preferred_encoding = previous.2.clone();
                                 if !self.offer_utf8_save(active, path, &error) {
-                                    return Err(error);
+                                    self.save_status(error);
                                 }
                                 false
                             }
@@ -1884,7 +1918,13 @@ impl App {
         };
         match decision {
             tab_adapter::CloseDecision::Save(path) => {
-                self.save_tab_with_path(window, index, false, path)
+                match self.save_tab_with_path(window, index, false, path) {
+                    Ok(saved) => Ok(saved),
+                    Err(error) => {
+                        self.save_status(error);
+                        Ok(false)
+                    }
+                }
             }
             tab_adapter::CloseDecision::Discard => Ok(true),
             tab_adapter::CloseDecision::Cancel => Ok(false),
@@ -1939,6 +1979,10 @@ impl App {
             return Ok(());
         }
         if self.apply_view_action(name, args)? {
+            return Ok(());
+        }
+        if matches!(name, "focus_next_control" | "focus_previous_control") {
+            self.next_accessibility_focus(window, name == "focus_previous_control");
             return Ok(());
         }
         if self.apply_build_action(window, name, args)? {
@@ -2022,7 +2066,7 @@ impl App {
                 }
             }
             if !errors.is_empty() {
-                self.panels.message = errors.join("\n");
+                self.save_status(errors.join("\n"));
             }
             return Ok(());
         }
@@ -2038,7 +2082,7 @@ impl App {
         if name == "open_file"
             && let Some(file) = args["file"].as_str()
         {
-            return self.workspace.open(crate::cli::FileLocation::parse(file));
+            return self.workspace.open_file_argument(file);
         }
         if name == "switch_file" {
             return self.workspace.switch_file(&args["extensions"]);
@@ -2078,10 +2122,6 @@ impl App {
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
         if self.apply_view_action(name, args)? {
-            return Ok(());
-        }
-        if matches!(name, "focus_next_control" | "focus_previous_control") {
-            self.next_accessibility_focus(w, name == "focus_previous_control");
             return Ok(());
         }
         let viewport = self.viewport();
@@ -2317,7 +2357,7 @@ impl App {
             }
             "open_file" => {
                 if let Some(file) = args["file"].as_str() {
-                    self.workspace.open(crate::cli::FileLocation::parse(file))?;
+                    self.workspace.open_file_argument(file)?;
                 } else if (args["force"].as_bool().unwrap_or(false) || self.can_close(w, active))
                     && let Some(path) = self.workspace.tabs[active].path.clone()
                 {
@@ -3350,6 +3390,7 @@ impl App {
         self.exact_scene = exact;
         scene.layers.push(chrome);
         self.panels.paint(&self.workspace, &mut scene);
+        self.paint_accessibility_focus(&mut scene);
         self.capture_format_hits(&scene);
         if theme_animating {
             self.workspace.themes.ui.borrow_mut().request_animation();
@@ -3404,7 +3445,8 @@ impl App {
         }
         self.sync_workspace_after_panels();
         if self.options.mode == Mode::Interactive {
-            self.session_due = Some(Instant::now() + Duration::from_millis(300));
+            self.session_due
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(300));
         }
         self.sync_active_view();
         self.input_at.get_or_insert(received);
@@ -3416,6 +3458,43 @@ impl App {
         self.log_input("text", &input);
         self.workspace.editor_mut().text_input(input);
         self.changed(w, received, true);
+    }
+    fn handle_text_input(&mut self, window: Option<&WindowHandle>, event: TextInput) {
+        if self.options.mode.automatic() {
+            self.external_input += 1;
+            return;
+        }
+        if self.region_blocks_text() {
+            return;
+        }
+        let viewport = self.viewport();
+        let panel_before = (
+            self.workspace.tabs[self.workspace.active].sheet,
+            self.workspace.editor().buffer.change_id(),
+            self.workspace.editor().regions(),
+        );
+        if self
+            .panels
+            .text_input(&mut self.workspace, event.clone(), viewport)
+        {
+            let moved = panel_before
+                != (
+                    self.workspace.tabs[self.workspace.active].sheet,
+                    self.workspace.editor().buffer.change_id(),
+                    self.workspace.editor().regions(),
+                );
+            self.named_changed(window, moved);
+            if let Some(w) = window {
+                w.request_frame_at(Instant::now() + Duration::from_millis(8));
+            }
+        } else if self.accessibility_focus.is_none() && !self.workspace.editor().read_only {
+            if let Some(w) = window {
+                self.input(w, event, Instant::now());
+            } else {
+                self.workspace.editor_mut().text_input(event);
+                self.changed_state(Instant::now(), true);
+            }
+        }
     }
     fn start_report(&mut self, w: &WindowHandle, p: Presentation) -> Result<(), String> {
         self.content_scanout = Some(p.scanout);
@@ -3780,17 +3859,6 @@ impl AppHandler for App {
         {
             return false;
         }
-        if let Some(id) = self.accessibility_focus {
-            let tree = self.accessible_tree();
-            if let Some(node) = tree.node(id) {
-                if node.text.is_none() && matches!(key.name.as_str(), "enter" | "space") {
-                    self.accessibility_action(w, id, accessibility::Request::Press);
-                    return true;
-                }
-            } else {
-                self.accessibility_focus = None;
-            }
-        }
         let viewport = self.viewport();
         if self.workspace.editor().vintage.is_some() {
             let first = (self.view.scroll_y / self.view.line_height).max(0.) as usize;
@@ -4007,40 +4075,20 @@ impl AppHandler for App {
     }
     fn on_text_input(&mut self, w: &WindowHandle, event: TextInput) {
         self.cancel_context(w);
-        if self.options.mode.automatic() {
-            self.external_input += 1;
-            return;
-        }
-        let viewport = self.viewport();
-        let panel_before = (
-            self.workspace.tabs[self.workspace.active].sheet,
-            self.workspace.editor().buffer.change_id(),
-            self.workspace.editor().regions(),
-        );
-        if self
-            .panels
-            .text_input(&mut self.workspace, event.clone(), viewport)
-        {
-            let moved = panel_before
-                != (
-                    self.workspace.tabs[self.workspace.active].sheet,
-                    self.workspace.editor().buffer.change_id(),
-                    self.workspace.editor().regions(),
-                );
-            self.changed(w, Instant::now(), moved);
-            w.request_frame_at(Instant::now() + Duration::from_millis(8));
-            return;
-        }
-        if self.workspace.editor().read_only {
-            return;
-        }
-        self.input(w, event, Instant::now());
+        self.handle_text_input(Some(w), event);
     }
     fn on_command(&mut self, w: &WindowHandle, command: Command) {
         self.cancel_context(w);
         self.log_input("command", command);
         if self.options.mode.automatic() {
             self.external_input += 1;
+            return;
+        }
+        if self.region_blocks_text() {
+            if command == Command::Cancel {
+                self.leave_region_focus();
+                w.request_frame();
+            }
             return;
         }
         if let Some(input) = self.panels.input_mut() {
@@ -4212,7 +4260,8 @@ impl AppHandler for App {
                 .iter()
                 .any(|t| t.loading.is_some() || t.binary_loading.is_some());
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
-            let mut changed = self.poll_workspace_model() || focus_changed;
+            let session_changed = self.poll_workspace_model() || focus_changed;
+            let mut changed = session_changed;
             self.publish_resource_reports();
             self.workspace
                 .themes
@@ -4223,7 +4272,10 @@ impl AppHandler for App {
             self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
             changed |= self.workspace.themes.ui.borrow().metrics.poll_images();
             changed |= self.builds.poll(&mut self.panels);
-            if changed && self.options.mode == Mode::Interactive && self.session_due.is_none() {
+            if session_changed
+                && self.options.mode == Mode::Interactive
+                && self.session_due.is_none()
+            {
                 self.session_due = Some(Instant::now() + Duration::from_millis(300));
             }
             if self.options.mode == Mode::Interactive {
@@ -4608,6 +4660,16 @@ impl AppHandler for App {
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
         self.prepare_quit(Some(w))
+    }
+    fn on_session_ending(&mut self, _window: &WindowHandle) {
+        // ST dev build 4075 checkpoints on system shutdown (sublimetext.com/dev).
+        // Keep the ordinary quit path responsible for prompts and the final flush.
+        if self.options.mode == Mode::Interactive
+            && self.hot_exit().retain(true)
+            && let Err(error) = self.save_workspace_checkpoint()
+        {
+            self.panels.message = format!("Could not checkpoint during logout: {error}");
+        }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
         self.receive_tabs();
@@ -5134,3 +5196,7 @@ mod round21_review;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "app_round21_typing_perf.rs"]
 mod round21_typing_perf;
+
+#[cfg(test)]
+#[path = "app_round22_tests.rs"]
+mod round22;

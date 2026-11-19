@@ -35,6 +35,25 @@ where
     result
 }
 
+/// Runs an operation whose panic will be caught by its caller; the hook logs
+/// it without treating it as a fatal incident on the next launch.
+pub fn recoverable<T>(operation: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RECOVERING.set(self.0);
+        }
+    }
+    let _restore = Reset(RECOVERING.replace(true));
+    operation()
+}
+
+/// Registers an alternate signal stack for a native worker if it lacks one.
+#[cfg(unix)]
+pub fn install_thread_stack() -> io::Result<()> {
+    signals::install_thread_stack()
+}
+
 /// Configuration supplied early in app startup, before native initialization.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -107,6 +126,7 @@ impl CrashReporter {
         #[cfg(not(unix))]
         fs::create_dir_all(&config.directory)?;
         config.directory = fs::canonicalize(&config.directory)?;
+        prune(&config.directory, 20)?;
         Ok(Self {
             state: Arc::new(State {
                 config,
@@ -180,6 +200,10 @@ impl CrashReporter {
         temp.as_file().sync_all()?;
         let path = self.report_path("panic", "crash");
         temp.persist_noclobber(&path).map_err(|e| e.error)?;
+        prune(
+            self.directory(),
+            20 - usize::from(self.state.signals_installed.load(Ordering::Acquire)),
+        )?;
         Ok(Report { path })
     }
     /// Installs a process-global panic hook and chains the prior hook for stderr diagnostics.
@@ -188,7 +212,9 @@ impl CrashReporter {
         let reporter = self.clone();
         let prior = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if RECOVERING.get() {
+            // Suppress reports for this thread only while a recoverable job runs, and
+            // never suppress them on threads that cannot read the flag.
+            if RECOVERING.try_with(|flag| flag.get()).unwrap_or(false) {
                 return;
             }
             if !reporter.state.reporting.swap(true, Ordering::AcqRel) {
@@ -200,15 +226,16 @@ impl CrashReporter {
         }));
     }
     /// Installs minimal fatal-signal handlers once per process, retaining an open report fd.
-    /// SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSEGV terminate with status `128 + signal` after writing.
+    /// SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSEGV are re-raised after writing.
     /// Signal reports carry cached version/OS/logs and an explicit "backtrace unavailable" line.
     /// No locks, allocation, unwinding, formatting or network operations run in the handler.
-    /// Empty reserved `.signal` files are ignored on normal exit and on subsequent launches.
+    /// The empty reservation is removed on normal process exit.
     #[cfg(unix)]
     pub fn install_signal_handlers(&self) -> io::Result<()> {
         let logs = self.state.logs.lock().unwrap_or_else(|e| e.into_inner());
         signals::install(&self.report_path("fatal", "signal"), &self.context(&logs))?;
         self.state.signals_installed.store(true, Ordering::Release);
+        prune(self.directory(), 19)?;
         Ok(())
     }
     /// Lists unacknowledged reports for the next-launch prompt. Empty signal reservations
@@ -270,6 +297,52 @@ impl CrashReporter {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
+}
+
+fn prune(directory: &Path, retain: usize) -> io::Result<()> {
+    let mut reports = Vec::new();
+    let now = SystemTime::now();
+    for entry in fs::read_dir(directory)?.flatten() {
+        if !entry.file_type().is_ok_and(|ty| ty.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if !matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("signal" | "crash" | "seen")
+        ) {
+            continue;
+        }
+        let Some(timestamp) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split('-').next())
+            .and_then(|s| s.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() == 0 {
+            if metadata
+                .modified()
+                .ok()
+                .and_then(|date| now.duration_since(date).ok())
+                .is_some_and(|age| age.as_secs() >= 7 * 24 * 3600)
+            {
+                let _ = fs::remove_file(path);
+            }
+        } else {
+            reports.push((timestamp, path));
+        }
+    }
+    reports.sort_unstable();
+    let delete = reports.len().saturating_sub(retain);
+    for (_, path) in reports.into_iter().take(delete) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
 }
 fn os_description() -> String {
     let mut description = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);

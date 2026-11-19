@@ -103,7 +103,7 @@ fn engine(a: &mut App, words: &[&str]) {
 }
 fn snippets(a: &mut App, entries: &[(&str, &str, &str)]) {
     let snippets=entries.iter().enumerate().map(|(i,(trigger,content,scope))| {
-        (format!("Packages/User/test{i}.sublime-snippet"),vel_snippet::SnippetFile::parse(&format!("<snippet><content><![CDATA[{content}]]></content><tabTrigger>{trigger}</tabTrigger><scope>{scope}</scope><description>Choice {i}</description></snippet>")).unwrap())
+        (format!("Packages/User/test{i}.sublime-snippet"), crate::completion::SnippetEntry::Parsed(vel_snippet::SnippetFile::parse(&format!("<snippet><content><![CDATA[{content}]]></content><tabTrigger>{trigger}</tabTrigger><scope>{scope}</scope><description>Choice {i}</description></snippet>")).unwrap()))
     }).collect();
     a.workspace.editor_mut().snippets = Arc::new(snippets);
 }

@@ -91,8 +91,37 @@ fn crashing_child() {
         assert!(reporter.install_signal_handlers().is_err());
         reporter.record(Level::Warn, "last event after signal installation");
         // SAFETY: this isolated child process intentionally exercises the fatal handler.
-        unsafe { libc::raise(libc::SIGABRT) };
+        unsafe { libc::raise(libc::SIGSEGV) };
         unreachable!();
+    }
+    #[cfg(unix)]
+    if std::env::var("VELOCITY_CRASH_TEST_MODE").as_deref() == Ok("overflow") {
+        reporter.install_signal_handlers().unwrap();
+        #[allow(unconditional_recursion)]
+        #[inline(never)]
+        fn overflow(depth: usize) -> usize {
+            let bytes = std::hint::black_box([depth as u8; 8192]);
+            overflow(depth + 1) + std::hint::black_box(usize::from(bytes[0]))
+        }
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                vel_crash::install_thread_stack().unwrap();
+                std::hint::black_box(overflow(0))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        unreachable!();
+    }
+    if std::env::var("VELOCITY_CRASH_TEST_MODE").as_deref() == Ok("recoverable") {
+        assert!(
+            std::panic::catch_unwind(|| {
+                vel_crash::recoverable(|| panic!("caught restore panic"))
+            })
+            .is_err()
+        );
+        return;
     }
     if std::env::var("VELOCITY_CRASH_TEST_MODE").as_deref() == Ok("normal") {
         #[cfg(unix)]
@@ -128,20 +157,27 @@ fn panic_hook_omits_payload_and_next_launch_discovers_it() {
 
 #[cfg(unix)]
 #[test]
-fn fatal_signal_writes_cached_context_in_a_child_and_normal_exit_is_not_a_crash() {
+#[ignore = "native WIFSIGNALED check; the macOS sandbox can suspend OS crash exits"]
+fn fatal_signal_preserves_sigsegv_exit_status() {
+    use std::os::unix::process::ExitStatusExt;
     let root = tempfile::tempdir().unwrap();
     assert_eq!(
-        run_child("signal", root.path()).code(),
-        Some(128 + libc::SIGABRT)
+        run_child("signal", root.path()).signal(),
+        Some(libc::SIGSEGV)
     );
     let next_launch = reporter(root.path());
     let reports = next_launch.pending_reports().unwrap();
     assert_eq!(reports.len(), 1);
     let text = fs::read_to_string(&reports[0].path).unwrap();
-    assert!(text.contains("signal: SIGABRT"));
+    assert!(text.contains("signal: SIGSEGV"));
     assert!(text.contains("version: 12.3.4"));
     assert!(text.contains("last event after signal installation"));
     assert!(text.contains("backtrace: unavailable in async signal context"));
+}
+
+#[cfg(unix)]
+#[test]
+fn normal_exit_removes_empty_signal_reservation() {
     let normal_home = tempfile::tempdir().unwrap();
     assert!(run_child("normal", normal_home.path()).success());
     assert!(
@@ -150,4 +186,30 @@ fn fatal_signal_writes_cached_context_in_a_child_and_normal_exit_is_not_a_crash(
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        fs::read_dir(reporter(normal_home.path()).directory())
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "native WIFSIGNALED check; the macOS sandbox can suspend OS crash exits"]
+fn stack_overflow_reports_on_an_alternate_stack() {
+    use std::os::unix::process::ExitStatusExt;
+    let home = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        run_child("overflow", home.path()).signal(),
+        Some(libc::SIGSEGV | libc::SIGBUS)
+    ));
+    assert_eq!(reporter(home.path()).pending_reports().unwrap().len(), 1);
+}
+
+#[test]
+fn recoverable_panic_does_not_create_a_report() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(run_child("recoverable", home.path()).success());
+    assert!(reporter(home.path()).pending_reports().unwrap().is_empty());
 }

@@ -143,21 +143,6 @@ impl Tab {
         editor.settings = settings.clone();
         editor.sync();
         editor.keymap = keymap.clone();
-        for command in [
-            "new_build_system",
-            "reopen_last_file",
-            "reopen_encoding",
-            "save_encoding",
-            "open_recent_file",
-            "open_recent_folder",
-            "clear_recent_items",
-            "toggle_tabs",
-            "toggle_status_bar",
-        ] {
-            editor
-                .registry
-                .register(command, vel_commands::Kind::WindowCommand, None);
-        }
         let format = fileio::default_format(&settings.editor()).unwrap_or_default();
         let mut tab = Self {
             shared_dirty: false,
@@ -600,14 +585,14 @@ pub struct Workspace {
     pub git: crate::git_ui::GitUi,
     pub catalog: Arc<crate::completion::Catalog>,
     pub assets: Arc<crate::language::Assets>,
-    pub(crate) syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
+    pub(crate) syntax_settings: crate::shipped::SyntaxSettings,
     schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
     pub dark: bool,
     pub workbench: vel_ui::workbench::Workbench,
     pub distraction_free: bool,
     pub(crate) window_layers: crate::workbench::WindowLayers,
     pub fullscreen: bool,
-    pub build_systems: Vec<vel_build::BuildSystem>,
+    pub build_systems: crate::shipped::Builds,
     pub build_system: Option<String>,
     pub project_model: vel_session::project::Project,
     pub recent_files: Vec<PathBuf>,
@@ -633,11 +618,13 @@ pub struct Workspace {
     pub palette: Vec<PaletteItem>,
     /// Macro filenames from the background resource overlay; contents are loaded on demand.
     pub(crate) macro_paths: std::collections::BTreeSet<String>,
+    pub(crate) resources: Resources,
     pub messages: Vec<String>,
     /// File load/reload diagnostics, consumed by status text and never modal alerts.
     pub(crate) load_notices: Vec<String>,
     /// Consolidated authoring diagnostics; consumed by the status bar, never alerts.
     pub(crate) resource_reports: Vec<String>,
+    ignored_user_keymaps: IgnoredKeymaps,
     pub(crate) settings_reports: crate::settings_reports::Scope,
     pub(crate) restore_in_progress: bool,
     pub(crate) restore_source: Option<PathBuf>,
@@ -674,41 +661,62 @@ pub(crate) fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.len(), m.modified().ok()?))
 }
-fn package_stamps(
-    dir: &Path,
-    out: &mut Vec<(PathBuf, Option<(u64, SystemTime)>)>,
-    seen: &mut std::collections::BTreeSet<PathBuf>,
-) {
-    let mut pending = vec![dir.to_owned()];
-    while let Some(dir) = pending.pop() {
-        let Ok(canonical) = std::fs::canonicalize(&dir) else {
-            continue;
-        };
-        if !seen.insert(canonical) {
-            continue;
-        }
-        out.push((dir.clone(), stamp(&dir)));
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                if path.is_dir() {
-                    pending.push(path);
-                } else if path.to_str().is_some_and(|p| {
-                    [
-                        ".sublime-syntax",
-                        ".tmLanguage",
-                        ".tmLanguage.json",
-                        ".tmPreferences",
-                    ]
-                    .iter()
-                    .any(|s| p.ends_with(s))
-                }) {
-                    out.push((path.clone(), stamp(&path)));
-                }
-            }
-        }
-    }
+fn count_unknown_menu(items: &[MenuItem], known: &impl Fn(&str) -> bool) -> usize {
+    items
+        .iter()
+        .map(|item| {
+            usize::from(item.command.as_deref().is_some_and(|name| !known(name)))
+                + count_unknown_menu(&item.children, known)
+        })
+        .sum()
 }
+
+fn filter_shipped_menu(items: &mut Vec<MenuItem>, known: &impl Fn(&str) -> bool) {
+    items.retain_mut(|item| {
+        if item.command.as_deref().is_some_and(|name| !known(name)) {
+            return false;
+        }
+        let submenu = !item.children.is_empty();
+        filter_shipped_menu(&mut item.children, known);
+        !submenu || !item.children.is_empty()
+    });
+}
+
+pub(crate) fn syntax_setting_key(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    [".sublime-syntax", ".tmLanguage.json", ".tmLanguage"]
+        .into_iter()
+        .find_map(|suffix| file.strip_suffix(suffix))
+        .unwrap_or(file)
+}
+
+fn extension_syntax<'a>(
+    syntaxes: &'a vel_syntax::SyntaxSet,
+    settings: &crate::shipped::SyntaxSettings,
+    path: Option<&Path>,
+) -> Option<&'a str> {
+    let name = path?.file_name()?.to_str()?;
+    let (_, suffixes) = name.split_once('.')?;
+    syntaxes
+        .syntaxes()
+        .iter()
+        .filter_map(|syntax| {
+            settings
+                .extensions(&syntax.path, &syntax.name)
+                .iter()
+                .filter(|ext| {
+                    suffixes.eq_ignore_ascii_case(ext)
+                        || suffixes
+                            .match_indices('.')
+                            .any(|(offset, _)| suffixes[offset + 1..].eq_ignore_ascii_case(ext))
+                })
+                .map(|ext| (ext.len(), syntax.path.as_str()))
+                .max_by_key(|(len, _)| *len)
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, syntax)| syntax)
+}
+
 /// One document identity for opens, Save As and restored paths. New filenames
 /// also resolve their existing parent, including directory symlinks.
 pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
@@ -750,11 +758,10 @@ pub(crate) fn absolute_folder(path: &Path) -> Result<PathBuf, String> {
 struct Configuration {
     appearance: appearance::Catalog,
     themes: crate::theme_ui::Prepared,
-    #[cfg(test)]
     resources: Resources,
     settings: Settings,
     keymap: Keymap,
-    syntax_settings: BTreeMap<String, serde_json::Map<String, Value>>,
+    syntax_settings: crate::shipped::SyntaxSettings,
     schemes: BTreeMap<String, Arc<vel_color_scheme::ColorScheme>>,
     assets: Arc<crate::language::Assets>,
     catalog: Arc<crate::completion::Catalog>,
@@ -765,11 +772,30 @@ struct Configuration {
     macro_paths: std::collections::BTreeSet<String>,
     folders: Vec<vel_search::project::Folder>,
     distraction_settings: serde_json::Map<String, Value>,
-    build_systems: Vec<vel_build::BuildSystem>,
+    build_systems: crate::shipped::Builds,
     project_model: vel_session::project::Project,
     config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
     messages: Vec<String>,
     resource_reports: Vec<String>,
+    ignored_user_keymaps: IgnoredKeymaps,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IgnoredKeymap {
+    origin: PathBuf,
+    stamp: Option<(u64, SystemTime)>,
+}
+
+type IgnoredKeymaps = BTreeMap<String, IgnoredKeymap>;
+
+fn report_ignored_keymaps(old: &IgnoredKeymaps, new: &IgnoredKeymaps, reports: &mut Vec<String>) {
+    reports.extend(
+        new.iter()
+            .filter(|(name, file)| old.get(*name) != Some(*file))
+            .map(|(name, _)| {
+                format!("Ignored {name}; use Packages/User/Default (OSX).sublime-keymap")
+            }),
+    );
 }
 // Diagnostics retain their resource paths; display names never establish provenance.
 fn user_resource(resource: &vel_config::resources::Resource, data: Option<&Path>) -> bool {
@@ -932,7 +958,7 @@ impl Configuration {
         let mut mouse_warnings = Vec::new();
         let mut scheme_warnings = Vec::new();
         let mut resource_log = Vec::new();
-        resources.load_syntaxes(&crate::language::packages_root())?;
+        crate::shipped::register(&crate::language::packages_root(), &mut resources);
         if let Some(bundle) = crate::release::bundle_resources() {
             collect_resource_warnings(
                 "package",
@@ -988,15 +1014,20 @@ impl Configuration {
         resources.set_ignored(ignored);
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
-        let mut syntax = serde_json::Map::new();
-        let mut syntax_settings: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+        let mut syntax_settings = crate::shipped::SyntaxSettings::default();
         let mut config_stamp = Vec::new();
         for resource in resources.matching(".sublime-settings") {
             let file = resource.path.rsplit('/').next().unwrap_or("");
             // Invalid settings must remain watched: an in-place repair does not
             // change the containing directory's timestamp.
-            if resource.origin.exists() {
+            if user_resource(resource, data_dir.as_deref()) {
                 config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
+            }
+            if let Some(name) = file.strip_suffix(".sublime-settings")
+                && !name.starts_with("Preferences")
+            {
+                syntax_settings.add(name, resource, &mut resource_messages);
+                continue;
             }
             let doc = match resource.text().and_then(Document::parse) {
                 Ok(doc) => doc,
@@ -1021,23 +1052,15 @@ impl Configuration {
                         || file == "Preferences (OSX).sublime-settings"
                     {
                         user.extend(doc.value.as_object().ok_or("settings object")?.clone());
-                    } else if file == "Plain Text.sublime-settings" {
-                        syntax.extend(doc.value.as_object().ok_or("settings object")?.clone());
-                    }
-                    if let Some(name) = file
-                        .strip_suffix(".sublime-settings")
-                        .filter(|n| !n.starts_with("Preferences"))
-                    {
-                        syntax_settings
-                            .entry(name.to_owned())
-                            .or_default()
-                            .extend(doc.value.as_object().ok_or("settings object")?.clone());
                     }
                 }
             }
         }
         settings.replace(Layer::User, Value::Object(user))?;
-        settings.replace(Layer::Syntax, Value::Object(syntax))?;
+        settings.replace(
+            Layer::Syntax,
+            Value::Object(syntax_settings.values("Plain Text.sublime-syntax", "Plain Text")),
+        )?;
         let mut distraction_settings = serde_json::json!({"line_numbers":false,"gutter":false,"draw_centered":true,"wrap_width":80,"word_wrap":true,"scroll_past_end":true,"show_minimap":false}).as_object().expect("object").clone();
         for resource in resources.matching("Distraction Free.sublime-settings") {
             if let Ok(doc) = resource.text().and_then(Document::parse)
@@ -1046,46 +1069,7 @@ impl Configuration {
                 distraction_settings.extend(values.clone());
             }
         }
-        let mut build_systems = Vec::new();
-        for resource in resources.matching(".sublime-build") {
-            let name = resource
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .trim_end_matches(".sublime-build");
-            match resource
-                .text()
-                .and_then(|source| vel_build::BuildSystem::parse(name, source))
-            {
-                Ok(build) => build_systems.push(build),
-                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
-            }
-        }
-        // Public permissively licensed build resources are loaded as-is.
-        for (name, source) in [
-            (
-                "Cargo",
-                include_str!("../../../third_party/sublime-packages/Rust/Cargo.sublime-build"),
-            ),
-            (
-                "Python",
-                include_str!("../../../third_party/sublime-packages/Python/Python.sublime-build"),
-            ),
-            (
-                "Make",
-                include_str!("../../../third_party/sublime-packages/Makefile/Make.sublime-build"),
-            ),
-        ] {
-            if resources.package_enabled(match name {
-                "Cargo" => "Rust",
-                "Python" => "Python",
-                _ => "Makefile",
-            }) && !build_systems.iter().any(|b| b.name == name)
-            {
-                build_systems.push(vel_build::BuildSystem::parse(name, source)?);
-            }
-        }
+        let mut project_builds = Vec::new();
         let project_model = project
             .as_deref()
             .map(vel_session::project::Project::load)
@@ -1095,8 +1079,16 @@ impl Configuration {
             let name = value["name"]
                 .as_str()
                 .ok_or("project build system needs name")?;
-            build_systems.push(vel_build::BuildSystem::from_value(name, value.clone())?);
+            project_builds.push(vel_build::BuildSystem::from_value(name, value.clone())?);
         }
+        let build_systems = crate::shipped::Builds::new(
+            resources
+                .matching(".sublime-build")
+                .into_iter()
+                .cloned()
+                .collect(),
+            project_builds,
+        );
         let mut folder_values = Vec::new();
         if let Some(path) = &project {
             let doc = Document::parse(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
@@ -1174,32 +1166,80 @@ impl Configuration {
                 follow_links: folder["follow_symlinks"].as_bool().unwrap_or(true),
             });
         }
-        let mut keys = Vec::new();
+        let mut keymap = Keymap::default();
+        let registry = Editor::command_registry();
+        let known = |name: &str| name == "noop" || registry.kind(name).is_some();
+        let mut unsupported: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
         let mut menus = Vec::new();
         let mut context_menus: BTreeMap<String, Vec<MenuItem>> = BTreeMap::new();
         let mut mousemap = Vec::new();
         let mut palette = Vec::new();
-        for resource in resources.matching(".sublime-keymap") {
-            if resource.path.contains("(Windows)") || resource.path.contains("(Linux)") {
-                continue;
-            }
-            let doc = match resource.text().and_then(Document::parse) {
-                Ok(doc) => doc,
-                Err(e) => {
-                    resource_messages.push(format!("{}: {e}", resource.path));
-                    continue;
-                }
-            };
-            let check = resource.text().and_then(|s| Keymap::default().append(s));
-            if let Err(e) = check {
-                resource_messages.push(format!("{}: {e}", resource.path));
-                continue;
-            }
-            if let Some(values) = doc.value.as_array() {
-                keys.extend(values.clone());
-            }
-            if resource.origin.exists() {
+        const LEGACY: &str = "Packages/User/Velocity.sublime-keymap";
+        let mut keymaps = resources.matching(".sublime-keymap");
+        let mut ignored_user_keymaps = IgnoredKeymaps::new();
+        // Public User naming: https://www.sublimetext.com/docs/key_bindings.html#user-bindings
+        // Load the old Velocity-generated file before either supported User override.
+        if let Some(i) = keymaps.iter().position(|r| r.path == LEGACY) {
+            let first_user = keymaps
+                .iter()
+                .position(|r| r.path.starts_with("Packages/User/"))
+                .unwrap_or(i);
+            keymaps[first_user..=i].rotate_right(1);
+        }
+        for resource in keymaps {
+            if user_resource(resource, data_dir.as_deref()) {
                 config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
+            }
+            let package = resource.path.split('/').nth(1).unwrap_or_default();
+            let file = resource.path.rsplit('/').next().unwrap_or_default();
+            // https://www.sublimetext.com/docs/key_bindings.html#user-bindings
+            let is_default = matches!(
+                file,
+                "Default.sublime-keymap" | "Default (OSX).sublime-keymap"
+            );
+            let ours = package == "Default"
+                && matches!(
+                    file,
+                    "Velocity.sublime-keymap" | "Velocity Vintage.sublime-keymap"
+                );
+            if !(is_default || ours || resource.path == LEGACY) {
+                if package == "User"
+                    && !matches!(
+                        file,
+                        "Default (Linux).sublime-keymap" | "Default (Windows).sublime-keymap"
+                    )
+                {
+                    ignored_user_keymaps.insert(
+                        resource.path.clone(),
+                        IgnoredKeymap {
+                            origin: resource.origin.clone(),
+                            stamp: stamp(&resource.origin),
+                        },
+                    );
+                }
+                continue;
+            }
+            // Velocity does not provide Python commands; don't let an unavailable
+            // package binding shadow a working shortcut. User bindings stay explicit.
+            match resource.text().and_then(|source| {
+                keymap.append_resource(
+                    source,
+                    &resource.path,
+                    |invocation| {
+                        package == "User"
+                            || crate::panels::usable_package_binding(
+                                &resources,
+                                &known,
+                                &invocation.command,
+                                &invocation.args,
+                                0,
+                            )
+                    },
+                    &mut resource_messages,
+                )
+            }) {
+                Ok(skipped) => unsupported.entry(package).or_default().0 += skipped,
+                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
         for resource in resources.matching(".sublime-menu") {
@@ -1212,9 +1252,32 @@ impl Configuration {
                 _ => continue,
             };
             match resource.text().and_then(ui::parse) {
-                Ok(items) => ui::merge_menu(target, items),
+                Ok(mut items) => {
+                    let package = resource.path.split('/').nth(1).unwrap_or_default();
+                    unsupported.entry(package).or_default().1 += count_unknown_menu(&items, &known);
+                    if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
+                        filter_shipped_menu(&mut items, &known);
+                    }
+                    ui::merge_menu(target, items);
+                }
                 Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
+        }
+        for (package, (count, shipped)) in resources.plugins() {
+            if shipped {
+                // Shipped packages have a known compatibility level, presented
+                // in Package: Enable/Disable rather than as startup errors.
+                continue;
+            }
+            let (keys, items) = unsupported.get(package).copied().unwrap_or_default();
+            let version = resources
+                .get(&format!("Packages/{package}/package-metadata.json"))
+                .and_then(|r| r.text().ok())
+                .and_then(|s| Document::parse(s).ok())
+                .and_then(|doc| doc.value["version"].as_str().map(str::to_owned));
+            // Reports are deduplicated by package/version, not by the individual missing commands.
+            resource_reports.push(format!("Package {}: {count} Python files not run; {keys} bindings / {items} menu items reference unavailable commands",
+                version.map_or_else(|| package.to_owned(), |v| format!("{package} ({v})"))));
         }
         for resource in resources.matching(".sublime-mousemap") {
             match resource.text().and_then(ui::parse_mousemap_with_warnings) {
@@ -1227,12 +1290,17 @@ impl Configuration {
         }
         for resource in resources.matching(".sublime-commands") {
             match resource.text().and_then(ui::parse::<PaletteItem>) {
-                Ok(items) => palette.extend(items),
+                Ok(mut items) => {
+                    if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
+                        items.retain(|item| known(&item.invocation.command));
+                    }
+                    palette.extend(items);
+                }
                 Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
         if let Some(tools) = menus.iter_mut().find(|m| m.id == "tools") {
-            let choices=std::iter::once(("Automatic",serde_json::json!({"name":"Automatic"}))).chain(build_systems.iter().map(|b|(b.name.as_str(),serde_json::json!({"name":b.name})))).map(|(caption,args)|serde_json::json!({"caption":caption,"command":"set_build_system","args":args})).collect::<Vec<_>>();
+            let choices=std::iter::once("Automatic").chain(build_systems.names()).map(|name|serde_json::json!({"caption":name,"command":"set_build_system","args":{"name":name}})).collect::<Vec<_>>();
             if let Some(item) = tools
                 .children
                 .iter_mut()
@@ -1267,18 +1335,21 @@ impl Configuration {
                     .any(|suffix| r.path.ends_with(suffix))
             })
             .collect();
-        let (metadata_warnings, syntax_warnings): (Vec<_>, Vec<_>) = assets
+        let (mut metadata_warnings, mut syntax_warnings): (Vec<_>, Vec<_>) = assets
             .syntaxes
             .warnings()
             .iter()
-            .map(|warning| {
+            .filter_map(|warning| {
                 let path = user_syntaxes
                     .iter()
                     .find(|r| warning_from_path(warning, &r.path))
                     .map(|r| r.path.as_str());
-                (path, warning.as_str())
+                (path.is_some() || !bundled.syntaxes.warnings().contains(warning))
+                    .then_some((path, warning.as_str()))
             })
             .partition(|(path, _)| path.is_some_and(|p| p.ends_with(".tmPreferences")));
+        metadata_warnings.sort_by_key(|(path, _)| *path);
+        syntax_warnings.sort_by_key(|(path, _)| *path);
         collect_resource_warnings(
             "syntax",
             syntax_warnings,
@@ -1302,20 +1373,20 @@ impl Configuration {
         }
         for suffix in [".sublime-snippet", ".sublime-completions"] {
             for resource in resources.matching(suffix) {
-                if resource.origin != Path::new("<embedded>") {
+                if user_resource(resource, data_dir.as_deref()) {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
                 }
             }
         }
         let catalog = crate::completion::Catalog::load(&resources, &mut resource_messages);
-        for (name, snippet) in &catalog.snippets {
+        for (name, snippet) in catalog.snippets.iter() {
             palette.push(PaletteItem {
                 caption: format!(
                     "Snippet: {}",
-                    if snippet.description.is_empty() {
+                    if snippet.description().is_empty() {
                         name.as_str()
                     } else {
-                        &snippet.description
+                        snippet.description()
                     }
                 ),
                 invocation: vel_config::keymap::Invocation {
@@ -1332,7 +1403,7 @@ impl Configuration {
             ".hidden-tmTheme",
         ] {
             for resource in resources.matching(suffix) {
-                if resource.origin.exists() {
+                if user_resource(resource, data_dir.as_deref()) {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
                 }
                 match resource.text() {
@@ -1412,12 +1483,14 @@ impl Configuration {
             ".sublime-menu",
             ".sublime-mousemap",
             ".sublime-commands",
+            ".sublime-build",
+            ".sublime-macro",
             ".sublime-theme",
             ".sublime-file-icons",
             ".png",
         ] {
             for resource in resources.matching(suffix) {
-                if resource.origin.exists() {
+                if user_resource(resource, data_dir.as_deref()) {
                     config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
                 }
             }
@@ -1449,10 +1522,13 @@ impl Configuration {
             }
         }
         if let Some(data) = &data_dir {
-            package_stamps(
-                &data.join("Packages"),
-                &mut config_stamp,
-                &mut std::collections::BTreeSet::new(),
+            config_stamp.extend(
+                vel_config::resources::loose_watch_paths(&data.join("Packages"))
+                    .into_iter()
+                    .map(|path| {
+                        let value = stamp(&path);
+                        (path, value)
+                    }),
             );
         }
         config_stamp.retain(|(p, _)| {
@@ -1460,9 +1536,6 @@ impl Configuration {
         });
         config_stamp.sort_by(|a, b| a.0.cmp(&b.0));
         config_stamp.dedup_by(|a, b| a.0 == b.0);
-        let keymap_source = serde_json::to_string(&keys).map_err(|e| e.to_string())?;
-        let mut keymap = Keymap::default();
-        keymap.append(&keymap_source)?;
         let themes = crate::theme_ui::Themes::prepare(
             &resources,
             &schemes,
@@ -1494,9 +1567,9 @@ impl Configuration {
         Ok(Self {
             appearance,
             resource_reports,
+            ignored_user_keymaps,
             themes,
             macro_paths,
-            #[cfg(test)]
             resources,
             settings,
             keymap,
@@ -1527,8 +1600,7 @@ impl Workspace {
         let Configuration {
             appearance,
             themes,
-            #[cfg(test)]
-                resources: _,
+            resources,
             settings,
             keymap,
             syntax_settings,
@@ -1546,8 +1618,14 @@ impl Workspace {
             project_model,
             config_stamp,
             messages: resource_messages,
-            resource_reports,
+            mut resource_reports,
+            ignored_user_keymaps,
         } = Configuration::load(data_dir.clone(), project.clone())?;
+        report_ignored_keymaps(
+            &IgnoredKeymaps::new(),
+            &ignored_user_keymaps,
+            &mut resource_reports,
+        );
         let tab = Tab::new(text, &settings, &keymap)?;
         let mut messages = resource_messages;
         let watcher = if watch {
@@ -1607,8 +1685,10 @@ impl Workspace {
             palette,
             macro_paths,
             messages,
+            resources,
             load_notices: Vec::new(),
             resource_reports,
+            ignored_user_keymaps,
             settings_reports: Default::default(),
             restore_in_progress: false,
             restore_source: None,
@@ -1811,12 +1891,15 @@ impl Workspace {
         }
     }
     pub fn new_file(&mut self) -> Result<(), String> {
+        self.new_text_tab(Text::new())
+    }
+    fn new_text_tab(&mut self, text: Text) -> Result<(), String> {
         if self.empty {
             self.tabs.clear();
             self.empty = false;
         }
         self.tabs
-            .push(Tab::new(Text::new(), &self.settings, &self.keymap)?);
+            .push(Tab::new(text, &self.settings, &self.keymap)?);
         self.workbench.groups[self.workbench.active]
             .add(self.tabs.last().expect("tab").sheet, false);
         self.active = self.tabs.len() - 1;
@@ -1825,6 +1908,22 @@ impl Workspace {
         self.tabs[self.active].indentation_initialized = true;
         self.configure_language(self.active, None, false)?;
         Ok(())
+    }
+    pub(crate) fn open_file_argument(&mut self, argument: &str) -> Result<(), String> {
+        let res = argument.strip_prefix("res://").unwrap_or(argument);
+        if res.starts_with("Packages/") {
+            let resource = self
+                .resources
+                .get(res)
+                .ok_or_else(|| format!("resource {res} is not available"))?;
+            let text = Text::from(resource.text()?);
+            self.new_text_tab(text)?;
+            let tab = &mut self.tabs[self.active];
+            tab.suggested_name = res.rsplit('/').next().map(str::to_owned);
+            tab.editor.read_only = true;
+            return Ok(());
+        }
+        self.open(FileLocation::parse(argument))
     }
     pub fn select(&mut self, index: usize) {
         self.observe_navigation();
@@ -1972,7 +2071,8 @@ impl Workspace {
         if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.read_only {
             return Err("file is loading or its load failed".into());
         }
-        if self.save_conflict(index, path.as_deref())? {
+        let (conflict, expected_disk) = self.resolve_save_conflict(index, path.as_deref())?;
+        if conflict {
             return Err("File changed on disk; confirm Overwrite or Cancel".into());
         }
         let tab = &mut self.tabs[index];
@@ -1990,12 +2090,18 @@ impl Workspace {
             &tab.tracker,
         );
         tab.editor.sync();
-        let content = fileio::save_with_identity(
+        let saved = fileio::save_report_with_expected(
             &target,
             tab.editor.buffer.text(),
             &tab.format,
             settings.atomic_save,
+            self.data_dir.as_deref(),
+            expected_disk,
         )?;
+        if let Some(warning) = saved.warning {
+            self.resource_reports.push(warning);
+        }
+        let content = saved.content;
         tab.editor.buffer.mark_saved();
         tab.editor.sync();
         tab.saved_format = tab.format.clone();
@@ -2053,8 +2159,10 @@ impl Workspace {
                 sibling.deleted = false;
             }
         }
-        if let Some(w) = self.watcher.as_mut() {
-            w.watch(&target)?;
+        if let Some(w) = self.watcher.as_mut()
+            && let Err(e) = w.watch(&target)
+        {
+            self.resource_reports.push(e);
         }
         if let Err(e) = self.configure_language(index, None, true) {
             self.messages.push(e);
@@ -2694,6 +2802,12 @@ impl Workspace {
                         self.settings_write_overrides.clear();
                     }
                     self.messages.append(&mut config.messages);
+                    report_ignored_keymaps(
+                        &self.ignored_user_keymaps,
+                        &config.ignored_user_keymaps,
+                        &mut config.resource_reports,
+                    );
+                    self.ignored_user_keymaps = config.ignored_user_keymaps;
                     self.resource_reports.append(&mut config.resource_reports);
                     self.themes = crate::theme_ui::Themes::publish(config.themes);
                     if let Err(e) = self.themes.select(&config.settings, self.dark) {
@@ -2748,6 +2862,7 @@ impl Workspace {
                     self.mousemap = config.mousemap;
                     self.palette = config.palette;
                     self.macro_paths = config.macro_paths;
+                    self.resources = config.resources;
                     self.config_stamp = config.config_stamp;
                     for tab in &mut self.tabs {
                         for layer in [Layer::Default, Layer::Platform, Layer::User, Layer::Project]
@@ -2830,7 +2945,7 @@ impl Workspace {
         }
         tab.editor.theme = self.themes.ui.clone();
         tab.editor.keymap = self.keymap.clone();
-        tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
+        tab.editor.snippets = self.catalog.snippets.clone();
         tab.language_settings_revision = u64::MAX;
     }
     pub fn set_appearance(&mut self, dark: bool) -> Result<(), String> {
@@ -2867,7 +2982,7 @@ impl Workspace {
             tab.language_settings_revision = tab.editor.settings.revision();
             return Ok(());
         }
-        tab.editor.snippets = Arc::new(self.catalog.snippets.clone());
+        tab.editor.snippets = self.catalog.snippets.clone();
         tab.editor.snippet_path = tab.path.clone();
         let previous = tab
             .editor
@@ -2876,10 +2991,16 @@ impl Workspace {
             .as_ref()
             .map(|l| l.syntax.clone());
         let setting_override = tab.editor.settings.get("syntax").and_then(Value::as_str);
-        let chosen =
-            explicit
-                .or(setting_override)
-                .or(if detect { None } else { previous.as_deref() });
+        let chosen = explicit
+            .or(setting_override)
+            .or(if detect { None } else { previous.as_deref() })
+            .or_else(|| {
+                extension_syntax(
+                    &self.assets.syntaxes,
+                    &self.syntax_settings,
+                    tab.path.as_deref(),
+                )
+            });
         let reference = vel_highlight::detect_syntax(
             &self.assets.syntaxes,
             &crate::language::syntax_path(tab.path.as_deref()),
@@ -2899,7 +3020,7 @@ impl Workspace {
                 .settings
                 .set(Layer::View, "syntax", serde_json::json!(syntax));
         }
-        let values = self.syntax_settings.get(&name).cloned().unwrap_or_default();
+        let values = self.syntax_settings.values(&syntax, &name);
         if tab.editor.settings.layer(Layer::Syntax) != &values {
             tab.editor
                 .settings
@@ -3385,6 +3506,52 @@ mod tests {
         assert_eq!(item.caption, "Reloaded");
         assert_eq!(item.command.as_deref(), Some("cut"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_watch_ignores_profile_links_and_still_reloads_linked_user() {
+        use std::{fs, os::unix::fs::symlink};
+        let data = tempfile::tempdir().unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        let packages = data.path().join("Packages");
+        fs::create_dir(&packages).unwrap();
+        symlink("..", packages.join("Cycle")).unwrap();
+        symlink(linked.path(), packages.join("User")).unwrap();
+        for directory in ["Cache", "Index", "Backup", ".git"] {
+            fs::create_dir(data.path().join(directory)).unwrap();
+            if directory == ".git" {
+                fs::create_dir(linked.path().join(directory)).unwrap();
+            } else {
+                // Real directories in a package may have these names. Only
+                // links into private profile directories should be ignored.
+                symlink(data.path().join(directory), linked.path().join(directory)).unwrap();
+            }
+        }
+        let preferences = linked.path().join("Preferences.sublime-settings");
+        fs::write(&preferences, r#"{"font_size":17}"#).unwrap();
+        let mut workspace =
+            Workspace::new(Text::new(), Some(data.path().into()), None, false).unwrap();
+        let start = Instant::now();
+        assert!(!workspace.configuration_changed(start));
+        for directory in ["Cache", "Index", "Backup", ".git"] {
+            fs::write(
+                data.path().join(directory).join("Never.sublime-settings"),
+                "not JSON",
+            )
+            .unwrap();
+        }
+        fs::write(
+            linked.path().join(".git/Never.sublime-settings"),
+            "not JSON",
+        )
+        .unwrap();
+        assert!(!workspace.configuration_changed(start + Duration::from_secs(1)));
+        fs::write(&preferences, r#"{"font_size":19, "tab_size":7}"#).unwrap();
+        assert!(workspace.configuration_changed(start + Duration::from_secs(2)));
+        workspace.request_resource_reload();
+        workspace.wait_resources();
+        assert_eq!(workspace.editor().preferences.font_size, 19.);
+    }
     /// Small paired helper for the stamp traversal changed in round 14. This measures
     /// resource polling alone; the main agent still runs full typing/scroll gates.
     #[test]
@@ -3426,7 +3593,7 @@ mod tests {
         std::fs::write(&prefs, "{ // user\n\"tab_size\": 2, \"font_size\": 16,}").unwrap();
         std::fs::write(user.join("Plain Text.sublime-settings"), "{\"tab_size\":3}").unwrap();
         std::fs::write(
-            user.join("Custom.sublime-keymap"),
+            user.join("Default.sublime-keymap"),
             r#"[{"keys":["super+d"],"command":"insert","args":{"characters":"override"}}]"#,
         )
         .unwrap();

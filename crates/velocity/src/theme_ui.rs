@@ -55,7 +55,7 @@ impl Themes {
         let images = [".png", ".jpg", ".jpeg", ".gif"]
             .into_iter()
             .flat_map(|suffix| resources.matching(suffix))
-            .map(|r| (r.path.clone(), Arc::from(r.bytes.clone())))
+            .map(|r| (r.path.clone(), Arc::from(r.bytes.as_ref())))
             .collect();
         let ui = Rc::try_unwrap(themes.ui)
             .expect("worker theme has a single owner")
@@ -180,7 +180,7 @@ impl Themes {
                     |p| {
                         Ok(resources
                             .get(&format!("Packages/{p}"))
-                            .map(|r| r.bytes.clone()))
+                            .map(|r| r.bytes.to_vec()))
                     },
                 ) {
                     Ok(image) => ui.insert_texture(name.clone(), image),
@@ -191,7 +191,7 @@ impl Themes {
         let mut image_resources = BTreeMap::new();
         for suffix in [".png", ".jpg", ".jpeg", ".gif"] {
             for r in resources.matching(suffix) {
-                image_resources.insert(r.path.clone(), Arc::from(r.bytes.clone()));
+                image_resources.insert(r.path.clone(), Arc::from(r.bytes.as_ref()));
             }
         }
         ui.metrics.set_image_resources(image_resources);

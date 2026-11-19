@@ -1,7 +1,11 @@
 //! Encoding-aware streaming IO, atomic saves and parent-directory file watching.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]
+pub mod atomic;
 mod decoding;
 mod identity;
+mod save;
+#[cfg(unix)]
+mod save_journal;
 pub use identity::content_identity;
 mod progressive;
 pub mod regular;
@@ -16,8 +20,8 @@ pub use progressive::{
     load_background_with_options, with_cancellation,
 };
 use std::{
-    fs::{self, File},
-    io::{self, BufReader, BufWriter, Read, Write},
+    fs,
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
@@ -871,39 +875,6 @@ fn write_encoded(
     }
     writer.flush().map_err(|e| e.to_string())
 }
-/// Whether replacing `target` by renaming a new file over it would lose something the user
-/// expects to keep: other hard links, an owner other than us, extended attributes (Finder tags,
-/// quarantine, ACL-backed metadata), or a read-only mode that must make the save fail.
-#[cfg(unix)]
-fn rename_would_lose(target: &Path, metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    metadata.nlink() > 1
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().readonly()
-        || has_user_xattrs(target)
-}
-/// Extended attributes a rename would drop. `com.apple.provenance` is ignored: macOS attaches it
-/// to nearly every file and gives the replacement its own.
-#[cfg(unix)]
-fn has_user_xattrs(target: &Path) -> bool {
-    let Ok(size) = rustix::fs::listxattr_query(target) else {
-        return true;
-    };
-    if size == 0 {
-        return false;
-    }
-    let mut names = vec![0; size + 64];
-    let Ok(len) = rustix::fs::listxattr(target, &mut names[..]) else {
-        return true;
-    };
-    names[..len]
-        .split(|&b| b == 0)
-        .any(|name| !name.is_empty() && name != b"com.apple.provenance")
-}
-#[cfg(not(unix))]
-fn rename_would_lose(_target: &Path, metadata: &fs::Metadata) -> bool {
-    metadata.permissions().readonly()
-}
 /// Renames `from` to `to` without ever replacing an existing destination.
 ///
 /// The check and the rename are one system call (`renameatx_np(RENAME_EXCL)` on macOS), so a
@@ -952,87 +923,9 @@ fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     fs::rename(from, to)
 }
-/// Re-encodes, restores endings and writes the file. With `atomic` an existing file is replaced
-/// by renaming a complete temporary file over it, keeping its permissions; when that would lose
-/// hard links, ownership, extended attributes or a read-only mode the file is rewritten in place
-/// instead (Sublime disables atomic saves adaptively in the same cases). New files are created
-/// directly so they get the process umask. Unrepresentable characters fail before the
-/// destination changes.
-pub fn save(path: &Path, text: &Text, format: &Format, atomic: bool) -> Result<(), String> {
-    save_with_identity(path, text, format, atomic).map(|_| ())
-}
-/// Saves and returns the raw identity without rereading the destination.
-pub fn save_with_identity(
-    path: &Path,
-    text: &Text,
-    format: &Format,
-    atomic: bool,
-) -> Result<ContentIdentity, String> {
-    let mut digest = identity::Digest::default();
-    let codec = encoding(&format.encoding)?;
-    // Follow a symlink rather than replacing the link itself.
-    let target = if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        fs::canonicalize(path).map_err(|e| e.to_string())?
-    } else {
-        path.to_owned()
-    };
-    let error = |e: io::Error| format!("{}: {e}", target.display());
-    let parent = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let existing = regular::metadata(&target, true)?;
-    let in_place = match &existing {
-        None => true,
-        Some(metadata) => !atomic || rename_would_lose(&target, metadata),
-    };
-    if in_place {
-        // Encoding errors must surface before the file is truncated.
-        if codec != UTF_8 && codec != UTF_16LE && codec != UTF_16BE {
-            write_encoded(&mut io::sink(), text, format, codec)?;
-        }
-        let file = regular::write(&target)?;
-        file.set_len(0).map_err(error)?;
-        let mut writer = BufWriter::with_capacity(256 * 1024, &file);
-        write_encoded(
-            &mut identity::DigestWriter {
-                output: &mut writer,
-                digest: &mut digest,
-            },
-            text,
-            format,
-            codec,
-        )?;
-        drop(writer);
-        file.sync_all().map_err(error)?;
-    } else {
-        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
-        if let Some(metadata) = &existing {
-            temp.as_file()
-                .set_permissions(metadata.permissions())
-                .map_err(error)?;
-        }
-        let mut writer = BufWriter::with_capacity(256 * 1024, temp.as_file_mut());
-        write_encoded(
-            &mut identity::DigestWriter {
-                output: &mut writer,
-                digest: &mut digest,
-            },
-            text,
-            format,
-            codec,
-        )?;
-        drop(writer);
-        temp.as_file().sync_all().map_err(error)?;
-        regular::metadata(&target, true)?;
-        temp.persist(&target).map_err(|e| error(e.error))?;
-    }
-    #[cfg(unix)]
-    File::open(parent)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
-    Ok(digest.identity())
-}
+pub use save::{Saved, save, save_report, save_report_with_expected, save_with_identity};
+#[cfg(unix)]
+pub use save_journal::{RecoveredSave, recover_pending_save, recover_saves};
 /// Parent-directory watcher so atomic renames do not detach file monitoring.
 #[derive(Debug)]
 pub struct Watcher {

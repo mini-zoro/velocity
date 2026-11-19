@@ -3,13 +3,21 @@ use super::*;
 
 impl App {
     pub(super) fn handle_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent) {
+        self.handle_mouse_event_with_focus(w, event, false);
+    }
+    pub(super) fn handle_mouse_event_with_focus(
+        &mut self,
+        w: Option<&WindowHandle>,
+        event: MouseEvent,
+        keep_focus: bool,
+    ) {
         // Every exit path releases capture, including overlays/status controls and
         // mouse bindings. Finishing a text move still happens in the normal route.
         let up = event.kind == MouseKind::Up;
         if event.kind == MouseKind::Down {
             self.end_mouse_gesture();
         }
-        self.route_mouse_event(w, event);
+        self.route_mouse_event(w, event, keep_focus);
         if up {
             self.end_mouse_gesture();
         }
@@ -22,7 +30,7 @@ impl App {
         self.text_drag_pressed = None;
         self.dragging_splitter = None;
     }
-    fn route_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent) {
+    fn route_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent, keep_focus: bool) {
         let captured = matches!(event.kind, MouseKind::Drag | MouseKind::Up)
             && (self.view.pointer_gesture_active()
                 || self.drag_select.is_some()
@@ -34,7 +42,9 @@ impl App {
                 event.button,
                 event.click_count,
             );
-            self.accessibility_focus = None;
+            if !keep_focus && self.accessibility_focus.is_some() {
+                self.leave_region_focus();
+            }
         }
         if self.options.mode.automatic() {
             self.external_input += 1;

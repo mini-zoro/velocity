@@ -52,11 +52,21 @@ impl Tab {
     }
 }
 impl Workspace {
+    #[cfg(test)]
     pub(crate) fn save_conflict(
         &self,
         index: usize,
         chosen: Option<&std::path::Path>,
     ) -> Result<bool, String> {
+        self.save_disk_revision(index, chosen)
+            .map(|(conflict, _)| conflict)
+    }
+
+    fn save_disk_revision(
+        &self,
+        index: usize,
+        chosen: Option<&std::path::Path>,
+    ) -> Result<(bool, Option<vel_fileio::ContentIdentity>), String> {
         let tab = &self.tabs[index];
         let path = chosen
             .or(tab.path.as_deref())
@@ -68,16 +78,16 @@ impl Workspace {
                     || crate::workspace::absolute(p).ok() == crate::workspace::absolute(path).ok()
             });
         if !inplace || current.is_none() || current == tab.overwrite_allowed {
-            return Ok(false);
+            return Ok((false, current));
         }
         if tab.disk_content.is_some() {
-            return Ok(current != tab.disk_content);
+            return Ok((current != tab.disk_content, current));
         }
         // Legacy sessions have no raw digest. Their saved text/format can prove
         // equality, but a matching stamp alone must not authorize an overwrite.
         let mut options = tab.decode_options();
         options.legacy_stamp_matches = false;
-        Ok(!vel_fileio::revision_unchanged(path, &options)?)
+        Ok((!vel_fileio::revision_unchanged(path, &options)?, current))
     }
     pub(crate) fn acknowledge_overwrite(
         &mut self,
@@ -89,6 +99,32 @@ impl Workspace {
             .ok_or("save requires a path")?;
         self.tabs[index].overwrite_allowed = vel_fileio::content_identity(path)?;
         Ok(())
+    }
+    pub(crate) fn resolve_save_conflict(
+        &mut self,
+        index: usize,
+        chosen: Option<&std::path::Path>,
+    ) -> Result<(bool, Option<vel_fileio::ContentIdentity>), String> {
+        let revision = self.save_disk_revision(index, chosen)?;
+        if !revision.0 {
+            return Ok(revision);
+        }
+        #[cfg(unix)]
+        {
+            let target = chosen
+                .or(self.tabs[index].path.as_deref())
+                .ok_or("save requires a path")?;
+            if let Some(recovered) = vel_fileio::recover_pending_save(target, self.data_path())? {
+                if !recovered.notice.is_empty() {
+                    self.resource_reports.push(recovered.notice);
+                }
+                if let Some(content) = recovered.content {
+                    self.tabs[index].overwrite_allowed = Some(content);
+                }
+                return self.save_disk_revision(index, chosen);
+            }
+        }
+        Ok(revision)
     }
     pub(crate) fn retry_failed_document(&mut self, index: usize) -> Result<(), String> {
         let identity = self.tabs[index].session_document;

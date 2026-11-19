@@ -1,6 +1,6 @@
 //! Non-modal settings diagnostics, once per physical file revision and across windows.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -103,7 +103,25 @@ impl Scope {
 }
 impl crate::workspace::Workspace {
     pub(crate) fn take_resource_reports(&mut self) -> Vec<String> {
-        self.settings_reports
-            .take(std::mem::take(&mut self.resource_reports))
+        static PLUGINS: OnceLock<Mutex<BTreeSet<(PathBuf, String)>>> = OnceLock::new();
+        let mut reports = std::mem::take(&mut self.resource_reports);
+        let root = self.data_path().unwrap_or_else(|| Path::new("")).to_owned();
+        reports.retain(|message| {
+            let Some((key, details)) = message
+                .strip_prefix("Package ")
+                .and_then(|s| s.split_once(": "))
+            else {
+                return true;
+            };
+            if !details.contains(" Python files not run;") {
+                return true;
+            }
+            PLUGINS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((root.clone(), key.to_owned()))
+        });
+        self.settings_reports.take(reports)
     }
 }

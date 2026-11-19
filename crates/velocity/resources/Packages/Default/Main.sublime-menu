@@ -726,6 +726,19 @@
         "command": "toggle_status_bar"
       },
       {
+        "caption": "Accessibility",
+        "children": [
+          {
+            "caption": "Focus Next Region",
+            "command": "focus_next_control"
+          },
+          {
+            "caption": "Focus Previous Region",
+            "command": "focus_previous_control"
+          }
+        ]
+      },
+      {
         "caption": "Next Tab",
         "command": "next_view"
       },
@@ -1298,6 +1311,7 @@
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Velocity.sublime-keymap",
+          "user_file": "${packages}/User/Default (OSX).sublime-keymap",
           "default": "[\n\t$0\n]\n"
         }
       },

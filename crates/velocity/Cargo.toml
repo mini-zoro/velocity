@@ -49,6 +49,11 @@ png = "=0.18.1"
 vel-theme = { path = "../vel-theme" }
 vel-minihtml = { path = "../vel-minihtml" }
 
+[build-dependencies]
+syn = { version = "=2.0.119", features = ["full", "visit"] }
+vel-config = { path = "../vel-config" }
+vel-snippet = { path = "../vel-snippet" }
+
 [dev-dependencies]
 regex = "=1.13.1"
 regex-automata = "=0.4.18"

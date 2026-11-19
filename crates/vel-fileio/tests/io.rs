@@ -233,12 +233,16 @@ fn new_files_get_the_umask_and_atomic_saves_keep_the_file_identity() {
     let metadata = std::fs::metadata(&plain).unwrap();
     assert_ne!(metadata.ino(), inode);
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    // Hard links stay shared.
+    // Atomic mode adapts to a journaled write if rename would break a hard link.
     let linked = dir.path().join("linked");
     let other = dir.path().join("other-name");
     std::fs::write(&linked, "a").unwrap();
     std::fs::hard_link(&linked, &other).unwrap();
+    let before = std::fs::metadata(&linked).unwrap().ino();
     save(&linked, &Text::from("both"), &Format::default(), true).unwrap();
+    assert_eq!(std::fs::metadata(&linked).unwrap().ino(), before);
+    assert_eq!(std::fs::metadata(&other).unwrap().ino(), before);
+    assert_eq!(std::fs::read(&linked).unwrap(), b"both");
     assert_eq!(std::fs::read(&other).unwrap(), b"both");
     // Extended attributes (Finder tags, quarantine) survive.
     let tagged = dir.path().join("tagged");
@@ -251,15 +255,13 @@ fn new_files_get_the_umask_and_atomic_saves_keep_the_file_identity() {
     )
     .is_ok()
     {
-        let inode = std::fs::metadata(&tagged).unwrap().ino();
         save(&tagged, &Text::from("b"), &Format::default(), true).unwrap();
-        assert_eq!(std::fs::metadata(&tagged).unwrap().ino(), inode);
         let mut value = [0; 8];
         let len = rustix::fs::getxattr(&tagged, "org.velocity.test", &mut value[..]).unwrap();
         assert_eq!(&value[..len], b"kept");
         assert_eq!(std::fs::read(&tagged).unwrap(), b"b");
     }
-    // Writing in place keeps the inode too, and a read-only file is not silently replaced.
+    // The default writes in place after staging. Read-only files remain protected.
     let direct = dir.path().join("direct");
     std::fs::write(&direct, "a").unwrap();
     let inode = std::fs::metadata(&direct).unwrap().ino();
@@ -276,7 +278,7 @@ fn new_files_get_the_umask_and_atomic_saves_keep_the_file_identity() {
             assert_eq!(std::fs::read(&direct).unwrap(), b"b");
         }
     }
-    // Unrepresentable characters fail before an in-place write truncates the file.
+    // Unrepresentable characters fail while staging, not while writing the document.
     let impossible = Format {
         encoding: "windows-1252".into(),
         ..Default::default()

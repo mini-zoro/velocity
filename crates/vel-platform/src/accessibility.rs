@@ -29,6 +29,8 @@ pub enum Role {
     Status,
     /// Action button.
     Button,
+    /// A checked/unchecked toggle.
+    CheckBox,
     /// Opens a choice list.
     PopupButton,
     /// Navigates from a visible minihtml link.
@@ -48,6 +50,7 @@ impl Role {
             Self::List => "AXList",
             Self::Status => "AXStaticText",
             Self::Button => "AXButton",
+            Self::CheckBox => "AXCheckBox",
             Self::PopupButton => "AXPopUpButton",
             Self::Link => "AXLink",
         }
@@ -65,7 +68,7 @@ pub struct TextArea {
     pub first_line: usize,
     /// Primary selection clipped to this value window.
     pub selected: Utf16Range,
-    /// Zero-based document line of the insertion point, even in a windowed value.
+    /// Zero-based line of the insertion point within the exposed value.
     pub insertion_line: usize,
     /// Visible intersection with this value window.
     pub visible: Utf16Range,
@@ -73,19 +76,32 @@ pub struct TextArea {
 impl TextArea {
     /// Builds a bounded window around the primary selection/caret, including IME preedit.
     pub fn new(state: &TextInputState, visible: Utf16Range) -> Self {
+        Self::windowed(state, visible, state.selected.end(), None)
+    }
+    /// Uses a page-aligned window with hysteresis, relative to the primary caret.
+    pub fn windowed(
+        state: &TextInputState,
+        visible: Utf16Range,
+        caret: usize,
+        previous: Option<usize>,
+    ) -> Self {
         let source = &state.text;
         let total = source.len_utf16();
-        let caret = state.selected.location.min(total);
+        let caret = source.clip_utf16(caret.min(total));
+        let page = TEXT_WINDOW / 4;
+        let last = total.saturating_sub(TEXT_WINDOW).div_ceil(page) * page;
         let start = source.clip_utf16(
-            caret
-                .saturating_sub(TEXT_WINDOW / 2)
-                .min(total.saturating_sub(TEXT_WINDOW)),
+            previous
+                .filter(|&start| {
+                    start <= last
+                        && (start == 0 || caret >= start + page)
+                        && (start + TEXT_WINDOW >= total || caret <= start + 3 * page)
+                })
+                .unwrap_or_else(|| (caret.saturating_sub(2 * page) / page * page).min(last)),
         );
         let end = source.clip_utf16((start + TEXT_WINDOW).min(total));
         let bytes = source.utf16_to_byte(start)..source.utf16_to_byte(end);
         let first_line = source.byte_to_line(bytes.start);
-        let insertion_line = source
-            .byte_to_line(source.utf16_to_byte(source.clip_utf16(state.selected.end().min(total))));
         let text = if start == 0 && end == total {
             source.clone()
         } else {
@@ -98,6 +114,7 @@ impl TextArea {
         };
         let selected = local(state.selected);
         let visible = local(visible);
+        let insertion_line = text.byte_to_line(text.utf16_to_byte(caret.clamp(start, end) - start));
         Self {
             text,
             document_offset: start,
@@ -145,6 +162,20 @@ impl TextArea {
         })
     }
 }
+/// Coarse keyboard navigation stops. Arrow keys traverse controls inside each region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Region {
+    /// Tab strip.
+    Tabs,
+    /// Editors and their splits.
+    Editor,
+    /// Side bar.
+    Sidebar,
+    /// Find, output, quick panels and popups.
+    Panel,
+    /// Status bar commands.
+    Status,
+}
 /// One accessible control; children are determined by their `parent` identity.
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -176,6 +207,12 @@ pub struct Node {
     pub activation: Option<(Point, bool)>,
     /// Text data, only for text roles.
     pub text: Option<TextArea>,
+    /// The region used by keyboard focus cycling.
+    pub region: Option<Region>,
+    /// State exposed by a checkbox.
+    pub checked: Option<bool>,
+    /// A change worth announcing to assistive clients.
+    pub announcement: Option<String>,
 }
 impl Node {
     /// Creates an enabled, unselected control.
@@ -201,11 +238,15 @@ impl Node {
             level: 0,
             activation: None,
             text: None,
+            region: None,
+            checked: None,
+            announcement: None,
         }
     }
     /// Whether the control participates in linear keyboard navigation.
     pub fn focusable(&self) -> bool {
-        self.enabled && (self.activation.is_some() || self.text.is_some())
+        self.enabled
+            && (self.activation.is_some() || matches!(self.role, Role::TextArea | Role::TextField))
     }
 }
 /// Current hierarchy in logical navigation order. Built only for accessibility requests.
@@ -213,6 +254,25 @@ impl Node {
 pub struct Tree {
     /// Parent-before-child ordered elements.
     pub nodes: Vec<Node>,
+}
+
+#[derive(Default)]
+pub(crate) struct TreeCache(std::cell::RefCell<Option<std::rc::Rc<Tree>>>);
+impl TreeCache {
+    pub(crate) fn invalidate(&self) {
+        self.0.take();
+    }
+    pub(crate) fn get(&self, build: impl FnOnce() -> Option<Tree>) -> std::rc::Rc<Tree> {
+        if let Some(tree) = self.0.borrow().as_ref().cloned() {
+            return tree;
+        }
+        let Some(built) = build() else {
+            return Default::default();
+        };
+        let built = std::rc::Rc::new(built);
+        *self.0.borrow_mut() = Some(built.clone());
+        built
+    }
 }
 impl Tree {
     /// Looks up a currently visible identity.
@@ -223,25 +283,33 @@ impl Tree {
     pub fn focused(&self) -> Option<Id> {
         self.nodes.iter().find(|n| n.focused).map(|n| n.id)
     }
-    /// Advances focus through active controls, wrapping in both directions.
+    /// Advances focus by region, preferring the selected control in each.
     pub fn next_focus(&self, current: Option<Id>, backwards: bool) -> Option<Id> {
-        let order = self
+        let mut regions: Vec<&Node> = Vec::new();
+        for node in self.nodes.iter().filter(|n| n.focusable()) {
+            if let Some(prior) = regions.iter_mut().find(|prior| same_region(prior, node)) {
+                if node.focused || (!prior.focused && !prior.selected && node.selected) {
+                    *prior = node;
+                }
+            } else {
+                regions.push(node);
+            }
+        }
+        let index = current
+            .and_then(|id| self.node(id))
+            .and_then(|node| regions.iter().position(|prior| same_region(prior, node)));
+        advance(regions, index, backwards)
+    }
+    /// Moves to another control inside the focused keyboard region.
+    pub fn next_in_region(&self, current: Id, backwards: bool) -> Option<Id> {
+        let node = self.node(current)?;
+        let order: Vec<_> = self
             .nodes
             .iter()
-            .filter(|n| n.focusable())
-            .map(|n| n.id)
-            .collect::<Vec<_>>();
-        if order.is_empty() {
-            return None;
-        }
-        let index = current.and_then(|id| order.iter().position(|n| *n == id));
-        let next = match (index, backwards) {
-            (Some(i), true) => (i + order.len() - 1) % order.len(),
-            (Some(i), false) => (i + 1) % order.len(),
-            (None, true) => order.len() - 1,
-            (None, false) => 0,
-        };
-        Some(order[next])
+            .filter(|n| n.focusable() && same_region(n, node))
+            .collect();
+        let index = order.iter().position(|n| n.id == current);
+        advance(order, index, backwards).filter(|id| *id != current)
     }
     /// Returns the deepest visible element at a logical point.
     pub fn hit(&self, point: Point) -> Option<Id> {
@@ -255,6 +323,48 @@ impl Tree {
                     && point.y < n.frame.y + n.frame.height
             })
             .map(|n| n.id)
+    }
+}
+
+fn same_region(a: &Node, b: &Node) -> bool {
+    a.id == b.id || (a.region.is_some() && a.region == b.region)
+}
+
+fn advance(order: Vec<&Node>, index: Option<usize>, backwards: bool) -> Option<Id> {
+    if order.is_empty() {
+        return None;
+    }
+    let next = match (index, backwards) {
+        (Some(i), true) => (i + order.len() - 1) % order.len(),
+        (Some(i), false) => (i + 1) % order.len(),
+        (None, true) => order.len() - 1,
+        (None, false) => 0,
+    };
+    Some(order[next].id)
+}
+
+/// Remembers only the latest announced item in each visible semantic channel.
+#[derive(Debug, Default)]
+pub struct Announcements(std::collections::BTreeMap<Id, String>);
+impl Announcements {
+    /// Returns new or changed announcements and forgets dismissed controls.
+    pub fn changes(&mut self, tree: &Tree) -> Vec<String> {
+        let next: std::collections::BTreeMap<_, _> = tree
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.announcement
+                    .as_ref()
+                    .map(|text| (node.parent.unwrap_or(node.id), text.clone()))
+            })
+            .collect();
+        let changed = next
+            .iter()
+            .filter(|(id, text)| self.0.get(id) != Some(text))
+            .map(|(_, text)| text.clone())
+            .collect();
+        self.0 = next;
+        changed
     }
 }
 /// Native accessibility actions, delivered on the same queue as keyboard/mouse events.
@@ -280,6 +390,90 @@ pub struct Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn page_alignment_keeps_caret_and_line_coordinates_stable() {
+        let text = Text::from("line\n".repeat(200_000).as_str());
+        let offset = text.line_to_byte(100_000);
+        let mut state = TextInputState {
+            text,
+            selected: Utf16Range::new(offset, 0),
+            ..Default::default()
+        };
+        let first = TextArea::windowed(&state, state.selected, offset, None);
+        state.selected.location += 1;
+        let second = TextArea::windowed(
+            &state,
+            state.selected,
+            offset + 1,
+            Some(first.document_offset),
+        );
+        assert_eq!(first.document_offset % (TEXT_WINDOW / 4), 0);
+        assert_eq!(second.document_offset, first.document_offset);
+        assert_eq!(second.selected.location, first.selected.location + 1);
+        let line = second.range_for_line(second.insertion_line).unwrap();
+        assert!(line.location <= second.selected.location && line.end() > second.selected.location);
+        let beyond = offset + TEXT_WINDOW;
+        assert_ne!(
+            TextArea::windowed(&state, state.selected, beyond, Some(first.document_offset))
+                .document_offset,
+            first.document_offset
+        );
+    }
+
+    #[test]
+    fn twenty_getters_share_one_tree_and_announcement_tracks_the_selected_row() {
+        let cache = TreeCache::default();
+        let calls = std::cell::Cell::new(0);
+        let get = |caption: &str| {
+            cache.get(|| {
+                calls.set(calls.get() + 1);
+                let mut node = Node::new(2, Some(1), Role::Row, caption, Rect::default());
+                node.announcement = Some(caption.into());
+                Some(Tree { nodes: vec![node] })
+            })
+        };
+        let mut tracker = Announcements::default();
+        assert_eq!(tracker.changes(&get("First, 1 of 2")), ["First, 1 of 2"]);
+        for _ in 0..20 {
+            assert!(tracker.changes(&get("First, 1 of 2")).is_empty());
+        }
+        assert_eq!(calls.get(), 1);
+        cache.invalidate();
+        assert_eq!(tracker.changes(&get("Second, 2 of 2")), ["Second, 2 of 2"]);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn five_regions_do_not_walk_every_tab_and_sidebar_row() {
+        let mut nodes = Vec::new();
+        for (region, count) in [
+            (Region::Tabs, 5),
+            (Region::Editor, 1),
+            (Region::Sidebar, 50),
+            (Region::Panel, 3),
+            (Region::Status, 2),
+        ] {
+            for _ in 0..count {
+                let mut n = Node::new(
+                    nodes.len() as u64 + 1,
+                    None,
+                    Role::Button,
+                    "",
+                    Rect::default(),
+                );
+                n.region = Some(region);
+                n.activation = Some((Point::default(), false));
+                nodes.push(n);
+            }
+        }
+        let tree = Tree { nodes };
+        let mut focus = Some(6);
+        for _ in 0..5 {
+            focus = tree.next_focus(focus, false);
+        }
+        assert_eq!(focus, Some(6));
+        assert_eq!(tree.next_in_region(8, false), Some(9));
+    }
     #[test]
     fn utf16_surrogates_combining_crlf_empty_lines_and_invalid_ranges() {
         let state = TextInputState {
@@ -318,7 +512,8 @@ mod tests {
         );
         assert!(model.text.len_utf16() <= TEXT_WINDOW);
         assert!(model.document_offset > 0);
-        assert_eq!(model.insertion_line, 90_000);
+        let line = model.range_for_line(model.insertion_line).unwrap();
+        assert!(line.location <= model.selected.location && line.end() > model.selected.location);
         assert_eq!(model.document_range(model.selected), selected);
         assert_eq!(model.string(model.selected).as_deref(), Some("😀"));
     }

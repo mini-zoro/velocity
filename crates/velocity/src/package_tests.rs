@@ -21,7 +21,7 @@ fn archive(dir: &Path) -> PathBuf {
             r##"{"rules":[{"class":"button","layer0.tint":"#123456"}]}"##,
         ),
         (
-            "fixture.sublime-keymap",
+            "Default.sublime-keymap",
             r#"[{"keys":["ctrl+alt+9"],"command":"insert","args":{"characters":"package key"}}]"#,
         ),
         (

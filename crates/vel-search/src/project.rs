@@ -413,12 +413,14 @@ impl Rules {
         if directory {
             return path == root || admitted(&self.include_folders, &self.folders);
         }
-        // Replace in Files owns these recovery artifacts. Never search or replace them,
-        // even when a project explicitly includes all files and excludes nothing.
+        // Replace in Files, document saves and project session writes own these
+        // recovery artifacts. Never expose them even with empty exclusion rules.
         !matches
             .name
             .windows(b".velocity-backup-".len())
             .any(|part| part == b".velocity-backup-")
+            && !matches.name.starts_with(b".velocity-save-")
+            && !matches.name.starts_with(b".velocity-session-")
             && admitted(&self.include_files, &self.files)
             && (!searchable || !self.binary.matches_path(&matches))
     }
@@ -1359,6 +1361,29 @@ mod tests {
         assert_eq!(build(&[folder.clone()], &stop).0.files.len(), 1);
         folder.rules = Rules::new(&[], &[".git".into()], &[]).unwrap();
         assert!(build(&[folder], &stop).0.files.is_empty());
+    }
+    #[test]
+    fn project_session_stages_are_hidden_from_the_sidebar_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "document.txt",
+            ".velocity-save-old",
+            ".velocity-session-16acf-crash",
+        ] {
+            std::fs::write(dir.path().join(name), "fixture").unwrap();
+        }
+        let folder = Folder {
+            path: dir.path().into(),
+            name: "root".into(),
+            follow_links: false,
+            rules: Rules::default(),
+        };
+        let stop = AtomicBool::new(false);
+        let rows = folder.sidebar_children(dir.path(), &stop).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].path, dir.path().join("document.txt"));
+        let (index, _) = build(&[folder], &stop);
+        assert_eq!(index.files.len(), 1);
     }
     #[test]
     fn sidebar_and_index_share_exclusions_and_lazy_loading() {

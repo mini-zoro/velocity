@@ -58,8 +58,8 @@ impl DescriptorStamp {
 }
 #[cfg(test)]
 thread_local! { static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
-fn open(path: &Path, write: bool) -> Result<File, String> {
-    let expected = metadata(path, write)?.as_ref().map(DescriptorStamp::of);
+fn open(path: &Path, write: bool, create: bool) -> Result<File, String> {
+    let expected = metadata(path, create)?;
     #[cfg(test)]
     if let Some(swap) = BEFORE_OPEN.with(|hook| hook.take()) {
         swap();
@@ -68,8 +68,8 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
     options
         .read(!write)
         .write(write)
-        .create(write)
-        .create_new(write && expected.is_none());
+        .create(create)
+        .create_new(create && expected.is_none());
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -79,7 +79,9 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
         // https://pubs.opengroup.org/onlinepubs/9799919799/functions/fstat.html
         // macOS semantics: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/open.2.html
         options
-            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .custom_flags(
+                (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC).bits() as i32,
+            )
             .mode(0o666);
     }
     let file = options.open(path).map_err(|e| error(path, e))?;
@@ -87,7 +89,12 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
     if !opened.is_file() {
         return Err(error(path, "only regular files can be used as documents"));
     }
-    if write && expected.is_some_and(|expected| expected != DescriptorStamp::of(&opened)) {
+    if write
+        && expected.is_some_and(|expected| {
+            DescriptorStamp::of(&expected) != DescriptorStamp::of(&opened)
+                && !decompressed_on_open(&expected, &opened)
+        })
+    {
         return Err(error(
             path,
             "file changed while opening for save; retry after reviewing it",
@@ -101,9 +108,28 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
     }
     Ok(file)
 }
+
+pub(crate) fn decompressed_on_open(before: &Metadata, after: &Metadata) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        // Darwin may materialize compressed blocks on the first writable open.
+        // Accept only that flag transition on the same descriptor and length.
+        // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/decmpfs.c
+        before.st_flags() & libc::UF_COMPRESSED != 0
+            && after.st_flags() & libc::UF_COMPRESSED == 0
+            && super::same_entry(before, after)
+            && before.len() == after.len()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (before, after);
+        false
+    }
+}
 /// Opens a checked regular document for reading, without blocking on a raced-in FIFO.
 pub fn read(path: &Path) -> Result<File, String> {
-    open(path, false)
+    open(path, false, false)
 }
 /// Opens a walker-identified file and returns the size of the opened object.
 /// Nonblocking open keeps a raced-in pipe from stalling a search worker.
@@ -125,7 +151,11 @@ pub(super) fn read_search_file(path: &Path) -> io::Result<(File, u64)> {
 /// Opens a checked regular/new document for writing. The caller truncates only
 /// after this descriptor check succeeds, never through OpenOptions::truncate.
 pub fn write(path: &Path) -> Result<File, String> {
-    open(path, true)
+    open(path, true, true)
+}
+/// Checks write access without creating or modifying an existing document.
+pub(crate) fn writable(path: &Path) -> Result<File, String> {
+    open(path, true, false)
 }
 
 #[cfg(all(test, unix))]
@@ -163,7 +193,7 @@ mod tests {
                     })));
                 });
                 let start = std::time::Instant::now();
-                let result = open(&path, write);
+                let result = open(&path, write, write);
                 assert!(start.elapsed() < std::time::Duration::from_secs(1));
                 assert_eq!(
                     result.is_ok(),

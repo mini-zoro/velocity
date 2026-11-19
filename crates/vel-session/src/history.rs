@@ -204,6 +204,7 @@ pub struct History {
     effective_encoding: Option<String>,
     saved_in_effective_encoding: bool,
     saved_content: Option<vel_fileio::ContentIdentity>,
+    recovered_name: Option<String>,
 }
 impl History {
     /// Captures groups, saved point, typing continuation and all attached views.
@@ -217,7 +218,17 @@ impl History {
             effective_encoding: None,
             saved_in_effective_encoding: false,
             saved_content: None,
+            recovered_name: None,
         }
+    }
+    pub(super) fn recovered(buffer: &Buffer, name: String) -> Self {
+        let mut history = Self::capture(buffer);
+        history.recovered_name = Some(name);
+        history
+    }
+    /// Title of an untitled document salvaged without its original path or history.
+    pub fn recovered_name(&self) -> Option<&str> {
+        self.recovered_name.as_deref()
     }
     /// Captures clean files without duplicating their current disk contents in session JSON.
     /// Native history still retains selection events and any saved text undo/redo steps.
@@ -381,6 +392,8 @@ impl Serialize for History {
             effective_encoding: &'a Option<String>,
             saved_in_effective_encoding: bool,
             saved_content: Option<vel_fileio::ContentIdentity>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            recovered_name: &'a Option<String>,
         }
         Wire {
             text: if self.disk.is_none() {
@@ -400,6 +413,7 @@ impl Serialize for History {
             effective_encoding: &self.effective_encoding,
             saved_in_effective_encoding: self.saved_in_effective_encoding,
             saved_content: self.saved_content,
+            recovered_name: &self.recovered_name,
         }
         .serialize(serializer)
     }
@@ -425,6 +439,8 @@ impl<'de> Deserialize<'de> for History {
                 saved_in_effective_encoding: bool,
                 #[serde(default)]
                 saved_content: Option<vel_fileio::ContentIdentity>,
+                #[serde(default)]
+                recovered_name: Option<String>,
             },
             Legacy(crate::legacy::History),
         }
@@ -438,6 +454,7 @@ impl<'de> Deserialize<'de> for History {
                 effective_encoding,
                 saved_in_effective_encoding,
                 saved_content,
+                recovered_name,
             } => {
                 if text.is_none() && disk.is_none() {
                     return Err(serde::de::Error::custom("missing session contents"));
@@ -451,6 +468,7 @@ impl<'de> Deserialize<'de> for History {
                     effective_encoding,
                     saved_in_effective_encoding,
                     saved_content,
+                    recovered_name,
                 })
             }
             Wire::Legacy(history) => {

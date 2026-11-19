@@ -309,6 +309,8 @@ pub trait AppHandler: 'static {
     fn on_quit_requested(&mut self, _window: &WindowHandle) -> bool {
         true
     }
+    /// Checkpoint on a system logout or power-off notification, before the quit request.
+    fn on_session_ending(&mut self, _window: &WindowHandle) {}
     /// Approve closing this window, distinct from quitting the application.
     fn on_window_close_requested(&mut self, window: &WindowHandle) -> bool {
         self.on_quit_requested(window)

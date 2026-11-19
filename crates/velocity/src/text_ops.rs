@@ -1,5 +1,6 @@
 //! Window bridge for recorded text commands, synchronous find playback and package macro files.
 use super::*;
+use vel_config::resources::Resources;
 
 type MacroCommands = Arc<[(String, Value)]>;
 
@@ -9,6 +10,79 @@ pub(super) struct MacroFiles {
     root: Option<PathBuf>,
     revision: u64,
     parsed: BTreeMap<String, MacroCommands>,
+}
+
+fn load_macro(resources: &Resources, path: &str) -> Result<Vec<(String, Value)>, String> {
+    if let Some(resource) = resources.get(path) {
+        return vel_commands::parse_macro(resource.text()?);
+    }
+    if resources.package_enabled("Default")
+        && let Some(commands) = vel_commands::builtin_macro_file(path)
+    {
+        return Ok(commands);
+    }
+    Err(format!("macro file {path} is not available"))
+}
+
+pub(crate) fn usable_package_binding(
+    resources: &Resources,
+    known: &impl Fn(&str) -> bool,
+    command: &str,
+    args: &Value,
+    depth: usize,
+) -> bool {
+    if depth >= 32 || !known(command) {
+        return false;
+    }
+    let step =
+        |name: &str, args: &Value| usable_package_binding(resources, known, name, args, depth + 1);
+    match command {
+        "run_macro_file" if args.get("file").is_some() => {
+            return args["file"]
+                .as_str()
+                .and_then(|p| load_macro(resources, p).ok())
+                .is_some_and(|commands| commands.iter().all(|(name, args)| step(name, args)));
+        }
+        "chain" => {
+            return args["commands"].as_array().is_some_and(|commands| {
+                commands.iter().all(|c| {
+                    vel_commands::chain_entry(c).is_ok_and(|(name, args)| step(name, args))
+                })
+            });
+        }
+        "run_macro" if args["commands"].is_array() => {
+            return vel_commands::parse_macro(&args["commands"].to_string())
+                .is_ok_and(|commands| commands.iter().all(|(name, args)| step(name, args)));
+        }
+        "insert_snippet" if !args["contents"].is_string() => {
+            return args["name"]
+                .as_str()
+                .or_else(|| args["file"].as_str())
+                .and_then(|path| resources.get(path))
+                .is_some_and(|resource| {
+                    resource
+                        .text()
+                        .is_ok_and(|s| vel_snippet::SnippetFile::parse(s).is_ok())
+                });
+        }
+        "edit_settings" if !args["base_file"].is_string() => return false,
+        _ => (),
+    }
+    ["file", "base_file"]
+        .iter()
+        .filter_map(|key| args[key].as_str())
+        .all(|path| {
+            if let Some(relative) = path
+                .strip_prefix("${packages}/")
+                .or_else(|| path.strip_prefix("$packages/"))
+            {
+                return resources
+                    .get(&format!("Packages/{relative}"))
+                    .is_some_and(|r| r.text().is_ok());
+            }
+            let path = path.strip_prefix("res://").unwrap_or(path);
+            !path.starts_with("Packages/") || resources.get(path).is_some_and(|r| r.text().is_ok())
+        })
 }
 
 impl Panels {
@@ -34,28 +108,38 @@ impl Panels {
         if let Some(commands) = cache.parsed.get(path) {
             return Ok(Arc::clone(commands));
         }
-        // Profile loose override/archive, then our bundled package, then clean-room built-ins.
-        // read_one opens this path only; never rebuild Resources on the UI command path.
-        let mut commands = None;
-        for root in [root, crate::release::bundle_resources()]
-            .into_iter()
-            .flatten()
+        if let Some(warning) =
+            package.and_then(|package| workspace.resources.archive_warning(package))
+        {
+            workspace
+                .messages
+                .push(format!("Macro resource warning: {warning}"));
+        }
+        // Shipped and third-party bindings use the same immutable overlay
+        // validated at load time. Keep the existing first-use behavior for
+        // User-recorded macros that can be created or edited between reloads.
+        let live = if package == Some("User")
+            && let Some(root) = root
         {
             match vel_config::resources::read_one(&root, path) {
-                Ok(Some(resource)) => {
-                    commands = Some(vel_commands::parse_macro(resource.text()?)?);
-                    break;
+                Ok(Some(resource)) => Some(resource.text().and_then(vel_commands::parse_macro)),
+                Ok(None) => None,
+                Err(error) => {
+                    workspace
+                        .messages
+                        .push(format!("Macro resource warning: {error}"));
+                    None
                 }
-                Ok(None) => {}
-                Err(error) => workspace
-                    .messages
-                    .push(format!("Macro resource warning: {error}")),
             }
+        } else {
+            None
+        };
+        let commands: MacroCommands = match live {
+            Some(Ok(commands)) => commands,
+            Some(Err(error)) if workspace.resources.get(path).is_none() => return Err(error),
+            _ => load_macro(&workspace.resources, path)?,
         }
-        let commands: MacroCommands = commands
-            .or_else(|| vel_commands::builtin_macro_file(file))
-            .ok_or_else(|| format!("macro file {file} is not available"))?
-            .into();
+        .into();
         cache.parsed.insert(path.into(), Arc::clone(&commands));
         Ok(commands)
     }
@@ -138,12 +222,16 @@ impl Panels {
             };
             let source = workspace.editor().registry.macro_source()? + "\n";
             let path = save_new_macro(&root, &filename, &source)?;
-            workspace.macro_paths.insert(format!(
+            let resource = format!(
                 "Packages/User/{}",
                 path.file_name()
                     .expect("saved macro filename")
                     .to_string_lossy()
-            ));
+            );
+            workspace
+                .resources
+                .insert(&resource, source.into_bytes(), path.clone());
+            workspace.macro_paths.insert(resource);
             workspace.request_resource_reload();
             self.set_message(format!("Saved macro {}", path.display()));
             return Ok(true);

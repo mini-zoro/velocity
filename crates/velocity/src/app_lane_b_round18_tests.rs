@@ -378,7 +378,8 @@ fn round18_build_dispatch_panel_save_all_restart_cancel_and_key_context() {
     finish(&mut a);
     assert!(a.panels.output.starts_with("replacement\n"));
     a.workspace.build_systems =
-        vec![vel_build::BuildSystem::parse("fixture", r#"{"cmd":["/bin/echo","f7"]}"#).unwrap()];
+        vec![vel_build::BuildSystem::parse("fixture", r#"{"cmd":["/bin/echo","f7"]}"#).unwrap()]
+            .into();
     a.workspace.build_system = Some("fixture".into());
     assert!(key(&mut a, "f7"));
     finish(&mut a);
@@ -401,7 +402,7 @@ fn round18_build_with_choices_filter_and_remember_variants() {
         vel_build::BuildSystem::parse("A",r#"{"selector":"source.rust","cmd":["/bin/echo","A"],"variants":[{"name":"Run","cmd":["/bin/echo","run"]}]}"#).unwrap(),
         vel_build::BuildSystem::parse("B",r#"{"selector":"source.rust - comment","cmd":["/bin/echo","B"]}"#).unwrap(),
         vel_build::BuildSystem::parse("No",r#"{"selector":"source.python","cmd":["false"]}"#).unwrap(),
-    ];
+    ].into();
     let choices = crate::build::Builds::choices(&a.workspace, true);
     assert_eq!(choices.len(), 3);
     assert!(!choices.iter().any(|c| c.caption == "No"));
@@ -681,7 +682,8 @@ fn round18_build_selector_adapter_synchronously_scores_stale_embedded_scopes() {
         .unwrap(),
         vel_build::BuildSystem::parse("general", r#"{"selector":"source.js","cmd":["true"]}"#)
             .unwrap(),
-    ];
+    ]
+    .into();
     assert_eq!(
         crate::build::Builds::matching(&a.workspace)
             .iter()
@@ -778,7 +780,7 @@ fn round18_review_build_memory_tracks_matching_sets_and_only_picker_choices() {
         )
         .unwrap()
     };
-    a.workspace.build_systems = vec![rust(), python()];
+    a.workspace.build_systems = vec![rust(), python()].into();
     set_syntax(&mut a, "Rust/Rust");
     assert!(key(&mut a, "super+b"));
     finish(&mut a);
@@ -1350,7 +1352,8 @@ fn round18_review_large_root_selector_build_avoids_a_full_caret_parse() {
             json!({"selector":"source.rust","cmd":["/bin/echo","ROOT"],"quiet":true}),
         )
         .unwrap(),
-    ];
+    ]
+    .into();
     let at = a.workspace.editor().text.line_to_byte(119999);
     a.workspace.editor_mut().set_caret(at, false);
     let matching = crate::build::Builds::matching(&a.workspace);
@@ -1393,7 +1396,8 @@ fn round18_review_build_matching_120000_lines_timing() {
             json!({"selector":"source.rust","cmd":["/bin/true"]}),
         )
         .unwrap(),
-    ];
+    ]
+    .into();
     let mut root = vec![];
     let mut embedded = vec![];
     for _ in 0..9 {

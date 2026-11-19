@@ -426,7 +426,8 @@ fn round18_final_login_double_build_keeps_shared_capture() {
                     json!({"cmd":["/usr/bin/printenv","PROFILE_READY"],"quiet":true}),
                 )
                 .unwrap(),
-            ];
+            ]
+            .into();
             // Selection prewarms the same cache; the fixture holds startup at a
             // barrier so both actual Cmd+B requests happen during that capture.
             named(&mut a, "set_build_system", json!({"name":"fixture"}));

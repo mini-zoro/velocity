@@ -32,7 +32,7 @@ pub(crate) fn retain_valid(
             (
                 (r.origin.clone(), r.path.clone()),
                 valid,
-                Arc::new(r.bytes.clone()),
+                Arc::new(r.bytes.to_vec()),
             )
         })
         .collect::<Vec<_>>();
@@ -67,6 +67,8 @@ pub(crate) fn retain_valid(
             "{} ({location}): {error}",
             resource.origin.display()
         ));
-        resource.bytes = previous.map_or_else(|| b"{}".to_vec(), |bytes| (*bytes).clone());
+        resource.bytes = previous
+            .map_or_else(|| b"{}".to_vec(), |bytes| (*bytes).clone())
+            .into();
     }
 }
