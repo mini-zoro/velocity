@@ -149,6 +149,7 @@
 {"class": "title_bar", "fg": "var(muted)", "bg": "var(surface)", "style": "dark"},
 {"class": "sidebar_tree", "indent": 16, "indent_offset": 4, "indent_top_level": false, "spacer_rows": true},
 {"class": "sidebar_heading", "fg": "var(muted)", "font.size": 11, "font.bold": true, "case": "upper"},
+{"class": "sidebar_indent_guide", "layer0.tint": "var(fg)", "layer0.opacity": 0.1},
 {"class": "tabset_control", "tab_height": 32, "tab_width": 180, "tab_min_width": 72, "tab_overlap": 0},
 {"class": "tab_control", "content_margin": [12, 8], "close_button_side": "right", "max_margin_trim": 6, "layer1.texture": "Theme - Velocity/tab-divider.png", "layer1.tint": "var(line)", "layer1.opacity": 1.0, "layer1.inner_margin": [0, 7, 1, 7], "layer1.draw_center": false},
 {"class": "tab_control", "attributes": ["hover"], "layer0.tint": "var(fg)", "layer0.opacity": {"target": 0.05, "speed": 8, "interpolation": "smoothstep"}},

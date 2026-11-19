@@ -473,10 +473,245 @@ impl View {
             clip,
         );
     }
+    /// Paper, ink and their mixes for sheets drawn without text styling (pictures, bytes):
+    /// the document's colour scheme when it has one, else the active scheme through the
+    /// theme palette, else the built-in palette.
+    fn sheet_colors(&self, e: &Editor) -> SheetColors {
+        if let Some(language) = e.language.borrow().as_ref() {
+            let scheme = &*language.scheme;
+            return SheetColors {
+                background: color(scheme, "background"),
+                foreground: color(scheme, "foreground"),
+                muted: color(scheme, "gutter_foreground"),
+                line: color(scheme, "line_highlight"),
+                selection: color(scheme, "selection"),
+            };
+        }
+        let fallback = fallback_scheme(self.appearance);
+        let theme = e.theme.borrow();
+        let palette = |name: &str, default: Color| {
+            theme
+                .palette
+                .color(&format!("var(--{name})"))
+                .map_or(default, vel_ui::theme::rgba)
+        };
+        let background = palette("background", color(fallback, "background"));
+        let foreground = palette("foreground", color(fallback, "foreground"));
+        let accent = palette("accent", foreground);
+        let mix = |to: Color, amount: f32| -> Color {
+            std::array::from_fn(|i| {
+                if i == 3 {
+                    1.
+                } else {
+                    background[i] + (to[i] - background[i]) * amount
+                }
+            })
+        };
+        SheetColors {
+            background,
+            foreground,
+            muted: mix(foreground, 0.62),
+            line: mix(foreground, 0.06),
+            selection: mix(accent, 0.3),
+        }
+    }
+    /// An invisible character's label: a rounded chip with the code point in a smaller cut of
+    /// the font, centred, readable on the caret line and in selections alike. Kept out of the
+    /// per-glyph loop (rarely taken).
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn paint_invisible_label(
+        &self,
+        layer: &mut Layer,
+        e: &Editor,
+        c: char,
+        x: f64,
+        y: f64,
+        width: f64,
+        baseline: f64,
+        mut color: Color,
+        clip: Rect,
+    ) {
+        // The label at the colour's full strength (the scheme's muted ink: 4.6:1 or more on
+        // paper), on a chip of the same colour at 10 %.
+        let mut chip = color;
+        chip[3] *= 0.1;
+        color[3] = 1.;
+        let rect = Rect {
+            x: x + 1.,
+            y: y + 2.,
+            width: (width - 2.).max(1.),
+            height: (self.line_height - 4.).max(1.),
+        };
+        layer.rects.push(SolidRect {
+            rect,
+            clip,
+            color: chip,
+            radius: 3.,
+        });
+        let label = vel_render::invisibles::label(c);
+        let ratio = 0.8;
+        let advance = label.len() as f64 * self.cell * ratio;
+        // Clipped to the chip and to the text area (never into the gutter when scrolled).
+        text_run(
+            layer,
+            &label,
+            rect.x + ((rect.width - advance) / 2.).max(0.),
+            baseline - self.ascent * (1. - ratio) * 0.4,
+            e.preferences.font_size * ratio,
+            color,
+            FontStyle::default(),
+            intersection(rect, clip),
+        );
+    }
+    /// An image file: the picture centred and scaled down to fit, on a checkerboard that shows
+    /// its transparency, framed by a hairline, above a footer with its size and zoom.
+    fn image_scene(&self, e: &Editor, image: &Arc<Image>) -> Scene {
+        let colors = self.sheet_colors(e);
+        let s = vel_ui::theme::ui_scale(&e.settings);
+        let footer_height = (24. * s).round();
+        let view = Rect {
+            x: 0.,
+            y: self.tab_height,
+            width: self.size.width,
+            height: (self.size.height - self.tab_height).max(0.),
+        };
+        let area = Rect {
+            height: (view.height - footer_height).max(0.),
+            ..view
+        };
+        let inset = 16. * s;
+        let [w, h] = image.logical_size.map(f64::from);
+        let scale = ((area.width - 2. * inset).max(1.) / w)
+            .min((area.height - 2. * inset).max(1.) / h)
+            .min(1.);
+        // Whole device pixels at 1x and 2x keep the image and its frame crisp.
+        let snap = |v: f64| (v * 2.).round() / 2.;
+        let rect = Rect {
+            x: snap(area.x + (area.width - w * scale) * 0.5),
+            y: snap(area.y + (area.height - h * scale) * 0.5),
+            width: snap(w * scale),
+            height: snap(h * scale),
+        };
+        let (background, foreground) = (colors.background, colors.foreground);
+        let mix = |amount: f32| -> Color {
+            std::array::from_fn(|i| {
+                if i == 3 {
+                    1.
+                } else {
+                    background[i] + (foreground[i] - background[i]) * amount
+                }
+            })
+        };
+        let mut layer = Layer::default();
+        layer.surfaces.push(Surface::Fill(SolidRect {
+            rect: view,
+            clip: view,
+            color: background,
+            radius: 0.,
+        }));
+        // Checkerboard behind the picture; at most ~1,600 squares however large it is shown.
+        let cell = (8. * s).max((rect.width * rect.height / 1600.).sqrt().ceil());
+        let squares = intersection(rect, area);
+        layer.rects.push(SolidRect {
+            rect: squares,
+            clip: area,
+            color: mix(0.04),
+            radius: 0.,
+        });
+        let (columns, rows) = (
+            (squares.width / cell).ceil() as usize,
+            (squares.height / cell).ceil() as usize,
+        );
+        for row in 0..rows {
+            for column in (row % 2..columns).step_by(2) {
+                let x = rect.x + column as f64 * cell;
+                let y = rect.y + row as f64 * cell;
+                layer.rects.push(SolidRect {
+                    rect: intersection(
+                        Rect {
+                            x,
+                            y,
+                            width: cell,
+                            height: cell,
+                        },
+                        squares,
+                    ),
+                    clip: area,
+                    color: mix(0.1),
+                    radius: 0.,
+                });
+            }
+        }
+        let mut picture = Layer::default();
+        picture.surfaces.push(Surface::Image(ImageQuad {
+            image: image.clone(),
+            source: [0., 0., image.width as f32, image.height as f32],
+            rect,
+            clip: area,
+            color: [1.; 4],
+        }));
+        let mut chrome = Layer::default();
+        border(
+            &mut chrome,
+            Rect {
+                x: rect.x - 1.,
+                y: rect.y - 1.,
+                width: rect.width + 2.,
+                height: rect.height + 2.,
+            },
+            area,
+            mix(0.18),
+        );
+        // Footer: dimensions, file size and zoom, in the UI font.
+        let footer = Rect {
+            y: area.y + area.height,
+            height: view.height - area.height,
+            ..view
+        };
+        fill(&mut chrome, footer, view, colors.line);
+        fill(
+            &mut chrome,
+            Rect {
+                height: 1.,
+                ..footer
+            },
+            view,
+            mix(0.12),
+        );
+        let bytes = e.binary.as_ref().map(|b| b.view.len_bytes());
+        let mut caption = format!("{w} × {h} pixels");
+        if let Some(bytes) = bytes {
+            caption.push_str(" · ");
+            caption.push_str(&file_size(bytes));
+        }
+        caption.push_str(&format!(" · {}%", (scale * 100.).round()));
+        let mut theme = e.theme.borrow_mut();
+        let path = [
+            vel_theme::Element::new("window", &[]),
+            vel_theme::Element::new("label_control", &[]),
+        ];
+        let mut label = theme.style(e.ui_id(0xE303), &vel_theme::ElementPath(&path), &e.settings);
+        label.foreground = colors.muted;
+        theme.text_fit(
+            &mut chrome,
+            &label,
+            &caption,
+            footer.x + 12. * s,
+            footer.y + (footer.height + f64::from(label.size) * 0.7) / 2.,
+            footer.width - 24. * s,
+            footer,
+        );
+        Scene {
+            background,
+            layers: vec![layer, picture, chrome],
+        }
+    }
     fn hex_scene(&mut self, e: &Editor) -> Scene {
         self.apply_style(e);
         let snapshot = e.binary.as_ref().expect("binary tab");
-        let scheme = fallback_scheme(self.appearance);
+        let colors = self.sheet_colors(e);
         let clip = Rect {
             x: 0.,
             y: self.tab_height,
@@ -486,6 +721,14 @@ impl View {
         let first = (self.scroll_y / self.line_height + 1e-8).floor().max(0.) as u64;
         let end = (first + self.rows() as u64 + 2).min(snapshot.view.len_rows());
         let mut layer = Layer::default();
+        // Sheets are composed into the window scene without their own background: paint the
+        // paper explicitly (light hex views were dark-on-dark).
+        layer.surfaces.push(Surface::Fill(SolidRect {
+            rect: clip,
+            clip,
+            color: colors.background,
+            radius: 0.,
+        }));
         for row in first..end {
             let r = snapshot.view.row(row).expect("bounded row");
             let y = self.tab_height + 4. + row as f64 * self.line_height - self.scroll_y;
@@ -496,7 +739,7 @@ impl View {
                 16. - self.scroll_x,
                 baseline,
                 e.preferences.font_size,
-                color(scheme, "gutter_foreground"),
+                colors.muted,
                 FontStyle::default(),
                 clip,
             );
@@ -513,7 +756,7 @@ impl View {
                             height: self.line_height,
                         },
                         clip,
-                        color(scheme, "selection"),
+                        colors.selection,
                     );
                     fill(
                         &mut layer,
@@ -524,7 +767,7 @@ impl View {
                             height: self.line_height,
                         },
                         clip,
-                        color(scheme, "selection"),
+                        colors.selection,
                     );
                 }
                 text_run(
@@ -533,7 +776,7 @@ impl View {
                     x,
                     baseline,
                     e.preferences.font_size,
-                    rgba(scheme.default_style().foreground),
+                    colors.foreground,
                     FontStyle::default(),
                     clip,
                 );
@@ -544,14 +787,54 @@ impl View {
                 16. + 68. * self.cell - self.scroll_x,
                 baseline,
                 e.preferences.font_size,
-                rgba(scheme.default_style().foreground),
+                colors.foreground,
                 FontStyle::default(),
                 clip,
             );
         }
+        // An image file that could not be decoded: say why its bytes are shown, in a quiet
+        // note below the last row (the status bar says it too when the tab opens).
+        let mut note = Layer::default();
+        if self.image_preview.failed && end == snapshot.view.len_rows() {
+            let s = vel_ui::theme::ui_scale(&e.settings);
+            let mut theme = e.theme.borrow_mut();
+            let path = [
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("label_control", &[]),
+            ];
+            let mut label =
+                theme.style(e.ui_id(0xE304), &vel_theme::ElementPath(&path), &e.settings);
+            label.foreground = colors.muted;
+            let text = crate::app::IMAGE_FALLBACK_NOTE;
+            let width = theme.advance(&label, text) + 20. * s;
+            let height = (22. * s).round();
+            let rect = Rect {
+                x: (16. + 18. * self.cell - self.scroll_x - 10. * s).round(),
+                y: (self.tab_height + 4. + end as f64 * self.line_height - self.scroll_y + 10. * s)
+                    .round(),
+                width: width.round(),
+                height,
+            };
+            if rect.y + rect.height <= clip.y + clip.height {
+                note.rects.push(SolidRect {
+                    rect,
+                    clip,
+                    color: colors.line,
+                    radius: (4. * s) as f32,
+                });
+                theme.text(
+                    &mut note,
+                    &label,
+                    text,
+                    rect.x + 10. * s,
+                    rect.y + (height + f64::from(label.size) * 0.7) / 2.,
+                    rect,
+                );
+            }
+        }
         let mut scene = Scene {
-            background: rgba(scheme.default_style().background),
-            layers: vec![layer],
+            background: colors.background,
+            layers: vec![layer, note],
         };
         self.paint_scrollbar(e, &mut scene);
         scene
@@ -1842,52 +2125,8 @@ impl View {
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
         let mut phase = self.profile.as_ref().map(|_| Instant::now());
-        if let Some(image) = &self.image_preview.image {
-            let scheme = fallback_scheme(self.appearance);
-            let clip = Rect {
-                x: 0.,
-                y: self.tab_height,
-                width: self.size.width,
-                height: (self.size.height - self.tab_height).max(0.),
-            };
-            let [w, h] = image.logical_size.map(f64::from);
-            let scale = (clip.width / w)
-                .min((clip.height - 24.).max(0.) / h)
-                .min(1.);
-            let rect = Rect {
-                x: (clip.width - w * scale) * 0.5,
-                y: clip.y + ((clip.height - 24.).max(0.) - h * scale) * 0.5,
-                width: w * scale,
-                height: h * scale,
-            };
-            let mut layer = Layer::default();
-            layer.surfaces.push(Surface::Fill(SolidRect {
-                rect: clip,
-                clip,
-                color: color(scheme, "background"),
-                radius: 0.,
-            }));
-            layer.surfaces.push(Surface::Image(ImageQuad {
-                image: image.clone(),
-                source: [0., 0., image.width as f32, image.height as f32],
-                rect,
-                clip,
-                color: [1.; 4],
-            }));
-            text_run(
-                &mut layer,
-                &format!("{} × {}", w, h),
-                12.,
-                clip.y + clip.height - 8.,
-                e.preferences.font_size,
-                color(scheme, "foreground"),
-                FontStyle::default(),
-                clip,
-            );
-            return Scene {
-                layers: vec![layer],
-                ..Scene::default()
-            };
+        if let Some(image) = self.image_preview.image.clone() {
+            return self.image_scene(e, &image);
         }
         if e.binary.is_some() {
             return self.hex_scene(e);
@@ -2533,25 +2772,40 @@ impl View {
             let mut column = segment.indent;
             let range_start = start + segment.bytes.start;
             let range_end = start + segment.bytes.end;
+            // Display columns before each unit of this row (inline phantoms and invisible-
+            // character labels included, exactly as the glyph loop below advances), built once
+            // for the row when a selection or field touches it. A band runs from the start of
+            // its first unit's gap (so a selected label is covered) to the end of its last unit.
+            let mut prefix: Option<Vec<usize>> = None;
+            let mut band =
+                |begin: usize, end: usize| {
+                    let prefix =
+                        prefix.get_or_insert_with(|| {
+                            band_prefix(&relevant, |at| {
+                                if inline_phantoms { display_gap(at) } else { 0 }
+                            })
+                        });
+                    band_columns(
+                        &relevant,
+                        prefix,
+                        begin - begin.min(start),
+                        end - end.min(start),
+                    )
+                };
+            // Regions are sorted: start at the first one that can reach this row.
+            let from = regions.partition_point(|r| r.end() <= range_start);
             for (selection_index, selection) in regions
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| !r.empty() && r.begin() <= range_end && r.end() > range_start)
+                .skip(from)
+                .take_while(|(_, r)| r.begin() <= range_end)
+                .filter(|(_, r)| !r.empty() && r.end() > range_start)
             {
-                let a = relevant
-                    .iter()
-                    .take_while(|u| start + u.bytes.end <= selection.begin())
-                    .map(|u| u.width)
-                    .sum::<usize>();
-                let b = relevant
-                    .iter()
-                    .take_while(|u| start + u.bytes.start < selection.end())
-                    .map(|u| u.width)
-                    .sum::<usize>();
+                let (a, b) = band(selection.begin(), selection.end());
                 let rect = Rect {
                     x: left + (segment.indent + a) as f64 * self.cell - self.scroll_x,
                     y,
-                    width: ((b - a) as f64 * self.cell).max(1.),
+                    width: (b.saturating_sub(a) as f64 * self.cell).max(1.),
                     height: self.line_height,
                 };
                 if !shaped_selection {
@@ -2570,22 +2824,13 @@ impl View {
                     .iter()
                     .filter(|f| f.range.start <= range_end && f.range.end > range_start)
                 {
-                    let a = relevant
-                        .iter()
-                        .take_while(|u| start + u.bytes.end <= field.range.start)
-                        .map(|u| u.width)
-                        .sum::<usize>();
-                    let b = relevant
-                        .iter()
-                        .take_while(|u| start + u.bytes.start < field.range.end)
-                        .map(|u| u.width)
-                        .sum::<usize>();
+                    let (a, b) = band(field.range.start, field.range.end);
                     border(
                         &mut layer,
                         Rect {
                             x: left + (segment.indent + a) as f64 * self.cell - self.scroll_x,
                             y,
-                            width: ((b - a) as f64 * self.cell).max(2.),
+                            width: (b.saturating_sub(a) as f64 * self.cell).max(2.),
                             height: self.line_height,
                         },
                         clip,
@@ -2790,26 +3035,8 @@ impl View {
                         } else {
                             global("invisibles")
                         };
-                        border(
-                            &mut layer,
-                            Rect {
-                                x,
-                                y: y + 1.,
-                                width,
-                                height: self.line_height - 2.,
-                            },
-                            clip,
-                            color,
-                        );
-                        text_run(
-                            &mut layer,
-                            &vel_render::invisibles::label(c),
-                            x,
-                            baseline,
-                            e.preferences.font_size,
-                            color,
-                            FontStyle::default(),
-                            clip,
+                        self.paint_invisible_label(
+                            &mut layer, e, c, x, y, width, baseline, color, clip,
                         );
                     }
                     column += unit.width;
@@ -3495,6 +3722,52 @@ impl View {
         }
     }
 }
+/// Display columns before each of a row's units (and after the last): unit widths plus the
+/// inline-phantom and invisible-label gaps the glyph loop inserts before each unit.
+#[inline(never)]
+fn band_prefix(units: &[&CachedUnit], gap: impl Fn(usize) -> usize) -> Vec<usize> {
+    let mut columns = Vec::with_capacity(units.len() + 1);
+    let mut total = 0;
+    columns.push(0);
+    for unit in units {
+        total += unit.width + gap(unit.bytes.start);
+        columns.push(total);
+    }
+    columns
+}
+/// A band's columns over a row for line-relative bytes `begin..end`: from the gap before its
+/// first unit to the end of its last unit.
+#[inline(never)]
+fn band_columns(
+    units: &[&CachedUnit],
+    prefix: &[usize],
+    begin: usize,
+    end: usize,
+) -> (usize, usize) {
+    let first = units.partition_point(|u| u.bytes.end <= begin);
+    let past = units.partition_point(|u| u.bytes.start < end);
+    (prefix[first], prefix[past.max(first)])
+}
+/// Colours of a sheet without text styling; see `View::sheet_colors`.
+struct SheetColors {
+    background: Color,
+    foreground: Color,
+    muted: Color,
+    line: Color,
+    selection: Color,
+}
+/// A file size as Finder shows it (decimal units).
+fn file_size(bytes: u64) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} bytes"),
+        1_000..1_000_000 => format!("{:.1} KB", bytes as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1} MB", bytes as f64 / 1e6),
+        _ => format!("{:.1} GB", bytes as f64 / 1e9),
+    }
+}
+fn intersection(a: Rect, b: Rect) -> Rect {
+    vel_ui::minihtml::intersection(a, b)
+}
 fn fallback_scheme(appearance: Appearance) -> &'static ColorScheme {
     static DARK: OnceLock<ColorScheme> = OnceLock::new();
     static LIGHT: OnceLock<ColorScheme> = OnceLock::new();
@@ -3618,6 +3891,355 @@ pub fn caret_alpha(style: &str, seconds: f64) -> f32 {
 mod tests {
     use super::*;
     use vel_text::Text;
+    /// Square-cornered selections (plain rects) in a scheme with known colours.
+    fn square_selection_editor(source: &str, wrap: bool) -> Editor {
+        let scheme = vel_color_scheme::SchemeSource::parse(
+            &vel_config::json!({"globals":{"background":"#101010","foreground":"#e0e0e0",
+                "selection":"#3366aa","selection_corner_style":"square","invisibles":"#808080"}})
+            .to_string(),
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        let mut e = Editor::new(Text::from(source));
+        e.attach_language(
+            crate::language::Assets::bundled().unwrap(),
+            "Plain Text",
+            Arc::new(scheme),
+        )
+        .unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(20);
+        while !e.language.borrow().as_ref().unwrap().ready() {
+            e.poll_language();
+            assert!(Instant::now() < until);
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        for (key, value) in [
+            ("draw_unicode_white_space", vel_config::json!("all")),
+            ("draw_unicode_bidi", vel_config::json!(true)),
+            ("word_wrap", vel_config::json!(wrap)),
+            ("wrap_width", vel_config::json!(14)),
+            ("show_minimap", vel_config::json!(false)),
+        ] {
+            e.settings
+                .set(vel_config::settings::Layer::View, key, value);
+        }
+        e.sync();
+        e
+    }
+    /// Expected bands of a selection on row 0, per visual row: built from the display units
+    /// of each row and the layout's gap tables, with plain loops.
+    fn reference_bands(e: &Editor, v: &View, begin: usize, end: usize) -> Vec<(f64, f64)> {
+        let layout = e.layout.borrow();
+        let line = e.text.line(0).to_string();
+        let units = crate::layout::units(&line, layout.hidden(0), e.preferences.tab_size);
+        let gaps = layout.invisible_gaps(0, &line);
+        let left = v.gutter(e) + v.margin(e) - v.scroll_x;
+        let mut bands = Vec::new();
+        for visual in 0..layout.total() {
+            let (row, subrow) = layout.locate(visual);
+            if row != 0 {
+                continue;
+            }
+            let segment = layout.segment(&e.text, row, subrow);
+            if !(begin <= segment.bytes.end && end > segment.bytes.start) {
+                continue;
+            }
+            let (mut a, mut b) = (0, 0);
+            for unit in units.iter().filter(|u| {
+                u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end
+            }) {
+                let advance = unit.width
+                    + layout.phantom_gap(unit.bytes.start)
+                    + gaps.as_ref().map_or(0, |g| {
+                        crate::layout::Layout::invisible_gap(g, unit.bytes.start)
+                    });
+                if unit.bytes.end <= begin {
+                    a += advance;
+                }
+                if unit.bytes.start < end {
+                    b += advance;
+                }
+            }
+            bands.push((
+                left + (segment.indent + a) as f64 * v.cell,
+                ((b - a) as f64 * v.cell).max(1.),
+            ));
+        }
+        bands
+    }
+    /// Selection bands over invisible-character labels and an inline phantom match the
+    /// reference for every pair of character boundaries, with word wrap off and on (where a
+    /// selection spans wrapped rows); a selected label is always inside its band.
+    #[test]
+    fn selection_bands_cover_labels_and_phantoms_for_every_boundary_pair() {
+        let source = "\u{200b}no\u{a0}break \u{202e}ab\u{202c} end\n";
+        let line = source.trim_end_matches('\n');
+        let bounds: Vec<usize> = line
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([line.len()])
+            .collect();
+        let selection = [
+            0x33 as f32 / 255.,
+            0x66 as f32 / 255.,
+            0xaa as f32 / 255.,
+            1.,
+        ];
+        let mut checked = 0;
+        for wrap in [false, true] {
+            let mut e = square_selection_editor(source, wrap);
+            let hint = line.find(" end").unwrap() + 1;
+            e.run(
+                "add_phantoms",
+                &vel_config::json!({"key":"hint","items":[{"at":hint,"layout":"inline","content":"<b>t</b>"}]}),
+            )
+            .unwrap();
+            let mut v = View::new(
+                Size {
+                    width: 600.,
+                    height: 300.,
+                },
+                8.,
+                12.,
+            );
+            v.focused = true;
+            v.scene(&e);
+            if wrap {
+                assert!(e.layout.borrow().total() > 2, "the line wraps");
+            }
+            for (i, &begin) in bounds.iter().enumerate() {
+                for &end in &bounds[i + 1..] {
+                    e.set_selection(vel_buffer::Selection::from_regions([
+                        vel_buffer::Region::new(begin, end),
+                    ]));
+                    let scene = v.scene(&e);
+                    let mut drawn: Vec<Rect> = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.rects)
+                        .filter(|r| r.color == selection && r.rect.height == v.line_height)
+                        .map(|r| r.rect)
+                        .collect();
+                    drawn.sort_by(|a, b| a.y.total_cmp(&b.y));
+                    let expected = reference_bands(&e, &v, begin, end);
+                    assert_eq!(drawn.len(), expected.len(), "wrap {wrap} [{begin},{end})");
+                    for (rect, (x, width)) in drawn.iter().zip(&expected) {
+                        assert!(
+                            (rect.x - x).abs() < 0.01 && (rect.width - width).abs() < 0.01,
+                            "wrap {wrap} [{begin},{end}): drawn {rect:?}, expected x {x} w {width}"
+                        );
+                    }
+                    // Every label of a selected character lies inside a band.
+                    for chip in scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.rects)
+                        .filter(|r| r.radius == 3.)
+                    {
+                        let inside = drawn.iter().any(|band| {
+                            (band.y - (chip.rect.y - 2.)).abs() < 0.01
+                                && chip.rect.x >= band.x - 0.01
+                                && chip.rect.x + chip.rect.width <= band.x + band.width + 0.01
+                        });
+                        let overlaps = drawn.iter().any(|band| {
+                            (band.y - (chip.rect.y - 2.)).abs() < 0.01
+                                && chip.rect.x < band.x + band.width
+                                && chip.rect.x + chip.rect.width > band.x
+                        });
+                        assert!(
+                            inside || !overlaps,
+                            "wrap {wrap} [{begin},{end}): label cut by the band"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 300, "{checked}");
+    }
+    /// Labels are clipped to the text area: horizontally scrolled, none draws into the gutter.
+    #[test]
+    fn invisible_labels_never_draw_into_the_gutter() {
+        let source = format!("{}\n", "ab\u{200b}cd\u{a0}".repeat(30));
+        let e = square_selection_editor(&source, false);
+        let mut v = View::new(
+            Size {
+                width: 400.,
+                height: 200.,
+            },
+            8.,
+            12.,
+        );
+        let gutter = v.gutter(&e);
+        let mut labels = 0;
+        for step in 0..120 {
+            v.scroll_x = f64::from(step) * 3.;
+            let scene = v.scene(&e);
+            for run in scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|r| r.text.starts_with("<0x"))
+            {
+                labels += 1;
+                assert!(
+                    run.clip.x >= gutter - 0.01,
+                    "scroll {}: {:?}",
+                    v.scroll_x,
+                    run.clip
+                );
+            }
+        }
+        assert!(labels > 0);
+    }
+    /// The image view paints its own paper (sheets are composed without a background), a
+    /// checkerboard bounded by the picture, a hairline frame and a size/zoom footer.
+    #[test]
+    fn image_view_paints_paper_checkerboard_frame_and_footer() {
+        let e = Editor::new(Text::new());
+        for (appearance, size, zoom) in [
+            (Appearance::Light, (800., 600.), "100%"),
+            (Appearance::Dark, (300., 200.), "%"),
+        ] {
+            let mut v = View::new(
+                Size {
+                    width: size.0,
+                    height: size.1,
+                },
+                8.,
+                12.,
+            );
+            v.appearance = appearance;
+            v.image_preview.image = Some(Arc::new(Image {
+                logical_size: [360., 220.],
+                id: 7 | (1 << 63),
+                width: 2,
+                height: 2,
+                rgba: vec![0; 16].into(),
+            }));
+            let scene = v.scene(&e);
+            let paper = v.sheet_colors(&e).background;
+            assert!(scene.layers[0].surfaces.iter().any(|s| matches!(
+                s,
+                Surface::Fill(r) if r.color == paper && r.rect.width == size.0
+            )));
+            let picture = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.surfaces)
+                .find_map(|s| match s {
+                    Surface::Image(q) => Some(q.rect),
+                    _ => None,
+                })
+                .expect("picture");
+            let squares: Vec<_> = scene.layers[0].rects.iter().map(|r| r.rect).collect();
+            assert!(squares.len() > 2);
+            assert!(squares.iter().all(|r| r.x >= picture.x - 0.01
+                && r.x + r.width <= picture.x + picture.width + 0.01
+                && r.y >= picture.y - 0.01
+                && r.y + r.height <= picture.y + picture.height + 0.01));
+            let caption = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .find(|r| r.text.contains("360 × 220 pixels"))
+                .expect("footer caption");
+            assert!(caption.text.ends_with(zoom), "{}", caption.text);
+            assert!(f64::from(caption.baseline) > picture.y + picture.height);
+            assert!(f64::from(caption.baseline) <= size.1);
+        }
+    }
+    /// Invisible characters are rounded chips with the code point; a selection covering them
+    /// spans the labels' full width.
+    #[test]
+    fn invisible_labels_are_chips_and_selections_cover_them() {
+        let mut e = Editor::new(Text::from("a\u{200b}b\u{202e}c\n"));
+        for (key, value) in [
+            ("draw_unicode_white_space", vel_config::json!("all")),
+            ("draw_unicode_bidi", vel_config::json!(true)),
+            ("word_wrap", vel_config::json!(false)),
+            ("show_minimap", vel_config::json!(false)),
+        ] {
+            e.settings
+                .set(vel_config::settings::Layer::View, key, value);
+        }
+        e.sync();
+        let line = e.text.to_string().find('\n').unwrap_or(0);
+        e.set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::new(0, line),
+        ]));
+        let mut v = View::new(
+            Size {
+                width: 600.,
+                height: 200.,
+            },
+            8.,
+            12.,
+        );
+        let scene = v.scene(&e);
+        let labels: Vec<_> = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .filter(|r| r.text.starts_with("<0x"))
+            .map(|r| r.text.clone())
+            .collect();
+        assert_eq!(labels, ["<0x200b>", "<0x202e>"]);
+        let chips = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.rects)
+            .filter(|r| r.radius == 3.)
+            .count();
+        assert_eq!(chips, 2);
+        // a, b and c plus two eight-cell labels.
+        let width = (3 + 8 + 8) as f64 * v.cell;
+        // The selection is drawn as a contour (or plain rects): measure its extent.
+        let selection = color(fallback_scheme(v.appearance), "selection");
+        let xs: Vec<f64> = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.contours)
+            .flat_map(|c| c.points.iter().map(|p| p.x + c.offset.x))
+            .chain(
+                scene
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.rects)
+                    .filter(|r| r.color == selection)
+                    .flat_map(|r| [r.rect.x, r.rect.x + r.rect.width]),
+            )
+            .collect();
+        let band = xs.iter().copied().fold(f64::MIN, f64::max)
+            - xs.iter().copied().fold(f64::MAX, f64::min);
+        // Same measure without labels: the band's own geometry (contour insets) cancels out.
+        let plain = {
+            let mut e = Editor::new(Text::from("abc\n"));
+            e.settings.set(
+                vel_config::settings::Layer::View,
+                "show_minimap",
+                vel_config::json!(false),
+            );
+            e.sync();
+            e.set_selection(vel_buffer::Selection::from_regions([
+                vel_buffer::Region::new(0, 3),
+            ]));
+            let scene = View::new(v.size, 8., 12.).scene(&e);
+            let xs: Vec<f64> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.contours)
+                .flat_map(|c| c.points.iter().map(|p| p.x + c.offset.x))
+                .collect();
+            xs.iter().copied().fold(f64::MIN, f64::max)
+                - xs.iter().copied().fold(f64::MAX, f64::min)
+        };
+        assert!(
+            (band - plain - 16. * v.cell).abs() < 0.01,
+            "band {band}, plain {plain}, labels {width}"
+        );
+    }
     /// Long lines (painted by their own path) put their numbers where every other row does.
     #[test]
     fn long_line_numbers_align_with_the_other_rows() {

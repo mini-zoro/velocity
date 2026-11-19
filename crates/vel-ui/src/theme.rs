@@ -934,11 +934,29 @@ impl ThemeUi {
         }
         fitted.to_string().into()
     }
+    /// The text as [`ThemeUi::text_fit`] would paint it: borrowed (unchanged) when it fits,
+    /// otherwise owned: its longest prefix plus an ellipsis, or empty when not even an ellipsis
+    /// fits.
+    pub fn fit_text<'a>(
+        &self,
+        style: &Style,
+        text: &'a str,
+        max_width: f64,
+    ) -> std::borrow::Cow<'a, str> {
+        if max_width <= 0. {
+            return String::new().into();
+        }
+        match self.fitted(style, text, max_width) {
+            Some(shown) => shown.to_string().into(),
+            None => text.into(),
+        }
+    }
     /// Cached fitting decision: None when `text` fits `max_width` as is.
     fn fitted(&self, style: &Style, text: &str, max_width: f64) -> Option<Arc<str>> {
-        // UI glyphs (including colour emoji) stay below 1.4 em, so short labels fit unmeasured.
+        // UI glyphs (including colour emoji) stay below 1.4 em, so short labels fit unmeasured;
+        // that bound is the only shortcut, however short the label is.
         let bound = text.chars().count() as f64 * f64::from(style.size) * 1.4;
-        if text.len() <= 2 || bound <= max_width {
+        if bound <= max_width {
             return None;
         }
         // Labels are painted every frame; remember each fitting decision.

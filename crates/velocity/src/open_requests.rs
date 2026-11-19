@@ -85,7 +85,7 @@ impl ImageQueue {
     }
 }
 
-fn image_matches(tab: &crate::workspace::Tab, root: &Path, path: &Path) -> bool {
+pub(crate) fn image_matches(tab: &crate::workspace::Tab, root: &Path, path: &Path) -> bool {
     let patterns = tab
         .editor
         .settings
@@ -124,6 +124,8 @@ pub(crate) struct ImagePreview {
     epoch: u64,
     pending: Option<PendingImage>,
     pub image: Option<Arc<vel_render::scene::Image>>,
+    /// The file matched the image patterns but could not be decoded; its bytes are shown.
+    pub failed: bool,
 }
 impl ImagePreview {
     pub fn busy(&self) -> bool {
@@ -156,7 +158,8 @@ impl ImagePreview {
             self.path = path.map(Path::to_owned);
             self.revision = revision;
             self.epoch = epoch;
-            changed = self.image.take().is_some();
+            changed = self.image.take().is_some() || self.failed;
+            self.failed = false;
             self.pending = None;
             if let Some(path) = path {
                 let root = folders
@@ -173,10 +176,15 @@ impl ImagePreview {
             match pending.result.try_recv() {
                 Ok(image) => {
                     self.image = image;
-                    changed |= self.image.is_some();
+                    self.failed = self.image.is_none();
+                    changed = true;
                     self.pending = None;
                 }
-                Err(mpsc::TryRecvError::Disconnected) => self.pending = None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = None;
+                    self.failed = true;
+                    changed = true;
+                }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }

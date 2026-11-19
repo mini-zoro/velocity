@@ -170,6 +170,10 @@ fn main() {
 }
 "#;
 
+/// Invisible characters: zero-width space, no-break space, a right-to-left override and its
+/// terminator, a bell control character.
+const INVISIBLE_RS: &str = "// Characters that are easy to miss.\nlet joined = \"zero\u{200b}width\";\nlet spaced = \"no\u{a0}break\";\nlet flipped = \"\u{202e}reversed\u{202c}\";\nlet bell = \"ding\u{7}\";\nlet plain = \"nothing hidden\";\n";
+
 impl Fixture {
     fn create() -> Result<Self, String> {
         let root = std::env::temp_dir().join("velocity-render-scenes");
@@ -228,6 +232,35 @@ impl Fixture {
             "{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"\n}\n",
         )
         .map_err(|e| e.to_string())?;
+        // Files outside the project folder (so the side bar and Goto stay unchanged): an image
+        // with transparency, a damaged image and a text file with invisible characters.
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+        let (width, height) = (360u32, 220u32);
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                // A soft disc over a transparent field, with a diagonal band.
+                let (dx, dy) = (x as f32 - 130., y as f32 - 110.);
+                let disc = (1. - ((dx * dx + dy * dy).sqrt() - 80.).clamp(0., 1.)) * 255.;
+                let band = ((x + y) / 24) % 2 == 0 && x > 200;
+                let (r, g, b, a) = if disc > 0. {
+                    (58, 132, 196, disc as u8)
+                } else if band {
+                    (233, 160, 64, 210)
+                } else {
+                    (0, 0, 0, 0)
+                };
+                pixels.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+        write_png(&scratch.join("logo.png"), width, height, &pixels)?;
+        std::fs::write(
+            scratch.join("damaged.png"),
+            b"\x89PNG\r\n\x1a\nnot really an image",
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(scratch.join("invisible.rs"), INVISIBLE_RS).map_err(|e| e.to_string())?;
         let project = root.join("sample.sublime-project");
         std::fs::write(&project, r#"{"folders":[{"path":"project"}]}"#)
             .map_err(|e| e.to_string())?;
@@ -240,6 +273,9 @@ impl Fixture {
     }
     fn path(&self, name: &str) -> PathBuf {
         self.root.join("project").join(name)
+    }
+    fn scratch(&self, name: &str) -> PathBuf {
+        self.root.join("scratch").join(name)
     }
 }
 
@@ -574,6 +610,165 @@ fn completion_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     editor.set_caret(at, false);
     named(&mut app, "insert", json!({"characters": "    vi"}));
     named(&mut app, "auto_complete", json!({}));
+    Ok(app)
+}
+
+fn set_view(app: &mut App, key: &str, value: Value) {
+    app.workspace
+        .editor_mut()
+        .settings
+        .set(vel_config::settings::Layer::View, key, value);
+}
+
+/// A completion popup in a short window: the caret sits low in a 280-point window.
+fn completion_short_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    open(&mut app, &fixture.file)?;
+    settle(&mut app);
+    let editor = app.workspace.editor_mut();
+    let at = editor.text.line_to_byte(41);
+    editor.set_caret(at, false);
+    named(&mut app, "insert", json!({"characters": "t"}));
+    named(&mut app, "auto_complete", json!({}));
+    Ok(app)
+}
+
+fn completion_ui2_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = completion_scene(fixture, dark)?;
+    set_view(&mut app, "ui_scale", json!(2.));
+    Ok(app)
+}
+
+fn image_scene(fixture: &Fixture, dark: bool, name: &str) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    open(&mut app, &fixture.file)?;
+    open(&mut app, &fixture.scratch(name))?;
+    settle(&mut app);
+    Ok(app)
+}
+
+/// Invisible characters drawn as boxed hex labels: on the caret line, in a selection and
+/// plain; the minimap shows the same lines.
+fn invisibles_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    open(&mut app, &fixture.scratch("invisible.rs"))?;
+    for (key, value) in [
+        ("draw_unicode_white_space", json!("all")),
+        ("draw_unicode_bidi", json!(true)),
+        ("draw_control_characters", json!(true)),
+    ] {
+        set_view(&mut app, key, value);
+    }
+    settle(&mut app);
+    // The caret on the zero-width-space line; the bidi line selected.
+    let text = app.workspace.editor().text.to_string();
+    let line = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap_or(0);
+    let (caret, selected) = (line("zero"), line("flipped"));
+    let len = text.lines().nth(selected).map_or(0, str::len);
+    select(&mut app, &[(selected, 0, selected, len)]);
+    let editor = app.workspace.editor_mut();
+    let at = editor.text.line_to_byte(caret) + 4;
+    let mut regions = editor.regions();
+    regions.push(vel_buffer::Region::caret(at));
+    editor.set_selection(vel_buffer::Selection::from_regions(regions));
+    Ok(app)
+}
+
+/// `show_scope_name` deep inside main(): a long scope stack.
+fn scope_popup_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    open(&mut app, &fixture.file)?;
+    settle(&mut app);
+    let row = MAIN_RS
+        .lines()
+        .position(|l| l.contains("{step:>2}"))
+        .unwrap_or(0);
+    let column = MAIN_RS
+        .lines()
+        .nth(row)
+        .and_then(|l| l.find("step:"))
+        .unwrap_or(0);
+    select(&mut app, &[(row, column + 2, row, column + 2)]);
+    settle(&mut app);
+    named(&mut app, "show_scope_name", json!({}));
+    Ok(app)
+}
+
+/// Many fitted tabs with two-letter names, some dirty, tab scrolling off.
+fn narrow_tabs_scene(fixture: &Fixture, dark: bool, ui: f64) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    for name in ["src/lib.rs", "src/config.rs", "README.md", "notes.txt"] {
+        open(&mut app, &fixture.path(name))?;
+    }
+    for (i, name) in ["ab", "db", "ok", "x", "go", "id", "ui", "to", "of", "up"]
+        .into_iter()
+        .enumerate()
+    {
+        named(&mut app, "new_file", json!({}));
+        // Every third one stays empty ("Untitled", clean); the others are dirty.
+        if i % 3 != 0 {
+            named(&mut app, "insert", json!({"characters": name}));
+        }
+    }
+    open(&mut app, &fixture.file)?;
+    settle(&mut app);
+    for (key, value) in [
+        ("enable_tab_scrolling", json!(false)),
+        ("ui_scale", json!(ui)),
+    ] {
+        named(
+            &mut app,
+            "set_setting",
+            json!({"setting": key, "value": value}),
+        );
+    }
+    Ok(app)
+}
+
+/// Benchmark: one 12 KB line with a no-break space and 3,000 selections, no wrap.
+fn selections_3000_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    named(&mut app, "new_file", json!({}));
+    let mut line = "word ".repeat(2400);
+    line.replace_range(6000..6001, "\u{a0}");
+    named(&mut app, "insert", json!({"characters": line}));
+    for (key, value) in [
+        ("word_wrap", json!(false)),
+        ("draw_unicode_white_space", json!("all")),
+    ] {
+        set_view(&mut app, key, value);
+    }
+    settle(&mut app);
+    let regions = (0..3000).map(|i| vel_buffer::Region::new(i * 4, i * 4 + 2));
+    app.workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from_regions(regions));
+    Ok(app)
+}
+
+/// Benchmark: 300 rows with four selections each and one inline phantom.
+fn phantom_selections_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    named(&mut app, "new_file", json!({}));
+    let text = "let value = compute(alpha, beta, gamma);\n".repeat(300);
+    named(&mut app, "insert", json!({"characters": text}));
+    settle(&mut app);
+    let editor = app.workspace.editor_mut();
+    let _ = editor.run(
+        "add_phantoms",
+        &json!({"key":"hint","items":[{"at":20,"layout":"inline","content":"<b>x:</b>"}]}),
+    );
+    let regions = (0..300).flat_map(|row| {
+        let start = row * 41;
+        [4, 12, 20, 33].map(|at| vel_buffer::Region::new(start + at, start + at + 3))
+    });
+    editor.set_selection(vel_buffer::Selection::from_regions(regions));
+    Ok(app)
+}
+
+fn sidebar_folders_only_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = sidebar_scene(fixture, dark)?;
+    named(&mut app, "toggle_show_open_files", json!({}));
     Ok(app)
 }
 
@@ -913,6 +1108,66 @@ const SCENARIOS: &[Scenario] = &[
         build: |f, d| overlay_scene(f, d, "goto", "rs"),
     },
     Scenario {
+        name: "completion_short",
+        size: (1000., 280.),
+        build: completion_short_scene,
+    },
+    Scenario {
+        name: "completion_ui2",
+        size: (1200., 800.),
+        build: completion_ui2_scene,
+    },
+    Scenario {
+        name: "image_view",
+        size: (1000., 640.),
+        build: |f, d| image_scene(f, d, "logo.png"),
+    },
+    Scenario {
+        name: "image_fallback",
+        size: (1000., 640.),
+        build: |f, d| image_scene(f, d, "damaged.png"),
+    },
+    Scenario {
+        name: "invisibles",
+        size: (1000., 480.),
+        build: invisibles_scene,
+    },
+    Scenario {
+        name: "scope_popup",
+        size: (1200., 800.),
+        build: scope_popup_scene,
+    },
+    Scenario {
+        name: "narrow_tabs",
+        size: (640., 400.),
+        build: |f, d| narrow_tabs_scene(f, d, 1.),
+    },
+    Scenario {
+        name: "narrow_tabs_ui2",
+        size: (1200., 500.),
+        build: |f, d| narrow_tabs_scene(f, d, 2.),
+    },
+    Scenario {
+        name: "sidebar_narrow",
+        size: (320., 520.),
+        build: sidebar_scene,
+    },
+    Scenario {
+        name: "sidebar_folders_only",
+        size: (1000., 560.),
+        build: sidebar_folders_only_scene,
+    },
+    Scenario {
+        name: "selections_3000",
+        size: (1200., 800.),
+        build: selections_3000_scene,
+    },
+    Scenario {
+        name: "phantom_selections",
+        size: (1200., 800.),
+        build: phantom_selections_scene,
+    },
+    Scenario {
         name: "build_output",
         size: (1200., 800.),
         build: output_scene,
@@ -1076,6 +1331,9 @@ fn settle(app: &mut App) {
             {
                 reasons.push(format!("{} highlighting", tab.label()));
             }
+        }
+        if app.view.image_preview.busy() {
+            reasons.push("image decode".into());
         }
         if reasons.is_empty() {
             quiet += 1;

@@ -128,6 +128,9 @@ pub struct App {
     visible_view_keys: Vec<(u64, u64, u64, usize)>,
     visible_view_scratch: Vec<(u64, u64, u64, usize)>,
     tab_close_hits: Vec<(u64, Rect)>,
+    /// Where the last click selected a tab: revealing that tab may slide the strip under the
+    /// pointer, and the second click of a double click still means the same tab.
+    tab_click: Option<(Point, u64)>,
     /// Pointer-hovered tab close button and tab-bar button, for their theme hover states.
     hovered_close: Option<u64>,
     hovered_tab_button: Option<(usize, &'static str)>,
@@ -175,6 +178,8 @@ pub struct App {
     first_scanout: FirstScanout,
     waiting_since: Option<Instant>,
 }
+/// Shown when an image file cannot be decoded and its bytes are shown instead.
+pub(crate) const IMAGE_FALLBACK_NOTE: &str = "Not shown as an image: unsupported or damaged";
 impl App {
     /// Restores retained documents before a temporary native receiver can write the profile.
     pub(crate) fn take_over_native_primary(
@@ -312,6 +317,7 @@ impl App {
             visible_view_keys: Vec::new(),
             visible_view_scratch: Vec::new(),
             tab_close_hits: Vec::new(),
+            tab_click: None,
             hovered_close: None,
             hovered_tab_button: None,
             revealed_tabs: Vec::new(),
@@ -2211,7 +2217,12 @@ impl App {
     }
     fn sync_active_view(&mut self) {
         let current = self.workspace.tabs[self.workspace.active].sheet;
-        if self.view_buffer != Some(current) {
+        let switched = self.view_buffer != Some(current);
+        if switched {
+            // The undecodable-image note belongs to the document it was shown for.
+            if self.panels.message == IMAGE_FALLBACK_NOTE {
+                self.panels.message.clear();
+            }
             register_window_commands(self.workspace.editor_mut());
             if let Some(old) = self.view_buffer {
                 self.save_on_focus_lost(Some(old));
@@ -2276,12 +2287,16 @@ impl App {
         self.initialize_view_metrics();
         self.view.apply_style(self.workspace.editor());
         let tab = &self.workspace.tabs[self.workspace.active];
-        if self.view.image_preview.sync(tab, &self.workspace.folders)
-            && let Some(image) = &self.view.image_preview.image
-        {
+        let synced = self.view.image_preview.sync(tab, &self.workspace.folders);
+        let active = self.workspace.active;
+        self.workspace.tabs[active].image_failed = self.view.image_preview.failed;
+        if let Some(image) = self.view.image_preview.image.as_ref().filter(|_| synced) {
             let [width, height] = image.logical_size;
             self.panels.set_message(format!("{width} × {height}"));
+        } else if self.view.image_preview.failed && (synced || switched) {
+            self.panels.set_message(IMAGE_FALLBACK_NOTE.to_owned());
         }
+        let tab = &self.workspace.tabs[active];
         if tab.loading.is_none() && tab.binary_loading.is_none() {
             self.view.finish_scroll_restore(&tab.editor);
         }
@@ -2640,6 +2655,7 @@ impl App {
                 if *sheet != focused {
                     view.image_preview
                         .sync(&self.workspace.tabs[index], &self.workspace.folders);
+                    self.workspace.tabs[index].image_failed = view.image_preview.failed;
                     if view.image_preview.busy() {
                         self.inactive_image_decodes.insert(*sheet);
                     } else {
@@ -2799,26 +2815,34 @@ impl App {
                         settings,
                     );
                     let icon = crate::panels::tab_icon(&self.workspace, tab);
-                    let narrow = rect.width < 48.;
+                    let s = self.panels.ui_scale;
+                    let narrow = rect.width < 48. * s;
                     // Close buttons follow show_tab_close_buttons; narrow fitted tabs keep
                     // their entire target for selecting the tab.
                     let close_left = tab_style.close_left;
                     let close_rect = Rect {
                         x: if close_left {
-                            rect.x + 6.
+                            rect.x + 6. * s
                         } else {
-                            rect.x + rect.width - 26.
+                            rect.x + rect.width - 26. * s
                         },
-                        y: rect.y + ((rect.height - 20.) / 2.).round(),
-                        width: 20.,
-                        height: 20.,
+                        y: rect.y + ((rect.height - 20. * s) / 2.).round(),
+                        width: 20. * s,
+                        height: 20. * s,
                     };
-                    // The close button exists only where it is entirely visible: tabs clipped
-                    // by the strip edge (or the scroll / new-tab buttons) get no target there.
+                    // The close button exists only where it is entirely visible (tabs clipped
+                    // by the strip edge or the scroll / new-tab buttons get no target there)
+                    // and leaves the middle of the visible tab free: a click on the centre of
+                    // a tab always selects it, however narrow or clipped the tab is.
+                    let middle = hit.x + hit.width / 2.;
                     let has_close = settings.bool("show_tab_close_buttons", true)
-                        && rect.width >= 28.
                         && close_rect.x >= hit.x
-                        && close_rect.x + close_rect.width <= hit.x + hit.width;
+                        && close_rect.x + close_rect.width <= hit.x + hit.width
+                        && if close_left {
+                            close_rect.x + close_rect.width < middle
+                        } else {
+                            close_rect.x > middle
+                        };
                     let close_left = has_close && close_left;
                     // A 16-DIP file icon, a label that ends before the close button, and a
                     // 20-DIP close target; all vertically centred in the tab.
@@ -2827,10 +2851,10 @@ impl App {
                             &mut chrome,
                             icon,
                             Rect {
-                                x: rect.x + if close_left { 30. } else { 10. },
-                                y: rect.y + ((rect.height - 16.) / 2.).round(),
-                                width: 16.,
-                                height: 16.,
+                                x: rect.x + if close_left { 30. } else { 10. } * s,
+                                y: rect.y + ((rect.height - 16. * s) / 2.).round(),
+                                width: 16. * s,
+                                height: 16. * s,
                             },
                             hit,
                             label.foreground,
@@ -2852,14 +2876,14 @@ impl App {
                     };
                     let bullet = !has_close && tab.dirty() && tab.progress().is_none();
                     let label_x = rect.x
-                        + if close_left {
+                        + (if close_left {
                             30.
                         } else if narrow {
                             4.
                         } else {
                             10.
-                        }
-                        + if icon.is_some() && !narrow { 22. } else { 2. };
+                        } + if icon.is_some() && !narrow { 22. } else { 2. })
+                            * s;
                     // Labels (and a dirty bullet) end inside the visible part of the tab.
                     let label_end = (rect.x + rect.width).min(hit.x + hit.width)
                         - if has_close && !close_left {
@@ -2868,17 +2892,25 @@ impl App {
                             2.
                         } else {
                             10.
-                        };
+                        } * s;
                     let baseline = rect.y + f64::from(label.size) + 8. * self.panels.ui_scale;
                     let label_clip = Rect {
                         width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
                         ..rect
                     };
                     let label_end = if bullet {
+                        // Right-aligned before the label's end; in a tab too narrow for that,
+                        // centred in the visible part, and only when it fits there at all.
                         let width = theme.advance(&label, "•");
-                        let x = (label_end - width).max(hit.x + 1.);
-                        theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
-                        x - 3.
+                        let x = if label_end - width >= hit.x + 1. {
+                            label_end - width
+                        } else {
+                            hit.x + (hit.width - width) / 2.
+                        };
+                        if width <= hit.width {
+                            theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
+                        }
+                        x - 3. * s
                     } else {
                         label_end
                     };

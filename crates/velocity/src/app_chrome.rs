@@ -285,6 +285,601 @@ mod tests {
         }
         assert!(checked > 0);
     }
+    fn press(a: &mut App, at: Point) {
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            a.handle_mouse_event(
+                None,
+                MouseEvent {
+                    position: at,
+                    kind,
+                    button: 0,
+                    click_count: 1,
+                    modifiers: vel_platform::Modifiers(0),
+                    timestamp: 0.,
+                },
+            );
+        }
+    }
+    fn clean_tabs(count: usize, width: f64, ui: f64, scrolling: bool) -> App {
+        let options = Options::default();
+        let mut workspace =
+            Workspace::new(vel_text::Text::new(), None, None, false).expect("workspace");
+        for _ in 1..count {
+            workspace.new_file().expect("tab");
+        }
+        for (key, value) in [
+            ("ui_scale", json!(ui)),
+            ("enable_tab_scrolling", json!(scrolling)),
+        ] {
+            workspace
+                .settings
+                .set(vel_config::settings::Layer::User, key, value.clone());
+            for tab in &mut workspace.tabs {
+                tab.editor
+                    .settings
+                    .set(vel_config::settings::Layer::User, key, value.clone());
+            }
+        }
+        let mut a = App::new(
+            options.clone(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            Reporter::for_options(&options, Instant::now()).expect("reporter"),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
+        );
+        a.window_size = Size {
+            width,
+            height: 600.,
+        };
+        a.scene();
+        a
+    }
+    /// A double click on a partly visible tab: the first click reveals the tab and slides the
+    /// strip, the second still belongs to it and never closes or selects a neighbour.
+    #[test]
+    fn double_click_stays_on_the_tab_that_the_first_click_revealed() {
+        let mut a = clean_tabs(12, 800., 1., true);
+        a.workspace.workbench.groups[0].tab_scroll = 90.;
+        a.scene();
+        let (sheet, hit) = *a.tab_hits.first().expect("clipped first tab");
+        let at = Point {
+            x: hit.x + hit.width / 2.,
+            y: hit.y + hit.height / 2.,
+        };
+        for clicks in [1, 2] {
+            for kind in [MouseKind::Down, MouseKind::Up] {
+                a.handle_mouse_event(
+                    None,
+                    MouseEvent {
+                        position: at,
+                        kind,
+                        button: 0,
+                        click_count: clicks,
+                        modifiers: vel_platform::Modifiers(0),
+                        timestamp: 0.,
+                    },
+                );
+            }
+            a.scene();
+        }
+        assert_eq!(a.workspace.tabs.len(), 12);
+        assert_eq!(a.workspace.workbench.groups[0].focused, Some(sheet));
+    }
+    /// The click map agrees with the painted strip: every painted tab's centre selects that
+    /// tab and never closes it, and every close button's centre closes exactly that tab.
+    #[test]
+    fn every_painted_tab_and_close_button_centre_hits_itself() {
+        let mut failures = Vec::new();
+        let mut clicks = 0;
+        for width in [400., 520., 640., 800., 1000., 1200., 1400.] {
+            for count in [1, 2, 3, 5, 8, 12, 16, 20, 30, 40] {
+                for scrolling in [true, false] {
+                    for ui in [1., 2.] {
+                        let label = format!("{width}w {count} tabs scroll={scrolling} ui{ui}");
+                        let mut a = clean_tabs(count, width, ui, scrolling);
+                        // Each centre comes from the frame the click lands on.
+                        for position in 0..count {
+                            a.scene();
+                            let sheets = a.workspace.workbench.groups[0].sheets.clone();
+                            let Some((sheet, hit)) = a
+                                .tab_hits
+                                .iter()
+                                .find(|(s, _)| *s == sheets[position])
+                                .copied()
+                            else {
+                                continue;
+                            };
+                            let centre = Point {
+                                x: hit.x + hit.width / 2.,
+                                y: hit.y + hit.height / 2.,
+                            };
+                            press(&mut a, centre);
+                            clicks += 1;
+                            let focused = a.workspace.workbench.groups[0].focused;
+                            if a.workspace.tabs.len() != count {
+                                failures
+                                    .push(format!("{label}: centre of {position} closed a tab"));
+                                break;
+                            }
+                            if focused != Some(sheet) {
+                                failures.push(format!(
+                                    "{label}: centre of {position} selected {focused:?}"
+                                ));
+                            }
+                        }
+                        // Close buttons, each from a fresh frame, until none is painted.
+                        let mut left = a.workspace.tabs.len();
+                        while left > 1 {
+                            a.scene();
+                            let Some((sheet, close)) = a.tab_close_hits.last().copied() else {
+                                break;
+                            };
+                            press(
+                                &mut a,
+                                Point {
+                                    x: close.x + close.width / 2.,
+                                    y: close.y + close.height / 2.,
+                                },
+                            );
+                            clicks += 1;
+                            left -= 1;
+                            if a.workspace.tabs.len() != left
+                                || a.workspace.sheet_index(sheet).is_some()
+                            {
+                                failures.push(format!("{label}: close of {sheet} missed"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(clicks > 1000, "{clicks}");
+        assert!(
+            failures.is_empty(),
+            "{} of {clicks}:\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(40)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    fn run_width(a: &App, run: &vel_render::scene::TextRun) -> f64 {
+        use vel_minihtml::FontMetrics;
+        let style = vel_minihtml::TextStyle {
+            font_family: run.family.clone().unwrap_or_else(|| "monospace".into()),
+            font_size: run.size,
+            font_weight: if run.style.bold { 700 } else { 400 },
+            italic: run.style.italic,
+            underline: false,
+            color: vel_minihtml::Color::rgb(255, 255, 255),
+        };
+        let metrics = a.workspace.themes.ui.borrow().metrics.clone();
+        f64::from(metrics.measure(&run.text, &style).advance)
+    }
+    /// Two-letter labels are measured like any other: with 18+ fitted tabs they never run
+    /// into the close button or the dirty dot, at UI scale 1 and 2.
+    #[test]
+    fn short_tab_labels_are_fitted_too() {
+        let mut checked = 0;
+        for ui in [1., 2.] {
+            for count in [18, 22, 26] {
+                let mut a = clean_tabs(count, 1200., ui, false);
+                for index in 0..a.workspace.tabs.len() {
+                    a.workspace.select(index);
+                    a.workspace
+                        .editor_mut()
+                        .run("insert", &json!({"characters": "ab"}))
+                        .expect("edit");
+                }
+                let scene = a.scene();
+                for (sheet, tab) in a.tab_hits.clone() {
+                    let close = a
+                        .tab_close_hits
+                        .iter()
+                        .find(|(s, _)| *s == sheet)
+                        .map(|c| c.1);
+                    let runs: Vec<_> = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.text)
+                        .filter(|r| {
+                            !r.text.is_empty()
+                                && f64::from(r.x) >= tab.x
+                                && f64::from(r.x) < tab.x + tab.width
+                                && f64::from(r.baseline) > tab.y
+                                && f64::from(r.baseline) < tab.y + tab.height
+                        })
+                        .collect();
+                    let bullet = runs.iter().find(|r| r.text == "•").map(|r| f64::from(r.x));
+                    let limit = close.map(|c| c.x).or(bullet).unwrap_or(tab.x + tab.width);
+                    for run in runs.iter().filter(|r| r.text != "•") {
+                        let end = f64::from(run.x) + run_width(&a, run);
+                        assert!(
+                            end <= limit + 0.01,
+                            "ui{ui} {count}: {:?} ends at {end}, limit {limit}",
+                            run.text
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
+    /// In the reproduction window (1000 × 280, caret on line 42) the completion popup stays
+    /// below the tab bar, and a click on the tab bar never commits a hidden row.
+    #[test]
+    fn completion_popup_stays_out_of_the_tab_bar_in_short_windows() {
+        let options = Options::default();
+        let text = (1..=80)
+            .map(|i| format!("let token_{i} = {i};\n"))
+            .collect::<String>();
+        let mut workspace = Workspace::new(vel_text::Text::from(text.as_str()), None, None, false)
+            .expect("workspace");
+        workspace.set_file_type("Rust").expect("syntax");
+        let mut a = App::new(
+            options.clone(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            Reporter::for_options(&options, Instant::now()).expect("reporter"),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
+        );
+        a.window_size = Size {
+            width: 1000.,
+            height: 280.,
+        };
+        a.scene();
+        let at = a.workspace.editor().text.line_to_byte(41);
+        a.workspace.editor_mut().set_caret(at, false);
+        a.workspace
+            .editor_mut()
+            .run("insert", &json!({"characters": "t"}))
+            .expect("type");
+        a.workspace
+            .editor_mut()
+            .run("auto_complete", &json!({}))
+            .expect("complete");
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !a.workspace.editor().completion.visible() {
+            a.workspace.editor_mut().poll_language();
+            a.workspace.editor_mut().poll_completion();
+            assert!(Instant::now() < deadline, "no completions");
+            std::thread::park_timeout(std::time::Duration::from_millis(2));
+        }
+        a.scene();
+        let popup = a.workspace.editor().completion.bounds.get();
+        assert!(popup.y >= a.view.tab_height - 0.01, "{popup:?}");
+        assert!(
+            popup.y + popup.height <= a.view.size.height + 0.01,
+            "{popup:?}"
+        );
+        let before = a.workspace.editor().text.to_string();
+        let (_, tab) = a.tab_hits[0];
+        let at = Point {
+            x: a.content.x + popup.x + 40.,
+            y: tab.y + tab.height / 2.,
+        };
+        press(&mut a, at);
+        assert_eq!(a.workspace.editor().text.to_string(), before);
+    }
+    /// Narrow side bars: Git badges stay, labels shorten (to nothing), icons and disclosure
+    /// triangles are left out before they would overlap a badge; indent guides sit under
+    /// the ancestors' triangles.
+    #[test]
+    fn narrow_side_bar_keeps_badges_and_drops_overlapping_icons() {
+        use vel_git::{Badge, FileStatus, Head, StatusSnapshot};
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().canonicalize().expect("root");
+        for name in [
+            "src/db",
+            "src/render/mod.rs",
+            "src/render/deep/ab",
+            "README.md",
+        ] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, "x\n").expect("file");
+        }
+        let mut a = clean_tabs(1, 1000., 1., true);
+        a.run_named(None, "add_folder", &json!({"dir": root}));
+        a.panels.side_visible = true;
+        let deep = root.join("src/render/deep/ab");
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let _ = a.panels.reveal_sidebar_path(&mut a.workspace, deep.clone());
+            let viewport = a.viewport();
+            a.panels.poll(&mut a.workspace, viewport);
+            if a.panels.side_rows.iter().any(|r| r.path == deep) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "tree never listed {deep:?}");
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        let mut files = std::collections::BTreeMap::new();
+        for name in [
+            "src/db",
+            "src/render/mod.rs",
+            "src/render/deep/ab",
+            "README.md",
+        ] {
+            files.insert(
+                std::path::PathBuf::from(name),
+                FileStatus {
+                    statuses: [Badge::Modified].into_iter().collect(),
+                },
+            );
+        }
+        let mut folders = std::collections::BTreeMap::new();
+        for name in ["", "src", "src/render", "src/render/deep"] {
+            folders.insert(std::path::PathBuf::from(name), Badge::Modified);
+        }
+        a.workspace.git.insert_snapshot(StatusSnapshot {
+            root: root.clone(),
+            generation: 1,
+            head: Head::Branch {
+                name: "main".into(),
+                unborn: false,
+            },
+            ahead_behind: None,
+            files,
+            folders,
+        });
+        let mut guides = 0;
+        for width in [320., 360., 400., 480., 560., 740.] {
+            a.window_size = Size {
+                width,
+                height: 600.,
+            };
+            let scene = a.scene();
+            let side = a.panels.side_bounds;
+            let inside = |x: f64| x >= side.x && x < side.x + side.width;
+            let badges: Vec<_> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|r| r.text == "M" && inside(f64::from(r.x)))
+                .collect();
+            assert!(badges.len() >= 6, "{width}: {} badges", badges.len());
+            for badge in &badges {
+                let (x, baseline) = (f64::from(badge.x), f64::from(badge.baseline));
+                let row_top = baseline - 17. * a.panels.ui_scale;
+                let row = |y: f64, h: f64| y < row_top + 24. && y + h > row_top;
+                for run in scene.layers.iter().flat_map(|l| &l.text).filter(|r| {
+                    r.baseline == badge.baseline && r.x < badge.x && inside(f64::from(r.x))
+                }) {
+                    let end = f64::from(run.x) + run_width(&a, run);
+                    assert!(
+                        end <= x + 0.01,
+                        "{width}: {:?} runs into the badge",
+                        run.text
+                    );
+                }
+                for surface in scene.layers.iter().flat_map(|l| &l.surfaces) {
+                    // Icons only (not the side bar's hairline edge textures).
+                    let rect = match surface {
+                        vel_render::scene::Surface::Image(q)
+                            if q.rect.width >= 8. && q.rect.height <= 24. =>
+                        {
+                            q.rect
+                        }
+                        _ => continue,
+                    };
+                    if inside(rect.x) && row(rect.y, rect.height) {
+                        assert!(
+                            rect.x + rect.width <= x - 1.,
+                            "{width}: icon {rect:?} under the badge at {x}"
+                        );
+                    }
+                }
+            }
+            // Hairline guides: one per ancestor level of each nested row.
+            guides += scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.surfaces)
+                .filter(|s| matches!(s, vel_render::scene::Surface::Fill(r) if r.rect.width == 1. && inside(r.rect.x) && r.rect.height >= 23.))
+                .count();
+        }
+        assert!(guides > 0, "no indent guides");
+    }
+    fn write_png(path: &std::path::Path) {
+        image::RgbaImage::from_pixel(6, 4, image::Rgba([40, 120, 200, 255]))
+            .save(path)
+            .expect("png");
+    }
+    fn open_path(a: &mut App, path: &std::path::Path) {
+        a.workspace
+            .open(crate::cli::FileLocation {
+                path: path.to_owned(),
+                line: 1,
+                column: 1,
+            })
+            .expect("open");
+    }
+    /// Frames until the visible tabs finished loading and decoding.
+    fn settle_images(a: &mut App) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            a.workspace.poll();
+            a.scene();
+            let loading = a
+                .workspace
+                .tabs
+                .iter()
+                .any(|t| t.loading.is_some() || t.binary_loading.is_some());
+            if !loading && !a.view.image_preview.busy() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "images never settled");
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+    }
+    /// Image tabs are named by the file, before and after decoding, whether or not they
+    /// were ever shown; only an image whose decode failed (and whose bytes are shown) says
+    /// "[hex]". The failure note goes away with the document it was shown for.
+    #[test]
+    fn image_tabs_say_hex_only_after_a_failed_decode() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (first, broken, second) = (
+            dir.path().join("first.png"),
+            dir.path().join("broken.png"),
+            dir.path().join("second.png"),
+        );
+        write_png(&first);
+        write_png(&second);
+        std::fs::write(&broken, b"\x89PNG\r\n\x1a\nnot an image").expect("broken");
+        let mut a = clean_tabs(1, 1000., 1., true);
+        let labels = |a: &App| {
+            a.workspace
+                .tabs
+                .iter()
+                .filter(|t| t.path.is_some())
+                .map(|t| t.label())
+                .collect::<Vec<_>>()
+        };
+        // Opened in turn without a frame in between: none was decoded yet.
+        for path in [&first, &broken, &second] {
+            open_path(&mut a, path);
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while a.workspace.tabs.iter().any(|t| t.binary_loading.is_some()) {
+            a.workspace.poll();
+            assert!(Instant::now() < deadline);
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(labels(&a), ["first.png", "broken.png", "second.png"]);
+        settle_images(&mut a);
+        // Each shown in turn, as a user clicking through them.
+        for name in ["first.png", "broken.png", "second.png"] {
+            let index = a
+                .workspace
+                .tabs
+                .iter()
+                .position(|t| t.label().starts_with(name))
+                .expect("tab");
+            a.workspace.select(index);
+            settle_images(&mut a);
+            let failed = name == "broken.png";
+            assert_eq!(
+                a.panels.message == crate::app::IMAGE_FALLBACK_NOTE,
+                failed,
+                "{name}: {:?}",
+                a.panels.message
+            );
+        }
+        assert_eq!(labels(&a), ["first.png", "broken.png [hex]", "second.png"]);
+        // From the damaged image back to a decoded one: the note does not linger.
+        let index = a
+            .workspace
+            .tabs
+            .iter()
+            .position(|t| t.label() == "broken.png [hex]")
+            .expect("broken");
+        a.workspace.select(index);
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, crate::app::IMAGE_FALLBACK_NOTE);
+        let index = a
+            .workspace
+            .tabs
+            .iter()
+            .position(|t| t.label() == "first.png")
+            .expect("first");
+        a.workspace.select(index);
+        settle_images(&mut a);
+        assert_ne!(a.panels.message, crate::app::IMAGE_FALLBACK_NOTE);
+    }
+    /// Image and hex views paint the active colour scheme's paper, not a built-in one.
+    #[test]
+    fn image_and_hex_views_use_the_active_scheme() {
+        let dir = tempfile::tempdir().expect("dir");
+        let profile = dir.path().join("profile");
+        let user = profile.join("Packages/User");
+        std::fs::create_dir_all(&user).expect("user");
+        std::fs::write(
+            user.join("Preferences.sublime-settings"),
+            r#"{"color_scheme":"Paper.sublime-color-scheme"}"#,
+        )
+        .expect("prefs");
+        std::fs::write(
+            user.join("Paper.sublime-color-scheme"),
+            r##"{"globals":{"background":"#204060","foreground":"#f0e0d0"}}"##,
+        )
+        .expect("scheme");
+        let (picture, broken) = (dir.path().join("p.png"), dir.path().join("b.png"));
+        write_png(&picture);
+        std::fs::write(&broken, b"\x89PNG\r\n\x1a\nnot an image").expect("broken");
+        let options = Options::default();
+        let mut workspace =
+            Workspace::new(vel_text::Text::new(), Some(profile.clone()), None, false)
+                .expect("workspace");
+        workspace.wait_resources();
+        let mut a = App::new(
+            options.clone(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            Reporter::for_options(&options, Instant::now()).expect("reporter"),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(
+                Some(profile.as_path()),
+            ))),
+        );
+        let paper = [
+            0x20 as f32 / 255.,
+            0x40 as f32 / 255.,
+            0x60 as f32 / 255.,
+            1.,
+        ];
+        for path in [&picture, &broken] {
+            open_path(&mut a, path);
+            settle_images(&mut a);
+            let scene = a.scene();
+            let painted = scene.layers.iter().flat_map(|l| &l.surfaces).any(|s| {
+                matches!(s, vel_render::scene::Surface::Fill(r)
+                    if r.color == paper && r.rect.width >= a.content.width - 1.)
+            });
+            assert!(painted, "{}: no scheme paper", path.display());
+        }
+    }
+    /// The dirty dot of a very narrow fitted tab stays inside the tab (or is left out when
+    /// even it does not fit).
+    #[test]
+    fn dirty_dots_stay_inside_very_narrow_tabs() {
+        let mut checked = 0;
+        for count in [120, 160, 220] {
+            let mut a = clean_tabs(count, 1200., 1., false);
+            for index in 0..a.workspace.tabs.len() {
+                a.workspace.select(index);
+                a.workspace
+                    .editor_mut()
+                    .run("insert", &json!({"characters": "x"}))
+                    .expect("edit");
+            }
+            let scene = a.scene();
+            for (_, tab) in a.tab_hits.clone() {
+                for dot in scene.layers.iter().flat_map(|l| &l.text).filter(|r| {
+                    r.text == "•"
+                        && f64::from(r.x) >= tab.x - 2.
+                        && f64::from(r.x) < tab.x + tab.width
+                        && f64::from(r.baseline) > tab.y
+                        && f64::from(r.baseline) < tab.y + tab.height
+                }) {
+                    let (x, end) = (f64::from(dot.x), f64::from(dot.x) + run_width(&a, dot));
+                    assert!(
+                        x >= tab.x - 0.01 && end <= tab.x + tab.width + 0.01,
+                        "{count} tabs: dot {x}..{end} in {tab:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 100, "{checked}");
+    }
     #[test]
     fn narrow_fitted_tabs_keep_the_dirty_marker() {
         let mut a = app(80);

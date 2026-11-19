@@ -319,14 +319,29 @@ impl Editor {
                 .replace('>', "&gt;")
                 .replace('\'', "&#39;")
         };
-        let body = scopes
+        // One monospace block, outermost scope first; the innermost one (the scope the caret
+        // is in) reads strongest. The link copies the whole stack as one line.
+        let (inner, outer) = scopes
+            .split_last()
+            .map_or((None, &[][..]), |(i, o)| (Some(i), o));
+        let outer = outer
             .iter()
-            .map(|s| escape(s))
-            .collect::<Vec<_>>()
-            .join("<br>");
+            .map(|s| format!("{}<br>", escape(s)))
+            .collect::<String>();
+        let inner = inner.map(|s| escape(s)).unwrap_or_default();
         let args = escape(&json!({"scopes":scopes.join(" ")}).to_string());
         format!(
-            "<p><code>{body}</code></p><p><a href='subl:copy_scope_name {args}'>Copy scope</a></p>"
+            "<style>.scopes{{font-family:monospace;background-color:color(var(--foreground) \
+             alpha(0.06));border-radius:4px;padding:6px 8px;margin:0 0 6px 0}}\
+             .outer{{color:color(var(--foreground) alpha(0.62))}}\
+             .meta{{color:color(var(--foreground) alpha(0.62))}}</style>\
+             <div class='scopes'><span class='outer'>{outer}</span><b>{inner}</b></div>\
+             <div><a href='subl:copy_scope_name {args}'>Copy scope</a> \
+             <span class='meta'>· {}</span></div>",
+            match scopes.len() {
+                1 => "1 scope".to_owned(),
+                n => format!("{n} scopes, outermost first"),
+            }
         )
     }
 }
@@ -596,6 +611,47 @@ pub fn sheet(editor: &Editor, view: &View) -> Option<Scene> {
     Some(scene)
 }
 
+/// The longest prefix of `message` (with an ellipsis when shortened) whose annotation, with
+/// its 12 points of padding, fits `room`; None when not even the ellipsis fits.
+fn fit_annotation(
+    metrics: &impl vel_minihtml::FontMetrics,
+    message: &str,
+    font_size: f64,
+    room: f64,
+) -> Option<String> {
+    let style = vel_minihtml::TextStyle {
+        font_family: "system-ui".into(),
+        font_size: font_size as f32,
+        font_weight: 400,
+        italic: false,
+        underline: false,
+        color: vel_minihtml::Color::rgb(0, 0, 0),
+    };
+    let width = |text: &str| f64::from(metrics.measure(text, &style).advance) + 12.;
+    if width(message) <= room {
+        return Some(message.to_owned());
+    }
+    let bounds: Vec<usize> = message.char_indices().map(|(i, _)| i).skip(1).collect();
+    let (mut low, mut high) = (0, bounds.len());
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if width(&format!(
+            "{}\u{2026}",
+            message[..bounds[mid - 1]].trim_end()
+        )) <= room
+        {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    if low > 0 {
+        Some(format!("{}\u{2026}", message[..bounds[low - 1]].trim_end()))
+    } else {
+        (width("\u{2026}") <= room).then(|| "\u{2026}".to_owned())
+    }
+}
+
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -632,13 +688,25 @@ pub fn paint_build_errors<'a>(
         if end.y < view.tab_height || end.y >= view.size.height {
             continue;
         }
+        let theme = editor.theme.borrow();
+        // One line, ending before the minimap: a message longer than the room right of the
+        // code is shortened with an ellipsis (the full text is in the build output panel).
+        let room = (clip.x + clip.width - (end.x + end.width + 8.) - 3.).min(clip.width * 0.6);
+        let Some(message) = fit_annotation(
+            &*theme.metrics,
+            &d.message,
+            editor.preferences.font_size,
+            room,
+        ) else {
+            continue;
+        };
         let source = format!(
-            "<span style='padding:2px 6px;color:var(--redish)' title='Build diagnostic'>{}</span>",
-            escape(&d.message)
+            "<span style='padding:2px 6px;color:var(--redish);white-space:nowrap' \
+             title='Build diagnostic'>{}</span>",
+            escape(&message)
         );
         let mut html = editor.html.borrow_mut();
-        let options = options(editor, clip.width * 0.55, false);
-        let theme = editor.theme.borrow();
+        let options = options(editor, clip.width, false);
         if let Ok(content) = html.cached(&source, false) {
             content.layout(&options, theme.revision, &theme.metrics);
             vel_ui::minihtml::paint_annotation(
@@ -649,5 +717,64 @@ pub fn paint_build_errors<'a>(
                 clip,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// The scope popup counts its scopes in words: "1 scope", "9 scopes, outermost first".
+    #[test]
+    fn scope_popup_counts_in_words() {
+        let mut e = Editor::new(vel_text::Text::from("x"));
+        e.attach_language(
+            crate::language::Assets::bundled().unwrap(),
+            "Plain Text",
+            std::sync::Arc::new(vel_color_scheme::ColorScheme::velocity_dark()),
+        )
+        .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            e.poll_language();
+            e.run("show_scope_name", &json!({})).unwrap();
+            let html = e.html.borrow().popup.as_ref().unwrap().html.source.clone();
+            if !html.contains("not ready") {
+                assert!(html.contains("· 1 scope<"), "{html}");
+                assert!(!html.contains("1 scopes"), "{html}");
+                break;
+            }
+            assert!(std::time::Instant::now() < until);
+            std::thread::park_timeout(std::time::Duration::from_millis(2));
+        }
+    }
+    /// Build errors right of long lines are shortened to the room before the minimap.
+    #[test]
+    fn annotation_messages_fit_the_room_left_of_the_minimap() {
+        use vel_minihtml::FontMetrics;
+        let metrics = vel_ui::minihtml::Metrics::default();
+        let style = vel_minihtml::TextStyle {
+            font_family: "system-ui".into(),
+            font_size: 13.,
+            font_weight: 400,
+            italic: false,
+            underline: false,
+            color: vel_minihtml::Color::rgb(0, 0, 0),
+        };
+        let message = "mismatched types: expected `&Task`, found `Option<&&Task>`";
+        let full = f64::from(metrics.measure(message, &style).advance) + 12.;
+        assert_eq!(
+            fit_annotation(&metrics, message, 13., full).as_deref(),
+            Some(message)
+        );
+        for room in [full - 1., full / 2., 80., 30.] {
+            let shown = fit_annotation(&metrics, message, 13., room).expect("fits");
+            assert!(shown.ends_with('\u{2026}'), "{shown}");
+            assert!(message.starts_with(shown.trim_end_matches('\u{2026}')));
+            assert!(
+                f64::from(metrics.measure(&shown, &style).advance) + 12. <= room,
+                "{room}"
+            );
+        }
+        assert_eq!(fit_annotation(&metrics, message, 13., 5.), None);
     }
 }

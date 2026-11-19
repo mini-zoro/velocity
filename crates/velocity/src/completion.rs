@@ -90,8 +90,8 @@ pub struct Completion {
     pub list: Option<CompletionList>,
     pub selected: usize,
     pub bounds: std::cell::Cell<Rect>,
-    /// First item and row count as painted; clicks map through the same rows.
-    painted_rows: std::cell::Cell<(usize, usize)>,
+    /// The rows as painted; clicks map through the same geometry.
+    painted_rows: std::cell::Cell<PaintedRows>,
     requested_carets: Vec<usize>,
     pending: Option<Invocation>,
     since: Instant,
@@ -327,14 +327,23 @@ impl Completion {
         };
         use vel_theme::{Element, ElementPath};
         let mut theme = editor.theme.borrow_mut();
-        // 4 points of padding above the rows (so the selected row clears the rounded
-        // border) and a footer with a details line when any item has details: the height
-        // stays put while the selection moves, so a popup above the caret does not jump.
+        // Padding above the rows (so the selected row clears the rounded border) and a footer
+        // with a details line when any item has details: the height stays put while the
+        // selection moves, so a popup above the caret does not jump. Everything scales with
+        // the UI, like the text drawn inside it.
+        let s = vel_ui::theme::ui_scale(&editor.settings);
         let details = list.items.iter().any(|item| !item.details.is_empty());
-        let n = popup_rows(list.items.len(), view.size.height, details);
-        let height = ROWS_TOP + n as f64 * 24. + popup_footer(details);
-        let rect = popup_bounds(view.rect_at(editor, editor.caret), view.size, height);
+        // The text area: never under the tab bar, never below the view.
+        let area = Rect {
+            x: 0.,
+            y: view.tab_height,
+            width: view.size.width.max(0.),
+            height: (view.size.height - view.tab_height).max(0.),
+        };
+        let caret = view.rect_at(editor, editor.caret);
+        let (rect, n, footer) = popup_placement(caret, area, list.items.len(), details, s);
         self.bounds.set(rect);
+        let (rows_top, row_height) = (ROWS_TOP * s, ROW_HEIGHT * s);
         let popup_path = [
             Element::new("window", &[]),
             Element::new("popup_control auto_complete_popup", &[]),
@@ -347,7 +356,12 @@ impl Completion {
         let mut layer = Layer::default();
         theme.surface(&mut layer, &popup, rect, rect);
         let first = self.selected.saturating_sub(n.saturating_sub(1));
-        self.painted_rows.set((first, n));
+        self.painted_rows.set(PaintedRows {
+            first,
+            count: n,
+            top: rows_top,
+            row: row_height,
+        });
         for (row, item) in list.items.iter().skip(first).take(n).enumerate() {
             let attrs = if first + row == self.selected {
                 &["selected"][..]
@@ -366,11 +380,14 @@ impl Completion {
                 &editor.settings,
             );
             let r = Rect {
-                x: rect.x + 4.,
-                y: rect.y + ROWS_TOP + row as f64 * 24.,
-                width: rect.width - 8.,
-                height: 24.,
+                x: rect.x + 4. * s,
+                y: rect.y + rows_top + row as f64 * row_height,
+                width: rect.width - 8. * s,
+                height: row_height,
             };
+            // Everything in a row is clipped to the popup too: a view shorter than one row
+            // gets a popup cut to the view, and nothing spills past it.
+            let row_clip = vel_ui::minihtml::intersection(r, rect);
             theme.surface(&mut layer, &row_style, r, rect);
             let label_path = [
                 path[0],
@@ -403,12 +420,13 @@ impl Completion {
                 &editor.settings,
             );
             let badge_rect = Rect {
-                x: r.x + 4.,
-                y: r.y + 3.,
-                width: 18.,
-                height: 18.,
+                x: r.x + 4. * s,
+                y: r.y + 3. * s,
+                width: 18. * s,
+                height: 18. * s,
             };
-            theme.surface(&mut layer, &kind, badge_rect, r);
+            let badge_clip = vel_ui::minihtml::intersection(badge_rect, rect);
+            theme.surface(&mut layer, &kind, badge_rect, row_clip);
             let label_path = [
                 kind_path[0],
                 kind_path[1],
@@ -428,10 +446,18 @@ impl Completion {
                 &kind_label,
                 &badge,
                 (badge_rect.x + (badge_rect.width - badge_width) / 2.).round(),
-                r.y + 16.,
-                badge_rect,
+                r.y + 16. * s,
+                badge_clip,
             );
-            theme.text(&mut layer, &text, &item.trigger, r.x + 30., r.y + 17., r);
+            let (label_x, baseline) = (r.x + 30. * s, r.y + 17. * s);
+            theme.text(
+                &mut layer,
+                &text,
+                &item.trigger,
+                label_x,
+                baseline,
+                row_clip,
+            );
             let prefix = list
                 .replace_ranges
                 .first()
@@ -446,8 +472,15 @@ impl Completion {
             let mut matched = text.clone();
             matched.foreground = text.matched;
             for range in matched_ranges(&item.trigger, &prefix) {
-                let x = r.x + 30. + theme.advance(&text, &item.trigger[..range.start]);
-                theme.text(&mut layer, &matched, &item.trigger[range], x, r.y + 17., r);
+                let x = label_x + theme.advance(&text, &item.trigger[..range.start]);
+                theme.text(
+                    &mut layer,
+                    &matched,
+                    &item.trigger[range],
+                    x,
+                    baseline,
+                    row_clip,
+                );
             }
             if !item.annotation.is_empty() {
                 let hint_path = [
@@ -467,13 +500,15 @@ impl Completion {
                     &hint,
                     &item.annotation,
                     r.x + r.width * 0.6,
-                    r.y + 17.,
-                    r,
+                    baseline,
+                    row_clip,
                 );
             }
         }
         scene.layers.push(layer);
-        if let Some(item) = list.items.get(self.selected) {
+        if footer > 0.
+            && let Some(item) = list.items.get(self.selected)
+        {
             let path = [
                 popup_path[0],
                 popup_path[1],
@@ -481,11 +516,11 @@ impl Completion {
                 Element::new("auto_complete_details", &[]),
             ];
             let detail = theme.style(editor.ui_id(0xC400), &ElementPath(&path), &editor.settings);
-            let mut footer = Layer::default();
+            let mut footer_layer = Layer::default();
             // A hairline separates the footer (kind name, then details) from the rows.
-            let separator = rect.y + ROWS_TOP + n as f64 * 24. + 2.;
+            let separator = rect.y + rows_top + n as f64 * row_height + 2. * s;
             if let Some((color, width)) = popup.border() {
-                footer.surfaces.push(vel_render::scene::Surface::Fill(
+                footer_layer.surfaces.push(vel_render::scene::Surface::Fill(
                     vel_render::scene::SolidRect {
                         rect: Rect {
                             x: rect.x + 1.,
@@ -500,15 +535,16 @@ impl Completion {
                 ));
             }
             theme.text(
-                &mut footer,
+                &mut footer_layer,
                 &detail,
                 &item.kind.name,
-                rect.x + 10.,
-                separator + 17.,
+                rect.x + 10. * s,
+                separator + 17. * s,
                 rect,
             );
-            scene.layers.push(footer);
-            if item.details.is_empty() {
+            scene.layers.push(footer_layer);
+            // A very short view keeps the kind name and gives up the details line.
+            if item.details.is_empty() || footer < popup_footer(true) * s {
                 return;
             }
             let mut palette = theme.palette.clone();
@@ -522,7 +558,7 @@ impl Completion {
                 },
             );
             let options = vel_minihtml::LayoutOptions {
-                max_width: (rect.width - 16.).max(1.) as f32,
+                max_width: (rect.width - 16. * s).max(1.) as f32,
                 root_font_size: detail.size,
                 palette,
                 extra_css: format!(
@@ -535,10 +571,10 @@ impl Completion {
                 html.paint(
                     scene,
                     Rect {
-                        x: rect.x + 10.,
-                        y: separator + 22.,
-                        width: rect.width - 20.,
-                        height: 26.,
+                        x: rect.x + 10. * s,
+                        y: separator + 22. * s,
+                        width: rect.width - 20. * s,
+                        height: 26. * s,
                     },
                 );
             }
@@ -551,12 +587,12 @@ impl Completion {
         if !self.visible() || !vel_ui::contains(rect, point) {
             return PopupHit::Outside;
         }
-        let (first, n) = self.painted_rows.get();
+        let rows = self.painted_rows.get();
         let count = self.list.as_ref().map_or(0, |list| list.items.len());
-        let offset = point.y - rect.y - ROWS_TOP;
-        let row = (offset / 24.).floor();
-        if offset >= 0. && row < n as f64 && first + (row as usize) < count {
-            self.selected = first + row as usize;
+        let offset = point.y - rect.y - rows.top;
+        let row = (offset / rows.row.max(1.)).floor();
+        if offset >= 0. && row < rows.count as f64 && rows.first + (row as usize) < count {
+            self.selected = rows.first + row as usize;
             PopupHit::Row
         } else {
             PopupHit::Chrome
@@ -628,31 +664,83 @@ fn system_fullname() -> &'static str {
         std::env::var("USER").unwrap_or_default()
     })
 }
-/// Padding above the completion rows.
+/// Rows of the popup as last painted, in view coordinates relative to its top.
+#[derive(Clone, Copy, Debug, Default)]
+struct PaintedRows {
+    first: usize,
+    count: usize,
+    top: f64,
+    row: f64,
+}
+/// Padding above the completion rows, at UI scale 1.
 const ROWS_TOP: f64 = 4.;
+/// Height of a completion row, at UI scale 1.
+const ROW_HEIGHT: f64 = 24.;
+/// Most rows shown at once.
+const MAX_ROWS: usize = 8;
 /// Footer below the rows: the kind name, plus a details line when there are details.
 fn popup_footer(details: bool) -> f64 {
     if details { 52. } else { 28. }
 }
-/// Rows that fit in a view `height` together with the padding and the footer (at least one).
-fn popup_rows(count: usize, height: f64, details: bool) -> usize {
-    count.min(8).min(
-        ((height - ROWS_TOP - popup_footer(details)) / 24.)
-            .floor()
-            .max(1.) as usize,
-    )
+/// Rows and footer height that fit `room` at UI scale `s`: rows give way first, down to one,
+/// then the details line, then the footer.
+fn popup_fit(count: usize, room: f64, details: bool, s: f64) -> (usize, f64) {
+    let (top, row) = (ROWS_TOP * s, ROW_HEIGHT * s);
+    let footer = [popup_footer(details), popup_footer(false)]
+        .into_iter()
+        .map(|footer| footer * s)
+        .find(|footer| top + row + footer <= room)
+        .unwrap_or(0.);
+    let fit = ((room - top - footer) / row).floor().max(1.) as usize;
+    (count.clamp(1, MAX_ROWS).min(fit), footer)
 }
-pub fn popup_bounds(caret: Rect, size: vel_platform::Size, height: f64) -> Rect {
-    let width = 460f64.min(size.width.max(0.));
-    let height = height.min(size.height.max(0.));
+/// Places the popup inside the text area `area`: below the caret when the whole list fits
+/// there, otherwise above it when it fits there, otherwise on the side with more room.
+/// Returns its bounds, the rows shown and the footer height.
+fn popup_placement(
+    caret: Rect,
+    area: Rect,
+    count: usize,
+    details: bool,
+    s: f64,
+) -> (Rect, usize, f64) {
+    let bottom = area.y + area.height;
+    let below = (bottom - (caret.y + caret.height)).max(0.);
+    let above = (caret.y - area.y).max(0.);
+    let wanted =
+        (ROWS_TOP + count.clamp(1, MAX_ROWS) as f64 * ROW_HEIGHT + popup_footer(details)) * s;
+    let room = if wanted <= below || (wanted > above && below >= above) {
+        below
+    } else {
+        above
+    };
+    // A caret in a sliver of a view has no usable side: the popup then covers the text area.
+    let smallest = (ROWS_TOP + ROW_HEIGHT) * s;
+    let (n, footer) = popup_fit(
+        count,
+        if room < smallest { area.height } else { room },
+        details,
+        s,
+    );
+    let height = (ROWS_TOP * s + n as f64 * ROW_HEIGHT * s + footer).min(area.height);
+    (popup_bounds(caret, area, 460. * s, height), n, footer)
+}
+/// Bounds of a popup of `height` next to the caret, kept inside `area`.
+pub fn popup_bounds(caret: Rect, area: Rect, width: f64, height: f64) -> Rect {
+    let width = width.min(area.width.max(0.));
+    let height = height.min(area.height.max(0.));
+    let bottom = area.y + area.height;
     Rect {
-        x: caret.x.min((size.width - width).max(0.)).max(0.),
-        y: (if caret.y + caret.height + height <= size.height {
+        x: caret
+            .x
+            .min(area.x + (area.width - width).max(0.))
+            .max(area.x),
+        y: (if caret.y + caret.height + height <= bottom {
             caret.y + caret.height
         } else {
             caret.y - height
         })
-        .clamp(0., (size.height - height).max(0.)),
+        .clamp(area.y, (bottom - height).max(area.y)),
         width,
         height,
     }
@@ -1588,8 +1676,8 @@ mod tests {
                     let scene = view.scene(&e);
                     let rect = e.completion.bounds.get();
                     let caret = view.rect_at(&e, e.caret);
-                    if above && caret.y >= rect.height {
-                        // Room above the caret: the popup opens there.
+                    if above && caret.y - view.tab_height >= rect.height {
+                        // Room above the caret (below the tab bar): the popup opens there.
                         assert!(rect.y + rect.height <= caret.y + 0.01, "{height}: {rect:?}");
                         placed_above += 1;
                     }
@@ -1618,8 +1706,15 @@ mod tests {
                         assert_eq!(&triggers[e.completion.selected], trigger, "{height}");
                         e.completion.selected = selected;
                     }
-                    // Padding above the rows and the footer below them are part of the popup.
-                    for y in [rect.y + 1., rect.y + rect.height - 2.] {
+                    // Padding above the rows and the footer below them (when one fits) are
+                    // part of the popup.
+                    let rows = e.completion.painted_rows.get();
+                    let footer = rect.y + rows.top + rows.count as f64 * rows.row
+                        < rect.y + rect.height - 2.;
+                    for y in [rect.y + 1., rect.y + rect.height - 2.]
+                        .into_iter()
+                        .take(if footer { 2 } else { 1 })
+                    {
                         assert_eq!(
                             e.completion.hit(Point { x: rect.x + 60., y }),
                             PopupHit::Chrome,
@@ -1648,6 +1743,161 @@ mod tests {
             assert_eq!(placed_above > 0, above);
         }
     }
+    /// In a short view the popup stays in the text area: below the tab bar, inside the view,
+    /// with its selected row visible, on either side of the caret.
+    #[test]
+    fn popup_stays_in_the_text_area_of_short_views() {
+        let tab = 32.;
+        for s in [1., 1.5, 2.] {
+            for height in (40..=400).step_by(4) {
+                let area = Rect {
+                    x: 0.,
+                    y: tab,
+                    width: 900.,
+                    height: f64::from(height) - tab,
+                };
+                for row in 0..30 {
+                    let caret = Rect {
+                        x: 40.,
+                        y: tab + 4. + f64::from(row) * 16.,
+                        width: 1.,
+                        height: 16.,
+                    };
+                    if caret.y + caret.height > f64::from(height) {
+                        break;
+                    }
+                    for count in [1, 3, 8, 40] {
+                        for details in [false, true] {
+                            let (rect, n, footer) = popup_placement(caret, area, count, details, s);
+                            let label = format!("s{s} h{height} row{row} n{count} d{details}");
+                            assert!(rect.y >= tab, "{label}: {rect:?}");
+                            assert!(
+                                rect.y + rect.height <= f64::from(height) + 0.01,
+                                "{label}: {rect:?}"
+                            );
+                            assert!(n >= 1 && n <= count.min(MAX_ROWS), "{label}");
+                            let content = (ROWS_TOP + n as f64 * ROW_HEIGHT) * s + footer;
+                            // Rows and footer are whole unless the view cannot hold even one row.
+                            if area.height >= (ROWS_TOP + ROW_HEIGHT) * s {
+                                assert!(content <= rect.height + 0.01, "{label}: {rect:?}");
+                            }
+                            // With room on a side the popup leaves the caret line uncovered.
+                            let room =
+                                (caret.y - tab).max(f64::from(height) - caret.y - caret.height);
+                            if room >= (ROWS_TOP + ROW_HEIGHT) * s {
+                                assert!(
+                                    rect.y >= caret.y + caret.height - 0.01
+                                        || rect.y + rect.height <= caret.y + 0.01,
+                                    "{label}: {rect:?} covers {caret:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    /// A text area shorter than one row: the popup is cut to the view and nothing in it (row
+    /// text, badges, hints) draws past it.
+    #[test]
+    fn popup_content_stays_inside_a_view_shorter_than_one_row() {
+        let mut e = editor("al");
+        let mut engine = CompletionEngine::new();
+        engine
+            .add_completions(r#"{"scope":"source.rust","completions":[{"trigger":"alpha","contents":"alpha","annotation":"hint"},"alpine"]}"#)
+            .unwrap();
+        e.completion.set_engine(Arc::new(engine));
+        for scale in [1., 2.] {
+            e.settings.set(Layer::View, "ui_scale", json!(scale));
+            e.sync();
+            e.run("auto_complete", &json!({})).unwrap();
+            ready(&mut e, true);
+            for area in [8., 14., 20., 27., 40., 55.] {
+                let mut view = crate::view::View::new(
+                    vel_platform::Size {
+                        width: 600.,
+                        height: 100.,
+                    },
+                    8.,
+                    12.,
+                );
+                // A text area of `area` points under the tab bar.
+                let height = view.tab_height + area;
+                view.size.height = height;
+                let scene = view.scene(&e);
+                let popup = e.completion.bounds.get();
+                assert!(
+                    popup.y >= view.tab_height - 0.01 && popup.y + popup.height <= height + 0.01,
+                    "ui{scale} view {height}: {popup:?}"
+                );
+                // The popup's layers are the last ones painted.
+                let first = scene
+                    .layers
+                    .iter()
+                    .position(|l| l.text.iter().any(|r| r.text == "alpha"))
+                    .expect("popup rows");
+                for layer in &scene.layers[first..] {
+                    for clip in layer
+                        .text
+                        .iter()
+                        .map(|r| r.clip)
+                        .chain(layer.surfaces.iter().map(|s| match s {
+                            vel_render::scene::Surface::Fill(r) => r.clip,
+                            vel_render::scene::Surface::CssBox(r) => r.clip,
+                            vel_render::scene::Surface::Image(q) => q.clip,
+                        }))
+                    {
+                        // An empty clip draws nothing, wherever it is.
+                        assert!(
+                            clip.height <= 0.
+                                || clip.width <= 0.
+                                || (clip.y >= popup.y - 0.01
+                                    && clip.y + clip.height <= popup.y + popup.height + 0.01),
+                            "ui{scale} view {height}: clip {clip:?} outside {popup:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    /// The whole popup scales with the UI: rows, padding, footer and click targets.
+    #[test]
+    fn popup_metrics_scale_with_the_ui() {
+        let mut e = editor("al");
+        let mut engine = CompletionEngine::new();
+        engine
+            .add_completions(r#"{"scope":"source.rust","completions":["alpha","alpine","alps"]}"#)
+            .unwrap();
+        e.completion.set_engine(Arc::new(engine));
+        e.settings.set(Layer::View, "ui_scale", json!(2.));
+        e.sync();
+        e.run("auto_complete", &json!({})).unwrap();
+        ready(&mut e, true);
+        let mut view = crate::view::View::new(
+            vel_platform::Size {
+                width: 1000.,
+                height: 500.,
+            },
+            8.,
+            12.,
+        );
+        view.scene(&e);
+        let rect = e.completion.bounds.get();
+        let n = e.completion.list.as_ref().unwrap().items.len();
+        assert_eq!(rect.width, 920.);
+        assert_eq!(
+            rect.height,
+            (ROWS_TOP + n as f64 * ROW_HEIGHT + popup_footer(false)) * 2.
+        );
+        for row in 0..n {
+            let y = rect.y + (ROWS_TOP + (row as f64 + 0.5) * ROW_HEIGHT) * 2.;
+            assert_eq!(
+                e.completion.hit(Point { x: rect.x + 60., y }),
+                PopupHit::Row
+            );
+            assert_eq!(e.completion.selected, row);
+        }
+    }
     #[test]
     fn popup_flips_and_clamps() {
         let rect = popup_bounds(
@@ -1657,10 +1907,13 @@ mod tests {
                 width: 2.,
                 height: 20.,
             },
-            vel_platform::Size {
+            Rect {
+                x: 0.,
+                y: 0.,
                 width: 400.,
                 height: 200.,
             },
+            460.,
             120.,
         );
         assert!(rect.y < 150.);

@@ -178,6 +178,7 @@ pub(crate) enum StyleId {
     HoverPopup,
     QuickScroll,
     StatusButton,
+    SideGuide,
 }
 impl StyleId {
     pub(crate) const fn at(self, index: u64) -> u64 {
@@ -432,7 +433,7 @@ pub struct Panels {
     pub quick_pending: bool,
     panel_bounds: Rect,
     pub(crate) quick_bounds: Rect,
-    side_bounds: Rect,
+    pub(crate) side_bounds: Rect,
     size: Size,
 }
 impl Default for Panels {
@@ -4896,26 +4897,25 @@ impl Panels {
                 {
                     label_style.foreground[3] *= 0.4;
                 }
-                if let Some(icon) = tab_icon(workspace, tab) {
-                    theme.icon(
-                        &mut layer,
-                        icon,
-                        Rect {
-                            x: (10. * self.ui_scale),
-                            y: node.rect.y + (4. * self.ui_scale),
-                            width: (16. * self.ui_scale),
-                            height: (16. * self.ui_scale),
-                        },
-                        clip,
-                        label_style.foreground,
-                    );
-                }
                 let badge = tab
                     .path
                     .as_deref()
                     .and_then(|p| workspace.git.badge(p, false));
                 let label_end =
                     self.paint_badge(&mut theme, &mut layer, settings, badge, node.rect, clip);
+                let icon_rect = Rect {
+                    x: (10. * self.ui_scale),
+                    y: node.rect.y + (4. * self.ui_scale),
+                    width: (16. * self.ui_scale),
+                    height: (16. * self.ui_scale),
+                };
+                // Narrow side bars: the badge stays, the label shortens to nothing, and the
+                // icon is left out before it would run into the badge.
+                if self.side_column_fits(icon_rect, label_end)
+                    && let Some(icon) = tab_icon(workspace, tab)
+                {
+                    theme.icon(&mut layer, icon, icon_rect, clip, label_style.foreground);
+                }
                 let label_x = (34. * self.ui_scale) + f64::from(label_style.margin.left);
                 let label = tab.label();
                 let shown = theme.fit_label(&label_style, &label, label_end - label_x);
@@ -4931,6 +4931,18 @@ impl Panels {
                 }
             }
             let base = self.folder_row_base(workspace);
+            // Indent guides: one hairline per ancestor level, under the ancestor's disclosure
+            // triangle. Themes without a `sidebar_indent_guide` rule draw none.
+            let guide = theme.style(
+                StyleId::SideGuide.at(0),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("sidebar_container", &[]),
+                    vel_theme::Element::new("sidebar_tree", &[]),
+                    vel_theme::Element::new("sidebar_indent_guide", &[]),
+                ]),
+                settings,
+            );
             for i in visible.start.saturating_sub(base)
                 ..visible.end.saturating_sub(base).min(self.side_rows.len())
             {
@@ -4941,6 +4953,19 @@ impl Panels {
                 };
                 let row_style = style(id, None, &mut theme);
                 theme.surface(&mut layer, &row_style, node.rect, clip);
+                for level in 0..row.depth {
+                    let x = (10. + 8. + level as f64 * 16.) * self.ui_scale;
+                    theme.surface(
+                        &mut layer,
+                        &guide,
+                        Rect {
+                            x: x.round(),
+                            width: 1.,
+                            ..node.rect
+                        },
+                        clip,
+                    );
+                }
                 let mut text = style(id, Some("sidebar_label"), &mut theme);
                 if workspace.git.badge(&row.path, row.directory) == Some(vel_git::Badge::Ignored) {
                     text.foreground[3] *= 0.4;
@@ -4963,17 +4988,26 @@ impl Panels {
                     width: (16. * self.ui_scale),
                     height: (16. * self.ui_scale),
                 };
-                if row.directory {
-                    let disclosure = style(id, Some("disclosure_button_control"), &mut theme);
-                    theme.icon_surface(&mut layer, &disclosure, Rect { x, ..icon_rect }, clip);
-                    let folder = style(id, Some("icon_folder"), &mut theme);
-                    theme.icon_surface(&mut layer, &folder, icon_rect, clip);
-                } else if let Some(icon) = workspace.themes.file_icon(&row.path) {
-                    theme.icon(&mut layer, icon, icon_rect, clip, text.foreground);
-                }
                 let badge = workspace.git.badge(&row.path, row.directory);
                 let label_end =
                     self.paint_badge(&mut theme, &mut layer, settings, badge, node.rect, clip);
+                // Narrow side bars: the badge stays, the label shortens to nothing, and the
+                // icon (then the disclosure triangle) is left out before it would run into it.
+                let disclosure_rect = Rect { x, ..icon_rect };
+                if row.directory {
+                    if self.side_column_fits(disclosure_rect, label_end) {
+                        let disclosure = style(id, Some("disclosure_button_control"), &mut theme);
+                        theme.icon_surface(&mut layer, &disclosure, disclosure_rect, clip);
+                    }
+                    if self.side_column_fits(icon_rect, label_end) {
+                        let folder = style(id, Some("icon_folder"), &mut theme);
+                        theme.icon_surface(&mut layer, &folder, icon_rect, clip);
+                    }
+                } else if self.side_column_fits(icon_rect, label_end)
+                    && let Some(icon) = workspace.themes.file_icon(&row.path)
+                {
+                    theme.icon(&mut layer, icon, icon_rect, clip, text.foreground);
+                }
                 let label_x = x + (36. * self.ui_scale);
                 theme.text_fit(
                     &mut layer,
@@ -5227,14 +5261,28 @@ impl Panels {
                 .as_ref()
                 .map(|l| l.name.clone())
                 .unwrap_or_else(|| "Plain Text".into());
+            // Bytes and pictures have no syntax or indentation to show or change.
+            let text_document = editor.binary.is_none();
             let candidates = [
-                (details::StatusItem::Syntax, language, 0.),
+                (
+                    details::StatusItem::Syntax,
+                    if text_document {
+                        language
+                    } else {
+                        String::new()
+                    },
+                    0.,
+                ),
                 (
                     details::StatusItem::Indentation,
-                    vel_ui::status::indentation(
-                        editor.preferences.translate_tabs_to_spaces,
-                        editor.preferences.tab_size,
-                    ),
+                    if text_document {
+                        vel_ui::status::indentation(
+                            editor.preferences.translate_tabs_to_spaces,
+                            editor.preferences.tab_size,
+                        )
+                    } else {
+                        String::new()
+                    },
                     0.,
                 ),
                 (
@@ -5518,10 +5566,22 @@ impl Panels {
                         width: (caption_end - rows.x).max(0.),
                         ..rows
                     };
+                    // A caption too long for the row keeps its matched runs up to the cut
+                    // and ends in an ellipsis, like unmatched captions.
+                    let fitted = theme.fit_text(&caption, &item.caption, caption_end - text_x);
+                    // Borrowed means it fits as is (a cut may be exactly as long as "…").
+                    let shown = if matches!(fitted, std::borrow::Cow::Borrowed(_)) {
+                        item.caption.len()
+                    } else {
+                        fitted
+                            .strip_suffix('\u{2026}')
+                            .map_or(0, str::len)
+                            .min(item.caption.len())
+                    };
                     let mut runs = Vec::new();
                     let mut start = 0;
                     let mut highlighted = item.highlights.contains(&0);
-                    for (byte, _) in item.caption.char_indices().skip(1) {
+                    for (byte, _) in item.caption[..shown].char_indices().skip(1) {
                         let next = item.highlights.contains(&byte);
                         if next != highlighted {
                             runs.push((start, byte, highlighted));
@@ -5529,13 +5589,25 @@ impl Panels {
                             highlighted = next;
                         }
                     }
-                    runs.push((start, item.caption.len(), highlighted));
+                    if shown > start {
+                        runs.push((start, shown, highlighted));
+                    }
                     for (start, end, highlighted) in runs {
                         theme.text(
                             &mut overlay,
                             if highlighted { &matched } else { &caption },
                             &item.caption[start..end],
                             text_x + theme.advance(&caption, &item.caption[..start]),
+                            baseline,
+                            clip,
+                        );
+                    }
+                    if shown < item.caption.len() && !fitted.is_empty() {
+                        theme.text(
+                            &mut overlay,
+                            &caption,
+                            "\u{2026}",
+                            text_x + theme.advance(&caption, &item.caption[..shown]),
                             baseline,
                             clip,
                         );
@@ -6448,6 +6520,65 @@ mod tests {
         };
         f64::from(metrics.measure(&run.text, &style).advance)
     }
+    /// A matched caption too long for its row is cut with an ellipsis: matched runs stop at
+    /// the cut and nothing is drawn past the row's text column.
+    #[test]
+    fn long_matched_captions_end_in_an_ellipsis() {
+        let workspace = workspace();
+        let caption = "src/render/an_unusually_long_module_name_for_truncation_checks.rs";
+        let highlights: Vec<usize> = caption
+            .char_indices()
+            .filter(|(_, c)| *c == 'r' || *c == 's')
+            .map(|(i, _)| i)
+            .collect();
+        for width in [420., 520., 700.] {
+            let mut panels = Panels::new(&workspace, false);
+            panels.side_visible = false;
+            panels.overlay = Some(Overlay::Goto);
+            panels.quick.set_items(vec![vel_ui::Item {
+                caption: caption.into(),
+                kind: "file".into(),
+                details: "/tmp/project/src/render".into(),
+                highlights: highlights.clone(),
+                ..Default::default()
+            }]);
+            panels.layout(Size {
+                width,
+                height: 400.,
+            });
+            let mut scene = Scene::default();
+            panels.paint(&workspace, &mut scene);
+            let first = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .find(|r| r.text == "\u{2026}")
+                .unwrap_or_else(|| panic!("{width}: no ellipsis"))
+                .baseline;
+            let runs: Vec<_> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|r| r.baseline == first && !r.text.is_empty())
+                .collect();
+            let shown: String = runs.iter().map(|r| r.text.as_str()).collect();
+            assert!(shown.ends_with('\u{2026}'), "{width}: {shown}");
+            assert!(
+                caption.starts_with(shown.trim_end_matches('\u{2026}')),
+                "{shown}"
+            );
+            let list = panels.quick_bounds;
+            for run in &runs {
+                let end = f64::from(run.x) + run_width(&*workspace.themes.ui.borrow().metrics, run);
+                assert!(
+                    end <= list.x + list.width,
+                    "{width}: {:?} at {}",
+                    run.text,
+                    run.x
+                );
+            }
+        }
+    }
     /// The empty-state hint sits directly under the FOLDERS heading, with or without the
     /// Open Files group above it.
     #[test]
@@ -7074,6 +7205,14 @@ impl Panels {
     /// Paints a side-bar Git badge right-aligned in its status colour and returns the x at
     /// which the row's label must end (ellipsized) so the two never overlap.
     #[allow(clippy::too_many_arguments)]
+    /// Whether a side-bar icon column ends clear of the row's Git badge (which starts 6 DIPs
+    /// after `label_end`), keeping 2 DIPs between them.
+    /// Rows without a badge keep their icons (the side bar edge clips them).
+    fn side_column_fits(&self, column: Rect, label_end: f64) -> bool {
+        let no_badge =
+            label_end >= self.side_bounds.x + self.side_bounds.width - 10. * self.ui_scale - 0.01;
+        no_badge || column.x + column.width <= label_end + 4. * self.ui_scale + 0.01
+    }
     fn paint_badge(
         &self,
         theme: &mut vel_ui::theme::ThemeUi,

@@ -270,7 +270,11 @@ resolved once per face).
 
 ## Images
 
-`before/` and `after/` (same names; 1x images are native 1x renders, 2x crops scaled to 45–80 %):
+Round 3 replaced these images to stay within the 40-image budget; the round-2 set is in git
+history at `569cc9c` (`git show 569cc9c:docs/design/after/r2-01-gutter-dark@2x.png`, and so
+on). The current `before/`/`after/` images belong to `ui-audit-r3.md`.
+
+Round-2 names, `before/` and `after/` (1x images are native 1x renders, 2x crops scaled to 45–80 %):
 `r2-01-gutter-dark@2x` (fold buttons, bookmark dot, diff marks), `r2-02-gutter-light@1x`,
 `r2-03-sidebar-dark@2x` (icons, bold headings, badges, hover), `r2-04-sidebar-focused-light@2x`,
 `r2-05-settings-window-dark@1x`, `r2-06-empty-window-light@1x` (empty state),

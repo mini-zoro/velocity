@@ -66,6 +66,10 @@ pub struct Tab {
     pub binary_loading: Option<crate::binary::Task>,
     /// Binary identity survives worker completion/failure independently of its snapshot.
     pub(crate) binary_document: bool,
+    /// An image file whose decode failed: its bytes are shown, so its label ends in `[hex]`.
+    pub(crate) image_failed: bool,
+    /// Whether the path matches `image_file_patterns`, for this settings revision.
+    image_file: std::cell::Cell<Option<(u64, bool)>>,
     /// The source could not load. Never persist an empty error placeholder as
     /// if it were recovered user text; retained dirty contents still survive.
     pub(crate) load_failed: bool,
@@ -195,6 +199,8 @@ impl Tab {
             loading: None,
             binary_loading: None,
             binary_document: false,
+            image_failed: false,
+            image_file: std::cell::Cell::new(None),
             load_failed: false,
             pending_restore: None,
             pending_center: false,
@@ -270,6 +276,22 @@ impl Tab {
             || self.editor.buffer.is_dirty()
             || self.format != self.saved_format
     }
+    /// Whether this document's path matches `image_file_patterns` (it is shown as a picture
+    /// unless its decode fails). Remembered per settings revision: labels are painted often.
+    pub(crate) fn is_image_file(&self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            return false;
+        };
+        let revision = self.editor.settings.revision();
+        if let Some((seen, image)) = self.image_file.get()
+            && seen == revision
+        {
+            return image;
+        }
+        let image = crate::open_requests::image_matches(self, path.parent().unwrap_or(path), path);
+        self.image_file.set(Some((revision, image)));
+        image
+    }
     pub fn label(&self) -> String {
         if let Some(title) = self
             .editor
@@ -282,7 +304,7 @@ impl Tab {
         let name = self.name();
         format!(
             "{name}{}{}{}{}",
-            if self.editor.binary.is_some() {
+            if self.editor.binary.is_some() && (self.image_failed || !self.is_image_file()) {
                 " [hex]"
             } else {
                 ""

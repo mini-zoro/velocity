@@ -275,6 +275,23 @@ impl App {
             return;
         }
         if event.kind == MouseKind::Down
+            && event.button == 0
+            && event.click_count >= 2
+            && let Some((at, sheet)) = self.tab_click
+            && (at.x - event.position.x).abs() <= 4.
+            && (at.y - event.position.y).abs() <= 4.
+            && let Some(index) = self.workspace.sheet_index(sheet)
+        {
+            // The first click revealed this tab, which may have moved the strip: the double
+            // click belongs to the tab it started on, not to whatever slid under the pointer.
+            self.workspace.make_permanent(index);
+            self.named_changed(w, false);
+            return;
+        }
+        if event.kind == MouseKind::Down {
+            self.tab_click = None;
+        }
+        if event.kind == MouseKind::Down
             && let Some((sheet, _)) = self
                 .tab_hits
                 .iter()
@@ -300,6 +317,7 @@ impl App {
                         event.modifiers.shift(),
                     );
                     self.panels.dragging_tab = Some(index);
+                    self.tab_click = Some((event.position, sheet));
                     if event.click_count >= 2 {
                         self.workspace.make_permanent(index);
                     }

@@ -236,6 +236,8 @@ for cls in ("overlay_control", "popup_control", "tool_tip_control", "auto_comple
 rule("title_bar", fg="var(muted)", bg="var(surface)", style="dark")
 rule("sidebar_tree", indent=16, indent_offset=4, indent_top_level=False, spacer_rows=True)
 rule("sidebar_heading", **{"fg": "var(muted)", "font.size": 11, "font.bold": True, "case": "upper"})
+# Hairline indent guides under each expanded folder's disclosure triangle (our own element).
+rule("sidebar_indent_guide", **fill("fg", .1))
 rule("tabset_control", tab_height=32, tab_width=180, tab_min_width=72, tab_overlap=0)
 # Tabs: inactive tabs sit on the chrome with a short divider; the selected tab takes the
 # editor background so it reads as part of the sheet below; the focused one gets an accent bar.
