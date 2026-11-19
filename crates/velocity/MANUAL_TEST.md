@@ -1,3 +1,64 @@
+# Round 21 Lane B (native checks pending)
+
+Use a temporary profile, document tree, HOME, and `VELOCITY_LOG_DIR` /
+`VELOCITY_CACHE_DIR`. Do not run this checklist against a real session.
+
+- [ ] **Terminal detach:** cold-launch `velocity -w file.txt`, make the tab
+  dirty, then press Ctrl+C in the terminal. The client exits 130 with a message,
+  and the GUI and its edit survive. Repeat by closing the terminal tab. Verify
+  the GUI has a separate session, no controlling tty, and logs to the fixture
+  directory. Repeat from Git's editor callback.
+- [ ] **Enqueue during a modal:** leave a native Open or Save dialog open. From
+  another terminal submit ordinary and `-w` requests, plus a Finder open.
+  Non-wait clients return after enqueue; no second editor starts. Submit more
+  than 16 files as separate requests. Overflow clients wait until accepted or
+  report the editor is busy. Accepted files open once the dialog closes, and
+  each `-w` client waits for its requested tabs to close.
+- [ ] **Upgrade:** with the previous build using a temporary profile, leave a
+  dirty tab open and launch the new CLI against that same profile. It forwards
+  to the previous build without launching a second editor. If the previous
+  build cannot accept the request, the CLI asks you to quit it first.
+- [ ] **Overlapping cold starts:** a second CLI waits up to 30 seconds while
+  the lock owner is still starting; the launcher leaves a short-lived marker
+  beside its socket and the editor clears it when it binds. When an editor
+  already held the profile and stops answering, or the marker is stale, the
+  client instead gives up after three seconds.
+- [ ] **Routing:** cold-launch on a directory and with `-n file.txt`; only one
+  window is created if the startup window is untouched. With two windows,
+  repeat exact folder and project opens and verify focus of an already-open
+  file. Open a project via Finder, the Dock, and the CLI.
+- [ ] **Native focus:** after closing the last file requested with `-w`, focus
+  returns to the terminal. With `-ws`, the terminal client returns but Velocity
+  retains focus. With `-b`, warm and cold opens leave the other app active.
+- [ ] **Safe mode:** quit completely, then hold Option while opening from the
+  Dock or Finder. It should start with bundled settings and no restored
+  session; ordinary relaunch restores the untouched normal profile. Repeat
+  with `--safe-mode`. For a fixture with a crashed restore, confirm Keep Closed
+  and Reopen Windows both leave the renamed session backup intact. With a
+  healthy saved session and a read-only `Sessions` directory, confirm that
+  recovery opens and the status bar reports that crash-loop protection is off.
+- [ ] **Menus and navigation:** confirm Revert and Cancel on a dirty file;
+  check the current View > Syntax item, View > Line Endings, status encoding
+  and line-ending popups, Tag commands, and the scope-name popup. Check the
+  symbol kind, line, highlighted letters, and relative path at narrow panel
+  widths and in both appearances.
+
+Initial round 21 results against `5497418` (before review fixes):
+
+- Nine alternating whole-process instruction pairs: typing1 **-0.57%**,
+  typing1000 **-0.56%**, features **+0.09%**. Use `scripts/round21-cpu.py`
+  with separate release binaries for both revisions.
+- 100,000 Goto Anything candidates, median of three runs per revision:
+  p50 **1.028 → 0.720 ms**, p95 **2.772 → 1.239 ms**. Multi-term queries
+  now return hits; their p95 was below 0.8 ms in the median run. The
+  standalone harness is `scripts/round21-fuzzy.rs`.
+- 100,000 indexed files: **77.27 coordinator turns/s, 200,280 stat reads/s**
+  before; **0/0** after with no stat fallback. The sandbox accepted the
+  native watch but did not deliver events, so the guarded fallback on this
+  host measured **1.60 turns/s, 180,184 stat reads/s**. Reproduce with the
+  ignored `measure_idle_index_100k` test; set
+  `VELOCITY_MEASURE_NATIVE_WATCH=1` to exercise native watch setup.
+
 # Round 20 Lane C review (native verification pending)
 
 Use a separate test profile. Do not run a build or capture the login environment with

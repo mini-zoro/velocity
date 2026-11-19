@@ -79,7 +79,6 @@ pub struct Policy {
 pub struct Sessions {
     pub restored: Session,
     pub(crate) original: Option<std::sync::Arc<crate::session_restore::Original>>,
-    pub instance: Option<crate::instance::Instance>,
     pub active_window: Option<u64>,
     recent: [Vec<PathBuf>; 3],
     recent_heads: BTreeMap<u64, [Option<PathBuf>; 3]>,
@@ -96,6 +95,11 @@ pub struct Sessions {
     next: u64,
     live: BTreeSet<u64>,
     transfers: BTreeMap<u64, Vec<(usize, crate::workspace::Tab)>>,
+    pub(crate) open_windows: BTreeMap<u64, crate::open_requests::WindowRoute>,
+    pub(crate) open_inbox: BTreeMap<u64, Vec<crate::instance::Incoming>>,
+    pub(crate) persist_project_workspaces: bool,
+    // Drop all writers before releasing the per-profile lock.
+    pub instance: Option<crate::instance::Instance>,
 }
 impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
@@ -131,6 +135,9 @@ impl Sessions {
             next: 1,
             live: BTreeSet::new(),
             transfers: BTreeMap::new(),
+            open_windows: BTreeMap::new(),
+            open_inbox: BTreeMap::new(),
+            persist_project_workspaces: true,
         }
     }
     pub fn register(&mut self) -> u64 {
@@ -236,7 +243,9 @@ impl Sessions {
         if let Some(writer) = &self.writer {
             writer.changed(session)?;
         }
-        if let Some(project) = &window.project {
+        if self.persist_project_workspaces
+            && let Some(project) = &window.project
+        {
             let path = vel_session::project::workspace_path(project);
             if !self.workspaces.contains_key(&path) {
                 self.workspaces.insert(
@@ -345,7 +354,7 @@ impl Sessions {
                     sheet.id = crate::workbench::next_sheet();
                     sheets.insert(sheet.id);
                     for group in &mut window.workbench.groups {
-                        for id in &mut group.sheets {
+                        for id in group.sheets.iter_mut().chain(&mut group.mru) {
                             if *id == old {
                                 *id = sheet.id;
                             }
@@ -380,6 +389,8 @@ impl Sessions {
     }
     pub fn close(&mut self, id: u64, retain: bool) {
         self.live.remove(&id);
+        self.open_windows.remove(&id);
+        self.open_inbox.remove(&id);
         self.recent_heads.remove(&id);
         if let Some(window) = self.windows.remove(&id)
             && retain
@@ -422,10 +433,13 @@ impl Sessions {
         }
     }
     pub fn clear_recent(&mut self, id: u64) {
-        for (paths, forgotten) in self.recent.iter_mut().zip(&mut self.forgotten_recent) {
-            forgotten.extend(paths.drain(..));
+        for kind in 0..3 {
+            self.clear_recent_kind(id, kind);
         }
-        self.recent_heads.insert(id, Default::default());
+    }
+    pub fn clear_recent_kind(&mut self, id: u64, kind: usize) {
+        self.forgotten_recent[kind].extend(self.recent[kind].drain(..));
+        self.recent_heads.entry(id).or_default()[kind] = None;
     }
     pub fn flush(&self) -> Result<(), String> {
         // A broken project workspace must not suppress flushes for other windows.

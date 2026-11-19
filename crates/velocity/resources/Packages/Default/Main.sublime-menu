@@ -18,6 +18,7 @@
         { "caption": "Clear Items", "command": "clear_recent_items" }
       ] },
       { "caption": "Reopen Closed File", "command": "reopen_last_file" },
+      { "caption": "Revert File", "command": "revert" },
       { "caption": "Reopen with Encoding", "children": [
         {"caption": "UTF-8", "command": "reopen_encoding", "args": {"encoding": "UTF-8"}},
         {"caption": "UTF-8 with BOM", "command": "reopen_encoding", "args": {"encoding": "UTF-8 with BOM"}},
@@ -439,7 +440,12 @@
             }
           }
         ]
-      }
+      },
+      {"caption":"Tag","children":[
+        {"caption":"Close Tag","command":"close_tag"},
+        {"caption":"Wrap Selection With Tag","command":"insert_snippet",
+          "args":{"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}}
+      ]}
     ]
   },
   {
@@ -628,7 +634,9 @@
       {"caption":"Jump Forward","command":"jump_forward"},
       {"caption":"Switch File","children":[
         {"caption":"Next File","command":"next_view"},
-        {"caption":"Previous File","command":"prev_view"}
+        {"caption":"Previous File","command":"prev_view"},
+        {"caption":"Switch Header/Implementation","command":"switch_file",
+          "args":{"extensions":["h","cpp","c","cc","mm","m"]}}
       ]},
       {"caption":"Jump to Matching Bracket","command":"move_to","args":{"to":"brackets"}},
       {
@@ -1141,7 +1149,8 @@
             ]
           }
         ]
-      }
+      },
+      {"caption":"Syntax","id":"syntax_list","children":[]}
     ]
   },
   {
@@ -1258,7 +1267,10 @@
             }
           }
         ]
-      }
+      },
+      {"caption":"Developer","children":[
+        {"caption":"Show Scope Name","command":"show_scope_name"}
+      ]}
     ]
   },
   {

@@ -23,6 +23,252 @@ pub enum SymbolKind {
     #[default]
     Other,
 }
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::*;
+
+    fn index_names(names: impl IntoIterator<Item = String>) -> Index {
+        let mut index = Index::new();
+        let symbols = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| IndexedSymbol {
+                name,
+                row: i as u32,
+                column: 0,
+                range: i as u32..i as u32 + 1,
+                kind: SymbolKind::Function,
+                definition: true,
+                reference: false,
+            })
+            .collect();
+        index.replace_file(
+            "fixture.rs",
+            FileAnalysis {
+                symbols,
+                ..Default::default()
+            },
+        );
+        index
+    }
+
+    #[test]
+    fn project_symbols_refine_multiple_terms_with_matching_highlights() {
+        let index = index_names(
+            [
+                "RenderedWidget",
+                "WorkspaceRenderer",
+                "WorkspaceBuffer",
+                "ÉtatDuWorkspace",
+            ]
+            .map(str::to_owned),
+        );
+        let query = "workspace render";
+        let hits = index.fuzzy_symbols(query, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].location.name, "WorkspaceRenderer");
+        assert_eq!(
+            index.fuzzy_symbols("render workspace", 10)[0].score,
+            hits[0].score
+        );
+        let mut positions = Vec::new();
+        let score = vel_search::fuzzy::LabelMatcher::new(query)
+            .score(&hits[0].location.name, Some(&mut positions));
+        assert_eq!(score, Some(hits[0].score));
+        assert_eq!(positions, (0..15).collect::<Vec<_>>());
+        assert_eq!(
+            index.fuzzy_symbols("état workspace", 100)[0].location.name,
+            "ÉtatDuWorkspace"
+        );
+    }
+
+    #[test]
+    fn project_symbol_winners_match_full_dp_with_a_one_row_limit() {
+        let mut labels: Vec<_> = (0..200).map(|i| format!("xxxx_Dat_{i:03}")).collect();
+        labels.extend(
+            [
+                "xd_Data_000",
+                "tab_close_sheets",
+                "MatchScore",
+                "SettingsGuard",
+                "set_font_grid",
+                "État",
+                "pkg.worker",
+                "path/component.rs",
+            ]
+            .map(str::to_owned),
+        );
+        labels.extend(
+            [
+                "write_settings_012",
+                "write_settings_023",
+                "write_settings_345",
+            ]
+            .map(str::to_owned),
+        );
+        let index = index_names(labels.clone());
+        for query in [
+            "dat", "tcs", "sgd", "état", "pkg.w", "/comp", "dat 00", "ws", "ws03",
+        ] {
+            let mut scorer = vel_search::fuzzy::LabelMatcher::new(query);
+            let mut expected: Vec<_> = labels
+                .iter()
+                .enumerate()
+                .filter_map(|(id, label)| {
+                    scorer
+                        .score(label, None)
+                        .map(|score| (std::cmp::Reverse(score), id))
+                })
+                .collect();
+            expected.sort_unstable();
+            let actual = index.fuzzy_symbols(query, 10);
+            assert_eq!(
+                actual.first().map(|h| (h.score, h.location.name.as_str())),
+                index
+                    .fuzzy_symbols(query, 1)
+                    .first()
+                    .map(|h| (h.score, h.location.name.as_str())),
+                "{query}"
+            );
+            let actual: Vec<_> = actual
+                .into_iter()
+                .map(|hit| (hit.score, hit.location.name))
+                .collect();
+            let expected: Vec<_> = expected
+                .into_iter()
+                .take(10)
+                .map(|(std::cmp::Reverse(score), id)| (score, labels[id].clone()))
+                .collect();
+            assert_eq!(actual, expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn project_symbols_prepared_names_match_full_dp_with_and_without_digits() {
+        use std::cmp::Reverse;
+        let long_core = format!("with{}Selection", "_".repeat(457));
+        let long_label = format!("{long_core}{}", "1".repeat(64));
+        let names = [
+            "withSelection0",
+            "withSelection000",
+            "withSelection99",
+            "ws123",
+            "ws",
+            "XWriteSettings012",
+            "writeSettings9",
+            "Component0::writeSelection45",
+            "with.Selection000",
+            "fichiers/withSelection00",
+            "é_withSelection02",
+            &long_core,
+            &long_label,
+        ]
+        .map(str::to_owned);
+        let index = index_names(names.clone());
+        for query in [
+            "ws",
+            "wS",
+            "wSe",
+            "withselection",
+            "ws0",
+            "selection 0",
+            "ws ws",
+            "0",
+            "éws",
+        ] {
+            let mut baseline = vel_search::fuzzy::LabelMatcher::new(query);
+            let mut expected: Vec<_> = names
+                .iter()
+                .enumerate()
+                .filter_map(|(id, name)| Some((Reverse(baseline.score(name, None)?), id)))
+                .collect();
+            expected.sort_unstable();
+            for limit in [1, 5, names.len()] {
+                let selected: Vec<_> = index
+                    .fuzzy_symbols(query, limit)
+                    .into_iter()
+                    .map(|hit| (Reverse(hit.score), hit.location.row))
+                    .collect();
+                assert_eq!(selected, expected[..limit.min(expected.len())], "{query}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "400k-name paired timing budget; run in release"]
+    fn project_symbols_400k_greedy_baseline_budget() {
+        use std::{hint::black_box, time::Instant};
+        let stems = [
+            "render_view",
+            "document_snapshot",
+            "workspace",
+            "with_selection",
+            "buffer",
+            "apply_patch",
+            "write_settings",
+            "pending_result",
+            "render_workspace",
+            "match_symbols",
+            "scroll",
+            "lookup",
+            "visible_row",
+            "command",
+        ];
+        let index = index_names((0..400_000).map(|i| {
+            let verb = stems[i / 128 % stems.len()];
+            match i / 128 % 4 {
+                0 => format!("{verb}_{i:06}"),
+                1 => format!("Component{}::{verb}_{i:06}", i / 1024),
+                2 => format!("{verb}Impl{i:06}"),
+                _ => format!("{verb}{i:06}"),
+            }
+        }));
+        let mut regressions = Vec::new();
+        for query in ["r", "rend", "ws", "buf", "tcs"] {
+            let measure = |refine| {
+                let start = Instant::now();
+                for _ in 0..3 {
+                    let hits = if refine {
+                        index.fuzzy_symbols(black_box(query), 100)
+                    } else {
+                        index
+                            .fuzzy_symbols_impl::<false>(black_box(query), 100, || false)
+                            .unwrap()
+                    };
+                    black_box(hits);
+                }
+                start.elapsed().as_secs_f64() * 1000. / 3.
+            };
+            let (mut old, mut new) = (Vec::new(), Vec::new());
+            for i in 0..37 {
+                let (a, b) = if i % 2 == 0 {
+                    (measure(false), measure(true))
+                } else {
+                    let b = measure(true);
+                    (measure(false), b)
+                };
+                if i >= 6 {
+                    old.push(a);
+                    new.push(b);
+                }
+            }
+            old.sort_by(f64::total_cmp);
+            new.sort_by(f64::total_cmp);
+            println!(
+                "{query:4} p50 {:.3} -> {:.3} ms; p95 {:.3} -> {:.3} ms",
+                old[15], new[15], old[29], new[29]
+            );
+            if new[15] > old[15] * 1.1 || new[29] > old[29] * 1.1 {
+                regressions.push(query);
+            }
+        }
+        assert!(
+            regressions.is_empty(),
+            "queries above 1.1x greedy budget: {regressions:?}"
+        );
+    }
+}
 impl SymbolKind {
     /// Infers a category from public scope naming conventions, most specific scope first.
     pub fn from_scopes(scopes: &[vel_scope::Scope]) -> Self {
@@ -422,18 +668,31 @@ impl Index {
         k: usize,
         cancel: impl Fn() -> bool + Sync,
     ) -> Option<Vec<SymbolMatch>> {
+        self.fuzzy_symbols_impl::<true>(query, k, cancel)
+    }
+
+    fn fuzzy_symbols_impl<const REFINE: bool>(
+        &self,
+        query: &str,
+        k: usize,
+        cancel: impl Fn() -> bool + Sync,
+    ) -> Option<Vec<SymbolMatch>> {
         if cancel() {
             return None;
         }
         if k == 0 {
             return Some(Vec::new());
         }
-        let required = mask(query);
+        let terms: Vec<_> = query.split_whitespace().collect();
+        let required = terms.iter().fold(0, |bits, term| bits | mask(term));
         let scan = |range: Range<usize>| -> Option<Vec<(i64, u32)>> {
+            use crate::names::FuzzyScorer;
             use std::{cmp::Reverse, collections::BinaryHeap};
-            let mut scorer = crate::names::FuzzyScorer::new(query);
+            let mut legacy = (!REFINE).then(|| FuzzyScorer::new(query));
+            let mut exact = REFINE.then(|| vel_search::fuzzy::LabelMatcher::new(query));
             let mut best: BinaryHeap<std::cmp::Reverse<(i64, Reverse<u32>)>> =
                 BinaryHeap::with_capacity(k.min(1024));
+            let mut cutoff = i64::MIN;
             for id in range {
                 if id % 256 == 0 && cancel() {
                     return None;
@@ -442,15 +701,29 @@ impl Index {
                 if name.definitions == 0 || name.mask & required != required {
                     continue;
                 }
-                if let Some(score) = scorer.score(self.names.text(id as u32)) {
+                let score = if terms.is_empty() {
+                    Some(0)
+                } else if let Some(scorer) = &mut exact {
+                    // IDs increase within this range, so any equal score
+                    // already in the heap wins the tie.
+                    let (label, core_end) = self.names.label(id as u32);
+                    scorer.score_above(label, core_end, cutoff)
+                } else {
+                    legacy.as_mut().unwrap().score(self.names.text(id as u32))
+                };
+                if let Some(score) = score {
                     let key = (score, Reverse(id as u32));
                     if best.len() < k {
                         best.push(Reverse(key));
-                    } else if best.peek().is_some_and(|worst| key > worst.0) {
+                        if best.len() == k {
+                            cutoff = best.peek().unwrap().0.0;
+                        }
+                    } else if score > cutoff {
                         *best.peek_mut().unwrap() = Reverse(key);
+                        cutoff = best.peek().unwrap().0.0;
                     }
                 }
-                if query.is_empty() && best.len() == k {
+                if terms.is_empty() && best.len() == k {
                     break;
                 }
             }
@@ -461,15 +734,16 @@ impl Index {
             )
         };
         let count = self.names.records.len();
-        let mut hits = if count >= 200_000 && !query.is_empty() {
+        let mut hits = if count >= 200_000 && !terms.is_empty() {
             std::thread::scope(|scope| {
                 let scan = &scan;
                 let step = count.div_ceil(8);
-                let handles: Vec<_> = (0..count)
+                let first_worker = if REFINE { step } else { 0 };
+                let handles: Vec<_> = (first_worker..count)
                     .step_by(step)
                     .map(|start| scope.spawn(move || scan(start..(start + step).min(count))))
                     .collect();
-                let mut hits = Vec::new();
+                let mut hits = if REFINE { scan(0..step)? } else { Vec::new() };
                 for handle in handles {
                     hits.extend(handle.join().ok()??);
                 }

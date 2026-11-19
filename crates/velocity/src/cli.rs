@@ -57,6 +57,13 @@ pub struct Options {
     pub new_window: bool,
     pub add_to_window: bool,
     pub wait: bool,
+    pub background: bool,
+    pub stay: bool,
+    pub launch_or_new_window: bool,
+    pub command: Option<Named>,
+    pub version: bool,
+    pub bench_help: bool,
+    pub safe_mode: bool,
     pub groups: usize,
     pub review_ui: Option<bool>,
     pub intel_words: usize,
@@ -85,6 +92,13 @@ impl Default for Options {
             new_window: false,
             add_to_window: false,
             wait: false,
+            background: false,
+            stay: false,
+            launch_or_new_window: false,
+            command: None,
+            version: false,
+            bench_help: false,
+            safe_mode: false,
             groups: 1,
             review_ui: None,
             intel_words: 100_000,
@@ -114,6 +128,11 @@ impl Options {
     pub fn launched_by_launch_services(&self, parent_pid: u32) -> bool {
         self.mode == Mode::Interactive
             && self.files.is_empty()
+            && self.project.is_none()
+            && self.command.is_none()
+            && !self.wait
+            && !self.background
+            && !self.launch_or_new_window
             && (parent_pid == 1 || self.launch_services_psn)
     }
     /// Normal editing creates no telemetry; explicit measurements opt in.
@@ -161,6 +180,22 @@ impl Options {
             }
             match arg.as_str() {
                 "--help" | "-h" => return Ok(None),
+                "--help-bench" => options.bench_help = true,
+                "--version" | "-v" => options.version = true,
+                "--safe-mode" => options.safe_mode = true,
+                "--background" | "-b" => options.background = true,
+                // https://www.sublimetext.com/docs/2/osx_command_line.html
+                "--stay" | "-s" => options.stay = true,
+                "-ws" | "-sw" => {
+                    options.wait = true;
+                    options.stay = true;
+                }
+                "--launch-or-new-window" => options.launch_or_new_window = true,
+                "--command" => {
+                    options.command = Some(Named::parse(
+                        &args.next().ok_or("--command needs a command")?,
+                    )?);
+                }
                 "--" => positional_only = true,
                 "--log-input" => options.log_input = true,
                 "--restore-session" => options.restore_session = true,
@@ -298,6 +333,37 @@ fn is_process_serial_number(arg: &str) -> bool {
         .iter()
         .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Named {
+    pub name: String,
+    pub args: serde_json::Value,
+}
+impl Named {
+    fn parse(command: &str) -> Result<Self, String> {
+        let (name, raw) = command
+            .trim()
+            .split_once(char::is_whitespace)
+            .unwrap_or((command.trim(), ""));
+        if name.is_empty() {
+            return Err("--command needs a name".into());
+        }
+        let args = if raw.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_str(raw).map_err(|e| format!("--command: {e}"))?;
+            if !value.is_object() {
+                return Err("--command arguments must be a JSON object".into());
+            }
+            value
+        };
+        Ok(Self {
+            name: name.into(),
+            args,
+        })
+    }
+}
+
 /// File path with one-based CLI row/scalar column suffixes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileLocation {
@@ -307,6 +373,14 @@ pub struct FileLocation {
 }
 impl FileLocation {
     pub fn parse(arg: &str) -> Self {
+        // Build 4180 supports literal colon filenames: https://www.sublimetext.com/download
+        if arg.contains(':') && std::path::Path::new(arg).exists() {
+            return Self {
+                path: arg.into(),
+                line: 1,
+                column: 1,
+            };
+        }
         let mut path = arg;
         let mut line = 1;
         let mut column = 1;
@@ -331,13 +405,55 @@ impl FileLocation {
     }
 }
 
-pub const HELP: &str = "Theme UI: --headless-theme-ui (CPU), --bench-theme-ui (automatic native)\nvelocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-large-files [4GB-log]  editor prefix, 50MB line and 4GB hex CPU budgets\n  --bench-large-files FILE  automatic native huge/long-line/hex viewport exercise\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --headless-review-history  50 dirty documents, native full-history save/restore; requires --data-dir\n  --review-ui on|off     Git/diff/spell A/B fixture for intelligence modes\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            enable native input/latency JSONL (off for normal editing)\n  --output PATH          enable JSONL at PATH; existing results are never overwritten\n  Default logs: $VELOCITY_LOG_DIR, else ~/Library/Logs/Velocity/\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --render-scenes DIR [--scale 1|2] [--appearance dark|light|both] [--only a,b] [--bench-scene N] [--first-frames N]\n                         developer tool: offscreen PNGs of UI states (or App::scene cost); never opens a window\n  --help                 print help without native initialization\n";
+pub const HELP: &str = r#"Usage: velocity [options] [file[:line[:column]] | directory ...]
+       velocity [options] -- [files beginning with '-']
+       velocity [options] - > output
+
+  --project PATH         Open a project
+  --command COMMAND      Run a named command with optional JSON arguments
+  -n, --new-window       Request a separate window
+  --launch-or-new-window Request a new window only when already running
+  -a, --add              Add folders to the current window
+  -w, --wait             Return after all requested tabs close (implied for stdin)
+  -b, --background       Leave the current application active
+  -s, --stay             Do not reactivate the terminal after waiting
+  --safe-mode            Start with clean settings and no restored session
+  --data-dir PATH        Use a separate settings and session profile
+  --help-bench           Show developer measurement options
+  -v, --version          Show the version and exit
+  -h, --help             Show this help and exit
+
+Regular or piped stdin is loaded when no paths are given. Edited text goes to stdout.
+"#;
+
+pub const BENCH_HELP: &str = "Theme UI: --headless-theme-ui (CPU), --bench-theme-ui (automatic native)\nvelocity [files… | file:line:col | -] [--bench-startup|--bench-open|--bench-scroll|--bench-typing|--bench-memory|--bench-panels|--headless-smoke|--headless-view-features] [file]\n  --width N --height N  logical window size (default 1200 x 800)\n  --large                3000 x 1800 points; actual physical size is logged\n  --lines N              benchmark first N lines; 0 = entire file; bundled sample = 5000\n  --bench-panels         automatic 100-action panel/100k-candidate GUI measurement\n  --headless-large-files [4GB-log]  editor prefix, 50MB line and 4GB hex CPU budgets\n  --bench-large-files FILE  automatic native huge/long-line/hex viewport exercise\n  --headless-view-features  CPU highlight/wrap/fold/minimap measurements, no GUI or GPU\n  --carets 1|1000        typing/headless benchmark selection count\n  -n / -a / -w           new window / add to window / wait for requested sheets to close\n  --groups 1|2|3|4        initial pane count, also applies to GUI typing/scroll modes\n  --headless-workbench   device-free sessions, restore and four-group scene budgets\n  --headless-parse-memory  ten-file parser CPU and footprint, no GUI or GPU\n  --headless-intelligence  100k-word popup typing and definition CPU budgets\n  --bench-intelligence   automatic native popup/index typing, scanout and memory\n  --headless-review-history  50 dirty documents, native full-history save/restore; requires --data-dir\n  --review-ui on|off     Git/diff/spell A/B fixture for intelligence modes\n  --intel-words 0|100000  extra synthetic project words (default 100000); 0 measures the real ten-file vocabulary\n  --data-dir PATH        Packages and Installed Packages location\n  --project PATH         project JSON settings\n  --present fifo         Fifo is the only supported presentation mode\n  --log-input            enable native input/latency JSONL (off for normal editing)\n  --output PATH          enable JSONL at PATH; existing results are never overwritten\n  Default logs: $VELOCITY_LOG_DIR, else ~/Library/Logs/Velocity/\n  --seed N               reproducible decimal u64 typing seed\n  --timeout SECONDS      independent automatic-run watchdog (default 180)\n  --render-scenes DIR [--scale 1|2] [--appearance dark|light|both] [--only a,b] [--bench-scene N] [--first-frames N]\n                         developer tool: offscreen PNGs of UI states (or App::scene cost); never opens a window\n  --help                 print help without native initialization\n";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn parse(s: &[&str]) -> Result<Option<Options>, String> {
         Options::parse(s.iter().map(|s| s.to_string()))
+    }
+    #[test]
+    fn parse_window_flags_command_arguments_and_safe_mode() {
+        let o = parse(&[
+            "-b",
+            "-ws",
+            "--launch-or-new-window",
+            "--safe-mode",
+            "--command",
+            r#"insert {"characters":"fixture"}"#,
+            "--",
+            "-dash.txt",
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(o.background && o.wait && o.stay && o.safe_mode && o.launch_or_new_window);
+        assert!(!o.new_window);
+        assert_eq!(o.files[0].path, PathBuf::from("-dash.txt"));
+        let command = o.command.unwrap();
+        assert_eq!(command.name, "insert");
+        assert_eq!(command.args["characters"], "fixture");
     }
     #[test]
     fn launch_services_keeps_only_path_free_interactive_launches_in_process() {

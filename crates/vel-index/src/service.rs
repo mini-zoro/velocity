@@ -11,7 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -21,6 +21,7 @@ use std::{
 use vel_search::project::{Folder, Patterns};
 use vel_syntax::{MetadataSet, SyntaxSet};
 use vel_text::Text;
+mod polling;
 /// Project indexing settings; field names mirror the public editor settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexOptions {
@@ -117,10 +118,13 @@ struct Completed {
 /// low-priority threads. All writes are serialized, stale tasks and unsaved versions are rejected.
 #[derive(Debug)]
 pub struct ProjectIndex {
+    #[cfg(test)]
+    idle_counters: Arc<IdleCounters>,
     root: PathBuf,
     source_root: PathBuf,
     shared: Arc<RwLock<Index>>,
     commands: mpsc::Sender<Command>,
+    wake: mpsc::SyncSender<()>,
     status: Arc<Mutex<IndexStatus>>,
     cancelled: Arc<AtomicBool>,
 }
@@ -147,10 +151,20 @@ impl ProjectIndex {
 
     /// Opens the symbol index using the same project filters as file navigation.
     pub fn open_folder(
+        folder: Folder,
+        syntaxes: Arc<SyntaxSet>,
+        metadata: Arc<MetadataSet>,
+        options: IndexOptions,
+    ) -> Result<Self, Error> {
+        Self::open_folder_with_volume(folder, syntaxes, metadata, options, polling::local_volume)
+    }
+
+    fn open_folder_with_volume(
         mut folder: Folder,
         syntaxes: Arc<SyntaxSet>,
         metadata: Arc<MetadataSet>,
         options: IndexOptions,
+        local_volume: fn(&Path) -> std::io::Result<bool>,
     ) -> Result<Self, Error> {
         let source_root = std::path::absolute(&folder.path)?;
         let root = source_root.canonicalize()?;
@@ -168,21 +182,40 @@ impl ProjectIndex {
         }));
         let cancelled = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
+        let (wake, signals) = mpsc::sync_channel(1);
         let mut hash = blake3::Hasher::new();
         hash.update(root.to_string_lossy().as_bytes());
-        hash.update(format!("{:?}", filter.folder).as_bytes());
+        hash.update(
+            format!(
+                "{:?}:{}:{:?}",
+                filter.folder.rules, filter.folder.follow_links, filter.folder.path
+            )
+            .as_bytes(),
+        );
         hash.update(&metadata.fingerprint());
         hash.update(&bincode::serialize(&*syntaxes).map_err(|e| Error::Analysis(e.to_string()))?);
-        hash.update(&bincode::serialize(&options).map_err(|e| Error::Analysis(e.to_string()))?);
-        let directory = options
-            .cache_dir
-            .clone()
-            .unwrap_or_else(cache_dir)
-            .join("velocity/index");
+        hash.update(
+            &bincode::serialize(&(
+                &options.index_exclude_patterns,
+                &options.index_include_patterns,
+                options.index_exclude_gitignore,
+                options.index_skip_unknown_extensions,
+                options.max_file_size,
+            ))
+            .map_err(|e| Error::Analysis(e.to_string()))?,
+        );
+        // ST4 cache relocation: https://www.sublimetext.com/download
+        // Rebuild here rather than replaying an old Application Support cache.
+        let directory = options.cache_dir.as_ref().map_or_else(
+            || cache_dir().join("Velocity/index"),
+            |base| base.join("velocity/index"),
+        );
         fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
         let cache = directory.join(format!("{}.v6", hash.finalize().to_hex()));
         let worker = Coordinator {
+            #[cfg(test)]
+            idle_counters: Arc::new(IdleCounters::default()),
             root: root.clone(),
             syntaxes,
             metadata,
@@ -192,16 +225,24 @@ impl ProjectIndex {
             status: status.clone(),
             cancelled: cancelled.clone(),
             commands: rx,
+            wake: wake.clone(),
+            signals,
             cache,
+            local_volume,
         };
+        #[cfg(test)]
+        let idle_counters = worker.idle_counters.clone();
         thread::Builder::new()
             .name("velocity-index".into())
             .spawn(move || worker.run())?;
         Ok(Self {
+            #[cfg(test)]
+            idle_counters,
             root,
             source_root,
             shared,
             commands: tx,
+            wake,
             status,
             cancelled,
         })
@@ -219,6 +260,11 @@ impl ProjectIndex {
         }
         status
     }
+    fn send(&self, command: Command) -> Result<(), ()> {
+        self.commands.send(command).map_err(|_| ())?;
+        let _ = self.wake.try_send(());
+        Ok(())
+    }
     fn path(&self, path: impl AsRef<Path>) -> PathBuf {
         if path.as_ref().is_absolute() {
             path.as_ref().strip_prefix(&self.source_root).map_or_else(
@@ -231,14 +277,12 @@ impl ProjectIndex {
     }
     /// Schedules a debounced disk update (or deletion); unsaved overlays take precedence.
     pub fn reindex_file(&self, path: impl AsRef<Path>) {
-        let _ = self.commands.send(Command::Disk(self.path(path)));
+        let _ = self.send(Command::Disk(self.path(path)));
     }
     /// Coalesces unsaved versions; older/equal revisions never overwrite a newer overlay.
     /// Overlays are never persisted and are independently syntax/size/binary filtered.
     pub fn update_buffer(&self, path: impl AsRef<Path>, revision: u64, text: Text) {
-        let _ = self
-            .commands
-            .send(Command::Buffer(self.path(path), revision, text));
+        let _ = self.send(Command::Buffer(self.path(path), revision, text));
     }
     /// Publishes an analysis prepared from the shared highlighter output, avoiding another
     /// syntax parse. Build it with `analyze_scopes` on the editor's analysis worker. `text` and
@@ -250,17 +294,15 @@ impl ProjectIndex {
         text: Text,
         analysis: FileAnalysis,
     ) {
-        let _ = self
-            .commands
-            .send(Command::Analyzed(self.path(path), revision, text, analysis));
+        let _ = self.send(Command::Analyzed(self.path(path), revision, text, analysis));
     }
     /// Drops an unsaved overlay and restores the file's current disk contents.
     pub fn close_buffer(&self, path: impl AsRef<Path>) {
-        let _ = self.commands.send(Command::Close(self.path(path)));
+        let _ = self.send(Command::Close(self.path(path)));
     }
     /// Rescans after project/ignore file or directory changes.
     pub fn rescan(&self) {
-        let _ = self.commands.send(Command::Rescan);
+        let _ = self.send(Command::Rescan);
     }
     /// Barrier for all current debounced/in-flight updates, followed by durable journal sync.
     /// Intended for tests/shutdown/background callers, never the editor's typing thread.
@@ -272,8 +314,7 @@ impl ProjectIndex {
             ));
         }
         let (tx, rx) = mpsc::channel();
-        self.commands
-            .send(Command::Flush(tx))
+        self.send(Command::Flush(tx))
             .map_err(|_| std::io::Error::other("index stopped"))?;
         rx.recv()
             .map_err(|_| std::io::Error::other("index stopped"))?
@@ -281,7 +322,7 @@ impl ProjectIndex {
     /// Permanently cancels indexing without blocking on a regex. Already indexed queries remain.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        let _ = self.commands.send(Command::Stop);
+        let _ = self.send(Command::Stop);
     }
     /// Exact definition query.
     pub fn lookup_definition(&self, name: &str) -> Vec<SymbolLocation> {
@@ -302,7 +343,9 @@ impl Drop for ProjectIndex {
     }
 }
 fn cache_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+    if !cfg!(target_os = "macos")
+        && let Some(path) = std::env::var_os("XDG_CACHE_HOME")
+    {
         return path.into();
     }
     let base = std::env::var_os("HOME")
@@ -583,7 +626,163 @@ fn priority() {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
 }
+
+// notify can register a watch without delivering events (e.g. in a sandbox).
+// A cache fixture is evidence only when it is on the project's own device.
+#[cfg(target_os = "macos")]
+fn check_event_delivery(root: &Path, cache: &Path, cancelled: &AtomicBool) -> std::io::Result<()> {
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+    let cache_directory = cache.parent().expect("cache directory");
+    if root.metadata()?.dev() != cache_directory.metadata()?.dev() {
+        return Err(io::Error::other(
+            "waiting for native events from the project volume",
+        ));
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = cache_directory.join(format!(
+        ".watch-test-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir)?;
+    let result = (|| {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let probe = dir.join("probe");
+        let expected = probe.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if event.is_ok_and(|event| event.paths.contains(&expected)) {
+                    let _ = tx.try_send(());
+                }
+            })
+            .map_err(io::Error::other)?;
+        watcher
+            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .map_err(io::Error::other)?;
+        fs::write(probe, b"watch health")?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+            if rx.recv_timeout(Duration::from_millis(50)).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(io::Error::other(
+            "native watch registered but delivered no events",
+        ))
+    })();
+    let _ = fs::remove_dir_all(dir);
+    result
+}
+
+type Notices = Arc<Mutex<(bool, HashSet<PathBuf>)>>;
+
+fn is_ignore_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+}
+
+fn watch_project(
+    root: &Path,
+    notices: Notices,
+    wake: mpsc::SyncSender<()>,
+    failed: Arc<AtomicBool>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_err() {
+            failed.store(true, Ordering::Release);
+        }
+        let mut changes = notices.lock().unwrap();
+        if !changes.0 {
+            if let Ok(event) = event
+                && !event.need_rescan()
+                && event.paths.len() <= 4096usize.saturating_sub(changes.1.len())
+            {
+                if !event.kind.is_access() {
+                    changes.1.extend(event.paths);
+                }
+            } else {
+                changes.0 = true;
+                changes.1.clear();
+            }
+        }
+        let _ = wake.try_send(());
+    })?;
+    watcher.watch(root, notify::RecursiveMode::Recursive)?;
+    Ok(watcher)
+}
+struct ParseResources {
+    syntaxes: Arc<SyntaxSet>,
+    metadata: Arc<MetadataSet>,
+    options: IndexOptions,
+    cancelled: Arc<AtomicBool>,
+    completed: mpsc::Sender<Completed>,
+    wake: mpsc::SyncSender<()>,
+}
+struct SharedPool {
+    workers: usize,
+    tasks: mpsc::SyncSender<(Task, Arc<ParseResources>)>,
+}
+impl SharedPool {
+    fn get() -> &'static Self {
+        static POOL: OnceLock<SharedPool> = OnceLock::new();
+        POOL.get_or_init(|| {
+            let count = thread::available_parallelism()
+                .map_or(2, usize::from)
+                .clamp(1, 8);
+            let (tasks, receiver) = mpsc::sync_channel::<(Task, Arc<ParseResources>)>(count * 4);
+            let receiver = Arc::new(Mutex::new(receiver));
+            let mut workers = 0;
+            for id in 0..count {
+                let receiver = receiver.clone();
+                if thread::Builder::new()
+                    .name(format!("velocity-index-parse-{id}"))
+                    .spawn(move || {
+                        priority();
+                        loop {
+                            let entry = receiver.lock().unwrap().recv();
+                            let Ok((mut task, resources)) = entry else {
+                                break;
+                            };
+                            if resources.cancelled.load(Ordering::Acquire) {
+                                continue;
+                            }
+                            let disk = task.overlay.is_none();
+                            let result = analyze_task(
+                                &mut task,
+                                &resources.syntaxes,
+                                &resources.metadata,
+                                &resources.options,
+                            );
+                            let (stamp, analysis) = result.map_or_else(
+                                |error| (None, Err(error)),
+                                |(stamp, analysis)| (stamp, Ok(analysis)),
+                            );
+                            let _ = resources.completed.send(Completed {
+                                path: task.path,
+                                generation: task.generation,
+                                disk,
+                                stamp,
+                                analysis,
+                            });
+                            let _ = resources.wake.try_send(());
+                        }
+                    })
+                    .is_ok()
+                {
+                    workers += 1;
+                }
+            }
+            Self {
+                workers: workers.max(1),
+                tasks,
+            }
+        })
+    }
+}
 struct Coordinator {
+    #[cfg(test)]
+    idle_counters: Arc<IdleCounters>,
     root: PathBuf,
     syntaxes: Arc<SyntaxSet>,
     metadata: Arc<MetadataSet>,
@@ -593,7 +792,10 @@ struct Coordinator {
     status: Arc<Mutex<IndexStatus>>,
     cancelled: Arc<AtomicBool>,
     commands: mpsc::Receiver<Command>,
+    wake: mpsc::SyncSender<()>,
+    signals: mpsc::Receiver<()>,
     cache: PathBuf,
+    local_volume: fn(&Path) -> std::io::Result<bool>,
 }
 impl Coordinator {
     fn excluded(&self, path: &Path) -> bool {
@@ -622,11 +824,8 @@ impl Coordinator {
     }
     fn run(self) {
         priority();
-        let loaded = Journal::open(
-            &self.cache,
-            &mut self.index.write().unwrap(),
-            &self.cancelled,
-        );
+        let mut local = Index::new();
+        let loaded = Journal::open(&self.cache, &mut local, &self.cancelled);
         let (mut journal, mut stamps) = match loaded {
             Ok(value) => value,
             Err(e) => {
@@ -639,98 +838,32 @@ impl Coordinator {
                 return;
             }
         };
+        *self.index.write().unwrap() = local;
+        let pool = SharedPool::get();
         let workers = if self.options.index_workers == 0 {
-            thread::available_parallelism()
-                .map_or(2, usize::from)
-                .clamp(1, 8)
+            pool.workers
         } else {
-            self.options.index_workers.clamp(1, 64)
+            self.options.index_workers.clamp(1, pool.workers)
         };
         self.log(format!(
-            "{workers} indexing workers; {} cached files",
+            "{workers} shared indexing workers; {} cached files",
             stamps.len()
         ));
-        let (tasks, task_rx) = mpsc::sync_channel::<Task>(workers * 2);
-        let task_rx = Arc::new(Mutex::new(task_rx));
         let (completed, result_rx) = mpsc::channel();
-        for n in 0..workers {
-            let rx = task_rx.clone();
-            let tx = completed.clone();
-            let syntaxes = self.syntaxes.clone();
-            let metadata = self.metadata.clone();
-            let options = self.options.clone();
-            let cancelled = self.cancelled.clone();
-            if let Err(error) = thread::Builder::new()
-                .name(format!("velocity-index-{n}"))
-                .spawn(move || {
-                    priority();
-                    loop {
-                        let task = rx.lock().unwrap().recv();
-                        let Ok(mut task) = task else {
-                            break;
-                        };
-                        if cancelled.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let disk = task.overlay.is_none();
-                        let result = analyze_task(&mut task, &syntaxes, &metadata, &options);
-                        let (stamp, analysis) = match result {
-                            Ok((stamp, analysis)) => (stamp, Ok(analysis)),
-                            Err(error) => (None, Err(error)),
-                        };
-                        if tx
-                            .send(Completed {
-                                path: task.path,
-                                generation: task.generation,
-                                disk,
-                                stamp,
-                                analysis,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-            {
-                self.log(format!("worker: {error}"));
-            }
-        }
-        drop(completed);
+        let resources = Arc::new(ParseResources {
+            syntaxes: self.syntaxes.clone(),
+            metadata: self.metadata.clone(),
+            options: self.options.clone(),
+            cancelled: self.cancelled.clone(),
+            completed,
+            wake: self.wake.clone(),
+        });
         let notices = Arc::new(Mutex::new((false, HashSet::<PathBuf>::new())));
-        let mut watcher = if self.options.watch {
-            let notices = notices.clone();
-            match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let mut changes = notices.lock().unwrap();
-                if changes.0 {
-                    return;
-                }
-                if let Ok(event) = event
-                    && !event.need_rescan()
-                    && event.paths.len() <= 4096usize.saturating_sub(changes.1.len())
-                {
-                    if !event.kind.is_access() {
-                        changes.1.extend(event.paths);
-                    }
-                } else {
-                    changes.0 = true;
-                    changes.1.clear();
-                }
-            }) {
-                Ok(mut watcher) => {
-                    if let Err(e) = watcher.watch(&self.root, notify::RecursiveMode::Recursive) {
-                        self.log(format!("watcher unavailable: {e}; use reindex_file/rescan"));
-                    }
-                    Some(watcher)
-                }
-                Err(e) => {
-                    self.log(format!("watcher unavailable: {e}; use reindex_file/rescan"));
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let watcher_failed = Arc::new(AtomicBool::new(false));
+        let mut watcher = None;
+        let mut probing = None::<mpsc::Receiver<std::io::Result<()>>>;
+        let mut fallback = self.options.watch;
+        let mut next_probe = self.options.watch.then(Instant::now);
         let mut pending: HashMap<PathBuf, (Instant, u64, Option<Text>)> = HashMap::new();
         let mut desired = HashMap::new();
         let mut overlays: HashMap<PathBuf, (u64, Text)> = HashMap::new();
@@ -738,9 +871,9 @@ impl Coordinator {
         let mut generation = 0u64;
         let mut inflight = 0usize;
         let mut running: HashMap<PathBuf, u64> = HashMap::new();
-        let mut observed_files: HashMap<PathBuf, Option<Stamp>> = HashMap::new();
-        let mut observed_directories: HashMap<PathBuf, Option<Stamp>> = HashMap::new();
-        let mut next_poll = Instant::now() + Duration::from_millis(500);
+        let mut observed_files = polling::Stamps::new();
+        let mut observed_directories = polling::Stamps::new();
+        let mut polling = polling::Polling::new();
         let mut scan = true;
         let mut subtrees = BTreeSet::new();
         let ignores = Arc::new(Mutex::new(IgnoreFiles::new(
@@ -751,13 +884,114 @@ impl Coordinator {
         let mut aliases = Aliases::default();
         let mut flushes = Vec::new();
         while !self.cancelled.load(Ordering::Acquire) {
+            #[cfg(test)]
+            self.idle_counters.turns.fetch_add(1, Ordering::Relaxed);
             let (overflow, events) = std::mem::take(&mut *notices.lock().unwrap());
             scan |= overflow;
+            let now = Instant::now();
+            let mut native_confirmed = events.iter().any(|path| {
+                path.starts_with(&self.root)
+                    && !path.starts_with(self.cache.parent().expect("cache directory"))
+            });
+            if watcher_failed.swap(false, Ordering::AcqRel) {
+                watcher.take();
+                probing = None;
+                next_probe = Some(now + polling::REPROBE);
+                fallback = true;
+                self.log("watcher failed; polling filesystem stamps");
+            }
+            if let Some(probe) = &probing {
+                match probe.try_recv() {
+                    Ok(result) => {
+                        native_confirmed |= result.is_ok();
+                        if let Err(error) = result
+                            && fallback
+                            && !native_confirmed
+                        {
+                            self.log(format!(
+                                "watcher unavailable: {error}; polling filesystem stamps"
+                            ));
+                        }
+                        probing = None;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => probing = None,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if fallback && watcher.is_some() && native_confirmed {
+                // A slow probe can time out while FSEvents is catching up. A
+                // real event on this root is also proof, followed by one catch-up scan.
+                fallback = false;
+                next_probe = None;
+                scan = true;
+                self.log("native watch confirmed");
+            }
+            if next_probe.is_some_and(|at| at <= now) {
+                next_probe = Some(now + polling::REPROBE);
+                match (self.local_volume)(&self.root) {
+                    Ok(true) => {
+                        watcher = match watch_project(
+                            &self.root,
+                            notices.clone(),
+                            self.wake.clone(),
+                            watcher_failed.clone(),
+                        ) {
+                            Ok(watch) => Some(watch),
+                            Err(error) => {
+                                self.log(format!(
+                                    "watcher unavailable: {error}; polling filesystem stamps"
+                                ));
+                                None
+                            }
+                        };
+                        if watcher.is_some() && probing.is_none() {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let (answer, result) = mpsc::sync_channel(1);
+                                let (root, cache) = (self.root.clone(), self.cache.clone());
+                                let (cancel, wake) = (self.cancelled.clone(), self.wake.clone());
+                                if thread::Builder::new()
+                                    .name("velocity-watch-probe".into())
+                                    .spawn(move || {
+                                        priority();
+                                        let _ = answer
+                                            .send(check_event_delivery(&root, &cache, &cancel));
+                                        let _ = wake.try_send(());
+                                    })
+                                    .is_ok()
+                                {
+                                    probing = Some(result);
+                                }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                fallback = false;
+                                next_probe = None;
+                                scan = true;
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        watcher.take();
+                        self.log("project is on a network volume; polling filesystem stamps")
+                    }
+                    Err(error) => self.log(format!(
+                        "cannot identify project volume: {error}; polling filesystem stamps"
+                    )),
+                }
+            }
             let events = events
                 .into_iter()
                 .filter(|path| path.starts_with(&self.root))
                 .map(Command::Disk);
-            for command in self.commands.try_iter().take(8192).chain(events) {
+            let mut command_count = 0;
+            for command in self
+                .commands
+                .try_iter()
+                .take(8192)
+                .inspect(|_| command_count += 1)
+                .chain(events)
+            {
                 if self.cancelled.load(Ordering::Relaxed) {
                     break;
                 }
@@ -862,6 +1096,7 @@ impl Coordinator {
                         };
                         let path = aliases.primary(&path).to_owned();
                         if self.options.watch
+                            && !fallback
                             && let Some(parent) = path.parent()
                             && let Some(stamp) = observed_directories.get_mut(parent)
                         {
@@ -892,39 +1127,46 @@ impl Coordinator {
                     }
                 }
             }
-            if self.options.watch && Instant::now() >= next_poll {
-                next_poll = Instant::now() + Duration::from_millis(500);
-                scan |= inherited
-                    .iter()
-                    .any(|(path, stamp)| Stamp::read(path).ok() != *stamp);
-                for (path, stamp) in &observed_directories {
-                    if Stamp::read(path).ok() != *stamp {
-                        let directory = if path
-                            .file_name()
-                            .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+            let mut shallow = BTreeSet::<PathBuf>::new();
+            if fallback {
+                scan |= polling.tick(
+                    Instant::now(),
+                    &inherited,
+                    &observed_directories,
+                    &observed_files,
+                    |path, current| {
+                        if is_ignore_file(path) {
+                            subtrees.insert(path.parent().unwrap_or(path).to_owned());
+                        } else if current.is_none()
+                            || self.filter.folder.follow_links
+                            || self.options.index_exclude_gitignore
+                                && [".gitignore", ".ignore"].into_iter().any(|name| {
+                                    let rule = path.join(name);
+                                    Stamp::read(&rule).ok()
+                                        != observed_directories.get(&rule).copied().flatten()
+                                })
                         {
-                            path.parent().unwrap_or(path)
+                            subtrees.insert(path.to_owned());
                         } else {
-                            path.as_path()
-                        };
-                        subtrees.insert(directory.to_owned());
-                    }
-                }
-                for (path, stamp) in &observed_files {
-                    if overlays.contains_key(path)
-                        || pending.contains_key(path)
-                        || running.contains_key(path)
-                    {
-                        continue;
-                    }
-                    if Stamp::read(path).ok() != *stamp {
-                        generation += 1;
-                        desired.insert(path.clone(), generation);
-                        pending.insert(path.clone(), (Instant::now(), generation, None));
-                    }
-                }
+                            shallow.insert(path.to_owned());
+                        }
+                    },
+                    |path, stamp| {
+                        if overlays.contains_key(path)
+                            || pending.contains_key(path)
+                            || running.contains_key(path)
+                        {
+                            return;
+                        }
+                        if Stamp::read(path).ok() != stamp {
+                            generation += 1;
+                            desired.insert(path.to_owned(), generation);
+                            pending.insert(path.to_owned(), (Instant::now(), generation, None));
+                        }
+                    },
+                );
             }
-            if scan || !subtrees.is_empty() {
+            if scan || !subtrees.is_empty() || !shallow.is_empty() {
                 self.status.lock().unwrap().active = true;
                 let mut roots = Vec::<PathBuf>::new();
                 if scan {
@@ -938,16 +1180,25 @@ impl Coordinator {
                         }
                     }
                 }
-                let under_scan = |path: &Path| {
+                let under_full_scan = |path: &Path| {
                     roots
                         .binary_search_by(|root| root.as_path().cmp(path))
                         .map_or_else(|pos| pos > 0 && path.starts_with(&roots[pos - 1]), |_| true)
                 };
+                shallow.retain(|p| !under_full_scan(p));
+                let under_scan = |path: &Path| {
+                    under_full_scan(path)
+                        || path.parent().is_some_and(|parent| shallow.contains(parent))
+                };
                 observed_files.retain(|p, _| !under_scan(p));
-                observed_directories.retain(|p, _| !under_scan(p));
+                observed_directories.retain(|p, _| !under_full_scan(p));
                 aliases.paths.retain(|p, _| !under_scan(p));
                 let mut seen = HashSet::new();
-                for start in &roots {
+                for (start, shallow_walk) in roots
+                    .iter()
+                    .map(|root| (root, false))
+                    .chain(shallow.iter().map(|root| (root, true)))
+                {
                     if self.cancelled.load(Ordering::Relaxed) {
                         break;
                     }
@@ -970,6 +1221,7 @@ impl Coordinator {
                     }
                     let mut walker = ignore::WalkBuilder::new(start);
                     walker
+                        .max_depth(shallow_walk.then_some(1))
                         .hidden(false)
                         .follow_links(self.filter.folder.follow_links)
                         .git_ignore(false)
@@ -1018,11 +1270,19 @@ impl Coordinator {
                             linked = Some(entry.depth());
                         }
                         if self.options.watch && entry.file_type().is_some_and(|ty| ty.is_dir()) {
+                            if shallow_walk && entry.depth() == 1 {
+                                if !observed_directories.contains_key(entry.path()) {
+                                    subtrees.insert(entry.path().to_owned());
+                                }
+                                continue;
+                            }
                             observed_directories
                                 .insert(entry.path().into(), Stamp::read(entry.path()).ok());
                             for name in [".gitignore", ".ignore"] {
                                 let path = entry.path().join(name);
-                                observed_directories.insert(path.clone(), Stamp::read(&path).ok());
+                                if let Ok(stamp) = Stamp::read(&path) {
+                                    observed_directories.insert(path, Some(stamp));
+                                }
                             }
                         }
                         if !entry.file_type().is_some_and(|ty| ty.is_file()) {
@@ -1146,31 +1406,36 @@ impl Coordinator {
                     Err(e) => self.log(format!("{}: {e}", result.path.display())),
                 }
             }
+            let mut pool_full = false;
             let due: Vec<_> = pending
                 .iter()
                 .filter(|(_, (at, _, _))| *at <= Instant::now() || !flushes.is_empty())
-                .take((workers * 3).saturating_sub(inflight))
+                .take(workers.saturating_sub(inflight))
                 .map(|(path, _)| path.clone())
                 .collect();
             for path in due {
                 let (_, generation, overlay) = pending.remove(&path).unwrap();
                 let task_path = path.clone();
                 let analysis = prepared.remove(&path);
-                match tasks.try_send(Task {
-                    path,
-                    generation,
-                    overlay,
-                    prepared: analysis,
-                }) {
+                match pool.tasks.try_send((
+                    Task {
+                        path,
+                        generation,
+                        overlay,
+                        prepared: analysis,
+                    },
+                    resources.clone(),
+                )) {
                     Ok(()) => {
                         inflight += 1;
                         running.insert(task_path, generation);
                     }
-                    Err(mpsc::TrySendError::Full(task)) => {
+                    Err(mpsc::TrySendError::Full((task, _))) => {
                         if let Some(analysis) = task.prepared {
                             prepared.insert(task.path.clone(), analysis);
                         }
                         pending.insert(task.path, (Instant::now(), task.generation, task.overlay));
+                        pool_full = true;
                         break;
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -1180,7 +1445,7 @@ impl Coordinator {
                     }
                 }
             }
-            let active = !pending.is_empty() || inflight > 0;
+            let active = !pending.is_empty() || inflight > 0 || !subtrees.is_empty();
             {
                 let mut status = self.status.lock().unwrap();
                 status.total_files = observed_files.len();
@@ -1188,13 +1453,44 @@ impl Coordinator {
                 status.active = active;
             }
             if !active {
+                if let Err(e) = journal.compact(&self.cancelled) {
+                    self.log(format!("compact: {e}"));
+                }
+                #[cfg(test)]
+                self.idle_counters.stats.store(
+                    crate::store::STAT_READS.with(std::cell::Cell::get),
+                    Ordering::Relaxed,
+                );
                 for reply in flushes.drain(..) {
                     let _ = reply.send(journal.flush());
                 }
             }
-            thread::park_timeout(Duration::from_millis(1));
+            if command_count == 8192 || !subtrees.is_empty() {
+                continue;
+            }
+            let deadline = if pool_full {
+                Some(Instant::now() + Duration::from_millis(5))
+            } else if inflight < workers {
+                pending.values().map(|(at, _, _)| *at).min()
+            } else {
+                None
+            };
+            let deadline = deadline
+                .into_iter()
+                .chain(fallback.then_some(polling.next))
+                .chain(next_probe)
+                .min();
+            match deadline {
+                Some(at) => {
+                    let _ = self
+                        .signals
+                        .recv_timeout(at.saturating_duration_since(Instant::now()));
+                }
+                None => {
+                    let _ = self.signals.recv();
+                }
+            }
         }
-        drop(tasks);
         watcher.take();
         if let Err(e) = journal.flush() {
             self.log(format!("persist: {e}"));
@@ -1204,6 +1500,14 @@ impl Coordinator {
         status.cancelled = true;
     }
 }
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct IdleCounters {
+    turns: std::sync::atomic::AtomicU64,
+    stats: std::sync::atomic::AtomicU64,
+}
+
 fn analyze_task(
     task: &mut Task,
     syntaxes: &Arc<SyntaxSet>,
@@ -1257,4 +1561,174 @@ fn analyze_task(
         analyze(&task.path, &source, syntaxes, metadata)?
     };
     Ok((stamp, Some(analysis)))
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    fn cpu_seconds() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: getrusage fills the process usage structure on success.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(result, 0);
+        // SAFETY: getrusage returned success.
+        let usage = unsafe { usage.assume_init() };
+        let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 * 1e-6;
+        seconds(usage.ru_utime) + seconds(usage.ru_stime)
+    }
+
+    fn sample(count: usize, interval: Duration, watch: bool) -> (f64, f64, f64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        for folder in 0..count.div_ceil(1000) {
+            let dir = root.join(folder.to_string());
+            fs::create_dir(&dir).unwrap();
+            for file in folder * 1000..count.min((folder + 1) * 1000) {
+                fs::write(dir.join(format!("{file}.txt")), "fixture\n").unwrap();
+            }
+        }
+        let mut builder = vel_syntax::SyntaxSetBuilder::new();
+        builder.add_plain_text_syntax();
+        let options = IndexOptions {
+            cache_dir: Some(tmp.path().join("cache")),
+            index_skip_unknown_extensions: false,
+            watch,
+            ..Default::default()
+        };
+        let index = ProjectIndex::open(
+            &root,
+            Arc::new(builder.build()),
+            Arc::new(MetadataSet::default()),
+            options,
+        )
+        .unwrap();
+        index.flush().unwrap();
+        assert_eq!(index.status().total_files, count);
+        // Settle any coalesced events from watcher setup before the idle sample.
+        thread::sleep(Duration::from_millis(2300));
+        let snapshot = || {
+            (
+                index.idle_counters.turns.load(Ordering::Relaxed),
+                index.idle_counters.stats.load(Ordering::Relaxed),
+            )
+        };
+        let before = snapshot();
+        let cpu_before = cpu_seconds();
+        let at = Instant::now();
+        thread::sleep(interval);
+        let cpu = cpu_seconds() - cpu_before;
+        let after = snapshot();
+        index.cancel();
+        let seconds = at.elapsed().as_secs_f64();
+        (
+            (after.0 - before.0) as f64 / seconds,
+            (after.1 - before.1) as f64 / seconds,
+            cpu * 100. / seconds,
+        )
+    }
+    #[test]
+    #[ignore = "100k-file idle measurement"]
+    fn measure_idle_index_100k() {
+        let watch = std::env::var_os("VELOCITY_MEASURE_NATIVE_WATCH").is_some();
+        let (turns, stats, cpu) = sample(100_000, Duration::from_secs(10), watch);
+        println!("idle {turns:.2} turns/s, {stats:.2} Stamp::read/s, {cpu:.2}% of one core");
+        if std::env::var_os("VELOCITY_EXPECT_POLLING").is_some() {
+            assert!(stats > 0. && stats <= 5000., "{stats} stats/s");
+        }
+    }
+    #[test]
+    fn event_driven_index_idles_without_stat_polling() {
+        // No native events in this fixture. The same channel is used for
+        // notifications, explicit reindex requests and worker results.
+        let (turns, stats, _) = sample(2_000, Duration::from_secs(1), false);
+        assert!(turns < 20., "{turns} turns per second");
+        assert_eq!(stats, 0.);
+    }
+
+    #[test]
+    fn network_volume_index_detects_new_files_and_edits_without_parent_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        let edited = root.join("nested/one.txt");
+        fs::write(&edited, "originalword\n").unwrap();
+        let mut builder = vel_syntax::SyntaxSetBuilder::new();
+        builder.add_plain_text_syntax();
+        let index = ProjectIndex::open_folder_with_volume(
+            Folder {
+                path: root.clone(),
+                name: String::new(),
+                rules: Default::default(),
+                follow_links: false,
+            },
+            Arc::new(builder.build()),
+            Arc::new(MetadataSet::default()),
+            IndexOptions {
+                cache_dir: Some(tmp.path().join("cache")),
+                index_skip_unknown_extensions: false,
+                ..Default::default()
+            },
+            |_| Ok(false),
+        )
+        .unwrap();
+        index.flush().unwrap();
+        assert!(
+            index
+                .status()
+                .logs
+                .iter()
+                .any(|line| line.contains("network volume"))
+        );
+        let parent = Stamp::read(edited.parent().unwrap()).unwrap();
+        fs::write(&edited, "replacementword\n").unwrap();
+        assert_eq!(Stamp::read(edited.parent().unwrap()).unwrap(), parent);
+
+        let wait_for = |word: &str| {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                let shared = index.shared_index();
+                if shared.read().unwrap().word_count(word) > 0 {
+                    break;
+                }
+                assert!(Instant::now() < until, "index did not find {word}");
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for("replacementword");
+        fs::write(root.join("nested/two.txt"), "newword\n").unwrap();
+        wait_for("newword");
+        // A new subdirectory needs a walk even though known siblings don't.
+        fs::create_dir(root.join("added")).unwrap();
+        fs::write(root.join("added/three.txt"), "subtreeword\n").unwrap();
+        wait_for("subtreeword");
+        index.flush().unwrap();
+        assert_eq!(index.status().total_files, 3);
+    }
+    #[test]
+    fn worker_count_and_debounce_keep_cache_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("one.txt"), "word").unwrap();
+        let mut builder = vel_syntax::SyntaxSetBuilder::new();
+        builder.add_plain_text_syntax();
+        let syntaxes = Arc::new(builder.build());
+        let metadata = Arc::new(MetadataSet::default());
+        for (workers, cached) in [(1, 0), (3, 1)] {
+            let options = IndexOptions {
+                index_workers: workers,
+                debounce: Duration::from_millis(workers as u64),
+                watch: false,
+                cache_dir: Some(tmp.path().join("cache")),
+                index_skip_unknown_extensions: false,
+                ..Default::default()
+            };
+            let index =
+                ProjectIndex::open(&root, syntaxes.clone(), metadata.clone(), options).unwrap();
+            index.flush().unwrap();
+            assert_eq!(index.status().cached_files, cached);
+        }
+    }
 }

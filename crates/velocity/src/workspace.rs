@@ -587,6 +587,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    pending_revert: Option<PendingRevert>,
     pub(crate) jump_history: crate::editor::navigation::Shared,
     pub(crate) appearance: appearance::Catalog,
     pub(crate) appearance_preview: Option<appearance::Preview>,
@@ -610,6 +611,7 @@ pub struct Workspace {
     pub build_system: Option<String>,
     pub project_model: vel_session::project::Project,
     pub recent_files: Vec<PathBuf>,
+    pub(crate) goto_recent_files: Vec<PathBuf>,
     pub recent_folders: Vec<PathBuf>,
     pub recent_projects: Vec<PathBuf>,
     recent_menu_state: Option<([Vec<PathBuf>; 3], u64)>,
@@ -659,6 +661,14 @@ pub struct Workspace {
     settings_write_overrides: BTreeMap<String, Option<Value>>,
     settings_reload_deferred: bool,
     pub resource_revision: u64,
+}
+#[derive(Debug)]
+struct PendingRevert {
+    sheet: u64,
+    path: PathBuf,
+    revision: u64,
+    format: fileio::Format,
+    task: LoadTask,
 }
 pub(crate) fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let m = std::fs::metadata(path).ok()?;
@@ -1603,6 +1613,8 @@ impl Workspace {
             restore_in_progress: false,
             restore_source: None,
             restore_deadline: None,
+            pending_revert: None,
+            goto_recent_files: Vec::new(),
             pane_extent: (1200., 800.),
             pane_minimum: (120., 112.),
             restore_original: None,
@@ -1833,8 +1845,18 @@ impl Workspace {
     pub fn open(&mut self, location: FileLocation) -> Result<(), String> {
         let _request = self.navigation_request();
         let result = self.open_mode(location, false);
+        if result.is_ok() {
+            self.remember_goto_file();
+        }
         self.observe_navigation();
         result
+    }
+    pub(crate) fn remember_goto_file(&mut self) {
+        if let Some(path) = self.tabs[self.active].path.clone() {
+            self.goto_recent_files.retain(|other| other != &path);
+            self.goto_recent_files.insert(0, path);
+            self.goto_recent_files.truncate(100);
+        }
     }
     pub fn preview(&mut self, location: FileLocation) -> Result<(), String> {
         let target = absolute(&location.path)?;
@@ -2172,6 +2194,91 @@ impl Workspace {
         Ok(())
     }
     /// Reopens a saved file with an explicit codec. Failed decoding leaves edits intact.
+    // The Sublime changelogs document `revert` scroll position (dev build 4063),
+    // not its undo history. Keep the existing confirmation before a disk reload.
+    // https://www.sublimetext.com/dev#build-4063
+    pub fn revert(&mut self, confirm: impl FnOnce() -> bool) -> Result<(), String> {
+        let tab = &self.tabs[self.active];
+        let path = tab.path.clone().ok_or("Revert requires a file on disk")?;
+        if tab.dirty() && !confirm() {
+            return Ok(());
+        }
+        let format = tab.format.clone();
+        let options = fileio::DecodeOptions {
+            encoding: Some(format.display_encoding().to_owned()),
+            default_line_ending: format.line_ending,
+            ..fileio::DecodeOptions::from_settings(&tab.editor.preferences)
+        };
+        self.pending_revert = Some(PendingRevert {
+            sheet: tab.sheet,
+            revision: tab.editor.revision,
+            task: fileio::load_background_with_options(path.clone(), options)?,
+            path,
+            format,
+        });
+        Ok(())
+    }
+    pub fn open_stdin(&mut self, stdin: &[u8]) -> Result<u64, String> {
+        // Builds 4113/4121/4200: detect syntax and indentation from stdin,
+        // start with an empty undo stack, and don't translate Tab.
+        // https://www.sublimetext.com/download
+        let options = fileio::DecodeOptions::from_settings(&self.editor().preferences);
+        let loaded = fileio::decode_bytes(stdin, &options)?;
+        self.new_file()?;
+        let tab = &mut self.tabs[self.active];
+        tab.install_restored(loaded);
+        tab.needs_detection = true;
+        let sheet = tab.sheet;
+        self.reconcile_installs();
+        self.configure_language(self.active, None, true)?;
+        self.editor_mut()
+            .settings
+            .set(Layer::View, "translate_tabs_to_spaces", Value::Bool(false));
+        self.editor_mut().sync();
+        self.stdout_sheets.insert(sheet);
+        Ok(sheet)
+    }
+    fn poll_revert(&mut self) -> bool {
+        let Some(pending) = self.pending_revert.as_ref() else {
+            return false;
+        };
+        let result = match pending.task.result.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(error) => Err(error.to_string()),
+        };
+        let pending = self.pending_revert.take().unwrap();
+        let Some(index) = self.sheet_index(pending.sheet) else {
+            return false;
+        };
+        let tab = &mut self.tabs[index];
+        if tab.path.as_ref() != Some(&pending.path)
+            || tab.editor.revision != pending.revision
+            || tab.format != pending.format
+            || tab.editor.marked.is_some()
+        {
+            self.load_notices
+                .push("Revert canceled: the tab changed while reading from disk".into());
+            return true;
+        }
+        match result {
+            Ok(mut loaded) => {
+                loaded.format.line_ending = pending.format.line_ending;
+                tab.external = None;
+                tab.loading = None;
+                tab.binary_loading = None;
+                tab.restore_history = None;
+                tab.install(loaded);
+                tab.deleted = false;
+                tab.restored_format_dirty = false;
+                self.reconcile_installs();
+            }
+            Err(error) => self
+                .load_notices
+                .push(fileio::regular::error(&pending.path, error)),
+        }
+        true
+    }
     pub fn reopen_encoding(&mut self, name: &str) -> Result<(), String> {
         let index = self.active;
         let tab = &self.tabs[index];
@@ -2255,7 +2362,8 @@ impl Workspace {
                 roots.push(parent.to_owned());
             }
         }
-        let mut changed = self.poll_appearance_commits();
+        let mut changed = self.poll_revert();
+        changed |= self.poll_appearance_commits();
         changed |= self.git.poll(enabled, roots);
         if changed {
             for tab in &mut self.tabs {
@@ -3541,10 +3649,12 @@ mod round15_tests {
             project: Some("project.sublime-project".into()),
             ..Default::default()
         };
-        let request = crate::instance::Request::new(&options, None).unwrap();
-        assert!(crate::open_requests::request_needs_window(&w, &request));
-        w.settings.set(Layer::User, "hot_exit", json!("always"));
-        assert!(!crate::open_requests::request_needs_window(&w, &request));
+        use crate::open_requests::{OpenWindow, Route, RouteRequest, WindowRoute, route};
+        let mut request = crate::instance::Request::new(&options, None).unwrap();
+        let request = RouteRequest::prepare(&mut request, OpenWindow::Never);
+        let mut window = WindowRoute::default();
+        window.update(&w, true);
+        assert_eq!(route(&request, &[(1, window)].into(), Some(1)), Route::New);
     }
     #[test]
     fn close_deleted_files_closes_clean_watched_tabs() {

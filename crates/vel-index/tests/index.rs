@@ -265,8 +265,8 @@ fn complete_journal_prefix_survives_truncated_tail() {
     }
     let path = std::fs::read_dir(cache.path().join("velocity/index"))
         .unwrap()
-        .next()
-        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "v6"))
         .unwrap()
         .path();
     use std::io::Write;
@@ -412,15 +412,7 @@ fn notify_changes_or_reported_watcher_fallback_update_the_index() {
     let index =
         ProjectIndex::open(root.path(), set(), Arc::new(MetadataSet::new()), settings).unwrap();
     index.flush().unwrap();
-    let fallback = index
-        .status()
-        .logs
-        .iter()
-        .any(|line| line.contains("watcher unavailable"));
     std::fs::write(root.path().join("hot.fix"), "fn notified\n").unwrap();
-    if fallback {
-        index.reindex_file("hot.fix");
-    }
     let deadline = Instant::now() + Duration::from_secs(5);
     while index.lookup_definition("notified").is_empty() {
         assert!(

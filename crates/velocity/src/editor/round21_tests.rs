@@ -235,8 +235,8 @@ fn round21_keymap_resolution_and_unicode_quotes() {
         ("super+shift+]", "next_view", json!({})),
         ("super+9", "select_by_index", json!({"index":-1})),
         // Lane B round 21 rebinds these to next/prev_view_in_stack and adds switch_file.
-        ("ctrl+tab", "next_view", json!({})),
-        ("ctrl+shift+tab", "prev_view", json!({})),
+        ("ctrl+tab", "next_view_in_stack", json!({})),
+        ("ctrl+shift+tab", "prev_view_in_stack", json!({})),
         ("super+f12", "goto_definition", json!({"side_by_side":true})),
         (
             "super+shift+f12",

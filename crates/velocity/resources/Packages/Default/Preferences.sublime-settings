@@ -14,6 +14,12 @@
   "trim_automatic_white_space": true,
   // Enter keeps the indentation of the current line.
   "auto_indent": true,
+  // Treat these characters as additional boundaries for sub-word commands.
+  "sub_word_separators": "_",
+  // Null uses the built-in scopes for HTML and CSS completions.
+  "default_completions_selector": null,
+  // Suppress built-in HTML and CSS completions without hiding user snippets.
+  "disable_default_completions": false,
   // With auto_indent, the syntax's indentation rules add or remove a level.
   "smart_indent": true,
   // Tab completes the word before the caret; false limits Tab to exact snippet triggers.
@@ -143,7 +149,8 @@
   "close_windows_when_empty": false,
   "close_deleted_files": false,
   "set_unsaved_view_name": true,
-  "open_files_in_new_window": false,
+  // File opens can target the current window, Finder/Dock only, or all sources.
+  "open_files_in_new_window": "never",
   // ST4 4143: https://www.sublimetext.com/download
   "update_system_recent_files": true,
   // ST4 4107 and 4126: https://www.sublimetext.com/download

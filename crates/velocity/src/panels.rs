@@ -403,11 +403,16 @@ pub struct Panels {
     file_candidates: Arc<Vec<fuzzy::Candidate>>,
     index: Option<Index>,
     folder_key: Vec<Folder>,
-    recency: HashMap<PathBuf, u64>,
+    extra_paths: Vec<PathBuf>,
+    extra_candidates: Arc<Vec<fuzzy::Candidate>>,
+    file_recency: BTreeMap<usize, u64>,
     palette_recent: HashMap<String, u64>,
     uses: u64,
     preview: Option<Preview>,
     last_preview: Option<(PathBuf, Target)>,
+    preview_symbol_version: Option<(u64, vel_buffer::ChangeId)>,
+    project_symbol_source: Vec<(PathBuf, usize, usize, usize)>,
+    local_kinds: Vec<vel_index::SymbolKind>,
     expanded: HashSet<PathBuf>,
     recursive_expansion: Option<RecursiveExpansion>,
     children: HashMap<PathBuf, Vec<Entry>>,
@@ -560,11 +565,16 @@ impl Default for Panels {
             file_candidates: Arc::new(vec![]),
             index: None,
             folder_key: Vec::new(),
-            recency: HashMap::new(),
+            extra_paths: Vec::new(),
+            extra_candidates: Arc::default(),
+            file_recency: BTreeMap::new(),
             palette_recent: HashMap::new(),
             uses: 0,
             preview: None,
             last_preview: None,
+            preview_symbol_version: None,
+            project_symbol_source: Vec::new(),
+            local_kinds: Vec::new(),
             expanded: HashSet::new(),
             recursive_expansion: None,
             children: HashMap::new(),
@@ -1507,22 +1517,36 @@ impl Panels {
             }
         }
     }
-    fn location_items(&mut self) {
+    fn location_items(&mut self, workspace: &Workspace) {
+        let mut scorer = fuzzy::LabelMatcher::new(&self.quick_input.value());
         self.quick.set_items(
             self.locations
                 .iter()
                 .enumerate()
-                .map(|(i, l)| Item {
-                    caption: l.name.clone(),
-                    value: i,
-                    kind: format!("{:?}", l.kind),
-                    annotation: format!(
-                        "{}:{}",
-                        l.file.file_name().unwrap_or_default().to_string_lossy(),
-                        l.row + 1
-                    ),
-                    details: l.file.display().to_string(),
-                    highlights: Vec::new(),
+                .map(|(i, l)| {
+                    let path = workspace
+                        .folders
+                        .iter()
+                        .filter(|folder| l.file.starts_with(&folder.path))
+                        .max_by_key(|folder| folder.path.as_os_str().len())
+                        .and_then(|folder| l.file.strip_prefix(&folder.path).ok())
+                        .unwrap_or(&l.file);
+                    let mut highlights = Vec::new();
+                    if self.overlay == Some(Overlay::ProjectSymbols) {
+                        scorer.score(&l.name, Some(&mut highlights));
+                    }
+                    Item {
+                        caption: l.name.clone(),
+                        value: i,
+                        kind: format!("{:?}", l.kind),
+                        annotation: format!(
+                            "{}:{}",
+                            l.file.file_name().unwrap_or_default().to_string_lossy(),
+                            l.row + 1
+                        ),
+                        details: path.display().to_string(),
+                        highlights,
+                    }
                 })
                 .collect(),
         );
@@ -1872,6 +1896,7 @@ impl Panels {
                 // Keep @/: prefixes while placing the caret after them.
                 self.quick_input.command(Command::End(false));
                 self.last_preview = None;
+                self.preview_symbol_version = None;
                 self.quick.set_items(Vec::new());
                 self.prepared.clear();
                 self.query_quick(workspace);
@@ -1998,6 +2023,7 @@ impl Panels {
                     }
                 }
             }
+            "hide_overlay" => self.cancel_overlay(workspace),
             "hide_panel" => {
                 if args["cancel"].as_bool() == Some(true) {
                     self.cancel_incremental(workspace);
@@ -2664,6 +2690,9 @@ impl Panels {
             self.local = None;
             self.candidates = Arc::default();
             self.paths = Arc::default();
+            self.extra_paths.clear();
+            self.extra_candidates = Arc::default();
+            self.file_recency.clear();
             self.local_positions.clear();
             self.quick.set_items(Vec::new());
         } else if self.quick_query != value {
@@ -2691,6 +2720,7 @@ impl Panels {
         }
         self.fuzzy_worker.cancel();
         if self.overlay == Some(Overlay::ProjectSymbols) {
+            self.project_symbol_source = self.intel.symbol_source();
             self.quick_pending = true;
             self.intel.query(
                 crate::intelligence::Query::Symbols(self.quick_input.value()),
@@ -2843,14 +2873,37 @@ impl Panels {
                 Target::Symbol(term) => {
                     let language = workspace.editor().language.borrow();
                     let analysis = language.as_ref().and_then(|l| l.analysis.as_ref());
-                    let symbols = analysis.map(|a| a.symbols.clone()).unwrap_or_default();
                     self.message = if analysis.is_none() {
                         "Indexing symbols…".into()
                     } else {
                         String::new()
                     };
-                    if analysis.is_some() {
+                    if let Some(analysis) = analysis {
+                        // Build 4107 displays symbol kinds: https://www.sublimetext.com/download
+                        // Index metadata supplies source order; keep that for an empty query.
+                        let editor = workspace.editor();
+                        let mut kinds = Vec::new();
+                        let symbols = analysis
+                            .index_symbols
+                            .symbols
+                            .iter()
+                            .filter(|s| s.local)
+                            .map(|symbol| {
+                                use vel_highlight::ScopeProvider;
+                                let scopes = language
+                                    .as_ref()
+                                    .and_then(|l| l.scopes.as_ref())
+                                    .and_then(|s| s.scopes_at(symbol.range.start))
+                                    .unwrap_or_default();
+                                kinds.push(vel_index::SymbolKind::from_scopes(scopes));
+                                (
+                                    symbol.name.clone(),
+                                    symbol.range.start.min(editor.text.len_bytes()),
+                                )
+                            })
+                            .collect();
                         self.set_local(symbols, term);
+                        self.local_kinds = kinds;
                     }
                     return;
                 }
@@ -2901,29 +2954,46 @@ impl Panels {
                 extra.push(path.clone());
             }
         }
-        self.paths = if extra.is_empty() {
-            self.file_paths.clone()
-        } else {
-            let mut paths = self.file_paths.as_ref().clone();
-            paths.extend(extra);
-            Arc::new(paths)
-        };
+        self.paths = self.file_paths.clone();
         self.local_positions.clear();
         let indexed = self.file_paths.len();
-        self.candidates = if self.paths.len() == indexed && self.recency.is_empty() {
-            self.file_candidates.clone()
-        } else {
-            let mut candidates = self.file_candidates.as_ref().clone();
-            for path in &self.paths[indexed..] {
-                candidates.push(fuzzy::Candidate::new(path.to_string_lossy()));
-            }
-            for (i, path) in self.paths.iter().enumerate() {
-                candidates[i].recent = self.recency.get(path).copied().unwrap_or(0);
-            }
-            Arc::new(candidates)
-        };
-        self.fuzzy_worker.set_items(self.candidates.clone());
+        self.candidates = self.file_candidates.clone();
+        self.extra_paths = extra;
+        self.extra_candidates = Arc::new(
+            self.extra_paths
+                .iter()
+                .map(|path| fuzzy::Candidate::new(path.to_string_lossy()))
+                .collect(),
+        );
+        self.file_recency = workspace
+            .goto_recent_files
+            .iter()
+            .rev()
+            .enumerate()
+            .filter_map(|(n, path)| {
+                self.paths
+                    .binary_search(path)
+                    .ok()
+                    .or_else(|| {
+                        self.extra_paths
+                            .iter()
+                            .position(|p| p == path)
+                            .map(|i| indexed + i)
+                    })
+                    .map(|i| (i, 200 - (workspace.goto_recent_files.len() - n - 1) as u64))
+            })
+            .collect();
+        self.fuzzy_worker.set_items_with_extras(
+            self.candidates.clone(),
+            self.extra_candidates.clone(),
+            self.file_recency.clone(),
+        );
         self.fuzzy_worker.query(query.file, 100);
+    }
+    fn quick_path(&self, index: usize) -> Option<&PathBuf> {
+        self.paths
+            .get(index)
+            .or_else(|| self.extra_paths.get(index.saturating_sub(self.paths.len())))
     }
     fn publish_quick(&mut self, workspace: &Workspace, hits: Vec<fuzzy::Hit>) {
         let palette = matches!(
@@ -2944,31 +3014,44 @@ impl Panels {
                     hit.index
                 };
                 Item {
-                    caption: self.candidates[hit.index].label.clone(),
+                    caption: self
+                        .candidates
+                        .get(hit.index)
+                        .unwrap_or_else(|| {
+                            &self.extra_candidates[hit.index - self.candidates.len()]
+                        })
+                        .label
+                        .clone(),
                     highlights: hit.positions,
                     value: index,
-                    kind: if palette {
-                        "command"
+                    kind: if let Some(kind) = self
+                        .local_kinds
+                        .get(hit.index)
+                        .filter(|_| !self.local_positions.is_empty())
+                    {
+                        format!("{kind:?}")
+                    } else if palette {
+                        "command".into()
                     } else if !self.local_positions.is_empty() {
-                        "symbol/word"
+                        "word".into()
                     } else {
-                        "file"
-                    }
-                    .into(),
+                        "file".into()
+                    },
                     annotation: if palette {
                         workspace
                             .editor()
                             .keymap
                             .hint(&palette_items[index].invocation)
                             .unwrap_or_default()
+                    } else if let Some(at) = self.local_positions.get(hit.index) {
+                        format!("Line {}", workspace.editor().text.byte_to_line(*at) + 1)
                     } else {
                         String::new()
                     },
                     details: if palette {
                         palette_items[index].invocation.command.clone()
                     } else {
-                        self.paths
-                            .get(hit.index)
+                        self.quick_path(hit.index)
                             .map(|p| p.display().to_string())
                             .unwrap_or_default()
                     },
@@ -2996,6 +3079,7 @@ impl Panels {
         )
     }
     fn set_local(&mut self, symbols: Vec<(String, usize)>, term: &str) {
+        self.local_kinds.clear();
         self.quick_ready = true;
         self.paths = Arc::default();
         self.local_positions = symbols.iter().map(|(_, p)| *p).collect();
@@ -3057,14 +3141,18 @@ impl Panels {
             workspace.editor_mut().set_caret(*at, false);
             return Ok(());
         }
-        let Some(path) = self.paths.get(index).cloned() else {
+        let Some(path) = self.quick_path(index).cloned() else {
             return Ok(());
         };
         let target = query.target;
         if self.last_preview.as_ref() == Some(&(path.clone(), target.clone())) {
+            if let Target::Symbol(term) = &target {
+                self.preview_file_symbol(workspace, term);
+            }
             return Ok(());
         }
         self.last_preview = Some((path.clone(), target.clone()));
+        self.preview_symbol_version = None;
         let (line, column) = match &target {
             Target::Line(l, c) => (*l, *c),
             _ => (1, 1),
@@ -3078,25 +3166,41 @@ impl Panels {
                 workspace.editor_mut().set_caret(hit.start, false);
             }
         } else if let Target::Symbol(term) = target {
-            let symbols = workspace
-                .editor()
-                .language
-                .borrow()
+            self.preview_file_symbol(workspace, &term);
+        }
+        Ok(())
+    }
+    fn preview_file_symbol(&mut self, workspace: &mut Workspace, term: &str) {
+        let tab = &workspace.tabs[workspace.active];
+        let version = (tab.sheet, tab.editor.buffer.change_id());
+        if self.preview_symbol_version == Some(version)
+            || !self
+                .last_preview
                 .as_ref()
-                .and_then(|l| l.analysis.as_ref())
-                .map(|a| a.symbols.clone())
-                .unwrap_or_default();
+                .is_some_and(|(p, _)| tab.path.as_ref().is_some_and(|path| path == p))
+        {
+            return;
+        }
+        let symbols = tab
+            .editor
+            .language
+            .borrow()
+            .as_ref()
+            .and_then(|l| l.analysis.as_ref())
+            .filter(|analysis| analysis.version == version.1)
+            .map(|a| a.symbols.clone());
+        if let Some(symbols) = symbols {
+            self.preview_symbol_version = Some(version);
             let items: Vec<_> = symbols
                 .iter()
                 .map(|(s, _)| fuzzy::Candidate::new(s))
                 .collect();
-            if let Some(hit) = fuzzy::Matcher::default().rank(&items, &term, 1).first() {
+            if let Some(hit) = fuzzy::Matcher::default().rank(&items, term, 1).first() {
                 workspace
                     .editor_mut()
                     .set_caret(symbols[hit.index].1, false);
             }
         }
-        Ok(())
     }
     fn cleanup_navigation_previews(&self, workspace: &mut Workspace, keep_active: bool) {
         let Some(preview) = &self.preview else {
@@ -3222,7 +3326,13 @@ impl Panels {
             } else {
                 &self.quick_input.value()
             };
-            let hits = fuzzy::Matcher::default().rank(&self.candidates, term, 100);
+            let hits = fuzzy::Matcher::default().rank_with_extras(
+                &self.candidates,
+                &self.extra_candidates,
+                &self.file_recency,
+                term,
+                100,
+            );
             self.publish_quick(workspace, hits);
             self.quick_pending = false;
         }
@@ -3334,10 +3444,7 @@ impl Panels {
                 .reset_current(crate::intelligence::capture(workspace));
             self.navigation_selection = None;
             self.navigation_options = Default::default();
-            if let Some(path) = &workspace.tabs[workspace.active].path {
-                self.uses += 1;
-                self.recency.insert(path.clone(), self.uses);
-            }
+            workspace.remember_goto_file();
             self.overlay = None;
             self.preview = None;
             self.navigation_preview_guard = None;
@@ -3886,12 +3993,18 @@ impl Panels {
             | self.intel.poll(workspace)
             | self.review_poll(workspace)
             | self.merge_git_tree(workspace);
-        if self.intel.busy()
-            && self.locations.is_empty()
-            && self.overlay == Some(Overlay::ProjectSymbols)
+        if self.overlay == Some(Overlay::ProjectSymbols)
             && !self.intel.pending
+            && self.project_symbol_source != self.intel.symbol_source()
         {
             self.query_quick(workspace);
+        }
+        if self.overlay == Some(Overlay::Goto)
+            && let Some((_, Target::Symbol(term))) = &self.last_preview
+            && !self.quick_pending
+        {
+            let term = term.clone();
+            self.preview_file_symbol(workspace, &term);
         }
         if self
             .hover_source
@@ -3981,7 +4094,7 @@ impl Panels {
                 {
                     self.locations = result.locations;
                     self.quick_pending = false;
-                    self.location_items();
+                    self.location_items(workspace);
                     let _ = self.preview_current(workspace);
                 }
                 Query::Definition(_) | Query::Reference(_) if current => {
@@ -4019,7 +4132,7 @@ impl Panels {
                         self.fuzzy_worker.cancel();
                         self.locations = result.locations;
                         self.quick_pending = false;
-                        self.location_items();
+                        self.location_items(workspace);
                         let _ = self.preview_current(workspace);
                     }
                 }
@@ -6758,6 +6871,111 @@ mod intelligence_tests {
             !p.intel.projects.is_empty() && !p.intel.projects[0].index.status().active
         });
         (root, data, workspace, panels)
+    }
+    #[test]
+    fn goto_uses_shared_files_and_retries_unopened_file_symbol() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        std::fs::write(dir.join("a.rs"), "fn first() {}\n\nfn beta() {}\n").unwrap();
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels.add_folder(&mut workspace, dir.clone()).unwrap();
+        wait(&mut workspace, &mut panels, |_, panels| {
+            panels.file_candidates.len() == 1
+        });
+        assert!(workspace.tabs.iter().all(|t| t.path.is_none()));
+        workspace.goto_recent_files.push(dir.join("a.rs"));
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto","text":"a.rs@beta"}),
+                0..10,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&panels.candidates, &panels.file_candidates));
+        wait(&mut workspace, &mut panels, |w, _| {
+            w.tabs[w.active].path.as_deref() == Some(dir.join("a.rs").as_path())
+                && w.editor().text.byte_to_line(w.editor().caret) == 2
+        });
+    }
+    #[test]
+    fn file_at_symbol_previews_the_first_local_picker_result() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let mut source = String::new();
+        for i in 0..200 {
+            source.push_str(&format!("fn xxxx_Dat_{i:03}() {{}}\n"));
+        }
+        source.push_str("fn xd_Data_000() {}\n");
+        std::fs::write(dir.join("a.rs"), &source).unwrap();
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels.add_folder(&mut workspace, dir.clone()).unwrap();
+        wait(&mut workspace, &mut panels, |_, panels| {
+            panels.file_candidates.len() == 1
+        });
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto","text":"a.rs@dat"}),
+                0..10,
+            )
+            .unwrap();
+        wait(&mut workspace, &mut panels, |w, p| {
+            w.tabs[w.active].path.as_ref() == Some(&dir.join("a.rs"))
+                && p.preview_symbol_version.is_some()
+        });
+        let preview = workspace.editor().caret;
+        assert_eq!(workspace.editor().text.byte_to_line(preview), 200);
+        panels
+            .key(&mut workspace, &Key::parse("enter").unwrap(), 0..10)
+            .unwrap();
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto","text":"@dat"}),
+                0..10,
+            )
+            .unwrap();
+        wait(&mut workspace, &mut panels, |_, p| {
+            !p.quick_pending && !p.quick.items.is_empty()
+        });
+        assert!(panels.quick.items[0].caption.contains("xd_Data_000"));
+        panels
+            .key(&mut workspace, &Key::parse("enter").unwrap(), 0..10)
+            .unwrap();
+        assert_eq!(workspace.editor().caret, preview);
+    }
+
+    #[test]
+    fn local_symbols_keep_source_order_with_kind_and_line() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("a.rs");
+        std::fs::write(&file, "fn extraordinary_name() {}\nfn x() {}\n").unwrap();
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        workspace
+            .open(FileLocation {
+                path: file,
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto","text":"@"}),
+                0..10,
+            )
+            .unwrap();
+        wait(&mut workspace, &mut panels, |_, p| p.quick.items.len() == 2);
+        assert!(panels.quick.items[0].caption.contains("extraordinary_name"));
+        assert_eq!(panels.quick.items[1].annotation, "Line 2");
+        assert_eq!(panels.quick.items[0].kind, "Function");
     }
     #[test]
     fn project_symbols_definition_previews_unicode_locations_and_bounded_history() {

@@ -227,8 +227,7 @@ fn r19_unfocused_cli_finder_and_open_preserve_origin() {
             let mut request = crate::instance::Request::new(&Options::default(), None).unwrap();
             request.files = vec![location];
             request.native_open = route == "finder";
-            let (stream, _client) = std::os::unix::net::UnixStream::pair().unwrap();
-            a.accept_request(crate::instance::Incoming { request, stream })
+            a.accept_request(crate::instance::Incoming::local(request))
                 .unwrap();
         }
         a.sync_active_view();
@@ -303,8 +302,7 @@ fn r19_existing_tab_open_requests_preserve_unfocused_origin() {
                     column: 1,
                 }];
                 request.native_open = route == "native_accept";
-                let (stream, _client) = std::os::unix::net::UnixStream::pair().unwrap();
-                a.accept_request(crate::instance::Incoming { request, stream })
+                a.accept_request(crate::instance::Incoming::local(request))
                     .unwrap();
             }
         }

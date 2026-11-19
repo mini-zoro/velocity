@@ -518,6 +518,51 @@ fn load_cancellable(
     }
     Err(plan.binary().map_or(failure, |notice| notice.message(path)))
 }
+/// Decodes in-memory text input with the file codec, BOM and fallback policy.
+pub fn decode_bytes(bytes: &[u8], options: &DecodeOptions) -> Result<Loaded, String> {
+    let path = Path::new("stdin");
+    let facts = PrefixFacts::inspect(bytes);
+    let decision = decide_decoding(&facts, options)?;
+    for attempt in decision.attempts {
+        let total = bytes.len() as u64;
+        let mut progress = |_| {};
+        let mut reader = DecodeReader::new(
+            &bytes[attempt.skip..],
+            attempt.encoding,
+            total,
+            &mut progress,
+            options.default_line_ending,
+        );
+        reader.allow_replacement = attempt.replacement;
+        if let Ok(text) = Text::from_reader(&mut reader) {
+            let line_ending = reader.ending();
+            return Ok(Loaded {
+                disk_content: None,
+                encoding_chosen: false,
+                unchanged: false,
+                warning: attempt.notice.as_ref().map(|notice| notice.message(path)),
+                text,
+                source_bytes: total,
+                format: Format {
+                    encoding: attempt.encoding.name().into(),
+                    display_name: None,
+                    bom: attempt.bom,
+                    line_ending,
+                },
+            });
+        }
+    }
+    Err(decision.binary.map_or_else(
+        || "invalid encoded stdin".into(),
+        |notice| notice.message(path),
+    ))
+}
+
+/// Encodes a buffer for stream output using the ordinary file representation.
+pub fn encode_to(writer: &mut impl Write, text: &Text, format: &Format) -> Result<(), String> {
+    write_encoded(writer, text, format, encoding(&format.encoding)?)
+}
+
 struct DecodeReader<'a, R> {
     input: R,
     decoder: encoding_rs::Decoder,

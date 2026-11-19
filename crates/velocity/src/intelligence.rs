@@ -41,7 +41,45 @@ enum Work {
         Query,
         (u64, BufferId, ChangeId, usize),
         Vec<Arc<ProjectIndex>>,
+        Vec<OpenSymbols>,
     ),
+}
+#[derive(Debug)]
+struct OpenSymbols {
+    path: PathBuf,
+    scopes: Arc<vel_highlight::ScopeSnapshot>,
+    symbols: Arc<vel_highlight::SymbolList>,
+}
+impl OpenSymbols {
+    fn lookup(&self, name: &str, reference: bool) -> impl Iterator<Item = SymbolLocation> {
+        use vel_highlight::ScopeProvider;
+        self.symbols
+            .symbols
+            .iter()
+            .filter(move |symbol| {
+                symbol.index_name == name
+                    && if reference {
+                        symbol.reference
+                    } else {
+                        symbol.indexed
+                    }
+            })
+            .map(|symbol| {
+                let point = self.scopes.text.byte_to_point(symbol.range.start);
+                SymbolLocation {
+                    file: self.path.clone(),
+                    name: symbol.index_name.clone(),
+                    row: point.row,
+                    column: point.column,
+                    range: symbol.range.clone(),
+                    kind: vel_index::SymbolKind::from_scopes(
+                        self.scopes
+                            .scopes_at(symbol.range.start)
+                            .unwrap_or_default(),
+                    ),
+                }
+            })
+    }
 }
 #[derive(Debug)]
 enum Publication {
@@ -104,12 +142,30 @@ impl Default for Intelligence {
         std::thread::Builder::new()
             .name("velocity-project-navigation".into())
             .spawn(move || {
-                while let Ok(Work::Query(id, query, source, projects)) = jobs.recv() {
+                while let Ok(Work::Query(id, query, source, projects, open)) = jobs.recv() {
                     if latest.load(Ordering::Acquire) != id {
                         continue;
                     }
                     let mut locations = Vec::new();
                     let mut references = Vec::new();
+                    // SymbolSource.ANY, plus the current-file priority restored in build 4186:
+                    // https://www.sublimetext.com/docs/api_reference.html
+                    // https://www.sublimetext.com/download
+                    for tab in &open {
+                        if latest.load(Ordering::Relaxed) != id {
+                            break;
+                        }
+                        match &query {
+                            Query::Definition(name) => locations.extend(tab.lookup(name, false)),
+                            Query::Reference(name) => locations.extend(tab.lookup(name, true)),
+                            Query::Hover(name) => {
+                                locations.extend(tab.lookup(name, false));
+                                references.extend(tab.lookup(name, true));
+                            }
+                            Query::Symbols(_) => {}
+                        }
+                    }
+                    let open_paths: BTreeSet<_> = open.iter().map(|tab| &tab.path).collect();
                     for index in projects {
                         if latest.load(Ordering::Acquire) != id {
                             break;
@@ -127,23 +183,38 @@ impl Default for Intelligence {
                                     .into_iter()
                                     .map(|m| m.location),
                             ),
-                            Query::Reference(name) => {
-                                locations.extend(index.lookup_references(name))
-                            }
-                            Query::Definition(name) => {
-                                locations.extend(index.lookup_definition(name))
-                            }
+                            Query::Reference(name) => locations.extend(
+                                index
+                                    .lookup_references(name)
+                                    .into_iter()
+                                    .filter(|l| !open_paths.contains(&l.file)),
+                            ),
+                            Query::Definition(name) => locations.extend(
+                                index
+                                    .lookup_definition(name)
+                                    .into_iter()
+                                    .filter(|l| !open_paths.contains(&l.file)),
+                            ),
                             Query::Hover(name) => {
-                                locations.extend(index.lookup_definition(name));
-                                references.extend(index.lookup_references(name));
+                                locations.extend(
+                                    index
+                                        .lookup_definition(name)
+                                        .into_iter()
+                                        .filter(|l| !open_paths.contains(&l.file)),
+                                );
+                                references.extend(
+                                    index
+                                        .lookup_references(name)
+                                        .into_iter()
+                                        .filter(|l| !open_paths.contains(&l.file)),
+                                );
                             }
                         }
                     }
                     if let Query::Symbols(term) = &query {
-                        locations.sort_by_key(|l| {
-                            std::cmp::Reverse(
-                                vel_index::fuzzy_score(&l.name, term).unwrap_or(i64::MIN),
-                            )
+                        let mut scorer = vel_search::fuzzy::LabelMatcher::new(term);
+                        locations.sort_by_cached_key(|l| {
+                            std::cmp::Reverse(scorer.score(&l.name, None).unwrap_or(i64::MIN))
                         });
                         locations.truncate(100);
                     }
@@ -257,9 +328,11 @@ impl Intelligence {
             changed = true;
         }
         if self.key != key {
+            if !self.key.is_empty() {
+                self.generation.fetch_add(1, Ordering::AcqRel);
+                self.pending = false;
+            }
             self.key = key;
-            self.generation.fetch_add(1, Ordering::AcqRel);
-            self.pending = false;
             for project in &self.projects {
                 project.index.cancel();
             }
@@ -289,15 +362,19 @@ impl Intelligence {
                     index_skip_unknown_extensions: settings
                         .bool("index_skip_unknown_extensions", true),
                     max_file_size: settings.usize("index_max_file_size", 2 * 1024 * 1024) as u64,
-                    cache_dir: Some(
-                        workspace
-                            .data_path()
-                            .map(|p| p.join("Cache/Index"))
-                            .unwrap_or_else(|| {
-                                std::env::temp_dir()
-                                    .join(format!("velocity-index-{}", std::process::id()))
-                            }),
-                    ),
+                    cache_dir: if cfg!(test) {
+                        Some(
+                            workspace
+                                .data_path()
+                                .map(|p| p.join("Cache/Index"))
+                                .unwrap_or_else(|| {
+                                    std::env::temp_dir()
+                                        .join(format!("velocity-index-{}", std::process::id()))
+                                }),
+                        )
+                    } else {
+                        std::env::var_os("VELOCITY_CACHE_DIR").map(PathBuf::from)
+                    },
                     ..IndexOptions::default()
                 };
                 let (tx, rx) = mpsc::channel();
@@ -506,6 +583,20 @@ impl Intelligence {
     pub fn busy(&self) -> bool {
         self.loading.is_some() || self.pending || self.percentage.is_some()
     }
+    pub fn symbol_source(&self) -> Vec<(PathBuf, usize, usize, usize)> {
+        self.projects
+            .iter()
+            .map(|project| {
+                let status = project.index.status();
+                (
+                    project.root.clone(),
+                    status.indexed_files,
+                    status.skipped_files,
+                    status.cached_files,
+                )
+            })
+            .collect()
+    }
     pub fn query(&mut self, query: Query, workspace: &Workspace) {
         self.query_at(query, workspace, workspace.editor().caret);
     }
@@ -516,6 +607,48 @@ impl Intelligence {
     pub fn query_at(&mut self, query: Query, workspace: &Workspace, point: usize) {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let e = workspace.editor();
+        let open = if matches!(query, Query::Symbols(_)) {
+            Vec::new()
+        } else {
+            let tabs = &workspace.tabs;
+            std::iter::once(&tabs[workspace.active])
+                .chain(
+                    tabs.iter()
+                        .enumerate()
+                        .filter(|(index, _)| *index != workspace.active)
+                        .map(|(_, tab)| tab),
+                )
+                .filter_map(|tab| {
+                    if tab.editor.shared_shadow {
+                        return None;
+                    }
+                    let lang = tab.editor.language.borrow();
+                    let language = lang.as_ref()?;
+                    let version = tab.editor.buffer.change_id();
+                    let analysis = language
+                        .analysis
+                        .as_ref()
+                        .filter(|analysis| analysis.version == version)?;
+                    let scopes = language
+                        .scopes
+                        .as_ref()
+                        .filter(|scopes| scopes.version == version)?;
+                    let symbols = &analysis.index_symbols;
+                    // A partial analysis must not suppress a valid on-disk result.
+                    if !symbols.complete {
+                        return None;
+                    }
+                    Some(OpenSymbols {
+                        path: tab
+                            .path
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from(format!("untitled:{}", tab.sheet))),
+                        scopes: scopes.clone(),
+                        symbols: symbols.clone(),
+                    })
+                })
+                .collect()
+        };
         let _ = self.tx.send(Work::Query(
             generation,
             query,
@@ -526,6 +659,7 @@ impl Intelligence {
                 point,
             ),
             self.projects.iter().map(|p| p.index.clone()).collect(),
+            open,
         ));
         self.pending = true;
     }
@@ -705,6 +839,19 @@ pub fn jump(
     location: &SymbolLocation,
     preview: bool,
 ) -> Result<(), String> {
+    if let Some(id) = location
+        .file
+        .to_str()
+        .and_then(|p| p.strip_prefix("untitled:"))
+        .and_then(|id| id.parse().ok())
+    {
+        let index = workspace
+            .sheet_index(id)
+            .ok_or("definition tab was closed")?;
+        workspace.select(index);
+        select_symbol(workspace, location);
+        return Ok(());
+    }
     let target = crate::cli::FileLocation {
         path: location.file.clone(),
         line: location.row + 1,
@@ -741,6 +888,9 @@ pub(crate) fn jump_with_options(
     let _history = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
     let source = workspace.sheet_index(options.origin);
     let group = source.and_then(|i| workspace.workbench.group_of(workspace.tabs[i].sheet));
+    if !location.file.is_absolute() {
+        return jump(workspace, location, preview);
+    }
     let Some(group) = group.filter(|_| options.side_by_side) else {
         return jump(workspace, location, preview);
     };

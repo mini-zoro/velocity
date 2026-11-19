@@ -157,6 +157,9 @@ pub struct Window {
     pub project: Option<PathBuf>,
     /// Added folders, including unsaved projects.
     pub folders: Vec<PathBuf>,
+    /// Recently opened paths used only for this window's Goto Anything ranking.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub goto_recent_files: Vec<PathBuf>,
     /// Group geometry, order and selections.
     pub workbench: Workbench,
     /// Open sheets.

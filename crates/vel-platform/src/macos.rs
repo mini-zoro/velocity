@@ -16,6 +16,31 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
+
+pub(super) fn option_held_at_launch() -> bool {
+    // SAFETY: NSEvent's class method modifierFlags returns the documented bitset.
+    let flags: NSEventModifierFlags = unsafe { msg_send![objc2::class!(NSEvent), modifierFlags] };
+    flags.contains(NSEventModifierFlags::Option)
+}
+
+pub(super) fn frontmost_pid() -> Option<i32> {
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    // SAFETY: NSRunningApplication's processIdentifier returns a Darwin pid_t.
+    let pid: i32 = unsafe { msg_send![&*app, processIdentifier] };
+    (pid > 0).then_some(pid)
+}
+
+pub(super) fn activate_pid(pid: i32) {
+    // https://developer.apple.com/documentation/appkit/nsrunningapplication/activate(options:)
+    // SAFETY: the documented selector accepts a pid_t and returns a nullable running app.
+    let app: Option<Retained<NSRunningApplication>> = unsafe {
+        msg_send![objc2::class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid]
+    };
+    if let Some(app) = app {
+        #[allow(deprecated)]
+        app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+    }
+}
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSFileManager, NSNotification, NSObject,
     NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
@@ -172,6 +197,13 @@ impl WindowHandle {
     /// Requests normal per-window close handling, including unsaved changes.
     pub fn request_close(&self) {
         self.0.dispatch(Event::CloseRequested);
+    }
+    /// Schedule the native Quit action once the current handler borrow is released.
+    pub fn request_app_quit(&self) {
+        let app = NSApplication::sharedApplication(self.0.mtm);
+        // SAFETY: terminate: is AppKit's normal application-menu action, accepts
+        // a nil sender and runs through all existing quit callbacks.
+        unsafe { app.performSelector_withObject_afterDelay(sel!(terminate:), None, 0.) }
     }
     /// Closes one approved window while other windows keep running.
     pub fn close(&self) {
@@ -1650,15 +1682,26 @@ impl Delegate {
             return Ok(());
         }
         h.phase("first_frame_prepared_before_order_front");
-        window.makeKeyAndOrderFront(None);
+        let activate = h
+            .app
+            .borrow()
+            .as_ref()
+            .is_none_or(|app| app.activate_on_open());
+        if activate {
+            window.makeKeyAndOrderFront(None);
+        } else {
+            window.orderBack(None);
+        }
         h.visible.set(true);
         h.phase("ordered_front");
         // No display-link tick, redraw notification or run-loop round trip here.
         h.render(FrameReason::StartupPresent, true);
         h.starting.set(false);
         CATransaction::flush();
-        #[allow(deprecated)]
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        if activate {
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        }
         h.phase("launch_callback_finished");
         lifecycle::launched();
         Ok(())

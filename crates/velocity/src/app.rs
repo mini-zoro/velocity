@@ -14,6 +14,9 @@ pub(crate) mod render_scenes;
 #[cfg(test)]
 #[path = "app_round20_invisible_perf.rs"]
 mod round20_invisible_perf;
+#[cfg(test)]
+#[path = "app_round21_lane_b_tests.rs"]
+mod round21_lane_b_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_status.rs"]
@@ -84,6 +87,12 @@ struct Sample {
     present_call_ms: f64,
     timer_lateness_ms: Option<f64>,
 }
+type PendingCliCommand = (
+    crate::cli::Named,
+    std::collections::BTreeSet<u64>,
+    Option<u64>,
+);
+
 #[derive(Debug)]
 pub struct App {
     /// A playback may edit only the workbench sheet that started it, including nested chains.
@@ -157,6 +166,9 @@ pub struct App {
     restored_windows: Vec<vel_session::Window>,
     restored_reserved_ids: std::collections::VecDeque<u64>,
     waiters: Vec<crate::instance::Waiter>,
+    cli_commands: std::collections::VecDeque<PendingCliCommand>,
+    restore_safety: crate::safe_mode::Startup,
+    skipped_recovery: Option<std::sync::mpsc::Receiver<vel_session::Recovery>>,
     view_buffer: Option<u64>,
     options: Options,
     clock: Clock,
@@ -277,6 +289,9 @@ impl App {
             restored_windows: Vec::new(),
             restored_reserved_ids: Default::default(),
             waiters: Vec::new(),
+            cli_commands: Default::default(),
+            restore_safety: Default::default(),
+            skipped_recovery: None,
             exact_scene: false,
             exact_drawables: Default::default(),
             content_scanout: None,
@@ -375,7 +390,11 @@ impl App {
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(), String> {
-        let result = crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths);
+        // A secondary native recipient can become primary if the old GUI
+        // exits. Normalize project paths just as for any other forwarded open.
+        let mut request = crate::open_requests::native_request(paths)?;
+        let _ = self.route_open(&mut request);
+        let result = self.accept_request(crate::instance::Incoming::local(request));
         self.sync_recents();
         result
     }
@@ -385,8 +404,74 @@ impl App {
     pub fn set_instance(&mut self, instance: Option<crate::instance::Instance>) {
         self.sessions.borrow_mut().instance = instance;
     }
+    pub fn set_restore_safety(&mut self, startup: crate::safe_mode::Startup) {
+        if self.options.safe_mode {
+            self.sessions.borrow_mut().persist_project_workspaces = false;
+        }
+        self.restore_safety = startup;
+    }
+    fn poll_restore_safety(&mut self, w: &WindowHandle) {
+        if let Some(warning) = self.restore_safety.warning.take() {
+            self.workspace.load_notices.push(warning.clone());
+            self.workspace.messages.push(warning);
+        }
+        if let Some(guard) = self.restore_safety.guard.take() {
+            guard.healthy_after_first_frame();
+        }
+        if w.is_focused()
+            && let Some(path) = self.restore_safety.skipped.take()
+            && w.alert(
+                "Session Recovery",
+                &format!(
+                    "The previous startup crashed during restore. The session was preserved at {}.",
+                    path.display()
+                ),
+                &["Keep Closed", "Reopen Windows"],
+            ) == 1
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(vel_session::load(&path));
+            });
+            self.skipped_recovery = Some(rx);
+        }
+        if let Some(rx) = &self.skipped_recovery {
+            match rx.try_recv() {
+                Ok(recovery) => {
+                    self.skipped_recovery = None;
+                    self.workspace.messages.extend(recovery.messages);
+                    let mut sessions = self.sessions.borrow_mut();
+                    sessions.restored = recovery.session;
+                    let ids = sessions.reserve_recovered();
+                    self.restored_windows
+                        .extend(sessions.restored.windows.iter().cloned());
+                    self.restored_reserved_ids.extend(ids);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.skipped_recovery = None;
+                    self.workspace
+                        .messages
+                        .push("Could not read the preserved session".into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    w.request_frame_at(Instant::now() + std::time::Duration::from_millis(25));
+                }
+            }
+        }
+    }
     fn hot_exit(&self) -> vel_session::HotExit {
-        self.workspace.hot_exit()
+        if self.options.safe_mode {
+            vel_session::HotExit::Disabled
+        } else {
+            self.workspace.hot_exit()
+        }
+    }
+    fn open_project_for_session(&mut self, project: PathBuf) -> Result<(), String> {
+        if self.options.safe_mode {
+            self.workspace.open_project_with_restore(project, false)
+        } else {
+            self.workspace.open_project(project)
+        }
     }
     fn checkpoint(&mut self, quitting: bool) -> Result<(), String> {
         self.checkpoint_reason(quitting, false)
@@ -491,6 +576,7 @@ impl App {
             workspace.restore_window(window, &documents)?;
         }
         let mut options = self.options.clone();
+        options.background &= restored.is_some();
         options.files.clear();
         options.file = None;
         options.project = None;
@@ -520,6 +606,8 @@ impl App {
         )
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
+        self.poll_restore_safety(w);
+        self.publish_open_route();
         self.sync_recents();
         self.sessions.borrow_mut().update_system_recents(
             self.workspace
@@ -556,6 +644,15 @@ impl App {
                 self.workspace.messages.push(format!("CLI request: {e}"));
             }
         }
+        let routed = self
+            .sessions
+            .borrow_mut()
+            .open_inbox
+            .remove(&self.session_id);
+        for incoming in routed.into_iter().flatten() {
+            self.apply_open_request(w, incoming)?;
+        }
+        self.poll_cli_commands(Some(w));
         self.waiters
             .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let messages = self.sessions.borrow_mut().poll();
@@ -575,12 +672,11 @@ impl App {
     fn receive_request(
         &mut self,
         w: &WindowHandle,
-        incoming: crate::instance::Incoming,
+        mut incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
-        let native_open = incoming.request.native_open;
-        let new_window =
-            crate::open_requests::request_needs_window(&self.workspace, &incoming.request);
-        if new_window {
+        use crate::open_requests::Route;
+        let route = self.route_open(&mut incoming.request);
+        if route == Route::New {
             let workspace = Workspace::new(
                 vel_text::Text::new(),
                 self.workspace.data_path().map(Path::to_owned),
@@ -588,6 +684,7 @@ impl App {
                 true,
             )?;
             let mut options = self.options.clone();
+            options.background = incoming.request.background;
             options.files.clear();
             options.file = None;
             options.project = None;
@@ -610,36 +707,74 @@ impl App {
                 },
                 app,
             )?;
-        } else {
-            self.accept_request(incoming)?;
-            w.focus();
-            self.changed(w, Instant::now(), !native_open);
+        } else if let Route::Window(id) = route {
+            if id == self.session_id {
+                self.apply_open_request(w, incoming)?;
+            } else {
+                let mut sessions = self.sessions.borrow_mut();
+                let inbox = sessions.open_inbox.entry(id).or_default();
+                if inbox.len() >= 16 {
+                    return Err("target window's open queue is full".into());
+                }
+                inbox.push(incoming);
+            }
         }
         Ok(())
+    }
+    fn route_open(&self, incoming: &mut crate::instance::Request) -> crate::open_requests::Route {
+        use crate::open_requests::{OpenWindow, RouteRequest, route};
+        let policy = OpenWindow::setting(self.workspace.settings.get("open_files_in_new_window"));
+        let request = RouteRequest::prepare(incoming, policy);
+        let sessions = self.sessions.borrow();
+        route(&request, &sessions.open_windows, Some(self.session_id))
+    }
+    fn publish_open_route(&self) {
+        self.sessions
+            .borrow_mut()
+            .open_windows
+            .entry(self.session_id)
+            .or_default()
+            .update(&self.workspace, self.options.mode == Mode::Interactive);
     }
     fn open_native_window_request(
         &mut self,
         w: &WindowHandle,
-        request: crate::instance::Request,
+        mut request: crate::instance::Request,
     ) -> Result<(), String> {
-        let (stream, _client) =
-            std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
-        let mut request = request;
-        request.queued_ack = true;
         request.new_window = true;
-        self.receive_request(w, crate::instance::Incoming { request, stream })
+        self.publish_open_route();
+        self.receive_request(w, crate::instance::Incoming::local(request))
+    }
+    fn apply_open_request(
+        &mut self,
+        w: &WindowHandle,
+        incoming: crate::instance::Incoming,
+    ) -> Result<(), String> {
+        let native_open = incoming.request.native_open;
+        let background = incoming.request.background;
+        self.accept_request(incoming)?;
+        self.publish_open_route();
+        if !background {
+            w.focus();
+        }
+        self.changed(w, Instant::now(), !native_open);
+        Ok(())
     }
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
-        let request = incoming.request.clone();
+        let request = &incoming.request;
         let mut ids = std::collections::BTreeSet::new();
         let mut errors = Vec::new();
-        if let Some(project) = request.project.clone() {
+        if let Some(project) = request.project.clone().filter(|p| {
+            !self
+                .workspace
+                .project_path()
+                .is_some_and(|open| crate::open_requests::same_path(open, p))
+        }) {
             let retain = self.hot_exit().retain(false);
             let result = (|| {
                 self.checkpoint_reason(false, true)?;
                 self.sessions.borrow().flush()?;
-                self.workspace
-                    .open_project(project.clone())
+                self.open_project_for_session(project.clone())
                     .map_err(|error| format!("{}: {error}", project.display()))?;
                 self.sessions
                     .borrow_mut()
@@ -675,25 +810,24 @@ impl App {
                 errors.extend(result);
             }
         }
-        if let Some(text) = request.stdin.clone() {
-            let result = self.workspace.new_file().and_then(|()| {
-                self.workspace
-                    .editor_mut()
-                    .run("insert", &json!({"characters":text}))
-            });
-            if let Err(error) = result {
-                errors.push(error);
-            } else {
-                let sheet = self.workspace.tabs[self.workspace.active].sheet;
-                ids.insert(sheet);
-                self.workspace.stdout_sheets.insert(sheet);
-            }
+        if let Some(stdin) = &request.stdin {
+            ids.insert(self.workspace.open_stdin(stdin.as_bytes())?);
         }
         if request.files.is_empty() && request.stdin.is_none() && !self.workspace.is_empty() {
             ids.insert(self.workspace.tabs[self.workspace.active].sheet);
         }
         if !errors.is_empty() {
             self.panels.message = errors.join("\n");
+        }
+        if let Some(command) = &request.command
+            && self.cli_commands.len() < 16
+        {
+            self.cli_commands.push_back((
+                command.clone(),
+                ids.clone(),
+                (!self.workspace.is_empty())
+                    .then(|| self.workspace.tabs[self.workspace.active].sheet),
+            ));
         }
         // Path failures do not suppress the accepted/closed protocol or later paths.
         if let Some(waiter) =
@@ -702,6 +836,23 @@ impl App {
             self.waiters.push(waiter);
         }
         Ok(())
+    }
+    fn poll_cli_commands(&mut self, w: Option<&WindowHandle>) {
+        // Build 4200 delays CLI commands until the requested files/plugins are loaded.
+        // https://www.sublimetext.com/download
+        while let Some((_, sheets, _)) = self.cli_commands.front() {
+            if self.workspace.tabs.iter().any(|tab| {
+                sheets.contains(&tab.sheet)
+                    && (tab.loading.is_some() || tab.binary_loading.is_some())
+            }) {
+                break;
+            }
+            let (command, _, target) = self.cli_commands.pop_front().unwrap();
+            if let Some(index) = target.and_then(|sheet| self.workspace.sheet_index(sheet)) {
+                self.workspace.activate_sheet(index);
+            }
+            self.run_named(w, &command.name, &command.args);
+        }
     }
     fn show_error(&mut self, w: &WindowHandle, message: &str) {
         let _ = self
@@ -774,7 +925,9 @@ impl App {
             }
             "toggle_show_open_files" | "move_tab_to_window" => return true,
             "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
-            "reopen" | "reopen_encoding" if self.workspace.tabs[target].path.is_none() => {
+            "reopen" | "reopen_encoding" | "revert"
+                if self.workspace.tabs[target].path.is_none() =>
+            {
                 return false;
             }
             "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
@@ -951,7 +1104,55 @@ impl App {
             .panels
             .macro_file_items(&self.workspace)
             .unwrap_or_default();
-        native_menu(&self.workspace.menus, &macros)
+        let mut entries = native_menu(&self.workspace.menus, &macros);
+        if let Some(syntax) = entries
+            .iter_mut()
+            .find(|item| item.caption == "View")
+            .and_then(|view| {
+                view.children
+                    .iter_mut()
+                    .find(|item| item.caption == "Syntax")
+            })
+        {
+            syntax.children.extend(self.syntax_menu());
+        }
+        entries
+    }
+    fn syntax_menu(&self) -> Vec<MenuEntry> {
+        let mut packages = std::collections::BTreeMap::<_, Vec<MenuEntry>>::new();
+        for syntax in self
+            .workspace
+            .assets
+            .syntaxes
+            .syntaxes()
+            .iter()
+            .filter(|s| !s.hidden)
+        {
+            let package = syntax
+                .path
+                .strip_prefix("Packages/")
+                .unwrap_or(&syntax.path)
+                .split_once('/')
+                .map_or("General", |(name, _)| name);
+            packages.entry(package).or_default().push(MenuEntry {
+                caption: syntax.name.clone(),
+                command: Some("set_file_type".into()),
+                args: json!({"syntax": syntax.path}).to_string(),
+                children: Vec::new(),
+            });
+        }
+        packages
+            .into_iter()
+            .map(|(package, mut children)| {
+                children.sort_unstable_by(|a, b| a.caption.cmp(&b.caption));
+                MenuEntry {
+                    caption: package.into(),
+                    command: None,
+                    args: "{}".into(),
+                    children,
+                }
+            })
+            .collect()
     }
     fn sync_recents(&mut self) {
         self.sessions.borrow_mut().sync_recents(
@@ -1134,6 +1335,12 @@ impl App {
         args: &Value,
         depth: usize,
     ) -> Result<(), String> {
+        // https://docs.sublimetext.io/reference/commands.html
+        let name = match name {
+            "prompt_add_folder" => "add_folder",
+            "prompt_select_project" => "prompt_open_project",
+            other => other,
+        };
         if !self.macro_view_active() {
             return Ok(());
         }
@@ -1145,6 +1352,8 @@ impl App {
                 name,
                 "next_view"
                     | "prev_view"
+                    | "next_view_in_stack"
+                    | "prev_view_in_stack"
                     | "select_by_index"
                     | "next_sheet"
                     | "prev_sheet"
@@ -1471,6 +1680,20 @@ impl App {
                 }
                 self.workspace
                     .reopen_encoding(args["encoding"].as_str().ok_or("missing encoding")?)?;
+            }
+            "revert" => {
+                // Build 4142 confirms dirty-file reopen. Public references do not
+                // specify Revert's undo policy; keep Velocity's existing reload behavior.
+                // https://www.sublimetext.com/download
+                self.workspace.revert(|| {
+                    window.is_some_and(|w| {
+                        w.alert(
+                            "Revert File?",
+                            "Discard unsaved changes and reload this file from disk?",
+                            &["Revert", "Cancel"],
+                        ) == 0
+                    })
+                })?;
             }
             "save_all" => {
                 let mut failures = Vec::new();
@@ -1815,6 +2038,23 @@ impl App {
         {
             return self.workspace.open(crate::cli::FileLocation::parse(file));
         }
+        if name == "switch_file" {
+            return self.workspace.switch_file(&args["extensions"]);
+        }
+        if matches!(name, "clear_recent_files" | "clear_recent_projects") {
+            let kind = if name == "clear_recent_files" {
+                self.workspace.recent_files.clear();
+                self.workspace.goto_recent_files.clear();
+                0
+            } else {
+                self.workspace.recent_projects.clear();
+                2
+            };
+            self.sessions
+                .borrow_mut()
+                .clear_recent_kind(self.session_id, kind);
+            return Ok(());
+        }
         if self.select_tab_action(name, args) {
             return Ok(());
         }
@@ -1938,11 +2178,20 @@ impl App {
                 }
                 return Ok(());
             }
-            "prompt_open_project" | "open_project" => {
+            "prompt_open_project" | "open_project" | "open_recent_project" => {
                 let path = args["file"]
                     .as_str()
                     .map(std::path::PathBuf::from)
-                    .or_else(|| w.open_files().into_iter().next());
+                    .or_else(|| {
+                        if name == "open_recent_project" {
+                            self.workspace
+                                .recent_projects
+                                .get(args["index"].as_u64()? as usize)
+                                .cloned()
+                        } else {
+                            w.open_files().into_iter().next()
+                        }
+                    });
                 if let Some(path) = path {
                     if !self.hot_exit().retain(false)
                         && !self
@@ -1953,8 +2202,7 @@ impl App {
                     self.checkpoint_reason(false, true)?;
                     self.sessions.borrow().flush()?;
                     let retain = self.hot_exit().retain(false);
-                    self.workspace
-                        .open_project(path.clone())
+                    self.open_project_for_session(path.clone())
                         .map_err(|error| format!("{}: {error}", path.display()))?;
                     self.sessions
                         .borrow_mut()
@@ -2044,6 +2292,7 @@ impl App {
                 self.workspace.recent_projects.clear();
                 self.sessions.borrow_mut().clear_recent(self.session_id);
             }
+            "exit" => w.request_app_quit(),
             "open_recent_file" => {
                 self.workspace.open(crate::cli::FileLocation {
                     path: args["file"].as_str().ok_or("missing file")?.into(),
@@ -2100,7 +2349,8 @@ impl App {
             "prompt_save_as" => {
                 self.save_tab(w, active, true);
             }
-            "next_view" | "prev_view" | "select_by_index" => {
+            "next_view" | "prev_view" | "next_view_in_stack" | "prev_view_in_stack"
+            | "select_by_index" => {
                 self.select_tab_action(name, args);
             }
             "new_window" => {
@@ -2129,6 +2379,12 @@ impl App {
     fn select_tab_action(&mut self, name: &str, args: &Value) -> bool {
         let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
         let sheet = match name {
+            // https://docs.sublimetext.io/reference/commands.html
+            // Build 3059 persists Ctrl+Tab order (https://www.sublimetext.com/3).
+            // The public references do not describe a release gesture: commit each step.
+            "next_view_in_stack" | "prev_view_in_stack" => {
+                group.stack_neighbor(name == "prev_view_in_stack")
+            }
             "next_view" | "prev_view" => {
                 let current = group
                     .sheets
@@ -3362,10 +3618,14 @@ impl App {
 }
 
 impl AppHandler for App {
+    fn activate_on_open(&self) -> bool {
+        !self.options.background
+    }
     fn on_platform_phase(&mut self, phase: &'static str) {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        self.publish_open_route();
         if let Some([x, y, width, height]) = self.window_frame {
             w.restore_frame(Rect {
                 x,
@@ -3573,23 +3833,10 @@ impl AppHandler for App {
                 return;
             }
         };
-        if crate::open_requests::needs_new_window(
-            &request,
-            self.workspace
-                .global_bool("open_files_in_new_window", false),
-        ) {
-            if let Err(error) = self.open_native_window_request(w, request) {
-                self.show_error(w, &error);
-            }
-            return;
+        self.publish_open_route();
+        if let Err(error) = self.receive_request(w, crate::instance::Incoming::local(request)) {
+            self.show_error(w, &error);
         }
-        if let Err(error) =
-            crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, paths)
-        {
-            self.panels.message = error;
-        }
-        self.changed(w, Instant::now(), false);
-        w.focus();
     }
     fn on_reopen(&mut self, w: &WindowHandle) {
         if self.options.mode == Mode::Interactive
@@ -3650,6 +3897,11 @@ impl AppHandler for App {
             .unwrap_or(self.workspace.active);
         let editor = &self.workspace.tabs[target].editor;
         match name {
+            "set_file_type" => {
+                editor.language.borrow().as_ref().is_some_and(|language| {
+                    args["syntax"].as_str() == Some(language.syntax.as_str())
+                })
+            }
             "set_build_system" => {
                 self.workspace
                     .build_system
@@ -4760,7 +5012,7 @@ mod round15_tests {
             Workspace::new(vel_text::Text::new(), None, None, false).unwrap(),
             None,
         );
-        app.accept_request(crate::instance::Incoming { request, stream })
+        app.accept_request(crate::instance::Incoming::fixture(request, stream))
             .unwrap();
         let mut ack = [0];
         client.read_exact(&mut ack).unwrap();
@@ -4784,8 +5036,7 @@ mod round15_tests {
             ..Options::default()
         };
         let request = crate::instance::Request::new(&options, None).unwrap();
-        let (stream, _client) = UnixStream::pair().unwrap();
-        app.accept_request(crate::instance::Incoming { request, stream })
+        app.accept_request(crate::instance::Incoming::local(request))
             .unwrap();
         app.checkpoint(false).unwrap();
         app.sessions.borrow().flush().unwrap();

@@ -1,19 +1,24 @@
 //! Local headless peer for the existing CLI wire protocol. No native app initialization.
 use std::{
-    hash::{Hash, Hasher},
+    fs::DirBuilder,
     io::{Read, Write},
-    os::unix::net::UnixListener,
+    os::unix::{fs::DirBuilderExt, net::UnixListener},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+#[path = "../src/instance_path.rs"]
+mod instance_path;
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
-    let data = Some(PathBuf::from(&args[1]));
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hash);
-    let uid = args[2].to_str().unwrap();
-    let path = std::env::temp_dir().join(format!("velocity-{uid}-{:016x}.sock", hash.finish()));
+    let data = PathBuf::from(&args[1]);
+    let uid = args[2].to_str().unwrap().parse().unwrap();
+    let path = instance_path::socket_path(Some(&data), uid);
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent().unwrap())
+        .unwrap();
     let listener = UnixListener::bind(&path).unwrap();
     listener.set_nonblocking(true).unwrap();
     println!("{}", path.display());
@@ -56,9 +61,9 @@ fn main() {
                 }
                 stream.write_all(&[2]).unwrap();
                 // `velocity - >out`: a stdin request gets the edited text back, length-delimited.
-                if bytes
-                    .windows(b"\"stdin\":\"".len())
-                    .any(|w| w == b"\"stdin\":\"")
+                if !bytes
+                    .windows(b"\"stdin\":null".len())
+                    .any(|w| w == b"\"stdin\":null")
                 {
                     let edited = "edited by peer 你好\n".as_bytes();
                     stream

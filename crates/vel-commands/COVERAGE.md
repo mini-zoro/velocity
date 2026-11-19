@@ -21,7 +21,7 @@ Each name counts once, even if it appears in multiple sources. Generic host forw
 is deliberately counted as partial, not implemented. Application hosts may implement
 more than this crate's standalone guarantee.
 
-**Counts: 61 implemented, 123 partially, 12 missing, 3 out of scope; 199 total.**
+**Counts: 61 implemented, 134 partially, 11 missing, 3 out of scope; 209 total.**
 
 Public sources:
 
@@ -219,7 +219,17 @@ and lane A wires browser/clipboard menus in the next round.
 | `swap_line_down` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `swap_line_up` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `swap_with_mark` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
-| `switch_file` | missing | changelog | No registration or executable adapter in vel-commands; window/application integration remains. |
+| `switch_file` | partially | ST4 changelog | Velocity's window host cycles existing sibling files. |
+| `next_view_in_stack` | partially | commands reference, round 21 | Velocity's window host walks the group's MRU stack. |
+| `prev_view_in_stack` | partially | commands reference, round 21 | Velocity's window host walks the group's MRU stack in reverse. |
+| `revert` | partially | commands reference, round 21 | Velocity's window host reloads the current file with confirmation. |
+| `prompt_add_folder` | partially | commands reference, round 21 | Velocity's window host prompts for a folder. |
+| `prompt_select_project` | partially | commands reference, round 21 | Velocity's window host prompts for a project. |
+| `open_recent_project` | partially | commands reference, round 21 | Velocity's window host opens a project from the recent list. |
+| `clear_recent_files` | partially | commands reference, round 21 | Velocity's window host clears recent files. |
+| `clear_recent_projects` | partially | commands reference, round 21 | Velocity's window host clears recent projects. |
+| `hide_overlay` | partially | commands reference, round 21 | Velocity's window host dismisses the active overlay. |
+| `exit` | partially | commands reference, round 21 | Velocity's window host requests normal application termination. |
 | `title_case` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `toggle_bookmark` | implemented | spec | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `toggle_comment` | partially | changelog | Registered host action/hook; this crate cannot execute it without an implementing host. |

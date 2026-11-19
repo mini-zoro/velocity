@@ -11,6 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 type Environment = BTreeMap<String, String>;
+#[cfg(all(test, unix))]
+#[path = "../tests/support/detached.rs"]
+mod detached_fixture;
 #[derive(Debug)]
 struct Capture {
     rx: std::sync::mpsc::Receiver<Result<Environment, String>>,
@@ -552,10 +555,16 @@ mod tests {
     #[test]
     fn round18_login_detached_pipe_obeys_deadline_and_retries() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let shell = dir.path().join("shell");
-        let pid_file = dir.path().join("pid");
-        std::fs::write(&shell, format!("#!/bin/sh\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(F,\">{}\"); print F $$; close F; sleep 8' &\nexec /bin/sh -c \"$3\"\n", pid_file.display())).unwrap();
+        let fixture = detached_fixture::DetachedFixture::new();
+        let shell = fixture.root().join("shell");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\n{}",
+                fixture.script(false, "exec /bin/sh -c \"$3\"")
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let at = Instant::now();
         let result = capture_shell(
@@ -564,12 +573,6 @@ mod tests {
             Duration::from_millis(100),
         );
         let elapsed = at.elapsed();
-        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
-            // SAFETY: this PID was written by this test's detached child.
-            unsafe {
-                libc::kill(pid.parse().unwrap(), libc::SIGKILL);
-            }
-        }
         assert!(result.is_err());
         assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     }

@@ -295,7 +295,7 @@ pub(crate) fn restored_window(windows: &[vel_session::Window], options: &Options
     }
     (!windows.is_empty()).then_some(0)
 }
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     let normalized = crate::workspace::absolute;
     match (normalized(a), normalized(b)) {
         (Ok(a), Ok(b)) => a == b,
@@ -457,24 +457,153 @@ impl Router {
     }
 }
 
-/// Whether a request needs a new window. Directories use a new window unless --add
-/// explicitly targets the current one, including native folders delivered by Finder.
-pub fn needs_new_window(request: &Request, open_files_in_new_window: bool) -> bool {
-    request.new_window
-        || (!request.add
-            && (open_files_in_new_window
-                || request.files.iter().any(|location| location.path.is_dir())))
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpenWindow {
+    #[default]
+    Never,
+    FinderOnly,
+    Always,
 }
-/// Includes the session policy in window routing so --project cannot overwrite dirty
-/// buffers when Hot Exit is disabled. Menu switches instead use normal close prompts.
-pub fn request_needs_window(workspace: &Workspace, request: &Request) -> bool {
-    needs_new_window(
-        request,
-        workspace.global_bool("open_files_in_new_window", false),
-    ) || (request.project.is_some()
-        && !workspace.hot_exit().retain(false)
-        && workspace.tabs.iter().any(|tab| tab.dirty()))
+impl OpenWindow {
+    pub fn setting(value: Option<&serde_json::Value>) -> Self {
+        // The public settings reference documents the Finder/Dock distinction:
+        // https://docs.sublimetext.io/reference/settings.html
+        // Preserve Velocity's previous false default when the setting is absent.
+        match value {
+            Some(v) if v.as_bool() == Some(true) || v.as_str() == Some("finder_only") => {
+                Self::FinderOnly
+            }
+            Some(v) if v.as_str() == Some("always") => Self::Always,
+            _ => Self::Never,
+        }
+    }
 }
+#[derive(Debug, Default)]
+pub struct WindowRoute {
+    pub project: Option<PathBuf>,
+    pub(crate) project_spelling: Option<PathBuf>,
+    pub folders: Vec<PathBuf>,
+    pub(crate) folder_spellings: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
+    pub untouched: bool,
+}
+impl WindowRoute {
+    pub fn update(&mut self, workspace: &Workspace, startup: bool) {
+        if self.project_spelling.as_deref() != workspace.project_path() {
+            self.project_spelling = workspace.project_path().map(Path::to_owned);
+            self.project = workspace.project_path().map(canonical_route_path);
+        }
+        let folders = || workspace.folders.iter().map(|f| &f.path);
+        if !self.folder_spellings.iter().eq(folders()) {
+            self.folder_spellings = folders().cloned().collect();
+            self.folders = self
+                .folder_spellings
+                .iter()
+                .map(|path| canonical_route_path(path))
+                .collect();
+            self.folders.sort_unstable();
+            self.folders.dedup();
+        }
+        let files = || workspace.tabs.iter().filter_map(|t| t.path.as_ref());
+        if !self.files.iter().eq(files()) {
+            self.files = files().cloned().collect();
+        }
+        self.untouched = startup
+            && self.project.is_none()
+            && self.folders.is_empty()
+            && workspace.tabs.len() == 1
+            && self.files.is_empty()
+            && workspace.editor().text.is_empty()
+            && !workspace.tabs[0].dirty()
+            && workspace.closed_files.is_empty()
+            && workspace.editor().revision == 0;
+    }
+}
+fn canonical_route_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+pub struct RouteRequest {
+    project: Option<PathBuf>,
+    dirs: std::collections::BTreeSet<PathBuf>,
+    files: Vec<PathBuf>,
+    separate: bool,
+}
+impl RouteRequest {
+    pub fn prepare(request: &mut Request, setting: OpenWindow) -> Self {
+        if request.project.is_none()
+            && let Some(index) = request.files.iter().position(|f| {
+                f.path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sublime-project"))
+            })
+        {
+            request.project = Some(request.files.remove(index).path);
+        }
+        let (mut dirs, mut files) = (std::collections::BTreeSet::new(), Vec::new());
+        for file in &request.files {
+            let path = canonical_route_path(&file.path);
+            if path.is_dir() {
+                dirs.insert(path);
+            } else {
+                files.push(path);
+            }
+        }
+        let has_input = request.stdin.is_some() || !request.files.is_empty();
+        Self {
+            project: request.project.as_deref().map(canonical_route_path),
+            separate: request.new_window
+                || (!request.add
+                    && (!dirs.is_empty()
+                        || (has_input
+                            && (setting == OpenWindow::Always
+                                || (setting == OpenWindow::FinderOnly && request.native_open))))),
+            dirs,
+            files,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    Window(u64),
+    New,
+}
+
+/// Build 4126 reuses the empty startup window for CLI -n; build 4121
+/// opens unmatched folders separately. <https://www.sublimetext.com/download>
+pub fn route(
+    request: &RouteRequest,
+    windows: &std::collections::BTreeMap<u64, WindowRoute>,
+    current: Option<u64>,
+) -> Route {
+    let mut preferred = current
+        .into_iter()
+        .filter_map(|id| windows.get_key_value(&id))
+        .chain(windows.iter().filter(|(id, _)| Some(**id) != current));
+    let existing = preferred.clone().find(|(_, window)| {
+        if let Some(project) = &request.project {
+            return window.project.as_ref() == Some(project);
+        }
+        if !request.dirs.is_empty() {
+            return request.dirs.len() == window.folders.len()
+                && window.folders.iter().all(|f| request.dirs.contains(f));
+        }
+        !request.files.is_empty() && request.files.iter().all(|file| window.files.contains(file))
+    });
+    if let Some((id, _)) = existing {
+        return Route::Window(*id);
+    }
+    if request.project.is_none() && !request.separate {
+        return preferred
+            .clone()
+            .next()
+            .map_or(Route::New, |(id, _)| Route::Window(*id));
+    }
+    preferred
+        .find(|(_, window)| window.untouched)
+        .map_or(Route::New, |(id, _)| Route::Window(*id))
+}
+
 /// Apply every CLI location, collecting all failures in order without aborting the batch.
 pub fn open_locations(
     workspace: &mut Workspace,
@@ -809,7 +938,8 @@ mod round15_tests {
     fn primary_takeover_keeps_inflight_and_all_later_native_batches_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let request = Request::new(&Options::default(), None).unwrap();
-        let Start::Primary(instance) = Instance::start(Some(dir.path()), &request).unwrap() else {
+        let Start::Primary(instance) = Instance::start_fixture(dir.path(), &request).unwrap()
+        else {
             panic!("primary")
         };
         let now = Instant::now();
@@ -834,19 +964,74 @@ mod round15_tests {
         assert!(relay.pending.is_empty());
     }
     #[test]
-    fn directories_choose_new_windows_unless_explicitly_added() {
+    fn route_matches_exact_roots_then_reuses_startup_and_respects_origin() {
         let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut windows = std::collections::BTreeMap::from([
+            (
+                1,
+                WindowRoute {
+                    folders: vec![root.join("another")],
+                    ..WindowRoute::default()
+                },
+            ),
+            (
+                2,
+                WindowRoute {
+                    folders: vec![root.clone(), root.join("extra")],
+                    ..WindowRoute::default()
+                },
+            ),
+            (
+                3,
+                WindowRoute {
+                    untouched: true,
+                    ..WindowRoute::default()
+                },
+            ),
+        ]);
         let mut request = native_request(&[dir.path().into()]).unwrap();
-        assert!(needs_new_window(&request, false));
+        let decision = |request: &Request, windows: &_, setting| {
+            route(
+                &RouteRequest::prepare(&mut request.clone(), setting),
+                windows,
+                Some(1),
+            )
+        };
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::Never),
+            Route::Window(3)
+        );
+        windows.get_mut(&2).unwrap().folders.pop();
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::Never),
+            Route::Window(2)
+        );
+        windows.get_mut(&2).unwrap().folders.clear();
+        windows.get_mut(&3).unwrap().untouched = false;
+        assert_eq!(decision(&request, &windows, OpenWindow::Never), Route::New);
+        request.files[0].path = root.join("file.rs");
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::FinderOnly),
+            Route::New
+        );
+        request.native_open = false;
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::FinderOnly),
+            Route::Window(1)
+        );
+        assert_eq!(decision(&request, &windows, OpenWindow::Always), Route::New);
         request.add = true;
-        assert!(!needs_new_window(&request, false));
-        request.new_window = true;
-        assert!(needs_new_window(&request, false));
-        request.new_window = false;
-        request.files.clear();
-        assert!(!needs_new_window(&request, true));
-        request.add = false;
-        assert!(needs_new_window(&request, true));
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::Always),
+            Route::Window(1)
+        );
+        request.files[0].path = root.join("p.sublime-project");
+        windows.get_mut(&2).unwrap().project = Some(request.files[0].path.clone());
+        assert_eq!(
+            decision(&request, &windows, OpenWindow::Never),
+            Route::Window(2)
+        );
     }
     #[test]
     fn forwarder_without_events_quits_and_waits_for_inflight_and_later_batches() {

@@ -4,6 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 use vel_build::{BuildSystem, Event, ResultParser, Task, Variables};
+#[cfg(unix)]
+#[path = "support/detached.rs"]
+mod detached_fixture;
 #[test]
 fn variables_nested_defaults_regex_unicode_and_literal_dollars() {
     let vars = Variables::new(
@@ -359,12 +362,8 @@ fn round18_variant_overrides_effective_platform_base_and_can_clear_shell_cmd() {
 #[test]
 fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() {
     for cancel in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("detached");
-        let script = format!(
-            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); open(F,\">{}\"); print F $$; close F; sleep 8' & sleep .1; echo started",
-            pid_file.display()
-        );
+        let fixture = detached_fixture::DetachedFixture::new();
+        let script = fixture.script(false, "sleep .1; echo started");
         let exec = BuildSystem::from_value(
             "detached",
             serde_json::json!({"cmd":["/bin/sh","-c",script]}),
@@ -382,7 +381,7 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
                 break;
             }
         }
-        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        assert!(fixture.root().join("ready").exists());
         let at = Instant::now();
         if cancel {
             old.cancel();
@@ -411,12 +410,15 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
                 _ => {}
             }
         }
-        // SAFETY: only the detached PID created and recorded by this fixture is killed.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
         assert_eq!(output, "NEW\n");
         assert!(at.elapsed() < Duration::from_secs(1));
+        // Lease removal releases the detached process without a signal.
+        std::fs::remove_file(fixture.root().join("lease")).unwrap();
+        let released = Instant::now();
+        while !fixture.root().join("done").exists() {
+            assert!(released.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     // Restart while the first worker is still in its pipe grace period.
     let old_exec = BuildSystem::from_value(

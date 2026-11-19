@@ -2,6 +2,13 @@
 // Groups/commands and line-ending arguments: https://docs.sublimetext.io/reference/commands.html
 // Split View and selected sheets: https://www.sublimetext.com/download (4107, 4126).
 [
+  {"caption":"File: Revert File","command":"revert"},
+  {"caption":"Edit: Close Tag","command":"close_tag"},
+  {"caption":"Edit: Wrap Selection With Tag","command":"insert_snippet",
+    "args":{"contents":"<${1:tag}>${0:$SELECTION}</${1/^([^\\s>]+).*/$1/}>"}},
+  {"caption":"Developer: Show Scope Name","command":"show_scope_name"},
+  {"caption":"Goto: Switch Header/Implementation","command":"switch_file",
+    "args":{"extensions":["h","cpp","c","cc","mm","m"]}},
   {"caption": "Project: Refresh Folders", "command": "refresh_folder_list"},
   {"caption": "Project: Remove All Folders", "command": "close_folder_list"},
   {"caption": "View: Show/Hide Open Files", "command": "toggle_show_open_files"},

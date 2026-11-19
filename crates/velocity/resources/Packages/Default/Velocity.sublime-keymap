@@ -40,20 +40,21 @@
     "keys": [
       "ctrl+tab"
     ],
-    // Lane B round 21 replaces this with next_view_in_stack (MRU order) once implemented.
-    "command": "next_view"
+    "command": "next_view_in_stack"
   },
   {
     "keys": [
       "ctrl+shift+tab"
     ],
-    "command": "prev_view"
+    "command": "prev_view_in_stack"
   },
   // Tabs: https://docs.sublimetext.io/reference/keyboard_shortcuts_osx.html#tabs
   {"keys":["super+shift+["], "command":"prev_view"},
   {"keys":["super+shift+]"], "command":"next_view"},
-  // switch_file (super+alt+up, header/implementation) is added by lane B round 21
-  // together with the command: https://www.sublimetext.com/docs/tab_multi-select.html
+  // Cmd+Option+Up: https://forum.sublimetext.com/t/switch-header-implementation/1906
+  // Velocity's extension cycle; the public commands reference does not list a default.
+  {"keys":["super+alt+up"], "command":"switch_file",
+    "args":{"extensions":["h","cpp","c","cc","mm","m"]}},
   {
     "keys": [
       "super+shift+n"

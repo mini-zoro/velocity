@@ -374,7 +374,7 @@ mod tests {
             },
         ];
         let (stream, mut client) = UnixStream::pair().unwrap();
-        app.accept_request(crate::instance::Incoming { request, stream })
+        app.accept_request(crate::instance::Incoming::fixture(request, stream))
             .unwrap();
         let mut ack = [0];
         client.read_exact(&mut ack).unwrap();

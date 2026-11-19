@@ -315,6 +315,9 @@ pub struct Group {
     pub anchor: Option<u64>,
     /// Horizontal tab-bar scroll offset.
     pub tab_scroll: f64,
+    /// Most recently focused sheets first; older sessions start with an empty stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mru: Vec<u64>,
 }
 impl Group {
     /// Applies plain, primary-modifier toggle, or shift-range selection.
@@ -349,6 +352,35 @@ impl Group {
             self.focused = Some(id);
             self.anchor = Some(id);
         }
+        self.touch_focus();
+    }
+    /// Commits the focused sheet as most recently used.
+    pub fn touch_focus(&mut self) {
+        if let Some(focus) = self.focused
+            && self.mru.first() != Some(&focus)
+        {
+            self.mru.retain(|id| *id != focus);
+            self.mru.insert(0, focus);
+        }
+    }
+    /// Resolves a stack step, including sheets not yet visited in a restored session.
+    pub fn stack_neighbor(&self, reverse: bool) -> Option<u64> {
+        let focus = self.focused;
+        let mut seen = self
+            .mru
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != focus && self.sheets.contains(id));
+        let mut rest = self
+            .sheets
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != focus && !self.mru.contains(id));
+        if reverse {
+            rest.next_back().or_else(|| seen.next_back())
+        } else {
+            seen.chain(rest).next()
+        }
     }
     /// Adds a sheet and focuses it, optionally retaining the selection.
     pub fn add(&mut self, id: u64, additive: bool) {
@@ -361,6 +393,7 @@ impl Group {
     pub fn remove(&mut self, id: u64) {
         let at = self.sheets.iter().position(|s| *s == id).unwrap_or(0);
         self.sheets.retain(|s| *s != id);
+        self.mru.retain(|s| *s != id);
         self.selected.remove(&id);
         if self.focused == Some(id) {
             self.focused = self.selected.first().copied().or_else(|| {
@@ -375,6 +408,7 @@ impl Group {
         if self.anchor == Some(id) {
             self.anchor = self.focused;
         }
+        self.touch_focus();
     }
     /// Selected IDs in display order.
     pub fn visible(&self) -> Vec<u64> {

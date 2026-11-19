@@ -216,6 +216,54 @@ impl Workspace {
             }
         }
     }
+    /// Visit the next existing sibling from a caller-supplied extension cycle.
+    pub fn switch_file(&mut self, extensions: &Value) -> Result<(), String> {
+        let mut extensions = if let Some(values) = extensions.as_array() {
+            values.iter().filter_map(Value::as_str).collect::<Vec<_>>()
+        } else if let Some(values) = extensions.as_str() {
+            values
+                .split(|ch: char| ch == ',' || ch.is_whitespace())
+                .collect()
+        } else {
+            return Err("switch_file requires extensions".into());
+        };
+        for ext in &mut extensions {
+            *ext = ext.trim_start_matches('.');
+        }
+        extensions.retain(|ext| !ext.is_empty() && !ext.contains(['/', '\\']));
+        let Some(path) = self.tabs[self.active].path.as_ref() else {
+            return Ok(());
+        };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(());
+        };
+        // ST4 supports compound extensions (https://www.sublimetext.com/download).
+        // Match the longest listed extension; replacing "cc" alone keeps "foo.pb".
+        let Some((start, stem)) = extensions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ext)| {
+                name.strip_suffix(ext)
+                    .and_then(|base| base.strip_suffix('.'))
+                    .map(|base| (i, base))
+            })
+            .min_by_key(|(_, stem)| stem.len())
+        else {
+            return Ok(());
+        };
+        let next = (1..extensions.len())
+            .map(|step| extensions[(start + step) % extensions.len()])
+            .map(|ext| path.with_file_name(format!("{stem}.{ext}")))
+            .find(|candidate| candidate != path && candidate.is_file());
+        if let Some(path) = next {
+            self.open(crate::cli::FileLocation {
+                path,
+                line: 1,
+                column: 1,
+            })?;
+        }
+        Ok(())
+    }
     /// Active title with explicit full-path/project-relative preferences.
     pub fn window_title(&self) -> String {
         // The reference describes show_full_path; the ST4 changelog adds show_rel_path.
@@ -1325,6 +1373,7 @@ impl Workspace {
         Ok((
             Window {
                 project: self.project.clone(),
+                goto_recent_files: self.goto_recent_files.clone(),
                 folders: self
                     .folders
                     .iter()
@@ -1350,6 +1399,7 @@ impl Workspace {
         documents: &[Document],
     ) -> Result<(), String> {
         crate::session_restore::step("folders");
+        self.goto_recent_files = window.goto_recent_files.iter().take(100).cloned().collect();
         for path in &window.folders {
             if !self.folders.iter().any(|f| &f.path == path) {
                 self.folders.push(vel_search::project::Folder {
@@ -1516,6 +1566,13 @@ impl Workspace {
         crate::session_restore::step("groups");
         self.workbench = window.workbench.clone();
         for g in &mut self.workbench.groups {
+            let mut seen = BTreeSet::new();
+            g.mru = g
+                .mru
+                .iter()
+                .filter_map(|s| remap.get(s).copied())
+                .filter(|s| seen.insert(*s))
+                .collect();
             g.sheets = g
                 .sheets
                 .iter()
@@ -1528,6 +1585,7 @@ impl Workspace {
                 .collect();
             g.focused = g.focused.and_then(|s| remap.get(&s).copied());
             g.anchor = g.anchor.and_then(|s| remap.get(&s).copied());
+            g.touch_focus();
         }
         let visible: Vec<_> = self
             .workbench
@@ -1599,6 +1657,13 @@ impl Workspace {
         self.data_dir.as_deref()
     }
     pub fn open_project(&mut self, path: PathBuf) -> Result<(), String> {
+        self.open_project_with_restore(path, true)
+    }
+    pub(crate) fn open_project_with_restore(
+        &mut self,
+        path: PathBuf,
+        restore: bool,
+    ) -> Result<(), String> {
         let path = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
         let mut config = Self::new(
             Text::new(),
@@ -1610,14 +1675,17 @@ impl Workspace {
         config.recent_folders = self.recent_folders.clone();
         config.recent_projects = self.recent_projects.clone();
         remember(&mut config.recent_projects, path.clone());
-        let recovery = vel_session::load(&vel_session::project::workspace_path(&path));
-        config.messages.extend(recovery.messages);
-        if let Some(window) = recovery.session.windows.first() {
-            config.restore_window_from(
-                window,
-                &recovery.session.documents,
-                Some(&vel_session::project::workspace_path(&path)),
-            )?;
+        if restore {
+            let workspace = vel_session::project::workspace_path(&path);
+            let recovery = vel_session::load(&workspace);
+            config.messages.extend(recovery.messages);
+            if let Some(window) = recovery.session.windows.first() {
+                config.restore_window_from(
+                    window,
+                    &recovery.session.documents,
+                    Some(&workspace),
+                )?;
+            }
         }
         std::mem::swap(self, &mut config);
         Ok(())

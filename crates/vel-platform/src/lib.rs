@@ -241,6 +241,10 @@ pub struct Presentation {
 /// applicationDidFinishLaunching callback. `request_frame` coalesces work; idle
 /// display links are paused. App callbacks never run from Metal handler threads.
 pub trait AppHandler: 'static {
+    /// Whether opening a window should activate the application.
+    fn activate_on_open(&self) -> bool {
+        true
+    }
     /// Initialize the renderer while the native window is still hidden.
     fn on_start(&mut self, _window: &WindowHandle) -> Result<(), String> {
         Ok(())
@@ -365,6 +369,21 @@ pub struct MenuEntry {
 #[derive(Debug)]
 pub struct Platform;
 impl Platform {
+    /// True when Option is held at native launch, before window creation.
+    #[cfg(target_os = "macos")]
+    pub fn option_held_at_launch() -> bool {
+        macos::option_held_at_launch()
+    }
+    /// Captures the foreground application before the terminal client submits its request.
+    #[cfg(target_os = "macos")]
+    pub fn frontmost_pid() -> Option<i32> {
+        macos::frontmost_pid()
+    }
+    /// Returns focus to a running application after a successful CLI wait.
+    #[cfg(target_os = "macos")]
+    pub fn activate_pid(pid: i32) {
+        macos::activate_pid(pid)
+    }
     /// Runs until explicit quit/completion or a callback failure. macOS 14+.
     /// Closing the last window retains a template handler for Dock reopen and IPC.
     pub fn run(app: impl AppHandler) -> Result<(), String> {

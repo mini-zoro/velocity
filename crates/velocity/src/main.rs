@@ -7,6 +7,7 @@ mod bench;
 mod binary;
 mod build;
 mod cli;
+mod cli_stdin;
 mod completion;
 mod context_menu;
 mod editing;
@@ -15,8 +16,10 @@ mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
 mod git_ui;
+mod gui_launch;
 mod html_ui;
 mod instance;
+mod instance_path;
 mod intelligence;
 mod intelligence_bench;
 mod language;
@@ -36,6 +39,7 @@ mod review_bench;
 #[cfg(test)]
 mod review_tests;
 mod review_ui;
+mod safe_mode;
 mod session;
 mod session_restore;
 mod settings_reports;
@@ -77,7 +81,7 @@ use vel_text::Text;
 fn main() {
     let entered = Instant::now();
     let wall = SystemTime::now();
-    if let Err(e) = run(entered, wall) {
+    if let Err(e) = run(entered, wall, gui_launch::Startup::take()) {
         eprintln!("velocity: {e}");
         std::process::exit(1);
     }
@@ -156,7 +160,7 @@ impl vel_platform::AppHandler for NativeForwarder {
         Ok(())
     }
 }
-fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
+fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(), String> {
     // Developer tool: offscreen PNGs of real UI states; never creates a window.
     #[cfg(target_os = "macos")]
     {
@@ -169,18 +173,55 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         print!("{}", cli::HELP);
         return Ok(());
     };
-    let data_dir = options
+    if options.version {
+        println!("Velocity {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if options.bench_help {
+        print!("{}", cli::BENCH_HELP);
+        return Ok(());
+    }
+    let normal_data_dir = options
         .data_dir
         .clone()
-        .or_else(workspace::Workspace::default_data_dir);
-    let mut stdin = None;
-    if options.mode == Mode::Interactive && options.files.iter().any(|f| f.path == Path::new("-")) {
-        let mut input = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
-            .map_err(|e| e.to_string())?;
-        stdin = Some(input);
+        .or_else(workspace::Workspace::default_data_dir)
+        .map(std::path::absolute)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let safe_profile = normal_data_dir
+        .as_deref()
+        .filter(|_| options.safe_mode)
+        .map(safe_mode::profile);
+    let inherited = if options.mode == Mode::Interactive {
+        instance::Claim::inherited(
+            safe_profile.as_deref().or(normal_data_dir.as_deref()),
+            gui.claim.as_deref(),
+        )
+    } else {
+        None
+    };
+    let gui_process = inherited.is_some();
+    let launch_services = !gui_process && options.launched_by_launch_services(parent_pid());
+    // https://www.sublimetext.com/docs/safe_mode.html
+    #[cfg(target_os = "macos")]
+    if launch_services && Platform::option_held_at_launch() {
+        options.safe_mode = true;
     }
-    let launch_services = options.launched_by_launch_services(parent_pid());
+    let data_dir = if options.safe_mode {
+        options.restore_session = false;
+        Some(safe_mode::profile(
+            normal_data_dir
+                .as_deref()
+                .ok_or("safe mode requires a data directory")?,
+        ))
+    } else {
+        normal_data_dir.clone()
+    };
+    let stdin = if options.mode == Mode::Interactive {
+        cli_stdin::read(&options, launch_services, gui_process)?
+    } else {
+        None
+    };
     let instance = if options.mode == Mode::Interactive {
         let mut request = instance::Request::new(&options, stdin.clone())?;
         if launch_services {
@@ -190,27 +231,50 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             request.add = true;
             request.wait = false;
         }
-        match instance::Instance::start(data_dir.as_deref(), &request) {
-            Ok(instance::Start::Forwarded) if launch_services => {
+        if request.wait && !gui_process && !launch_services {
+            gui_launch::install_client_interrupt().map_err(|e| e.to_string())?;
+            // Build 4126 restored terminal focus on wait completion.
+            // https://www.sublimetext.com/download
+            #[cfg(target_os = "macos")]
+            if !request.stay && !request.background {
+                request.return_pid = Platform::frontmost_pid();
+            }
+        }
+        let entry = if let Some(claim) = inherited {
+            if let Some(log) = gui.log
+                && let Err(e) = gui_launch::capture_stderr(log)
+            {
+                eprintln!("velocity: could not rotate GUI stderr: {e}");
+            }
+            instance::Entry::Claimed(claim)
+        } else {
+            instance::Instance::enter(data_dir.as_deref(), &request)?
+        };
+        match entry {
+            instance::Entry::Forwarded if launch_services => {
                 // Retain the native event recipient until its actual paths are relayed.
                 // This temporary receiver must never restore or overwrite the primary session.
                 options.forward_native_opens = true;
                 None
             }
-            Ok(instance::Start::Forwarded) => return Ok(()),
-            Ok(instance::Start::Primary(instance)) => {
+            instance::Entry::Forwarded => return Ok(()),
+            instance::Entry::Claimed(claim) => {
                 // Finder/Dock launches must retain the process receiving Apple events.
                 // See Options::launched_by_launch_services for the path-free heuristics.
-                if std::env::var_os("VELOCITY_GUI_PROCESS").is_none() && !launch_services {
-                    drop(instance);
-                    let mut command = std::process::Command::new(
-                        std::env::current_exe().map_err(|e| e.to_string())?,
-                    );
-                    command
-                        .env("VELOCITY_GUI_PROCESS", "1")
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null());
-                    if let Some(data) = &data_dir {
+                if !gui_process && !launch_services {
+                    request.new_window = options.new_window;
+                    let path = claim.path().to_owned();
+                    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                    let mut command = gui_launch::gui_command(&exe, gui_launch::log_path(&path))
+                        .map_err(|e| e.to_string())?;
+                    claim.pass_to(&mut command);
+                    if options.background {
+                        command.arg("--background");
+                    }
+                    if options.safe_mode {
+                        command.arg("--safe-mode");
+                    }
+                    if let Some(data) = &normal_data_dir {
                         command.arg("--data-dir").arg(data);
                     }
                     command.args([
@@ -223,13 +287,17 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                         command.arg("--log-input");
                     }
                     if let Some(output) = &options.output {
-                        command.arg("--output").arg(output);
+                        command
+                            .arg("--output")
+                            .arg(std::path::absolute(output).map_err(|e| e.to_string())?);
                     }
                     let mut child = command.spawn().map_err(|e| e.to_string())?;
+                    claim.handoff();
                     let at = Instant::now();
                     loop {
-                        if instance::Instance::forward_existing(data_dir.as_deref(), &request)? {
-                            return Ok(());
+                        match instance::Instance::forward(&path, &request)? {
+                            instance::Forward::Submitted(result) => return result,
+                            instance::Forward::NotRunning => {}
                         }
                         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                             return Err(format!(
@@ -242,16 +310,13 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
-                Some(instance)
-            }
-            Err(e) => {
-                eprintln!("velocity: single-instance forwarding unavailable: {e}");
-                None
+                Some(claim.listen().map_err(|e| e.to_string())?)
             }
         }
     } else {
         None
     };
+    let flush_replies = instance.is_some() || options.forward_native_opens;
     let crash = if options.mode == Mode::Interactive && !options.forward_native_opens {
         match std::env::var_os("HOME")
             .ok_or_else(|| "home directory unavailable".to_owned())
@@ -266,6 +331,32 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
     } else {
         None
     };
+    let workspace_data = if options.safe_mode
+        && !options.forward_native_opens
+        && options.mode == Mode::Interactive
+    {
+        Some(
+            safe_mode::fresh_run(data_dir.as_deref().expect("safe profile"))
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        data_dir.clone()
+    };
+    let restore_safety = if options.mode == Mode::Interactive
+        && !options.safe_mode
+        && !options.forward_native_opens
+        && let Some(data) = &data_dir
+    {
+        safe_mode::protect(
+            data,
+            crash.as_ref().map_or(&[][..], |c| c.pending.as_slice()),
+        )
+    } else {
+        safe_mode::Startup::default()
+    };
+    if let Some(warning) = &restore_safety.warning {
+        eprintln!("velocity: {warning}");
+    }
     let mut clock = Clock::new(entered, wall);
     let reporter = Reporter::for_options(&options, entered)?;
     let _watchdog = options
@@ -336,14 +427,10 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             options.mode,
             Mode::Interactive | Mode::Open | Mode::LargeFiles
         ) {
-            if let Some(input) = &stdin {
-                (Text::from(input.as_str()), "stdin".into())
-            } else {
-                (
-                    Text::new(),
-                    "empty document; files opened through vel-fileio".into(),
-                )
-            }
+            (
+                Text::new(),
+                "empty document; files opened through vel-fileio".into(),
+            )
         } else {
             load(options.file.as_deref(), options.lines)?
         };
@@ -368,9 +455,11 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             };
             let sessions = std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(
                 if !options.forward_native_opens
+                    && !options.safe_mode
+                    && !restore_safety.keep_original_closed
                     && (options.mode == Mode::Interactive || options.restore_session)
                 {
-                    data_dir.as_deref()
+                    workspace_data.as_deref()
                 } else {
                     None
                 },
@@ -389,7 +478,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             });
             let initial_workspace = workspace::Workspace::new(
                 if stdin.is_some() { Text::new() } else { text },
-                data_dir.clone(),
+                workspace_data.clone(),
                 project.clone(),
                 options.mode == Mode::Interactive,
             );
@@ -398,7 +487,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 Err(e) if project.is_some() || first.is_some() => {
                     let mut workspace = workspace::Workspace::new(
                         Text::new(),
-                        data_dir.clone(),
+                        workspace_data.clone(),
                         None,
                         options.mode == Mode::Interactive,
                     )?;
@@ -430,6 +519,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                     restored_ui = Some(window.clone());
                 }
             } else if options.mode == Mode::Interactive
+                && !options.safe_mode
                 && let Some(project) = &options.project
             {
                 let recovery = vel_session::load(&vel_session::project::workspace_path(project));
@@ -447,9 +537,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
                 }
             }
             if let Some(input) = &stdin {
-                workspace
-                    .editor_mut()
-                    .run("insert", &json!({"characters":input}))?;
+                workspace.open_stdin(input.as_bytes())?;
             }
             if matches!(
                 options.mode,
@@ -514,6 +602,7 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
             app.restore_remaining_reserved(windows, ids);
             app.set_instance(instance);
             app.set_crash(crash);
+            app.set_restore_safety(restore_safety);
             Platform::run_with_options(window, app)?;
             if options.mode == Mode::Interactive {
                 done.store(true, Ordering::Release);
@@ -529,6 +618,9 @@ fn run(entered: Instant, wall: SystemTime) -> Result<(), String> {
         }
         Ok(())
     })();
+    if flush_replies {
+        instance::finish_replies();
+    }
     if let Err(e) = &result {
         let _ = reporter.emit(json!({"kind":"error","stage":"run","message":e,"complete":false}));
     }

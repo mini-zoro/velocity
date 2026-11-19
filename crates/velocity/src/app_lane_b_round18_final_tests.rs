@@ -282,28 +282,14 @@ fn round18_final_reflow_finishes_animation_at_text_destination() {
         );
     }
 }
-struct DetachedFixture(tempfile::TempDir);
-impl Drop for DetachedFixture {
-    fn drop(&mut self) {
-        if let Ok(pid) = std::fs::read_to_string(self.0.path().join("pid"))
-            && let Ok(pid) = pid.parse::<i32>()
-        {
-            // SAFETY: PID recorded by this test's own setsid child; no user process is targeted.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
-    }
-}
+#[path = "../../vel-build/tests/support/detached.rs"]
+mod detached_fixture;
+
 #[test]
 fn round18_final_continuous_daemon_finishes_and_cancels_promptly() {
     for cancel in [false, true] {
-        let fixture = DetachedFixture(tempfile::tempdir().unwrap());
-        let pid = fixture.0.path().join("pid");
-        let script = format!(
-            "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); $|=1; open(F,\">{}\"); print F $$; close F; for (1..160) {{print \"DAEMON\\n\"; select undef,undef,undef,0.05;}}' & sleep .05; echo ROOT_EXIT",
-            pid.display()
-        );
+        let fixture = detached_fixture::DetachedFixture::new();
+        let script = fixture.script(true, "sleep .05; echo ROOT_EXIT");
         let mut a = app("", None);
         named(&mut a, "exec", json!({"cmd":["/bin/sh","-c",script]}));
         let limit = Instant::now() + Duration::from_secs(10);

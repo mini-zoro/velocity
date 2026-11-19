@@ -1,5 +1,8 @@
 use std::hash::{Hash, Hasher};
 pub(crate) const NONE: u32 = u32::MAX;
+const PLAIN_ASCII: u32 = 1 << 31;
+const SHORT_LENGTH_BITS: u32 = 10;
+const SHORT_LENGTH_MASK: u32 = (1 << SHORT_LENGTH_BITS) - 1;
 #[derive(Debug, Default)]
 pub(crate) struct Name {
     pub(crate) start: u32,
@@ -28,10 +31,22 @@ pub(crate) fn mask(text: &str) -> u64 {
 }
 impl Names {
     pub(crate) fn text(&self, id: u32) -> &str {
+        self.label(id).0
+    }
+    pub(crate) fn label(&self, id: u32) -> (&str, Option<usize>) {
         let n = &self.records[id as usize];
         let chunk = (n.start >> 20) as usize;
         let offset = (n.start & ((1 << 20) - 1)) as usize;
-        &self.arena[chunk][offset..offset + self.lengths[id as usize] as usize]
+        let packed = self.lengths[id as usize];
+        let (len, core) = if packed & PLAIN_ASCII != 0 {
+            (
+                (packed & SHORT_LENGTH_MASK) as usize,
+                Some(((packed & !PLAIN_ASCII) >> SHORT_LENGTH_BITS) as usize),
+            )
+        } else {
+            (packed as usize, None)
+        };
+        (&self.arena[chunk][offset..offset + len], core)
     }
     pub(crate) fn find(&self, text: &str) -> Option<u32> {
         if self.table.is_empty() {
@@ -79,10 +94,26 @@ impl Names {
         let chunk = self.arena.len() - 1;
         let offset = self.arena[chunk].len();
         let start = ((chunk as u32) << 20) | offset as u32;
-        let length = u32::try_from(text.len()).expect("index name exceeds 4 GiB");
+        assert!(
+            text.len() < PLAIN_ASCII as usize,
+            "index name exceeds 2 GiB"
+        );
+        let length = text.len() as u32;
         let id = u32::try_from(self.records.len()).expect("index name ID overflow");
         self.arena[chunk].push_str(text);
-        self.lengths.push(length);
+        // Use the spare bits of a short label's length for its numeric
+        // suffix boundary. Querying the interner needs no extra allocation.
+        let packed = if length <= SHORT_LENGTH_MASK
+            && text
+                .bytes()
+                .all(|c| c.is_ascii() && !matches!(c, b'/' | b'\\' | b'.'))
+        {
+            let core = text.trim_end_matches(|c: char| c.is_ascii_digit()).len() as u32;
+            PLAIN_ASCII | length | (core << SHORT_LENGTH_BITS)
+        } else {
+            length
+        };
+        self.lengths.push(packed);
         self.records.push(Name {
             start,
             mask: mask(text),
