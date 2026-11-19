@@ -2907,16 +2907,9 @@ impl Workspace {
         }
         if detect && tab.lazy.is_none() && tab.needs_detection {
             if tab.editor.settings.bool("detect_indentation", true)
-                && let Some((size, spaces)) = crate::language::detect_indentation(&tab.editor.text)
+                && let Some(indentation) = crate::language::detect_indentation(&tab.editor.text)
             {
-                tab.editor
-                    .settings
-                    .set(Layer::View, "tab_size", serde_json::json!(size));
-                tab.editor.settings.set(
-                    Layer::View,
-                    "translate_tabs_to_spaces",
-                    serde_json::json!(spaces),
-                );
+                indentation.apply(&mut tab.editor);
             }
             // A load with detection disabled also consumes the one load-time attempt.
             tab.needs_detection = false;
@@ -2963,6 +2956,41 @@ impl Workspace {
         }
         tab.language_settings_revision = tab.editor.settings.revision();
         Ok(())
+    }
+    /// A confirmed disk replacement is a normal edit in open, unchanged buffers.
+    pub(crate) fn accept_file_replacement(
+        &mut self,
+        change: &vel_search::files::FileChange,
+        identity: fileio::ContentIdentity,
+    ) {
+        let path = &change.path;
+        for tab in &mut self.tabs {
+            if tab.path.as_ref() != Some(path)
+                || tab.dirty()
+                || tab.editor.read_only
+                || tab.loading.is_some()
+                || tab.lazy.is_some()
+                || tab.editor.buffer.text() != change.before()
+                || tab.editor.buffer.id() != tab.document
+            {
+                continue;
+            }
+            vel_search::text::apply(&mut tab.editor.buffer, tab.editor.id, change.edits());
+            tab.editor.buffer.mark_saved();
+            tab.editor.sync();
+            tab.tracker.mark_saved(&tab.editor.buffer);
+            tab.disk_content = Some(identity);
+            tab.disk_stamp = stamp(path);
+            tab.disk_saved = vel_session::DiskStamp::read(path);
+            tab.external = None;
+            tab.overwrite_allowed = None;
+            tab.editor.annotations.borrow_mut().reference(
+                tab.editor.buffer.text().clone(),
+                tab.path.clone(),
+                self.data_dir.as_ref().map(|d| d.join("Packages")),
+            );
+        }
+        self.sync_shared();
     }
     pub fn reload_external(&mut self, index: usize, reload: bool) {
         if let Some(loaded) = self.tabs[index].external.take() {

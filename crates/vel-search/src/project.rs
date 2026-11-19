@@ -662,14 +662,16 @@ pub struct SidebarSubtree {
 /// The side bar groups directories first and folds case (original spelling breaks ties).
 /// The public docs do not specify a numeric collation; keep lexical number ordering.
 pub fn sort_sidebar_entries(entries: &mut [Entry]) {
-    entries.sort_by_cached_key(|e| {
-        let name = e.path.file_name().unwrap_or_default();
-        (
-            !e.directory,
-            name.to_string_lossy().to_lowercase(),
-            name.to_owned(),
-        )
-    });
+    entries
+        .sort_by_cached_key(|e| sidebar_key(e.path.file_name().unwrap_or_default(), e.directory));
+}
+pub(crate) type SidebarKey = (bool, String, std::ffi::OsString);
+pub(crate) fn sidebar_key(name: &std::ffi::OsStr, directory: bool) -> SidebarKey {
+    (
+        !directory,
+        name.to_string_lossy().to_lowercase(),
+        name.to_owned(),
+    )
 }
 /// Complete, sorted project snapshot. Partial traversals are never published.
 #[derive(Debug, Default)]
@@ -1697,17 +1699,16 @@ mod review15_tests {
     #[test]
     fn replacement_backups_are_excluded_from_sidebar_full_incremental_and_file_search() {
         use crate::{
-            files::{self, FileChange},
+            files,
             text::{Options, Search},
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.txt");
         std::fs::write(&path, "cat\n").unwrap();
         let search = Search::new("cat", Options::default()).unwrap();
-        let backup = FileChange::prepare(path.clone(), &search, "cat changed")
-            .unwrap()
-            .commit()
-            .unwrap();
+        // A legacy backup, or a recovery copy retained after a write error.
+        let backup = dir.path().join("source.txt.velocity-backup-1");
+        std::fs::write(&backup, "cat\n").unwrap();
         let mut folder = folder(dir.path());
         folder.rules = Rules::new(&[], &[], &[])
             .unwrap()
@@ -1739,7 +1740,7 @@ mod review15_tests {
         loop {
             match task.events.recv_timeout(Duration::from_secs(10)).unwrap() {
                 files::Event::Line(line) => {
-                    assert_eq!(line.path, path);
+                    assert_eq!(line.path.as_ref(), path);
                 }
                 files::Event::Error(error) => panic!("{error}"),
                 files::Event::Done { matches, files } => {
@@ -1747,16 +1748,6 @@ mod review15_tests {
                     break;
                 }
             }
-        }
-        for file in tree.files.iter() {
-            FileChange::prepare(
-                file.clone(),
-                &Search::new("cat", Options::default()).unwrap(),
-                "dog",
-            )
-            .unwrap()
-            .commit()
-            .unwrap();
         }
         assert_eq!(std::fs::read_to_string(backup).unwrap(), "cat\n");
     }

@@ -540,7 +540,7 @@ fn indentation_commands_keep_find_focus_and_skip_heredoc_content() {
         json!({"setting":"tab_size","value":8}),
     );
     named(&mut a, "detect_indentation", json!({}));
-    assert_eq!(a.workspace.editor().preferences.tab_size, 4);
+    assert_eq!(a.workspace.editor().preferences.tab_size, 8);
     assert_eq!(a.panels.query.value(), query);
     assert!(a.panels.input().is_some(), "Find retains keyboard focus");
     let source =
@@ -592,6 +592,102 @@ fn indentation_commands_keep_find_focus_and_skip_heredoc_content() {
         a.workspace.editor().text.to_string(),
         source.replace("    cat", "\tcat")
     );
+}
+
+#[test]
+fn tab_indented_load_and_guess_respect_live_user_and_syntax_width() {
+    for local in [false, true] {
+        let profile = tempfile::tempdir().unwrap();
+        let user = profile.path().join("Packages/User");
+        std::fs::create_dir_all(&user).unwrap();
+        let prefs = user.join("Preferences.sublime-settings");
+        std::fs::write(
+            &prefs,
+            r#"{"index_files":false,"tab_size":8,"translate_tabs_to_spaces":true}"#,
+        )
+        .unwrap();
+        let settings = if local {
+            let syntax = user.join("Go.sublime-settings");
+            std::fs::write(&syntax, r#"{"tab_size":6}"#).unwrap();
+            syntax
+        } else {
+            prefs
+        };
+        let file = profile.path().join("main.go");
+        std::fs::write(
+            &file,
+            "package main\nfunc main() {\n\tcall()\n\tcall()\n}\n",
+        )
+        .unwrap();
+        let mut a = app("", Some(profile.path()));
+        a.workspace
+            .open(crate::cli::FileLocation {
+                path: file,
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while a.workspace.tabs[a.workspace.active].loading.is_some() {
+            a.poll_workspace_model();
+            assert!(Instant::now() < deadline);
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        assert_eq!(
+            a.workspace.editor().preferences.tab_size,
+            if local { 6 } else { 8 }
+        );
+        assert!(!a.workspace.editor().preferences.translate_tabs_to_spaces);
+        named(&mut a, "detect_indentation", json!({}));
+        std::fs::write(
+            settings,
+            r#"{"index_files":false,"tab_size":7,"translate_tabs_to_spaces":true}"#,
+        )
+        .unwrap();
+        a.workspace.request_resource_reload();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while a.workspace.editor().preferences.tab_size != 7 {
+            a.poll_workspace_model();
+            assert!(Instant::now() < deadline, "tab width did not reload");
+            std::thread::park_timeout(Duration::from_millis(2));
+        }
+        assert!(!a.workspace.editor().preferences.translate_tabs_to_spaces);
+    }
+}
+
+#[test]
+fn guessing_tabs_clears_only_the_width_owned_by_an_earlier_guess() {
+    for (before, after, expected) in [(None, None, 8), (Some(6), None, 6), (None, Some(2), 2)] {
+        let mut a = app("root\n  a\n    b\n  c\nroot\n", None);
+        let e = a.workspace.editor_mut();
+        e.settings
+            .set(vel_config::settings::Layer::User, "tab_size", json!(8));
+        e.sync();
+        if let Some(width) = before {
+            named(
+                &mut a,
+                "set_setting",
+                json!({"setting":"tab_size","value":width}),
+            );
+        }
+        named(&mut a, "detect_indentation", json!({}));
+        assert_eq!(a.workspace.editor().preferences.tab_size, 2);
+        if let Some(width) = after {
+            // Even an explicit choice equal to the former guess takes ownership.
+            named(
+                &mut a,
+                "set_setting",
+                json!({"setting":"tab_size","value":width}),
+            );
+        }
+        key(&mut a, "super+a");
+        a.workspace.editor_mut().clipboard = "root\n\ta\n\tb\n".into();
+        key(&mut a, "super+v");
+        named(&mut a, "detect_indentation", json!({}));
+        let e = a.workspace.editor();
+        assert!(!e.preferences.translate_tabs_to_spaces);
+        assert_eq!(e.preferences.tab_size, expected);
+    }
 }
 
 #[test]

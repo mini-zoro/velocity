@@ -552,11 +552,11 @@ fn r20_multicaret_invisible_wrap_preserves_segments_and_gaps() {
             );
             let text = editor.text.line(row).to_string();
             assert_eq!(
-                layout.invisible_gaps(row, &text),
-                reference.invisible_gaps(row, &text)
+                layout.invisible_gaps(row, &text, 0, 0),
+                reference.invisible_gaps(row, &text, 0, 0)
             );
             if row < 12 {
-                assert!(layout.invisible_gaps(row, &text).is_some());
+                assert!(layout.invisible_gaps(row, &text, 0, 0).is_some());
             }
         }
     }

@@ -41,7 +41,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use vel_config::{Value, settings::Layer};
+use vel_config::Value;
+#[cfg(test)]
+use vel_config::settings::Layer;
 use vel_platform::*;
 use vel_render::scene::Layer as SceneLayer;
 use vel_render::{FrameTimes, Renderer, font::Fonts};
@@ -2279,7 +2281,7 @@ impl App {
             .panels
             .action(&mut self.workspace, name, args, viewport)?
         {
-            self.replacement_confirmation(w)?;
+            self.replacement_confirmation(w);
             return Ok(());
         }
         let active = self.workspace.active;
@@ -2630,22 +2632,70 @@ impl App {
     fn viewport(&self) -> std::ops::Range<usize> {
         self.view.viewport(self.workspace.editor())
     }
-    fn replacement_confirmation(&mut self, w: &WindowHandle) -> Result<(), String> {
-        if let Some(plan) = self.panels.replacement_plan.take() {
-            if self
-                .workspace
-                .tabs
-                .iter()
-                .any(|t| t.dirty() && plan.iter().any(|c| t.path.as_ref() == Some(&c.path)))
-            {
-                return Err("A target has unsaved edits; save it before replacing in files".into());
+    fn replacement_confirmation(&mut self, w: &WindowHandle) {
+        self.confirm_file_replacements(|count, files| {
+            w.alert(
+                "Replace in Files?",
+                &format!("Replace {count} matches in {files} files?"),
+                &["Cancel", "Replace"],
+            ) == 1
+        });
+    }
+    fn confirm_file_replacements(&mut self, confirm: impl FnOnce(usize, usize) -> bool) {
+        let Some(plan) = self.panels.replacement_plan.take() else {
+            return;
+        };
+        let result = self.check_replacement_targets(&plan).and_then(|()| {
+            let count = plan.iter().map(|p| p.count).sum();
+            if count > 0 && confirm(count, plan.len()) {
+                self.commit_file_replacements(plan)
+            } else {
+                Ok(())
             }
-            let count: usize = plan.iter().map(|p| p.count).sum();
-            if count > 0 && w.alert("Replace in Files?", &format!("Replace {count} matches in {} files? Each original is backed up beside the file before atomic saving.", plan.len()), &["Cancel", "Replace"]) == 1 {
-                let mut backups = Vec::new();
-                for change in plan { backups.push(change.commit()?); }
-                self.panels.message = format!("Replaced {count} matches. {} original-file backups retained.", backups.len());
-            }
+        });
+        if let Err(message) = result {
+            let _ = self
+                .reporter
+                .emit(json!({"kind":"editor_error","message":message}));
+            self.panels.set_message(message);
+        }
+    }
+    fn check_replacement_targets(
+        &self,
+        plan: &[vel_search::files::FileChange],
+    ) -> Result<(), String> {
+        if self
+            .workspace
+            .tabs
+            .iter()
+            .any(|t| t.dirty() && plan.iter().any(|c| t.path.as_ref() == Some(&c.path)))
+        {
+            return Err("A target has unsaved edits; save it before replacing in files".into());
+        }
+        Ok(())
+    }
+    fn commit_file_replacements(
+        &mut self,
+        plan: Vec<vel_search::files::FileChange>,
+    ) -> Result<(), String> {
+        self.check_replacement_targets(&plan)?;
+        let mut count = 0;
+        let mut warnings = Vec::new();
+        for change in plan {
+            let saved = change.commit().map_err(|e| {
+                warnings.push(format!("Replaced {count} matches before stopping: {e}"));
+                warnings.join("; ")
+            })?;
+            self.workspace
+                .accept_file_replacement(&change, saved.identity);
+            count += change.count;
+            warnings.extend(saved.warning);
+        }
+        self.panels.message = format!("Replaced {count} matches.");
+        if !warnings.is_empty() {
+            self.panels
+                .message
+                .push_str(&format!(" {}", warnings.join("; ")));
         }
         Ok(())
     }
@@ -4201,9 +4251,7 @@ impl AppHandler for App {
             if let Some(invocation) = self.panels.pending_command.take() {
                 self.run_named(Some(w), &invocation.command, &invocation.args);
             }
-            if let Err(error) = self.replacement_confirmation(w) {
-                self.show_error(w, &error);
-            }
+            self.replacement_confirmation(w);
             if self.releases.busy()
                 || self.workspace.resources_busy()
                 || self.panels.busy()
@@ -4630,7 +4678,7 @@ impl AppHandler for App {
             return None;
         }
         if let Some(input) = self.panels.input() {
-            return Some(input.utf16_at_x(point.x));
+            return Some(input.utf16_at_point(point));
         }
         Some(
             self.workspace
@@ -4836,10 +4884,12 @@ mod workbench_scenes {
         let mut app = app(workspace);
         assert!(!app.command_enabled("next_result", "{}"));
         app.panels.result_view.push(vel_search::files::Line {
-            path: "Untitled 1".into(),
+            path: Path::new("Untitled 1").into(),
             number: 1,
             text: "cat".into(),
             highlights: std::iter::once(0..3).collect(),
+            column_offset: 0,
+            match_count: 1,
         });
         app.panels.search_results_active = true;
         assert!(app.command_enabled("next_result", "{}"));

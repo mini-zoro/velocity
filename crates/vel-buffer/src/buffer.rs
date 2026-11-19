@@ -534,8 +534,31 @@ impl Buffer {
         id: ViewId,
         kind: EditKind,
         edits: &[Edit<'_>],
+        new_selection: Selection,
+        moves: Option<crate::change::RegionMoves>,
+    ) -> ChangeId {
+        self.transact_impl(id, kind, edits, new_selection, moves, None)
+    }
+    /// Records projected edits together, using the original caret edits for typing-group decisions.
+    /// For example, snippet mirrors need not have a caret of their own.
+    pub fn transact_projected(
+        &mut self,
+        id: ViewId,
+        kind: EditKind,
+        edits: &[Edit<'_>],
+        new_selection: Selection,
+        caret_edits: &[Edit<'_>],
+    ) -> ChangeId {
+        self.transact_impl(id, kind, edits, new_selection, None, Some(caret_edits))
+    }
+    fn transact_impl(
+        &mut self,
+        id: ViewId,
+        kind: EditKind,
+        edits: &[Edit<'_>],
         mut new_selection: Selection,
         moves: Option<crate::change::RegionMoves>,
+        caret_edits: Option<&[Edit<'_>]>,
     ) -> ChangeId {
         // Validate even an all-no-op request, before changing selections or history.
         let mut previous_end = 0;
@@ -596,12 +619,18 @@ impl Buffer {
         {
             validate_selection(&after, &new_selection);
         }
-        let run = typing_run(kind, edits, &self.view(id).settings, &before_selection);
+        let caret_edits = caret_edits.unwrap_or(edits);
+        let run = typing_run(
+            kind,
+            caret_edits,
+            &self.view(id).settings,
+            &before_selection,
+        );
         let merge = self.group_open
             && self
                 .undo
                 .back()
-                .is_some_and(|g| can_group(g, id, &before_selection, run, edits));
+                .is_some_and(|g| can_group(g, id, &before_selection, run, caret_edits));
         self.clear_redo();
         let state = self.next_state;
         self.next_state = self.next_state.checked_add(1).expect("revision overflow");

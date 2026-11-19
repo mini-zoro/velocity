@@ -109,6 +109,7 @@ pub struct Editor {
     pub marked: Option<Range<usize>>,
     composition: Option<Composition>,
     pub settings: Settings,
+    pub(crate) detected_tab_size: Option<crate::language::DetectedTabSize>,
     pub preferences: EditorSettings,
     settings_revision: u64,
     pub registry: Registry,
@@ -242,6 +243,7 @@ impl Editor {
             text,
             preferences,
             settings_revision,
+            detected_tab_size: None,
             anchor: 0,
             caret: 0,
             marked: None,
@@ -357,8 +359,12 @@ impl Editor {
             self.read_only = true;
         }
         if self.settings_revision != self.settings.revision() {
+            let old_tab_size = self.preferences.tab_size;
             self.preferences = self.settings.editor();
             self.settings_revision = self.settings.revision();
+            if old_tab_size != self.preferences.tab_size {
+                self.layout.borrow_mut().invalidate();
+            }
             self.configure_vintage();
             vel_commands::sync_buffer_settings(&mut self.buffer, self.id, &self.preferences);
         }
@@ -457,6 +463,13 @@ impl Editor {
         }) {
             self.fields = None;
         }
+    }
+
+    pub(crate) fn set_view_setting(&mut self, key: &str, value: vel_config::Value) {
+        if key == "tab_size" {
+            self.detected_tab_size = None;
+        }
+        self.settings.set(Layer::View, key, value);
     }
     pub fn attach_language(
         &mut self,

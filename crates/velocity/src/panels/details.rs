@@ -62,11 +62,12 @@ impl Panels {
             _ => &[],
         }
     }
-    fn find_fields(panel: Panel) -> usize {
+    pub(super) fn find_fields(panel: Panel) -> usize {
         match panel {
             Panel::Replace => 2,
             Panel::Files => 3,
-            _ => 1,
+            Panel::Find | Panel::Incremental | Panel::Input => 1,
+            _ => 0,
         }
     }
     /// Width (DIPs) left of the inputs for their labels: 80, less when the input would get
@@ -105,22 +106,48 @@ impl Panels {
         let Some(panel) = self.panel else {
             return self.ui_scale;
         };
-        let natural = Self::find_panel_height(panel, self.panel_bounds.width, self.ui_scale);
+        let natural = self.find_panel_natural_height(panel, self.panel_bounds.width);
         (self.panel_bounds.height / natural.max(1.)).min(self.ui_scale)
     }
+    pub(super) fn find_input_extras(&self, panel: Panel) -> [f64; 3] {
+        if panel == Panel::Input {
+            return [0.; 3];
+        }
+        [
+            18. * self.query.natural_rows().saturating_sub(1) as f64,
+            if matches!(panel, Panel::Replace | Panel::Files) {
+                18. * self.replace.natural_rows().saturating_sub(1) as f64
+            } else {
+                0.
+            },
+            0.,
+        ]
+    }
+    pub(super) fn find_panel_natural_height(&self, panel: Panel, width: f64) -> f64 {
+        Self::find_panel_height(panel, width, self.ui_scale)
+            + self.find_input_extras(panel).iter().sum::<f64>()
+    }
     /// Toggles, buttons and message slot of the open find panel, as laid out and hit-tested.
-    /// Cached per (panel, bounds, scale): painting asks for it several times a frame.
+    /// Cached by geometry: painting asks for it several times a frame.
     pub(crate) fn find_controls(&mut self) -> Option<FindControls> {
         let panel = self.panel?;
-        if let Some((p, bounds, scale, controls)) = &self.find_layout
+        let vertical = self.find_vertical_scale();
+        if let Some((p, bounds, scale, v, controls)) = &self.find_layout
             && *p == panel
             && *bounds == self.panel_bounds
             && *scale == self.ui_scale
+            && *v == vertical
         {
             return Some(controls.clone());
         }
         let controls = self.compute_find_controls()?;
-        self.find_layout = Some((panel, self.panel_bounds, self.ui_scale, controls.clone()));
+        self.find_layout = Some((
+            panel,
+            self.panel_bounds,
+            self.ui_scale,
+            vertical,
+            controls.clone(),
+        ));
         Some(controls)
     }
     fn compute_find_controls(&self) -> Option<FindControls> {
@@ -129,7 +156,11 @@ impl Panels {
             return None;
         }
         let v = self.find_vertical_scale();
-        let top = self.panel_bounds.y + (8. + Self::find_fields(panel) as f64 * PANEL_ROW) * v;
+        let top = self.panel_bounds.y
+            + (8.
+                + Self::find_fields(panel) as f64 * PANEL_ROW
+                + self.find_input_extras(panel).iter().sum::<f64>())
+                * v;
         Some(Self::find_controls_at(
             panel,
             self.panel_bounds.x,
@@ -309,10 +340,11 @@ impl Panels {
     /// The find panel's status message slot (match counts, errors).
     pub(super) fn panel_message_clip(&self) -> Rect {
         match &self.find_layout {
-            Some((panel, bounds, scale, controls))
+            Some((panel, bounds, scale, vertical, controls))
                 if Some(*panel) == self.panel
                     && *bounds == self.panel_bounds
-                    && *scale == self.ui_scale =>
+                    && *scale == self.ui_scale
+                    && *vertical == self.find_vertical_scale() =>
             {
                 controls.message
             }
@@ -546,7 +578,7 @@ impl Panels {
         self.result_view
             .rows
             .iter()
-            .any(|r| matches!(r, files::Row::Line(line) if !line.highlights.is_empty()))
+            .any(|r| matches!(r, files::Row::Line(line) if line.match_count > 0))
     }
     /// Walks search results through the same jump path used by Enter and the mouse.
     pub fn navigate_result(
@@ -554,27 +586,23 @@ impl Panels {
         workspace: &mut Workspace,
         forward: bool,
     ) -> Result<(), String> {
-        let hits: Vec<_> = self
-            .result_view
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| {
-                matches!(r, files::Row::Line(line) if !line.highlights.is_empty()).then_some(i)
-            })
-            .collect();
+        let rows = &self.result_view.rows;
+        let is_hit =
+            |i: &usize| matches!(rows.get(*i), Some(files::Row::Line(l)) if l.match_count > 0);
+        let cursor = self.result_cursor;
         let next = if forward {
-            hits.iter()
-                .find(|i| self.result_cursor.is_none_or(|cursor| **i > cursor))
-                .or_else(|| hits.first())
+            let first = cursor.map_or(0, |i| i + 1);
+            (first..rows.len()).chain(0..first).find(is_hit)
         } else {
-            hits.iter()
+            let first = cursor.unwrap_or(rows.len());
+            (0..first)
                 .rev()
-                .find(|i| self.result_cursor.is_none_or(|cursor| **i < cursor))
-                .or_else(|| hits.last())
+                .chain((first..rows.len()).rev())
+                .find(is_hit)
         };
-        if let Some(&index) = next {
+        if let Some(index) = next {
             self.result_selected = index;
+            self.result_navigated = true;
             self.result_scroll.reveal(index);
             self.jump_result(workspace)?;
         }
@@ -702,9 +730,7 @@ impl Panels {
             );
         }
         if let Some(width) = args["width"].as_u64().filter(|w| (1..=32).contains(w)) {
-            editor
-                .settings
-                .set(vel_config::settings::Layer::View, "tab_size", json!(width));
+            editor.set_view_setting("tab_size", json!(width));
         }
         editor.sync();
         if args["convert"].as_bool() == Some(true) && !editor.read_only {

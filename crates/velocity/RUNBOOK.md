@@ -574,10 +574,12 @@ plus Find All and Find Next/Replace All buttons. Enter in the Files panel starts
 search; the palette's Find: Replace in Files prepares a replacement plan after that search
 finishes. Return to the Files panel to edit Replace/Where, rerun when query/scope flags change,
 then invoke Replace in Files. Save dirty target documents first. Confirmation lists match/file
-counts; each written original is kept as `NAME.velocity-backup-TIMESTAMP`. A file changed since
-preview is rejected; batch writes are atomic per file, with backups retained on partial failure.
+counts. A file changed since preview is rejected. A temporary recovery copy is removed
+after a successful write or when a failed write leaves the original unchanged. If a failed
+write may have changed the original, the status message names the retained copy.
 Where supports comma-separated folders, files, `<project>`, `<open files>`, include globs and
-`-exclude` globs. Unsaved buffers are searched in `<open files>`; regex disk search is line-oriented.
+`-exclude` globs. Unsaved buffers are searched in `<open files>`; disk search also supports
+patterns that consume newlines.
 
 The side bar loads directories only when expanded, with shared ignore/exclusion rules. Single
 click previews; double click/Enter pins. Open Files and folders support keyboard navigation.

@@ -221,7 +221,9 @@ impl Default for CompletionSettings {
             // No default is specified by the public docs; preserve our no-space behavior.
             auto_complete_trailing_spaces: false,
             auto_complete_include_snippets: true,
-            auto_complete_include_snippets_when_typing: false,
+            // https://www.sublimetext.com/docs/completions.html#settings documents false
+            // as opting out of automatic (but not explicitly invoked) snippet suggestions.
+            auto_complete_include_snippets_when_typing: true,
             max_results: 64,
         }
     }

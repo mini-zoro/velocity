@@ -50,25 +50,35 @@ full results are accepted only for the current query generation, buffer identity
 Navigation waits for that pass if necessary. Cancellation occurs between regex matches/scans;
 an individual no-match engine scan finishes before the next generation runs.
 
-`files::Task` uses ignore + grep-searcher on at most four walker threads with a bounded channel
+`files::Task` uses ignore on at most four walker threads with a bounded channel
 and cancellation-aware backpressure. Where accepts comma-separated folders/files, `<project>`,
 `<open files>`, include globs and `-exclude` globs; quoted paths can contain spaces. Commas inside
 paths/globs are not supported. Open-file snapshots include unsaved edits and take precedence over
-disk copies. Search is line-oriented for disk files; multiline matches belong to document search.
+disk copies. Both query modes and replacement previews use the window's automatic encoding
+and line ending policy. An explicit cancellation still delivers `Done` to a live consumer.
+Workers reuse contiguous buffers for files up to 4 MiB. Larger files use a compact index of
+source windows, validating and checking for required literals together. Line-local queries
+use contiguous grep on UTF-8 LF or CRLF bytes or on normalized batches. Cross-line queries
+only read the source when advancing, and replay immutable windows when the engine backtracks.
+An unusually long regex attempt or stateful legacy codec can use anonymous temporary storage,
+with a shared 768 MiB limit. A changed file or exceeded limit is reported as a file error.
 Results contain file headers, numbered match/context lines, gap rows and UTF-8 highlight spans.
-Parallel streams can repeat a file header when their output interleaves.
+Parallel streams merge into one ordered row group per file using shared paths and a ranked
+radix index. Headers and gaps need no stored row. Insertion ranks are resolved only for navigation.
 
 `FileChange::prepare` reads/expands without writing. After native confirmation, `commit` rechecks
-content/encoding/EOL, saves original bytes as `NAME.velocity-backup-TIMESTAMP`, and uses vel-fileio's
-permission-preserving atomic save. Changed files fail instead of overwriting a stale preview.
-The batch is atomic per file, not across files; completed backups remain if a later file fails.
-Velocity requires dirty target tabs to be saved before disk replacement. Restore a backup by
-copying its bytes over the original with the app closed, then reopening. No backup is deleted
-automatically. Workspace-session persistence is deferred by the spec.
+content/encoding/EOL, writes a temporary recovery copy, and uses vel-fileio's
+permission-preserving save. Changed files fail instead of overwriting a stale preview.
+The batch is not atomic across files. The recovery copy is removed on success or if a
+failed save left the same file with the same raw bytes. Otherwise the error names the
+retained copy, which includes the original filename.
+Velocity requires dirty target tabs to be saved before disk replacement. An open, clean
+target can undo the edit in its buffer; Undo does not rewrite the saved file.
 
 ```sh
 cargo test -p vel-search
 cargo run --release -p vel-search --example search_bench
+cargo test --release -p vel-search --test find_in_files_perf -- --ignored --nocapture --test-threads=1
 ```
 
 The example exits automatically and reports JSONL: 100k prepared paths/top 100, 180 synchronous
@@ -81,5 +91,4 @@ reviewer measurement; CPU results do not establish an input-to-display budget.
 Sources: [public API](https://www.sublimetext.com/docs/api_reference.html),
 [projects](https://www.sublimetext.com/docs/projects.html),
 [file patterns](https://www.sublimetext.com/docs/file_patterns.html),
-[ignore](https://docs.rs/ignore/latest/ignore/struct.WalkBuilder.html),
-[grep-searcher](https://docs.rs/grep-searcher/latest/grep_searcher/).
+[ignore](https://docs.rs/ignore/latest/ignore/struct.WalkBuilder.html).

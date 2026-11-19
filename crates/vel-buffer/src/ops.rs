@@ -627,13 +627,36 @@ pub fn single_selection(buffer: &mut Buffer, id: ViewId) {
     let r = buffer.view(id).sel().primary().unwrap_or_default();
     buffer.set_selection(id, Selection::from(r));
 }
-/// Splits each selection at LF boundaries, omitting the LF from the pieces.
+/// Splits each selection at LF boundaries, or into words if it fits on one line.
 pub fn split_selection_into_lines(buffer: &mut Buffer, id: ViewId) {
     // ST-BEHAVIOR: unverified [L3]: keep empty lines; a selection ending at BOL adds no extra caret; preserve direction.
     let text = buffer.text();
     let v = buffer.view(id);
     let mut regions = Vec::new();
     for r in v.sel().iter() {
+        // https://www.sublimetext.com/download (Split into Lines falls back to words).
+        if !r.empty() && text.byte_to_line(r.begin()) == text.byte_to_line(r.end()) {
+            let mut start = None;
+            let mut at = r.begin();
+            let previous_len = regions.len();
+            for c in text.slice(r.to_range()).chars() {
+                if c.is_whitespace() {
+                    if let Some(a) = start.take() {
+                        regions.push(r.directed(a, at));
+                    }
+                } else {
+                    start.get_or_insert(at);
+                }
+                at += c.len_utf8();
+            }
+            if let Some(a) = start {
+                regions.push(r.directed(a, at));
+            }
+            if regions.len() == previous_len {
+                regions.push(r);
+            }
+            continue;
+        }
         for line in touched_lines(text, &Selection::from(r)) {
             let a = r.begin().max(text.line_to_byte(line));
             let b = r.end().min(line_end(text, line));

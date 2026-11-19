@@ -224,6 +224,16 @@ impl State {
         self.peak = self.peak.max(self.bytes);
     }
     fn next(&mut self, cancel: bool, started: Instant) -> Result<Delivery, TryRecvError> {
+        // A cancelled build discards unread output, but must still report a
+        // retention drop that had already happened before cancellation.
+        if self.reset {
+            self.reset = false;
+            return Ok(Delivery::Event(Event::Truncated {
+                bytes: self.dropped,
+                first_line: self.row,
+                cancelling: cancel,
+            }));
+        }
         if cancel && !self.cancelled_delivered {
             self.bytes = 0;
             self.messages.clear();
@@ -247,13 +257,6 @@ impl State {
         }
         if self.cancelled_delivered {
             return Err(TryRecvError::Disconnected);
-        }
-        if self.reset {
-            self.reset = false;
-            return Ok(Delivery::Event(Event::Truncated {
-                bytes: self.dropped,
-                first_line: self.row,
-            }));
         }
         if let Some(event) = self.messages.pop_front() {
             return Ok(Delivery::Event(event));
@@ -377,7 +380,12 @@ pub struct Events {
 impl Events {
     fn delivered(&self, delivery: Delivery) -> Event {
         let event = delivery.event();
-        if let Event::Truncated { first_line, .. } = &event {
+        if let Event::Truncated {
+            first_line,
+            cancelling: false,
+            ..
+        } = &event
+        {
             self.next_result_row.store(*first_line, Ordering::Relaxed);
         }
         event
@@ -520,6 +528,37 @@ pub(crate) fn channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelling_a_stalled_receiver_delivers_pending_truncation() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (output, events) = channel(
+            ResultParser::new(None, None, "/tmp".into()).unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            cancel.clone(),
+        );
+        let chunk = "x".repeat(65535) + "\n";
+        for _ in 0..=LIMIT / chunk.len() {
+            assert!(output.send(Event::Output {
+                stream: Stream::Stdout,
+                text: chunk.clone(),
+            }));
+        }
+        let dropped = events.stats().dropped_bytes;
+        assert!(dropped > 0);
+        cancel.store(true, Ordering::Release);
+        assert!(
+            matches!(events.try_recv(), Ok(Event::Truncated { bytes, .. }) if bytes == dropped)
+        );
+        assert!(matches!(events.try_recv(), Ok(Event::Results(_))));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::Finished {
+                cancelled: true,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn round18_final_spill_is_bounded_lossless_and_ordered() {
         for (count, width) in [(80, 65536), (1000, 1)] {

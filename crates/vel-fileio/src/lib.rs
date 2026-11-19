@@ -5,6 +5,7 @@ mod identity;
 pub use identity::content_identity;
 mod progressive;
 pub mod regular;
+pub mod search;
 pub use decoding::{
     ContentIdentity, DecodeAttempt, DecodeNotice, DecodingDecision, PrefixFacts, decide_decoding,
     decoding_for_path,
@@ -659,22 +660,28 @@ impl<R: Read> Read for DecodeReader<'_, R> {
                     "invalid encoded text",
                 ));
             }
-            for byte in &decoded[..written] {
-                if self.pending_cr {
-                    self.ready.push(b'\n');
-                    self.pending_cr = false;
-                    if *byte == b'\n' {
-                        self.counts[1] += 1;
-                        continue;
+            let decoded = &decoded[..written];
+            if !self.pending_cr && !decoded.contains(&b'\r') {
+                self.ready.extend_from_slice(decoded);
+                self.counts[0] += decoded.iter().filter(|&&b| b == b'\n').count() as u64;
+            } else {
+                for &byte in decoded {
+                    if self.pending_cr {
+                        self.ready.push(b'\n');
+                        self.pending_cr = false;
+                        if byte == b'\n' {
+                            self.counts[1] += 1;
+                            continue;
+                        }
+                        self.counts[2] += 1;
                     }
-                    self.counts[2] += 1;
-                }
-                if *byte == b'\r' {
-                    self.pending_cr = true;
-                } else {
-                    self.ready.push(*byte);
-                    if *byte == b'\n' {
-                        self.counts[0] += 1;
+                    if byte == b'\r' {
+                        self.pending_cr = true;
+                    } else {
+                        self.ready.push(byte);
+                        if byte == b'\n' {
+                            self.counts[0] += 1;
+                        }
                     }
                 }
             }

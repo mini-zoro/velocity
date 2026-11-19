@@ -255,10 +255,8 @@ impl App {
                 if let Some(invocation) = self.panels.pending_command.take() {
                     self.run_named(w, &invocation.command, &invocation.args);
                 }
-                if let Some(w) = w
-                    && let Err(error) = self.replacement_confirmation(w)
-                {
-                    self.named_error(Some(w), &error);
+                if let Some(w) = w {
+                    self.replacement_confirmation(w);
                 }
                 // Opening or accepting a settings/syntax picker does not navigate.
                 let moved = self.target_changed(&panel_before);
@@ -743,8 +741,7 @@ impl App {
                 } else {
                     self.workspace
                         .editor_mut()
-                        .settings
-                        .set(Layer::View, key, json!(!value));
+                        .set_view_setting(key, json!(!value));
                 }
             }
             "set_setting" => {
@@ -759,8 +756,7 @@ impl App {
                 } else {
                     self.workspace
                         .editor_mut()
-                        .settings
-                        .set(Layer::View, key, value.clone());
+                        .set_view_setting(key, value.clone());
                 }
             }
             "drag_select" => self.begin_bound_drag(args)?,

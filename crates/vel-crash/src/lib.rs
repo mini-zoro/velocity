@@ -19,6 +19,22 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
+thread_local! {
+    static RECOVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs a recoverable job whose caller will report any panic as an ordinary error.
+/// The crash hook ignores only this thread and only while the job is running.
+pub fn catch_recoverable<F, T>(job: F) -> std::thread::Result<T>
+where
+    F: FnOnce() -> T + std::panic::UnwindSafe,
+{
+    let previous = RECOVERING.replace(true);
+    let result = std::panic::catch_unwind(job);
+    RECOVERING.set(previous);
+    result
+}
+
 /// Configuration supplied early in app startup, before native initialization.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -172,6 +188,9 @@ impl CrashReporter {
         let reporter = self.clone();
         let prior = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if RECOVERING.get() {
+                return;
+            }
             if !reporter.state.reporting.swap(true, Ordering::AcqRel) {
                 let location = info.location().map(|l| (l.file(), l.line(), l.column()));
                 let _ = reporter.write_report_at(location);

@@ -1,5 +1,9 @@
 //! Rope regex search and atomic buffer replacements, without copying the document.
 use regex_cursor::{Input, engines::meta::Regex};
+/// Quotes a literal to seed a regex search without interpreting its metacharacters.
+pub fn escape_literal(text: &str) -> String {
+    regex::escape(text)
+}
 use std::{
     ops::Range,
     sync::{
@@ -47,8 +51,16 @@ pub struct Search {
     re: Regex,
 }
 impl Search {
-    /// Compiles once per query. Empty input clears search instead of matching every boundary.
-    pub fn new(query: &str, options: Options) -> Result<Self, String> {
+    pub(super) fn matches_in<'a, C: regex_cursor::Cursor + 'a>(
+        &'a self,
+        cursor: C,
+    ) -> impl Iterator<Item = Range<usize>> + 'a {
+        self.re
+            .find_iter(Input::new(cursor))
+            .map(|m| m.start()..m.end())
+    }
+
+    pub(super) fn pattern(query: &str, options: Options) -> String {
         let source = if options.regex {
             query.into()
         } else {
@@ -59,15 +71,25 @@ impl Search {
         } else {
             source
         };
+        format!(
+            "(?m){}(?:{source})",
+            if options.case_sensitive { "" } else { "(?i)" }
+        )
+    }
+
+    pub(super) fn contiguous(&self) -> Result<regex::Regex, String> {
+        regex::Regex::new(&Self::pattern(&self.query, self.options))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Compiles once per query. Empty input clears search instead of matching every boundary.
+    pub fn new(query: &str, options: Options) -> Result<Self, String> {
         // regex-cursor 0.1.5 can skip or shorten matches at chunk boundaries
         // when its prefilter has unequal-length candidates (e.g. k/K/K or t ?).
         // Both find and captures must use the full rope matcher.
         let re = Regex::builder()
             .configure(Regex::config().auto_prefilter(false))
-            .build(&format!(
-                "(?m){}(?:{source})",
-                if options.case_sensitive { "" } else { "(?i)" }
-            ))
+            .build(&Self::pattern(query, options))
             .map_err(|_| {
                 // Report the user's expression, never the internal flag/boundary wrapper.
                 regex::RegexBuilder::new(query)

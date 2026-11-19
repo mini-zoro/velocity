@@ -10,6 +10,7 @@ no Sublime application resources or Default package were consulted.
 | `indent_to_bracket` | `false` | Supported: Enter aligns after an unmatched `(` or `[` with content on its line, ignoring strings/comments. Checks line/column limits before requesting scopes, then scans at most 64 lines / 8 KiB; preserves hanging and bracket-pair indentation. Requires auto indentation; unavailable exact scopes keep normal indentation. |
 | `find_selected_text` | `true` | Supported: opening or re-running Find, Replace or Incremental Find seeds a single-line selection. Empty selections keep the existing query. |
 | `auto_find_in_selection` | `false` | Supported: a multi-line selection enables In Selection when opening a find-family panel. |
+| `word_wrap` | `"auto"` | Automatic wrapping still respects the large-file limits. `true`, including View > Word Wrap, explicitly wraps even multi-megabyte lines. |
 | `close_find_after_find_all` | `true` | Supported: controls Find All panel closure. Explicit keyboard shortcuts still close. |
 | `close_find_after_replace_all` | `true` | Supported: controls Replace All panel closure after a successful operation. Invalid expressions keep feedback visible. |
 | `move_to_limit_on_up_down` | `false` | Supported: Up/Down on the first/last visual row reaches the document boundary, including extending selections. Pages are unaffected. |
@@ -25,7 +26,7 @@ no Sublime application resources or Default package were consulted.
 | `auto_complete_selector` | `meta.tag, source - comment - string.quoted.double.block - string.quoted.single.block - string.unquoted.heredoc` | Supported: the public documentation's selector permits ordinary quoted strings and excludes comments and block/heredoc strings. |
 | `auto_complete_use_history` | `true` (retained) | Supported. Public documentation describes the switch but does not establish the proposed `false` default. |
 | `auto_complete_preserve_order` | `"some"` (retained) | Supported values: `"none"` ranks textual matches, `"some"` also considers likelihood/proximity, `"strict"` keeps source order. Legacy `true` maps to `"strict"`, `false` to `"some"`; unknown values use `"some"`. |
-| `auto_complete_include_snippets_when_typing` | `false` (retained) | Supported. Public documentation describes exclusion when false but does not establish the proposed `true` default. |
+| `auto_complete_include_snippets_when_typing` | `true` | `false` hides snippets from automatic suggestions; manually invoked completion still includes snippets. The public documentation describes the switch; Velocity's default follows its snippet spec. |
 | `auto_complete_triggers` | `[]` (retained) | Explicit entries support selectors, optional character sets and `rhs_empty`. Scope tests use the just-typed character, on the completion worker. `rhs_empty` requires EOF or immediate whitespace at every caret. The published docs do not establish the proposed combined default trigger list. |
 
 Sources and evidence boundaries:

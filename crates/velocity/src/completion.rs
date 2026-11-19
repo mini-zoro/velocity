@@ -826,8 +826,10 @@ fn settings(editor: &Editor) -> CompletionSettings {
             d.auto_complete_trailing_spaces,
         ),
         auto_complete_include_snippets: s.bool("auto_complete_include_snippets", true),
+        // https://www.sublimetext.com/docs/completions.html#settings documents
+        // the opt-out. Velocity's snippet spec enables suggestions by default.
         auto_complete_include_snippets_when_typing: s
-            .bool("auto_complete_include_snippets_when_typing", false),
+            .bool("auto_complete_include_snippets_when_typing", true),
         ..d
     }
 }

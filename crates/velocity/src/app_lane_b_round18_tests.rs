@@ -1116,31 +1116,91 @@ fn round18_review_signal_output_and_retention_hysteresis() {
         "exec",
         json!({"cmd":["/usr/bin/awk","BEGIN { for(i=0;i<200000;i++) print \"012345678901234567890123456789012345678901234567890123456789\" }"],"quiet":true}),
     );
-    let mut trims = 0;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while a.builds.task.is_some() {
-        a.panels.output_reset = false;
-        a.builds.poll(&mut a.panels);
-        if a.panels.output_reset {
-            trims += 1;
-            assert!(a.panels.output.starts_with("[output truncated]"));
-            // A transport reset publishes its retained tail after production
-            // may have advanced since trimming. Its cap is 8 MiB; a synchronous
-            // UI trim still immediately leaves at most 6 MiB.
-            let transported = a
-                .panels
-                .output
-                .lines()
-                .next()
-                .is_some_and(|line| line.contains("bytes dropped"));
-            let limit = if transported { 8 } else { 6 } * 1024 * 1024;
-            assert!(a.panels.output.len() <= limit);
-        }
-        assert!(Instant::now() < deadline);
+    // Stall the UI until the worker has drained its pipes. Normal streaming
+    // can trim the mirror's prefix without resetting it.
+    let task = a.builds.task.as_ref().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !task.finished() {
+        assert!(Instant::now() < deadline, "build producer did not finish");
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!((1..=3).contains(&trims), "{trims}");
+    let dropped = task.events.stats().dropped_bytes;
+    assert!(dropped > 0);
+    a.panels.output_reset = false;
+    a.builds.poll(&mut a.panels);
+    assert!(a.panels.output_reset);
+    assert!(
+        a.panels
+            .output
+            .starts_with(&format!("[output truncated] ({dropped} bytes dropped)\n"))
+    );
+    finish(&mut a);
     assert!(a.panels.output.len() <= 8 * 1024 * 1024);
+}
+
+#[cfg(unix)]
+#[test]
+fn cancel_after_transport_drop_preserves_already_displayed_output_and_f4_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let flag = dir.path().join("flood");
+    let script = dir.path().join("fixture.sh");
+    std::fs::write(&script, r#"
+/usr/bin/awk 'BEGIN { for(i=1;i<=323;i++) printf "fixture.rs:%d:1: initial diagnostic %08d\n",i,i }'
+while [ ! -f flood ]; do /bin/sleep .01; done
+/usr/bin/awk 'BEGIN { for(i=324;i<=600000;i++) printf "fixture.rs:%d:1: error %08d padding padding\n",i,i }'
+exec /bin/sleep 20
+"#).unwrap();
+    let file = dir.path().canonicalize().unwrap().join("fixture.rs");
+    std::fs::write(&file, "line\n".repeat(500)).unwrap();
+    let mut a = app("", None);
+    named(
+        &mut a,
+        "exec",
+        json!({
+            "cmd":["/bin/sh",script],
+            "working_dir":dir.path(),
+            "file_regex":r"^(\S+):(\d+):(\d+): (.*)$",
+            "quiet":true,
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while a.panels.build_results.len() < 323 {
+        a.builds.poll(&mut a.panels);
+        assert!(
+            Instant::now() < deadline,
+            "{}; {} results",
+            a.panels.output,
+            a.panels.build_results.len()
+        );
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    let prefix = a.panels.output.clone();
+    let results = a.panels.build_results.clone();
+    std::fs::write(flag, "").unwrap();
+    while a.builds.task.as_ref().unwrap().events.stats().dropped_bytes == 0 {
+        assert!(Instant::now() < deadline);
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    a.panels.output_reset = false;
+    assert!(key(&mut a, "ctrl+c"));
+    finish(&mut a);
+    assert!(a.panels.output.starts_with(&prefix));
+    assert!(a.panels.output.contains("[output truncated]"));
+    assert!(a.panels.output.contains("[Cancelled]"));
+    assert_eq!(a.panels.build_results, results);
+    assert!(!a.panels.output_reset);
+    eprintln!(
+        "cancelled flood: {} -> {} shown bytes; {} -> {} navigable diagnostics",
+        prefix.len(),
+        a.panels.output.len(),
+        results.len(),
+        a.panels.build_results.len()
+    );
+    assert!(key(&mut a, "f4"));
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_deref(),
+        Some(file.as_path())
+    );
 }
 
 #[test]
@@ -1160,26 +1220,29 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(2));
     }
+    // The file index can rebuild its rows while this test runs; lay out and read the
+    // row order right before the click so the click lands on the row it looked up.
+    let mut position = None;
+    for _ in 0..200 {
+        a.panels.layout(a.window_size);
+        if let Some(i) = a.panels.side_rows.iter().position(|r| r.path == file) {
+            let base = a.panels.folder_row_base(&a.workspace);
+            position = Some(Point {
+                x: 60.,
+                y: 30. + (base + i) as f64 * 24. + 12.,
+            });
+        }
+        if position.is_some() && !a.panels.file_task.is_some() {
+            break;
+        }
+        let viewport = a.viewport();
+        a.panels.poll(&mut a.workspace, viewport);
+        std::thread::sleep(Duration::from_millis(2));
+    }
     a.panels.layout(a.window_size);
-    let i = a
-        .panels
-        .side_rows
-        .iter()
-        .position(|r| r.path == file)
-        .unwrap();
-    let count = if a.workspace.is_empty() {
-        0
-    } else {
-        a.workspace.tabs.len()
-    };
-    mouse(
-        &mut a,
-        Point {
-            x: 60.,
-            y: 30. + (count + 2 + i) as f64 * 24. + 12.,
-        },
-        1,
-    );
+    // One more layout after polling so the geometry matches the rows we clicked.
+    let position = position.expect("the file row is listed");
+    mouse(&mut a, position, 1);
     assert_eq!(
         a.workspace.tabs[a.workspace.active].path.as_ref(),
         Some(&file)
@@ -1240,10 +1303,12 @@ fn round18_review_headless_result_navigation_obeys_active_result_source() {
     std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
     let mut a = app("", None);
     a.panels.result_view.push(vel_search::files::Line {
-        path: file.clone(),
+        path: file.clone().into(),
         number: 3,
         text: "three".into(),
         highlights: std::iter::once(0..5).collect(),
+        column_offset: 0,
+        match_count: 1,
     });
     a.panels.search_results_active = true;
     named(&mut a, "next_result", json!({}));

@@ -207,7 +207,7 @@
   // Rank by match (none), match and likelihood (some), or source order (strict).
   "auto_complete_preserve_order": "some",
   // Include snippet candidates in suggestions opened by typing.
-  "auto_complete_include_snippets_when_typing": false,
+  "auto_complete_include_snippets_when_typing": true,
   // Extra triggers accept a selector, optional characters and an optional rhs_empty flag.
   "auto_complete_triggers": [],
   "show_git_status": true,

@@ -1,8 +1,12 @@
 //! Round 18 follows the shared native/headless command, input and resource paths.
 #[path = "panels/find_differential_tests.rs"]
 mod find_differential_tests;
+#[path = "panels/find_files_tests.rs"]
+mod find_files_tests;
 #[path = "panels/find_tests.rs"]
 mod find_tests;
+#[path = "app_long_wrap_tests.rs"]
+mod long_wrap_tests;
 #[path = "app_round19_tests.rs"]
 mod round19;
 #[path = "app_round20_tests.rs"]
@@ -102,6 +106,94 @@ fn snippets(a: &mut App, entries: &[(&str, &str, &str)]) {
         (format!("Packages/User/test{i}.sublime-snippet"),vel_snippet::SnippetFile::parse(&format!("<snippet><content><![CDATA[{content}]]></content><tabTrigger>{trigger}</tabTrigger><scope>{scope}</scope><description>Choice {i}</description></snippet>")).unwrap())
     }).collect();
     a.workspace.editor_mut().snippets = Arc::new(snippets);
+}
+fn user_snippet_fixture() -> (tempfile::TempDir, PathBuf) {
+    let profile = tempfile::tempdir().unwrap();
+    let user = profile.path().join("Packages/User");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("Preferences.sublime-settings"),
+        r#"{"index_files":false,"auto_complete_delay":0}"#,
+    )
+    .unwrap();
+    std::fs::write(user.join("forx.sublime-snippet"), "<snippet><content><![CDATA[${1:item} ${1:item}$0]]></content><tabTrigger>forx</tabTrigger><scope>source.rust</scope></snippet>").unwrap();
+    let file = profile.path().canonicalize().unwrap().join("main.rs");
+    std::fs::write(&file, "fn main() {\n    \n}\n").unwrap();
+    (profile, file)
+}
+
+#[test]
+fn snippet_completion_is_suggested_by_default_and_opt_out_keeps_manual_completion() {
+    let (profile, file) = user_snippet_fixture();
+    let mut a = app("", "Plain Text", Some(profile.path()));
+    open_ready(&mut a, &file);
+    let viewport = a.viewport();
+    a.panels.poll(&mut a.workspace, viewport);
+    let ready = |a: &App| {
+        a.workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .is_some_and(|l| l.scopes_ready())
+    };
+    until(&mut a, ready);
+    a.workspace.editor_mut().set_caret(16, false);
+    input(&mut a, "f");
+    input(&mut a, "o");
+    let includes = |a: &App| {
+        a.workspace
+            .editor()
+            .completion
+            .list
+            .as_ref()
+            .is_some_and(|list| list.items.iter().any(|item| item.trigger == "forx"))
+    };
+    until(&mut a, includes);
+    key(&mut a, "escape");
+    set(
+        &mut a,
+        "auto_complete_include_snippets_when_typing",
+        json!(false),
+    );
+    key(&mut a, "backspace");
+    input(&mut a, "o");
+    assert!(a.workspace.editor().completion.busy());
+    until(&mut a, |a| !a.workspace.editor().completion.busy());
+    assert!(!includes(&a));
+    named(&mut a, "auto_complete", json!({}));
+    until(&mut a, includes);
+}
+
+#[test]
+fn snippet_field_word_and_mirror_are_one_undoable_typing_run() {
+    let (profile, file) = user_snippet_fixture();
+    let mut a = app("", "Plain Text", Some(profile.path()));
+    open_ready(&mut a, &file);
+    until(&mut a, |a| {
+        a.workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .is_some_and(|l| l.scopes_ready())
+    });
+    set(&mut a, "auto_complete", json!(false));
+    a.workspace.editor_mut().set_caret(16, false);
+    for letter in ["f", "o", "r", "x"] {
+        input(&mut a, letter);
+    }
+    key(&mut a, "tab");
+    let expanded = "fn main() {\n    item item\n}\n";
+    assert_eq!(a.workspace.editor().text, expanded);
+    for letter in ["i", "d", "x"] {
+        input(&mut a, letter);
+    }
+    assert_eq!(a.workspace.editor().text, "fn main() {\n    idx idx\n}\n");
+    key(&mut a, "super+z");
+    assert_eq!(a.workspace.editor().text, expanded);
+    key(&mut a, "super+shift+z");
+    assert_eq!(a.workspace.editor().text, "fn main() {\n    idx idx\n}\n");
 }
 #[test]
 fn fresh_bundled_startup_has_no_modal_or_status_diagnostics() {

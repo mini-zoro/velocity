@@ -328,10 +328,12 @@ fn r19_find_result_and_closed_view_history() {
     w.observe_navigation();
     let original = w.tabs[w.active].sheet;
     p.result_view.push(files::Line {
-        path: root.path().canonicalize().unwrap().join("b.rs"),
+        path: root.path().canonicalize().unwrap().join("b.rs").into(),
         number: 2,
         text: "fn another() { local(); }".into(),
         highlights: std::iter::once(15..20).collect(),
+        column_offset: 0,
+        match_count: 1,
     });
     p.result_selected = p
         .result_view

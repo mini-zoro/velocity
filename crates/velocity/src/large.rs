@@ -87,6 +87,9 @@ impl FeatureConfig {
             p.highlighting = vel_largefile::HighlightMode::Full;
         }
         p.indexing |= self.indexing;
+        // The thresholds govern automatic wrapping. An explicit word_wrap:true
+        // (including View > Word Wrap) opts in even for multi-MiB lines. Layout
+        // and painting use independent visual-row ranges once breaks are built.
         p.word_wrap = self.wrap.unwrap_or(p.word_wrap) || self.enable_wrap;
         p.spell_check |= self.spell;
         p.diff_against_disk |= self.diff;

@@ -115,11 +115,11 @@ struct CachedUnit {
     marker: bool,
 }
 impl CachedUnit {
-    fn text<'a>(&self, line: &'a str) -> &'a str {
+    fn text<'a>(&self, line: &'a str, base: usize) -> &'a str {
         if self.marker {
             "…"
         } else {
-            &line[self.bytes.clone()]
+            &line[self.bytes.start - base..self.bytes.end - base]
         }
     }
 }
@@ -129,6 +129,25 @@ struct CachedLine {
     hidden: Vec<Range<usize>>,
     tab: usize,
     units: Arc<[CachedUnit]>,
+}
+#[derive(Debug)]
+struct WrappedRow {
+    text: String,
+    base: usize,
+    units: Arc<[CachedUnit]>,
+}
+#[derive(Debug)]
+struct WrappedLine {
+    key: (
+        vel_buffer::BufferId,
+        vel_buffer::ChangeId,
+        u64,
+        usize,
+        usize,
+    ),
+    rows: HashMap<usize, Arc<WrappedRow>>,
+    indentation: usize,
+    trimmed: Range<usize>,
 }
 
 /// A reading position survives changes in wrapping and text metrics.
@@ -195,6 +214,11 @@ pub struct View {
     pub(crate) image_preview: crate::open_requests::ImagePreview,
     pub profile: Option<SceneProfile>,
     units: HashMap<u64, CachedLine>,
+    wrapped_line: Option<WrappedLine>,
+    #[cfg(test)]
+    pub(crate) wrapped_row_bytes: usize,
+    #[cfg(test)]
+    pub(crate) fold_header_rope_lookups: usize,
     selection_cache: Option<SelectionCache>,
     pub find_matches: Vec<Range<usize>>,
     pub size: Size,
@@ -891,6 +915,11 @@ impl View {
             image_preview: Default::default(),
             profile: std::env::var_os("VELOCITY_REVIEW_PROFILE").map(|_| SceneProfile::default()),
             units: HashMap::new(),
+            wrapped_line: None,
+            #[cfg(test)]
+            wrapped_row_bytes: 0,
+            #[cfg(test)]
+            fold_header_rope_lookups: 0,
             selection_cache: None,
             find_matches: Vec::new(),
             size,
@@ -972,6 +1001,104 @@ impl View {
             );
         }
         units
+    }
+    fn wrapped_row(
+        &mut self,
+        e: &Editor,
+        layout: &layout::Layout,
+        row: usize,
+        start: usize,
+        subrow: usize,
+        segment: &layout::Segment,
+    ) -> Arc<WrappedRow> {
+        // https://www.sublimetext.com/download (very long line rendering).
+        // The physical line can be megabytes; cache only a bounded set of its
+        // visible slices, keyed by text version and layout geometry.
+        let key = (
+            e.buffer.id(),
+            e.buffer.change_id(),
+            layout.geometry_revision,
+            row,
+            e.preferences.tab_size,
+        );
+        if self
+            .wrapped_line
+            .as_ref()
+            .is_none_or(|line| line.key != key)
+        {
+            let body = e.text.slice(start..start + e.text.line_len_bytes(row));
+            let tab = e.preferences.tab_size.max(1);
+            let mut indentation = 0;
+            for b in body.bytes().take_while(|b| matches!(b, b' ' | b'\t')) {
+                indentation += if b == b'\t' {
+                    tab - indentation % tab
+                } else {
+                    1
+                };
+            }
+            let leading: usize = body
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(char::len_utf8)
+                .sum();
+            let trailing = if leading == body.len_bytes() {
+                0
+            } else {
+                body.len_bytes()
+                    - body
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_whitespace())
+                        .map(char::len_utf8)
+                        .sum::<usize>()
+            };
+            self.wrapped_line = Some(WrappedLine {
+                key,
+                rows: HashMap::new(),
+                indentation,
+                trimmed: leading..trailing,
+            });
+        }
+        let cache = self.wrapped_line.as_mut().expect("wrapped line");
+        if let Some(row) = cache.rows.get(&subrow) {
+            return row.clone();
+        }
+        let (text, base, column) = layout::Layout::segment_text(&e.text, start, segment);
+        #[cfg(test)]
+        {
+            self.wrapped_row_bytes += text.len();
+        }
+        let hidden = layout.hidden(row);
+        let units = layout::units_in(&text, base, hidden, e.preferences.tab_size, column)
+            .into_iter()
+            .map(|u| CachedUnit {
+                marker: u.text == "…" && hidden.contains(&u.bytes),
+                bytes: u.bytes,
+                width: u.width,
+            })
+            .collect();
+        // A single pathological grapheme or folded span may exceed the byte cap.
+        let result = Arc::new(WrappedRow { text, base, units });
+        if result.text.len() <= 4096 {
+            if cache.rows.len() == 256 {
+                cache.rows.clear();
+            }
+            cache.rows.insert(subrow, result.clone());
+        }
+        result
+    }
+    #[cfg(test)]
+    pub(crate) fn poison_wrapped_rows(&mut self) {
+        let rows = &mut self.wrapped_line.as_mut().expect("cached wrap").rows;
+        assert!(!rows.is_empty());
+        for row in rows.values_mut() {
+            let row = Arc::get_mut(row).expect("cache owns the row");
+            row.text.replace_range(..1, "~");
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn clear_wrapped_rows(&mut self) {
+        self.wrapped_line = None;
     }
     pub fn minimap_width(&self, e: &Editor) -> f64 {
         if e.binary.is_some() {
@@ -1891,21 +2018,27 @@ impl View {
         let end_col = if e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
             layout.column(&e.text, end)
         } else {
-            let line = e.text.line(row).to_string();
-            let gaps = layout.invisible_gaps(row, &line);
             let start = e.text.line_to_byte(row);
+            let (line, base, source_column) = layout.unit_window(&e.text, row, start, &segment);
+            let gaps = layout.invisible_gaps(row, &line, base, source_column);
             segment.indent
-                + layout::units(&line, layout.hidden(row), e.preferences.tab_size)
-                    .iter()
-                    .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= end - start)
-                    .map(|u| {
-                        u.width
-                            + layout.phantom_gap(start + u.bytes.start)
-                            + gaps
-                                .as_ref()
-                                .map_or(0, |g| layout::Layout::invisible_gap(g, u.bytes.start))
-                    })
-                    .sum::<usize>()
+                + layout::units_in(
+                    &line,
+                    base,
+                    layout.hidden(row),
+                    e.preferences.tab_size,
+                    source_column,
+                )
+                .iter()
+                .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= end - start)
+                .map(|u| {
+                    u.width
+                        + layout.phantom_gap(start + u.bytes.start)
+                        + gaps
+                            .as_ref()
+                            .map_or(0, |g| layout::Layout::invisible_gap(g, u.bytes.start))
+                })
+                .sum::<usize>()
         };
         r.width =
             ((end_col as f64 - layout.column(&e.text, bytes.start) as f64) * self.cell).max(1.);
@@ -2392,6 +2525,9 @@ impl View {
         let solid_guides = guide_options.is_some_and(|o| o.iter().any(|s| s == "solid"));
         let normal_guides = guide_options.is_none_or(|o| o.iter().any(|s| s == "draw_normal"));
         let occurrence = selected_word(e, &regions);
+        let fold_buttons = e.preferences.gutter && e.settings.bool("fold_buttons", true);
+        let show_fold_candidates =
+            fold_buttons && (self.gutter_hover || !e.settings.bool("fade_fold_buttons", true));
         let bookmarks = if e.bookmarks().is_empty() {
             &[]
         } else {
@@ -2491,7 +2627,7 @@ impl View {
                 });
             }
 
-            if !layout.wrapped() && e.text.line_len_bytes(row) >= crate::large::LONG_LINE {
+            if !layout.wrapped() && segment.bytes.end >= crate::large::LONG_LINE {
                 self.note_width(e, None);
                 self.paint_long_line(
                     e,
@@ -2507,7 +2643,16 @@ impl View {
                 );
                 continue;
             }
-            let line = e.text.line(row).to_string();
+            let long_wrap = layout.long_wrapped(row);
+            let wrapped =
+                long_wrap.then(|| self.wrapped_row(e, &layout, row, start, subrow, &segment));
+            let physical;
+            let (line, base) = if let Some(wrapped) = &wrapped {
+                (wrapped.text.as_str(), wrapped.base)
+            } else {
+                physical = layout.unit_window(&e.text, row, start, &segment);
+                (physical.0.as_str(), physical.1)
+            };
 
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
             let baseline = self.baseline(e, y);
@@ -2613,16 +2758,23 @@ impl View {
                         },
                     );
                 }
-                if e.settings.bool("fold_buttons", true) {
-                    let header_end = start + line.trim_end_matches('\n').len();
+                if fold_buttons {
+                    let header_end = start
+                        + if wrapped.is_none() && base == 0 {
+                            line.len()
+                        } else {
+                            #[cfg(test)]
+                            {
+                                self.fold_header_rope_lookups += 1;
+                            }
+                            e.text.line_len_bytes(row)
+                        };
                     let is_folded = folded
                         .get(folded.partition_point(|r| r.begin() < start))
                         .is_some_and(|r| r.begin() <= header_end);
                     // Faded buttons appear with the pointer over the gutter; a collapsed fold
                     // keeps its button so hidden lines stay discoverable.
-                    let shown = is_folded
-                        || !e.settings.bool("fade_fold_buttons", true)
-                        || self.gutter_hover;
+                    let shown = is_folded || show_fold_candidates;
                     let candidate = shown
                         && language.and_then(|l| l.analysis.as_ref()).is_some_and(|a| {
                             let at = a.folds.partition_point(|f| f.range.start < start);
@@ -2666,9 +2818,35 @@ impl View {
                     }
                 }
             }
-            let display = self.line_units(&line, layout.hidden(row), e.preferences.tab_size);
+            let display = if let Some(wrapped) = &wrapped {
+                wrapped.units.clone()
+            } else if base == 0 {
+                self.line_units(line, layout.hidden(row), e.preferences.tab_size)
+            } else {
+                layout::units_in(
+                    line,
+                    base,
+                    layout.hidden(row),
+                    e.preferences.tab_size,
+                    segment.source_column,
+                )
+                .into_iter()
+                .map(|u| CachedUnit {
+                    marker: layout.hidden(row).contains(&u.bytes),
+                    bytes: u.bytes,
+                    width: u.width,
+                })
+                .collect()
+            };
             let gaps = draw_invisible
-                .then(|| layout.invisible_gaps(row, &line))
+                .then(|| {
+                    layout.invisible_gaps(
+                        row,
+                        line,
+                        base,
+                        if base == 0 { 0 } else { segment.source_column },
+                    )
+                })
                 .flatten();
             let invisible_gap = |at: usize| {
                 gaps.as_ref()
@@ -2843,11 +3021,20 @@ impl View {
                 }
             }
             if indent_guides {
-                let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
                 let columns = guides.and_then(|g| g.columns(row)).unwrap_or_else(|| {
-                    crate::editor::cells_with_tab(&line[..leading], e.preferences.tab_size)
+                    if long_wrap {
+                        self.wrapped_line
+                            .as_ref()
+                            .expect("wrapped line")
+                            .indentation
+                    } else {
+                        let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
+                        crate::editor::cells_with_tab(&line[..leading], e.preferences.tab_size)
+                    }
                 });
-                for col in vel_render::guides::columns(columns, e.preferences.tab_size) {
+                for col in vel_render::guides::columns(columns, e.preferences.tab_size)
+                    .take_while(|&col| !long_wrap || left + col as f64 * self.cell < right)
+                {
                     let active = active
                         .as_ref()
                         .is_some_and(|a| a.column == col && a.rows.contains(&row));
@@ -2881,7 +3068,23 @@ impl View {
                             0
                         }
                 };
-                for range in word_occurrences(&line, word) {
+                let occurrence_window = (long_wrap || base != 0).then(|| {
+                    // Keep one word and a scalar of context beyond each wrap break.
+                    let a = e.text.floor_char_boundary(
+                        start + segment.bytes.start.saturating_sub(word.len() + 4),
+                    );
+                    let b = e.text.ceil_char_boundary(
+                        start
+                            + (segment.bytes.end + word.len() + 4).min(e.text.line_len_bytes(row)),
+                    );
+                    (a - start, e.text.slice(a..b).to_string())
+                });
+                let (origin, sample) = occurrence_window
+                    .as_ref()
+                    .map_or((0, line), |(a, s)| (*a, s.as_str()));
+                for range in
+                    word_occurrences(sample, word).map(|r| r.start + origin..r.end + origin)
+                {
                     let absolute = start + range.start..start + range.end;
                     if absolute.end <= range_start {
                         continue;
@@ -2960,7 +3163,7 @@ impl View {
                     }
                     column += gap;
                 }
-                let text = unit.text(&line);
+                let text = unit.text(line, base);
                 let x = left + column as f64 * self.cell - self.scroll_x;
                 let at = start + unit.bytes.start;
                 let selected = has_selection
@@ -3082,7 +3285,17 @@ impl View {
                     && matches!(text, " " | "\t")
                     && draw_whitespace
                     && (!whitespace_selection_only || selected)
-                    && whitespace(e, &line, unit.bytes.start, selected)
+                    && if long_wrap {
+                        let trim = &self.wrapped_line.as_ref().expect("wrapped line").trimmed;
+                        draw_whitespace_at(
+                            e,
+                            selected,
+                            || unit.bytes.start <= trim.start,
+                            || unit.bytes.start >= trim.end,
+                        )
+                    } else {
+                        whitespace(e, line, unit.bytes.start - base, selected)
+                    }
                 {
                     text_run(
                         &mut layer,
@@ -3854,8 +4067,19 @@ fn underline(layer: &mut Layer, rect: Rect, color: Color, options: &str, clip: R
     }
 }
 fn whitespace(e: &Editor, line: &str, byte: usize, selected: bool) -> bool {
-    let leading = || line[..byte].trim().is_empty();
-    let trailing = || line[byte..].trim().is_empty();
+    draw_whitespace_at(
+        e,
+        selected,
+        || line[..byte].trim().is_empty(),
+        || line[byte..].trim().is_empty(),
+    )
+}
+fn draw_whitespace_at(
+    e: &Editor,
+    selected: bool,
+    leading: impl Fn() -> bool,
+    trailing: impl Fn() -> bool,
+) -> bool {
     match e.settings.get("draw_white_space") {
         Some(vel_config::Value::Array(options)) => options.iter().any(|s| {
             s == "all"
@@ -3933,7 +4157,7 @@ mod tests {
         let layout = e.layout.borrow();
         let line = e.text.line(0).to_string();
         let units = crate::layout::units(&line, layout.hidden(0), e.preferences.tab_size);
-        let gaps = layout.invisible_gaps(0, &line);
+        let gaps = layout.invisible_gaps(0, &line, 0, 0);
         let left = v.gutter(e) + v.margin(e) - v.scroll_x;
         let mut bands = Vec::new();
         for visual in 0..layout.total() {

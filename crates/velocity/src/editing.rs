@@ -329,7 +329,7 @@ impl Editor {
     pub fn apply_edits(
         &mut self,
         mut owned: Vec<(Range<usize>, String)>,
-        mut after: Option<Selection>,
+        after: Option<Selection>,
         kind: EditKind,
     ) {
         if self.read_only || owned.is_empty() {
@@ -359,7 +359,7 @@ impl Editor {
                 Ok(edits) => {
                     let new_fields = fields.selections();
                     let requested = after.as_ref();
-                    after = Some(Selection::from_regions(
+                    let selection = Selection::from_regions(
                         self.buffer
                             .view(self.id)
                             .sel()
@@ -384,9 +384,27 @@ impl Editor {
                                 };
                                 Some(Region::new(map(desired.a), map(desired.b)))
                             }),
-                    ));
-                    owned = edits.into_iter().map(|e| (e.range, e.text)).collect();
+                    );
+                    let edits: Vec<_> = edits
+                        .iter()
+                        .map(|e| Edit {
+                            range: e.range.clone(),
+                            text: &e.text,
+                        })
+                        .filter(|e| !self.buffer.edit_is_noop(e))
+                        .collect();
+                    let caret_edits: Vec<_> = input
+                        .iter()
+                        .map(|e| Edit {
+                            range: e.range.clone(),
+                            text: &e.text,
+                        })
+                        .collect();
                     self.fields = Some(fields);
+                    // https://www.sublimetext.com/docs/completions.html (mirrored snippet fields).
+                    // Group by the typed characters, not by the rendered mirrors.
+                    self.transact_direct_impl(&edits, selection, kind, Some(&caret_edits));
+                    return;
                 }
                 Err(_) => {
                     if fields.rebase(&input_changes) {
@@ -436,6 +454,15 @@ impl Editor {
         self.transact_direct(&edits, selection, kind);
     }
     fn transact_direct(&mut self, edits: &[Edit<'_>], selection: Selection, kind: EditKind) {
+        self.transact_direct_impl(edits, selection, kind, None);
+    }
+    fn transact_direct_impl(
+        &mut self,
+        edits: &[Edit<'_>],
+        selection: Selection,
+        kind: EditKind,
+        caret_edits: Option<&[Edit<'_>]>,
+    ) {
         if edits.is_empty() {
             if self.buffer.view(self.id).sel() != &selection {
                 self.buffer.set_selection(self.id, selection);
@@ -456,7 +483,12 @@ impl Editor {
         self.layout
             .borrow_mut()
             .prepare_change((self.buffer.id(), self.buffer.change_id()));
-        self.buffer.transact(self.id, kind, edits, selection);
+        if let Some(caret_edits) = caret_edits {
+            self.buffer
+                .transact_projected(self.id, kind, edits, selection, caret_edits);
+        } else {
+            self.buffer.transact(self.id, kind, edits, selection);
+        }
         self.publish_direct_change(old, before_version, changes);
     }
     /// Publishes one completed transaction made by the host or the vi engine.
@@ -783,14 +815,8 @@ impl Editor {
                 self.convert_leading_tabs(name == "expand_tabs", args)?
             }
             "detect_indentation" => {
-                if let Some((size, spaces)) = crate::language::detect_indentation(&self.text) {
-                    self.settings
-                        .set(vel_config::settings::Layer::View, "tab_size", json!(size));
-                    self.settings.set(
-                        vel_config::settings::Layer::View,
-                        "translate_tabs_to_spaces",
-                        json!(spaces),
-                    );
+                if let Some(indentation) = crate::language::detect_indentation(&self.text) {
+                    indentation.apply(self);
                     self.sync();
                 }
             }

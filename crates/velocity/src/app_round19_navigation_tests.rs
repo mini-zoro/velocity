@@ -2,6 +2,30 @@
 use super::*;
 
 #[test]
+fn goto_line_with_argument_jumps_but_no_argument_opens_goto() {
+    let mut a = app("a\nβ\nthird\nfourth\n", "Plain Text", None);
+    named(&mut a, "goto_line", json!({"line":3}));
+    assert_eq!(a.workspace.editor().selection(), 5..5);
+    assert!(a.panels.overlay.is_none());
+    key(&mut a, "ctrl+g");
+    assert_eq!(a.panels.overlay, Some(crate::panels::Overlay::Goto));
+    assert_eq!(a.panels.quick_input.value(), ":");
+}
+
+#[test]
+fn split_into_lines_splits_a_single_line_selection_into_words() {
+    let mut a = app("alpha beta gamma\n", "Plain Text", None);
+    a.workspace
+        .editor_mut()
+        .set_selection(Selection::from_regions([Region::new(16, 0)]));
+    key(&mut a, "super+shift+l");
+    assert_eq!(
+        a.workspace.editor().regions(),
+        [Region::new(5, 0), Region::new(10, 6), Region::new(16, 11)]
+    );
+}
+
+#[test]
 fn r19_repeated_editing_commands_preserve_goto_origin() {
     for (command, count) in [
         ("pagedown", 5),

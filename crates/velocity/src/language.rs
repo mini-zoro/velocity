@@ -1382,7 +1382,63 @@ fn add_block_fold(text: &Text, range: Range<usize>, folds: &mut Vec<Fold>) {
     }
 }
 
-pub fn detect_indentation(text: &Text) -> Option<(usize, bool)> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Indentation {
+    Tabs,
+    Spaces(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct DetectedTabSize {
+    width: usize,
+    previous: Option<serde_json::Value>,
+}
+
+impl Indentation {
+    pub fn apply(self, editor: &mut crate::editor::Editor) {
+        use vel_config::settings::Layer;
+        let settings = &mut editor.settings;
+        let width = settings.layer(Layer::View).get("tab_size");
+        let inferred = editor
+            .detected_tab_size
+            .take()
+            .filter(|guess| width.and_then(serde_json::Value::as_u64) == Some(guess.width as u64));
+        // https://www.sublimetext.com/docs/indentation.html#indentation-detection
+        // Tabs reveal the indentation style, not the display width.
+        let spaces = match self {
+            Self::Tabs => {
+                if let Some(guess) = inferred {
+                    if let Some(previous) = guess.previous {
+                        settings.set(Layer::View, "tab_size", previous);
+                    } else {
+                        let mut view = settings.layer(Layer::View).clone();
+                        view.remove("tab_size");
+                        settings
+                            .replace(Layer::View, serde_json::Value::Object(view))
+                            .expect("view settings");
+                    }
+                }
+                false
+            }
+            Self::Spaces(size) => {
+                let previous = inferred.map_or_else(|| width.cloned(), |guess| guess.previous);
+                settings.set(Layer::View, "tab_size", serde_json::json!(size));
+                editor.detected_tab_size = Some(DetectedTabSize {
+                    width: size,
+                    previous,
+                });
+                true
+            }
+        };
+        settings.set(
+            Layer::View,
+            "translate_tabs_to_spaces",
+            serde_json::json!(spaces),
+        );
+    }
+}
+
+pub fn detect_indentation(text: &Text) -> Option<Indentation> {
     let mut tabs = 0usize;
     let mut deltas = BTreeMap::<usize, usize>::new();
     let mut previous = 0;
@@ -1403,12 +1459,12 @@ pub fn detect_indentation(text: &Text) -> Option<(usize, bool)> {
         previous = n;
     }
     if tabs > deltas.values().sum::<usize>() {
-        Some((4, false))
+        Some(Indentation::Tabs)
     } else {
         deltas
             .into_iter()
             .max_by_key(|(n, count)| (*count, std::cmp::Reverse(*n)))
-            .map(|(n, _)| (n, true))
+            .map(|(n, _)| Indentation::Spaces(n))
     }
 }
 
@@ -1647,11 +1703,11 @@ mod tests {
     fn indentation_detection_ignores_blank_lines_and_observes_tab_stops() {
         assert_eq!(
             detect_indentation(&Text::from("a\n  b\n    c\n\n  d")),
-            Some((2, true))
+            Some(Indentation::Spaces(2))
         );
         assert_eq!(
             detect_indentation(&Text::from("a\n\tb\n\t\tc")),
-            Some((4, false))
+            Some(Indentation::Tabs)
         );
         assert_eq!(detect_indentation(&Text::new()), None);
     }

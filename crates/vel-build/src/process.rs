@@ -37,6 +37,8 @@ pub enum Event {
         bytes: usize,
         /// Absolute row of the first retained output line.
         first_line: usize,
+        /// Cancellation discards the retained backlog; keep the output already delivered.
+        cancelling: bool,
     },
     /// Nonfatal environment fallback; shown in the status bar.
     Warning(String),

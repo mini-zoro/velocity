@@ -443,6 +443,10 @@ impl Intelligence {
         {
             self.loading = None;
             self.projects = projects;
+            // Ready analysis can arrive before the new services. Publish those
+            // snapshots to the new consumers even if the buffer hasn't changed.
+            self.published.clear();
+            self.words.clear();
             workspace.messages.extend(messages);
             changed = true;
         }
@@ -579,6 +583,13 @@ impl Intelligence {
             .map_err(|e| e.to_string())?;
         rx.recv_timeout(Duration::from_secs(60))
             .map_err(|e| e.to_string())?
+    }
+    #[cfg(test)]
+    pub(crate) fn defer_project_attachment(&mut self) -> impl FnOnce() + use<> {
+        let projects = std::mem::take(&mut self.projects);
+        let (tx, rx) = mpsc::channel();
+        self.loading = Some(rx);
+        move || tx.send((projects, Vec::new())).unwrap()
     }
     pub fn busy(&self) -> bool {
         self.loading.is_some() || self.pending || self.percentage.is_some()

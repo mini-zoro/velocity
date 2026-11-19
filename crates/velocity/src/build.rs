@@ -119,7 +119,23 @@ impl Builds {
                         self.append_output(panels, &text);
                     }
                 }
-                Event::Truncated { bytes, first_line } => {
+                Event::Truncated {
+                    bytes,
+                    cancelling: true,
+                    ..
+                } => {
+                    if !panels.output.is_empty() && !panels.output.ends_with('\n') {
+                        panels.output.push('\n');
+                    }
+                    panels
+                        .output
+                        .push_str(&format!("[output truncated] ({bytes} bytes dropped)\n"));
+                }
+                Event::Truncated {
+                    bytes,
+                    first_line,
+                    cancelling: false,
+                } => {
                     panels.output = format!("[output truncated] ({bytes} bytes dropped)\n");
                     panels.output_reset = true;
                     panels.build_output_offset = 0;

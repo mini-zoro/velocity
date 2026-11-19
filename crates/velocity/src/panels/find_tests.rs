@@ -86,6 +86,191 @@ fn painted_message(a: &mut App, expected: &str) {
 }
 
 #[test]
+fn find_and_replace_paste_hard_lines_and_keep_enter_as_search() {
+    let mut a = find_app("one\ntwo\none two\none\ntwo\n");
+    key(&mut a, "super+f");
+    let _ = a.scene();
+    let single = a.panels.query.bounds.height;
+    a.workspace.editor_mut().clipboard = "one\r\ntwo".into();
+    key(&mut a, "super+v");
+    settle(&mut a);
+    assert_eq!(a.panels.query.value(), "one\ntwo");
+    assert_eq!(hits(&a), [0..7, 16..23]);
+    assert_eq!(selected(&a), std::slice::from_ref(&(0..7)));
+    let _ = a.scene();
+    assert!(a.panels.query.bounds.height > single);
+    key(&mut a, "enter");
+    settle(&mut a);
+    assert_eq!(selected(&a), std::slice::from_ref(&(16..23)));
+    assert_eq!(a.panels.query.value(), "one\ntwo");
+    key(&mut a, "super+a");
+    type_query(&mut a, "one");
+    key(&mut a, "ctrl+enter");
+    type_query(&mut a, "two");
+    assert_eq!(a.panels.query.value(), "one\ntwo");
+
+    a.workspace.editor_mut().clipboard = "1\n2\n3\n4\n5\n6".into();
+    key(&mut a, "super+a");
+    key(&mut a, "super+v");
+    let _ = a.scene();
+    let query = &a.panels.query;
+    let state = query.state();
+    let rows: Vec<_> = query
+        .visible_rows(&state.text)
+        .map(|(_, _, text)| text)
+        .collect();
+    assert_eq!(rows, ["3", "4", "5", "6"]);
+
+    let mut b = find_app("a;b");
+    key(&mut b, "super+alt+f");
+    type_query(&mut b, ";");
+    key(&mut b, "tab");
+    b.workspace.editor_mut().clipboard = ";\n".into();
+    key(&mut b, "super+v");
+    key(&mut b, "ctrl+alt+enter");
+    settle(&mut b);
+    assert_eq!(b.workspace.editor().text, "a;\nb");
+    key(&mut b, "super+z");
+    assert_eq!(b.workspace.editor().text, "a;b");
+}
+
+#[test]
+fn hard_lines_do_not_trap_find_history_arrows() {
+    let mut a = find_app("foo\none\ntwo\nbar\n");
+    key(&mut a, "super+f");
+    for value in ["foo", "one\ntwo", "bar"] {
+        key(&mut a, "super+a");
+        type_query(&mut a, value);
+        key(&mut a, "enter");
+        settle(&mut a);
+    }
+    key(&mut a, "up");
+    assert_eq!(a.panels.query.value(), "bar");
+    key(&mut a, "up");
+    assert_eq!(a.panels.query.value(), "one\ntwo");
+    key(&mut a, "up");
+    assert_eq!(
+        a.panels.query.value(),
+        "one\ntwo",
+        "first move within the field"
+    );
+    key(&mut a, "up");
+    assert_eq!(a.panels.query.value(), "foo");
+    key(&mut a, "down");
+    assert_eq!(a.panels.query.value(), "one\ntwo");
+    key(&mut a, "down");
+    assert_eq!(a.panels.query.value(), "bar");
+}
+
+#[test]
+fn replace_toggle_cannot_focus_the_hidden_where_field() {
+    let mut a = find_app("one two");
+    key(&mut a, "super+alt+f");
+    let _ = a.scene();
+    let hidden_where = a.panels.where_input.value();
+    assert_eq!(a.panels.where_input.bounds, Rect::default());
+    let rect = a.panels.find_controls().unwrap().toggles[0];
+    let point = Point {
+        x: rect.x + rect.width / 2.,
+        y: rect.y + rect.height / 2.,
+    };
+    let viewport = a.viewport();
+    assert!(
+        a.panels
+            .mouse(&mut a.workspace, point, true, false, false, viewport)
+            .unwrap()
+    );
+    let viewport = a.viewport();
+    let _ = a
+        .panels
+        .mouse(&mut a.workspace, point, false, false, false, viewport);
+    assert!(a.panels.options.regex);
+    type_query(&mut a, "two");
+    assert_eq!(a.panels.query.value(), "two");
+    assert_eq!(a.panels.where_input.value(), hidden_where);
+}
+
+#[test]
+fn regex_buffer_seeds_are_literal_through_find_and_find_in_files() {
+    for (body, literal, encoded) in [
+        ("a.b axb a.b", "a.b", r"a\.b"),
+        ("f(x) fx f(x)", "f(x)", r"f\(x\)"),
+    ] {
+        let mut a = find_app(body);
+        set(&mut a, "find_selected_text", json!(true));
+        key(&mut a, "super+f");
+        key(&mut a, "alt+super+r");
+        key(&mut a, "escape");
+        select(&mut a, 0..literal.len());
+        key(&mut a, "super+e");
+        assert_eq!(a.panels.query.value(), encoded);
+        key(&mut a, "super+g");
+        settle(&mut a);
+        let second = body.rfind(literal).unwrap();
+        assert_eq!(
+            selected(&a),
+            std::slice::from_ref(&(second..second + literal.len()))
+        );
+        key(&mut a, "super+f");
+        settle(&mut a);
+        assert_eq!(a.panels.query.value(), encoded);
+        assert_eq!(hits(&a), [0..literal.len(), second..second + literal.len()]);
+        key(&mut a, "escape");
+        key(&mut a, "super+shift+f");
+        assert_eq!(a.panels.query.value(), encoded);
+        key(&mut a, "escape");
+        select(&mut a, 0..literal.len());
+        named(&mut a, "find_under_expand", json!({}));
+        assert_eq!(
+            selected(&a),
+            [0..literal.len(), second..second + literal.len()]
+        );
+        select(&mut a, 0..literal.len());
+        named(&mut a, "find_all_under", json!({}));
+        assert_eq!(
+            selected(&a),
+            [0..literal.len(), second..second + literal.len()]
+        );
+    }
+}
+
+#[test]
+fn panel_pattern_args_preserve_explicit_regex_and_replacement_groups() {
+    let mut a = find_app("red green read");
+    toggle(&mut a, "regex");
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel":"replace", "text":"unused", "pattern":"r(ea?)d", "replace_pattern":"$1!"}),
+    );
+    settle(&mut a);
+    assert_eq!(hits(&a), [0..3, 10..14]);
+    assert_eq!(a.panels.replace.value(), "$1!");
+    key(&mut a, "ctrl+alt+enter");
+    settle(&mut a);
+    assert_eq!(a.workspace.editor().text, "e! green ea!");
+}
+
+#[test]
+fn incremental_find_shift_enter_selects_previous_and_closes() {
+    let mut a = find_app("x y x y x\n");
+    select(&mut a, 9..9);
+    key(&mut a, "super+i");
+    type_query(&mut a, "y");
+    settle(&mut a);
+    let before = selected(&a);
+    key(&mut a, "shift+enter");
+    settle(&mut a);
+    let expected = if before == std::slice::from_ref(&(6..7)) {
+        2..3
+    } else {
+        6..7
+    };
+    assert_eq!(selected(&a), [expected]);
+    assert!(a.panels.panel.is_none());
+}
+
+#[test]
 fn cmd_f_scope_follows_selection_panel_session_and_tab() {
     let mut a = find_app("begin\nhit\nend\nhit");
     let original = a.workspace.active;
@@ -422,9 +607,9 @@ fn cmd_i_shift_enter_and_named_find_prev_respect_wrap() {
     key(&mut a, "shift+enter");
     settle(&mut a);
     assert_eq!(a.workspace.editor().selection(), 18..21);
-    key(&mut a, "enter");
-    settle(&mut a);
     assert!(a.panels.panel.is_none());
+    key(&mut a, "super+g");
+    settle(&mut a);
     assert_eq!(a.workspace.editor().selection(), 0..3);
     key(&mut a, "super+i");
     toggle(&mut a, "wrap");

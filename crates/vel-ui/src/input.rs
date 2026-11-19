@@ -1,10 +1,10 @@
-//! Single-line buffer-backed panel input with transient native composition and undo.
+//! Buffer-backed panel input with transient native composition and undo.
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vel_buffer::{Buffer, Region, Selection, ViewId};
 use vel_commands::{Host, Registry};
 use vel_config::{Value, settings::EditorSettings};
-use vel_platform::{Command, Rect, TextInput, TextInputState, Utf16Range};
+use vel_platform::{Command, Point, Rect, TextInput, TextInputState, Utf16Range};
 use vel_text::Text;
 
 /// Monospace display cells, keeping combining sequences and emoji graphemes together.
@@ -51,6 +51,9 @@ pub struct Input {
     pub bounds: Rect,
     /// Horizontal scroll in grid cells.
     pub scroll: usize,
+    multiline: bool,
+    first_row: usize,
+    row_pitch: f64,
     registry: Registry,
     clipboard: String,
     composition: Option<Composition>,
@@ -78,10 +81,88 @@ impl Input {
             view,
             bounds: Rect::default(),
             scroll: 0,
+            multiline: false,
+            first_row: 0,
+            row_pitch: 18.,
             registry: Registry::standard(),
             clipboard: String::new(),
             composition: None,
         }
+    }
+    /// Enables hard line breaks for search and replacement fields only.
+    pub fn set_multiline(&mut self, enabled: bool) {
+        if self.multiline != enabled {
+            self.multiline = enabled;
+            self.first_row = 0;
+            self.scroll = 0;
+        }
+    }
+    /// Whether the field accepts hard line breaks.
+    pub fn multiline(&self) -> bool {
+        self.multiline
+    }
+    /// Natural height in hard rows, capped so a paste cannot fill the window.
+    pub fn natural_rows(&self) -> usize {
+        if self.multiline {
+            self.preview_text().len_lines().min(4)
+        } else {
+            1
+        }
+    }
+    /// Whether a vertical arrow can move within the field instead of browsing history.
+    pub fn can_move_vertically(&self, forward: bool) -> bool {
+        if !self.multiline {
+            return false;
+        }
+        let text = self.buffer.text();
+        let caret = self
+            .buffer
+            .view(self.view)
+            .sel()
+            .primary()
+            .expect("selection")
+            .b;
+        let row = text.byte_to_line(caret);
+        if forward {
+            row + 1 < text.len_lines()
+        } else {
+            row > 0
+        }
+    }
+    /// Row spacing after the panel's vertical size constraints.
+    pub fn set_row_pitch(&mut self, pitch: f64) {
+        self.row_pitch = pitch.max(1.);
+    }
+    fn fitted_rows(&self) -> usize {
+        ((self.bounds.height - self.row_pitch * (10. / 18.)) / self.row_pitch + 0.01)
+            .floor()
+            .max(1.) as usize
+    }
+    /// Visible hard rows, with their absolute byte starts and top positions.
+    pub fn visible_rows<'a>(
+        &'a self,
+        text: &'a Text,
+    ) -> impl Iterator<Item = (usize, f64, String)> + 'a {
+        let first = self.first_row.min(text.len_lines() - 1);
+        let end = first
+            .saturating_add(self.fitted_rows())
+            .min(text.len_lines());
+        (first..end).map(move |row| {
+            let (start, value) = Self::line(text, row);
+            (
+                start,
+                self.bounds.y + (row - first) as f64 * self.row_pitch,
+                value,
+            )
+        })
+    }
+    fn line(text: &Text, row: usize) -> (usize, String) {
+        let start = text.line_to_byte(row);
+        (
+            start,
+            text.slice(start..start + text.line_len_bytes(row))
+                .to_string(),
+        )
     }
     /// Shares the theme's actual metrics with painting, hit testing and native IME geometry.
     pub fn configure_theme(
@@ -249,10 +330,12 @@ impl Input {
                     self.buffer
                         .set_selection(self.view, Selection::from_regions([Region::from(range)]));
                 }
-                let _ = self.run(
-                    "insert",
-                    &serde_json::json!({"characters":text.replace(['\n', '\r'], "")}),
-                );
+                let text = if self.multiline {
+                    normalize_breaks(&text)
+                } else {
+                    text.replace(['\n', '\r'], "")
+                };
+                let _ = self.run("insert", &serde_json::json!({"characters":text}));
             }
             TextInput::Unmark => self.commit_composition(),
         }
@@ -261,7 +344,12 @@ impl Input {
         if let Some(c) = self.composition.take() {
             self.buffer
                 .set_selection(self.view, Selection::from_regions([Region::from(c.range)]));
-            let _ = self.run("insert", &serde_json::json!({"characters":c.text}));
+            let text = if self.multiline {
+                normalize_breaks(&c.text)
+            } else {
+                c.text
+            };
+            let _ = self.run("insert", &serde_json::json!({"characters":text}));
         }
     }
     /// Discards preedit only; Escape's panel-close behavior belongs to the focus router.
@@ -286,6 +374,12 @@ impl Input {
                 "move",
                 serde_json::json!({"by":"word_ends","forward":matches!(command,WordRight(_)),"extend":e}),
             ),
+            Up(e) | Down(e) if self.multiline => (
+                "move",
+                serde_json::json!({"by":"lines","forward":matches!(command,Down(_)),"extend":e}),
+            ),
+            Home(e) if self.multiline => ("move_to", serde_json::json!({"to":"bol","extend":e})),
+            End(e) if self.multiline => ("move_to", serde_json::json!({"to":"eol","extend":e})),
             Home(e) | DocumentStart(e) => ("move_to", serde_json::json!({"to":"bof","extend":e})),
             End(e) | DocumentEnd(e) => ("move_to", serde_json::json!({"to":"eof","extend":e})),
             SelectAll => ("select_all", serde_json::json!({})),
@@ -298,9 +392,16 @@ impl Input {
         };
         let _ = self.run(name, &args);
     }
+    fn preview_text(&self) -> Text {
+        let mut text = self.buffer.text().clone();
+        if let Some(c) = &self.composition {
+            text.replace(c.range.clone(), &c.text);
+        }
+        text
+    }
     /// Native UTF-16 snapshot and candidate rectangle, including inline preedit.
     pub fn state(&self) -> TextInputState {
-        let mut text = self.buffer.text().clone();
+        let text = self.preview_text();
         let region = self
             .buffer
             .view(self.view)
@@ -308,7 +409,6 @@ impl Input {
             .primary()
             .expect("selection");
         let (selected, marked) = if let Some(c) = &self.composition {
-            text.replace(c.range.clone(), &c.text);
             let relative = c.selected.bytes(&Text::from(c.text.as_str()));
             (
                 Utf16Range::from_bytes(
@@ -324,12 +424,7 @@ impl Input {
             (Utf16Range::from_bytes(&text, region.to_range()), None)
         };
         let caret_byte = selected.bytes(&text).end;
-        let caret = Rect {
-            x: self.x_for_byte(&text.to_string(), caret_byte),
-            y: self.bounds.y + (6. * self.scale),
-            width: 1.,
-            height: (18. * self.scale),
-        };
+        let caret = self.rect_for_bytes(&text, caret_byte..caret_byte);
         TextInputState {
             text,
             selected,
@@ -348,17 +443,27 @@ impl Input {
     /// Clips horizontal scroll so native caret geometry stays in the visible input.
     pub fn reveal(&mut self) {
         let state = self.state();
-        let col = cells(
-            &state
-                .text
-                .slice(0..state.selected.bytes(&state.text).end)
-                .to_string(),
-        );
+        let mut byte = state.selected.bytes(&state.text).end;
+        let value = if self.multiline {
+            let row = state.text.byte_to_line(byte);
+            let visible = self.fitted_rows();
+            self.first_row = self
+                .first_row
+                .min(row)
+                .max((row + 1).saturating_sub(visible));
+            self.first_row = self
+                .first_row
+                .min(state.text.len_lines().saturating_sub(visible));
+            let (start, value) = Self::line(&state.text, row);
+            byte -= start;
+            value
+        } else {
+            state.text.to_string()
+        };
+        let col = cells(&value[..byte]);
         if col < self.scroll {
             self.scroll = col;
         }
-        let value = state.text.to_string();
-        let byte = state.selected.bytes(&state.text).end;
         while self.x_for_byte(&value, byte) > self.bounds.x + self.bounds.width - self.margin()
             && self.scroll < col
         {
@@ -368,8 +473,18 @@ impl Input {
     }
     /// Places a caret from an input-local pointer column.
     pub fn click(&mut self, x: f64, extend: bool) {
+        self.click_at(
+            Point {
+                x,
+                y: self.bounds.y,
+            },
+            extend,
+        );
+    }
+    /// Places a caret from a pointer, using both coordinates in multiline fields.
+    pub fn click_at(&mut self, point: Point, extend: bool) {
         self.commit_composition();
-        let byte = self.byte_at_x(&self.value(), x);
+        let byte = self.byte_at_point(self.buffer.text(), point);
         let old = self
             .buffer
             .view(self.view)
@@ -380,36 +495,85 @@ impl Input {
             self.view,
             Selection::from_regions([Region::new(if extend { old.a } else { byte }, byte)]),
         );
+        self.reveal();
     }
     /// Visible suffix at the current display-cell scroll position.
     pub fn visible_text(&self) -> String {
         let value = self.state().text.to_string();
         value[byte_at_column(&value, self.scroll)..].into()
     }
+    /// Horizontally clipped suffix of one display row.
+    pub fn visible_suffix<'a>(&self, row: &'a str) -> &'a str {
+        &row[byte_at_column(row, self.scroll)..]
+    }
+    fn byte_at_point(&self, text: &Text, point: Point) -> usize {
+        if self.multiline {
+            let local_y = point.y - self.bounds.y - self.row_pitch * (5. / 18.);
+            let row = self
+                .first_row
+                .saturating_add(
+                    ((local_y / self.row_pitch).max(0.) as usize).min(self.fitted_rows() - 1),
+                )
+                .min(text.len_lines() - 1);
+            let (start, value) = Self::line(text, row);
+            start + self.byte_at_x(&value, point.x)
+        } else {
+            self.byte_at_x(&text.to_string(), point.x)
+        }
+    }
     /// Native point-to-UTF-16 lookup, including preedit and wide graphemes.
     pub fn utf16_at_x(&self, x: f64) -> usize {
+        self.utf16_at_point(Point {
+            x,
+            y: self.bounds.y,
+        })
+    }
+    /// Native point-to-UTF-16 lookup in either kind of input.
+    pub fn utf16_at_point(&self, point: Point) -> usize {
         let state = self.state();
         state
             .text
-            .byte_to_utf16(self.byte_at_x(&state.text.to_string(), x))
+            .byte_to_utf16(self.byte_at_point(&state.text, point))
     }
     /// Native range geometry in logical widget coordinates.
     pub fn range_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
         let state = self.state();
-        let bytes = range.bytes(&state.text);
-        let text = state.text.to_string();
-        let start = self.x_for_byte(&text, bytes.start);
-        let width = self.x_for_byte(&text, bytes.end) - start;
+        let mut bytes = range.bytes(&state.text);
+        if self.multiline {
+            let row = state.text.byte_to_line(bytes.start);
+            bytes.end = bytes
+                .end
+                .min(state.text.line_to_byte(row) + state.text.line_len_bytes(row));
+        }
         (
-            Rect {
-                x: start,
-                y: self.bounds.y + (6. * self.scale),
-                width: width.max(1.),
-                height: (18. * self.scale),
-            },
+            self.rect_for_bytes(&state.text, bytes.clone()),
             Utf16Range::from_bytes(&state.text, bytes),
         )
     }
+    fn rect_for_bytes(&self, text: &Text, bytes: std::ops::Range<usize>) -> Rect {
+        let (offset, y, line, scale) = if self.multiline {
+            let row = text.byte_to_line(bytes.start);
+            let (start, line) = Self::line(text, row);
+            (
+                start,
+                self.bounds.y + (row as f64 - self.first_row as f64) * self.row_pitch,
+                line,
+                self.row_pitch / 18.,
+            )
+        } else {
+            (0, self.bounds.y, text.to_string(), self.scale)
+        };
+        let x = self.x_for_byte(&line, bytes.start - offset);
+        Rect {
+            x,
+            y: y + 6. * scale,
+            width: (self.x_for_byte(&line, bytes.end - offset) - x).max(1.),
+            height: 18. * scale,
+        }
+    }
+}
+fn normalize_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 impl Host for Input {
     fn buffer(&mut self) -> (&mut Buffer, ViewId) {
@@ -419,7 +583,11 @@ impl Host for Input {
         EditorSettings::default()
     }
     fn clipboard(&mut self) -> String {
-        self.clipboard.replace(['\n', '\r'], " ")
+        if self.multiline {
+            normalize_breaks(&self.clipboard)
+        } else {
+            self.clipboard.replace(['\n', '\r'], " ")
+        }
     }
     fn set_clipboard(&mut self, text: &str) {
         self.clipboard = text.into();

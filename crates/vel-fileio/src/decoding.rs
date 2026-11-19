@@ -53,21 +53,24 @@ impl PrefixFacts {
             nuls: bytes.contains(&0),
             valid_utf8,
             utf16: vel_largefile::detect_utf16(bytes).and_then(|name| encoding(name).ok()),
-            binary_signature: [
-                b"\x89PNG\r\n\x1a\n".as_slice(),
-                b"GIF87a",
-                b"GIF89a",
-                b"\xff\xd8\xff",
-                b"PK\x03\x04",
-                b"\x7fELF",
-            ]
-            .iter()
-            .any(|signature| bytes.starts_with(signature)),
+            binary_signature: binary_signature(bytes),
             content: None,
             legacy_text_matches: false,
             revision_stamp_matches: false,
         }
     }
+}
+pub(super) fn binary_signature(bytes: &[u8]) -> bool {
+    [
+        b"\x89PNG\r\n\x1a\n".as_slice(),
+        b"GIF87a",
+        b"GIF89a",
+        b"\xff\xd8\xff",
+        b"PK\x03\x04",
+        b"\x7fELF",
+    ]
+    .iter()
+    .any(|signature| bytes.starts_with(signature))
 }
 /// A diagnostic template; the file name is added identically by every caller.
 #[derive(Clone, Debug, PartialEq, Eq)]

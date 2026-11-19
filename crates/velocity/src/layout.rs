@@ -229,10 +229,7 @@ impl Layout {
         self.identity = Some(identity);
         self.options = options;
         self.requested_folds = folds.to_vec();
-        self.folds = vel_render::fold::outermost(folds.iter().map(|r| r.to_range()))
-            .into_iter()
-            .map(Region::from)
-            .collect();
+        self.project_folds(text);
         self.count = text.len_lines();
         self.rewrapped = 0;
         self.byte_rows.tree.clear();
@@ -243,63 +240,22 @@ impl Layout {
             return;
         }
         if options.width == 0 {
-            let single = Arc::from([Segment {
-                bytes: 0..usize::MAX,
-                indent: 0,
-                source_column: 0,
-                columns: usize::MAX,
-            }]);
-            self.lines = vec![
-                Line {
-                    segments: single,
-                    hidden: vec![],
-                };
-                self.count
-            ];
-            // Hidden rows share one empty slice, just as ordinary rows share
-            // the unwrapped segment. Avoid one allocation/free per hidden row.
+            self.lines = vec![Self::unwrapped_line(); self.count];
+            // https://www.sublimetext.com/download (rendering large folded regions).
+            // Measure only exposed edges, using the same geometry as an edit.
             let empty = Line::default();
+            let mut measured = None;
             for fold in &self.folds {
                 let first = text.byte_to_line(fold.begin());
                 let last = text.byte_to_line(fold.end());
-                let start = text.line_to_byte(first);
-                let len = text.line_len_bytes(first);
-                // A multiline marker consumes the header's LF. Giving it a real byte
-                // span keeps the caret before it and assigns it to exactly one wrap row.
-                let hidden_end = fold
-                    .end()
-                    .min(start + len + usize::from(first + 1 < self.count))
-                    - start;
-                let line = &mut self.lines[first];
-                let visible_start = line.segments.first().map_or(0, |s| s.bytes.start);
-                line.segments = Arc::from([Segment {
-                    bytes: visible_start..len.max(hidden_end),
-                    indent: 0,
-                    source_column: 0,
-                    columns: usize::MAX,
-                }]);
-                line.hidden.push(fold.begin() - start..hidden_end);
-                for row in first + 1..last {
-                    self.lines[row] = empty.clone();
+                if measured != Some(first) {
+                    self.lines[first] = self.make_unwrapped_line(text, first);
                 }
-                if last > first {
-                    let end = fold.end() - text.line_to_byte(last);
-                    if end > 0 {
-                        self.lines[last] = if end >= text.line_len_bytes(last) {
-                            empty.clone()
-                        } else {
-                            Line {
-                                segments: Arc::from([Segment {
-                                    bytes: end..usize::MAX,
-                                    indent: 0,
-                                    source_column: 0,
-                                    columns: usize::MAX,
-                                }]),
-                                hidden: vec![],
-                            }
-                        };
-                    }
+                if first < last {
+                    self.lines[first + 1..last].fill(empty.clone());
+                    self.lines[last] = self.make_unwrapped_line(text, last);
                 }
+                measured = Some(last);
             }
             self.heights = Heights::build(&self.lines);
             return;
@@ -310,7 +266,67 @@ impl Layout {
         self.rebuild_byte_rows();
     }
     pub fn invalidate(&mut self) {
-        self.identity = None;
+        if self.identity.take().is_some() {
+            self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        }
+    }
+    fn project_folds(&mut self, text: &Text) {
+        fn plain_boundary(text: &Text, at: usize) -> bool {
+            if at == 0 || at == text.len_bytes() {
+                return true;
+            }
+            let (chunk, start) = text.chunk_at_byte(at);
+            let bytes = chunk.as_bytes();
+            let next = bytes[at - start];
+            if !next.is_ascii() {
+                return false;
+            }
+            let before = if at == start {
+                text.byte_at(at - 1)
+            } else {
+                bytes[at - start - 1]
+            };
+            before.is_ascii() && (before != b'\r' || next != b'\n')
+        }
+        self.folds = vel_render::fold::outermost(self.requested_folds.iter().filter_map(|r| {
+            let a = r.begin().min(text.len_bytes());
+            let b = r.end().min(text.len_bytes());
+            (a < b).then(|| {
+                // Fold markers must not leave dangling combining marks or split emoji.
+                let a = if plain_boundary(text, a) {
+                    a
+                } else {
+                    text.prev_grapheme_boundary(
+                        text.next_grapheme_boundary(text.floor_char_boundary(a)),
+                    )
+                };
+                let b = if plain_boundary(text, b) {
+                    b
+                } else {
+                    text.next_grapheme_boundary(
+                        text.prev_grapheme_boundary(text.ceil_char_boundary(b)),
+                    )
+                };
+                a..b
+            })
+        }))
+        .into_iter()
+        .map(Region::from)
+        .collect();
+    }
+    fn unwrapped_line() -> Line {
+        static SEGMENT: std::sync::LazyLock<Arc<[Segment]>> = std::sync::LazyLock::new(|| {
+            Arc::from([Segment {
+                bytes: 0..usize::MAX,
+                indent: 0,
+                source_column: 0,
+                columns: usize::MAX,
+            }])
+        });
+        Line {
+            segments: SEGMENT.clone(),
+            hidden: Vec::new(),
+        }
     }
     pub fn change(
         &mut self,
@@ -333,12 +349,16 @@ impl Layout {
             .map(|r| changes.transform_region(*r))
             .filter(|r| !r.empty())
             .collect();
-        self.folds = vel_render::fold::outermost(self.requested_folds.iter().map(|r| r.to_range()))
-            .into_iter()
-            .map(Region::from)
-            .collect();
+        if !self.requested_folds.is_empty() || !self.folds.is_empty() {
+            self.project_folds(after);
+        }
         self.count = after.len_lines();
         self.rewrapped = 0;
+        if self.options.width == 0 && self.folds.is_empty() {
+            self.lines.clear();
+            self.heights.tree.clear();
+            return;
+        }
         if changes.changes().windows(2).any(|pair| {
             pair[0].old_range.end > pair[1].old_range.start
                 || pair[0].old_range.start == pair[1].old_range.start
@@ -909,16 +929,20 @@ impl Layout {
         column
     }
     fn make_line(&self, text: &Text, row: usize) -> (Line, WrapCache) {
-        if self.invisible.is_some() {
+        if self.options.width == 0 {
+            (self.make_unwrapped_line(text, row), WrapCache::default())
+        } else if self.invisible.is_some() {
             self.make_line_impl::<true>(text, row)
         } else {
             self.make_line_impl::<false>(text, row)
         }
     }
-    fn make_line_impl<const GAPS: bool>(&self, text: &Text, row: usize) -> (Line, WrapCache) {
-        let start = text.line_to_byte(row);
-        let content = text.line(row).to_string();
-        let len = content.trim_end_matches('\n').len();
+    fn fold_projection(
+        &self,
+        row: usize,
+        start: usize,
+        len: usize,
+    ) -> Option<(usize, Vec<Range<usize>>)> {
         let mut hidden = Vec::new();
         let mut visible_start = 0;
         // Fold sets are sorted and disjoint; binary search keeps this O(log folds).
@@ -929,7 +953,7 @@ impl Layout {
         {
             if fold.begin() < start && fold.end() > start {
                 if fold.end() >= start + len {
-                    return (Line::default(), WrapCache::default());
+                    return None;
                 }
                 visible_start = fold.end() - start;
                 continue;
@@ -944,10 +968,75 @@ impl Layout {
                 );
             }
         }
-        let units: Vec<_> = units(&content[..len], &hidden, self.options.tab)
-            .into_iter()
-            .filter(|u| u.bytes.start >= visible_start)
-            .collect();
+        Some((visible_start, hidden))
+    }
+    fn make_unwrapped_line(&self, text: &Text, row: usize) -> Line {
+        if self.folds.is_empty() {
+            return Self::unwrapped_line();
+        }
+        let start = text.line_to_byte(row);
+        let (chunk, base) = text.chunk_at_byte(start);
+        let tail = &chunk[start - base..];
+        let owned;
+        let content = if let Some((line, _)) = tail.split_once('\n') {
+            line
+        } else if base + chunk.len() == text.len_bytes() {
+            tail
+        } else {
+            owned = text.line(row).to_string();
+            &owned
+        };
+        let Some((visible_start, hidden)) = self.fold_projection(row, start, content.len()) else {
+            return Line::default();
+        };
+        if visible_start == 0 && hidden.is_empty() {
+            return Self::unwrapped_line();
+        }
+        let tab = self.options.tab.max(1);
+        let width = |span: &str, initial: usize| {
+            if !span.is_ascii() {
+                return crate::editor::cells_with_tab_at(span, tab, initial);
+            }
+            let mut col = initial;
+            for byte in span.bytes() {
+                col += if byte == b'\t' { tab - col % tab } else { 1 };
+            }
+            col - initial
+        };
+        let mut columns = 0;
+        let mut at = visible_start;
+        for fold in &hidden {
+            columns += width(&content[at..fold.start], columns) + 1;
+            at = fold.end.min(content.len());
+        }
+        columns += width(&content[at..], columns);
+        let end = hidden
+            .last()
+            .map_or(content.len(), |f| content.len().max(f.end));
+        Line {
+            segments: Arc::from([Segment {
+                bytes: visible_start..end,
+                indent: 0,
+                source_column: 0,
+                columns,
+            }]),
+            hidden,
+        }
+    }
+    fn make_line_impl<const GAPS: bool>(&self, text: &Text, row: usize) -> (Line, WrapCache) {
+        let start = text.line_to_byte(row);
+        let content = text.line(row).to_string();
+        let len = content.len();
+        let Some((visible_start, hidden)) = self.fold_projection(row, start, len) else {
+            return (Line::default(), WrapCache::default());
+        };
+        let units = units_in(
+            &content[visible_start..len],
+            visible_start,
+            &hidden,
+            self.options.tab,
+            0,
+        );
         let mut gaps = Vec::new();
         if GAPS
             && let Some(options) = self
@@ -1062,7 +1151,13 @@ impl Layout {
 
     // Wrapped rows keep their ordered, line-relative gaps with the wrap cache.
     // Unwrapped rows only need gaps for a visible row or a caret geometry query.
-    pub fn invisible_gaps(&self, row: usize, text: &str) -> Option<Arc<Vec<(usize, usize)>>> {
+    pub fn invisible_gaps(
+        &self,
+        row: usize,
+        text: &str,
+        base: usize,
+        source_column: usize,
+    ) -> Option<Arc<Vec<(usize, usize)>>> {
         let options = self.invisible?;
         if let Some(cache) = self.wrap.get(row) {
             return cache.invisible.clone();
@@ -1070,13 +1165,19 @@ impl Layout {
         if text.len() >= crate::large::LONG_LINE || !options.contains(text) {
             return None;
         }
-        let gaps = units(text, self.hidden(row), self.options.tab)
-            .into_iter()
-            .filter_map(|u| {
-                let (_, gap) = options.cell(u.text, u.width)?;
-                (gap != 0).then_some((u.bytes.start, gap))
-            })
-            .collect::<Vec<_>>();
+        let gaps = units_in(
+            text,
+            base,
+            self.hidden(row),
+            self.options.tab,
+            source_column,
+        )
+        .into_iter()
+        .filter_map(|u| {
+            let (_, gap) = options.cell(u.text, u.width)?;
+            (gap != 0).then_some((u.bytes.start, gap))
+        })
+        .collect::<Vec<_>>();
         (!gaps.is_empty()).then(|| Arc::new(gaps))
     }
 
@@ -1274,9 +1375,9 @@ impl Layout {
                     c + i.byte_to_column(col.saturating_sub(a))
                 });
         }
-        let line = text.line(row).to_string();
         let (_, segment) = self.visual_at(text, byte);
         let start = text.line_to_byte(row);
+        let (line, base, source_column) = self.unit_window(text, row, start, &segment);
         let inline: usize = self.phantom_inline[self
             .phantom_inline
             .partition_point(|(at, _)| *at < start + segment.bytes.start)..]
@@ -1284,25 +1385,32 @@ impl Layout {
             .take_while(|(at, _)| *at < byte)
             .map(|(_, n)| n)
             .sum();
-        let gaps = self.invisible_gaps(row, &line).map_or(0, |gaps| {
-            gaps[gaps.partition_point(|(at, _)| *at < segment.bytes.start)..]
-                .iter()
-                .take_while(|(at, _)| *at < col)
-                .map(|(_, n)| n)
-                .sum()
-        });
+        let gaps = self
+            .invisible_gaps(row, &line, base, source_column)
+            .map_or(0, |gaps| {
+                gaps[gaps.partition_point(|(at, _)| *at < segment.bytes.start)..]
+                    .iter()
+                    .take_while(|(at, _)| *at < col)
+                    .map(|(_, n)| n)
+                    .sum()
+            });
         after_marker
             + inline
             + gaps
             + segment.indent
-            + units(&line, self.hidden(row), self.options.tab)
-                .iter()
-                .filter(|u| {
-                    u.bytes.start >= segment.bytes.start
-                        && u.bytes.end <= col.min(segment.bytes.end)
-                })
-                .map(|u| u.width)
-                .sum::<usize>()
+            + units_in(
+                &line,
+                base,
+                self.hidden(row),
+                self.options.tab,
+                source_column,
+            )
+            .iter()
+            .filter(|u| {
+                u.bytes.start >= segment.bytes.start && u.bytes.end <= col.min(segment.bytes.end)
+            })
+            .map(|u| u.width)
+            .sum::<usize>()
     }
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
         let visual = visual.min(self.total().saturating_sub(1));
@@ -1316,14 +1424,20 @@ impl Layout {
                     a + i.column_to_byte(((x + 0.5) as usize).saturating_sub(c))
                 });
         }
-        let line = text.line(row).to_string();
-        let gaps = self.invisible_gaps(row, &line);
         let start = text.line_to_byte(row);
+        let (line, base, source_column) = self.unit_window(text, row, start, &segment);
+        let gaps = self.invisible_gaps(row, &line, base, source_column);
         let mut col = segment.indent as f64;
         let x = if x.is_finite() { x.max(0.) } else { 0. };
-        for unit in units(&line, self.hidden(row), self.options.tab)
-            .iter()
-            .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end)
+        for unit in units_in(
+            &line,
+            base,
+            self.hidden(row),
+            self.options.tab,
+            source_column,
+        )
+        .iter()
+        .filter(|u| u.bytes.start >= segment.bytes.start && u.bytes.end <= segment.bytes.end)
         {
             let gap = self.phantom_gap(start + unit.bytes.start) as f64;
             if x <= col + gap {
@@ -1349,8 +1463,7 @@ impl Layout {
         if let Some(end) = self.folded_segment_end(text, row, visual, &segment) {
             return end;
         }
-        let end =
-            text.line_to_byte(row) + line.floor_char_boundary(segment.bytes.end.min(line.len()));
+        let end = text.floor_char_boundary(start + segment.bytes.end.min(text.line_len_bytes(row)));
         if segment.bytes.end < body_len(text, row) {
             text.prev_grapheme_boundary(end)
         } else {
@@ -1403,6 +1516,48 @@ impl Layout {
     }
     pub fn wrapped(&self) -> bool {
         self.options.width > 0
+    }
+    pub(crate) fn long_wrapped(&self, row: usize) -> bool {
+        self.wrapped()
+            && self
+                .lines
+                .get(row)
+                .is_some_and(|line| line.segments.last().is_some_and(|s| s.bytes.end > 8192))
+    }
+    pub(crate) fn segment_text(
+        text: &Text,
+        start: usize,
+        segment: &Segment,
+    ) -> (String, usize, usize) {
+        let base = segment.bytes.start;
+        (
+            text.slice(start + base..(start + segment.bytes.end).min(text.len_bytes()))
+                .to_string(),
+            base,
+            segment.source_column,
+        )
+    }
+    pub(crate) fn unit_window(
+        &self,
+        text: &Text,
+        row: usize,
+        start: usize,
+        segment: &Segment,
+    ) -> (String, usize, usize) {
+        if self.long_wrapped(row)
+            || !self.folds.is_empty()
+                && self.lines.get(row).is_some_and(|line| {
+                    line.segments
+                        .first()
+                        .is_some_and(|first| first.bytes.start != 0)
+                        || segment.bytes.start > 0
+                            && line.hidden.iter().any(|r| r.start < segment.bytes.start)
+                })
+        {
+            Self::segment_text(text, start, segment)
+        } else {
+            (text.line(row).to_string(), 0, 0)
+        }
     }
     pub fn long_window(
         &self,
@@ -1599,6 +1754,29 @@ fn wrap_end(
 /// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
 pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit<'a>> {
     units_from(line, hidden, tab, 0)
+}
+/// Measures a visual row using its physical tab phase, returning line-relative bytes.
+pub(crate) fn units_in<'a>(
+    line: &'a str,
+    base: usize,
+    hidden: &[Range<usize>],
+    tab: usize,
+    column: usize,
+) -> Vec<Unit<'a>> {
+    if base == 0 {
+        return units_from(line, hidden, tab, column);
+    }
+    let folds = hidden[hidden.partition_point(|r| r.start < base)..]
+        .iter()
+        .take_while(|r| r.start <= base + line.len())
+        .map(|r| r.start - base..r.end - base)
+        .collect::<Vec<_>>();
+    let mut units = units_from(line, &folds, tab, column);
+    for unit in &mut units {
+        unit.bytes.start += base;
+        unit.bytes.end += base;
+    }
+    units
 }
 fn units_from<'a>(
     line: &'a str,
@@ -1908,10 +2086,15 @@ mod round20_tests {
         ];
         let id = BufferId(920);
         for seed in (0..seeds).chain([1000493, 23028]) {
-            for width in [1, 2, 7, 13, 80] {
+            for width in [0, 1, 2, 7, 13, 80] {
                 for indent in [false, true] {
                     let mut rng = seed + 1;
                     let mut source = Text::from("  let x = 1; 你好 e\u{301}\tmore words\n\t世界\n");
+                    let mut folds = if width == 0 {
+                        vec![Region::new(5, source.line_to_byte(1) + 2)]
+                    } else {
+                        Vec::new()
+                    };
                     let options = Options {
                         width,
                         tab: 1 + random(&mut rng, 8),
@@ -1933,7 +2116,7 @@ mod round20_tests {
                         &TOKENS[..TOKENS.len() - 5]
                     };
                     actual.set_invisibles(marks);
-                    actual.configure(&source, (id, ChangeId(0)), options, &[]);
+                    actual.configure(&source, (id, ChangeId(0)), options, &folds);
                     for step in 1..=24 {
                         let content = source.to_string();
                         let boundaries: Vec<_> = content
@@ -1973,9 +2156,14 @@ mod round20_tests {
                                 .collect(),
                         );
                         actual.change(&before, &source, (id, ChangeId(step as u64)), &changes);
+                        folds = folds
+                            .into_iter()
+                            .map(|r| changes.transform_region(r))
+                            .filter(|r| !r.empty())
+                            .collect();
                         let mut model = Layout::default();
                         model.set_invisibles(marks);
-                        model.configure(&source, (id, ChangeId(step as u64)), options, &[]);
+                        model.configure(&source, (id, ChangeId(step as u64)), options, &folds);
                         if actual.lines != model.lines {
                             eprintln!("before: {before}\nedits: {edits:?}");
                         }
@@ -1984,6 +2172,37 @@ mod round20_tests {
                 }
             }
         }
+    }
+    #[test]
+    fn unwrapped_fold_ends_on_grapheme_boundary_and_measures_visible_columns() {
+        let mut source = Text::from("fn alpha() {\n    hello();\n    world();\ne\u{301}\tend\n");
+        let before = source.clone();
+        let options = Options {
+            width: 0,
+            tab: 4,
+            indent: false,
+        };
+        let id = BufferId(923);
+        let fold = Region::new(12, source.line_to_byte(3) + 1);
+        let mut changed = Layout::default();
+        changed.configure(&source, (id, ChangeId(0)), options, &[fold]);
+        source.insert(3, "Z");
+        let changes = ChangeSet::new(vec![Change {
+            old_range: 3..3,
+            new_len: 1,
+        }]);
+        changed.change(&before, &source, (id, ChangeId(1)), &changes);
+        let mut fresh = Layout::default();
+        fresh.configure(
+            &source,
+            (id, ChangeId(1)),
+            options,
+            &[changes.transform_region(fold)],
+        );
+        equal(&changed, &fresh, 923, 1, &source);
+        assert_eq!(changed.segment(&source, 0, 0).columns, 14);
+        assert_eq!(changed.segment(&source, 3, 0).bytes.start, "e\u{301}".len());
+        assert_eq!(changed.segment(&source, 3, 0).columns, 7);
     }
     #[test]
     fn incremental_wrap_folds_and_inline_phantoms_use_full_geometry() {

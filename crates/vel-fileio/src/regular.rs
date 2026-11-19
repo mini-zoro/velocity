@@ -105,6 +105,23 @@ fn open(path: &Path, write: bool) -> Result<File, String> {
 pub fn read(path: &Path) -> Result<File, String> {
     open(path, false)
 }
+/// Opens a walker-identified file and returns the size of the opened object.
+/// Nonblocking open keeps a raced-in pipe from stalling a search worker.
+pub(super) fn read_search_file(path: &Path) -> io::Result<(File, u64)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("only regular files can be searched"));
+    }
+    Ok((file, metadata.len()))
+}
 /// Opens a checked regular/new document for writing. The caller truncates only
 /// after this descriptor check succeeds, never through OpenOptions::truncate.
 pub fn write(path: &Path) -> Result<File, String> {
