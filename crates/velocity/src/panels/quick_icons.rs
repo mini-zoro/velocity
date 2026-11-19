@@ -7,9 +7,43 @@ use vel_ui::{ItemIcon, SymbolBadge, theme::ThemeUi};
 pub(super) fn command(item: &PaletteItem) -> ItemIcon {
     use ItemIcon::*;
     let name = item.invocation.command.as_str();
+    // Use the original caption, never a translation or the winning match.
+    // Some Edit actions use the snippet dispatcher but are not snippet picks.
+    let group = item.caption.split(": ").next().unwrap_or_default();
+    match group {
+        "File" => return FileCommand,
+        "Edit" => return Edit,
+        "Developer" => return Build,
+        _ => {}
+    }
     match name {
+        "save" | "save_all" | "revert" | "new_file" => return FileCommand,
+        "undo"
+        | "redo"
+        | "cut"
+        | "copy"
+        | "toggle_comment"
+        | "indent"
+        | "unindent"
+        | "duplicate_line"
+        | "join_lines"
+        | "wrap_lines"
+        | "close_tag"
+        | "upper_case"
+        | "lower_case"
+        | "title_case"
+        | "swap_case"
+        | "sort_lines"
+        | "reindent"
+        | "auto_complete"
+        | "revert_modification" => return Edit,
+        _ if name.starts_with("paste") || name.starts_with("swap_line") => return Edit,
         "set_file_type" | "show_syntax" => return Syntax,
-        "insert_snippet" | "show_snippets" | "clear_snippet_fields" | "new_snippet" => {
+        "insert_snippet"
+        | "show_snippets"
+        | "clear_snippet_fields"
+        | "clear_fields"
+        | "new_snippet" => {
             return Snippet;
         }
         "toggle_bookmark"
@@ -17,11 +51,37 @@ pub(super) fn command(item: &PaletteItem) -> ItemIcon {
         | "prev_bookmark"
         | "clear_bookmarks"
         | "select_all_bookmarks" => return Bookmarks,
-        "toggle_minimap" | "toggle_word_wrap" => return View,
-        "build" | "set_build_system" | "show_build_systems" | "cancel_build"
-        | "new_build_system" | "run_macro_file" => return Build,
+        "toggle_minimap"
+        | "toggle_word_wrap"
+        | "fold"
+        | "fold_by_level"
+        | "fold_tag_attributes"
+        | "unfold"
+        | "unfold_all"
+        | "toggle_inline_diff" => return View,
+        "toggle_setting"
+            if matches!(
+                item.invocation.args["setting"].as_str(),
+                Some("word_wrap" | "spell_check")
+            ) =>
+        {
+            return View;
+        }
+        "build"
+        | "set_build_system"
+        | "show_build_systems"
+        | "cancel_build"
+        | "new_build_system"
+        | "run_macro_file"
+        | "show_scope_name"
+        | "show_indexing_status" => {
+            return Build;
+        }
         "set_ui_language" | "set_indentation" | "set_encoding" | "show_dictionary"
         | "set_dictionary" => return Settings,
+        "next_modification" | "prev_modification" | "next_misspelling" | "prev_misspelling" => {
+            return Goto;
+        }
         "open_project" => return Project,
         "show_overlay" if item.invocation.args["overlay"] == "syntax" => return Syntax,
         "show_overlay" if item.invocation.args["overlay"] == "goto" => return Goto,
@@ -29,22 +89,21 @@ pub(super) fn command(item: &PaletteItem) -> ItemIcon {
         "edit_settings" | "edit_syntax_settings" => return Settings,
         _ => {}
     }
-    // Only the resource caption is considered here, never a translation or the
-    // label that won matching. The prefix is also how packages group commands.
-    let group = item.caption.split(": ").next().unwrap_or_default();
     match group {
-        "View" | "Window" => View,
+        "View" | "Window" | "Large File" | "Spell Check" => View,
         "Selection" => Selection,
-        "Goto" | "Jump Back" | "Jump Forward" => Goto,
+        "Goto" | "Jump Back" | "Jump Forward" | "Accessibility" => Goto,
         "Find" => Find,
-        "Project" => Project,
-        "Tools" | "Build" => Build,
+        "Project" | "Git" => Project,
+        "Tools" | "Build" | "Theme & minihtml" => Build,
         "Package" | "Packages" | "Package Control" => Package,
-        "Preferences" | "Settings" | "Theme" => Settings,
+        "Preferences" | "Settings" | "Theme" | "UI" => Settings,
         "Syntax" | "Set Syntax" => Syntax,
         "Snippet" => Snippet,
         "Bookmarks" => Bookmarks,
+        "Indentation" | "Hex" => Edit,
         _ if group.starts_with("Goto ") => Goto,
+        _ if name.starts_with("prompt_open") || name.starts_with("close") => FileCommand,
         _ => Neutral,
     }
 }
@@ -80,6 +139,8 @@ fn texture(icon: ItemIcon) -> &'static str {
         };
     }
     match icon {
+        FileCommand => asset!("file"),
+        Edit => asset!("edit"),
         View => asset!("view"),
         Selection => asset!("selection"),
         Goto => asset!("goto"),
@@ -175,12 +236,24 @@ mod tests {
     }
 
     #[test]
-    fn assembled_palette_uses_twelve_registered_families() {
+    fn assembled_palette_uses_fourteen_registered_families() {
         use ItemIcon::*;
         let workspace = workspace();
         let expected: BTreeSet<_> = [
-            Neutral, View, Selection, Goto, Find, Project, Build, Package, Settings, Syntax,
-            Snippet, Bookmarks,
+            Neutral,
+            FileCommand,
+            Edit,
+            View,
+            Selection,
+            Goto,
+            Find,
+            Project,
+            Build,
+            Package,
+            Settings,
+            Syntax,
+            Snippet,
+            Bookmarks,
         ]
         .into_iter()
         .map(texture)
@@ -197,6 +270,8 @@ mod tests {
                 assert_eq!(icon, previous, "{}", item.caption);
             }
         }
+        // Neutral is a supported fallback even if no built-in row needs it.
+        seen.insert(texture(Neutral));
         assert_eq!(seen, expected);
         let rect = Rect {
             width: 16.,
@@ -211,6 +286,109 @@ mod tests {
             let glyph = image(&layer).expect("registered mask");
             assert!(pixels.insert(glyph.image.id), "duplicate mask {id}");
         }
+    }
+
+    #[test]
+    fn file_edit_and_developer_icons_follow_caption_or_command() {
+        use ItemIcon::{Build, Edit, FileCommand};
+        let workspace = workspace();
+        for (caption, expected) in [
+            ("File: Revert File…", FileCommand),
+            ("File: Save", FileCommand),
+            ("File: Close All Files", FileCommand),
+            ("Edit: Close Tag", Edit),
+            ("Edit: Paste and Indent", Edit),
+            ("Edit: Wrap Selection With Tag", Edit),
+            ("Developer: Show Scope Name", Build),
+        ] {
+            let row = workspace
+                .palette
+                .iter()
+                .find(|row| row.caption == caption)
+                .expect(caption);
+            assert_eq!(command(row), expected, "{caption}");
+        }
+        for (expected, names) in [
+            (
+                FileCommand,
+                &[
+                    "save",
+                    "save_all",
+                    "revert",
+                    "close_all",
+                    "new_file",
+                    "prompt_open",
+                    "prompt_open_file",
+                    "close",
+                    "close_others",
+                ][..],
+            ),
+            (
+                Edit,
+                &[
+                    "paste",
+                    "paste_and_indent",
+                    "undo",
+                    "redo",
+                    "cut",
+                    "copy",
+                    "toggle_comment",
+                    "indent",
+                    "unindent",
+                    "swap_line_up",
+                    "swap_line_down",
+                    "duplicate_line",
+                    "join_lines",
+                    "wrap_lines",
+                    "close_tag",
+                    "upper_case",
+                    "lower_case",
+                    "title_case",
+                    "swap_case",
+                    "sort_lines",
+                    "reindent",
+                ],
+            ),
+            (Build, &["show_scope_name"][..]),
+        ] {
+            for &name in names {
+                let row = PaletteItem {
+                    caption: "An ungrouped caption".into(),
+                    invocation: vel_config::keymap::Invocation {
+                        command: name.into(),
+                        args: Default::default(),
+                    },
+                };
+                assert_eq!(command(&row), expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn assembled_english_palette_neutral_rows_are_intentional_and_under_budget() {
+        let workspace = workspace();
+        let mut neutral: Vec<_> = workspace
+            .palette
+            .iter()
+            .filter(|row| command(row) == ItemIcon::Neutral)
+            .map(|row| row.caption.as_str())
+            .collect();
+        neutral.sort_unstable();
+        eprintln!(
+            "Neutral English palette rows ({}/{}): {neutral:#?}",
+            neutral.len(),
+            workspace.palette.len()
+        );
+        assert!(neutral.len() * 10 <= workspace.palette.len(), "{neutral:?}");
+        assert_eq!(
+            neutral,
+            [
+                "Help: Release Notes",          // Opens a help page.
+                "Help: Velocity Documentation", // Opens the external manual.
+                "Install Command Line Tool…",   // App integration, not a package install.
+                "Open Crash Reports",           // Opens the diagnostic log folder.
+            ]
+        );
     }
 
     #[test]
@@ -333,6 +511,14 @@ mod tests {
             let mut scene = Scene::default();
             panels.paint(&workspace, &mut scene);
             let row = panels.tree.nodes[&id].rect;
+            assert!(panels.tree.nodes[&id].children.is_empty());
+            assert_eq!(
+                panels.tree.hit_test(vel_platform::Point {
+                    x: row.x + row.width / 2.,
+                    y: row.y + row.height / 2.,
+                }),
+                Some(id)
+            );
             let ink = scene
                 .layers
                 .iter()

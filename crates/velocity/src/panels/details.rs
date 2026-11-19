@@ -400,6 +400,36 @@ impl Panels {
             slot.height >= 16. * self.ui_scale && slot.width >= 24. * self.ui_scale
         }
     }
+    pub(super) fn paint_find_edge_buttons(
+        &self,
+        theme: &mut vel_ui::theme::ThemeUi,
+        settings: &vel_config::settings::Settings,
+        layer: &mut Layer,
+        clip: Rect,
+    ) {
+        for (index, (id, class)) in [
+            (CLOSE_ID, "panel_close_button"),
+            (WHERE_ID, "panel_close_button panel_where_button"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(node) = self.tree.nodes.get(&id).filter(|n| n.visible) else {
+                continue;
+            };
+            let attributes: Vec<_> = node.attributes.iter().copied().collect();
+            let style = theme.style(
+                StyleId::FindClose.at(index as u64),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("panel_control", &[]),
+                    vel_theme::Element::new(class, &attributes),
+                ]),
+                settings,
+            );
+            theme.icon_surface(layer, &style, node.rect, clip);
+        }
+    }
     /// Plain-language name and shortcut of the find-panel control under the pointer.
     pub(super) fn panel_tooltip(&self, workspace: &Workspace, point: Point) -> Option<String> {
         if !self.find_panel_visible() {
@@ -407,6 +437,11 @@ impl Panels {
         }
         let id = self.tree.hit_test(point)?;
         let (name, invocation) = match id {
+            WHERE_ID => {
+                return self
+                    .hit_find_options(point)
+                    .then(|| workspace.translations.caption("Where…").to_owned());
+            }
             30..=35 => {
                 let (name, option) = [
                     ("Regular expression", "regex"),
@@ -645,15 +680,15 @@ impl Panels {
         }
         Ok(())
     }
-    pub(super) fn overlay_footer(&self) -> &'static str {
-        match self.overlay {
-            Some(Overlay::Palette) => "Enter run · Esc cancel",
-            Some(Overlay::Appearance) => "Arrows preview · Enter save · Esc cancel",
-            Some(Overlay::Syntax | Overlay::Choices) => "Enter select · Esc cancel",
-            Some(Overlay::ProjectSymbols | Overlay::Locations) => "Enter jump · Esc cancel",
-            Some(Overlay::Goto) => "Enter open · Cmd/Ctrl+Enter split · Esc cancel",
+    pub(super) fn overlay_footer<'a>(&self, tr: &'a vel_i18n::Translator) -> &'a str {
+        tr.caption(match self.overlay {
+            Some(Overlay::Palette) => "↩ Run · ⎋ Cancel",
+            Some(Overlay::Appearance) => "↑↓ Preview · ↩ Save · ⎋ Cancel",
+            Some(Overlay::Syntax | Overlay::Choices) => "↩ Select · ⎋ Cancel",
+            Some(Overlay::ProjectSymbols | Overlay::Locations) => "↩ Jump · ⎋ Cancel",
+            Some(Overlay::Goto) => "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
             None => "",
-        }
+        })
     }
     /// Whether the native command dispatcher is validating the accepted palette row.
     pub fn palette_accept_pending(&self, name: &str, args: &Value) -> bool {
@@ -876,6 +911,77 @@ mod tests {
             assert!(w.tabs[w.active].path.is_none());
         }
     }
+
+    #[test]
+    fn preferred_palette_matches_survive_the_limit_and_alias_deduplication() {
+        let (w, mut p) = setup("text");
+        const DISTRACTORS: usize = 205;
+        let primary = 0..=DISTRACTORS;
+        p.overlay = Some(Overlay::Choices);
+        p.quick_query = "rust".into();
+        p.palette_indices = primary.clone().collect();
+        p.choice_items = primary
+            .clone()
+            .map(|_| vel_config::ui::PaletteItem {
+                caption: String::new(),
+                invocation: Invocation {
+                    command: "noop".into(),
+                    args: json!({}),
+                },
+            })
+            .collect();
+        p.palette_primary = primary.clone().chain(primary.clone()).collect();
+        p.candidates = Arc::new(
+            primary
+                .map(|index| match index {
+                    0 => "甲Rust",
+                    DISTRACTORS => "乙",
+                    _ => "候选",
+                })
+                .chain(std::iter::repeat_n("crust", DISTRACTORS))
+                .chain(["Rust"])
+                .map(fuzzy::Candidate::new)
+                .collect(),
+        );
+
+        // A raw fuzzy order crowded by high-scoring mid-word hits, including
+        // the alias of the direct hit. Lower-scoring preferred hits must survive.
+        let mut hits: Vec<_> = (0..DISTRACTORS)
+            .map(|index| fuzzy::Hit {
+                index: 1 + DISTRACTORS + index,
+                score: 12,
+                positions: vec![1, 2, 3, 4],
+            })
+            .collect();
+        hits.extend([
+            fuzzy::Hit {
+                index: 0,
+                score: 10,
+                positions: vec![3, 4, 5, 6],
+            },
+            fuzzy::Hit {
+                index: 2 * DISTRACTORS + 1,
+                score: 9,
+                positions: vec![0, 1, 2, 3],
+            },
+        ]);
+        hits.truncate(p.palette_match_limit());
+        p.publish_quick(&w, hits);
+        assert_eq!(p.quick.items.len(), 100);
+        assert_eq!(p.quick.items[0].caption, "甲Rust");
+        assert_eq!(p.quick.items[0].highlights, [3, 4, 5, 6]);
+        assert_eq!(p.quick.items[1].caption, "乙");
+        assert_eq!(p.quick.items[1].highlights, [0]);
+        assert!(
+            p.quick.items[2..]
+                .iter()
+                .all(|row| row.highlights.is_empty())
+        );
+        assert_eq!(p.quick.items.iter().filter(|row| row.value == 0).count(), 1);
+
+        p.overlay = Some(Overlay::Goto);
+        assert_eq!(p.palette_match_limit(), 100);
+    }
     #[test]
     fn target_switch_clears_rows_and_an_unavailable_symbol_source_is_not_ranked() {
         let (mut w, mut p) = setup(&"a".repeat(600));
@@ -1082,6 +1188,88 @@ mod tests {
         p.layout(size());
         p.paint(&w, &mut Scene::default());
         assert!(p.review.tooltip.is_none());
+    }
+
+    #[test]
+    fn find_in_files_where_matches_close_ink_center_and_hover_at_both_scales() {
+        use vel_render::scene::{ImageQuad, SolidRect, Surface};
+
+        fn glyph(scene: &Scene, button: Rect) -> &ImageQuad {
+            scene
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.surfaces)
+                .find_map(|surface| match surface {
+                    Surface::Image(image) if contains(button, center(image.rect)) => Some(image),
+                    _ => None,
+                })
+                .expect("themed button mask")
+        }
+
+        fn ink_center_y(glyph: &ImageQuad) -> f64 {
+            let mut area = 0.;
+            let mut moment = 0.;
+            for (i, pixel) in glyph.image.rgba.as_chunks::<4>().0.iter().enumerate() {
+                let y = i / glyph.image.width as usize;
+                let alpha = f64::from(pixel[3]);
+                area += alpha;
+                moment += (y as f64 + 0.5) * alpha;
+            }
+            assert!(area > 0.);
+            glyph.rect.y + glyph.rect.height * moment / (area * f64::from(glyph.image.height))
+        }
+
+        fn wash(scene: &Scene, button: Rect) -> Option<&SolidRect> {
+            scene
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.surfaces)
+                .find_map(|surface| match surface {
+                    Surface::Fill(wash) if wash.rect == button && wash.radius > 0. => Some(wash),
+                    _ => None,
+                })
+        }
+
+        for scale in [1., 2.] {
+            let (mut w, mut p) = setup("text");
+            p.ui_scale = scale;
+            action(
+                &mut p,
+                &mut w,
+                "show_panel",
+                json!({"panel":"find_in_files"}),
+            );
+            p.layout(size());
+            let mut idle = Scene::default();
+            p.paint(&w, &mut idle);
+            let close = p.close_button_rect();
+            let more = p.find_options_rect();
+            let close_ink = glyph(&idle, close);
+            let where_ink = glyph(&idle, more);
+            assert_eq!(more.height, CLOSE_BUTTON * scale);
+            assert!(p.hit_find_options(center(more)));
+            assert_ne!(close_ink.image.id, where_ink.image.id);
+            assert!(
+                (ink_center_y(close_ink) - ink_center_y(where_ink)).abs() < 0.1,
+                "Where and Close ink must be on the same line at {scale}×"
+            );
+            assert!(wash(&idle, close).is_none() && wash(&idle, more).is_none());
+
+            let mut hover = |button| {
+                p.tree.pointer(center(button), None);
+                p.review_hover(&w, center(button));
+                let mut scene = Scene::default();
+                p.paint(&w, &mut scene);
+                let wash = wash(&scene, button).expect("hover wash");
+                assert_ne!(glyph(&scene, button).color, glyph(&idle, button).color);
+                (wash.color, wash.radius)
+            };
+            assert_eq!(hover(close), hover(more));
+            assert_eq!(p.review.tooltip.as_ref().unwrap().0, "Where…");
+            w.translations.select(vel_i18n::Language::ZhHans);
+            p.paint(&w, &mut Scene::default());
+            assert_eq!(p.review.tooltip.as_ref().unwrap().0, "位置…");
+        }
     }
     #[test]
     fn every_new_palette_query_selects_its_best_hit_including_early_enter() {
@@ -1807,24 +1995,61 @@ mod tests {
         assert_eq!(w.editor().caret, 4);
     }
     #[test]
-    fn overlay_footers_and_scaled_geometry_are_surface_specific() {
-        let (w, mut p) = setup("text");
+    fn every_quick_panel_paints_a_localized_footer_with_mac_key_glyphs() {
+        use vel_i18n::Language::{En, ZhHans};
+        let (mut w, mut p) = setup("text");
         p.message = "stale find message".into();
-        for overlay in [
-            Overlay::Goto,
-            Overlay::Palette,
-            Overlay::Syntax,
-            Overlay::Choices,
-            Overlay::ProjectSymbols,
-            Overlay::Locations,
+        for (overlays, en, zh) in [
+            (
+                &[Overlay::Palette][..],
+                "↩ Run · ⎋ Cancel",
+                "↩ 运行 · ⎋ 取消",
+            ),
+            (
+                &[Overlay::Appearance][..],
+                "↑↓ Preview · ↩ Save · ⎋ Cancel",
+                "↑↓ 预览 · ↩ 保存 · ⎋ 取消",
+            ),
+            (
+                &[Overlay::Syntax, Overlay::Choices][..],
+                "↩ Select · ⎋ Cancel",
+                "↩ 选择 · ⎋ 取消",
+            ),
+            (
+                &[Overlay::ProjectSymbols, Overlay::Locations][..],
+                "↩ Jump · ⎋ Cancel",
+                "↩ 跳转 · ⎋ 取消",
+            ),
+            (
+                &[Overlay::Goto][..],
+                "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
+                "↩ 打开 · ⌘↩ / ⌃↩ 在拆分视图中打开 · ⎋ 取消",
+            ),
         ] {
-            p.overlay = Some(overlay);
-            assert!(!p.overlay_footer().contains("stale"));
-            assert_eq!(
-                p.overlay_footer().contains("split"),
-                overlay == Overlay::Goto
-            );
+            for &overlay in overlays {
+                p.overlay = Some(overlay);
+                p.layout(size());
+                for (language, expected) in [(En, en), (ZhHans, zh)] {
+                    w.translations.select(language);
+                    let mut scene = Scene::default();
+                    p.paint(&w, &mut scene);
+                    assert!(
+                        scene
+                            .layers
+                            .iter()
+                            .flat_map(|layer| &layer.text)
+                            .any(|run| run.text == expected),
+                        "{overlay:?} {language:?}: {expected}"
+                    );
+                }
+            }
         }
+    }
+
+    #[test]
+    fn overlay_and_sidebar_geometry_stay_aligned_across_scales() {
+        let (w, mut p) = setup("text");
+        p.overlay = Some(Overlay::Locations);
         for scale in [0.75, 1., 1.5, 2.] {
             p.ui_scale = scale;
             p.layout(size());

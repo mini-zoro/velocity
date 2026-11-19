@@ -5155,8 +5155,13 @@ fn native_menu(
                 macros
                     .iter()
                     .map(|row| MenuEntry {
-                        caption: crate::workspace::localized_macro_name(tr, &row.caption)
-                            .to_owned(),
+                        caption: tr.tr_fmt(
+                            "Macro: {name}",
+                            &[(
+                                "name",
+                                crate::workspace::macro_name(&row.caption).to_owned(),
+                            )],
+                        ),
                         command: Some(row.invocation.command.clone()),
                         args: row.invocation.args.to_string(),
                         shortcut: keymap

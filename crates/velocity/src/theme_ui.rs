@@ -461,6 +461,8 @@ macro_rules! palette_masks {
     };
 }
 const PALETTE_MASKS: &[(&str, &[u8])] = palette_masks![
+    "file",
+    "edit",
     "view",
     "selection",
     "goto",

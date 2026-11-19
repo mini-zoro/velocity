@@ -561,7 +561,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 11.0,
-            "text": "Enter open · Cmd/Ctrl+Enter split · Esc cancel",
+            "text": "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
             "x": 147.0
           }
         ],
@@ -14558,7 +14558,7 @@
             "family": "system-ui",
             "italic": false,
             "size": 11.0,
-            "text": "Enter open · Cmd/Ctrl+Enter split · Esc cancel",
+            "text": "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
             "x": 147.0
           }
         ],

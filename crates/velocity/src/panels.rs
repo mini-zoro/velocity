@@ -155,6 +155,8 @@ const PANEL_ROW: f64 = 34.;
 const CLOSE_BUTTON: f64 = 22.;
 /// Retained widget id of the find-panel close button.
 const CLOSE_ID: u64 = 60;
+/// Retained widget id of the Find in Files scope menu button.
+const WHERE_ID: u64 = 61;
 /// Theme style-cache ids for chrome painted outside the retained widget tree. Every element
 /// kind owns a disjoint range far above sheet-, row- and widget-based ids, so caches and
 /// transitions of different elements never share an id.
@@ -2903,10 +2905,19 @@ impl Panels {
         }
     }
     fn palette_match_limit(&self) -> usize {
-        if !self.palette_primary.is_empty() {
+        if self.palette_primary.is_empty()
+            || !matches!(
+                self.overlay,
+                Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
+            )
+        {
+            100
+        } else if self.quick_query.trim().is_empty() {
             200
         } else {
-            100
+            // The worker sorts by score. Keep all bilingual matches until the
+            // palette has ranked match tiers and deduplicated the labels.
+            self.candidates.len()
         }
     }
     fn query_quick(&mut self, workspace: &mut Workspace) {
@@ -3068,9 +3079,8 @@ impl Panels {
                 })
                 .map(|(i, _)| i)
                 .collect();
-            // Score both labels with the same worker and recency. Ranking the
-            // aliases independently and keeping the highest-ranked hit per row
-            // leaves the file/symbol matcher and its fast path untouched.
+            // Score both labels with the same worker and recency. Apply the
+            // palette's alias ranking when publishing, not in the file matcher.
             let mut aliases = Vec::new();
             let mut candidates = Vec::with_capacity(self.palette_indices.len());
             for (primary, &index) in self.palette_indices.iter().enumerate() {
@@ -3282,10 +3292,27 @@ impl Panels {
             &workspace.palette
         };
         let bilingual = palette && !self.palette_primary.is_empty();
+        let (preferred, scattered) = if bilingual && !self.quick_query.trim().is_empty() {
+            // Preserve fuzzy order in each tier, before deduplication: a row
+            // with a direct hit must not be consumed by a scattered alias.
+            hits.into_iter().partition(|hit| {
+                self.palette_primary.get(hit.index).is_some_and(|&shown| {
+                    shown == hit.index
+                        || alias_matches_word_starts(
+                            &self.candidates[hit.index].label,
+                            &hit.positions,
+                        )
+                })
+            })
+        } else {
+            (hits, Vec::new())
+        };
         let mut seen = BTreeSet::new();
-        let items = hits
+        let items = preferred
             .into_iter()
-            .filter_map(|hit| {
+            .map(|hit| (hit, true))
+            .chain(scattered.into_iter().map(|hit| (hit, false)))
+            .filter_map(|(hit, preferred)| {
                 let shown = if bilingual {
                     let shown = *self.palette_primary.get(hit.index)?;
                     if !seen.insert(shown) {
@@ -3313,9 +3340,7 @@ impl Panels {
                     // rather than a whole row that looks like the best match.
                     highlights: if shown == hit.index {
                         hit.positions
-                    } else if self.candidates.get(hit.index).is_some_and(|alias| {
-                        alias_matches_word_starts(&alias.label, &hit.positions)
-                    }) {
+                    } else if preferred && !hit.positions.is_empty() {
                         caption.char_indices().map(|(byte, _)| byte).collect()
                     } else {
                         Vec::new()
@@ -5105,6 +5130,7 @@ impl Panels {
             };
             self.widget(11, "scroll_area", list, &[]);
             self.tree.nodes.get_mut(&1).expect("overlay").children = vec![10, 11];
+            let compact = self.quick_compact();
             for row in self.quick.scroll.visible() {
                 let item = &self.quick.items[row];
                 let id = (1 << 40) + item.value as u64 * 5;
@@ -5127,6 +5153,11 @@ impl Panels {
                     .expect("list")
                     .children
                     .push(id);
+                // Compact rows paint their icon, label and shortcut directly;
+                // only the row itself is a retained hit target.
+                if compact {
+                    continue;
+                }
                 for (part, class) in [
                     (1, "quick_panel_label"),
                     (2, "kind_badge"),
@@ -5251,6 +5282,20 @@ impl Panels {
                     .expect("panel")
                     .children
                     .push(CLOSE_ID);
+                if self.show_find_options_button() {
+                    self.widget(WHERE_ID, "button", self.find_options_rect(), &[]);
+                    self.tree
+                        .nodes
+                        .get_mut(&WHERE_ID)
+                        .expect("Where button")
+                        .label = workspace.translations.caption("Where…").into();
+                    self.tree
+                        .nodes
+                        .get_mut(&2)
+                        .expect("panel")
+                        .children
+                        .push(WHERE_ID);
+                }
             }
         }
         if self.side_visible {
@@ -5783,32 +5828,7 @@ impl Panels {
                             node.rect,
                         );
                     }
-                    if let Some(node) = self.tree.nodes.get(&CLOSE_ID).filter(|n| n.visible) {
-                        // A plain close glyph with a hover wash, not a filled button.
-                        let attributes: Vec<&str> = node.attributes.iter().copied().collect();
-                        let close = theme.style(
-                            StyleId::FindClose.at(0),
-                            &vel_theme::ElementPath(&[
-                                vel_theme::Element::new("window", &[]),
-                                vel_theme::Element::new("panel_control", &[]),
-                                vel_theme::Element::new("panel_close_button", &attributes),
-                            ]),
-                            settings,
-                        );
-                        theme.icon_surface(&mut layer, &close, node.rect, clip);
-                    }
-                    if self.show_find_options_button() {
-                        let more = self.find_options_rect();
-                        theme.text_fit(
-                            &mut layer,
-                            &text_style,
-                            "…",
-                            more.x + 5. * self.ui_scale,
-                            more.y + more.height * 0.7,
-                            more.width - 5. * self.ui_scale,
-                            more,
-                        );
-                    }
+                    self.paint_find_edge_buttons(&mut theme, settings, &mut layer, clip);
                     let message_style = if self.find_error.is_some() {
                         self.tree.style_child(
                             2,
@@ -6331,7 +6351,7 @@ impl Panels {
                 theme.text(
                     &mut overlay,
                     &footer,
-                    self.overlay_footer(),
+                    self.overlay_footer(&workspace.translations),
                     rows.x + (12. * self.ui_scale),
                     self.quick_bounds.y + self.quick_bounds.height - (9. * self.ui_scale),
                     self.quick_bounds,
@@ -7335,18 +7355,34 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let whole = |caption: &str| caption.char_indices().map(|(i, _)| i).collect::<Vec<_>>();
+        let assert_match_tiers = |rows: &[(String, Vec<usize>)]| {
+            let weak = rows.iter().position(|(_, marks)| marks.is_empty()).unwrap();
+            assert!(weak > 0);
+            assert!(
+                rows[weak..].iter().all(|(_, marks)| marks.is_empty()),
+                "preferred matches below a scattered alias: {rows:?}"
+            );
+        };
         let save = rows("save");
         let hit = save
             .iter()
-            .find(|(caption, _)| caption == "保存")
-            .expect("保存 for save");
-        assert_eq!(hit.1, whole("保存"));
+            .find(|(caption, _)| caption == "文件：保存")
+            .expect("文件：保存 for save");
+        assert_eq!(hit.1, whole("文件：保存"));
+        assert!(save.iter().any(|(caption, marks)| {
+            caption == "文件：全部保存" && *marks == whole(caption)
+        }));
+        assert_match_tiers(&save);
         let rust = rows("rust");
-        let weak = rust
-            .iter()
-            .find(|(caption, _)| caption == "偏好设置：自定主题…")
-            .expect("a scattered alias hit for rust");
-        assert!(weak.1.is_empty(), "{weak:?}");
+        assert!(rust[0].0.contains("Rust"));
+        for caption in ["偏好设置：自定主题…", "偏好设置：自定配色方案…"] {
+            let weak = rust
+                .iter()
+                .find(|(label, _)| label == caption)
+                .expect(caption);
+            assert!(weak.1.is_empty(), "{weak:?}");
+        }
+        assert_match_tiers(&rust);
         // A direct hit on the shown caption keeps its precise highlight.
         let theme = rows("主题");
         let direct = theme
@@ -8101,7 +8137,11 @@ impl Panels {
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            self.tree.hit_test(*point).hash(&mut h);
+            let control = self.tree.hit_test(*point);
+            control.hash(&mut h);
+            if control == Some(WHERE_ID) {
+                workspace.translations.revision().hash(&mut h);
+            }
             format!("{:?}", self.panel).hash(&mut h);
             (
                 self.options.regex,

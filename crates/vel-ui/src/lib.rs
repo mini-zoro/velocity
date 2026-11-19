@@ -312,6 +312,10 @@ pub enum ItemIcon {
     /// Miscellaneous commands and fallback for unmapped items.
     #[default]
     Neutral,
+    /// File lifecycle commands, not results associated with a path.
+    FileCommand,
+    /// Editing commands.
+    Edit,
     /// View and layout commands.
     View,
     /// Selection commands.

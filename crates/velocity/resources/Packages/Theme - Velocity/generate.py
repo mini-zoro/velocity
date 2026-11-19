@@ -88,6 +88,11 @@ def rounded_box(x, y, left, top, right, bottom, radius):
 def palette_icons():
     """Original 16-DIP quick-panel masks; the renderer supplies light/dark ink."""
     paths = {
+        # Folded document and pencil.
+        "file": [[(4.5, 2.5), (9.5, 2.5), (12.5, 5.5), (12.5, 13.5), (4.5, 13.5), (4.5, 2.5)],
+                 [(9.5, 2.5), (9.5, 5.5), (12.5, 5.5)], [(6.5, 9.5), (10.5, 9.5)]],
+        "edit": [[(3, 13), (4, 9.5), (11, 2.5), (13.5, 5), (6.5, 12), (3, 13)],
+                 [(9.5, 4), (12, 6.5)]],
         # Window, selection marquee, jump arrow, folder, hammer, shipping box.
         "view": [[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5), (2.5, 3.5)],
                  [(2.5, 6.5), (13.5, 6.5)]],
@@ -422,6 +427,9 @@ rule("sidebar_button_control", settings=["sidebar_on_right"], **{"layer1.texture
 # Settings overrides follow the base icon rules, so hiding wins.
 for cls, setting in (("tab_close_button", "!show_tab_close_buttons"), ("scroll_tabs_left_button", "hide_tab_scrolling_buttons"), ("scroll_tabs_right_button", "hide_tab_scrolling_buttons"), ("new_tab_button", "hide_new_tab_button")):
     rule(cls, settings=[setting], **{"layer0.opacity": 0.0, "layer1.opacity": 0.0, "content_margin": 0})
+
+# Where inherits Close's button states; only the mask is different.
+rule("panel_where_button", **{"layer1.texture": "Theme - Velocity/palette-neutral.png"})
 
 def compact(value):
     return json.dumps(value, separators=(", ", ": "))

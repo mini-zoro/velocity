@@ -229,17 +229,20 @@ No Sublime menu files or artwork were consulted.
 | Preferences / Help | Keep these in their macOS roles, with Window and Help trailing. Add ellipses to comparison-window and Indexing Status actions. The settings editors remain in Preferences apart from the app-menu Settings entry. |
 | Editor / sidebar / mount / tab popups | Match editor and tab labels for Copy File Path and Reveal in Side Bar. Keep folder-specific operations on the mount/sidebar, and close-by-target on the tab. Reveal in Finder is consistent across surfaces. Widget history, spelling suggestions and third-party labels still preserve user/package text. |
 
-The palette has 12 original 16-DIP command masks at 1×, 2× and 3×. Textures
-are tinted from the same theme ink as file icons. Command identity comes from
-the source command family, not the winning caption or alias. Existing typed
-file icons and explicit symbol badges are unchanged; a missing texture uses
-the neutral dots. Appearance previews retain their own row layout.
+The palette has 14 original 16-DIP command masks at 1×, 2× and 3×, including
+the File document and Edit pencil. Developer actions share the Tools/Build
+family. Textures use the same theme ink as file icons. Command identity comes
+from the source family, not the winning caption or alias. Existing typed file
+icons and symbol badges are unchanged; a missing texture uses the neutral dots.
+Appearance previews retain their own row layout.
 
-The zh-Hans pass covers menu rows, built-in macro labels, encoding descriptions,
-palette commands and authored prefixes in dynamic pickers. Resource identifiers
-(including syntax, snippet, build-system, theme and dictionary names), paths,
-history and standardized codec labels are preserved verbatim. Panels, status
-bar, dialogs, window titles and accessibility remain out of scope for this pass.
+The zh-Hans pass covers menu rows, encoding descriptions, palette commands,
+authored prefixes in dynamic pickers and quick-panel footers. Names of macros
+and other resources, paths, history and standardized codec labels are preserved
+verbatim. Scattered English alias hits stay below direct and word-aligned hits.
+The Find in Files Where button shares Close's center line and hover treatment
+and has a localized tooltip. Other panels, the status bar, dialogs, window
+titles and accessibility remain out of scope for this pass.
 
 ## Rules
 

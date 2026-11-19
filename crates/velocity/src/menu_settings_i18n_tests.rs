@@ -418,6 +418,7 @@ fn enabled_menu_rows_are_safe_to_dispatch() {
 #[test]
 fn live_language_switch_and_bilingual_palette() {
     const SAVE: &str = "File: Save";
+    const ZH_SAVE: &str = "文件：保存";
     let data = tempfile::tempdir().unwrap();
     let sessions = std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None)));
     let mut app = fixture_with_session(Some(data.path()), sessions.clone(), true);
@@ -445,24 +446,24 @@ fn live_language_switch_and_bilingual_palette() {
     // English alias: highlight the entire shown label, not English byte positions.
     for window in [&mut app, &mut second] {
         wait_language(window, "zh-Hans");
-        let row = palette_row(window, "保存");
+        let row = palette_row(window, ZH_SAVE);
         assert_eq!(row.annotation, hint);
-        assert_eq!(row.highlights, [0, "保".len()]);
-        assert!(!row.highlights.is_empty());
-        assert!(
-            row.highlights
-                .iter()
-                .all(|&at| at < row.caption.len() && row.caption.is_char_boundary(at))
+        assert_eq!(
+            row.highlights,
+            ZH_SAVE.char_indices().map(|(at, _)| at).collect::<Vec<_>>()
         );
     }
     open_palette(&mut app, "保");
     assert_eq!(
-        palette_row(&mut app, "保存").highlights,
-        [0],
+        palette_row(&mut app, ZH_SAVE).highlights,
+        ["文件：".len()],
         "direct match stays precise"
     );
     open_palette(&mut app, "保存");
-    assert_eq!(palette_row(&mut app, "保存").highlights, [0, "保".len()]);
+    assert_eq!(
+        palette_row(&mut app, ZH_SAVE).highlights,
+        ["文件：".len(), "文件：保".len()]
+    );
     app.workspace.wait_resources();
     assert!(
         fs::read_to_string(
@@ -673,6 +674,32 @@ fn shipped_catalog_has_all_static_ui_captions() {
 }
 
 #[test]
+fn chinese_catalog_retains_group_separators() {
+    // There are currently no exceptions. Add a named, explained entry here if
+    // an English colon is punctuation rather than a UI group separator.
+    const ALLOW_UNGROUPED: &[&str] = &[];
+    let catalog = vel_i18n::Catalog::load(include_str!(
+        "../resources/Packages/Default/Localization/zh-Hans.sublime-localization"
+    ))
+    .unwrap();
+    let missing: BTreeSet<_> = catalog
+        .strings
+        .iter()
+        .filter(|(source, translated)| {
+            source.contains(": ")
+                && !translated.contains('：')
+                && !ALLOW_UNGROUPED.contains(&source.as_str())
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "Missing Chinese group separators: {missing:#?}"
+    );
+    assert_eq!(catalog.strings["File: Save"], "文件：保存");
+    assert_eq!(catalog.strings["File: Save All"], "文件：全部保存");
+}
+
+#[test]
 fn assembled_palette_has_complete_translations_and_preserves_invocations() {
     let mut app = fixture(None);
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -798,9 +825,7 @@ fn round24_localized_menu_walk_preserves_dispatch_and_data() {
                         | "UTF-8"
                         | "UTF-16 LE"
                         | "UTF-16 BE"
-                )
-                || (before.command.as_deref() == Some("run_macro_file")
-                    && !before.args.contains("Packages/Default/")))
+                ))
             {
                 assert!(
                     after
@@ -833,7 +858,35 @@ fn round24_localized_menu_walk_preserves_dispatch_and_data() {
         rows(&chinese).any(|row| row.caption == "简体中文（GB18030）"
             && row.args.contains("Chinese Simplified (GB18030)"))
     );
-    assert!(rows(&chinese).any(|row| row.caption == "在下方插入行" && row.args.contains("Add Line.sublime-macro")));
+    assert!(rows(&chinese).any(|row| row.caption == "宏：Add Line" && row.args.contains("Add Line.sublime-macro")));
+}
+
+#[test]
+fn tools_macro_menu_localizes_prefix_but_not_names() {
+    let data = tempfile::tempdir().unwrap();
+    let user = data.path().join("Packages/User");
+    fs::create_dir_all(&user).unwrap();
+    // A name that is also a catalog key must remain resource data.
+    fs::write(user.join("Save.sublime-macro"), "[]").unwrap();
+    let mut app = fixture(Some(data.path()));
+    let en = app.application_menu();
+    app.workspace
+        .translations
+        .select(vel_i18n::Language::ZhHans);
+    let zh = app.application_menu();
+    fn macros(menu: &[MenuEntry]) -> &[MenuEntry] {
+        &role(&role(menu, "tools").children, "macros").children
+    }
+    let (en, zh) = (macros(&en), macros(&zh));
+    assert_eq!(en.len(), zh.len());
+    for (en, zh) in en.iter().zip(zh) {
+        let name = en.caption.strip_prefix("Macro: ").unwrap();
+        assert_eq!(zh.caption.strip_prefix("宏："), Some(name));
+        assert_eq!(zh.command.as_deref(), Some("run_macro_file"));
+        assert_eq!(zh.args, en.args);
+    }
+    assert!(zh.iter().any(|row| row.caption == "宏：User/Save"));
+    assert!(zh.iter().any(|row| row.caption == "宏：Add Line"));
 }
 
 #[test]

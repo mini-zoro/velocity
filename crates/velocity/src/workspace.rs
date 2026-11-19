@@ -21,11 +21,10 @@ use vel_text::Text;
 #[path = "appearance.rs"]
 pub(crate) mod appearance;
 
-/// Built-in macro labels are UI strings; package and user macro names are data.
-pub(crate) fn localized_macro_name<'a>(tr: &'a vel_i18n::Translator, caption: &'a str) -> &'a str {
+/// The authored name of a macro; the default package needs no qualifier.
+pub(crate) fn macro_name(caption: &str) -> &str {
     let name = caption.strip_prefix("Macro: ").unwrap_or(caption);
-    name.strip_prefix("Default/")
-        .map_or(name, |name| tr.caption(name))
+    name.strip_prefix("Default/").unwrap_or(name)
 }
 
 #[derive(Debug)]
@@ -1949,7 +1948,7 @@ impl Workspace {
                 Some("Tools: Build System")
             }
             "run_macro_file" if caption.starts_with("Macro: ") => {
-                let name = localized_macro_name(tr, caption);
+                let name = macro_name(caption);
                 return tr
                     .palette_caption("Macro")
                     .map(|prefix| format!("{prefix}：{name}"));
