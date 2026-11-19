@@ -689,7 +689,10 @@ mod tests {
         assert!(guides > 0, "no indent guides");
     }
     fn write_png(path: &std::path::Path) {
-        image::RgbaImage::from_pixel(6, 4, image::Rgba([40, 120, 200, 255]))
+        write_png_sized(path, 6, 4);
+    }
+    fn write_png_sized(path: &std::path::Path, width: u32, height: u32) {
+        image::RgbaImage::from_pixel(width, height, image::Rgba([40, 120, 200, 255]))
             .save(path)
             .expect("png");
     }
@@ -793,6 +796,252 @@ mod tests {
         a.workspace.select(index);
         settle_images(&mut a);
         assert_ne!(a.panels.message, crate::app::IMAGE_FALLBACK_NOTE);
+    }
+    /// A decoded image that is decoded again (a reload, a settings change) keeps showing its
+    /// picture, and its label never says "[hex]" in between; its size is reported again.
+    #[test]
+    fn image_redecoding_keeps_the_picture_and_the_label() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("picture.png");
+        write_png_sized(&file, 6, 4);
+        let mut a = clean_tabs(1, 1000., 1., true);
+        open_path(&mut a, &file);
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, "6 × 4");
+        let size = |a: &mut App| {
+            let image = a.view.image_preview.image.clone().expect("decoded");
+            image.logical_size
+        };
+        assert_eq!(size(&mut a), [6., 4.]);
+        // Settings changed: the file is decoded again under the same path.
+        let revision = a.workspace.editor().settings.revision();
+        a.workspace.editor_mut().settings.set(
+            vel_config::settings::Layer::User,
+            "image_after_settings",
+            json!(true),
+        );
+        assert!(a.workspace.editor().settings.revision() > revision);
+        for _ in 0..3 {
+            a.scene();
+            assert!(a.view.image_preview.image.is_some(), "picture dropped");
+            assert!(!a.view.image_preview.failed);
+            assert!(!a.workspace.tabs[0].label().contains("[hex]"));
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, "6 × 4");
+        assert_eq!(a.workspace.tabs[0].label(), "picture.png");
+    }
+    /// A picture that changes size on disk reports the new size, not the old one, and the
+    /// report goes away with the document it was shown for.
+    #[test]
+    fn image_status_follows_the_picture_on_disk() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().canonicalize().expect("root");
+        let (picture, text) = (root.join("p.png"), root.join("t.txt"));
+        write_png_sized(&picture, 6, 4);
+        std::fs::write(&text, "text\n").expect("text");
+        let mut a = clean_tabs(1, 1000., 1., true);
+        a.workspace.watcher = Some(vel_fileio::Watcher::new().unwrap());
+        open_path(&mut a, &picture);
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, "6 × 4");
+        // The picture is replaced on disk, the way another program would.
+        let stamp = std::fs::metadata(&picture).unwrap().modified().unwrap();
+        write_png_sized(&picture, 9, 3);
+        std::fs::File::open(&picture)
+            .unwrap()
+            .set_modified(stamp + std::time::Duration::from_secs(2))
+            .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while a.panels.message != "9 × 3" {
+            assert!(Instant::now() < deadline, "{}", a.panels.message);
+            a.workspace.poll();
+            a.scene();
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        open_path(&mut a, &text);
+        settle_images(&mut a);
+        let index = a
+            .workspace
+            .tabs
+            .iter()
+            .position(|t| t.path.as_deref() == Some(text.as_path()))
+            .expect("text tab");
+        a.workspace.select(index);
+        settle_images(&mut a);
+        assert_ne!(a.panels.message, "9 × 3");
+    }
+    /// Project-relative `//` rules in `image_file_patterns` match against the project folder,
+    /// as the decoder reads them, so a picture below it is a picture and its tab never says
+    /// "[hex]".
+    #[test]
+    fn project_relative_image_patterns_follow_the_project_folder() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().canonicalize().expect("root");
+        let picture = root.join("art/logo.png");
+        std::fs::create_dir_all(picture.parent().unwrap()).expect("art");
+        write_png_sized(&picture, 6, 4);
+        let mut a = clean_tabs(1, 1000., 1., true);
+        a.workspace.folders.push(vel_search::project::Folder {
+            path: root.clone(),
+            name: "root".into(),
+            rules: Default::default(),
+            follow_links: true,
+        });
+        open_path(&mut a, &picture);
+        // Decoding runs on a worker; the label answers before a frame has been painted.
+        assert!(
+            a.workspace.tabs[0].editor.binary.is_some()
+                || a.workspace.tabs[0].binary_loading.is_some()
+        );
+        for tab in &mut a.workspace.tabs {
+            tab.editor.settings.set(
+                vel_config::settings::Layer::User,
+                "image_file_patterns",
+                json!(["//art/*.png"]),
+            );
+        }
+        assert!(a.workspace.tabs[0].is_image_file(), "before frame");
+        a.scene();
+        assert!(a.workspace.tabs[0].is_image_file(), "after frame");
+        assert_eq!(a.workspace.tabs[0].label(), "logo.png");
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, "6 × 4");
+        // A file below the project that the rule does not cover stays bytes.
+        let other = root.join("notes/logo.png");
+        std::fs::create_dir_all(other.parent().unwrap()).expect("notes");
+        write_png_sized(&other, 6, 4);
+        open_path(&mut a, &other);
+        for tab in &mut a.workspace.tabs {
+            tab.editor.settings.set(
+                vel_config::settings::Layer::User,
+                "image_file_patterns",
+                json!(["//art/*.png"]),
+            );
+        }
+        settle_images(&mut a);
+        assert_eq!(a.workspace.tabs[1].label(), "logo.png [hex]");
+        assert_eq!(a.workspace.tabs[1].label(), "logo.png [hex]");
+    }
+    /// A renamed picture changes its label with its name, without the cached image decision
+    /// outliving the path it was made for: the renamed file keeps its picture, the old name
+    /// is gone.
+    #[test]
+    fn renaming_a_picture_updates_its_label() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = dir.path().canonicalize().expect("root");
+        let (old, new) = (root.join("old.png"), root.join("new.png"));
+        write_png_sized(&old, 6, 4);
+        let mut a = clean_tabs(1, 1000., 1., true);
+        open_path(&mut a, &old);
+        settle_images(&mut a);
+        assert_eq!(a.workspace.tabs[0].label(), "old.png");
+        std::fs::rename(&old, &new).expect("rename");
+        crate::context_menu::apply_rename(&mut a.workspace, &old, &new).expect("retarget");
+        assert_eq!(a.workspace.tabs[0].path.as_deref(), Some(new.as_path()));
+        a.scene();
+        assert_eq!(a.workspace.tabs[0].label(), "new.png");
+        settle_images(&mut a);
+        assert_eq!(a.panels.message, "6 × 4");
+        // Renamed to a name the image rules do not cover: shown as bytes, under that name.
+        let bytes = root.join("picture.dat");
+        std::fs::rename(&new, &bytes).expect("rename");
+        crate::context_menu::apply_rename(&mut a.workspace, &new, &bytes).expect("retarget");
+        settle_images(&mut a);
+        assert_eq!(a.workspace.tabs[0].label(), "picture.dat [hex]");
+    }
+    /// A selected tab is painted with the scheme's background. Under a theme of the other
+    /// luminosity (the dark theme with a light scheme) its label therefore takes the scheme's
+    /// own ink, which stays readable on it, instead of the theme's near-white.
+    #[test]
+    fn selected_tabs_of_the_other_luminosity_keep_a_readable_label() {
+        let dir = tempfile::tempdir().expect("dir");
+        let profile = dir.path().join("profile");
+        let user = profile.join("Packages/User");
+        std::fs::create_dir_all(&user).expect("user");
+        std::fs::write(
+            user.join("Preferences.sublime-settings"),
+            r#"{"color_scheme":"Paper.sublime-color-scheme"}"#,
+        )
+        .expect("prefs");
+        std::fs::write(
+            user.join("Paper.sublime-color-scheme"),
+            r##"{"globals":{"background":"#fbf7ee","foreground":"#20303a"}}"##,
+        )
+        .expect("scheme");
+        let options = Options::default();
+        let mut workspace =
+            Workspace::new(vel_text::Text::new(), Some(profile.clone()), None, false)
+                .expect("workspace");
+        workspace.wait_resources();
+        workspace.new_file().expect("tab");
+        let mut a = App::new(
+            options.clone(),
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            Reporter::for_options(&options, Instant::now()).expect("reporter"),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(
+                Some(profile.as_path()),
+            ))),
+        );
+        assert!(a.workspace.dark, "the default UI theme is the dark one");
+        a.scene();
+        let metrics = a.workspace.themes.ui.borrow().metrics.clone();
+        let tab = a.view_buffer.expect("active");
+        let hit = a
+            .tab_hits
+            .iter()
+            .find(|(sheet, _)| *sheet == tab)
+            .map(|(_, rect)| *rect)
+            .expect("tab");
+        let label = a
+            .scene()
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .find(|r| {
+                f64::from(r.x) >= hit.x
+                    && f64::from(r.x) < hit.x + hit.width
+                    && f64::from(r.baseline) > hit.y
+                    && f64::from(r.baseline) < hit.y + hit.height
+                    && !r.text.is_empty()
+            })
+            .cloned()
+            .expect("tab label");
+        // The label's ink against the light scheme paper it sits on, in WCAG relative
+        // luminance; body text needs 4.5:1, and the scheme's ink gives about 12:1.
+        let luminance = |rgb: [f64; 3]| {
+            let channel = |c: f64| {
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+        };
+        // The scheme's own foreground ("#20303a").
+        assert!(
+            label.color[..3]
+                .iter()
+                .zip([0x20, 0x30, 0x3a])
+                .all(
+                    |(painted, scheme)| ((f64::from(*painted) * 255.) - f64::from(scheme)).abs()
+                        < 1.5
+                ),
+            "{:?}",
+            label.color
+        );
+        let ink = luminance([0.1254902, 0.1882353, 0.22745098]);
+        let paper = luminance([0xfb as f64 / 255., 0xf7 as f64 / 255., 0xee as f64 / 255.]);
+        let contrast = (paper + 0.05) / (ink + 0.05);
+        assert!(
+            contrast >= 7.,
+            "label ink {ink} on paper {paper}: {contrast}x"
+        );
+        let _ = metrics;
     }
     /// Image and hex views paint the active colour scheme's paper, not a built-in one.
     #[test]

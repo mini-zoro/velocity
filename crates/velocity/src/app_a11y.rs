@@ -449,7 +449,7 @@ impl App {
             }
         }
     }
-    fn set_region_focus(&mut self, window: Option<&WindowHandle>, id: Id) {
+    pub(super) fn set_region_focus(&mut self, window: Option<&WindowHandle>, id: Id) {
         if id == EDITOR || (OTHER_EDITOR..COMPLETIONS).contains(&id) {
             if let Some(index) = id
                 .checked_sub(OTHER_EDITOR)
@@ -595,9 +595,28 @@ impl App {
             return;
         };
         use vel_render::scene::{BorderEdge, CssBox, Layer, Surface};
+        // The ring marks the region focus (Cmd/Ctrl+F6) in the color scheme's accent, at the
+        // panel's own UI scale: a fixed blue would clash with every other theme colour.
+        let accent = self
+            .workspace
+            .themes
+            .ui
+            .borrow()
+            .palette
+            .color("var(--accent)")
+            .map_or([0.34, 0.64, 1., 1.], vel_ui::theme::rgba);
+        // Inside the region's own bounds, so a ring on a tab neither covers its neighbour's
+        // divider nor the strip's edge.
         let edge = BorderEdge {
-            width: 2.,
-            color: [0.34, 0.64, 1., 1.],
+            width: 1.5 * self.panels.ui_scale as f32,
+            color: accent,
+        };
+        let inset = 1.5 * self.panels.ui_scale;
+        let rect = Rect {
+            x: rect.x + inset,
+            y: rect.y + inset,
+            width: (rect.width - inset * 2.).max(1.),
+            height: (rect.height - inset * 2.).max(1.),
         };
         let mut layer = Layer::default();
         layer.surfaces.push(Surface::CssBox(CssBox {
@@ -619,6 +638,44 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The region focus ring is painted only while region focus is on, in the scheme's
+    /// accent colour.
+    #[test]
+    fn region_focus_ring_only_exists_while_the_region_has_focus() {
+        let mut app = app("selector\n");
+        app.panels.side_visible = true;
+        app.scene();
+        let ring = |app: &mut App| {
+            let scene = app.scene();
+            scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.surfaces)
+                .find_map(|s| match s {
+                    vel_render::scene::Surface::CssBox(b)
+                        if b.borders.iter().any(|e| e.width > 0.) =>
+                    {
+                        Some(b.borders[0].color)
+                    }
+                    _ => None,
+                })
+        };
+        assert_eq!(ring(&mut app), None);
+        let tab = app.tab_hits[0].0;
+        app.set_region_focus(None, 1000 + tab * 2);
+        let accent = app
+            .workspace
+            .themes
+            .ui
+            .borrow()
+            .palette
+            .color("var(--accent)")
+            .map(vel_ui::theme::rgba)
+            .expect("accent");
+        assert_eq!(ring(&mut app), Some(accent));
+        app.set_region_focus(None, EDITOR);
+        assert_eq!(ring(&mut app), None);
+    }
     #[test]
     fn find_toggle_exposes_checkbox_and_output_exposes_read_only_text() {
         let mut app = app("editor");

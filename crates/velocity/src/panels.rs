@@ -1548,7 +1548,15 @@ impl Panels {
                     Item {
                         caption: l.name.clone(),
                         value: i,
-                        kind: format!("{:?}", l.kind),
+                        kind: match l.kind {
+                            vel_index::SymbolKind::Function => "function",
+                            vel_index::SymbolKind::Type => "type",
+                            vel_index::SymbolKind::Namespace => "namespace",
+                            vel_index::SymbolKind::Variable => "variable",
+                            vel_index::SymbolKind::Markup => "markup",
+                            vel_index::SymbolKind::Other => "symbol",
+                        }
+                        .into(),
                         annotation: format!(
                             "{}:{}",
                             l.file.file_name().unwrap_or_default().to_string_lossy(),
@@ -4647,7 +4655,7 @@ impl Panels {
             height: (size.height - status - bottom).max(32. * self.ui_scale),
         }
     }
-    fn paint_input(layer: &mut Layer, input: &Input, focused: bool) {
+    fn paint_input(layer: &mut Layer, input: &Input, focused: bool, ink: [f32; 4]) {
         let rect = input.bounds;
         // Inputs shrunk by a very short panel scale their vertical offsets with the box, so
         // the glyphs (cap height to descender) stay inside it instead of sinking out.
@@ -4714,6 +4722,26 @@ impl Panels {
             }
             if focused {
                 fill(layer, state.caret, rect, [0.9, 0.92, 0.97, 1.]);
+            }
+            // Hard rows past the four the field shows: a slim indicator on its right edge
+            // says how much of the text is out of sight, and where.
+            let (shown, rows, first) = input.shown_rows();
+            if rows > shown {
+                let inset = 2. * s;
+                let travel = rect.height - inset * 2.;
+                let thumb = (travel * shown as f64 / rows as f64).max(16. * s);
+                let at = first.min(rows - shown) as f64 / (rows - shown) as f64;
+                fill(
+                    layer,
+                    Rect {
+                        x: rect.x + rect.width - inset - 2. * s,
+                        y: rect.y + inset + (travel - thumb) * at,
+                        width: 2. * s,
+                        height: thumb,
+                    },
+                    rect,
+                    [ink[0], ink[1], ink[2], if focused { 0.9 } else { 0.6 }],
+                );
             }
             return;
         }
@@ -5844,8 +5872,13 @@ impl Panels {
                         ..rows
                     };
                     // A caption too long for the row keeps its matched runs up to the cut
-                    // and ends in an ellipsis, like unmatched captions.
-                    let fitted = theme.fit_text(&caption, &item.caption, caption_end - text_x);
+                    // and ends in an ellipsis, like unmatched captions: the cut is fitted
+                    // within the room the ellipsis itself needs, so it always has one.
+                    let fitted = theme.fit_text(
+                        &caption,
+                        &item.caption,
+                        caption_end - text_x - theme.advance(&caption, "\u{2026}"),
+                    );
                     // Borrowed means it fits as is (a cut may be exactly as long as "…").
                     let shown = if matches!(fitted, std::borrow::Cow::Borrowed(_)) {
                         item.caption.len()
@@ -5879,14 +5912,18 @@ impl Panels {
                             clip,
                         );
                     }
-                    if shown < item.caption.len() && !fitted.is_empty() {
-                        theme.text(
+                    if shown > 0 && shown < item.caption.len() {
+                        // Placed after the prefix as drawn; one the row cannot hold is not
+                        // drawn at all.
+                        let at = text_x + theme.advance(&caption, &item.caption[..shown]);
+                        theme.text_fit(
                             &mut overlay,
                             &caption,
                             "\u{2026}",
-                            text_x + theme.advance(&caption, &item.caption[..shown]),
+                            at,
                             baseline,
-                            clip,
+                            caption_end - at,
+                            rows,
                         );
                     }
                 }
@@ -5919,8 +5956,12 @@ impl Panels {
                     );
                 } else if badges {
                     let kind_class = match item.kind.as_str() {
-                        "function" | "symbol" => "kind_container kind_function",
+                        "function" => "kind_container kind_function",
                         "command" => "kind_container kind_keyword",
+                        "type" => "kind_container kind_type",
+                        "namespace" => "kind_container kind_namespace",
+                        "variable" => "kind_container kind_variable",
+                        "markup" => "kind_container kind_markup",
                         _ => "kind_container kind_navigation",
                     };
                     let kind = self.tree.style(id, Some(kind_class), &mut theme, settings);
@@ -6799,8 +6840,101 @@ mod tests {
         };
         f64::from(metrics.measure(&run.text, &style).advance)
     }
-    /// A matched caption too long for its row is cut with an ellipsis: matched runs stop at
-    /// the cut and nothing is drawn past the row's text column.
+    /// A find field holding several hard rows grows to four rows and no further; past that
+    /// it scrolls, with the rest of the text out of sight behind a scroll indicator.
+    #[test]
+    fn multi_line_find_fields_grow_to_four_rows_then_scroll() {
+        for ui in [1., 2.] {
+            let mut workspace = workspace();
+            workspace
+                .settings
+                .set(vel_config::settings::Layer::User, "ui_scale", json!(ui));
+            let mut panels = Panels::new(&workspace, true);
+            panels
+                .action(
+                    &mut workspace,
+                    "show_panel",
+                    &json!({"panel":"find"}),
+                    0..11,
+                )
+                .unwrap();
+            panels.layout(Size {
+                width: 900.,
+                height: 600.,
+            });
+            let ui = panels.ui_scale;
+            let empty = panels.query.bounds.height;
+            assert_eq!(empty, 28. * ui, "{ui}");
+            // Six hard rows: the field stops at four.
+            panels.query.set("one\ntwo\nthree\nfour\nfive\nsix");
+            panels.layout(Size {
+                width: 900.,
+                height: 600.,
+            });
+            assert_eq!(panels.query.bounds.height, (28. + 3. * 18.) * ui, "{ui}");
+            let mut scene = Scene::default();
+            panels.paint(&workspace, &mut scene);
+            let field = panels.query.bounds;
+            let inside = |x: f64, y: f64| {
+                x >= field.x
+                    && x < field.x + field.width
+                    && y > field.y
+                    && y < field.y + field.height
+            };
+            let rows: Vec<String> = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .filter(|r| inside(f64::from(r.x), f64::from(r.baseline)))
+                .map(|r| r.text.clone())
+                .filter(|text| !text.is_empty())
+                .collect();
+            assert_eq!(rows.len(), 4, "{ui}: {rows:?}");
+            // The indicator sits inside the field's right edge and is shorter than it.
+            let (thumb, _bar) = scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.rects)
+                .filter_map(|r| {
+                    (r.rect.width <= 2. * ui + 0.01
+                        && r.rect.height >= 16. * ui
+                        && r.rect.x + 4. * ui >= field.x + field.width
+                        && r.rect.x <= field.x + field.width)
+                        .then_some(r.rect)
+                })
+                .fold((None, 0.), |(thumb, tall): (Option<Rect>, f64), rect| {
+                    if rect.height < field.height {
+                        (thumb.or(Some(rect)), tall.max(rect.height))
+                    } else {
+                        (thumb, tall.max(rect.height))
+                    }
+                });
+            let thumb = thumb.unwrap_or_else(|| panic!("{ui}: no scroll indicator"));
+            assert!(thumb.height < field.height);
+            assert!(thumb.y >= field.y && thumb.y + thumb.height <= field.y + field.height);
+            // Fewer rows than fit: no field growth and no indicator.
+            panels.query.set("one\ntwo");
+            panels.layout(Size {
+                width: 900.,
+                height: 600.,
+            });
+            assert_eq!(panels.query.bounds.height, (28. + 18.) * ui, "{ui}");
+            let mut scene = Scene::default();
+            panels.paint(&workspace, &mut scene);
+            let field = panels.query.bounds;
+            assert!(
+                scene.layers.iter().flat_map(|l| &l.rects).all(|r| {
+                    !(r.rect.width <= 2. * ui + 0.01
+                        && r.rect.height >= 16. * ui
+                        && r.rect.x + 4. * ui >= field.x + field.width
+                        && r.rect.x <= field.x + field.width)
+                }),
+                "{ui}: indicator without overflow"
+            );
+        }
+    }
+    /// A matched caption too long for its row is cut with an ellipsis: its runs stop at the
+    /// cut and nothing is drawn past the row's text column.
     #[test]
     fn long_matched_captions_end_in_an_ellipsis() {
         let workspace = workspace();
@@ -6810,7 +6944,8 @@ mod tests {
             .filter(|(_, c)| *c == 'r' || *c == 's')
             .map(|(i, _)| i)
             .collect();
-        for width in [420., 520., 700.] {
+        let (mut cut, mut ellipses) = (0, 0);
+        for width in (400..=1100).map(f64::from) {
             let mut panels = Panels::new(&workspace, false);
             panels.side_visible = false;
             panels.overlay = Some(Overlay::Goto);
@@ -6827,36 +6962,106 @@ mod tests {
             });
             let mut scene = Scene::default();
             panels.paint(&workspace, &mut scene);
-            let first = scene
-                .layers
-                .iter()
-                .flat_map(|l| &l.text)
-                .find(|r| r.text == "\u{2026}")
-                .unwrap_or_else(|| panic!("{width}: no ellipsis"))
-                .baseline;
-            let runs: Vec<_> = scene
-                .layers
-                .iter()
-                .flat_map(|l| &l.text)
-                .filter(|r| r.baseline == first && !r.text.is_empty())
-                .collect();
-            let shown: String = runs.iter().map(|r| r.text.as_str()).collect();
-            assert!(shown.ends_with('\u{2026}'), "{width}: {shown}");
-            assert!(
-                caption.starts_with(shown.trim_end_matches('\u{2026}')),
-                "{shown}"
-            );
-            let list = panels.quick_bounds;
-            for run in &runs {
-                let end = f64::from(run.x) + run_width(&*workspace.themes.ui.borrow().metrics, run);
+            // A details line can share a row with the caption, even its baseline on a narrow
+            // panel; the caption's line is the one whose runs, left to right, are its pieces.
+            let all: Vec<_> = scene.layers.iter().flat_map(|l| &l.text).collect();
+            let mut lines: Vec<f32> = Vec::new();
+            for run in all.iter().filter(|r| !r.text.is_empty()) {
+                if !lines.contains(&run.baseline) {
+                    lines.push(run.baseline);
+                }
+            }
+            let (_baseline, runs) = lines
+                .into_iter()
+                .filter_map(|line| {
+                    let mut runs: Vec<_> = all.iter().filter(|r| r.baseline == line).collect();
+                    runs.sort_by(|a, b| a.x.total_cmp(&b.x));
+                    let mut at = 0;
+                    let mut shown = String::new();
+                    for run in runs.iter().filter(|r| !r.text.is_empty()) {
+                        let piece = run.text.strip_suffix('\u{2026}');
+                        if !caption[at..].starts_with(piece.unwrap_or(&run.text)) {
+                            return None;
+                        }
+                        at += piece.unwrap_or(&run.text).len();
+                        shown.push_str(&run.text);
+                        if piece.is_some() {
+                            break;
+                        }
+                    }
+                    // The whole caption, or a prefix cut at a word boundary with an ellipsis.
+                    let score = if shown == caption {
+                        3
+                    } else if caption.starts_with(shown.trim_end_matches('\u{2026}'))
+                        && shown.ends_with('\u{2026}')
+                    {
+                        2
+                    } else {
+                        0
+                    };
+                    (score > 0).then_some((score, line, runs))
+                })
+                .max_by_key(|(score, _, _)| *score)
+                .map(|(_, line, runs)| (line, runs))
+                .unwrap_or_else(|| panic!("{width}: no caption"));
+            let caption_runs: Vec<_> = runs.iter().filter(|r| !r.text.is_empty()).collect();
+            let mut shown = String::new();
+            let mut at = 0;
+            let mut ellipsis = false;
+            for run in caption_runs.iter().copied() {
+                let piece = run.text.strip_suffix('\u{2026}');
                 assert!(
-                    end <= list.x + list.width,
-                    "{width}: {:?} at {}",
+                    caption[at..].starts_with(piece.unwrap_or(&run.text)),
+                    "{width}: {:?}",
+                    run.text
+                );
+                at += piece.unwrap_or(&run.text).len();
+                shown.push_str(&run.text);
+                if piece.is_some() {
+                    ellipsis = true;
+                    break;
+                }
+            }
+            if shown != caption {
+                cut += 1;
+                // A caption cut leaves room for the ellipsis that marks it, down to the
+                // narrowest row with any text at all, unless the prefix already fills the
+                // measured room to within a single glyph.
+                let prefix = shown.trim_end_matches('\u{2026}');
+                let metrics = workspace.themes.ui.borrow().metrics.clone();
+                let room = caption_runs.first().map_or(0., |run| {
+                    let mut prefix_run: vel_render::scene::TextRun = (***run).clone();
+                    prefix_run.text = prefix.to_owned();
+                    (run.clip.x + run.clip.width)
+                        - (f64::from(run.x) + run_width(&*metrics, &prefix_run))
+                });
+                // The caption's own text column ends 36 points in from the clip on the rows
+                // that carry a kind badge.
+                let slack = room - 36.;
+                if ellipsis {
+                    ellipses += 1;
+                } else {
+                    assert!(
+                        prefix.is_empty() || slack >= -0.7,
+                        "{width}: cut without an ellipsis: {shown} (slack {slack})"
+                    );
+                }
+            }
+            // Every run, the ellipsis included, ends inside its clip.
+            let metrics = workspace.themes.ui.borrow().metrics.clone();
+            for run in &runs {
+                let end = f64::from(run.x) + run_width(&*metrics, run);
+                assert!(
+                    end <= run.clip.x + run.clip.width + 0.01,
+                    "{width}: {:?} ends at {end}, clip {:?}",
                     run.text,
-                    run.x
+                    run.clip
                 );
             }
         }
+        assert!(cut > 100, "{cut}");
+        // Beyond the narrowest band, every cut ends in an ellipsis.
+        assert!(ellipses > 90, "{ellipses} of {cut}");
     }
     /// The empty-state hint sits directly under the FOLDERS heading, with or without the
     /// Open Files group above it.
@@ -7142,6 +7347,51 @@ mod intelligence_tests {
         assert!(panels.quick.items[0].caption.contains("extraordinary_name"));
         assert_eq!(panels.quick.items[1].annotation, "Line 2");
         assert_eq!(panels.quick.items[0].kind, "Function");
+    }
+    /// Project symbol rows carry the symbol's kind (function, type, ...) in its own badge
+    /// class and letter, not the debug name of an internal enum.
+    #[test]
+    fn project_symbol_rows_badge_their_kind() {
+        let (_root, _data, mut w, mut p) = setup();
+        p.layout(Size {
+            width: 900.,
+            height: 600.,
+        });
+        p.action(&mut w, "goto_symbol_in_project", &json!({}), 0..100)
+            .unwrap();
+        p.quick_input.set("uniq");
+        p.query_quick(&mut w);
+        wait(&mut w, &mut p, |_, p| {
+            !p.quick_pending && !p.quick.items.is_empty()
+        });
+        assert_eq!(p.quick.items[0].kind, "function");
+        p.layout(Size {
+            width: 900.,
+            height: 600.,
+        });
+        let mut scene = Scene::default();
+        p.paint(&w, &mut scene);
+        // The badge letter is the kind's (lowercase, like file kinds), in the function
+        // kind's own ink.
+        let mut ui = w.themes.ui.borrow_mut();
+        let function = ui.style(
+            0,
+            &vel_theme::ElementPath(&[
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("kind_container kind_function", &[]),
+                vel_theme::Element::new("kind_label", &[]),
+            ]),
+            &w.editor().settings,
+        );
+        drop(ui);
+        assert!(
+            scene
+                .layers
+                .iter()
+                .flat_map(|l| &l.text)
+                .any(|r| r.text == "f" && r.color == function.foreground),
+            "no function kind letter"
+        );
     }
     #[test]
     fn project_symbols_definition_previews_unicode_locations_and_bounded_history() {
@@ -7494,7 +7744,7 @@ fn paint_themed_input(
     input.configure_theme(style, theme.metrics.clone());
     let first = layer.rects.len();
     let text = layer.text.len();
-    Panels::paint_input(layer, input, focused);
+    Panels::paint_input(layer, input, focused, style.matched);
     layer.rects.remove(first);
     theme.surface(layer, style, input.bounds, input.bounds);
     for run in &mut layer.text[text..] {

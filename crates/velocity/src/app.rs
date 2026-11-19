@@ -143,6 +143,9 @@ pub struct App {
     /// Where the last click selected a tab: revealing that tab may slide the strip under the
     /// pointer, and the second click of a double click still means the same tab.
     tab_click: Option<(Point, u64)>,
+    /// The last image status message ("W × H" or the decode failure note): it describes the
+    /// document it was shown for and goes away with it.
+    image_status: Option<String>,
     /// Pointer-hovered tab close button and tab-bar button, for their theme hover states.
     hovered_close: Option<u64>,
     hovered_tab_button: Option<(usize, &'static str)>,
@@ -337,6 +340,7 @@ impl App {
             visible_view_scratch: Vec::new(),
             tab_close_hits: Vec::new(),
             tab_click: None,
+            image_status: None,
             hovered_close: None,
             hovered_tab_button: None,
             revealed_tabs: Vec::new(),
@@ -2517,8 +2521,10 @@ impl App {
         let current = self.workspace.tabs[self.workspace.active].sheet;
         let switched = self.view_buffer != Some(current);
         if switched {
-            // The undecodable-image note belongs to the document it was shown for.
-            if self.panels.message == IMAGE_FALLBACK_NOTE {
+            // An image's size or decode-failure note belongs to the document it was shown for.
+            if let Some(status) = self.image_status.take()
+                && self.panels.message == status
+            {
                 self.panels.message.clear();
             }
             register_window_commands(self.workspace.editor_mut());
@@ -2587,12 +2593,22 @@ impl App {
         let tab = &self.workspace.tabs[self.workspace.active];
         let synced = self.view.image_preview.sync(tab, &self.workspace.folders);
         let active = self.workspace.active;
-        self.workspace.tabs[active].image_failed = self.view.image_preview.failed;
-        if let Some(image) = self.view.image_preview.image.as_ref().filter(|_| synced) {
+        // A decode in progress keeps the last known result (no "[hex]" flicker).
+        if !self.view.image_preview.busy() {
+            self.workspace.tabs[active].image_failed = self.view.image_preview.failed;
+        }
+        let status = if let Some(image) = self.view.image_preview.image.as_ref().filter(|_| synced)
+        {
             let [width, height] = image.logical_size;
-            self.panels.set_message(format!("{width} × {height}"));
+            Some(format!("{width} × {height}"))
         } else if self.view.image_preview.failed && (synced || switched) {
-            self.panels.set_message(IMAGE_FALLBACK_NOTE.to_owned());
+            Some(IMAGE_FALLBACK_NOTE.to_owned())
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            self.panels.set_message(status.clone());
+            self.image_status = Some(status);
         }
         let tab = &self.workspace.tabs[active];
         if tab.loading.is_none() && tab.binary_loading.is_none() {
@@ -2845,6 +2861,11 @@ impl App {
         self.sheet_bounds.clear();
         self.group_bounds.clear();
         self.tab_hits.clear();
+        // Byte documents learn whether they are images from the same project folders the
+        // decoder uses (their labels say "[hex]" otherwise).
+        for tab in &self.workspace.tabs {
+            tab.sync_image_file(&self.workspace.folders);
+        }
         self.tab_bars.clear();
         self.tab_button_hits.clear();
         self.tab_close_hits.clear();
@@ -3001,7 +3022,10 @@ impl App {
                 if *sheet != focused {
                     view.image_preview
                         .sync(&self.workspace.tabs[index], &self.workspace.folders);
-                    self.workspace.tabs[index].image_failed = view.image_preview.failed;
+                    // A decode in progress keeps the last known result (no "[hex]" flicker).
+                    if !view.image_preview.busy() {
+                        self.workspace.tabs[index].image_failed = view.image_preview.failed;
+                    }
                     if view.image_preview.busy() {
                         self.inactive_image_decodes.insert(*sheet);
                     } else {

@@ -133,6 +133,15 @@ impl Input {
     pub fn set_row_pitch(&mut self, pitch: f64) {
         self.row_pitch = pitch.max(1.);
     }
+    /// Rows the field can show at once, how many hard rows it holds, and the first one shown
+    /// (for a scroll indicator).
+    pub fn shown_rows(&self) -> (usize, usize, usize) {
+        (
+            self.fitted_rows(),
+            self.buffer.text().len_lines(),
+            self.first_row,
+        )
+    }
     fn fitted_rows(&self) -> usize {
         ((self.bounds.height - self.row_pitch * (10. / 18.)) / self.row_pitch + 0.01)
             .floor()

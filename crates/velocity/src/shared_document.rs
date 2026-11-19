@@ -18,6 +18,7 @@ impl Tab {
         self.load_failed = source.load_failed;
         self.shared_dirty = source.shared_dirty || source.editor.buffer.is_dirty();
         self.path = source.path.clone();
+        self.image_root = source.image_root.clone();
         self.format = source.format.clone();
         self.saved_format = source.saved_format.clone();
         self.tracker = source.tracker.clone();
@@ -41,6 +42,8 @@ impl Tab {
     }
     pub(crate) fn inherit_document_mode(&mut self, source: &Self) {
         self.binary_document = source.binary_document;
+        // A clone shows the same bytes: it starts from the source's decode result.
+        self.image_failed = source.image_failed;
         self.editor.binary = source.editor.binary.clone();
         self.editor.read_only = source.editor.read_only
             || (source.loading.is_some() && !source.external_load)

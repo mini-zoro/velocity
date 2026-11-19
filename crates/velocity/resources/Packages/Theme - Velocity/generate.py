@@ -249,6 +249,15 @@ rule("tab_control", attributes=["selected", "focused"], **texture("tab-indicator
 rule("tab_label", fg="var(muted)")
 for parent in ("selected", "hover"):
     rule("tab_label", parents=[{"class": "tab_control", "attributes": [parent]}], fg="var(fg)")
+# The selected tab is painted with the color scheme's background; a scheme of the other
+# luminosity than the theme (a light scheme under a dark theme) carries the other's ink, so
+# its label takes the scheme's own foreground instead of the theme's, which would vanish.
+rule("tab_control", attributes=["selected", "file_dark"], tint_index=0)
+rule("tab_label", parents=[{"class": "tab_control", "attributes": ["selected", "file_dark"]}],
+     fg="var(--foreground)")
+rule("tab_control", attributes=["selected", "file_light"], tint_index=0)
+rule("tab_label", parents=[{"class": "tab_control", "attributes": ["selected", "file_light"]}],
+     fg="var(--foreground)")
 rule("tab_control", attributes=["transient"], **{"font.italic": True})
 rule("open_file", attributes=["transient"], **{"font.italic": True})
 rule("open_file", attributes=["dirty"], fg="var(amber)")
