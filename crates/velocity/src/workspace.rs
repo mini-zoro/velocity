@@ -68,8 +68,8 @@ pub struct Tab {
     pub(crate) binary_document: bool,
     /// An image file whose decode failed: its bytes are shown, so its label ends in `[hex]`.
     pub(crate) image_failed: bool,
-    /// Whether the path matches `image_file_patterns`, for this settings revision.
-    image_file: std::cell::Cell<Option<(u64, bool)>>,
+    /// Whether the path matches `image_file_patterns`, with what that decision depends on.
+    image_file: std::cell::RefCell<Option<ImageFile>>,
     /// The source could not load. Never persist an empty error placeholder as
     /// if it were recovered user text; retained dirty contents still survive.
     pub(crate) load_failed: bool,
@@ -81,6 +81,14 @@ pub struct Tab {
     load_started: Option<Instant>,
     pub(crate) disk_stamp: Option<(u64, SystemTime)>,
     pub external: Option<Loaded>,
+}
+/// A remembered `image_file_patterns` decision and what it depends on.
+#[derive(Debug, Clone)]
+pub(crate) struct ImageFile {
+    revision: u64,
+    path: PathBuf,
+    root: PathBuf,
+    image: bool,
 }
 /// Only owned IO results cross the restore watchdog; editor state stays on its thread.
 pub(crate) enum PreparedLoad {
@@ -185,7 +193,7 @@ impl Tab {
             binary_loading: None,
             binary_document: false,
             image_failed: false,
-            image_file: std::cell::Cell::new(None),
+            image_file: std::cell::RefCell::new(None),
             load_failed: false,
             pending_restore: None,
             pending_center: false,
@@ -262,20 +270,46 @@ impl Tab {
             || self.format != self.saved_format
     }
     /// Whether this document's path matches `image_file_patterns` (it is shown as a picture
-    /// unless its decode fails). Remembered per settings revision: labels are painted often.
+    /// unless its decode fails). Remembered per settings revision and path (labels are painted
+    /// often), matched against the project folder that `Workspace::sync_image_files` supplies,
+    /// the same root the decoder uses; until then against the file's own folder.
     pub(crate) fn is_image_file(&self) -> bool {
         let Some(path) = self.path.as_deref() else {
             return false;
         };
         let revision = self.editor.settings.revision();
-        if let Some((seen, image)) = self.image_file.get()
-            && seen == revision
+        if let Some(known) = self.image_file.borrow().as_ref()
+            && known.revision == revision
+            && known.path == path
         {
-            return image;
+            return known.image;
         }
-        let image = crate::open_requests::image_matches(self, path.parent().unwrap_or(path), path);
-        self.image_file.set(Some((revision, image)));
+        self.classify_image_file(revision, path, path.parent().unwrap_or(path))
+    }
+    fn classify_image_file(&self, revision: u64, path: &Path, root: &Path) -> bool {
+        let image = crate::open_requests::image_matches(self, root, path);
+        *self.image_file.borrow_mut() = Some(ImageFile {
+            revision,
+            path: path.to_owned(),
+            root: root.to_owned(),
+            image,
+        });
         image
+    }
+    /// Matches a byte document's path against `image_file_patterns` relative to its project
+    /// folder (project-relative `//` rules need it), when anything it depends on changed.
+    pub(crate) fn sync_image_file(&self, folders: &[vel_search::project::Folder]) {
+        let Some(path) = self.path.as_deref().filter(|_| self.editor.binary.is_some()) else {
+            return;
+        };
+        let revision = self.editor.settings.revision();
+        let root = crate::open_requests::image_root(folders, path);
+        if self.image_file.borrow().as_ref().is_some_and(|known| {
+            known.revision == revision && known.path == path && known.root == root
+        }) {
+            return;
+        }
+        self.classify_image_file(revision, path, root);
     }
     pub fn label(&self) -> String {
         if let Some(title) = self

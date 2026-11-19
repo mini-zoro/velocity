@@ -5880,11 +5880,14 @@ impl Panels {
                         );
                     }
                     if shown < item.caption.len() && !fitted.is_empty() {
+                        // Placed so the fitted text (prefix and ellipsis, measured together)
+                        // ends where it was measured to end, inside the clip.
                         theme.text(
                             &mut overlay,
                             &caption,
                             "\u{2026}",
-                            text_x + theme.advance(&caption, &item.caption[..shown]),
+                            text_x + theme.advance(&caption, &fitted)
+                                - theme.advance(&caption, "\u{2026}"),
                             baseline,
                             clip,
                         );
@@ -6810,7 +6813,8 @@ mod tests {
             .filter(|(_, c)| *c == 'r' || *c == 's')
             .map(|(i, _)| i)
             .collect();
-        for width in [420., 520., 700.] {
+        let (mut cut, mut exact) = (0, 0);
+        for width in (400..=1100).map(f64::from) {
             let mut panels = Panels::new(&workspace, false);
             panels.side_visible = false;
             panels.overlay = Some(Overlay::Goto);
@@ -6831,8 +6835,8 @@ mod tests {
                 .layers
                 .iter()
                 .flat_map(|l| &l.text)
-                .find(|r| r.text == "\u{2026}")
-                .unwrap_or_else(|| panic!("{width}: no ellipsis"))
+                .find(|r| r.text.starts_with("src") && caption.starts_with(r.text.as_str()))
+                .unwrap_or_else(|| panic!("{width}: no caption"))
                 .baseline;
             let runs: Vec<_> = scene
                 .layers
@@ -6841,22 +6845,31 @@ mod tests {
                 .filter(|r| r.baseline == first && !r.text.is_empty())
                 .collect();
             let shown: String = runs.iter().map(|r| r.text.as_str()).collect();
-            assert!(shown.ends_with('\u{2026}'), "{width}: {shown}");
-            assert!(
-                caption.starts_with(shown.trim_end_matches('\u{2026}')),
-                "{shown}"
-            );
-            let list = panels.quick_bounds;
-            for run in &runs {
-                let end = f64::from(run.x) + run_width(&*workspace.themes.ui.borrow().metrics, run);
+            // Either the whole caption, or a prefix and an ellipsis (also when the cut is
+            // exactly as long as the ellipsis itself).
+            if shown != caption {
+                assert!(shown.ends_with('\u{2026}'), "{width}: {shown}");
                 assert!(
-                    end <= list.x + list.width,
-                    "{width}: {:?} at {}",
+                    caption.starts_with(shown.trim_end_matches('\u{2026}')),
+                    "{shown}"
+                );
+                cut += 1;
+                exact += usize::from(shown.len() == caption.len());
+            }
+            // Every run, the ellipsis included, ends inside its clip.
+            let metrics = workspace.themes.ui.borrow().metrics.clone();
+            for run in &runs {
+                let end = f64::from(run.x) + run_width(&*metrics, run);
+                assert!(
+                    end <= run.clip.x + run.clip.width + 0.01,
+                    "{width}: {:?} ends at {end}, clip {:?}",
                     run.text,
-                    run.x
+                    run.clip
                 );
             }
         }
+        assert!(cut > 100, "{cut}");
+        assert!(exact > 0, "no width cut exactly three bytes");
     }
     /// The empty-state hint sits directly under the FOLDERS heading, with or without the
     /// Open Files group above it.

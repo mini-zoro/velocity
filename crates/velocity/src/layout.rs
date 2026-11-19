@@ -1349,6 +1349,12 @@ impl Layout {
         (before + segment + shift, self.segment(text, row, segment))
     }
     pub fn column(&self, text: &Text, byte: usize) -> usize {
+        self.column_in(text, byte, &mut None)
+    }
+    /// [`Layout::column`] for many positions: consecutive queries on one row (and, for wrapped
+    /// or folded rows, one segment) share its display units and gaps through `row_cache`,
+    /// instead of rebuilding the whole line each time.
+    pub fn column_in(&self, text: &Text, byte: usize, row_cache: &mut Option<RowColumns>) -> usize {
         let byte = text.floor_char_boundary(byte.min(text.len_bytes()));
         let fold = self
             .folds
@@ -1377,7 +1383,50 @@ impl Layout {
         }
         let (_, segment) = self.visual_at(text, byte);
         let start = text.line_to_byte(row);
-        let (line, base, source_column) = self.unit_window(text, row, start, &segment);
+        // [`Layout::unit_window`] measures a window for long wrapped rows and for folded rows
+        // whose first segment starts inside a fold or that reach a segment behind a hidden
+        // range; the cache then also depends on the segment's start and source column.
+        let window = self.long_wrapped(row)
+            || !self.folds.is_empty()
+                && self.lines.get(row).is_some_and(|line| {
+                    line.segments
+                        .first()
+                        .is_some_and(|first| first.bytes.start != 0)
+                        || segment.bytes.start > 0
+                            && line.hidden.iter().any(|r| r.start < segment.bytes.start)
+                });
+        let stale = row_cache.as_ref().is_none_or(|cache| {
+            cache.row != row
+                || window
+                    && (cache.base != segment.bytes.start
+                        || cache.source_column != segment.source_column)
+        });
+        if stale {
+            let (line, base, source_column) = self.unit_window(text, row, start, &segment);
+            let units = units_in(
+                &line,
+                base,
+                self.hidden(row),
+                self.options.tab,
+                source_column,
+            );
+            let mut widths = Vec::with_capacity(units.len() + 1);
+            widths.push(0);
+            let mut total = 0;
+            for unit in &units {
+                total += unit.width;
+                widths.push(total);
+            }
+            *row_cache = Some(RowColumns {
+                row,
+                base,
+                source_column,
+                bounds: units.iter().map(|u| (u.bytes.start, u.bytes.end)).collect(),
+                widths,
+                gaps: self.invisible_gaps(row, &line, base, source_column),
+            });
+        }
+        let cache = row_cache.as_ref().expect("row columns");
         let inline: usize = self.phantom_inline[self
             .phantom_inline
             .partition_point(|(at, _)| *at < start + segment.bytes.start)..]
@@ -1385,32 +1434,25 @@ impl Layout {
             .take_while(|(at, _)| *at < byte)
             .map(|(_, n)| n)
             .sum();
-        let gaps = self
-            .invisible_gaps(row, &line, base, source_column)
-            .map_or(0, |gaps| {
-                gaps[gaps.partition_point(|(at, _)| *at < segment.bytes.start)..]
-                    .iter()
-                    .take_while(|(at, _)| *at < col)
-                    .map(|(_, n)| n)
-                    .sum()
-            });
+        let gaps = cache.gaps.as_ref().map_or(0, |gaps| {
+            gaps[gaps.partition_point(|(at, _)| *at < segment.bytes.start)..]
+                .iter()
+                .take_while(|(at, _)| *at < col)
+                .map(|(_, n)| n)
+                .sum()
+        });
+        // Units are ordered and contiguous: those starting in the segment and ending by the
+        // column form one run, summed through the prefix widths.
+        let first = cache.bounds.partition_point(|(a, _)| *a < segment.bytes.start);
+        let past = cache
+            .bounds
+            .partition_point(|(_, b)| *b <= col.min(segment.bytes.end));
         after_marker
             + inline
             + gaps
             + segment.indent
-            + units_in(
-                &line,
-                base,
-                self.hidden(row),
-                self.options.tab,
-                source_column,
-            )
-            .iter()
-            .filter(|u| {
-                u.bytes.start >= segment.bytes.start && u.bytes.end <= col.min(segment.bytes.end)
-            })
-            .map(|u| u.width)
-            .sum::<usize>()
+            + cache.widths[past.max(first)]
+            - cache.widths[first]
     }
     pub fn offset(&self, text: &Text, visual: usize, x: f64) -> usize {
         let visual = visual.min(self.total().saturating_sub(1));
@@ -1752,6 +1794,20 @@ fn wrap_end(
 }
 
 /// Graphemes are indivisible; folded ranges occupy one ellipsis cell.
+/// One row's (or wrapped segment's) display units, for repeated [`Layout::column_in`]
+/// queries.
+#[derive(Debug)]
+pub struct RowColumns {
+    row: usize,
+    /// Start of the measured window within the line, and its first source column.
+    base: usize,
+    source_column: usize,
+    /// Window-relative byte range of each unit, in order.
+    bounds: Vec<(usize, usize)>,
+    /// Cells before each unit (and after the last).
+    widths: Vec<usize>,
+    gaps: Option<Arc<Vec<(usize, usize)>>>,
+}
 pub fn units<'a>(line: &'a str, hidden: &[Range<usize>], tab: usize) -> Vec<Unit<'a>> {
     units_from(line, hidden, tab, 0)
 }

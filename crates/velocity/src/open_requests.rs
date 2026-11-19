@@ -117,11 +117,23 @@ pub(crate) fn image_matches(tab: &crate::workspace::Tab, root: &Path, path: &Pat
     )
 }
 
+/// The folder `image_file_patterns` are matched against for `path`: its project folder (the
+/// deepest one containing it), else its own folder. Decoding and tab labels share it.
+pub(crate) fn image_root<'a>(folders: &'a [vel_search::project::Folder], path: &'a Path) -> &'a Path {
+    folders
+        .iter()
+        .filter(|f| path.starts_with(&f.path))
+        .max_by_key(|f| f.path.as_os_str().len())
+        .map_or_else(|| path.parent().unwrap_or(path), |f| f.path.as_path())
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ImagePreview {
     path: Option<PathBuf>,
     revision: u64,
     epoch: u64,
+    /// Identity of the loaded bytes: a reload from disk decodes again.
+    snapshot: usize,
     pending: Option<PendingImage>,
     pub image: Option<Arc<vel_render::scene::Image>>,
     /// The file matched the image patterns but could not be decoded; its bytes are shown.
@@ -153,23 +165,31 @@ impl ImagePreview {
         }
         let revision = tab.editor.settings.revision();
         let epoch = tab.editor.revision;
+        let snapshot = tab
+            .editor
+            .binary
+            .as_ref()
+            .map_or(0, |b| Arc::as_ptr(b) as usize);
         let mut changed = false;
-        if (path, revision, epoch) != (self.path.as_deref(), self.revision, self.epoch) {
+        if (path, revision, epoch, snapshot)
+            != (self.path.as_deref(), self.revision, self.epoch, self.snapshot)
+        {
+            // The same file decoded again (settings, zoom, a reload from disk) keeps showing
+            // its last result until the new one arrives: no frame without the picture or
+            // without "[hex]". Another file starts from nothing.
+            let same_file = path.is_some() && path == self.path.as_deref();
             self.path = path.map(Path::to_owned);
             self.revision = revision;
             self.epoch = epoch;
-            changed = self.image.take().is_some() || self.failed;
-            self.failed = false;
+            self.snapshot = snapshot;
             self.pending = None;
-            if let Some(path) = path {
-                let root = folders
-                    .iter()
-                    .filter(|f| path.starts_with(&f.path))
-                    .max_by_key(|f| f.path.as_os_str().len())
-                    .map_or_else(|| path.parent().unwrap_or(path), |f| f.path.as_path());
-                if image_matches(tab, root, path) {
-                    self.pending = Some(ImageQueue::submit(path));
-                }
+            let image_file = path.is_some_and(|path| image_matches(tab, image_root(folders, path), path));
+            if !same_file || !image_file {
+                changed = self.image.take().is_some() || self.failed;
+                self.failed = false;
+            }
+            if let Some(path) = path.filter(|_| image_file) {
+                self.pending = Some(ImageQueue::submit(path));
             }
         }
         if let Some(pending) = &self.pending {

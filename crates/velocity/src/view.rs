@@ -1873,11 +1873,18 @@ impl View {
         }
     }
     /// Documented caret extensions combine with block/underline drawing and blink style.
-    fn drawn_caret(&self, e: &Editor, byte: usize) -> Rect {
+    /// A caret as drawn (style, extra width/top/bottom); consecutive carets on one row share
+    /// its display columns through `row`.
+    fn drawn_caret_in(
+        &self,
+        e: &Editor,
+        byte: usize,
+        row: &mut Option<crate::layout::RowColumns>,
+    ) -> Rect {
         // Public setting names: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html
         // The detailed reference gives zero for caret_extra_top/caret_extra_bottom.
         // block_caret/inverse_caret_state defaults are unlisted; retain false.
-        let mut caret = self.rect_at(e, byte);
+        let mut caret = self.rect_at_in(e, byte, row);
         let block = e.command_mode()
             || e.settings.bool("block_caret", false)
             || e.preferences.caret_style == "block";
@@ -1913,6 +1920,14 @@ impl View {
             .map_or_else(|| e.layout.borrow().total(), |b| b.view.len_rows() as usize)
     }
     pub fn rect_at(&self, e: &Editor, byte: usize) -> Rect {
+        self.rect_at_in(e, byte, &mut None)
+    }
+    fn rect_at_in(
+        &self,
+        e: &Editor,
+        byte: usize,
+        row: &mut Option<crate::layout::RowColumns>,
+    ) -> Rect {
         if e.binary.is_some() {
             return Rect {
                 x: 16. + (18 + (byte % 16) * 3) as f64 * self.cell - self.scroll_x,
@@ -1926,7 +1941,7 @@ impl View {
         Rect {
             x: self.gutter(e)
                 + self.margin(e)
-                + vel_render::typography::grid_x(layout.column(&e.text, byte), self.cell)
+                + vel_render::typography::grid_x(layout.column_in(&e.text, byte, row), self.cell)
                 - self.scroll_x,
             y: self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y,
             width: 1.,
@@ -3405,12 +3420,14 @@ impl View {
         {
             alpha = 1. - alpha;
         }
+        // Carets are ordered: those on one row share its display columns.
+        let mut caret_row = None;
         for r in regions {
             let visual = e.layout.borrow().visual_at(&e.text, r.b).0;
             if !(first..last).contains(&visual) {
                 continue;
             }
-            let caret = self.drawn_caret(e, r.b);
+            let caret = self.drawn_caret_in(e, r.b, &mut caret_row);
             let mut color = global("caret");
             color[3] *= alpha * if e.command_mode() { 0.45 } else { 1. };
             if self.focused {
@@ -5534,7 +5551,7 @@ mod lane_b_round18_tests {
             e.settings.replace(SettingLayer::View, json!({"block_caret":block,"caret_extra_top":top,"caret_extra_bottom":bottom,"inverse_caret_state":inverse,"caret_style":"solid"})).unwrap();
             e.sync();
             v.apply_style(&e);
-            let rect = v.drawn_caret(&e, 0);
+            let rect = v.drawn_caret_in(&e, 0, &mut None);
             assert_eq!(rect.width, if block { v.cell } else { 1. });
             assert_eq!(rect.y, v.tab_height + 4. - top);
             assert_eq!(rect.height, v.line_height + top + bottom);
