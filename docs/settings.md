@@ -226,7 +226,7 @@ retained for compatibility, used indirectly, or not yet implemented.
 | `added_words` | `` [] `` |  |  No direct reader found. |
 | `always_show_minimap_viewport` | `` false `` |  | Visible default change; Visual Settings documents false (hover reveals it). https://docs.sublimetext.io/reference/settings.html#visual-settings [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `animation_enabled` | `` true `` | `` true `` |  [vel-ui/theme.rs](../crates/vel-ui/src/theme.rs), [velocity/panels.rs](../crates/velocity/src/panels.rs), [velocity/view.rs](../crates/velocity/src/view.rs) |
-| `atomic_save` | `` false `` |  | Write through a temporary file and rename it over the original. Even when true, files with hard links, another owner, extended attributes or a read-only mode are written in place. No direct reader found. |
+| `atomic_save` | `` false `` |  | Write through a temporary file and rename it over the original. Even when true, files with hard links, another owner, or metadata that cannot be preserved are saved in place. In-place saves keep a rollback clone or a full staged revision for recovery. No direct reader found. |
 | `auto_close_tags` | `` true `` |  | Finish the innermost HTML or XML closing tag when a slash follows a less-than sign. [velocity/editing.rs](../crates/velocity/src/editing.rs) |
 | `auto_complete` | `` true `` |  |  [velocity/completion.rs](../crates/velocity/src/completion.rs) |
 | `auto_complete_commit_on_tab` | `` false `` |  |  [velocity/completion.rs](../crates/velocity/src/completion.rs) |
@@ -281,7 +281,7 @@ retained for compatibility, used indirectly, or not yet implemented.
 | `ensure_newline_at_eof_on_save` | `` false `` |  |  No direct reader found. |
 | `fade_fold_buttons` | `` true `` |  |  [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `fallback_encoding` | `` "Western (Windows 1252)" `` |  |  [velocity/annotations.rs](../crates/velocity/src/annotations.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
-| `file_exclude_patterns` | `` ["*.pyc", "*.pyo", "*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib", "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store", "*.class", "*.psd", "*.db", "*.sublime-workspace"] `` |  |  No direct reader found. |
+| `file_exclude_patterns` | `` ["*.pyc", "*.pyo", "*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib", "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store", "*.class", "*.psd", "*.db", "*.sublime-workspace", ".velocity-save-*"] `` |  |  No direct reader found. |
 | `file_icon_theme` | Not shipped |  |  [velocity/theme_ui.rs](../crates/velocity/src/theme_ui.rs) |
 | `file_tab_style` | `` "angled" `` |  |  No direct reader found. |
 | `find_selected_text` | `` true `` |  | Seed Find, Replace and Incremental Find from a single-line selection. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
@@ -388,7 +388,7 @@ retained for compatibility, used indirectly, or not yet implemented.
 | `show_status_bar` | `` true `` |  |  [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `show_tab_close_buttons` | `` true `` |  |  [velocity/app.rs](../crates/velocity/src/app.rs) |
 | `show_tab_close_buttons_on_left` | `` false `` |  |  No direct reader found. |
-| `show_tabs` | `` true `` |  |  [velocity/app.rs](../crates/velocity/src/app.rs) |
+| `show_tabs` | `` true `` |  |  [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/app_a11y.rs](../crates/velocity/src/app_a11y.rs) |
 | `smart_indent` | `` true `` |  | With auto_indent, the syntax's indentation rules add or remove a level. [velocity/editing.rs](../crates/velocity/src/editing.rs) |
 | `spell_check` | `` false `` |  |  [velocity/annotations.rs](../crates/velocity/src/annotations.rs), [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `spelling_selector` | `` "markup.raw, source string.quoted - punctuation - meta.preprocessor.c.include, source comment - source comment.block.preprocessor, -(source, constant, keyword, storage, support, variable, markup.underline.link, meta.tag)" `` |  | Public scope selector reference: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#system-and-miscellaneous-settings [velocity/annotations.rs](../crates/velocity/src/annotations.rs) |

@@ -115,7 +115,7 @@ fn menu_roles_and_exact_shortcuts_survive_renaming_and_reload() {
     let user = data.path().join("Packages/User");
     fs::create_dir_all(&user).unwrap();
     fs::write(
-        user.join("Test.sublime-keymap"),
+        user.join("Default.sublime-keymap"),
         r#"[{"keys":["super+alt+n"],"command":"new_file"}]"#,
     )
     .unwrap();
@@ -506,10 +506,14 @@ fn assembled_palette_has_complete_translations_and_preserves_invocations() {
     let mut missing = BTreeSet::new();
     for item in &app.workspace.palette {
         let Some(localized) = app.workspace.palette_caption(item) else {
-            if item.invocation.command != "set_file_type" {
-                missing.insert(&item.caption);
-            } else {
+            if item.invocation.command == "set_file_type" {
                 assert!(item.caption.starts_with("Set Syntax: "));
+            } else if item.invocation.command == "set_build_system" {
+                assert!(item.caption.starts_with("Tools: Build System: "));
+            } else if item.caption.starts_with("Snippet: ") {
+                // Snippet captions come from each snippet's first line.
+            } else {
+                missing.insert(&item.caption);
             }
             continue;
         };

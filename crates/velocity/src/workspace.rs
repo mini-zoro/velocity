@@ -887,6 +887,10 @@ impl Configuration {
         crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
             (
+                "Distraction Free.sublime-settings",
+                include_str!("../resources/Packages/Default/Distraction Free.sublime-settings"),
+            ),
+            (
                 "Rust Function.sublime-snippet",
                 include_str!("../resources/Packages/Default/Rust Function.sublime-snippet"),
             ),
@@ -1862,7 +1866,12 @@ impl Workspace {
         self.translations.select(language)
     }
     pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
-        if item.invocation.command == "set_file_type" {
+        // Rows whose caption is the user's data (a syntax name, a build
+        // system's name) stay as written: there is nothing to translate.
+        if matches!(
+            item.invocation.command.as_str(),
+            "set_file_type" | "set_build_system"
+        ) {
             return None;
         }
         self.translations.palette_caption(&item.caption)
