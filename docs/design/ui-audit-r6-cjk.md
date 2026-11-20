@@ -130,3 +130,12 @@ All paired medians met the 2% budget.
 
 Left for later: per-glyph advances for custom fonts whose wide classes are
 not uniform, and an interactive IME candidate-window check.
+
+## Round 26 review renders (Metal)
+
+`after/r26-tabs-square-*@2x.png` and `after/r26-tabs-rounded-left-*@2x.png` (scenes
+`r26-tabs-square`, `r26-tabs-rounded-left`) show the tab strip with a modified tab under
+`file_tab_style: "square"` and under `"rounded"` with `show_tab_close_buttons_on_left`: the
+close button and the dirty marker move to the left together, and the selected tab is rounded.
+`after/r26-cjk-zh-metal-dark@2x.png` is the `r6-cjk-zh` scene through Metal after the
+line-breaking change: no wrapped row starts with "。" or "，".

@@ -1055,6 +1055,29 @@ fn r5_sidebar(fixture: &Fixture, dark: bool) -> Result<App, String> {
     Ok(app)
 }
 
+/// The tab strip under `file_tab_style` and `show_tab_close_buttons_on_left`, with a
+/// modified tab so the dirty marker's side shows too.
+fn r26_tabs(fixture: &Fixture, dark: bool, rounded: bool, left: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    open(&mut app, &fixture.docs("说明.md"))?;
+    named(&mut app, "insert", json!({"characters": "草稿\n"}));
+    open(&mut app, &fixture.file)?;
+    for (key, value) in [
+        (
+            "file_tab_style",
+            json!(if rounded { "rounded" } else { "square" }),
+        ),
+        ("show_tab_close_buttons_on_left", json!(left)),
+    ] {
+        let e = app.workspace.editor_mut();
+        e.settings
+            .set(vel_config::settings::Layer::View, key, value);
+        e.sync();
+    }
+    settle(&mut app);
+    Ok(app)
+}
+
 fn r6_cjk(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_app(fixture, dark)?;
     named(&mut app, "new_file", json!({}));
@@ -1548,6 +1571,16 @@ const SCENARIOS: &[Scenario] = &[
         name: "r6-cjk-zh",
         size: (800., 360.),
         build: r6_cjk,
+    },
+    Scenario {
+        name: "r26-tabs-square",
+        size: (800., 200.),
+        build: |f, d| r26_tabs(f, d, false, false),
+    },
+    Scenario {
+        name: "r26-tabs-rounded-left",
+        size: (800., 200.),
+        build: |f, d| r26_tabs(f, d, true, true),
     },
 ];
 
