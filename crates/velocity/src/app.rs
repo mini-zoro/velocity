@@ -2883,6 +2883,11 @@ impl App {
             self.panels
                 .output_view
                 .set_font_metrics(fonts.metrics, scale);
+            // Build output is an editor view too: Chinese diagnostics and the localized
+            // "[已完成…]" footer use the same measured wide advances as documents.
+            self.panels
+                .output_view
+                .set_wide_advances(fonts.wide_advances());
         }
     }
     fn sync_active_view(&mut self) {

@@ -1089,11 +1089,9 @@ fn r25_status_selection(fixture: &Fixture, dark: bool) -> Result<App, String> {
 
 fn r25_build_output(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_editor(fixture, dark)?;
-    named(
-        &mut app,
-        "show_output_panel",
-        json!({"text":"Compiling demo.rs\nwarning: unused variable: sample\n"}),
-    );
+    // The output view exists once a build configures it, as `build::start` does.
+    app.panels.configure_output(&app.workspace, None, false);
+    app.panels.output = "Compiling demo.rs\nwarning: unused variable: sample\n".into();
     app.panels
         .append_output_ui(crate::build::finish_line_with_signal(
             Some(0),
@@ -1102,6 +1100,7 @@ fn r25_build_output(fixture: &Fixture, dark: bool) -> Result<App, String> {
             Duration::from_millis(1200),
             false,
         ));
+    app.panels.panel = Some(crate::panels::Panel::Output);
     Ok(app)
 }
 

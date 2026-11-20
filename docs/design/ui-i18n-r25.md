@@ -39,3 +39,16 @@ env HOME=/tmp/velocity-r25-home SHELL=/bin/sh target/release/velocity \
 
 The same cases work with `--language en` for comparison. Append
 `--bench-scene 1` to build and measure the real scenes without Metal.
+
+## Review renders (Metal)
+
+Rendered through the real Metal path by the reviewer, `--language zh-Hans`:
+`after/r25-find-zh-dark@2x.png`, `r25-find_in_files-zh-dark@2x.png`, `r25-sidebar-zh-dark@2x.png`,
+`r25-input_panel-zh-dark@2x.png`, `r25-status_selection-zh-dark@2x.png`,
+`r25-build_output-zh-dark@2x.png`, and at UI scale 2 `r25-find_ui2-zh-light@1x.png`,
+`r25-find_in_files_ui2-zh-light@1x.png`.
+
+Review fixes: the `r25_build_output` scene now configures the output view as a build does
+(it showed an empty panel before), and the output view now uses the editor's measured wide
+advances, so the localized "[已完成，用时 1.2s]" footer and Chinese tool output are no longer
+letter-spaced (`round26_settings_tests::output_view_uses_the_measured_wide_advances`).

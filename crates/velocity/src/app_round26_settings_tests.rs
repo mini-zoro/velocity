@@ -239,3 +239,16 @@ fn settings_user_tab_save_updates_existing_window_and_preserves_explicit_toggles
     }
     assert!(!app.panels.side_visible, "window toggle wins over User");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn output_view_uses_the_measured_wide_advances() {
+    let mut app = app(None);
+    let mut fonts = vel_render::font::Fonts::load().unwrap();
+    let advances = fonts.wide_advances();
+    assert_ne!(advances, Default::default());
+    app.fonts = Some(fonts);
+    app.initialize_view_metrics();
+    assert_eq!(app.view.wide_advances, advances);
+    assert_eq!(app.panels.output_view.wide_advances, advances);
+}
