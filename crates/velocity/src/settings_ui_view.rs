@@ -275,6 +275,9 @@ fn paint_chips(
     let tags = row.tags();
     let right = control.x + control.width;
     let gap = 4. * scale;
+    let padding = 6. * scale;
+    let remove_width = 18. * scale;
+    let chip_style = if enabled { &ink.normal } else { &ink.muted };
     let mut shown = 0;
     for (index, tag) in tags.iter().take(MAX_CHIPS).enumerate() {
         let label = Row::tag_label(tag);
@@ -283,9 +286,10 @@ fn paint_chips(
             0.
         } else {
             let label = tr.tr_fmt("+{count} more", &[("count", remaining.to_string())]);
-            theme.advance(&ink.quiet, &label) + 14. * scale
+            theme.advance(&ink.quiet, &label) + 14. * scale + gap
         };
-        let width = (theme.advance(&ink.quiet, &label) + 27. * scale).min(98. * scale);
+        let width = (theme.advance(chip_style, &label).ceil() + 2. * padding + remove_width)
+            .min(152. * scale);
         if x + width + more > right {
             break;
         }
@@ -296,9 +300,9 @@ fn paint_chips(
             control.height - 4. * scale,
         );
         let remove = rect(
-            chip.x + chip.width - 18. * scale,
+            chip.x + chip.width - remove_width,
             chip.y,
-            18. * scale,
+            remove_width,
             chip.height,
         );
         let target = Target::RemoveTag(id, index);
@@ -313,16 +317,15 @@ fn paint_chips(
             },
             4.,
         );
-        let style = if enabled { &ink.normal } else { &ink.muted };
         text(
             theme,
             layer,
-            style,
+            chip_style,
             &label,
             rect(
-                chip.x + 5. * scale,
+                chip.x + padding,
                 chip.y,
-                chip.width - 24. * scale,
+                chip.width - 2. * padding - remove_width,
                 chip.height,
             ),
             clip,
@@ -330,7 +333,7 @@ fn paint_chips(
         text(
             theme,
             layer,
-            style,
+            chip_style,
             &tr.tr("✕"),
             rect(
                 remove.x + 3. * scale,
@@ -1094,7 +1097,8 @@ impl Page {
                 right + reset_w
             };
             let link = rect(second_end - link_w, y + 26. * scale, link_w, 19. * scale);
-            if (selected || hovered) && link.x > left {
+            let enum_open = self.popup.as_ref().is_some_and(|p| p.row == id && !p.tags);
+            if (selected || hovered) && link.x > left && !enum_open {
                 text(theme, layer, &ink.link, &edit_json, link, list);
                 if self.focus == Focus::Action(Target::RowJson(id)) {
                     fill(

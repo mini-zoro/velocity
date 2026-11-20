@@ -288,13 +288,11 @@ impl Fixture {
         }
         // Deterministic chrome: no tree/hover animations, no blinking; the UI language as a
         // user's preference would set it.
-        let language_setting = language.map_or(String::new(), |language| {
-            format!(",\n\t\"ui_language\": {}", json!(language))
-        });
+        let language_setting = json!(language.unwrap_or("en"));
         std::fs::write(
             data.join("Packages/User/Preferences.sublime-settings"),
             format!(
-                "{{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"{language_setting}\n}}\n"
+                "{{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\",\n\t\"ui_language\": {language_setting}\n}}\n"
             ),
         )
         .map_err(|e| e.to_string())?;
@@ -1058,10 +1056,11 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
                 "wrap"
             },
         ),
-        "enum" | "array" | "dependent" => {
+        "enum" | "array" | "guides" | "dependent" => {
             page.search_for(match variant {
                 "enum" => "word_wrap",
                 "array" => "file_exclude_patterns",
+                "guides" => "indent_guide_options",
                 _ => "wrap_width",
             });
             page.command(
@@ -1694,6 +1693,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "settings_ui_array",
         size: (900., 650.),
         build: |f, d| settings_ui_scene(f, d, "array"),
+    },
+    Scenario {
+        name: "settings_ui_guides",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "guides"),
     },
     Scenario {
         name: "settings_ui_dependent",
@@ -2344,7 +2348,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     }
                     None => match Renderer::offscreen(width, height) {
                         Ok(r) => Some(renderer.insert(r)),
-                        Err(error) if scenario.name == "r6-cjk-zh" => {
+                        Err(error)
+                            if scenario.name == "r6-cjk-zh"
+                                || scenario.name.starts_with("settings_ui") =>
+                        {
                             eprintln!("velocity: {error}; using flat software text snapshot");
                             None
                         }
@@ -2417,16 +2424,32 @@ fn finish_layout(app: &mut App, name: &str) {
 #[cfg(test)]
 #[test]
 fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_scales() {
-    for (language, search, repair, add_tag) in [
-        ("en", "Search settings", "Edit JSON to fix", "Add tag…"),
-        ("zh-Hans", "搜索设置", "在 JSON 中修复", "添加标签…"),
+    for (language, search, repair, add_tag, wrap, description, json_link) in [
+        (
+            "en",
+            "Search settings",
+            "Edit JSON to fix",
+            "Add tag…",
+            "Word Wrap",
+            "Wrap long lines to fit the editor or a set column.",
+            "Edit in JSON",
+        ),
+        (
+            "zh-Hans",
+            "搜索设置",
+            "在 JSON 中修复",
+            "添加标签…",
+            "自动换行",
+            "在编辑器边缘或指定列自动换行。",
+            "在 JSON 中编辑",
+        ),
     ] {
         let fixture = Fixture::create(Some(language), &[]).unwrap();
         let settings: Vec<_> = SCENARIOS
             .iter()
             .filter(|s| s.name.starts_with("settings_ui"))
             .collect();
-        assert_eq!(settings.len(), 7);
+        assert_eq!(settings.len(), 8);
         for scenario in settings {
             for dark in [true, false] {
                 for density in [1., 2.] {
@@ -2451,6 +2474,7 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                         "settings_ui_modified" => "tab_size",
                         "settings_ui_broken" => repair,
                         "settings_ui_array" => add_tag,
+                        "settings_ui_guides" => "draw_normal",
                         "settings_ui_dependent" => "wrap_width_style",
                         _ => unreachable!(),
                     };
@@ -2461,6 +2485,11 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                     );
                     if scenario.name == "settings_ui_enum" {
                         assert!(texts.iter().any(|text| text.starts_with("✓  ")));
+                        assert!(
+                            texts.contains(&wrap) && texts.contains(&description),
+                            "{texts:?}"
+                        );
+                        assert_eq!(texts.iter().filter(|&&text| text == json_link).count(), 1);
                     }
                     if scenario.name == "settings_ui_array" {
                         assert!(texts.contains(&"*.log"));

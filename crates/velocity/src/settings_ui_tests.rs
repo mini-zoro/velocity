@@ -7,11 +7,11 @@ fn app(source: &str) -> (tempfile::TempDir, App, PathBuf) {
     let path = crate::workbench::preferences_path(data.path());
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, source).unwrap();
-    let workspace = Workspace::new(
+    let workspace = Workspace::new_with_preferred_languages(
         vel_text::Text::from("alpha-beta\nsecond line\n"),
         Some(data.path().to_owned()),
-        None,
         false,
+        &["en"],
     )
     .unwrap();
     let options = Options::default();
@@ -52,15 +52,48 @@ fn edit(app: &mut App, key_name: &str) {
     key(app, "enter"); // List -> field or switch
 }
 
-fn json_pair(app: &mut App, path: &Path) {
+#[track_caller]
+fn json_pair(app: &mut App, path: &Path) -> App {
     let child = app.opened_settings.pop().expect("two-pane settings editor");
     assert_eq!(child.workspace.workbench.groups.len(), 2);
     assert_eq!(child.workspace.workbench.active, 1);
     assert!(child.workspace.tabs[0].editor.read_only);
     assert_eq!(
+        child.workspace.tabs[0]
+            .editor
+            .settings
+            .string("velocity_settings_resource", ""),
+        "Packages/Default/Preferences.sublime-settings"
+    );
+    assert_eq!(
         child.workspace.tabs[child.workspace.active].path.as_ref(),
         Some(&path.canonicalize().unwrap())
     );
+    child
+}
+
+fn palette_settings(app: &mut App, caption: &str) {
+    app.run_named(
+        None,
+        "show_overlay",
+        &json!({"overlay": "command_palette", "text": caption}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.panels.ranking_pending() {
+        let viewport = app.viewport();
+        app.panels.poll(&mut app.workspace, viewport);
+        assert!(Instant::now() < deadline, "{caption} did not rank");
+        std::thread::yield_now();
+    }
+    let row = app
+        .panels
+        .quick
+        .items
+        .iter()
+        .position(|item| item.caption == caption)
+        .unwrap_or_else(|| panic!("missing palette row: {caption}"));
+    app.panels.quick.selected = row;
+    key(app, "enter");
 }
 
 fn click(app: &mut App, text: &str) {
@@ -91,10 +124,42 @@ fn click(app: &mut App, text: &str) {
 fn settings_ui_entry_points_reuse_the_sheet_and_keep_json_pairs() {
     let (_data, mut app, path) = app("{}");
     key(&mut app, "super+,");
+    assert!(app.workspace.settings_page.is_none());
+    let mut json = json_pair(&mut app, &path);
+    palette_settings(&mut json, "Preferences: Settings (Graphical)");
+    assert!(json.workspace.settings_page.is_some());
+
+    let menu = app.application_menu();
+    for (id, caption, command, shortcut) in [
+        ("application", "Settings…", "edit_settings", Some("super+,")),
+        ("preferences", "Settings…", "edit_settings", None),
+        (
+            "preferences",
+            "Settings (Graphical)…",
+            "show_settings",
+            None,
+        ),
+    ] {
+        let row = menu
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap()
+            .children
+            .iter()
+            .find(|row| row.caption == caption)
+            .unwrap();
+        assert_eq!(row.command.as_deref(), Some(command));
+        assert_eq!(row.shortcut.as_deref(), shortcut);
+        app.run_named(None, command, &serde_json::from_str(&row.args).unwrap());
+        if command == "edit_settings" {
+            assert!(app.workspace.settings_page.is_none());
+            json_pair(&mut app, &path);
+        }
+    }
     assert_eq!(app.workspace.window_title(), "Settings");
     let sheet = &**app.workspace.settings_page.as_ref().unwrap() as *const Page;
     type_text(&mut app, "wrap");
-    key(&mut app, "super+,");
+    palette_settings(&mut app, "Preferences: Settings (Graphical)");
     assert_eq!(
         sheet,
         &**app.workspace.settings_page.as_ref().unwrap() as *const Page
@@ -103,31 +168,9 @@ fn settings_ui_entry_points_reuse_the_sheet_and_keep_json_pairs() {
     click(&mut app, "Edit in JSON");
     json_pair(&mut app, &path);
 
-    let menu = app.application_menu();
-    let preferences = menu.iter().find(|row| row.id == "preferences").unwrap();
-    for (caption, command) in [
-        ("Settings…", "show_settings"),
-        ("Settings – JSON", "edit_settings"),
-    ] {
-        let row = preferences
-            .children
-            .iter()
-            .find(|row| row.caption == caption)
-            .unwrap();
-        assert_eq!(row.command.as_deref(), Some(command));
-        app.run_named(None, command, &serde_json::from_str(&row.args).unwrap());
-    }
+    key(&mut app, "super+,");
     json_pair(&mut app, &path);
-
-    app.run_named(
-        None,
-        "show_overlay",
-        &json!({
-            "overlay": "command_palette",
-            "text": "Preferences: Settings (JSON)"
-        }),
-    );
-    key(&mut app, "enter");
+    palette_settings(&mut app, "Preferences: Settings");
     json_pair(&mut app, &path);
     assert_eq!(
         sheet,
@@ -250,32 +293,91 @@ fn settings_ui_broken_file_is_read_only_and_the_repair_button_opens_json() {
 
 #[test]
 fn settings_ui_metadata_keys_search_by_key_name_chinese_and_description() {
-    let (_data, mut app, _) = app(
-        r#"{"trim_trailing_white_space_on_save":true,"draw_indent_guides":true,"auto_complete":true,"word_wrap":true}"#,
-    );
-    app.run_named(None, "show_settings", &json!({}));
-    let page = app.workspace.settings_page.as_mut().unwrap();
-    page.search_for(" ");
     let defaults = Document::parse(include_str!(
         "../resources/Packages/Default/Preferences.sublime-settings"
     ))
     .unwrap()
     .value;
-    for key in defaults.as_object().unwrap().keys() {
-        page.search_for(key);
-        let name = page
-            .results()
-            .find_map(|(found, name)| (found == key).then(|| name.to_owned()))
-            .unwrap_or_else(|| panic!("missing key: {key}"));
-        page.search_for(&name);
-        assert!(
-            page.results().any(|(k, _)| k == key),
-            "missing name: {name}"
-        );
-    }
-    for query in ["字号", "Size of editor text"] {
-        page.search_for(query);
+    let fixtures = ["en", "zh-Hans"].map(|language| {
+        let (data, mut app, _) = app(&json!({
+            "ui_language": language, "trim_trailing_white_space_on_save":true,
+            "draw_indent_guides":true, "auto_complete":true,"word_wrap":true
+        })
+        .to_string());
+        app.run_named(None, "show_settings", &json!({}));
+        (data, app)
+    });
+    let copies = fixtures.each_ref().map(|(_, app)| {
+        app.workspace
+            .settings_page
+            .as_ref()
+            .unwrap()
+            .localized_copy()
+            .map(|(key, name, description)| {
+                (key.to_owned(), (name.to_owned(), description.to_owned()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
+    for (language, (_data, mut app)) in ["en", "zh-Hans"].into_iter().zip(fixtures) {
+        let page = app.workspace.settings_page.as_mut().unwrap();
+        for key in defaults.as_object().unwrap().keys() {
+            let (en_name, en_desc) = &copies[0][key];
+            let (zh_name, zh_desc) = &copies[1][key];
+            assert_ne!(en_name, zh_name, "{key}");
+            for query in [key, en_name, zh_name, en_desc, zh_desc] {
+                page.search_for(query);
+                assert!(
+                    page.results().any(|(k, _)| k == key),
+                    "{language}: {key}: {query}"
+                );
+            }
+        }
+        page.search_for("字号");
         assert!(page.results().any(|(key, _)| key == "font_size"));
+    }
+}
+
+#[test]
+fn settings_ui_descriptions_exclude_developer_notes_and_paths() {
+    let languages = std::iter::once("en".to_owned())
+        .chain(crate::ui_language::shipped_catalogs().map(|(tag, _)| tag.as_str().to_owned()));
+    for language in languages {
+        let (_data, mut app, _) = app(&json!({"ui_language": language}).to_string());
+        app.run_named(None, "show_settings", &json!({}));
+        let page = app.workspace.settings_page.as_ref().unwrap();
+        for (key, _, description) in page.localized_copy() {
+            let text = description.to_lowercase();
+            assert!(
+                !text.trim().is_empty()
+                    && !text.contains(['\n', '\r', '/', '\\'])
+                    && !["lane ", "round ", "http", "todo"]
+                        .iter()
+                        .any(|word| text.contains(word))
+                    && !text.split_whitespace().any(|word| {
+                        word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                            .rsplit_once('.')
+                            .is_some_and(|(_, ext)| ext.bytes().any(|ch| ch.is_ascii_alphabetic()))
+                    }),
+                "{language} {key}: {description}"
+            );
+        }
+    }
+    for source in [
+        include_str!("../resources/Packages/Default/Preferences.sublime-settings"),
+        include_str!("../resources/Packages/Default/Preferences (OSX).sublime-settings"),
+    ] {
+        for line in source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("//"))
+        {
+            let comment = line.to_lowercase();
+            assert!(
+                !["lane ", "round ", "http://", "https://"]
+                    .iter()
+                    .any(|word| comment.contains(word)),
+                "{line}"
+            );
+        }
     }
 }
 
@@ -338,7 +440,7 @@ fn settings_ui_search_uses_find_field_style_and_passes_wcag_contrast() {
     for dark in [true, false] {
         let (_data, mut app, _) = app("{}");
         app.workspace.set_appearance(dark).unwrap();
-        key(&mut app, "super+,");
+        app.run_named(None, "show_settings", &json!({}));
         let scene = painted(&mut app, 800.);
         let search = app.accessible_tree().focused().unwrap();
         let bounds = app.accessible_tree().node(search).unwrap().frame;
@@ -384,7 +486,7 @@ fn settings_ui_search_uses_find_field_style_and_passes_wcag_contrast() {
 fn settings_ui_dense_rows_keep_tooltips_and_keyboard_json_link() {
     use vel_platform::accessibility::Role;
     let (_data, mut app, path) = app(r#"{"auto_close_tags":false}"#);
-    key(&mut app, "super+,");
+    app.run_named(None, "show_settings", &json!({}));
     let scene = painted(&mut app, 800.);
     let tree = app.accessible_tree();
     let rows: Vec<_> = tree.nodes.iter().filter(|n| n.role == Role::Row).collect();
@@ -477,7 +579,7 @@ fn settings_ui_broken_controls_keep_geometry_and_are_dimmed() {
     let (_data, mut good, _) = app(r#"{"tab_size":4}"#);
     let (_broken_data, mut broken, _) = app("{\"tab_size\": }");
     let snapshots = [&mut good, &mut broken].map(|app| {
-        key(app, "super+,");
+        app.run_named(None, "show_settings", &json!({}));
         let scene = painted(app, 800.);
         let tree = app.accessible_tree();
         let row = tree
@@ -517,7 +619,7 @@ fn settings_ui_broken_controls_keep_geometry_and_are_dimmed() {
 #[test]
 fn settings_ui_footer_shortens_in_the_middle_and_tooltip_has_full_path() {
     let (data, mut app, path) = app("{}");
-    key(&mut app, "super+,");
+    app.run_named(None, "show_settings", &json!({}));
     app.workspace
         .settings_page
         .as_mut()
@@ -566,7 +668,7 @@ fn settings_ui_footer_shortens_in_the_middle_and_tooltip_has_full_path() {
 #[test]
 fn settings_ui_deferred_effect_is_kept_on_the_second_line() {
     let (_data, mut app, _) = app("{}");
-    key(&mut app, "super+,");
+    app.run_named(None, "show_settings", &json!({}));
     type_text(&mut app, "hot_exit");
     let scene = painted(&mut app, 800.);
     let runs: Vec<_> = scene.layers.iter().flat_map(|layer| &layer.text).collect();
@@ -583,7 +685,17 @@ fn settings_ui_enum_uses_typed_legacy_choices_and_updates_dependencies() {
     use vel_platform::accessibility::Role;
     let (_data, mut app, path) = app("{}");
     edit(&mut app, "word_wrap");
-    painted(&mut app, 800.);
+    let scene = painted(&mut app, 800.);
+    assert_eq!(
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .filter(|run| run.text == "Edit in JSON")
+            .count(),
+        1,
+        "only the header link is drawn while the enum is open"
+    );
     let tree = app.accessible_tree();
     let popup = tree
         .nodes
@@ -591,9 +703,17 @@ fn settings_ui_enum_uses_typed_legacy_choices_and_updates_dependencies() {
         .find(|n| n.role == Role::PopupButton && n.label.starts_with("Word Wrap,"))
         .unwrap();
     assert_eq!(popup.expanded, Some(true));
+    assert!(!tree.nodes.iter().any(|n| n.role == Role::Link));
     assert!(tree.nodes.iter().any(|n| n.label == "On"));
     key(&mut app, "up"); // Wrap from Automatic to Off.
     key(&mut app, "enter");
+    painted(&mut app, 800.);
+    assert!(
+        app.accessible_tree()
+            .nodes
+            .iter()
+            .any(|n| n.role == Role::Link)
+    );
     assert_eq!(
         app.workspace.settings.layer(Layer::User)["word_wrap"],
         false
@@ -672,6 +792,35 @@ fn settings_ui_arrays_add_remove_and_open_overflow_without_losing_types() {
 }
 
 #[test]
+fn settings_ui_array_chips_fit_short_labels_and_cap_long_ones() {
+    let long_pattern = format!("{}*.log", "long-pattern-".repeat(12));
+    let (_data, mut app, _) = app(&json!({
+        "ui_language": "zh-Hans",
+        "indent_guide_options": ["draw_normal", "draw_active"],
+        "file_exclude_patterns": [long_pattern]
+    })
+    .to_string());
+    edit(&mut app, "indent_guide_options");
+    let scene = painted(&mut app, 800.);
+    text_ink(&scene, "draw_normal");
+    text_ink(&scene, "draw_active");
+
+    edit(&mut app, "file_exclude_patterns");
+    let scene = painted(&mut app, 800.);
+    assert!(
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .any(|run| {
+                run.text
+                    .strip_suffix('…')
+                    .is_some_and(|prefix| !prefix.is_empty() && long_pattern.starts_with(prefix))
+            })
+    );
+}
+
+#[test]
 fn settings_ui_reset_all_restores_the_exact_opening_file() {
     let source = "{\n  // opening comment\n  \"tab_size\": 5,\n  \"unknown\": [true, false],\n}\n";
     let (_data, mut app, path) = app(source);
@@ -723,7 +872,7 @@ fn settings_ui_reset_all_checks_mtime_and_offers_reload() {
 #[test]
 fn settings_ui_reset_all_refuses_external_contents_even_after_another_page_write() {
     let (_data, mut app, path) = app("{}");
-    key(&mut app, "super+,");
+    app.run_named(None, "show_settings", &json!({}));
     let modified = fs::metadata(&path).unwrap().modified().unwrap();
     fs::write(&path, r#"{"tab_size":9}"#).unwrap();
     fs::File::open(&path)

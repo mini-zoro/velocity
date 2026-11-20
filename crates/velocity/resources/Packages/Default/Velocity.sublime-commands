@@ -837,16 +837,16 @@
     "command": "new_build_system"
   },
   {
-    "caption": "Preferences: Settings…",
-    "command": "show_settings"
-  },
-  {
-    "caption": "Preferences: Settings (JSON)",
+    "caption": "Preferences: Settings",
     "command": "edit_settings",
     "args": {
       "base_file": "${packages}/Default/Preferences.sublime-settings",
       "default": "{\n\t$0\n}\n"
     }
+  },
+  {
+    "caption": "Preferences: Settings (Graphical)",
+    "command": "show_settings"
   },
   {
     "caption": "Preferences: Key Bindings…",

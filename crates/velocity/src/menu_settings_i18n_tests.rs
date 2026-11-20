@@ -21,11 +21,11 @@ fn fixture_with_session(
         options.clone(),
         Clock::new(start, std::time::SystemTime::now()),
         Reporter::for_options(&options, start).unwrap(),
-        Workspace::new(
+        Workspace::new_with_preferred_languages(
             vel_text::Text::from("plain text\n"),
             data.map(Path::to_owned),
-            None,
             watch,
+            &["en"],
         )
         .unwrap(),
         Arc::new(AtomicBool::new(false)),
@@ -98,7 +98,7 @@ fn menu_roles_and_exact_shortcuts_survive_renaming_and_reload() {
         vec![
             (Some("native_about"), None),
             (None, None),
-            (Some("show_settings"), Some("super+,")),
+            (Some("edit_settings"), Some("super+,")),
             (None, None),
             (Some("native_services"), None),
             (None, None),
@@ -539,6 +539,56 @@ fn enabled_menu_rows_are_safe_to_dispatch() {
 }
 
 #[test]
+fn default_ui_language_follows_the_first_supported_system_preference() {
+    for (preferred, expected) in [
+        (&["fr-CA", "zh-Hans-CN", "en-US"][..], "zh-Hans"),
+        (&["en-GB", "zh-Hans"], "en"),
+        (&["fr-CA", "zh-TW", "zh-Hans"], "zh-Hans"),
+        (&["fr-CA", "zh-TW"], "en"),
+        (&[][..], "en"),
+    ] {
+        let workspace =
+            Workspace::new_with_preferred_languages(vel_text::Text::new(), None, false, preferred)
+                .unwrap();
+        assert_eq!(
+            workspace.settings.layer(Layer::Default)["ui_language"],
+            "auto"
+        );
+        assert_eq!(workspace.ui_language_setting(), "auto");
+        assert_eq!(workspace.checked_ui_language(), "auto");
+        assert_eq!(
+            workspace.translations.matched_language().as_str(),
+            expected,
+            "{preferred:?}"
+        );
+        assert!(workspace.ui_language_notice.is_none());
+    }
+
+    let data = tempfile::tempdir().unwrap();
+    let path = crate::workbench::preferences_path(data.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, r#"{"ui_language":"en"}"#).unwrap();
+    let mut workspace = Workspace::new_with_preferred_languages(
+        vel_text::Text::new(),
+        Some(data.path().to_owned()),
+        false,
+        &["zh-Hans"],
+    )
+    .unwrap();
+    assert_eq!(workspace.checked_ui_language(), "en");
+    assert!(workspace.translations.language().is_english());
+    workspace
+        .set_user_preference("ui_language", json!("auto"))
+        .unwrap();
+    workspace.wait_resources();
+    assert_eq!(workspace.checked_ui_language(), "auto");
+    assert_eq!(
+        workspace.translations.matched_language().as_str(),
+        "zh-Hans"
+    );
+}
+
+#[test]
 fn live_language_switch_and_bilingual_palette() {
     const SAVE: &str = "File: Save";
     const ZH_SAVE: &str = "文件：保存";
@@ -615,7 +665,7 @@ fn open_palette(app: &mut App, query: &str) {
 
 fn wait_language(app: &mut App, language: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
-    while app.workspace.global_string("ui_language", "en") != language {
+    while app.workspace.ui_language_setting() != language {
         app.poll_workspace_model();
         assert!(
             Instant::now() < deadline,
@@ -627,7 +677,7 @@ fn wait_language(app: &mut App, language: &str) {
 
 fn r25_language(app: &mut App, language: &str) {
     app.run_named(None, "set_ui_language", &json!({"language":language}));
-    assert_eq!(app.workspace.global_string("ui_language", "en"), language);
+    assert_eq!(app.workspace.ui_language_setting(), language);
 }
 
 fn r25_paint(app: &mut App, wanted: &[&str]) {
@@ -1161,7 +1211,7 @@ fn unsupported_language_explains_the_fallback_in_the_previous_language() {
     );
     app.run_named(None, "set_ui_language", &json!({"language":"fr"}));
     assert_eq!(app.panels.message, "不支持此界面语言，已改用英语");
-    assert_eq!(app.workspace.global_string("ui_language", "zh-Hans"), "en");
+    assert_eq!(app.workspace.ui_language_setting(), "en");
     assert_eq!(role(&app.application_menu(), "view").caption, "View");
     app.workspace.wait_resources();
     let settings = fs::read_to_string(
@@ -1278,7 +1328,7 @@ fn user_catalog_reloads_menus_palette_panels_status_and_accessibility() {
     wait_for_catalog(&mut app, false);
     assert_eq!(app.panels.message, "[Ûnsûppôrtêd]");
     assert!(app.workspace.translations.language().is_english());
-    assert_eq!(app.workspace.global_string("ui_language", "en"), "x-test");
+    assert_eq!(app.workspace.ui_language_setting(), "x-test");
     let choices = language_rows(&mut app);
     assert!(!choices.iter().any(|(tag, _, _)| tag == "x-test"));
     assert!(choices.contains(&("en".into(), "English".into(), true)));
@@ -1446,6 +1496,17 @@ fn check_static_ui_captions(tag: &vel_i18n::Language, catalog: &vel_i18n::Catalo
     captions.extend(generated.into_iter().map(|item| item.caption));
     let rust_keys: &[&str] = include!(concat!(env!("OUT_DIR"), "/ui_keys.rs"));
     captions.extend(rust_keys.iter().map(|key| (*key).to_owned()));
+    for source in crate::settings_ui::source_text() {
+        assert!(
+            catalog
+                .strings
+                .get(source)
+                .is_some_and(|text| !text.trim().is_empty()),
+            "{} missing setting copy: {source}",
+            tag.as_str()
+        );
+        captions.insert(source.to_owned());
+    }
     captions.extend(
         vel_fileio::ENCODINGS
             .iter()

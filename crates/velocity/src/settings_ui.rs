@@ -84,7 +84,8 @@ mod model {
         decimal: bool,
         #[serde(default)]
         aliases: Vec<String>,
-        name: Option<String>,
+        name: String,
+        description: String,
         #[serde(default)]
         choices: Vec<Value>,
         #[serde(default)]
@@ -141,16 +142,15 @@ mod model {
 
     #[derive(Debug, Deserialize)]
     struct Reference {
-        description: String,
         effect: Effect,
+        #[serde(default)]
+        compatibility: bool,
     }
 
     #[derive(Debug)]
     struct Definition {
         key: String,
-        name: String,
-        description: String,
-        effect: Effect,
+        reference: Reference,
         meta: Meta,
     }
 
@@ -161,33 +161,19 @@ mod model {
         let mut reference: BTreeMap<String, Reference> =
             serde_json::from_str(REFERENCE).expect("generated settings reference");
         meta.into_iter()
-            .map(|(key, mut meta)| {
-                let Reference {
-                    description,
-                    effect,
-                } = reference.remove(&key).expect("checked reference coverage");
-                let name = meta.name.take().unwrap_or_else(|| human_name(&key));
-                Definition {
-                    key,
-                    name,
-                    description,
-                    effect,
-                    meta,
-                }
+            .map(|(key, meta)| Definition {
+                reference: reference.remove(&key).expect("checked reference coverage"),
+                key,
+                meta,
             })
             .collect()
     });
 
-    fn human_name(key: &str) -> String {
-        key.split(['_', '.'])
-            .map(|word| match word {
-                "ui" => "UI".into(),
-                "git" => "Git".into(),
-                "eof" => "EOF".into(),
-                _ => word[..1].to_ascii_uppercase() + &word[1..],
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+    #[cfg(test)]
+    pub(crate) fn source_text() -> impl Iterator<Item = &'static str> {
+        DEFINITIONS
+            .iter()
+            .flat_map(|def| [def.meta.name.as_str(), def.meta.description.as_str()])
     }
 
     #[derive(Debug)]
@@ -213,7 +199,7 @@ mod model {
         }
 
         pub(super) fn next_window(&self) -> bool {
-            matches!(self.def.effect, Effect::NextWindow)
+            matches!(self.def.reference.effect, Effect::NextWindow)
         }
 
         pub(super) fn editable(&self) -> bool {
@@ -610,12 +596,17 @@ mod model {
                 let modified = user.contains_key(key);
                 *self.groups.entry(def.meta.group).or_default() += usize::from(modified);
                 self.modified_count += usize::from(modified);
-                let name = tr.tr(&def.name).into_owned();
-                let description = tr.tr(&def.description).into_owned();
-                let mut search = format!(
-                    "{key}\n{}\n{name}\n{}\n{description}",
-                    def.name, def.description
-                );
+                let name = tr.tr(&def.meta.name).into_owned();
+                let description = tr.tr(&def.meta.description).into_owned();
+                let mut search = format!("{key}\n{}\n{}", def.meta.name, def.meta.description);
+                for catalog in tr.installed_catalogs() {
+                    for source in [&def.meta.name, &def.meta.description] {
+                        if let Some(localized) = catalog.strings.get(source) {
+                            search.push('\n');
+                            search.push_str(localized);
+                        }
+                    }
+                }
                 for alias in &def.meta.aliases {
                     search.push('\n');
                     search.push_str(alias);
@@ -625,17 +616,15 @@ mod model {
                     value: effective(key).cloned().unwrap_or_default(),
                     name,
                     description,
-                    effect: (!matches!(def.effect, Effect::Immediate)).then(|| {
+                    effect: (!matches!(def.reference.effect, Effect::Immediate)).then(|| {
                         tr.tr_fmt(
                             "Takes effect: {time}",
-                            &[("time", def.effect.label(tr).into_owned())],
+                            &[("time", def.reference.effect.label(tr).into_owned())],
                         )
                     }),
                     search: search.to_lowercase(),
                     modified,
-                    compatibility: def
-                        .description
-                        .contains("accepted for compatibility, no effect in Velocity"),
+                    compatibility: def.reference.compatibility,
                     visible: def.meta.show_when.iter().all(|(key, condition)| {
                         effective(key.as_str()).is_some_and(|value| condition.matches(value))
                     }),
@@ -1611,7 +1600,14 @@ mod model {
         pub(crate) fn results(&self) -> impl Iterator<Item = (&str, &str)> {
             self.filtered
                 .iter()
-                .map(|&i| (self.rows[i].key(), self.rows[i].def.name.as_str()))
+                .map(|&i| (self.rows[i].key(), self.rows[i].name.as_str()))
+        }
+
+        #[cfg(test)]
+        pub(crate) fn localized_copy(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+            self.rows
+                .iter()
+                .map(|row| (row.key(), row.name.as_str(), row.description.as_str()))
         }
 
         pub(crate) fn read_only(&self) -> Option<&str> {
@@ -1859,6 +1855,8 @@ mod model {
     }
 }
 
+#[cfg(all(target_os = "macos", test))]
+pub(crate) use model::source_text;
 #[cfg(target_os = "macos")]
 pub(crate) use model::{Navigation, Page};
 #[cfg(not(target_os = "macos"))]

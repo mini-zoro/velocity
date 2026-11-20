@@ -742,6 +742,7 @@ pub struct Workspace {
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
     pub(crate) translations: vel_i18n::Translator,
+    preferred_languages: crate::ui_language::PreferredLanguages,
     unsupported_ui_language: Option<String>,
     pub(crate) ui_language_notice: Option<String>,
     pub(crate) ui: crate::ui_text::Chrome,
@@ -1018,13 +1019,19 @@ fn snippet_title(name: &str) -> &str {
 impl Configuration {
     #[cfg(test)]
     fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
-        Self::load_with_window_overrides(data_dir, project, Some(Default::default()))
+        Self::load_with_window_overrides(
+            data_dir,
+            project,
+            Some(Default::default()),
+            Default::default(),
+        )
     }
 
     fn load_with_window_overrides(
         data_dir: Option<PathBuf>,
         project: Option<PathBuf>,
         window_overrides: Option<serde_json::Map<String, Value>>,
+        preferred_languages: crate::ui_language::PreferredLanguages,
     ) -> Result<Self, String> {
         let mut resources = Resources::default();
         crate::theme_ui::bundled(&mut resources);
@@ -1504,8 +1511,12 @@ impl Configuration {
                     .into_iter()
                     .find_map(|layer| settings.layer(layer).get("ui_language"))
                     .and_then(Value::as_str)
-                    .unwrap_or("en");
-                tr.select(tr.resolve(language).unwrap_or_default());
+                    .unwrap_or(crate::ui_language::DEFAULT_UI_LANGUAGE);
+                tr.select(
+                    preferred_languages
+                        .resolve(&tr, language)
+                        .unwrap_or_default(),
+                );
                 tr
             });
             resource_reports.push(tr.tr_fmt(
@@ -1855,6 +1866,41 @@ impl Workspace {
         watch: bool,
         window_overrides: Option<serde_json::Map<String, Value>>,
     ) -> Result<Self, String> {
+        Self::new_configured(
+            text,
+            data_dir,
+            project,
+            watch,
+            window_overrides,
+            Default::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_preferred_languages(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        watch: bool,
+        preferred: &'static [&'static str],
+    ) -> Result<Self, String> {
+        Self::new_configured(
+            text,
+            data_dir,
+            None,
+            watch,
+            Some(Default::default()),
+            crate::ui_language::PreferredLanguages(preferred),
+        )
+    }
+
+    fn new_configured(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        watch: bool,
+        window_overrides: Option<serde_json::Map<String, Value>>,
+        preferred_languages: crate::ui_language::PreferredLanguages,
+    ) -> Result<Self, String> {
         let Configuration {
             appearance,
             themes,
@@ -1883,6 +1929,7 @@ impl Workspace {
             data_dir.clone(),
             project.clone(),
             window_overrides,
+            preferred_languages,
         )?;
         report_ignored_keymaps(
             &IgnoredKeymaps::new(),
@@ -1950,6 +1997,7 @@ impl Workspace {
             palette,
             ui: crate::ui_text::Chrome::new(&localizer),
             translations: localizer,
+            preferred_languages,
             unsupported_ui_language: None,
             ui_language_notice: None,
             menu_revision: 0,
@@ -2054,9 +2102,18 @@ impl Workspace {
         self.menu_revision = self.menu_revision.wrapping_add(1);
         true
     }
+    pub(crate) fn ui_language_setting(&self) -> &str {
+        self.global_string("ui_language", crate::ui_language::DEFAULT_UI_LANGUAGE)
+    }
+
+    pub(crate) fn resolve_ui_language(&self, requested: &str) -> Option<vel_i18n::Language> {
+        self.preferred_languages
+            .resolve(&self.translations, requested)
+    }
+
     pub(crate) fn sync_ui_language(&mut self) -> bool {
-        let setting = self.global_string("ui_language", "en");
-        let language = self.translations.resolve(setting);
+        let setting = self.ui_language_setting();
+        let language = self.resolve_ui_language(setting);
         if language.is_some() {
             self.unsupported_ui_language = None;
         } else if self.unsupported_ui_language.as_deref() != Some(setting) {
@@ -2076,7 +2133,7 @@ impl Workspace {
         true
     }
     pub(crate) fn checked_ui_language(&self) -> &str {
-        if self.global_string("ui_language", "en") == "auto" {
+        if self.ui_language_setting() == "auto" {
             "auto"
         } else {
             self.translations.matched_language().as_str()
@@ -3141,6 +3198,7 @@ impl Workspace {
             let data = self.data_dir.clone();
             let project = self.project.clone();
             let overrides = self.settings.layer(Layer::Window).clone();
+            let preferred_languages = self.preferred_languages;
             match std::thread::Builder::new()
                 .name("velocity-resources".into())
                 .spawn(move || {
@@ -3148,6 +3206,7 @@ impl Workspace {
                         data,
                         project,
                         Some(overrides),
+                        preferred_languages,
                     ));
                 }) {
                 Ok(_) => self.config_rx = Some(rx),

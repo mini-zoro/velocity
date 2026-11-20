@@ -1,3 +1,26 @@
+# Round 31 Lane B Settings (native checks pending)
+
+Use fixture HOME/SHELL and a temporary data directory.
+
+- [ ] Press ⌘, from the editor and from graphical Settings. Verify the JSON
+  window has a read-only Default pane and an editable User pane. Repeat via
+  Velocity › Settings…, Preferences › Settings…, and Preferences: Settings
+  in the palette. Only the application-menu row advertises ⌘,.
+- [ ] Open Preferences › Settings (Graphical)… and Preferences: Settings
+  (Graphical). Run the latter from the JSON window; use Edit in JSON from
+  the page to return to the two-pane editor.
+- [ ] With no User `ui_language`, check Follow System. Use macOS preferences
+  with an unsupported language followed by Simplified Chinese, then with
+  English before Simplified Chinese. Check that an explicit language wins.
+- [ ] In each language, search for a name in the other language. In the
+  dense rows, check names, descriptions, and unlocalized keys and values.
+  Open an enum and verify the row's JSON link is hidden until it closes.
+  Check that `draw_normal` fits and only long tags use an ellipsis.
+
+Offscreen check: `velocity --render-scenes "$OUT" --only settings_ui --language zh-Hans --appearance both --scale 1,2`.
+Without a Metal adapter this falls back to flat software text snapshots. Use
+Metal for visual checks of the themed surfaces.
+
 # Round 23 Lane B (native checks pending)
 
 Use fixture HOME/SHELL and a temporary data directory. No native window was run

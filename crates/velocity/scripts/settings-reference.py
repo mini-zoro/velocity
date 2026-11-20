@@ -46,6 +46,33 @@ EFFECT_LABELS = {
     "next_vintage_view": "When a view enters Vintage",
 }
 
+# Background references belong in the documentation, not the shipped JSON editor
+# or the Settings page. Keep these next to the generator for the Notes column.
+SETTINGS_REFERENCE = "https://docs.sublimetext.io/reference/settings.html"
+ARCHIVED_REFERENCE = "https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html"
+CHANGELOG = "https://www.sublimetext.com/download"
+NOTES = {
+    "draw_white_space": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
+    "highlight_line": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
+    "match_selection": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
+    "trim_only_modified_white_space": f"[Build 4107]({CHANGELOG})",
+    "reload_file_on_change": f"[Build 4107]({CHANGELOG})",
+    "scroll_past_end": f"[Build 4107]({CHANGELOG})",
+    "folder_exclude_patterns": f"[Global settings]({SETTINGS_REFERENCE}#global-settings)",
+    "indent_guide_options": "[Active-guide default](https://www.sublimetext.com/updates/2/stable/release_notes.html)",
+    "always_show_minimap_viewport": f"[Visual settings]({SETTINGS_REFERENCE}#visual-settings)",
+    "block_caret": f"[Settings reference]({SETTINGS_REFERENCE}); [archived reference]({ARCHIVED_REFERENCE})",
+    "mouse_wheel_switches_tabs": f"[Global settings]({SETTINGS_REFERENCE}#global-settings)",
+    "result_file_regex": "[Build system options](https://www.sublimetext.com/docs/build_systems.html#exec-target-options)",
+    "update_system_recent_files": f"[Build 4143]({CHANGELOG})",
+    "draw_unicode_white_space": f"[Builds 4107 and 4126]({CHANGELOG})",
+    "image_file_patterns": f"[Image file selection]({CHANGELOG})",
+    "index_exclude_patterns": "[Indexing settings](https://www.sublimetext.com/docs/indexing.html#settings)",
+    "spelling_selector": f"[Scope selector]({ARCHIVED_REFERENCE}#system-and-miscellaneous-settings)",
+    "ignored_packages": "[Enabling Vintage](https://www.sublimetext.com/docs/vintage.html#enabling-vintage)",
+    "vintage_ctrl_keys": "[Vintage Ctrl keys](https://www.sublimetext.com/docs/vintage.html#ctrl-keys)",
+}
+
 
 def unique_object(pairs):
     obj = {}
@@ -65,7 +92,7 @@ def jsonc(source, *, unique=False):
 
 
 def settings_file(name):
-    """Read JSONC and original author descriptions without stripping quoted text."""
+    """Read JSONC and optional explanatory comments for the reference's notes."""
     source = (DEFAULT / name).read_text(encoding="utf-8-sig")
     descriptions = {}
     for match in re.finditer(r'^((?:  //[^\n]*\n)+)  "([^"]+)":', source, re.M):
@@ -211,7 +238,7 @@ def uncovered_settings(shipped, descriptions, readers):
                       descriptions.get(key, "").lower()))
 
 
-def ui_reference(defaults, descriptions):
+def ui_reference(defaults, notes):
     metadata = jsonc((DEFAULT / "settings-ui.json").read_text(encoding="utf-8"), unique=True)
     missing, extra = defaults.keys() - metadata.keys(), metadata.keys() - defaults.keys()
     if missing or extra:
@@ -221,10 +248,14 @@ def ui_reference(defaults, descriptions):
         raise ValueError(f"Unshipped settings in effect table: {sorted(extra_timing)}")
     data = {}
     for key, meta in sorted(metadata.items()):
-        description = meta.get("note", descriptions.get(key, ""))
-        if not description:
-            raise ValueError(f"{key}: needs a description in the defaults or Settings UI metadata")
-        data[key] = {"description": description, "effect": timing.get(key, "immediate")}
+        for field in ("name", "description"):
+            value = meta.get(field)
+            if not isinstance(value, str) or not value.strip() or len(value.splitlines()) != 1:
+                raise ValueError(f"{key}: needs a one-line {field} in Settings UI metadata")
+        row = {"description": meta["description"], "effect": timing.get(key, "immediate")}
+        if NO_EFFECT in notes.get(key, "").lower():
+            row["compatibility"] = True
+        data[key] = row
     return data
 
 
@@ -234,7 +265,7 @@ def inline(value):
     return f"`` {encoded} ``"
 
 
-def reference(defaults, mac, descriptions, readers, ui):
+def reference(defaults, mac, notes, readers, ui):
     lines = [
         BEGIN,
         "## Shipped and recognized settings",
@@ -243,19 +274,22 @@ def reference(defaults, mac, descriptions, readers, ui):
         "column means the general default applies. Links point to runtime readers,",
         "including typed consumers, shipped theme guards and key-binding contexts.",
         "",
-        "| Setting | General default | macOS override | Takes effect | Description and read sites |",
-        "| --- | --- | --- | --- | --- |",
+        "| Setting | General default | macOS override | Takes effect | Description | Notes |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for key, paths in sorted(readers.items()):
         default = inline(defaults[key]) if key in defaults else "Not shipped"
         platform = inline(mac[key]) if key in mac else ""
         row = ui.get(key)
         effect = EFFECT_LABELS[row["effect"]] if row else ""
-        description = descriptions.get(key, row["description"] if row else "").replace("|", r"\|")
+        description = row["description"] if row else ""
         refs = ", ".join(
             f"[{path.parts[1]}/{path.name}](../{quote(path.as_posix())})" for path in sorted(paths)
         )
-        lines.append(f"| `{key}` | {default} | {platform} | {effect} | {f'{description} {refs}'.strip()} |")
+        details = " ".join(part for part in (notes.get(key), NOTES.get(key), refs)
+                           if part and part != description)
+        description, details = (value.replace("|", r"\|") for value in (description, details))
+        lines.append(f"| `{key}` | {default} | {platform} | {effect} | {description} | {details} |")
     return "\n".join([*lines, END])
 
 
@@ -263,21 +297,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    defaults, descriptions = settings_file("Preferences.sublime-settings")
-    mac, mac_descriptions = settings_file("Preferences (OSX).sublime-settings")
-    descriptions = mac_descriptions | descriptions
+    defaults, notes = settings_file("Preferences.sublime-settings")
+    mac, mac_notes = settings_file("Preferences (OSX).sublime-settings")
+    notes = mac_notes | notes
     shipped = defaults.keys() | mac.keys()
     readers = read_sites(shipped)
-    if missing := uncovered_settings(shipped, descriptions, readers):
+    if missing := uncovered_settings(shipped, notes, readers):
         parser.exit(1, f"Shipped settings need a reader or an explicit '{NO_EFFECT}' note: "
                        f"{', '.join(missing)}\n")
     try:
-        ui = ui_reference(defaults, descriptions)
+        ui = ui_reference(defaults, notes)
     except ValueError as error:
         parser.exit(1, f"{error}\n")
-    generated = reference(defaults, mac, descriptions, readers, ui)
-    data = "{\n" + ",\n".join(f"  {json.dumps(key)}: {json.dumps(row, ensure_ascii=False)}"
-                              for key, row in ui.items()) + "\n}\n"
+    generated = reference(defaults, mac, notes, readers, ui)
+    reference_fields = {key: {k: v for k, v in row.items() if k != "description"}
+                        for key, row in ui.items()}
+    data = "{\n" + ",\n".join(f"  {json.dumps(key)}: {json.dumps(row)}"
+                              for key, row in reference_fields.items()) + "\n}\n"
     source = DOC.read_text(encoding="utf-8")
     if BEGIN in source:
         result = source[:source.index(BEGIN)] + generated + source[source.index(END) + len(END):]

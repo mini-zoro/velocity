@@ -1,4 +1,4 @@
-// macOS layer: https://www.sublimetext.com/docs/settings.html
+// macOS-specific defaults.
 {
   "font_face": "Menlo",
   // Keep Velocity's scroll and animation defaults on macOS. Reduce Motion wins.

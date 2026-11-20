@@ -10,8 +10,8 @@ public sources, the decision is the user's and is recorded here.
 
 | # | Topic | Decision | Status |
 | --- | --- | --- | --- |
-| D1 | ⌘, | Opens the Default/User two-pane JSON settings, as in Sublime. The graphical Settings page is reached from Preferences › Settings…, the command palette and a button in the JSON window. | To do (revert R1's ⌘, change) |
-| D2 | Default UI language | `ui_language: "auto"`: Simplified Chinese when it is the first macOS preferred language that has a catalog, otherwise English. | To do (default was `"en"`) |
+| D1 | ⌘, | Opens the Default/User two-pane JSON settings, as in Sublime. Use Preferences › Settings (Graphical)… or Preferences: Settings (Graphical) for the page. The palette command also works from the JSON window. | Done (round 31 lane B) |
+| D2 | Default UI language | `ui_language: "auto"`: the first supported macOS preferred language, otherwise English. Explicit language preferences override it. | Done (round 31 lane B) |
 | D3 | Find in Files results | A "Find Results" tab like Sublime: scrollable, editable, double-click / Return jumps to the match; a "Use Buffer"-style toggle in the panel switches to the bottom output panel. | Done (round 31 lane C) |
 | D4 | Opening files from Finder / Dock | `open_files_in_new_window: "never"` stays the default: files open as tabs in the current window. | Done (unchanged) |
 | D5 | Closing windows / relaunch | Closed windows do not come back at launch; quitting restores the windows open at quit (`hot_exit`). Closing a non-project window with unsaved changes prompts. | Done (round 28 lane A) |

@@ -321,6 +321,13 @@ impl Translator {
             .map(|(_, catalog)| catalog.as_ref())
     }
 
+    /// Installed catalogs, including ones not selected for display.
+    pub fn installed_catalogs(&self) -> impl Iterator<Item = &Catalog> {
+        self.catalogs
+            .iter()
+            .flat_map(|catalogs| catalogs.iter().map(|(_, catalog)| catalog))
+    }
+
     /// The cache key for derived translations.
     pub fn revision(&self) -> u64 {
         self.revision

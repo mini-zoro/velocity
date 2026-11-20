@@ -2483,7 +2483,7 @@ impl App {
             // The preference is app-wide; the ordinary User writer also updates
             // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
             let (language, note) = match args["language"].as_str() {
-                Some(requested) if self.workspace.translations.resolve(requested).is_some() => {
+                Some(requested) if self.workspace.resolve_ui_language(requested).is_some() => {
                     (requested, None)
                 }
                 _ => (
@@ -2491,7 +2491,7 @@ impl App {
                     Some(self.workspace.ui.unsupported_language.to_string()),
                 ),
             };
-            if self.workspace.global_string("ui_language", "en") != language {
+            if self.workspace.ui_language_setting() != language {
                 self.workspace
                     .set_user_preference("ui_language", json!(language))?;
                 if self.workspace.sync_ui_language() {
@@ -5645,23 +5645,19 @@ fn localized_menu_caption<'a>(
 
 fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Translator) {
     // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#App-menu
-    // Keep the platform shortcut in the application menu and the explicit
-    // graphical entry beside Settings – JSON under Preferences.
+    // Advertise the JSON settings shortcut once, in the application menu.
     let settings = entries
         .iter_mut()
         .find(|item| item.id == "preferences")
         .and_then(|item| {
-            let index = item
-                .children
-                .iter()
-                .position(|entry| entry.id == "settings")?;
-            if item.children[index].command.as_deref() == Some("show_settings") {
-                let settings = item.children[index].clone();
-                item.children[index].shortcut = None;
-                Some(settings)
-            } else {
-                Some(item.children.remove(index))
-            }
+            item.children
+                .iter_mut()
+                .find(|entry| entry.id == "settings")
+        })
+        .map(|entry| {
+            let settings = entry.clone();
+            entry.shortcut = None;
+            settings
         });
     let mut rows = Vec::new();
     for (caption, command, shortcut) in [
