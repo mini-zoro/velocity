@@ -154,7 +154,7 @@
 {"class": "tab_control", "content_margin": [12, 8], "close_button_side": "right", "max_margin_trim": 6, "layer1.texture": "Theme - Velocity/tab-divider.png", "layer1.tint": "var(line)", "layer1.opacity": 1.0, "layer1.inner_margin": [0, 7, 1, 7], "layer1.draw_center": false},
 {"class": "tab_control", "attributes": ["hover"], "layer0.tint": "var(fg)", "layer0.opacity": {"target": 0.05, "speed": 8, "interpolation": "smoothstep"}},
 {"class": "tab_control", "attributes": ["selected"], "layer0.opacity": 1.0, "tint_index": 0, "layer1.opacity": 0.0},
-{"class": "tab_control", "attributes": ["selected", "focused"], "layer2.texture": "Theme - Velocity/tab-indicator.png", "layer2.tint": "var(accent)", "layer2.opacity": 1.0, "layer2.inner_margin": [0, 2, 0, 0], "layer2.draw_center": false},
+{"class": "tab_control", "attributes": ["selected", "focused"], "layer2.texture": "Theme - Velocity/tab-indicator.png", "layer2.tint": "var(accent)", "layer2.opacity": 1.0, "layer2.inner_margin": [1, 2, 1, 0], "layer2.draw_center": false},
 {"class": "tab_label", "fg": "var(muted)"},
 {"class": "tab_label", "parents": [{"class": "tab_control", "attributes": ["selected"]}], "fg": "var(fg)"},
 {"class": "tab_label", "parents": [{"class": "tab_control", "attributes": ["hover"]}], "fg": "var(fg)"},

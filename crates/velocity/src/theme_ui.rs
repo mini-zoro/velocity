@@ -839,6 +839,18 @@ const BUNDLED: &[(&str, &[u8])] = &[
         include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator@3x.png"),
     ),
     (
+        "tab-indicator-rounded.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded.png"),
+    ),
+    (
+        "tab-indicator-rounded@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded@2x.png"),
+    ),
+    (
+        "tab-indicator-rounded@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded@3x.png"),
+    ),
+    (
         "wrap.png",
         include_bytes!("../resources/Packages/Theme - Velocity/wrap.png"),
     ),
@@ -851,3 +863,43 @@ const BUNDLED: &[(&str, &[u8])] = &[
         include_bytes!("../resources/Packages/Theme - Velocity/wrap@3x.png"),
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every texture the bundled themes and file icons name is embedded at 1x, 2x and 3x.
+    /// `tab-indicator-rounded.png` was missing, so `file_tab_style: "rounded"` silently
+    /// dropped the focused tab's accent line.
+    #[test]
+    fn every_texture_named_by_a_bundled_theme_is_bundled_at_every_density() {
+        let names: std::collections::BTreeSet<_> = BUNDLED
+            .iter()
+            .chain(PALETTE_MASKS)
+            .map(|(name, _)| *name)
+            .collect();
+        let mut referenced = std::collections::BTreeSet::new();
+        for (name, bytes) in BUNDLED {
+            if name.ends_with(".png") {
+                continue;
+            }
+            let text = std::str::from_utf8(bytes).unwrap();
+            for piece in text.split("Theme - Velocity/").skip(1) {
+                // Themes name the file; file icons name it without the extension.
+                let texture = piece.split('"').next().unwrap();
+                referenced.insert(texture.strip_suffix(".png").unwrap_or(texture));
+            }
+        }
+        assert!(referenced.contains("tab-indicator-rounded"));
+        assert!(referenced.contains("file-code"));
+        for stem in referenced {
+            for variant in [
+                format!("{stem}.png"),
+                format!("{stem}@2x.png"),
+                format!("{stem}@3x.png"),
+            ] {
+                assert!(names.contains(variant.as_str()), "{variant} is not bundled");
+            }
+        }
+    }
+}

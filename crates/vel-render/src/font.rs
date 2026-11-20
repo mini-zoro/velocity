@@ -891,6 +891,54 @@ mod tests {
     }
     #[cfg(target_os = "macos")]
     #[test]
+    fn bold_ui_runs_keep_their_weight_in_the_cjk_fallback() {
+        // The system UI font's Chinese fallback answers a bold request with a virtual font
+        // that has no file of its own (only `wght` 700). Side bar headings are bold 11 pt:
+        // "打开的文件" must be as bold as "OPEN FILES", not the regular face.
+        let mut fonts = super::Fonts::load().unwrap();
+        let bold = crate::scene::FontStyle {
+            bold: true,
+            italic: false,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let _ = fonts.shape_ui("打开", "system", 22., Default::default());
+            let _ = fonts.shape_ui("打开", "system", 22., bold);
+            if !fonts.fallback_pending() {
+                break;
+            }
+            while fonts.fallback_pending() {
+                assert!(std::time::Instant::now() < deadline);
+                fonts.poll_fallbacks();
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+        }
+        let regular = fonts.shape_ui("打开", "system", 22., Default::default());
+        let heavy = fonts.shape_ui("打开", "system", 22., bold);
+        let (r, b) = (regular.glyphs[0], heavy.glyphs[0]);
+        assert!(r.id != 0 && b.id != 0, "{}", fonts.metadata());
+        assert!(
+            fonts.warnings.iter().all(|w| !w.contains("no file URL")),
+            "{:?}",
+            fonts.warnings
+        );
+        let ink = |face: u16, id: u16, fonts: &mut super::Fonts| {
+            let image = fonts.rasterize(face, id, 22., 0).unwrap();
+            image.data.iter().map(|a| u32::from(*a)).sum::<u32>()
+        };
+        let regular_ink = ink(r.face, r.id, &mut fonts);
+        let bold_ink = ink(b.face, b.id, &mut fonts);
+        assert!(
+            bold_ink > regular_ink * 6 / 5,
+            "bold {bold_ink} vs regular {regular_ink} ({} / {})",
+            fonts.faces[r.face as usize].name,
+            fonts.faces[b.face as usize].name
+        );
+        // Full-width characters keep their one-em advance in either weight.
+        assert!((heavy.advance - regular.advance).abs() < 0.5);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
     fn variable_system_font_bold_and_text_cut_follow_coretext() {
         // The system UI font is one variable file: CoreText's bold face is that file at
         // wght 700 and small text uses the opsz 17 cut. Both must reach the rasterizer.

@@ -3567,7 +3567,18 @@ impl App {
                     let settings = &self.workspace.editor().settings;
                     let tab_style =
                         theme.style(100 + *sheet, &vel_theme::ElementPath(&path), settings);
-                    theme.surface(&mut chrome, &tab_style, rect, bar);
+                    // A selected rounded tab joins the sheet below it, so only its top
+                    // corners are round: its box runs one radius past the strip and is
+                    // clipped there, leaving no notches at the sheet's edge.
+                    let surface = if selected && tab_style.radius > 0. {
+                        Rect {
+                            height: rect.height + f64::from(tab_style.radius),
+                            ..rect
+                        }
+                    } else {
+                        rect
+                    };
+                    theme.surface(&mut chrome, &tab_style, surface, bar);
                     let label_path = [
                         path[0],
                         path[1],

@@ -261,14 +261,12 @@ impl Panels {
     ) -> FindControls {
         let toggles = Self::find_toggle_options(panel).len();
         let buttons = Self::panel_buttons(panel).len();
-        // Inputs span [x + label, x + width - 40] (DIPs); the full area keeps an 8-DIP margin.
-        let label = Self::find_label_column(
-            width,
-            s,
-            Self::find_edge_reserve(panel, width, s),
-            sizing.caption,
-        );
-        let aligned = (x + label * s, x + width - 40. * s);
+        // Inputs span [x + label, x + width - 12 - reserve] (DIPs): 40 beside the close
+        // button, 66 when Find in Files also shows its Where button. The buttons end with the
+        // inputs, not under the edge buttons. The full area keeps an 8-DIP margin.
+        let reserve = Self::find_edge_reserve(panel, width, s);
+        let label = Self::find_label_column(width, s, reserve, sizing.caption);
+        let aligned = (x + label * s, x + width - (12. + reserve) * s);
         let full = (x + 8. * s, x + width - 8. * s);
         let span = |r: (f64, f64)| ((r.1 - r.0) / s).max(0.);
         let run = |n: usize, item: f64, gap: f64| {
@@ -1366,6 +1364,43 @@ mod tests {
             w.sync_ui_language();
             p.paint(&w, &mut Scene::default());
             assert_eq!(p.review.tooltip.as_ref().unwrap().0, "位置…");
+        }
+    }
+    /// The action buttons end where the inputs end. Find in Files reserves room for its Where
+    /// button beside the close button; its Find and Replace buttons ran 26 DIP past the inputs,
+    /// under that pair, instead of lining up with the fields above them.
+    #[test]
+    fn find_panel_buttons_end_with_the_inputs() {
+        for name in ["find", "replace", "find_in_files"] {
+            for scale in [1., 2.] {
+                for width in [640., 760., 980., 1200., 1600.] {
+                    let (mut w, mut p) = setup("text");
+                    p.ui_scale = scale;
+                    p.side_visible = false;
+                    action(&mut p, &mut w, "show_panel", json!({"panel": name}));
+                    p.layout(Size {
+                        width: width * scale,
+                        height: 800. * scale,
+                    });
+                    p.sync_widgets(&w);
+                    let at = format!("{name} ×{scale} {width}");
+                    let controls = p.find_controls().unwrap();
+                    let last = *controls.buttons.last().unwrap();
+                    let input = p.query.bounds;
+                    assert!(
+                        (last.x + last.width - (input.x + input.width)).abs() < 0.01,
+                        "{at}: button {last:?} input {input:?}"
+                    );
+                    // Edge buttons stay to the right of the action area, on the first row.
+                    let edge = if name == "find_in_files" {
+                        p.find_options_rect()
+                    } else {
+                        p.close_button_rect()
+                    };
+                    assert!(edge.x >= last.x + last.width, "{at}: {edge:?} {last:?}");
+                    assert!(controls.toggles[0].x == input.x, "{at}");
+                }
+            }
         }
     }
     #[test]

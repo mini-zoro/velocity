@@ -208,7 +208,10 @@ png("edge-top", lambda x, y, s: y < 1)
 png("edge-bottom", lambda x, y, s: y >= 15)
 png("edge-right", lambda x, y, s: x >= 15)
 png("tab-indicator", lambda x, y, s: y < 2)
-png("tab-indicator-rounded", lambda x, y, s: 6 <= x < 10 and y < 2)
+# The rounded bar is nine-sliced at [6, 2, 6, 0]: its ink starts one DIP inside each corner
+# slice, so the stretched middle never filters against transparent texels (that faded
+# the bar's ends over several DIPs) and the ends stay crisp, 5 DIPs from the tab's sides.
+png("tab-indicator-rounded", lambda x, y, s: 5 <= x < 11 and y < 2)
 png("tab-divider", lambda x, y, s: x >= 15 and 7 <= y < 9)
 
 
@@ -291,7 +294,9 @@ rule("tab_control", content_margin=[12, 8], close_button_side="right", max_margi
      **texture("tab-divider", "line", [0, 7, 1, 7]))
 rule("tab_control", attributes=["hover"], **fill("fg", .05, animated=True))
 rule("tab_control", attributes=["selected"], **{"layer0.opacity": 1.0, "tint_index": 0, "layer1.opacity": 0.0})
-rule("tab_control", attributes=["selected", "focused"], **texture("tab-indicator", "accent", [0, 2, 0, 0], layer=2))
+# One-DIP end slices keep the bar's ends crisp: a slice stretched to the texture's edge filters
+# against the atlas around it, which faded the bar over its first and last 6 DIPs.
+rule("tab_control", attributes=["selected", "focused"], **texture("tab-indicator", "accent", [1, 2, 1, 0], layer=2))
 rule("tab_label", fg="var(muted)")
 for parent in ("selected", "hover"):
     rule("tab_label", parents=[{"class": "tab_control", "attributes": [parent]}], fg="var(fg)")

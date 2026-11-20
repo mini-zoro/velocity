@@ -39,8 +39,10 @@ pub fn font_variant(
     original: &NativeFont,
     style: crate::scene::FontStyle,
 ) -> Result<(std::path::PathBuf, String, NativeFont), String> {
-    use objc2_core_foundation::CFURL;
-    use objc2_core_text::{CTFontSymbolicTraits, kCTFontURLAttribute};
+    use objc2_core_foundation::{CFDictionary, CFString, CFURL};
+    use objc2_core_text::{
+        CTFontDescriptor, CTFontSymbolicTraits, kCTFontURLAttribute, kCTFontVariationAttribute,
+    };
     let mut traits = CTFontSymbolicTraits::empty();
     if style.bold {
         traits |= CTFontSymbolicTraits::TraitBold;
@@ -59,12 +61,45 @@ pub fn font_variant(
     }
     .ok_or("font family has no requested weight/slant")?;
     // SAFETY: immutable attributes are read from a live retained CTFont.
-    let (url, name) = unsafe {
+    let (mut url, mut name) = unsafe {
         (
             font.attribute(kCTFontURLAttribute),
             font.post_script_name().to_string(),
         )
     };
+    let mut font = font;
+    if url.is_none() {
+        // A cascade face can answer with a virtual font that has no file, only a weight
+        // variation: the system UI font's Chinese fallback (PingFang) asked for bold returns
+        // `.AppleSimplifiedChineseFont-Bold` at `wght` 700. Apply that variation to the
+        // original file instead, so a bold run's CJK characters are bold like its Latin ones.
+        // SAFETY: reads an immutable dictionary copied from a live retained CTFont.
+        let variation = unsafe { font.variation() }.ok_or("variant font has no file URL")?;
+        // SAFETY: the exported attribute key is an immutable CFString.
+        let key = unsafe { kCTFontVariationAttribute };
+        let attributes =
+            CFDictionary::<CFString, CFDictionary>::from_slices(&[key], &[&*variation]);
+        // SAFETY: the dictionary holds one valid attribute; original is retained, and the
+        // null matrix preserves its transform.
+        let instance = unsafe {
+            original.copy_with_attributes(
+                13.,
+                std::ptr::null(),
+                Some(&CTFontDescriptor::with_attributes(attributes.as_opaque())),
+            )
+        };
+        // SAFETY: immutable attributes are read from a live retained CTFont.
+        (url, name) = unsafe {
+            (
+                instance.attribute(kCTFontURLAttribute),
+                instance.post_script_name().to_string(),
+            )
+        };
+        if font_variation(&instance).is_empty() {
+            return Err("font family has no requested weight/slant".into());
+        }
+        font = instance;
+    }
     let path = url
         .and_then(|a| a.downcast::<CFURL>().ok())
         .and_then(|u| u.to_file_path())

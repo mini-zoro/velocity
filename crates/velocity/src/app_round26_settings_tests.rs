@@ -55,9 +55,108 @@ fn rounded_and_square_tab_styles_change_the_drawn_tab_not_the_hit_rect() {
             let scene = app.scene();
             let tab = app.tab_hits[0].1;
             assert_eq!(tab, *original_hit.get_or_insert(tab));
+            // A selected rounded tab's box runs one radius below the strip, clipped there.
+            let below = f64::from(radius);
             assert!(scene.layers.iter().flat_map(|l| &l.surfaces).any(|s| {
-                matches!(s, Surface::Fill(q) if q.rect == tab && (q.radius - radius).abs() < 0.01)
+                matches!(s, Surface::Fill(q) if q.rect == Rect { height: tab.height + below, ..tab }
+                    && q.clip.y + q.clip.height == tab.y + tab.height
+                    && (q.radius - radius).abs() < 0.01)
             }), "{dark} {style} {tab:?}");
+        }
+    }
+}
+
+/// `file_tab_style: "rounded"`: the selected tab rounds only its top corners (its bottom
+/// joins the sheet without notches), and a focused one keeps the accent line, 5 DIPs inside
+/// the round corners, with crisp ends. The rounded indicator texture was not bundled, so the
+/// line was lost.
+#[test]
+fn selected_rounded_tabs_join_the_sheet_and_keep_their_accent_line() {
+    let mut app = app(None);
+    for scale in [1., 2.] {
+        preference(&mut app, "ui_scale", json!(scale));
+        for dark in [false, true] {
+            app.workspace.set_appearance(dark).unwrap();
+            for (style, inset) in [("square", 0.), ("rounded", 5.)] {
+                preference(&mut app, "file_tab_style", json!(style));
+                let scene = app.scene();
+                let tab = app.tab_hits[0].1;
+                let bottom = tab.y + tab.height;
+                let surfaces: Vec<_> = scene.layers.iter().flat_map(|l| &l.surfaces).collect();
+                // No visible fill of the tab ends inside the strip with rounded corners.
+                for surface in &surfaces {
+                    if let Surface::Fill(q) = surface
+                        && q.radius > 0.
+                        && q.rect.x == tab.x
+                        && q.rect.width == tab.width
+                        && q.rect.y == tab.y
+                    {
+                        assert!(
+                            q.rect.y + q.rect.height >= bottom + f64::from(q.radius) - 0.01
+                                && q.clip.y + q.clip.height <= bottom + 0.01,
+                            "{style} {dark} ×{scale}: bottom corners are visible: {q:?}"
+                        );
+                    }
+                }
+                // The indicator's slices at the tab's top, and the extent of their ink.
+                let alpha = |q: &vel_render::scene::ImageQuad, col: usize, row: usize| {
+                    q.image.rgba[(row * q.image.width as usize + col) * 4 + 3]
+                };
+                let slices: Vec<_> = surfaces
+                    .iter()
+                    .filter_map(|s| match s {
+                        Surface::Image(q)
+                            if q.rect.y == tab.y
+                                && q.rect.x >= tab.x
+                                && q.rect.x + q.rect.width <= tab.x + tab.width
+                                && q.color[3] > 0.5
+                                && q.rect.height <= 2. * scale + 0.01 =>
+                        {
+                            Some(q)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let (mut left, mut right) = (f64::MAX, f64::MIN);
+                for q in &slices {
+                    let [x, y, w, h] = q.source.map(|v| v as usize);
+                    let inked: Vec<_> = (x..x + w)
+                        .filter(|&col| (y..y + h).any(|row| alpha(q, col, row) > 0))
+                        .collect();
+                    let (Some(&first), Some(&last)) = (inked.first(), inked.last()) else {
+                        continue;
+                    };
+                    let k = q.rect.width / w as f64;
+                    left = left.min(q.rect.x + (first - x) as f64 * k);
+                    right = right.max(q.rect.x + (last + 1 - x) as f64 * k);
+                    // A stretched slice must not filter against a transparent texel beside
+                    // it, or against the atlas past the texture's edge: either fades the bar's
+                    // ends over several DIPs.
+                    if k > 1.5 * scale * q.image.logical_size[0] as f64 / q.image.width as f64 {
+                        let width = q.image.width as usize;
+                        for row in y..y + h {
+                            let (start, end) = (alpha(q, x, row), alpha(q, x + w - 1, row));
+                            let before = if x > 0 { alpha(q, x - 1, row) } else { 0 };
+                            let after = if x + w < width {
+                                alpha(q, x + w, row)
+                            } else {
+                                0
+                            };
+                            assert_eq!(before, start, "{style}: slice {:?}", q.source);
+                            assert_eq!(after, end, "{style}: slice {:?}", q.source);
+                        }
+                    }
+                }
+                assert!(left < right, "{style} {dark} ×{scale}: no accent line");
+                assert!(
+                    (left - (tab.x + inset * scale)).abs() < 0.01,
+                    "{style} {left}"
+                );
+                assert!(
+                    (right - (tab.x + tab.width - inset * scale)).abs() < 0.01,
+                    "{style} {right}"
+                );
+            }
         }
     }
 }
