@@ -85,27 +85,38 @@ impl Editor {
             .is_some_and(|v| v.engine.mode() != Mode::Insert)
     }
     /// Mode, count/operator prefix and macro recording indicator for the status bar.
+    #[cfg(test)]
     pub fn vintage_status(&self) -> String {
+        self.localized_vintage_status(&crate::ui_text::Chrome::new(
+            &vel_i18n::Translator::default(),
+        ))
+    }
+    pub fn localized_vintage_status(&self, ui: &crate::ui_text::Chrome) -> String {
         let Some(vi) = &self.vintage else {
             return String::new();
         };
-        let mode = match vi.engine.mode() {
-            Mode::Insert => "INSERT",
-            Mode::Normal => "COMMAND",
-            Mode::Replace => "REPLACE",
-            Mode::VisualChar => "VISUAL",
-            Mode::VisualLine => "VISUAL LINE",
-            Mode::VisualBlock => "VISUAL BLOCK",
-            Mode::CommandLine => "PROMPT",
-        };
+        let mode = &ui.vintage_modes[match vi.engine.mode() {
+            Mode::Insert => 0,
+            Mode::Normal => 1,
+            Mode::Replace => 2,
+            Mode::VisualChar => 3,
+            Mode::VisualLine => 4,
+            Mode::VisualBlock => 5,
+            Mode::CommandLine => 6,
+        }];
         format!(
-            "{mode} {}{}",
+            "{mode} {}{}{}",
             vi.pending,
             if vi.engine.context("vi_recording_macro") {
-                " · recording"
+                " · "
             } else {
                 ""
-            }
+            },
+            if vi.engine.context("vi_recording_macro") {
+                ui.recording.as_ref()
+            } else {
+                ""
+            },
         )
     }
     /// Routes decoded document keys before the ordinary keymap. Printable insert-mode

@@ -102,15 +102,18 @@ enum Publication {
 pub struct StatusSource {
     pub indices: Vec<Arc<ProjectIndex>>,
     pub loading: bool,
+    pub(crate) labels: crate::ui_text::IndexLabels,
 }
 impl StatusSource {
     fn text(&self) -> String {
         if self.loading && self.indices.is_empty() {
-            return "Indexing Status\n\nPreparing project index…\n".into();
+            return format!("{}\n\n{}\n", self.labels.heading, self.labels.preparing);
         }
-        let mut text = status_text(&self.indices);
+        let mut text = status_text_localized(&self.indices, &self.labels);
         if self.loading {
-            text.push_str("\nPreparing project index…\n");
+            text.push('\n');
+            text.push_str(&self.labels.preparing);
+            text.push('\n');
         }
         text
     }
@@ -1010,21 +1013,33 @@ pub(crate) fn jump_with_options(
     workspace.observe_navigation();
     Ok(())
 }
+#[cfg(test)]
 pub fn status_text(indices: &[Arc<ProjectIndex>]) -> String {
-    let mut output = String::from("Indexing Status\n\n");
+    status_text_localized(indices, &crate::ui_text::IndexLabels::default())
+}
+
+pub fn status_text_localized(
+    indices: &[Arc<ProjectIndex>],
+    labels: &crate::ui_text::IndexLabels,
+) -> String {
+    let mut output = format!("{}\n\n", labels.heading);
     if indices.is_empty() {
-        output.push_str("No project index. Open a folder and enable index_files.\n");
+        output.push_str(&labels.inactive);
+        output.push('\n');
     }
     for index in indices {
         let status = index.status();
-        output.push_str(&format!(
-            "{}%  {} files, {} cached, {} pending, {} skipped\n",
-            (status.fraction() * 100.) as u32,
-            status.indexed_files,
-            status.cached_files,
-            status.pending_files,
-            status.skipped_files
+        output.push_str(&vel_i18n::format_named(
+            &labels.progress,
+            &[
+                ("percent", ((status.fraction() * 100.) as u32).to_string()),
+                ("files", status.indexed_files.to_string()),
+                ("cached", status.cached_files.to_string()),
+                ("pending", status.pending_files.to_string()),
+                ("skipped", status.skipped_files.to_string()),
+            ],
         ));
+        output.push('\n');
         for line in &status.logs {
             output.push_str(line);
             output.push('\n');
@@ -1084,7 +1099,11 @@ impl vel_platform::AppHandler for StatusWindow {
             height: size.height,
         };
         let mut layer = vel_render::scene::Layer::default();
-        let status_text = self.source.lock().unwrap().text();
+        let status_text = {
+            let source = self.source.lock().unwrap();
+            ctx.window.set_title(&source.labels.title);
+            source.text()
+        };
         for (i, line) in status_text
             .lines()
             .skip(self.scroll.floor() as usize)

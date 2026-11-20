@@ -1,4 +1,5 @@
 //! Resource-driven context menus and file operations that need no native UI.
+use crate::ui_text::UiText;
 use std::{
     fs::{self, OpenOptions},
     path::{Component, Path, PathBuf},
@@ -192,7 +193,7 @@ pub trait SidebarPlatform {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SidebarEffect {
     /// Run this `show_input_panel` invocation; its callback carries the context.
-    Input(Invocation),
+    Input(Invocation, UiText),
     /// Ask for confirmation, then dispatch `on_confirm` only on acceptance.
     ConfirmDelete {
         /// Entries to move, with duplicates and covered descendants removed.
@@ -319,12 +320,14 @@ fn relative_path(path: &Path, roots: &[PathBuf]) -> Result<String, String> {
         relative.to_string_lossy().into_owned()
     })
 }
-fn input(name: &str, args: &Value, caption: &str, initial: &str) -> SidebarEffect {
-    SidebarEffect::Input(Invocation {
-        command: "show_input_panel".into(),
-        args: json!({"caption": caption, "initial_text": initial,
-            "on_done": {"command": name, "args": args}}),
-    })
+fn input(name: &str, args: &Value, caption: UiText, initial: &str) -> SidebarEffect {
+    SidebarEffect::Input(
+        Invocation {
+            command: "show_input_panel".into(),
+            args: json!({"initial_text": initial, "on_done": {"command": name, "args": args}}),
+        },
+        caption,
+    )
 }
 fn deletion_paths(args: &Value) -> Result<Vec<PathBuf>, String> {
     let entries = paths(args)?
@@ -369,9 +372,9 @@ pub fn sidebar_command(
                     name,
                     args,
                     if directory {
-                        "Name for the new folder"
+                        UiText::tr("Name for the new folder")
                     } else {
-                        "Name for the new file"
+                        UiText::tr("Name for the new file")
                     },
                     "",
                 )));
@@ -398,7 +401,7 @@ pub fn sidebar_command(
                 return Ok(Some(input(
                     name,
                     args,
-                    "New name for this entry",
+                    UiText::tr("New name for this entry"),
                     &old_name.to_string_lossy(),
                 )));
             };
@@ -639,9 +642,9 @@ pub fn prepare_file_operation(
         }
         let tab = &workspace.tabs[index];
         if tab.loading.is_some() || tab.binary_loading.is_some() {
-            failures.push(format!(
-                "Wait for {} to finish loading before changing its file",
-                tab.label()
+            failures.push(workspace.translations.tr_fmt(
+                "Wait for {name} to finish loading before changing its file",
+                &[("name", tab.ui_label(&workspace.ui))],
             ));
         }
     }

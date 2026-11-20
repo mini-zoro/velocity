@@ -289,6 +289,9 @@ impl Workspace {
         // https://docs.sublimetext.io/reference/settings.html#global-settings
         // https://www.sublimetext.com/download
         let tab = &self.tabs[self.active];
+        if tab.editor.settings.get("velocity_settings_label").is_some() {
+            return self.ui.settings_window.to_string();
+        }
         let settings = &tab.editor.settings;
         let name = if self.is_empty() {
             "Velocity".into()
@@ -304,23 +307,34 @@ impl Workspace {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| {
                     if settings.bool("show_full_path", false) {
-                        tab.path
-                            .as_ref()
-                            .map_or_else(|| tab.name(), |p| p.to_string_lossy().into_owned())
+                        tab.path.as_ref().map_or_else(
+                            || tab.ui_name(&self.ui),
+                            |p| p.to_string_lossy().into_owned(),
+                        )
                     } else {
-                        tab.name()
+                        tab.ui_name(&self.ui)
                     }
                 })
         } else if settings.bool("show_full_path", false) {
-            tab.path
-                .as_ref()
-                .map_or_else(|| tab.name(), |p| p.to_string_lossy().into_owned())
+            tab.path.as_ref().map_or_else(
+                || tab.ui_name(&self.ui),
+                |p| p.to_string_lossy().into_owned(),
+            )
         } else {
-            tab.name()
+            tab.ui_name(&self.ui)
         };
         let title = format!(
-            "{name}{}{}",
-            if tab.deleted { " [deleted]" } else { "" },
+            "{name}{}{}{}",
+            if tab.deleted {
+                self.ui.deleted.as_ref()
+            } else {
+                ""
+            },
+            if tab.editor.read_only && !self.is_empty() {
+                self.ui.read_only.as_ref()
+            } else {
+                ""
+            },
             if tab.dirty() { " •" } else { "" }
         );
         self.project
@@ -328,7 +342,15 @@ impl Workspace {
             .and_then(Path::file_stem)
             .map_or_else(
                 || title.clone(),
-                |project| format!("{title} — {}", project.to_string_lossy()),
+                |project| {
+                    vel_i18n::format_named(
+                        &self.ui.project_title,
+                        &[
+                            ("title", std::borrow::Cow::Borrowed(title.as_str())),
+                            ("project", project.to_string_lossy()),
+                        ],
+                    )
+                },
             )
     }
     /// Zoom is a user Preference shared by every tab, rather than a view override.

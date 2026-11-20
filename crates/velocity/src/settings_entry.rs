@@ -1,5 +1,8 @@
 //! Settings windows built from our resources and User files, through the normal editor/loaders.
-use crate::{app::App, cli::FileLocation, workbench::restore_settings_tab, workspace::Workspace};
+use crate::{
+    app::App, cli::FileLocation, ui_text::UiText, workbench::restore_settings_tab,
+    workspace::Workspace,
+};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -292,7 +295,9 @@ impl App {
             // schemes; XML customization/conversion behavior is unconfirmed.
             // https://www.sublimetext.com/docs/color_schemes.html#customization
             if scheme && !base.ends_with(".sublime-color-scheme") {
-                self.panels.message = "Customization requires a .sublime-color-scheme file".into();
+                self.panels.set_message(UiText::tr(
+                    "Customization requires a .sublime-color-scheme file",
+                ));
                 return Ok(true);
             }
             // Customization merges matching filenames; templates are authored here.
@@ -306,18 +311,21 @@ impl App {
                 "{\n    \"variables\": {},\n    \"rules\": []\n}\n"
             };
             args = json!({"base_file":base,"default":template});
-            self.panels.message = format!(
-                "Customizing {active}{}",
-                if auto {
-                    if self.workspace.dark {
-                        " (dark variant)"
-                    } else {
-                        " (light variant)"
-                    }
+            self.panels.set_message(if auto {
+                if self.workspace.dark {
+                    UiText::tr_fmt(
+                        "Customizing {name} (dark variant)",
+                        [("name", active.to_owned())],
+                    )
                 } else {
-                    ""
+                    UiText::tr_fmt(
+                        "Customizing {name} (light variant)",
+                        [("name", active.to_owned())],
+                    )
                 }
-            );
+            } else {
+                UiText::tr_fmt("Customizing {name}", [("name", active.to_owned())])
+            });
         }
         let workspace = settings_workspace(&data, &args, &self.workspace.resources)?;
         let mut options = self.options.clone();
@@ -338,7 +346,7 @@ impl App {
         if let Some(window) = window {
             window.new_window(
                 WindowOptions {
-                    title: "Settings — Velocity".into(),
+                    title: app.workspace.window_title(),
                     size: Size {
                         width: options.width as f64,
                         height: options.height as f64,

@@ -548,16 +548,21 @@ impl WindowHandle {
     }
     /// Chooses a destination; cancellation leaves the document untouched.
     pub fn save_file(&self, suggested: &str) -> Option<std::path::PathBuf> {
-        self.save_file_in(suggested, None)
+        self.save_file_in(suggested, None, None)
     }
     /// Chooses a save destination with an optional initial directory.
     pub fn save_file_in(
         &self,
         suggested: &str,
         directory: Option<&Path>,
+        captions: Option<(&str, &str)>,
     ) -> Option<std::path::PathBuf> {
         let panel = NSSavePanel::savePanel(self.0.mtm);
         panel.setNameFieldStringValue(&NSString::from_str(suggested));
+        if let Some((label, prompt)) = captions {
+            panel.setNameFieldLabel(Some(&NSString::from_str(label)));
+            panel.setPrompt(Some(&NSString::from_str(prompt)));
+        }
         if let Some(url) = directory.and_then(|path| file_url(path).ok()) {
             panel.setDirectoryURL(Some(&url));
         }
@@ -1824,7 +1829,6 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
             Some("native_minimize") => Some(sel!(performMiniaturize:)),
             Some("native_zoom") => Some(sel!(performZoom:)),
             Some("native_bring_all_to_front") => Some(sel!(arrangeInFront:)),
-            Some("native_about") => Some(sel!(orderFrontStandardAboutPanel:)),
             Some("native_hide") => Some(sel!(hide:)),
             Some("native_hide_others") => Some(sel!(hideOtherApplications:)),
             Some("native_show_all") => Some(sel!(unhideAllApplications:)),

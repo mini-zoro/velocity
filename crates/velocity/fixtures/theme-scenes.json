@@ -153,6 +153,27 @@
             "x": 151.0
           },
           {
+            "baseline": 82.0,
+            "bold": false,
+            "clip": [
+              143.0,
+              62.0,
+              614.0,
+              32.0
+            ],
+            "color": [
+              0.8901960849761963,
+              0.9215686321258545,
+              0.9333333373069763,
+              0.6499999761581421
+            ],
+            "family": "system-ui",
+            "italic": false,
+            "size": 12.0,
+            "text": "Go to file, symbol, or line",
+            "x": 153.0
+          },
+          {
             "baseline": 119.0,
             "bold": false,
             "clip": [
@@ -14148,6 +14169,27 @@
             "size": 12.0,
             "text": "",
             "x": 151.0
+          },
+          {
+            "baseline": 82.0,
+            "bold": false,
+            "clip": [
+              143.0,
+              62.0,
+              614.0,
+              32.0
+            ],
+            "color": [
+              0.1411764770746231,
+              0.21960784494876862,
+              0.26274511218070984,
+              0.6499999761581421
+            ],
+            "family": "system-ui",
+            "italic": false,
+            "size": 12.0,
+            "text": "Go to file, symbol, or line",
+            "x": 153.0
           },
           {
             "baseline": 119.0,

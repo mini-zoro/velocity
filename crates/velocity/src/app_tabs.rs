@@ -167,7 +167,7 @@ impl App {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
-                    self.panels.message = error;
+                    self.panels.message = error.into();
                     break;
                 }
             }

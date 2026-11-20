@@ -1,6 +1,7 @@
 //! UI adapter for asynchronous builds and output-panel result navigation.
 use crate::{
     panels::{Panel, Panels},
+    ui_text::UiText,
     workspace::Workspace,
 };
 use vel_build::{BuildSystem, Diagnostic, Event, Task, Variables};
@@ -131,8 +132,15 @@ impl Builds {
         let exec = match build.resolve(&variables) {
             Ok(exec) => exec,
             Err(error) => {
-                panels.output = format!("[Build error: {error}]\n");
-                panels.message = error.clone();
+                panels.clear_output();
+                panels.append_output_ui(UiText::tr_fmt(
+                    "[Build error: {detail}]\n",
+                    [("detail", error.clone())],
+                ));
+                panels.set_message(UiText::tr_fmt(
+                    "Build failed: {detail}",
+                    [("detail", error.clone())],
+                ));
                 return Err(error);
             }
         };
@@ -150,8 +158,7 @@ impl Builds {
         self.task = Some(task);
         self.quiet = exec.quiet;
         self.environment_warning = None;
-        panels.output.clear();
-        panels.output_reset = true;
+        panels.clear_output();
         panels.build_output_offset = 0;
         if workspace
             .editor()
@@ -192,17 +199,21 @@ impl Builds {
                     if !panels.output.is_empty() && !panels.output.ends_with('\n') {
                         panels.output.push('\n');
                     }
-                    panels
-                        .output
-                        .push_str(&format!("[output truncated] ({bytes} bytes dropped)\n"));
+                    panels.append_output_ui(UiText::tr_fmt(
+                        "[output truncated] ({bytes} bytes dropped)\n",
+                        [("bytes", bytes.to_string())],
+                    ));
                 }
                 Event::Truncated {
                     bytes,
                     first_line,
                     cancelling: false,
                 } => {
-                    panels.output = format!("[output truncated] ({bytes} bytes dropped)\n");
-                    panels.output_reset = true;
+                    panels.clear_output();
+                    panels.append_output_ui(UiText::tr_fmt(
+                        "[output truncated] ({bytes} bytes dropped)\n",
+                        [("bytes", bytes.to_string())],
+                    ));
                     panels.build_output_offset = 0;
                     self.discarded_lines = first_line;
                     self.received_lines = first_line;
@@ -215,7 +226,7 @@ impl Builds {
                     self.accept_results(panels, results);
                 }
                 Event::Warning(message) => {
-                    panels.message = message.clone();
+                    panels.message = message.clone().into();
                     self.environment_warning = Some(message);
                 }
                 Event::Error(e) => panels.output.push_str(&format!("\n[Build error: {e}]\n")),
@@ -242,17 +253,21 @@ impl Builds {
             changed = true;
         }
         if let Some((code, signal, cancelled, elapsed)) = finish {
-            panels.output.push_str(&finish_line_with_signal(
+            panels.append_output_ui(finish_line_with_signal(
                 code, signal, cancelled, elapsed, self.quiet,
             ));
-            panels.message = format!(
-                "Build: {} error{}",
-                self.error_count,
-                if self.error_count == 1 { "" } else { "s" }
-            );
+            let mut message = if self.error_count == 1 {
+                UiText::tr("Build: 1 error")
+            } else {
+                UiText::tr_fmt(
+                    "Build: {count} errors",
+                    [("count", self.error_count.to_string())],
+                )
+            };
             if let Some(warning) = &self.environment_warning {
-                panels.message.push_str(&format!(" · {warning}"));
+                message = message.with_raw_suffix(&format!(" · {warning}"));
             }
+            panels.set_message(message);
             self.task = None;
         }
         changed
@@ -297,11 +312,9 @@ impl Builds {
                 .map_or(panels.output.len(), |n| cut + n + 1);
             self.discard_partial_line = at == panels.output.len() && !panels.output.ends_with('\n');
             let lines = panels.output[..at].bytes().filter(|b| *b == b'\n').count();
-            panels.output.replace_range(..at, NOTICE);
+            panels.replace_output_prefix(at, UiText::tr("[output truncated]\n"));
             self.discarded_lines += lines.saturating_sub(usize::from(self.retention_notice));
             self.retention_notice = true;
-            // The output view drops the same prefix instead of re-inserting megabytes.
-            panels.trim_output_prefix(at, NOTICE.len());
             panels.build_output_offset = panels.build_output_offset.saturating_sub(lines);
             self.diagnostics.retain(|d| d.output_line >= lines);
             for d in &mut self.diagnostics {
@@ -507,31 +520,39 @@ pub(crate) fn finish_line(
     elapsed: std::time::Duration,
     quiet: bool,
 ) -> String {
-    finish_line_with_signal(code, None, cancelled, elapsed, quiet)
+    finish_line_with_signal(code, None, cancelled, elapsed, quiet).to_string()
 }
-fn finish_line_with_signal(
+pub(crate) fn finish_line_with_signal(
     code: Option<i32>,
     signal: Option<i32>,
     cancelled: bool,
     elapsed: std::time::Duration,
     quiet: bool,
-) -> String {
+) -> UiText {
     if cancelled {
-        return "\n[Cancelled]\n".into();
+        return UiText::tr("\n[Cancelled]\n");
     }
     if quiet {
-        return String::new();
+        return UiText::default();
     }
     let duration = if elapsed.as_secs() == 0 {
         format!("{}ms", elapsed.as_millis())
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
     };
-    let suffix = match code {
-        Some(0) => String::new(),
-        Some(code) => format!(" with exit code {code}"),
+    match code {
+        Some(0) => UiText::tr_fmt("\n[Finished in {duration}]\n", [("duration", duration)]),
+        Some(code) => UiText::tr_fmt(
+            "\n[Finished in {duration} with exit code {code}]\n",
+            [("duration", duration), ("code", code.to_string())],
+        ),
         None => signal.map_or_else(
-            || " without an exit status".into(),
+            || {
+                UiText::tr_fmt(
+                    "\n[Finished in {duration} without an exit status]\n",
+                    [("duration", duration.clone())],
+                )
+            },
             |signal| {
                 #[cfg(unix)]
                 let name = {
@@ -559,11 +580,17 @@ fn finish_line_with_signal(
                 } else {
                     name
                 };
-                format!(" with signal {signal} ({name})")
+                UiText::tr_fmt(
+                    "\n[Finished in {duration} with signal {signal} ({name})]\n",
+                    [
+                        ("duration", duration.clone()),
+                        ("signal", signal.to_string()),
+                        ("name", name.into()),
+                    ],
+                )
             },
         ),
-    };
-    format!("\n[Finished in {duration}{suffix}]\n")
+    }
 }
 
 #[cfg(test)]

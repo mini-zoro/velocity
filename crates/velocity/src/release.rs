@@ -1,5 +1,9 @@
 //! Application release actions. Disk, settings and HTTPS work share one serial queue.
-use crate::{panels::Panels, workspace::Workspace};
+use crate::{
+    panels::Panels,
+    ui_text::{Dialog, UiText},
+    workspace::Workspace,
+};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -146,8 +150,8 @@ impl CrashStartup {
 #[derive(Debug)]
 enum Reply {
     Choices(Vec<PaletteItem>),
-    Changed(String),
-    Message(String),
+    Changed(UiText),
+    Message(UiText),
     CliPlans(Vec<CliInstallPlan>),
 }
 #[derive(Debug, Default)]
@@ -192,7 +196,9 @@ impl Actions {
                 self.start(move || {
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     open_folder(&folder)?;
-                    Ok(Reply::Message("Opened local crash reports folder".into()))
+                    Ok(Reply::Message(UiText::tr(
+                        "Opened local crash reports folder",
+                    )))
                 })?;
             }
             "install_cli" => {
@@ -217,7 +223,13 @@ impl Actions {
                 })?;
             }
             "package_install_url" if args["url"].as_str().or(args["text"].as_str()).is_none() => {
-                panels.action(workspace, "show_input_panel", &json!({"caption":"HTTPS URL of a .sublime-package archive","on_done":{"command":"package_install_url","args":{}}}), viewport)?;
+                panels.show_input_caption(
+                    workspace,
+                    "show_input_panel",
+                    &json!({"on_done":{"command":"package_install_url","args":{}}}),
+                    UiText::tr("HTTPS URL of a .sublime-package archive"),
+                    viewport,
+                )?;
             }
             "package_install_url"
                 if args["name"].as_str().is_none()
@@ -235,14 +247,17 @@ impl Actions {
                     .next()
                     .unwrap_or("")
                     .trim_end_matches(".sublime-package");
-                panels.action(workspace,"show_input_panel",&json!({"caption":"Package name","initial_text":guess,"on_done":{"command":"package_install_url","args":{"url":url}}}),viewport)?;
+                panels.show_input_caption(workspace, "show_input_panel",
+                    &json!({"initial_text":guess,"on_done":{"command":"package_install_url","args":{"url":url}}}),
+                    UiText::tr("Package name"), viewport)?;
             }
             "package_list" if args["detail"].as_str().is_some() => {
-                w.alert(
-                    "Package contributions",
+                Dialog::new(
+                    UiText::tr("Package contributions"),
                     args["detail"].as_str().unwrap_or(""),
-                    &["OK"],
-                );
+                    [UiText::tr("OK")],
+                )
+                .show(&workspace.translations, w);
             }
             "package_install_file"
             | "package_install_url"
@@ -281,18 +296,27 @@ impl Actions {
                 }
                 if name == "package_remove"
                     && args["name"].as_str().is_some()
-                    && w.alert(
-                        "Remove package?",
-                        &format!(
-                            "Move {} and its loose overrides to recoverable backups?",
-                            args["name"].as_str().unwrap_or("")
+                    && Dialog::new(
+                        UiText::tr("Remove package?"),
+                        UiText::tr_fmt(
+                            "Move {name} and its loose overrides to recoverable backups?",
+                            [("name", args["name"].as_str().unwrap_or("").into())],
                         ),
-                        &["Cancel", "Remove"],
-                    ) != 1
+                        [UiText::tr("Cancel"), UiText::tr("Remove")],
+                    )
+                    .show(&workspace.translations, w)
+                        != 1
                 {
                     return Ok(true);
                 }
-                if name == "package_upgrade" && w.alert("Upgrade package?", &format!("Install {} {} from {}? The previous archive will be backed up; disabled packages stay disabled.", args["release"]["name"].as_str().unwrap_or(""), args["release"]["version"].as_str().unwrap_or(""), args["release"]["url"].as_str().unwrap_or("")), &["Cancel", "Install"]) != 1 { return Ok(true); }
+                if name == "package_upgrade" && Dialog::new(
+                    UiText::tr("Upgrade package?"),
+                    UiText::tr_fmt("Install {name} {version} from {url}? The previous archive will be backed up; disabled packages stay disabled.",
+                        ["name", "version", "url"].map(|key| (key, args["release"][key].as_str().unwrap_or("").into()))),
+                    [UiText::tr("Cancel"), UiText::tr("Install")],
+                ).show(&workspace.translations, w) != 1 {
+                    return Ok(true);
+                }
                 let name = name.to_owned();
                 let ignored = workspace.ignored_packages();
                 let index = workspace
@@ -301,7 +325,7 @@ impl Actions {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 self.start(move || package_job(&data, &name, &args, ignored, index))?;
-                panels.message = "Working on packages…".into();
+                panels.set_message(UiText::tr("Working on packages…"));
             }
             _ => return Ok(false),
         }
@@ -319,15 +343,12 @@ impl Actions {
         {
             let reports = std::mem::take(&mut crash.pending);
             let reporter = crash.reporter.clone();
-            let open = w.alert(
-                "Velocity found a crash report",
-                &format!(
-                    "{} local report(s) from a previous launch. No report is uploaded.\n{}",
-                    reports.len(),
-                    reporter.directory().display()
-                ),
-                &["Open Report Folder", "Dismiss"],
-            ) == 0;
+            let open = Dialog::new(
+                UiText::tr("Velocity found a crash report"),
+                UiText::tr_fmt("{count} local report(s) from a previous launch. No report is uploaded.\n{path}",
+                    [("count", reports.len().to_string()), ("path", reporter.directory().display().to_string())]),
+                [UiText::tr("Open Report Folder"), UiText::tr("Dismiss")],
+            ).show(&workspace.translations, w) == 0;
             if let Err(error) = self.start(move || {
                 if open {
                     open_folder(reporter.directory())?;
@@ -335,11 +356,11 @@ impl Actions {
                 for report in reports {
                     reporter.acknowledge(&report).map_err(|e| e.to_string())?;
                 }
-                Ok(Reply::Message(
-                    "Crash report prompt dismissed; reports retained locally".into(),
-                ))
+                Ok(Reply::Message(UiText::tr(
+                    "Crash report prompt dismissed; reports retained locally",
+                )))
             }) {
-                panels.message = error;
+                panels.message = error.into();
             }
         }
         let Some(result) = self.rx.as_ref().and_then(|rx| match rx.try_recv() {
@@ -353,34 +374,44 @@ impl Actions {
         match result {
             Ok(Reply::Choices(items)) => {
                 if items.is_empty() {
-                    panels.message = "No packages or upgrades found".into();
+                    panels.set_message(UiText::tr("No packages or upgrades found"));
                 } else {
                     panels.choices(workspace, items);
                 }
             }
             Ok(Reply::Changed(message)) => {
                 workspace.request_resource_reload();
-                panels.message = message;
+                panels.set_message(message);
             }
-            Ok(Reply::Message(message)) => panels.message = message,
+            Ok(Reply::Message(message)) => panels.set_message(message),
             Ok(Reply::CliPlans(plans)) => {
                 let Some(first) = plans.first() else {
                     return true;
                 };
-                let detail = format!(
-                    "Source: {}\nDestination: {}\n\nAlternative: {}\n\nThe user-local directory may need to be added to PATH. Existing commands are never overwritten. No sudo is used.",
-                    first.launcher().display(),
-                    first.link().display(),
-                    plans
-                        .get(1)
-                        .map(|p| p.link().display().to_string())
-                        .unwrap_or_default()
+                let detail = UiText::tr_fmt(
+                    "Source: {source}\nDestination: {destination}\n\nAlternative: {alternative}\n\nThe user-local directory may need to be added to PATH. Existing commands are never overwritten. No sudo is used.",
+                    [
+                        ("source", first.launcher().display().to_string()),
+                        ("destination", first.link().display().to_string()),
+                        (
+                            "alternative",
+                            plans
+                                .get(1)
+                                .map(|p| p.link().display().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    ],
                 );
-                let selected = w.alert(
-                    "Install Command Line Tool…",
-                    &detail,
-                    &["Cancel", "Install at Destination", "Use Alternative…"],
-                );
+                let selected = Dialog::new(
+                    UiText::tr("Install Command Line Tool…"),
+                    detail,
+                    [
+                        UiText::tr("Cancel"),
+                        UiText::tr("Install at Destination"),
+                        UiText::tr("Use Alternative…"),
+                    ],
+                )
+                .show(&workspace.translations, w);
                 let plan = match selected {
                     1 => plans.first(),
                     2 => plans.get(1),
@@ -389,22 +420,47 @@ impl Actions {
                 .cloned();
                 if let Some(plan) = plan {
                     let confirmed = selected == 1
-                        || w.alert(
-                            "Confirm command line tool destination",
-                            &format!(
-                                "{} → {}\nAdd {} to PATH if needed.",
-                                plan.launcher().display(),
-                                plan.link().display(),
-                                plan.link().parent().unwrap_or(Path::new("")).display()
+                        || Dialog::new(
+                            UiText::tr("Confirm command line tool destination"),
+                            UiText::tr_fmt(
+                                "{source} → {destination}\nAdd {directory} to PATH if needed.",
+                                [
+                                    ("source", plan.launcher().display().to_string()),
+                                    ("destination", plan.link().display().to_string()),
+                                    (
+                                        "directory",
+                                        plan.link()
+                                            .parent()
+                                            .unwrap_or(Path::new(""))
+                                            .display()
+                                            .to_string(),
+                                    ),
+                                ],
                             ),
-                            &["Cancel", "Install"],
-                        ) == 1;
-                    if confirmed && let Err(error) = self.start(move || install_cli(&plan, |_| true).map(|outcome| Reply::Message(match outcome {CliInstallOutcome::Declined=>"Command line tool installation cancelled".into(),CliInstallOutcome::AlreadyInstalled=>format!("Command line tool is already installed at {}",plan.link().display()),CliInstallOutcome::Installed(path)=>format!("Installed command line tool at {}. Add {} to PATH if needed.",path.display(),path.parent().unwrap_or(Path::new("")).display())})).map_err(|e| format!("{e}. Run Install Command Line Tool again and choose ~/.local/bin if the system directory is unwritable."))) { panels.message = error; }
+                            [UiText::tr("Cancel"), UiText::tr("Install")],
+                        )
+                        .show(&workspace.translations, w)
+                            == 1;
+                    if confirmed && let Err(error) = self.start(move || {
+                        install_cli(&plan, |_| true).map(|outcome| Reply::Message(match outcome {
+                            CliInstallOutcome::Declined => UiText::tr("Command line tool installation cancelled"),
+                            CliInstallOutcome::AlreadyInstalled => UiText::tr_fmt("Command line tool is already installed at {path}", [("path", plan.link().display().to_string())]),
+                            CliInstallOutcome::Installed(path) => UiText::tr_fmt("Installed command line tool at {path}. Add {directory} to PATH if needed.",
+                                [("path", path.display().to_string()), ("directory", path.parent().unwrap_or(Path::new("")).display().to_string())]),
+                        })).map_err(|e| e.to_string())
+                    }) {
+                        panels.set_message(UiText::tr_fmt("Could not install the command line tool: {detail}", [("detail", error)]));
+                    }
                 }
             }
             Err(error) => {
-                panels.message = error.clone();
-                w.alert("Velocity package / release action", &error, &["OK"]);
+                panels.message = error.clone().into();
+                Dialog::new(
+                    UiText::tr("Velocity package / release action"),
+                    error,
+                    [UiText::tr("OK")],
+                )
+                .show(&workspace.translations, w);
             }
         }
         true
@@ -465,24 +521,31 @@ fn package_job(
                 manager.install_https(name, source, &client)
             }
             .map_err(|e| e.to_string())?;
-            Reply::Changed(format!(
-                "Installed {}. Backup: {}{}",
-                installed.path.display(),
-                backup_text(installed.backup.as_deref()),
-                warnings_text(&installed.warnings)
-            ))
+            Reply::Changed(
+                UiText::tr_fmt(
+                    "Installed {path}. Backup: {backup}",
+                    [
+                        ("path", installed.path.display().to_string()),
+                        ("backup", backup_text(installed.backup.as_deref())),
+                    ],
+                )
+                .with_raw_suffix(&warnings_text(&installed.warnings)),
+            )
         }
         "package_remove" if args["name"].as_str().is_some() => {
             let backups = manager
                 .remove(args["name"].as_str().unwrap_or(""))
                 .map_err(|e| e.to_string())?;
-            Reply::Changed(format!(
-                "Removed package. Backups: {}",
-                backups
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            Reply::Changed(UiText::tr_fmt(
+                "Removed package. Backups: {paths}",
+                [(
+                    "paths",
+                    backups
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )],
             ))
         }
         "package_toggle" if args["name"].as_str().is_some() => {
@@ -491,11 +554,15 @@ fn package_job(
             let backup = manager
                 .set_enabled_inheriting(name, enabled, &ignored)
                 .map_err(|e| e.to_string())?;
-            Reply::Changed(format!(
-                "{} {name}. Preferences backup: {}",
-                if enabled { "Enabled" } else { "Disabled" },
-                backup_text(backup.as_deref())
-            ))
+            let arguments = [
+                ("name", name.to_owned()),
+                ("backup", backup_text(backup.as_deref())),
+            ];
+            Reply::Changed(if enabled {
+                UiText::tr_fmt("Enabled {name}. Preferences backup: {backup}", arguments)
+            } else {
+                UiText::tr_fmt("Disabled {name}. Preferences backup: {backup}", arguments)
+            })
         }
         "package_check_upgrades" => {
             let url = index
@@ -536,12 +603,16 @@ fn package_job(
             let installed = manager
                 .install_release(&release, &client)
                 .map_err(|e| e.to_string())?;
-            Reply::Changed(format!(
-                "Upgraded {}. Backup: {}{}",
-                installed.path.display(),
-                backup_text(installed.backup.as_deref()),
-                warnings_text(&installed.warnings)
-            ))
+            Reply::Changed(
+                UiText::tr_fmt(
+                    "Upgraded {path}. Backup: {backup}",
+                    [
+                        ("path", installed.path.display().to_string()),
+                        ("backup", backup_text(installed.backup.as_deref())),
+                    ],
+                )
+                .with_raw_suffix(&warnings_text(&installed.warnings)),
+            )
         }
         _ => {
             let packages = manager.list().map_err(|e| e.to_string())?;

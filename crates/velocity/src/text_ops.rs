@@ -195,12 +195,13 @@ impl Panels {
     ) -> Result<bool, String> {
         if name == "save_macro" {
             let Some(filename) = args["text"].as_str().or_else(|| args["name"].as_str()) else {
-                return self.action(
+                return self.show_input_caption(
                     workspace,
                     "show_input_panel",
                     &json!({
-                    "caption":"Save recorded macro as", "initial_text":"Recorded.sublime-macro",
+                    "initial_text":"Recorded.sublime-macro",
                     "on_done":{"command":"save_macro","args":{}}}),
+                    UiText::tr("Save recorded macro as"),
                     viewport,
                 );
             };
@@ -233,7 +234,10 @@ impl Panels {
                 .insert(&resource, source.into_bytes(), path.clone());
             workspace.macro_paths.insert(resource);
             workspace.request_resource_reload();
-            self.set_message(format!("Saved macro {}", path.display()));
+            self.set_message(UiText::tr_fmt(
+                "Saved macro {path}",
+                [("path", path.display().to_string())],
+            ));
             return Ok(true);
         }
         if name == "run_macro_file" && args.get("file").is_none() {

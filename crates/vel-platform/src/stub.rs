@@ -105,6 +105,7 @@ impl WindowHandle {
         &self,
         _suggested: &str,
         _directory: Option<&std::path::Path>,
+        _captions: Option<(&str, &str)>,
     ) -> Option<std::path::PathBuf> {
         None
     }

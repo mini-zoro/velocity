@@ -1,5 +1,6 @@
 //! Native application handler and buffered benchmark observations.
 use crate::app_scene_translate as translate_scene;
+use crate::ui_text::{Dialog, UiText};
 #[path = "app_a11y.rs"]
 mod accessibility_adapter;
 #[path = "app_context.rs"]
@@ -324,7 +325,7 @@ impl App {
             panels: {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
-                panels.message = workspace.take_resource_reports().join("; ");
+                panels.message = workspace.take_resource_reports().join("; ").into();
                 if !matches!(
                     options.mode,
                     Mode::Interactive | Mode::Panels | Mode::ThemeUi
@@ -447,14 +448,12 @@ impl App {
         }
         if w.is_focused()
             && let Some(path) = self.restore_safety.skipped.take()
-            && w.alert(
-                "Session Recovery",
-                &format!(
-                    "The previous startup crashed during restore. The session was preserved at {}.",
-                    path.display()
-                ),
-                &["Keep Closed", "Reopen Windows"],
-            ) == 1
+            && Dialog::new(
+                UiText::tr("Session Recovery"),
+                UiText::tr_fmt("The previous startup crashed during restore. The session was preserved at {path}.",
+                    [("path", path.display().to_string())]),
+                [UiText::tr("Keep Closed"), UiText::tr("Reopen Windows")],
+            ).show(&self.workspace.translations, w) == 1
         {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -560,7 +559,7 @@ impl App {
                     self.save_status(format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
                     return false;
                 }
-                self.panels.message = error;
+                self.panels.message = error.into();
             }
         } else {
             if !window.is_some_and(|w| {
@@ -569,7 +568,7 @@ impl App {
                 return false;
             }
             if let Err(error) = self.save_workspace_checkpoint() {
-                self.panels.message = error;
+                self.panels.message = error.into();
             }
         }
         for waiter in &mut self.waiters {
@@ -646,7 +645,7 @@ impl App {
         if let Some(destination) = merge
             && let Err(error) = self.merge_tabs_into(w, destination)
         {
-            self.panels.message = error;
+            self.panels.message = error.into();
         }
         self.install_native_menu(w, false);
         self.sessions.borrow_mut().update_system_recents(
@@ -694,14 +693,17 @@ impl App {
             .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let messages = self.sessions.borrow_mut().poll();
         for message in messages {
-            self.panels.message = message.clone();
+            self.panels.message = message.clone().into();
             self.reporter
                 .emit(json!({"kind":"session_error","message":message}))?;
         }
         if self.session_due.is_some_and(|due| Instant::now() >= due)
             && let Err(e) = self.checkpoint(false)
         {
-            self.panels.message = format!("Session save failed: {e}");
+            self.panels.set_message(UiText::tr_fmt(
+                "Session save failed: {detail}",
+                [("detail", e.to_string())],
+            ));
             self.session_due = None;
         }
         Ok(())
@@ -859,7 +861,7 @@ impl App {
             ids.insert(self.workspace.tabs[self.workspace.active].sheet);
         }
         if !errors.is_empty() {
-            self.panels.message = errors.join("\n");
+            self.panels.message = errors.join("\n").into();
         }
         if let Some(command) = &request.command
             && self.cli_commands.len() < 16
@@ -902,15 +904,20 @@ impl App {
             .reporter
             .emit(json!({"kind":"editor_error","message":message}));
         if message.contains("only regular files can be used as documents") {
-            self.panels.message = message.to_owned();
+            self.panels.message = message.to_owned().into();
         } else {
-            w.alert("Velocity", message, &["OK"]);
+            Dialog::new(
+                UiText::tr("Velocity Error"),
+                UiText::command_error(message),
+                [UiText::tr("OK")],
+            )
+            .show(&self.workspace.translations, w);
         }
     }
     fn publish_resource_reports(&mut self) {
         let reports = self.workspace.take_resource_reports();
         if !reports.is_empty() {
-            self.panels.message = reports.join("; ");
+            self.panels.message = reports.join("; ").into();
             for report in &reports {
                 self.panels.note_console(report);
             }
@@ -1446,6 +1453,7 @@ impl App {
             )
         {
             self.refresh_open_palette();
+            self.panels.refresh_locale(&self.workspace);
         }
         changed || transferred
     }
@@ -1536,7 +1544,7 @@ impl App {
         if let Some(window) = window {
             self.show_error(window, message);
         } else {
-            self.panels.message = message.into();
+            self.panels.set_message(UiText::command_error(message));
         }
     }
     fn named_changed(&mut self, window: Option<&WindowHandle>, reveal: bool) {
@@ -1660,7 +1668,7 @@ impl App {
             }
             Ok(false) => {}
             Err(error) => {
-                self.panels.message = error;
+                self.panels.message = error.into();
                 self.named_changed(window, false);
                 return Ok(());
             }
@@ -1794,12 +1802,15 @@ impl App {
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.workspace.tabs[index].name());
+                .unwrap_or_else(|| self.workspace.tabs[index].ui_name(&self.workspace.ui));
             let Some(window) = window else {
                 return Ok(false);
             };
-            let directory = self.save_dialog_directory(index);
-            let Some(path) = window.save_file_in(&suggested, directory.as_deref()) else {
+            let Some(path) = self.choose_save_path(
+                window,
+                &suggested,
+                self.save_dialog_directory(index).as_deref(),
+            ) else {
                 return Ok(false);
             };
             Some(path)
@@ -1814,11 +1825,15 @@ impl App {
                 .0
         {
             let overwrite = if let Some(window) = window {
-                window.alert(
-                    "File changed on disk",
-                    "The file has changed since it was loaded. Overwrite the disk contents?",
-                    &["Overwrite", "Cancel"],
-                ) == 0
+                Dialog::new(
+                    UiText::tr("File changed on disk"),
+                    UiText::tr(
+                        "The file has changed since it was loaded. Overwrite the disk contents?",
+                    ),
+                    [UiText::tr("Overwrite"), UiText::tr("Cancel")],
+                )
+                .show(&self.workspace.translations, window)
+                    == 0
             } else {
                 #[cfg(test)]
                 {
@@ -1830,7 +1845,8 @@ impl App {
                 }
             };
             if !overwrite {
-                self.panels.message = "Save cancelled: file changed on disk".into();
+                self.panels
+                    .set_message(UiText::tr("Save cancelled: file changed on disk"));
                 return Ok(false);
             }
             self.workspace
@@ -1838,6 +1854,17 @@ impl App {
         }
         self.workspace.save(index, path)?;
         Ok(true)
+    }
+    fn choose_save_path(
+        &self,
+        window: &WindowHandle,
+        name: &str,
+        directory: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let tr = &self.workspace.translations;
+        let label = tr.tr("Save As:");
+        let button = tr.tr("Save");
+        window.save_file_in(name, directory, Some((&label, &button)))
     }
     fn save_dialog_directory(&self, index: usize) -> Option<PathBuf> {
         // An empty default_dir preserves the current document directory.
@@ -1888,8 +1915,9 @@ impl App {
                 },
             }],
         );
-        self.panels.set_message(format!(
-            "{error}. Choose Save as UTF-8 to save these characters."
+        self.panels.set_message(UiText::tr_fmt(
+            "{detail}. Choose Save as UTF-8 to save these characters.",
+            [("detail", error.to_owned())],
         ));
         true
     }
@@ -1945,13 +1973,16 @@ impl App {
                 // Build 4142 confirms dirty-file reopen. Public references do not
                 // specify Revert's undo policy; keep Velocity's existing reload behavior.
                 // https://www.sublimetext.com/download
+                let tr = self.workspace.translations.clone();
                 self.workspace.revert(|| {
                     window.is_some_and(|w| {
-                        w.alert(
-                            "Revert File?",
-                            "Discard unsaved changes and reload this file from disk?",
-                            &["Revert", "Cancel"],
-                        ) == 0
+                        Dialog::new(
+                            UiText::tr("Revert File?"),
+                            UiText::tr("Discard unsaved changes and reload this file from disk?"),
+                            [UiText::tr("Revert"), UiText::tr("Cancel")],
+                        )
+                        .show(&tr, w)
+                            == 0
                     })
                 })?;
             }
@@ -1966,8 +1997,9 @@ impl App {
                     }
                     let path = if self.workspace.tabs[index].path.is_none() {
                         let Some(path) = window.and_then(|window| {
-                            window.save_file_in(
-                                &self.workspace.tabs[index].name(),
+                            self.choose_save_path(
+                                window,
+                                &self.workspace.tabs[index].ui_name(&self.workspace.ui),
                                 self.save_dialog_directory(index).as_deref(),
                             )
                         }) else {
@@ -2093,7 +2125,7 @@ impl App {
         match self.decide_close_document(Some(w), index, false) {
             Ok(close) => close,
             Err(error) => {
-                self.panels.message = error;
+                self.panels.message = error.into();
                 false
             }
         }
@@ -2118,11 +2150,10 @@ impl App {
             return Ok(true);
         }
         let decision = if let Some(window) = window {
-            match window.alert(
-                "Save changes?",
-                &self.workspace.tabs[index].name(),
-                &["Save", "Don't Save", "Cancel"],
-            ) {
+            match self
+                .unsaved_changes_dialog(index)
+                .show(&self.workspace.translations, window)
+            {
                 0 => tab_adapter::CloseDecision::Save(None),
                 1 => tab_adapter::CloseDecision::Discard,
                 _ => tab_adapter::CloseDecision::Cancel,
@@ -2153,6 +2184,17 @@ impl App {
             tab_adapter::CloseDecision::Cancel => Ok(false),
         }
     }
+    fn unsaved_changes_dialog(&self, index: usize) -> Dialog {
+        Dialog::new(
+            UiText::tr("Save changes?"),
+            self.workspace.tabs[index].ui_name(&self.workspace.ui),
+            [
+                UiText::tr("Save"),
+                UiText::tr("Don't Save"),
+                UiText::tr("Cancel"),
+            ],
+        )
+    }
     fn handle_named_actions(&mut self, window: Option<&WindowHandle>) -> Result<(), String> {
         let actions = std::mem::take(&mut self.workspace.editor_mut().actions);
         let mut result = Ok(());
@@ -2179,9 +2221,9 @@ impl App {
         if self.macro_origin.is_some_and(|sheet| {
             self.workspace.is_empty() || self.workspace.tabs[self.workspace.active].sheet != sheet
         }) {
-            self.panels.set_message(
-                "Macro playback stopped: the starting view is no longer active".into(),
-            );
+            self.panels.set_message(UiText::tr(
+                "Macro playback stopped: the starting view is no longer active",
+            ));
             return false;
         }
         true
@@ -2202,7 +2244,8 @@ impl App {
                     Some(
                         self.workspace
                             .translations
-                            .tr("Unsupported UI language; using English"),
+                            .tr("Unsupported UI language; using English")
+                            .into_owned(),
                     ),
                 ),
             };
@@ -2214,7 +2257,15 @@ impl App {
                 }
             }
             if let Some(note) = note {
-                self.panels.set_message(note.into_owned());
+                self.panels.set_message(note);
+            }
+            self.panels.refresh_locale(&self.workspace);
+            return Ok(());
+        }
+        if name == "native_about" {
+            if let Some(window) = window {
+                self.about_dialog()
+                    .show(&self.workspace.translations, window);
             }
             return Ok(());
         }
@@ -2438,7 +2489,8 @@ impl App {
         {
             return Ok(());
         }
-        self.panels.message = "This action is available in an editor window.".into();
+        self.panels
+            .set_message(UiText::tr("This action is available in an editor window."));
         Ok(())
     }
     fn apply_action(&mut self, w: &WindowHandle, name: &str, args: &Value) -> Result<(), String> {
@@ -2508,10 +2560,12 @@ impl App {
                 self.panels.message = args["href"].as_str().unwrap_or("").into();
             }
             "show_indexing_status" => {
+                self.panels.refresh_locale(&self.workspace);
                 let source = self.panels.intel.status_source.clone();
+                let title = source.lock().unwrap().labels.title.to_string();
                 w.new_window(
                     WindowOptions {
-                        title: "Indexing Status — Velocity".into(),
+                        title,
                         size: Size {
                             width: 720.,
                             height: 480.,
@@ -2578,7 +2632,7 @@ impl App {
                 if let Some(path) = args["file"]
                     .as_str()
                     .map(std::path::PathBuf::from)
-                    .or_else(|| w.save_file("project.sublime-project"))
+                    .or_else(|| self.choose_save_path(w, "project.sublime-project", None))
                 {
                     self.workspace.save_project_as(path)?;
                 }
@@ -2981,7 +3035,10 @@ impl App {
             return;
         }
         if let Err(error) = self.workspace.save(index, None) {
-            self.panels.message = format!("Automatic save failed: {error}");
+            self.panels.set_message(UiText::tr_fmt(
+                "Automatic save failed: {detail}",
+                [("detail", error)],
+            ));
         }
     }
     fn sync_palette_enabled(&mut self) {
@@ -3011,13 +3068,29 @@ impl App {
         self.view.viewport(self.workspace.editor())
     }
     fn replacement_confirmation(&mut self, w: &WindowHandle) {
+        let tr = self.workspace.translations.clone();
         self.confirm_file_replacements(|count, files| {
-            w.alert(
-                "Replace in Files?",
-                &format!("Replace {count} matches in {files} files?"),
-                &["Cancel", "Replace"],
-            ) == 1
+            Dialog::new(
+                UiText::tr("Replace in Files?"),
+                UiText::tr_fmt(
+                    "Replace {count} matches in {files} files?",
+                    [("count", count.to_string()), ("files", files.to_string())],
+                ),
+                [UiText::tr("Cancel"), UiText::tr("Replace")],
+            )
+            .show(&tr, w)
+                == 1
         });
+    }
+    fn about_dialog(&self) -> Dialog {
+        Dialog::new(
+            UiText::tr("About Velocity"),
+            UiText::tr_fmt(
+                "Version {version}",
+                [("version", env!("CARGO_PKG_VERSION").into())],
+            ),
+            [UiText::tr("OK")],
+        )
     }
     fn confirm_file_replacements(&mut self, confirm: impl FnOnce(usize, usize) -> bool) {
         let Some(plan) = self.panels.replacement_plan.take() else {
@@ -3035,7 +3108,7 @@ impl App {
             let _ = self
                 .reporter
                 .emit(json!({"kind":"editor_error","message":message}));
-            self.panels.set_message(message);
+            self.panels.set_message(UiText::command_error(&message));
         }
     }
     fn check_replacement_targets(
@@ -3069,12 +3142,12 @@ impl App {
             count += change.count;
             warnings.extend(saved.warning);
         }
-        self.panels.message = format!("Replaced {count} matches.");
-        if !warnings.is_empty() {
-            self.panels
-                .message
-                .push_str(&format!(" {}", warnings.join("; ")));
-        }
+        let message = UiText::tr_fmt("Replaced {count} matches.", [("count", count.to_string())]);
+        self.panels.set_message(if warnings.is_empty() {
+            message
+        } else {
+            message.with_raw_suffix(&format!(" {}", warnings.join("; ")))
+        });
         Ok(())
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
@@ -3558,13 +3631,13 @@ impl App {
                     let caption = if let Some((read, total)) = tab.progress() {
                         format!(
                             "{} · {}%",
-                            tab.label(),
+                            tab.ui_label(&self.workspace.ui),
                             read.saturating_mul(100) / total.max(1)
                         )
                     } else {
                         // A drawn close button shows the dirty dot; tabs without one draw
                         // the bullet themselves (below) so truncation never hides it.
-                        let label = tab.label();
+                        let label = tab.ui_label(&self.workspace.ui);
                         label
                             .strip_suffix(" •")
                             .map_or(label.clone(), str::to_owned)
@@ -4729,14 +4802,19 @@ impl AppHandler for App {
                 .map(|(i, _)| i)
                 .collect();
             for index in conflicts {
-                let reload = w.alert(
-                    "File changed on disk",
-                    &format!(
-                        "{} has unsaved edits. Reloading discards them.",
-                        self.workspace.tabs[index].label()
+                let reload = Dialog::new(
+                    UiText::tr("File changed on disk"),
+                    UiText::tr_fmt(
+                        "{name} has unsaved edits. Reloading discards them.",
+                        [(
+                            "name",
+                            self.workspace.tabs[index].ui_name(&self.workspace.ui),
+                        )],
                     ),
-                    &["Keep Edits", "Reload"],
-                ) == 1;
+                    [UiText::tr("Keep Edits"), UiText::tr("Reload")],
+                )
+                .show(&self.workspace.translations, w)
+                    == 1;
                 self.workspace.reload_external(index, reload);
             }
             for message in std::mem::take(&mut self.workspace.messages) {
@@ -5050,7 +5128,10 @@ impl AppHandler for App {
             && self.hot_exit().retain(true)
             && let Err(error) = self.save_workspace_checkpoint()
         {
-            self.panels.message = format!("Could not checkpoint during logout: {error}");
+            self.panels.set_message(UiText::tr_fmt(
+                "Could not checkpoint during logout: {detail}",
+                [("detail", error)],
+            ));
         }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
@@ -5074,7 +5155,7 @@ impl AppHandler for App {
                     self.show_error(w, &format!("Could not save closed window: {error}"));
                     return false;
                 }
-                self.panels.message = error;
+                self.panels.message = error.into();
             }
         } else {
             if !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {

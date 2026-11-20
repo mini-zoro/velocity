@@ -12,6 +12,7 @@ pub(crate) fn ax_id(id: u64) -> u64 {
 }
 impl Panels {
     pub fn accessibility(&self, workspace: &Workspace, include_text: bool) -> AxTree {
+        let tr = &workspace.translations;
         let mut out = AxTree::default();
         // Walk actual ancestry, in child order. Hidden rows have no accessible object.
         fn visit(
@@ -26,50 +27,42 @@ impl Panels {
                 return;
             };
             let mut text = None;
+            let tr = &workspace.translations;
             let (role, label) = match widget.class {
                 "text_area" => return,
-                "quick_panel" => (Role::Group, "Quick panel".into()),
-                "scroll_area" if id == 11 => (Role::List, "Results".into()),
+                "quick_panel" => (Role::Group, tr.tr("Quick panel").into_owned()),
+                "scroll_area" if id == 11 => (Role::List, tr.tr("Results").into_owned()),
                 "sidebar_container" | "side_bar" => {
-                    (Role::Outline, "Project and open files".into())
+                    (Role::Outline, tr.tr("Project and open files").into_owned())
                 }
                 "status_bar" => {
                     let e = workspace.editor();
                     let point = e.text.byte_to_point(e.caret.min(e.text.len_bytes()));
                     (
                         Role::Status,
-                        format!(
-                            "Line {}, column {}; {} selections; {}. {}",
-                            point.row + 1,
-                            point.column + 1,
-                            e.regions().len(),
-                            workspace.tabs[workspace.active].format.encoding,
-                            p.message
+                        tr.tr_fmt(
+                            "Line {line}, column {column}; {count} selections; {encoding}. {message}",
+                            &[
+                                ("line", (point.row + 1).to_string()),
+                                ("column", (point.column + 1).to_string()),
+                                ("count", e.regions().len().to_string()),
+                                ("encoding", workspace.tabs[workspace.active].format.display_encoding().to_owned()),
+                                ("message", p.message.to_string()),
+                            ],
                         ),
                     )
                 }
                 "text_input" => {
                     let (input, label) = match id {
-                        10 => (
-                            &p.quick_input,
-                            match p.overlay {
-                                Some(Overlay::Palette) => "Search commands",
-                                Some(Overlay::Goto) => "Go to file, symbol, or line",
-                                Some(Overlay::Syntax) => "Filter syntaxes",
-                                Some(Overlay::Appearance) => "Filter appearances",
-                                Some(Overlay::ProjectSymbols) => "Search project symbols",
-                                Some(Overlay::Locations) => "Filter locations",
-                                Some(Overlay::Choices) | None => "Filter choices",
-                            },
-                        ),
-                        21 => (&p.replace, "Replace"),
-                        22 => (&p.where_input, "Where"),
+                        10 => (&p.quick_input, p.overlay_prompt(workspace)),
+                        21 => (&p.replace, workspace.ui.find_fields[1].as_ref()),
+                        22 => (&p.where_input, workspace.ui.find_fields[2].as_ref()),
                         _ => (
                             &p.query,
                             if p.panel == Some(Panel::Input) {
                                 p.input_caption.as_str()
                             } else {
-                                "Find"
+                                &workspace.ui.find_fields[0]
                             },
                         ),
                     };
@@ -123,9 +116,9 @@ impl Panels {
                     (
                         Role::Row,
                         if tab.dirty() {
-                            format!("{}, edited", tab.name())
+                            tr.tr_fmt("{name}, edited", &[("name", tab.ui_name(&workspace.ui))])
                         } else {
-                            tab.name()
+                            tab.ui_name(&workspace.ui)
                         },
                     )
                 }
@@ -136,15 +129,7 @@ impl Panels {
                         Role::Button
                     },
                     if (30..36).contains(&id) {
-                        [
-                            "Regular expression",
-                            "Case sensitive",
-                            "Whole word",
-                            "Wrap search",
-                            "In selection",
-                            "Preserve case",
-                        ][(id - 30) as usize]
-                            .into()
+                        workspace.ui.find_options[(id - 30) as usize].to_string()
                     } else {
                         widget.label.clone()
                     },
@@ -152,9 +137,9 @@ impl Panels {
                 class if class.starts_with("panel_control") => (
                     Role::Group,
                     if p.panel == Some(Panel::Input) {
-                        p.input_caption.clone()
+                        p.input_caption.to_string()
                     } else {
-                        "Find and output panel".into()
+                        tr.tr("Find and output panel").into_owned()
                     },
                 ),
                 _ => {
@@ -191,11 +176,13 @@ impl Panels {
                     .iter()
                     .position(|item| (1 << 40) + item.value as u64 * 5 == id)
             {
-                node.announcement = Some(format!(
-                    "{}, {} of {}",
-                    node.label,
-                    index + 1,
-                    p.quick.items.len()
+                node.announcement = Some(tr.tr_fmt(
+                    "{name}, {index} of {count}",
+                    &[
+                        ("name", node.label.clone()),
+                        ("index", (index + 1).to_string()),
+                        ("count", p.quick.items.len().to_string()),
+                    ],
                 ));
             }
             node.expanded = widget
@@ -241,11 +228,11 @@ impl Panels {
         if self.overlay.is_none() && matches!(self.panel, Some(Panel::Output | Panel::Results)) {
             let results = self.panel == Some(Panel::Results);
             let title = if results {
-                "Find Results"
-            } else if self.output.starts_with("Indexing Status\n") {
-                "Indexing Status"
+                workspace.ui.find_results.clone()
+            } else if self.indexing_output {
+                tr.tr("Indexing Status")
             } else {
-                "Output"
+                workspace.ui.output.clone()
             };
             let mut node = AxNode::new(
                 ax_id(89),
@@ -281,15 +268,10 @@ impl Panels {
             }
             out.nodes.push(node);
         }
-        if !self.message.is_empty() {
-            let mut node = AxNode::new(
-                ax_id(90),
-                None,
-                Role::Status,
-                self.message.clone(),
-                Rect::default(),
-            );
-            node.announcement = Some(self.message.clone());
+        let status = self.status_message(workspace);
+        if !status.is_empty() {
+            let mut node = AxNode::new(ax_id(90), None, Role::Status, status, Rect::default());
+            node.announcement = Some(status.to_owned());
             out.nodes.push(node);
         }
         // Syntax status popup has the exact hit area used by mouse dispatch (as painted).
@@ -301,14 +283,18 @@ impl Panels {
                 ax_id(99),
                 None,
                 Role::PopupButton,
-                format!(
-                    "Syntax: {}",
-                    workspace
-                        .editor()
-                        .language
-                        .borrow()
-                        .as_ref()
-                        .map_or("Plain Text", |l| l.name.as_str())
+                tr.tr_fmt(
+                    "Syntax: {name}",
+                    &[(
+                        "name",
+                        workspace
+                            .editor()
+                            .language
+                            .borrow()
+                            .as_ref()
+                            .map_or("Plain Text", |l| l.name.as_str())
+                            .to_owned(),
+                    )],
                 ),
                 frame,
             );
@@ -327,9 +313,14 @@ impl Panels {
                 ax_id(98),
                 None,
                 Role::PopupButton,
-                format!(
-                    "Indentation: {}",
-                    vel_ui::status::indentation(editor.translate_tabs_to_spaces, editor.tab_size)
+                tr.tr_fmt(
+                    "Indentation: {value}",
+                    &[(
+                        "value",
+                        workspace
+                            .ui
+                            .indent(editor.translate_tabs_to_spaces, editor.tab_size),
+                    )],
                 ),
                 frame,
             );
@@ -356,7 +347,7 @@ impl Panels {
                 ax_id(1000),
                 None,
                 Role::List,
-                "Context menu",
+                tr.tr("Context menu"),
                 bounds,
             ));
             for (i, item) in self.review.items.iter().enumerate() {

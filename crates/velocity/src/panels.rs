@@ -1,5 +1,5 @@
 //! Headless UI controller: navigation, panel focus, workers and project tree state.
-use crate::{cli::FileLocation, workspace::Workspace};
+use crate::{cli::FileLocation, ui_text::UiText, workspace::Workspace};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ops::Range,
@@ -79,12 +79,18 @@ pub(crate) fn status_format_menu(
 ) -> Vec<vel_ui::status::FormatMenuItem> {
     let tab = &workspace.tabs[workspace.active];
     match item {
-        vel_ui::status::FormatItem::Encoding => vel_ui::status::encoding_menu(
-            vel_fileio::ENCODINGS,
-            tab.format.display_encoding(),
-            tab.path.is_some(),
-            !tab.editor.read_only && !workspace.is_empty(),
-        ),
+        vel_ui::status::FormatItem::Encoding => {
+            let mut menu = vel_ui::status::encoding_menu(
+                vel_fileio::ENCODINGS,
+                tab.format.display_encoding(),
+                tab.path.is_some(),
+                !tab.editor.read_only && !workspace.is_empty(),
+            );
+            for row in &mut menu {
+                row.caption = workspace.translations.caption(&row.caption).to_owned();
+            }
+            menu
+        }
         vel_ui::status::FormatItem::LineEndings => {
             vel_ui::status::line_ending_menu(match tab.format.line_ending {
                 vel_fileio::LineEnding::Lf => "unix",
@@ -122,21 +128,56 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
                 .sum(),
         )
     };
-    vel_ui::status::position_mode(
-        editor.settings.string("show_line_column", "compact"),
-        row,
-        column,
-        regions.len(),
-        selected,
-        editor
-            .settings
-            .bool("show_encoding", true)
-            .then_some(tab.format.display_encoding()),
-        editor
-            .settings
-            .bool("show_line_endings", true)
-            .then_some(tab.format.line_ending.display_name()),
-    )
+    let mode = editor.settings.string("show_line_column", "compact");
+    let encoding = editor
+        .settings
+        .bool("show_encoding", true)
+        .then_some(tab.format.display_encoding());
+    let endings = editor
+        .settings
+        .bool("show_line_endings", true)
+        .then_some(tab.format.line_ending.display_name());
+    if workspace.translations.language() == vel_i18n::Language::En {
+        return vel_ui::status::position_mode(
+            mode,
+            row,
+            column,
+            regions.len(),
+            selected,
+            encoding,
+            endings,
+        );
+    }
+    let ui = &workspace.ui;
+    let mut fields = Vec::with_capacity(5);
+    if mode != "disabled" {
+        fields.push(vel_i18n::format_named(
+            if mode == "enabled" {
+                &ui.full_position
+            } else {
+                &ui.compact_position
+            },
+            &[("line", row.to_string()), ("column", column.to_string())],
+        ));
+    }
+    if regions.len() > 1 {
+        fields.push(vel_i18n::format_named(
+            &ui.regions,
+            &[("count", regions.len().to_string())],
+        ));
+    }
+    if selected > 0 {
+        fields.push(vel_i18n::format_named(
+            if selected == 1 {
+                &ui.character
+            } else {
+                &ui.characters
+            },
+            &[("count", selected.to_string())],
+        ));
+    }
+    fields.extend(encoding.into_iter().chain(endings).map(str::to_owned));
+    fields.join(" · ")
 }
 type DirectoryResult = (u64, PathBuf, Result<Vec<Entry>, String>);
 #[derive(Debug)]
@@ -344,13 +385,13 @@ pub struct Panels {
     find_jump_origin: Option<crate::intelligence::Jump>,
     history_cursor: [Option<usize>; 2],
     history_draft: [String; 2],
-    message_seen: String,
+    message_seen: UiText,
     message_until: Option<Instant>,
     pub search_results_active: bool,
     result_cursor: Option<usize>,
     files_searched: usize,
     file_matches: usize,
-    result_status: String,
+    result_status: UiText,
     palette_enabled: Vec<bool>,
     palette_accept: Option<Invocation>,
     pub pending_command: Option<Invocation>,
@@ -387,7 +428,7 @@ pub struct Panels {
     pub options: text::Options,
     pub in_selection: bool,
     pub highlights: Vec<Range<usize>>,
-    pub message: String,
+    pub message: UiText,
     pub result_view: files::Results,
     pub result_selected: usize,
     result_navigated: bool,
@@ -399,6 +440,10 @@ pub struct Panels {
     replace_signature: Option<(String, text::Options, String, String)>,
     pub replacement_plan: Option<Vec<files::FileChange>>,
     pub output: String,
+    pub(crate) indexing_output: bool,
+    index_labels_revision: Option<u64>,
+    output_ui: Vec<(usize, UiText)>,
+    output_ui_revision: Option<u64>,
     show_console: bool,
     console_messages: std::collections::VecDeque<String>,
     pub output_editor: Option<crate::editor::Editor>,
@@ -416,10 +461,12 @@ pub struct Panels {
     /// State the shown tool tip was last derived from (control, options, panel).
     tooltip_key: u64,
     output_mirrored: usize,
-    pub input_caption: String,
+    pub input_caption: UiText,
     /// The input panel caption's measured width in DIPs, from the last paint (see
     /// `fit_input_caption`); `None` until it has been measured.
     input_caption_advance: Option<f64>,
+    find_sizing: details::FindSizing,
+    find_measurement: Option<(Panel, f64, u64, u64)>,
     pub input_done: Option<Invocation>,
     focus_input: usize,
     selection_scope: Vec<Range<usize>>,
@@ -427,8 +474,8 @@ pub struct Panels {
     scope_selection: Option<(u64, Selection)>,
     scope_manual: bool,
     search: Option<Search>,
-    find_error: Option<String>,
-    find_status: String,
+    find_error: Option<UiText>,
+    find_status: UiText,
     search_worker: text::Worker,
     search_identity: Option<FindIdentity>,
     all_matches_ready: bool,
@@ -519,13 +566,13 @@ impl Default for Panels {
             find_jump_origin: None,
             history_cursor: [None, None],
             history_draft: Default::default(),
-            message_seen: String::new(),
+            message_seen: UiText::default(),
             message_until: None,
             search_results_active: false,
             result_cursor: None,
             files_searched: 0,
             file_matches: 0,
-            result_status: String::new(),
+            result_status: UiText::default(),
             palette_enabled: Vec::new(),
             palette_accept: None,
             pending_command: None,
@@ -564,7 +611,7 @@ impl Default for Panels {
             options: text::Options::default(),
             in_selection: false,
             highlights: vec![],
-            message: String::new(),
+            message: UiText::default(),
             result_selected: 0,
             result_navigated: false,
             result_scroll: Scroll::default(),
@@ -575,6 +622,10 @@ impl Default for Panels {
             replace_signature: None,
             replacement_plan: None,
             output: String::new(),
+            indexing_output: false,
+            index_labels_revision: None,
+            output_ui: Vec::new(),
+            output_ui_revision: None,
             show_console: false,
             console_messages: std::collections::VecDeque::new(),
             output_editor: None,
@@ -586,8 +637,10 @@ impl Default for Panels {
             status_items: None,
             tooltip_key: 0,
             output_mirrored: 0,
-            input_caption: String::new(),
+            input_caption: UiText::default(),
             input_caption_advance: None,
+            find_sizing: details::FindSizing::default(),
+            find_measurement: None,
             input_done: None,
             focus_input: 0,
             selection_scope: vec![],
@@ -596,7 +649,7 @@ impl Default for Panels {
             scope_manual: false,
             search: None,
             find_error: None,
-            find_status: String::new(),
+            find_status: UiText::default(),
             search_worker: text::Worker::default(),
             search_identity: None,
             all_matches_ready: false,
@@ -741,7 +794,7 @@ impl Panels {
                 &reference.path,
                 language.scheme.clone(),
             ) {
-                self.message = e;
+                self.message = e.into();
             }
         }
         self.output_editor = Some(editor);
@@ -760,6 +813,70 @@ impl Panels {
         } else {
             self.output_trim = Some((removed, inserted));
         }
+    }
+    pub(crate) fn clear_output(&mut self) {
+        self.output.clear();
+        self.output_ui.clear();
+        self.indexing_output = false;
+        self.output_reset = true;
+    }
+    pub(crate) fn append_output_ui(&mut self, message: UiText) {
+        if !message.is_empty() {
+            self.output_ui.push((self.output.len(), message.clone()));
+            self.output.push_str(&message);
+            self.output_ui_revision = None;
+        }
+    }
+    pub(crate) fn replace_output_prefix(&mut self, removed: usize, message: UiText) {
+        self.output_ui.retain_mut(|(start, text)| {
+            if *start < removed {
+                return false;
+            }
+            *start = *start - removed + message.len();
+            !text.is_empty()
+        });
+        self.output.replace_range(..removed, &message);
+        self.trim_output_prefix(removed, message.len());
+        self.output_ui.insert(0, (0, message));
+        self.output_ui_revision = None;
+    }
+    pub(super) fn refresh_output_locale(&mut self, tr: &vel_i18n::Translator) {
+        if self.index_labels_revision != Some(tr.revision()) {
+            self.intel.status_source.lock().unwrap().labels = crate::ui_text::IndexLabels::new(tr);
+            self.index_labels_revision = Some(tr.revision());
+            if self.indexing_output {
+                self.refresh_index_report();
+            }
+        }
+        if self.output_ui.is_empty() || self.output_ui_revision == Some(tr.revision()) {
+            return;
+        }
+        self.output_ui_revision = Some(tr.revision());
+        let mut shift = 0isize;
+        for (start, text) in &mut self.output_ui {
+            *start = start.saturating_add_signed(shift);
+            let previous_len = text.len();
+            if text.refresh(tr) {
+                self.output
+                    .replace_range(*start..*start + previous_len, text);
+                shift += text.len() as isize - previous_len as isize;
+                if *start < self.output_mirrored {
+                    self.output_reset = true;
+                }
+            }
+        }
+    }
+    fn refresh_index_report(&mut self) {
+        self.output = crate::intelligence::status_text_localized(
+            &self
+                .intel
+                .projects
+                .iter()
+                .map(|p| p.index.clone())
+                .collect::<Vec<_>>(),
+            &self.intel.status_source.lock().unwrap().labels,
+        );
+        self.output_reset = true;
     }
     /// Whether the read-only output view still lags the build output.
     fn output_pending(&self) -> bool {
@@ -1318,22 +1435,37 @@ impl Panels {
                 .and_then(|v| v.engine.command_line())
         {
             let caption = match prompt.chars().next() {
-                Some('/') => "Search forward /",
-                Some('?') => "Search backward ?",
-                _ => ":",
+                Some('/') => UiText::tr("Search forward /"),
+                Some('?') => UiText::tr("Search backward ?"),
+                _ => ":".into(),
             };
-            self.action(
+            self.show_input_caption(
                 workspace,
                 "show_input_panel",
                 &json!({
-                    "caption": caption, "initial_text": &prompt[1..],
+                    "initial_text": &prompt[1..],
                     "on_done": {"command":"vintage_submit_prompt", "args":{}}
                 }),
+                caption,
                 viewport,
             )?;
             self.vintage_prompt = Some(sheet);
         }
         Ok(())
+    }
+    pub(crate) fn show_input_caption(
+        &mut self,
+        workspace: &mut Workspace,
+        command: &str,
+        args: &Value,
+        mut caption: UiText,
+        viewport: Range<usize>,
+    ) -> Result<bool, String> {
+        debug_assert_eq!(command, "show_input_panel");
+        let handled = self.action(workspace, command, args, viewport)?;
+        caption.refresh(&workspace.translations);
+        self.input_caption = caption;
+        Ok(handled)
     }
     pub fn input(&self) -> Option<&Input> {
         if self.overlay.is_some() {
@@ -1395,7 +1527,10 @@ impl Panels {
         self.focus.set(Surface::Panel, 2);
         true
     }
-    pub(crate) fn widget_history_menu(&self) -> Vec<vel_config::ui::PaletteItem> {
+    pub(crate) fn widget_history_menu(
+        &self,
+        tr: &vel_i18n::Translator,
+    ) -> Vec<vel_config::ui::PaletteItem> {
         // Use the same history as Up/Down; the Where and overlay fields have no
         // history in Velocity. https://www.sublimetext.com/docs/menus.html
         if self.overlay.is_some() || !self.find_panel_visible() || self.focus_input > 1 {
@@ -1412,7 +1547,7 @@ impl Panels {
             .take(20)
             .map(|value| vel_config::ui::PaletteItem {
                 caption: if value.is_empty() {
-                    "Empty Replacement".into()
+                    tr.tr("Empty Replacement").into_owned()
                 } else {
                     value.replace('\n', " ↵ ")
                 },
@@ -1884,7 +2019,9 @@ impl Panels {
                     | "replace_all"
             )
         {
-            self.set_message("Text search is unavailable in hex and image tabs.".into());
+            self.set_message(UiText::tr(
+                "Text search is unavailable in hex and image tabs.",
+            ));
             return Ok(true);
         }
         // Record the document find operation at the interception boundary. Query-field
@@ -1917,7 +2054,9 @@ impl Panels {
         let _find_recording_guard = vel_commands::is_find_command(name)
             .then(|| workspace.editor().registry.suspend_recording());
         if workspace.editor().binary.is_some() && name == "goto_line" {
-            return self.action(workspace, "show_input_panel", &json!({"caption":"Goto byte offset (decimal or 0x hex)","initial_text":format!("0x{:x}", workspace.editor().caret),"on_done":{"command":"goto_hex_offset","args":{}}}), viewport);
+            self.action(workspace, "show_input_panel", &json!({"initial_text":format!("0x{:x}", workspace.editor().caret),"on_done":{"command":"goto_hex_offset","args":{}}}), viewport)?;
+            self.input_caption = UiText::tr("Goto byte offset (decimal or 0x hex)");
+            return Ok(true);
         }
         if self.review_action(workspace, name, args)? {
             return Ok(true);
@@ -1969,14 +2108,9 @@ impl Panels {
                 self.restore_scroll = Some(workspace.tabs[workspace.active].scroll);
             }
             "show_indexing_status" => {
-                self.output = crate::intelligence::status_text(
-                    &self
-                        .intel
-                        .projects
-                        .iter()
-                        .map(|p| p.index.clone())
-                        .collect::<Vec<_>>(),
-                );
+                self.clear_output();
+                self.indexing_output = true;
+                self.refresh_index_report();
                 self.panel = Some(Panel::Output);
                 self.panel_focused = true;
             }
@@ -2153,7 +2287,9 @@ impl Panels {
                     self.in_selection = enabled && self.multiline_scope(workspace);
                 }
                 if name == "show_input_panel" {
-                    self.input_caption = args["caption"].as_str().unwrap_or("Input").into();
+                    self.input_caption = args["caption"]
+                        .as_str()
+                        .map_or_else(|| UiText::tr("Input"), UiText::from);
                     self.query.set(args["initial_text"].as_str().unwrap_or(""));
                     self.input_done = args
                         .get("on_done")
@@ -2162,6 +2298,7 @@ impl Panels {
                         .transpose()
                         .map_err(|e| e.to_string())?;
                 } else if name == "show_output_panel" {
+                    self.clear_output();
                     self.output = args["text"].as_str().unwrap_or("").into();
                 } else {
                     // https://www.sublimetext.com/download (show_panel arguments).
@@ -2473,10 +2610,12 @@ impl Panels {
         self.finish_find_navigation(workspace);
         if self.panel == Some(Panel::Results) && self.file_task.take().is_some() {
             self.file_complete = false;
-            self.result_status = format!(
-                "Search cancelled · {} matches in {} files",
-                self.file_matches,
-                self.result_view.matched_files()
+            self.result_status = UiText::tr_fmt(
+                "Search cancelled · {count} matches in {files} files",
+                [
+                    ("count", self.file_matches.to_string()),
+                    ("files", self.result_view.matched_files().to_string()),
+                ],
             );
             self.set_message(self.result_status.clone());
         }
@@ -2635,7 +2774,7 @@ impl Panels {
         let snapshot = key.snapshot;
         let result = (!snapshot.binary).then(|| Search::new(&key.query, key.options));
         self.search_identity = Some(key);
-        if self.find_error.take().as_ref() == Some(&self.message)
+        if self.find_error.take().as_deref() == Some(self.message.as_ref())
             || (!self.find_status.is_empty() && self.find_status == self.message)
         {
             self.set_message(String::new());
@@ -2651,14 +2790,14 @@ impl Panels {
                 {
                     self.all_matches_ready = true;
                 } else if snapshot.loading {
-                    self.find_status = "Waiting for file to load…".into();
+                    self.find_status = UiText::tr("Waiting for file to load…");
                 } else if editor.text.len_bytes() <= 4096 && !search.options.regex {
                     // Keep tiny literal searches immediate. A viewport may include
                     // an arbitrarily long logical line; never scan it as a preview.
                     self.highlights = search.find(&editor.text, &self.scope());
                     self.all_matches_ready = true;
                 } else {
-                    self.find_status = "Searching…".into();
+                    self.find_status = UiText::tr("Searching…");
                     self.search_worker.search(
                         search.clone(),
                         editor.text.clone(),
@@ -2672,9 +2811,10 @@ impl Panels {
                 }
             }
             Some(Err(error)) => {
-                self.find_error = Some(error.clone());
-                self.find_status.clone_from(&error);
-                self.set_message(error);
+                self.find_status =
+                    UiText::tr_fmt("Invalid regular expression: {detail}", [("detail", error)]);
+                self.find_error = Some(self.find_status.clone());
+                self.set_message(self.find_status.clone());
                 self.search = None;
                 self.all_matches_ready = true;
             }
@@ -2682,7 +2822,7 @@ impl Panels {
                 self.pending_navigation.clear();
                 self.search = None;
                 self.all_matches_ready = true;
-                self.find_status = "Text search is unavailable in hex and image tabs.".into();
+                self.find_status = UiText::tr("Text search is unavailable in hex and image tabs.");
             }
         }
     }
@@ -2694,30 +2834,36 @@ impl Panels {
             self.message_until = None;
         }
         self.find_status = if search.query.is_empty() {
-            String::new()
+            UiText::default()
         } else if self.highlights.is_empty() {
             let mut flags = Vec::new();
             if search.options.case_sensitive {
-                flags.push("Match Case on");
+                flags.push(UiText::tr("Match Case on"));
             }
             if search.options.whole_word {
-                flags.push("Whole Word on");
+                flags.push(UiText::tr("Whole Word on"));
             }
             if self.in_selection {
                 flags.push(if self.selection_scope.is_empty() {
-                    "In Selection on; no selection"
+                    UiText::tr("In Selection on; no selection")
                 } else {
-                    "In Selection on"
+                    UiText::tr("In Selection on")
                 });
             }
-            if flags.is_empty() {
-                "No matches".into()
+            if let Some(options) = flags.into_iter().reduce(|left, right| {
+                UiText::compose("{left}, {right}", [("left", left), ("right", right)])
+            }) {
+                UiText::compose("No matches ({options})", [("options", options)])
             } else {
-                format!("No matches ({})", flags.join(", "))
+                UiText::tr("No matches")
             }
         } else {
             let n = self.highlights.len();
-            format!("{n} {}", if n == 1 { "match" } else { "matches" })
+            if n == 1 {
+                UiText::tr("1 match")
+            } else {
+                UiText::tr_fmt("{count} matches", [("count", n.to_string())])
+            }
         };
     }
     fn queue_find(&mut self, workspace: &mut Workspace, action: FindNavigation) {
@@ -2833,11 +2979,34 @@ impl Panels {
                 self.remember_find_selection(workspace);
                 self.reveal = true;
                 self.update_find_status();
+                if report
+                    && self.highlights.len() > 1
+                    && let Ok(index) = self
+                        .highlights
+                        .binary_search_by_key(&workspace.editor().selection().start, |r| r.start)
+                {
+                    self.find_status = UiText::tr_fmt(
+                        "{index} of {count}",
+                        [
+                            ("index", (index + 1).to_string()),
+                            ("count", self.highlights.len().to_string()),
+                        ],
+                    );
+                }
             } else if report && !search.query.is_empty() {
                 self.update_find_status();
                 if !self.highlights.is_empty() {
-                    let direction = if backwards { "previous" } else { "later" };
-                    self.find_status = format!("No {direction} match ({})", self.find_status);
+                    self.find_status = if backwards {
+                        UiText::compose(
+                            "No previous match ({summary})",
+                            [("summary", self.find_status.clone())],
+                        )
+                    } else {
+                        UiText::compose(
+                            "No later match ({summary})",
+                            [("summary", self.find_status.clone())],
+                        )
+                    };
                 }
                 self.set_message(self.find_status.clone());
             }
@@ -2889,20 +3058,41 @@ impl Panels {
         if !all {
             self.navigate_find(workspace, false, false, false);
         }
-        self.set_message(format!(
-            "Replaced {count} occurrence{}",
-            if count == 1 { "" } else { "s" }
-        ));
+        self.set_message(if count == 1 {
+            UiText::tr("Replaced 1 occurrence")
+        } else {
+            UiText::tr_fmt(
+                "Replaced {count} occurrences",
+                [("count", count.to_string())],
+            )
+        });
         Ok(())
     }
     pub(crate) fn refresh_localized_palette(&mut self, workspace: &mut Workspace) {
-        if matches!(
-            self.overlay,
-            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
-        ) {
-            self.prepared.clear();
-            self.query_quick(workspace);
+        match self.overlay {
+            Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices) => {
+                self.prepared.clear();
+                self.query_quick(workspace);
+            }
+            Some(Overlay::Appearance) => self.refresh_appearance_locale(workspace),
+            Some(Overlay::Goto) if !self.local_positions.is_empty() => {
+                for item in &mut self.quick.items {
+                    if let Some(at) = self.local_positions.get(item.value) {
+                        item.annotation = Self::local_annotation(workspace, *at);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+    fn local_annotation(workspace: &Workspace, at: usize) -> String {
+        workspace.translations.tr_fmt(
+            "Line {number}",
+            &[(
+                "number",
+                (workspace.editor().text.byte_to_line(at) + 1).to_string(),
+            )],
+        )
     }
     fn palette_match_limit(&self) -> usize {
         if self.palette_primary.is_empty()
@@ -2965,7 +3155,9 @@ impl Panels {
         if workspace.editor().binary.is_some() && matches!(target, "line" | "symbol" | "word") {
             self.fuzzy_worker.cancel();
             self.quick_pending = false;
-            self.set_message("Text navigation is unavailable in hex and image tabs.".into());
+            self.set_message(UiText::tr(
+                "Text navigation is unavailable in hex and image tabs.",
+            ));
             return;
         }
         // Symbol sources change on an edit or when analysis publishes, not on every frame.
@@ -3160,9 +3352,9 @@ impl Panels {
                     let language = workspace.editor().language.borrow();
                     let analysis = language.as_ref().and_then(|l| l.analysis.as_ref());
                     self.message = if analysis.is_none() {
-                        "Indexing symbols…".into()
+                        UiText::tr("Indexing symbols…")
                     } else {
-                        String::new()
+                        UiText::default()
                     };
                     if let Some(analysis) = analysis {
                         // Build 4107 displays symbol kinds: https://www.sublimetext.com/download
@@ -3366,13 +3558,7 @@ impl Panels {
                             .hint(&palette_items[index].invocation)
                             .unwrap_or_default()
                     } else if let Some(at) = self.local_positions.get(hit.index) {
-                        workspace.translations.tr_fmt(
-                            "Line {number}",
-                            &[(
-                                "number",
-                                (workspace.editor().text.byte_to_line(*at) + 1).to_string(),
-                            )],
-                        )
+                        Self::local_annotation(workspace, *at)
                     } else {
                         String::new()
                     },
@@ -4187,7 +4373,7 @@ impl Panels {
         self.result_navigated = false;
         self.result_scroll.offset = 0.;
         self.file_complete = false;
-        self.result_status = "Searching 0 files…".into();
+        self.result_status = UiText::tr_fmt("Searching {files} files…", [("files", "0".into())]);
         self.set_message(self.result_status.clone());
         self.panel = Some(Panel::Results);
         Ok(())
@@ -4248,7 +4434,7 @@ impl Panels {
             let _ = tx.send(result);
         });
         self.replace_rx = Some(rx);
-        self.message = "Preparing replacement preview…".into();
+        self.set_message(UiText::tr("Preparing replacement preview…"));
         Ok(())
     }
     pub(crate) fn file_replace_ready(&self) -> bool {
@@ -4375,7 +4561,7 @@ impl Panels {
         if self.vintage_prompt.is_some()
             && let Err(error) = self.sync_vintage_prompt(workspace, viewport.clone())
         {
-            self.message = error;
+            self.message = error.into();
         }
         let intelligence_changed = folder_edit_changed
             | self.intel.poll(workspace)
@@ -4503,7 +4689,7 @@ impl Panels {
                         self.navigation_selection = None;
                         self.navigation_options = Default::default();
                     } else if result.locations.is_empty() {
-                        self.message = "No indexed locations".into();
+                        self.set_message(UiText::tr("No indexed locations"));
                         self.navigation_origin = None;
                         self.navigation_selection = None;
                         self.navigation_options = Default::default();
@@ -4571,10 +4757,15 @@ impl Panels {
             {
                 match result {
                     Ok(plan) => self.replacement_plan = Some(plan),
-                    Err(error) => self.message = error,
+                    Err(error) => self.set_message(UiText::tr_fmt(
+                        "Could not prepare replacement: {detail}",
+                        [("detail", error)],
+                    )),
                 }
             } else {
-                self.message = "Replacement options changed; prepare the preview again".into();
+                self.set_message(UiText::tr(
+                    "Replacement options changed; prepare the preview again",
+                ));
             }
             changed = true;
         }
@@ -4635,7 +4826,7 @@ impl Panels {
                     rows_changed |= self.children.remove(&path).is_some();
                     // Missing children disappear through their parent's listing.
                     if workspace.folders.iter().any(|folder| folder.path == path) {
-                        self.message = error;
+                        self.message = error.into();
                         changed = true;
                     }
                 }
@@ -4657,7 +4848,9 @@ impl Panels {
                         rows_changed = true;
                     }
                     if subtree.limited {
-                        self.set_message("Recursive expansion stopped at 5,000 directories".into());
+                        self.set_message(UiText::tr(
+                            "Recursive expansion stopped at 5,000 directories",
+                        ));
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.recursive_expansion = None,
@@ -4686,7 +4879,7 @@ impl Panels {
             self.quick_elapsed_ms = ranked.elapsed.as_secs_f64() * 1000.;
             self.publish_quick(workspace, ranked.hits);
             if let Err(error) = self.preview_current(workspace) {
-                self.message = error;
+                self.message = error.into();
             }
             changed = true;
         }
@@ -4721,7 +4914,10 @@ impl Panels {
             let searched = task.searched_files();
             if searched != self.files_searched {
                 self.files_searched = searched;
-                self.result_status = format!("Searching {searched} files…");
+                self.result_status = UiText::tr_fmt(
+                    "Searching {files} files…",
+                    [("files", searched.to_string())],
+                );
                 self.set_message(self.result_status.clone());
                 changed = true;
             }
@@ -4755,11 +4951,24 @@ impl Panels {
                         }
                     }
                 }
-                files::Event::Error(error) => self.message = error,
+                files::Event::Error(error) => self.set_message(UiText::tr_fmt(
+                    "File search failed: {detail}",
+                    [("detail", error)],
+                )),
                 files::Event::Done { files, .. } => {
                     self.files_searched = files;
-                    self.result_status =
-                        vel_ui::status::search(self.file_matches, self.result_view.matched_files());
+                    self.result_status = match (self.file_matches, self.result_view.matched_files())
+                    {
+                        (1, 1) => UiText::tr("1 match in 1 file"),
+                        (count, 1) => UiText::tr_fmt(
+                            "{count} matches in 1 file",
+                            [("count", count.to_string())],
+                        ),
+                        (count, files) => UiText::tr_fmt(
+                            "{count} matches in {files} files",
+                            [("count", count.to_string()), ("files", files.to_string())],
+                        ),
+                    };
                     self.set_message(self.result_status.clone());
                     self.file_complete = true;
                     self.file_task = None;
@@ -4777,6 +4986,7 @@ impl Panels {
         } else {
             self.result_view.rows.len()
         };
+        self.refresh_locale(workspace);
         changed |= self.sync_output();
         changed
     }
@@ -4871,14 +5081,12 @@ impl Panels {
         self.quick
             .scroll
             .set_viewport((self.quick_bounds.height - ((header + footer) * self.ui_scale)).max(1.));
-        let mut close = if self.find_panel_visible() {
-            CLOSE_BUTTON + 6.
-        } else {
-            0.
-        };
-        if self.show_find_options_button() {
-            close += CLOSE_BUTTON + 4.;
-        }
+        let close = self
+            .panel
+            .filter(|_| self.find_panel_visible())
+            .map_or(0., |panel| {
+                Self::find_edge_reserve(panel, self.panel_bounds.width, self.ui_scale)
+            });
         let v = self.find_vertical_scale();
         // Narrow panels give the input room first: the label column shrinks, then the labels
         // are dropped, before the input would collapse under the close button. The input
@@ -4890,7 +5098,12 @@ impl Panels {
                 self.input_caption_advance,
             )
         } else {
-            Self::find_label_column(self.panel_bounds.width, self.ui_scale, close)
+            Self::find_label_column(
+                self.panel_bounds.width,
+                self.ui_scale,
+                close,
+                self.find_sizing.caption,
+            )
         };
         let extras = self
             .panel
@@ -5260,7 +5473,7 @@ impl Panels {
                         .nodes
                         .get_mut(&(50 + i as u64))
                         .expect("button")
-                        .label = (*caption).into();
+                        .label = workspace.ui.find_buttons[*caption].to_string();
                     self.tree
                         .nodes
                         .get_mut(&2)
@@ -5275,7 +5488,7 @@ impl Panels {
                     .nodes
                     .get_mut(&CLOSE_ID)
                     .expect("close button")
-                    .label = "Close find panel".into();
+                    .label = workspace.ui.close_find.to_string();
                 self.tree
                     .nodes
                     .get_mut(&2)
@@ -5288,7 +5501,7 @@ impl Panels {
                         .nodes
                         .get_mut(&WHERE_ID)
                         .expect("Where button")
-                        .label = workspace.translations.caption("Where…").into();
+                        .label = workspace.ui.where_menu.to_string();
                     self.tree
                         .nodes
                         .get_mut(&2)
@@ -5429,6 +5642,7 @@ impl Panels {
         self.tree.index_ancestry();
     }
     pub fn paint(&mut self, workspace: &Workspace, scene: &mut Scene) {
+        self.refresh_locale(workspace);
         self.side_scroll.rows = self.folder_row_base(workspace) + self.side_rows.len();
         if !workspace
             .editor()
@@ -5446,7 +5660,11 @@ impl Panels {
             workspace.themes.ui.borrow_mut().request_animation();
         }
         self.sync_widgets(workspace);
-        self.fit_input_caption(workspace);
+        if self.fit_input_caption(workspace)
+            || (self.find_panel_visible() && self.measure_find_controls(workspace))
+        {
+            self.sync_widgets(workspace);
+        }
         let mut theme = workspace.themes.ui.borrow_mut();
 
         let settings = &workspace.editor().settings;
@@ -5467,20 +5685,28 @@ impl Panels {
             theme.surface(&mut layer, &sidebar, cap, cap);
             theme.surface(&mut layer, &sidebar, clip, clip);
             let heading = style(3, Some("sidebar_heading"), &mut theme);
+            let mut heading = heading;
+            if workspace.translations.language() == vel_i18n::Language::ZhHans {
+                heading.case = None;
+            }
             for (caption, row) in [
-                ("Open Files", 0),
-                ("Folders", self.folder_row_base(workspace) - 1),
+                (workspace.ui.open_files.as_ref(), 0),
+                (
+                    workspace.ui.folders.as_ref(),
+                    self.folder_row_base(workspace) - 1,
+                ),
             ]
             .into_iter()
             .skip(usize::from(!self.open_files_visible))
             {
-                theme.text(
+                theme.text_fit(
                     &mut layer,
                     &heading,
                     caption,
                     10. * self.ui_scale,
                     clip.y + row as f64 * (24. * self.ui_scale) - self.side_scroll.offset
                         + (17. * self.ui_scale),
+                    clip.width - 20. * self.ui_scale,
                     clip,
                 );
             }
@@ -5490,9 +5716,12 @@ impl Panels {
                 // First row under the FOLDERS heading, wherever Open Files left it.
                 let top = clip.y + self.folder_row_base(workspace) as f64 * (24. * self.ui_scale)
                     - self.side_scroll.offset;
-                for (line, caption) in ["No folders open", "Project \u{203a} Add Folder\u{2026}"]
-                    .into_iter()
-                    .enumerate()
+                for (line, caption) in [
+                    workspace.ui.no_folders.as_ref(),
+                    workspace.ui.add_folder_hint.as_ref(),
+                ]
+                .into_iter()
+                .enumerate()
                 {
                     theme.text_fit(
                         &mut layer,
@@ -5551,7 +5780,7 @@ impl Panels {
                     theme.icon(&mut layer, icon, icon_rect, clip, label_style.foreground);
                 }
                 let label_x = (34. * self.ui_scale) + f64::from(label_style.margin.left);
-                let label = tab.label();
+                let label = tab.ui_label(&workspace.ui);
                 let shown = theme.fit_label(&label_style, &label, label_end - label_x);
                 if !shown.is_empty() {
                     theme.text(
@@ -5664,11 +5893,11 @@ impl Panels {
                     &mut layer,
                     &text_style,
                     &if panel == Panel::Results {
-                        format!("Find Results · {}", self.result_status)
+                        format!("{} · {}", workspace.ui.find_results, self.result_status)
                     } else if self.console_visible() {
-                        "Console".into()
+                        workspace.ui.console.to_string()
                     } else {
-                        "Output".into()
+                        workspace.ui.output.to_string()
                     },
                     clip.x + (10. * self.ui_scale),
                     clip.y + (20. * self.ui_scale),
@@ -5774,7 +6003,7 @@ impl Panels {
                             if panel == Panel::Input {
                                 &self.input_caption
                             } else {
-                                ["Find", "Replace", "Where"][i]
+                                &workspace.ui.find_fields[i]
                             },
                             clip.x + (8. * self.ui_scale),
                             input.bounds.y + (20. * self.ui_scale),
@@ -5818,11 +6047,16 @@ impl Panels {
                         let node = &self.tree.nodes[&id];
                         let button = style(id, None, &mut theme);
                         theme.surface(&mut layer, &button, node.rect, clip);
-                        let width = theme.advance(&button, &node.label);
+                        let shown = theme.fit_label(
+                            &button,
+                            &node.label,
+                            (node.rect.width - 8. * self.ui_scale).max(0.),
+                        );
+                        let width = theme.advance(&button, &shown);
                         theme.text(
                             &mut layer,
                             &button,
-                            &node.label,
+                            &shown,
                             (node.rect.x + (node.rect.width - width) / 2.).round(),
                             node.rect.y + node.rect.height / 2. + 4. * self.ui_scale,
                             node.rect,
@@ -5875,19 +6109,33 @@ impl Panels {
             let tab = &workspace.tabs[workspace.active];
             let document_hint = if let Some(binary) = &editor.binary {
                 format!(
-                    "Read-only hex · Offset 0x{:x} / {} bytes · ",
-                    editor.caret,
-                    binary.view.len_bytes()
+                    "{} · ",
+                    vel_i18n::format_named(
+                        &workspace.ui.hex,
+                        &[
+                            ("offset", format!("{:x}", editor.caret)),
+                            ("bytes", binary.view.len_bytes().to_string()),
+                        ]
+                    )
                 )
             } else if let Some((read, total)) = tab.progress() {
                 format!(
-                    "Loading {}% · Read-only prefix · ",
-                    read.saturating_mul(100) / total.max(1)
+                    "{} · ",
+                    vel_i18n::format_named(
+                        &workspace.ui.loading,
+                        &[(
+                            "percent",
+                            (read.saturating_mul(100) / total.max(1)).to_string()
+                        ),]
+                    )
                 )
             } else {
-                let mut hint = crate::large::hint(editor.features);
+                let mut hint = crate::large::hint(editor.features, &workspace.ui);
                 if editor.layout.borrow().long.pending() {
-                    hint.push_str(" · Preparing line geometry");
+                    if !hint.is_empty() {
+                        hint.push_str(" · ");
+                    }
+                    hint.push_str(&workspace.ui.preparing);
                 }
                 if hint.is_empty() {
                     String::new()
@@ -5924,10 +6172,17 @@ impl Panels {
                 (
                     details::StatusItem::Indentation,
                     if text_document {
-                        vel_ui::status::indentation(
-                            editor.preferences.translate_tabs_to_spaces,
-                            editor.preferences.tab_size,
-                        )
+                        if workspace.translations.language() == vel_i18n::Language::En {
+                            vel_ui::status::indentation(
+                                editor.preferences.translate_tabs_to_spaces,
+                                editor.preferences.tab_size,
+                            )
+                        } else {
+                            workspace.ui.indent(
+                                editor.preferences.translate_tabs_to_spaces,
+                                editor.preferences.tab_size,
+                            )
+                        }
                     } else {
                         String::new()
                     },
@@ -5942,7 +6197,12 @@ impl Panels {
                     details::StatusItem::Indexing,
                     self.intel
                         .percentage
-                        .map(|p| format!("Indexing {p}%"))
+                        .map(|p| {
+                            vel_i18n::format_named(
+                                &workspace.ui.indexing,
+                                &[("percent", p.to_string())],
+                            )
+                        })
                         .unwrap_or_default(),
                     0.,
                 ),
@@ -6042,7 +6302,7 @@ impl Panels {
                         "{}{}{}",
                         document_hint,
                         if editor.vintage.is_some() {
-                            format!("{} · ", editor.vintage_status())
+                            format!("{} · ", editor.localized_vintage_status(&workspace.ui))
                         } else {
                             String::new()
                         },
@@ -6156,6 +6416,30 @@ impl Panels {
                 &mut self.quick_input,
                 true,
             );
+            let input = self.quick_input.bounds;
+            let value = self.quick_input.buffer.text();
+            let show_prompt = value.is_empty()
+                || (self.overlay == Some(Overlay::Goto)
+                    && value.len_bytes() == 1
+                    && matches!(value.chars().next(), Some(':' | '@')));
+            if show_prompt {
+                let mut prompt_style = input_style.clone();
+                prompt_style.foreground[3] *= 0.65;
+                let pad = if self.quick_input.buffer.text().is_empty() {
+                    10.
+                } else {
+                    22.
+                } * self.ui_scale;
+                theme.text_fit(
+                    &mut overlay,
+                    &prompt_style,
+                    self.overlay_prompt(workspace),
+                    input.x + pad,
+                    input.y + input.height / 2. + 4. * self.ui_scale,
+                    input.width - pad - 10. * self.ui_scale,
+                    input,
+                );
+            }
             let rows = Rect {
                 x: self.quick_bounds.x,
                 y: self.quick_list_top(),
@@ -6163,6 +6447,20 @@ impl Panels {
                 height: self.quick.scroll.viewport,
             };
             let s = self.ui_scale;
+            if self.quick_ready && self.quick.items.is_empty() && !show_prompt {
+                let style = self
+                    .tree
+                    .style(1, Some("label_control"), &mut theme, settings);
+                theme.text_fit(
+                    &mut overlay,
+                    &style,
+                    &workspace.ui.no_matches,
+                    rows.x + 12. * s,
+                    rows.y + 20. * s,
+                    rows.width - 24. * s,
+                    rows,
+                );
+            }
             // Appearance previews have their own row layout; other lists reserve the badge lane.
             let compact = self.quick_compact();
             let badges = self.overlay != Some(Overlay::Appearance);
@@ -6351,7 +6649,7 @@ impl Panels {
                 theme.text(
                     &mut overlay,
                     &footer,
-                    self.overlay_footer(&workspace.translations),
+                    self.overlay_footer(workspace),
                     rows.x + (12. * self.ui_scale),
                     self.quick_bounds.y + self.quick_bounds.height - (9. * self.ui_scale),
                     self.quick_bounds,
@@ -8122,7 +8420,7 @@ impl Panels {
         } else if self.side_visible && point.x >= self.side_bounds.width - 32. {
             self.review_side_path(workspace, point)
                 .and_then(|(path, folder)| workspace.git.badge(&path, folder))
-                .map(|b| crate::git_ui::badge_text(b).1.to_owned())
+                .map(|b| crate::git_ui::badge_tooltip(b, &workspace.translations).into_owned())
         } else {
             None
         }
@@ -8139,9 +8437,7 @@ impl Panels {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             let control = self.tree.hit_test(*point);
             control.hash(&mut h);
-            if control == Some(WHERE_ID) {
-                workspace.translations.revision().hash(&mut h);
-            }
+            workspace.translations.revision().hash(&mut h);
             format!("{:?}", self.panel).hash(&mut h);
             (
                 self.options.regex,

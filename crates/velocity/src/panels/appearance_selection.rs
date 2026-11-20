@@ -3,7 +3,7 @@ use super::*;
 
 #[derive(Debug)]
 pub(super) struct Row {
-    caption: String,
+    caption: UiText,
     key: &'static str,
     value: String,
     path: String,
@@ -14,6 +14,7 @@ pub(super) struct SelectionPanel {
     candidates: Vec<fuzzy::Candidate>,
     revision: u64,
     sheet: u64,
+    root: &'static str,
 }
 impl Panels {
     pub(super) fn open_appearance(&mut self, workspace: &mut Workspace, theme: bool) {
@@ -26,10 +27,7 @@ impl Panels {
             &workspace.appearance.schemes
         };
         let mut rows = vec![Row {
-            caption: workspace
-                .translations
-                .tr("Automatic (follow system appearance)")
-                .into_owned(),
+            caption: UiText::tr("Automatic (follow system appearance)"),
             key: root,
             value: "auto".into(),
             path: String::new(),
@@ -63,13 +61,13 @@ impl Panels {
                     ]
                 } {
                     rows.push(Row {
-                        caption: workspace.translations.tr_fmt(
+                        caption: UiText::tr_fmt(
                             if prefix == "Dark" {
                                 "Dark: {name} (applies in Dark mode)"
                             } else {
                                 "Light: {name} (applies in Light mode)"
                             },
-                            &[("name", name.into())],
+                            [("name", name.into())],
                         ),
                         key,
                         value: resource.value.clone(),
@@ -87,14 +85,18 @@ impl Panels {
                             && row.value.rsplit('/').next() == current.rsplit('/').next()))
             })
             .unwrap_or(0);
+        for row in &mut rows {
+            row.caption.refresh(&workspace.translations);
+        }
         self.appearance_selection = Some(SelectionPanel {
             candidates: rows
                 .iter()
-                .map(|r| fuzzy::Candidate::new(&r.caption))
+                .map(|r| fuzzy::Candidate::new(r.caption.as_str()))
                 .collect(),
             rows,
             revision: workspace.resource_revision,
             sheet: workspace.tabs[workspace.active].sheet,
+            root,
         });
         self.overlay = Some(Overlay::Appearance);
         self.fuzzy_worker.cancel();
@@ -136,7 +138,7 @@ impl Panels {
                 .map(|hit| {
                     let row = &panel.rows[hit.index];
                     Item {
-                        caption: row.caption.clone(),
+                        caption: row.caption.to_string(),
                         value: hit.index,
                         icon: vel_ui::ItemIcon::Settings,
                         annotation: row.key.into(),
@@ -148,6 +150,33 @@ impl Panels {
         );
         if preview {
             self.preview_appearance(workspace);
+        }
+    }
+    pub(super) fn refresh_appearance_locale(&mut self, workspace: &mut Workspace) {
+        let Some(panel) = self.appearance_selection.as_mut() else {
+            return;
+        };
+        let mut changed = false;
+        for row in &mut panel.rows {
+            changed |= row.caption.refresh(&workspace.translations);
+        }
+        if changed {
+            let selected = self.quick.current();
+            panel.candidates = panel
+                .rows
+                .iter()
+                .map(|row| fuzzy::Candidate::new(row.caption.as_str()))
+                .collect();
+            self.query_appearance(workspace, false);
+            if let Some(index) = self
+                .quick
+                .items
+                .iter()
+                .position(|item| Some(item.value) == selected)
+            {
+                self.quick.selected = index;
+                self.quick.scroll.reveal(index);
+            }
         }
     }
     pub(super) fn preview_appearance(&mut self, workspace: &mut Workspace) {
@@ -182,10 +211,32 @@ impl Panels {
         self.focus.show(Surface::Overlay, false);
         Ok(())
     }
-    pub(super) fn appearance_stale(&self, workspace: &Workspace) -> bool {
-        self.appearance_selection.as_ref().is_some_and(|p| {
-            p.revision != workspace.resource_revision
-                || p.sheet != workspace.tabs[workspace.active].sheet
-        })
+    pub(super) fn appearance_stale(&mut self, workspace: &Workspace) -> bool {
+        let Some(panel) = &mut self.appearance_selection else {
+            return false;
+        };
+        if panel.sheet != workspace.tabs[workspace.active].sheet {
+            return true;
+        }
+        if panel.revision == workspace.resource_revision {
+            return false;
+        }
+        let resources = if panel.root == "theme" {
+            &workspace.appearance.themes
+        } else {
+            &workspace.appearance.schemes
+        };
+        // A preference reload (including a language change) need not close a
+        // picker whose underlying resources still have the same identities.
+        let same_resources = panel
+            .rows
+            .iter()
+            .filter(|row| row.key == panel.root && !row.path.is_empty())
+            .map(|row| (&row.path, &row.value))
+            .eq(resources
+                .iter()
+                .map(|resource| (&resource.path, &resource.value)));
+        panel.revision = workspace.resource_revision;
+        !same_resources
     }
 }

@@ -191,7 +191,8 @@ impl App {
             return Vec::new();
         };
         let dynamic = if pending.kind == ContextMenuKind::Widget {
-            self.panels.widget_history_menu()
+            self.panels
+                .widget_history_menu(&self.workspace.translations)
         } else {
             std::mem::take(&mut self.panels.review.items)
         };
@@ -269,8 +270,7 @@ impl App {
             rows.into_iter()
                 .map(|row| MenuEntry {
                     caption: if row.invocation.as_ref().is_some_and(|i| {
-                        i.command == "replace_misspelling"
-                            || (i.command == "widget_history" && i.args["text"] != "")
+                        i.command == "replace_misspelling" || i.command == "widget_history"
                     }) {
                         row.caption
                     } else {
@@ -315,25 +315,36 @@ impl App {
             return Ok(false);
         };
         match effect {
-            SidebarEffect::Input(invocation) => {
+            SidebarEffect::Input(invocation, caption) => {
                 let viewport = self.viewport();
-                self.panels.action(
+                self.panels.show_input_caption(
                     &mut self.workspace,
                     &invocation.command,
                     &invocation.args,
+                    caption,
                     viewport,
                 )?;
             }
             SidebarEffect::ConfirmDelete { paths, on_confirm } => {
-                let text = format!(
-                    "Move these entries to the Trash?\n{}",
-                    paths
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                let text = UiText::tr_fmt(
+                    "Move these entries to the Trash?\n{paths}",
+                    [(
+                        "paths",
+                        paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )],
                 );
-                if w.alert("Move to Trash?", &text, &["Cancel", "Move to Trash"]) == 1 {
+                if Dialog::new(
+                    UiText::tr("Move to Trash?"),
+                    text,
+                    [UiText::tr("Cancel"), UiText::tr("Move to Trash")],
+                )
+                .show(&self.workspace.translations, w)
+                    == 1
+                {
                     self.context_action(w, &on_confirm.command, &on_confirm.args)?;
                 }
             }

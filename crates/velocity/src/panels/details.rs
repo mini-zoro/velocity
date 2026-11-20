@@ -13,6 +13,12 @@ const BUTTON_MIN: f64 = 56.;
 const BUTTON_GAP: f64 = 6.;
 const MESSAGE_MIN: f64 = 96.;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct FindSizing {
+    pub(super) caption: f64,
+    button: f64,
+}
+
 /// Right-hand status-bar items, in placement priority (right to left).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusItem {
@@ -31,22 +37,13 @@ pub(crate) struct FindControls {
 }
 
 impl Panels {
-    pub(super) fn panel_buttons(panel: Panel) -> &'static [(&'static str, &'static str)] {
+    pub(super) fn panel_buttons(panel: Panel) -> &'static [(usize, &'static str)] {
         match panel {
-            Panel::Find | Panel::Incremental => &[
-                ("Find", "find_next"),
-                ("Find Prev", "find_prev"),
-                ("Find All", "find_all"),
-            ],
-            Panel::Replace => &[
-                ("Find", "find_next"),
-                ("Replace", "replace_next"),
-                ("Replace All", "replace_all"),
-            ],
-            Panel::Files => &[
-                ("Find", "find_in_files_start"),
-                ("Replace", "replace_in_files"),
-            ],
+            Panel::Find | Panel::Incremental => {
+                &[(0, "find_next"), (1, "find_prev"), (2, "find_all")]
+            }
+            Panel::Replace => &[(0, "find_next"), (3, "replace_next"), (4, "replace_all")],
+            Panel::Files => &[(0, "find_in_files_start"), (3, "replace_in_files")],
             _ => &[],
         }
     }
@@ -73,12 +70,10 @@ impl Panels {
     /// Width (DIPs) left of the inputs for their labels: 80, less when the input would get
     /// narrower than 120 DIPs, and 8 (no labels) below 64. `close` is the close button's
     /// reserve in DIPs (zero for panels without one).
-    pub(super) fn find_label_column(width: f64, s: f64, close: f64) -> f64 {
+    pub(super) fn find_label_column(width: f64, s: f64, close: f64, advance: f64) -> f64 {
         let room = width / s - 12. - close - 120.;
-        if room >= 80. {
-            80.
-        } else if room >= 64. {
-            room
+        if room >= 64. {
+            (advance.ceil() + 16.).max(80.).min(room)
         } else {
             8.
         }
@@ -92,7 +87,7 @@ impl Panels {
     /// measured, the find panels' column.
     pub(super) fn input_label_column(width: f64, s: f64, caption: Option<f64>) -> f64 {
         let Some(caption) = caption else {
-            return Self::find_label_column(width, s, 0.);
+            return Self::find_label_column(width, s, 0., 0.);
         };
         let label = (caption + 16.).max(80.).min((width / s - 12.) / 2.);
         if label >= 64. { label } else { 8. }
@@ -100,9 +95,9 @@ impl Panels {
     /// Measures the input panel's caption with the style it is painted with. When that changed
     /// (a new caption, theme, font or UI scale) the panel is laid out again before it is
     /// painted, so the field never starts under its caption, not even on the first frame.
-    pub(super) fn fit_input_caption(&mut self, workspace: &Workspace) {
+    pub(super) fn fit_input_caption(&mut self, workspace: &Workspace) -> bool {
         if self.panel != Some(Panel::Input) {
-            return;
+            return false;
         }
         let advance = {
             let mut theme = workspace.themes.ui.borrow_mut();
@@ -117,14 +112,57 @@ impl Panels {
         if self.input_caption_advance != Some(advance) {
             self.input_caption_advance = Some(advance);
             self.layout(self.size);
+            return true;
         }
+        false
+    }
+    pub(super) fn measure_find_controls(&mut self, workspace: &Workspace) -> bool {
+        let Some(panel) = self
+            .panel
+            .filter(|p| !Self::find_toggle_options(*p).is_empty())
+        else {
+            return false;
+        };
+        let settings = &workspace.editor().settings;
+        let mut theme = workspace.themes.ui.borrow_mut();
+        let key = (panel, self.ui_scale, workspace.ui.revision, theme.revision);
+        if self.find_measurement == Some(key) {
+            return false;
+        }
+        self.find_measurement = Some(key);
+        let label = self
+            .tree
+            .style(2, Some("label_control"), &mut theme, settings);
+        let caption = workspace.ui.find_fields[..Self::find_fields(panel)]
+            .iter()
+            .map(|name| theme.advance(&label, name) / self.ui_scale)
+            .fold(0., f64::max);
+        let button = Self::panel_buttons(panel)
+            .iter()
+            .enumerate()
+            .map(|(i, (caption, _))| {
+                let style = self.tree.style(50 + i as u64, None, &mut theme, settings);
+                theme.advance(&style, &workspace.ui.find_buttons[*caption]) / self.ui_scale + 8.
+            })
+            .fold(BUTTON_MIN, f64::max);
+        let sizing = FindSizing {
+            caption,
+            button: button.ceil(),
+        };
+        if self.find_sizing != sizing {
+            self.find_sizing = sizing;
+            self.find_layout = None;
+            self.layout(self.size);
+            return true;
+        }
+        false
     }
     /// Height a find panel needs at its natural size, in DIPs, for a panel of `width` pixels.
-    pub(super) fn find_panel_height(panel: Panel, width: f64, s: f64) -> f64 {
+    fn find_panel_height(panel: Panel, width: f64, s: f64, sizing: FindSizing) -> f64 {
         let rows = if Self::find_toggle_options(panel).is_empty() {
             0
         } else {
-            Self::find_controls_at(panel, 0., width, s, s, 0.).rows
+            Self::find_controls_at(panel, 0., width, s, s, 0., sizing).rows
         };
         let actions = if rows == 0 {
             0.
@@ -161,7 +199,7 @@ impl Panels {
         ]
     }
     pub(super) fn find_panel_natural_height(&self, panel: Panel, width: f64) -> f64 {
-        Self::find_panel_height(panel, width, self.ui_scale)
+        Self::find_panel_height(panel, width, self.ui_scale, self.find_sizing)
             + self.find_input_extras(panel).iter().sum::<f64>()
     }
     /// Toggles, buttons and message slot of the open find panel, as laid out and hit-tested.
@@ -205,6 +243,7 @@ impl Panels {
             self.ui_scale,
             v,
             top,
+            self.find_sizing,
         ))
     }
     /// Flow layout of the action area. At normal widths it is one row aligned with the inputs:
@@ -218,11 +257,17 @@ impl Panels {
         s: f64,
         v: f64,
         top: f64,
+        sizing: FindSizing,
     ) -> FindControls {
         let toggles = Self::find_toggle_options(panel).len();
         let buttons = Self::panel_buttons(panel).len();
         // Inputs span [x + label, x + width - 40] (DIPs); the full area keeps an 8-DIP margin.
-        let label = Self::find_label_column(width, s, CLOSE_BUTTON + 6.);
+        let label = Self::find_label_column(
+            width,
+            s,
+            Self::find_edge_reserve(panel, width, s),
+            sizing.caption,
+        );
         let aligned = (x + label * s, x + width - 40. * s);
         let full = (x + 8. * s, x + width - 8. * s);
         let span = |r: (f64, f64)| ((r.1 - r.0) / s).max(0.);
@@ -234,7 +279,9 @@ impl Panels {
             }
         };
         let toggle_run = run(toggles, TOGGLE_WIDTH, TOGGLE_GAP);
-        let button_min = run(buttons, BUTTON_MIN, BUTTON_GAP);
+        let min_button_width = sizing.button.max(BUTTON_MIN);
+        let max_button_width = min_button_width.max(BUTTON_WIDTH);
+        let button_min = run(buttons, min_button_width, BUTTON_GAP);
         let pitch = (ACTION_HEIGHT + ACTION_ROW_GAP) * v;
         let height = ACTION_HEIGHT * v;
         let row_y = |row: usize| top + row as f64 * pitch;
@@ -242,7 +289,7 @@ impl Panels {
         let a = span(aligned);
         if toggle_run + 8. + MESSAGE_MIN + 8. + button_min <= a {
             let room = a - toggle_run - 16. - MESSAGE_MIN - run(buttons, 0., BUTTON_GAP);
-            let bw = (room / buttons.max(1) as f64).clamp(BUTTON_MIN, BUTTON_WIDTH);
+            let bw = (room / buttons.max(1) as f64).clamp(min_button_width, max_button_width);
             for i in 0..toggles {
                 out.toggles.push(Rect {
                     x: aligned.0 + i as f64 * (TOGGLE_WIDTH + TOGGLE_GAP) * s,
@@ -304,10 +351,11 @@ impl Panels {
         }
         row += toggle_rows;
         // Buttons, right-aligned on the following row(s).
-        let per = (((w + BUTTON_GAP) / (BUTTON_MIN.min(w) + BUTTON_GAP)).floor() as usize).max(1);
+        let per =
+            (((w + BUTTON_GAP) / (min_button_width.min(w) + BUTTON_GAP)).floor() as usize).max(1);
         let in_row = buttons.min(per).max(1);
         let bw = ((w - run(in_row, 0., BUTTON_GAP)) / in_row as f64)
-            .clamp(BUTTON_MIN.min(w), BUTTON_WIDTH.min(w));
+            .clamp(min_button_width.min(w), max_button_width.min(w));
         let first_row_buttons = buttons.min(per);
         let first_row_left = region.1 - run(first_row_buttons, bw, BUTTON_GAP) * s;
         let message_on_buttons =
@@ -343,6 +391,15 @@ impl Panels {
         }
         out.rows = row + buttons.div_ceil(per);
         out
+    }
+    pub(super) fn find_edge_reserve(panel: Panel, width: f64, s: f64) -> f64 {
+        CLOSE_BUTTON
+            + 6.
+            + if panel == Panel::Files && width >= 272. * s {
+                CLOSE_BUTTON + 4.
+            } else {
+                0.
+            }
     }
     /// Quick-panel row height in DIPs. Command lists (palette, syntax and snippet choices)
     /// show only a caption and key binding; other overlays have a details line.
@@ -440,19 +497,20 @@ impl Panels {
             WHERE_ID => {
                 return self
                     .hit_find_options(point)
-                    .then(|| workspace.translations.caption("Where…").to_owned());
+                    .then(|| workspace.ui.where_menu.to_string());
             }
             30..=35 => {
-                let (name, option) = [
-                    ("Regular expression", "regex"),
-                    ("Match case", "case_sensitive"),
-                    ("Whole word", "whole_word"),
-                    ("Wrap around", "wrap"),
-                    ("In selection", "in_selection"),
-                    ("Preserve case", "preserve_case"),
-                ][(id - 30) as usize];
+                let i = (id - 30) as usize;
+                let option = [
+                    "regex",
+                    "case_sensitive",
+                    "whole_word",
+                    "wrap",
+                    "in_selection",
+                    "preserve_case",
+                ][i];
                 (
-                    name.to_owned(),
+                    workspace.ui.find_options[i].as_ref(),
                     Invocation {
                         command: "toggle_find_option".into(),
                         args: json!({ "option": option }),
@@ -460,7 +518,7 @@ impl Panels {
                 )
             }
             CLOSE_ID => (
-                "Close".to_owned(),
+                workspace.ui.close.as_ref(),
                 Invocation {
                     command: "hide_panel".into(),
                     args: json!({}),
@@ -471,7 +529,7 @@ impl Panels {
                     .panel
                     .and_then(|p| Self::panel_buttons(p).get(id.checked_sub(50)? as usize))?;
                 (
-                    (*caption).to_owned(),
+                    workspace.ui.find_buttons[*caption].as_ref(),
                     Invocation {
                         command: (*command).into(),
                         args: json!({}),
@@ -479,7 +537,8 @@ impl Panels {
                 )
             }
         };
-        let state = match id {
+        let tr = &workspace.translations;
+        let name = match id {
             30..=35 => {
                 let on = [
                     self.options.regex,
@@ -489,19 +548,35 @@ impl Panels {
                     self.in_selection,
                     self.options.preserve_case,
                 ][(id - 30) as usize];
-                if on { ": on" } else { ": off" }
+                if on {
+                    tr.tr_fmt("{name}: on", &[("name", name.to_owned())])
+                } else {
+                    tr.tr_fmt("{name}: off", &[("name", name.to_owned())])
+                }
             }
-            _ => "",
+            _ => name.to_owned(),
         };
         Some(match workspace.editor().keymap.hint(&invocation) {
-            Some(keys) => format!("{name}{state} ({keys})"),
-            None => format!("{name}{state}"),
+            Some(keys) => format!("{name} ({keys})"),
+            None => name,
         })
     }
-    pub(crate) fn set_message(&mut self, message: String) {
-        self.message = message;
+    pub(crate) fn set_message(&mut self, message: impl Into<UiText>) {
+        self.message = message.into();
         self.message_seen.clone_from(&self.message);
         self.message_until = Some(Instant::now() + Duration::from_secs(5));
+    }
+    pub(crate) fn refresh_locale(&mut self, workspace: &Workspace) {
+        let tr = &workspace.translations;
+        self.message.refresh(tr);
+        self.message_seen.refresh(tr);
+        self.find_status.refresh(tr);
+        if let Some(error) = &mut self.find_error {
+            error.refresh(tr);
+        }
+        self.result_status.refresh(tr);
+        self.input_caption.refresh(tr);
+        self.refresh_output_locale(tr);
     }
     pub(super) fn panel_status_message(&self, workspace: &Workspace) -> &str {
         if self.document_find_visible()
@@ -680,15 +755,32 @@ impl Panels {
         }
         Ok(())
     }
-    pub(super) fn overlay_footer<'a>(&self, tr: &'a vel_i18n::Translator) -> &'a str {
-        tr.caption(match self.overlay {
-            Some(Overlay::Palette) => "↩ Run · ⎋ Cancel",
-            Some(Overlay::Appearance) => "↑↓ Preview · ↩ Save · ⎋ Cancel",
-            Some(Overlay::Syntax | Overlay::Choices) => "↩ Select · ⎋ Cancel",
-            Some(Overlay::ProjectSymbols | Overlay::Locations) => "↩ Jump · ⎋ Cancel",
-            Some(Overlay::Goto) => "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
+    pub(super) fn overlay_footer<'a>(&self, workspace: &'a Workspace) -> &'a str {
+        let ui = &workspace.ui;
+        match self.overlay {
+            Some(Overlay::Palette) => &ui.palette_footer,
+            Some(Overlay::Appearance) => &ui.appearance_footer,
+            Some(Overlay::Syntax | Overlay::Choices) => &ui.choice_footer,
+            Some(Overlay::ProjectSymbols | Overlay::Locations) => &ui.jump_footer,
+            Some(Overlay::Goto) => &ui.goto_footer,
             None => "",
-        })
+        }
+    }
+    pub(super) fn overlay_prompt<'a>(&self, workspace: &'a Workspace) -> &'a str {
+        let ui = &workspace.ui;
+        match self.overlay {
+            Some(Overlay::Palette) => &ui.palette_prompt,
+            Some(Overlay::Goto) => match self.quick_input.buffer.text().chars().next() {
+                Some(':') => &ui.line_prompt,
+                Some('@') => &ui.symbol_prompt,
+                _ => &ui.goto_prompt,
+            },
+            Some(Overlay::Syntax) => &ui.syntax_prompt,
+            Some(Overlay::Appearance) => &ui.appearance_prompt,
+            Some(Overlay::ProjectSymbols) => &ui.project_symbol_prompt,
+            Some(Overlay::Locations) => &ui.location_prompt,
+            Some(Overlay::Choices) | None => &ui.choice_prompt,
+        }
     }
     /// Whether the native command dispatcher is validating the accepted palette row.
     pub fn palette_accept_pending(&self, name: &str, args: &Value) -> bool {
@@ -1266,7 +1358,12 @@ mod tests {
             };
             assert_eq!(hover(close), hover(more));
             assert_eq!(p.review.tooltip.as_ref().unwrap().0, "Where…");
-            w.translations.select(vel_i18n::Language::ZhHans);
+            w.settings.set(
+                vel_config::settings::Layer::User,
+                "ui_language",
+                json!("zh-Hans"),
+            );
+            w.sync_ui_language();
             p.paint(&w, &mut Scene::default());
             assert_eq!(p.review.tooltip.as_ref().unwrap().0, "位置…");
         }
@@ -2030,7 +2127,12 @@ mod tests {
                 p.overlay = Some(overlay);
                 p.layout(size());
                 for (language, expected) in [(En, en), (ZhHans, zh)] {
-                    w.translations.select(language);
+                    w.settings.set(
+                        vel_config::settings::Layer::User,
+                        "ui_language",
+                        json!(if language == ZhHans { "zh-Hans" } else { "en" }),
+                    );
+                    w.sync_ui_language();
                     let mut scene = Scene::default();
                     p.paint(&w, &mut scene);
                     assert!(
@@ -2277,7 +2379,7 @@ mod publication_tests {
         assert!(selected.contains("2 characters selected"));
         assert!(!selected.contains("UTF-8"));
         assert!(!selected.contains(w.tabs[w.active].format.line_ending.display_name()));
-        p.set_message("Unable to find missing".into());
+        p.set_message("Unable to find missing");
         assert!(text(&mut p, &w).contains("Unable to find missing"));
     }
 }

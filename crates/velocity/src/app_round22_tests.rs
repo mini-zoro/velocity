@@ -807,7 +807,7 @@ fn ignored_keymap_notice_repeats_only_after_that_file_changes() {
     };
     let mut first = ignored(&mut a);
     if a.panels.message.starts_with("Ignored Packages/User/") {
-        first.push(std::mem::take(&mut a.panels.message));
+        first.push(std::mem::take(&mut a.panels.message).to_string());
     }
     assert_eq!(first.len(), 1, "{first:?}");
     assert!(first[0].contains("Unrecognized"));

@@ -502,6 +502,395 @@ fn wait_language(app: &mut App, language: &str) {
     }
 }
 
+fn r25_language(app: &mut App, language: &str) {
+    app.run_named(None, "set_ui_language", &json!({"language":language}));
+    assert_eq!(app.workspace.global_string("ui_language", "en"), language);
+}
+
+fn r25_paint(app: &mut App, wanted: &[&str]) {
+    let scene = app.scene();
+    let runs: Vec<_> = scene.layers.iter().flat_map(|layer| &layer.text).collect();
+    let theme = app.workspace.themes.ui.borrow();
+    for text in wanted {
+        let run = runs
+            .iter()
+            .find(|run| run.text == *text)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {text:?} in {:?}",
+                    runs.iter().map(|r| &r.text).collect::<Vec<_>>()
+                )
+            });
+        let ink = vel_minihtml::TextStyle {
+            font_family: run.family.clone().unwrap_or_else(|| "monospace".into()),
+            font_size: run.size,
+            font_weight: if run.style.bold { 700 } else { 400 },
+            italic: run.style.italic,
+            underline: false,
+            color: vel_minihtml::Color::rgb(0, 0, 0),
+        };
+        let width =
+            vel_minihtml::FontMetrics::measure(theme.metrics.as_ref(), &run.text, &ink).advance;
+        assert!(
+            f64::from(run.x + width) <= run.clip.x + run.clip.width + 1.,
+            "{run:?}"
+        );
+    }
+}
+
+#[test]
+fn r25_find_family_and_where_menu_relabel_in_place() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    for scale in [1., 2.] {
+        app.workspace
+            .editor_mut()
+            .settings
+            .set(Layer::View, "ui_scale", json!(scale));
+        for (panel, english, chinese) in [
+            (
+                "find",
+                &["Find", "Find Prev", "Find All"][..],
+                &["查找", "查找上一个", "查找全部"][..],
+            ),
+            (
+                "incremental_find",
+                &["Find", "Find Prev"][..],
+                &["查找", "查找上一个"][..],
+            ),
+            (
+                "replace",
+                &["Find", "Replace", "Replace All"][..],
+                &["查找", "替换", "全部替换"][..],
+            ),
+            (
+                "find_in_files",
+                &["Find", "Replace", "Where"][..],
+                &["查找", "替换", "位置"][..],
+            ),
+        ] {
+            app.run_named(None, "show_panel", &json!({"panel":panel}));
+            let opened = app.panels.panel;
+            r25_paint(&mut app, english);
+            r25_language(&mut app, "zh-Hans");
+            r25_paint(&mut app, chinese);
+            assert_eq!(app.panels.panel, opened);
+            let ax = app.accessible_tree();
+            assert!(ax.nodes.iter().any(|node| node.label == "正则表达式"));
+            if panel == "find_in_files" {
+                let menu = app.find_options_menu(Point::default());
+                assert!(rows(&menu).any(|m| m.caption == "仅查找打开的文件夹"));
+            }
+            r25_language(&mut app, "en");
+            r25_paint(&mut app, english);
+            assert_eq!(app.panels.panel, opened);
+        }
+    }
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_find_results_and_replacement_messages_keep_their_arguments() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(
+        None,
+        "show_panel",
+        &json!({"panel":"replace", "pattern":"text", "replace_pattern":"text text"}),
+    );
+    app.run_named(None, "replace_all", &json!({}));
+    assert_eq!(app.panels.message, "Replaced 1 occurrence");
+    r25_language(&mut app, "zh-Hans");
+    assert_eq!(app.panels.message, "已替换 1 处");
+    r25_language(&mut app, "en");
+    assert_eq!(app.panels.message, "Replaced 1 occurrence");
+
+    app.run_named(
+        None,
+        "show_panel",
+        &json!({"panel":"find_in_files", "pattern":"text"}),
+    );
+    app.panels.where_input.set("<current file>");
+    // Give the current-file source a real file name without writing editor contents.
+    let path = data.path().join("source.txt");
+    fs::write(&path, "text text\n").unwrap();
+    app.workspace
+        .open(crate::cli::FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    app.run_named(None, "find_in_files_start", &json!({}));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.panels.message != "2 matches in 1 file" {
+        let viewport = app.viewport();
+        app.panels.poll(&mut app.workspace, viewport);
+        assert!(
+            Instant::now() < deadline,
+            "file search: {}",
+            app.panels.message
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    r25_paint(&mut app, &["Find Results · 2 matches in 1 file"]);
+    r25_language(&mut app, "zh-Hans");
+    r25_paint(&mut app, &["查找结果 · 在 1 个文件中找到 2 个匹配项"]);
+    r25_language(&mut app, "en");
+    r25_paint(&mut app, &["Find Results · 2 matches in 1 file"]);
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_sidebar_status_and_window_titles_follow_the_live_language() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.panels.side_visible = true;
+    app.panels.open_files_visible = true;
+    let e = app.workspace.editor_mut();
+    e.settings
+        .set(Layer::View, "set_unsaved_view_name", json!(false));
+    e.settings
+        .set(Layer::View, "translate_tabs_to_spaces", json!(true));
+    e.set_selection(vel_buffer::Selection::from_regions([
+        vel_buffer::Region::new(0, 6),
+    ]));
+    app.workspace.editor_mut().sync();
+    for scale in [1., 2.] {
+        app.workspace
+            .editor_mut()
+            .settings
+            .set(Layer::View, "ui_scale", json!(scale));
+        for language in ["en", "zh-Hans", "en"] {
+            r25_language(&mut app, language);
+            let (headings, tab, count) = if language == "en" {
+                (
+                    ["OPEN FILES", "FOLDERS", "Spaces: 4"],
+                    "Untitled",
+                    "6 characters selected",
+                )
+            } else {
+                (
+                    ["打开的文件", "文件夹", "空格：4"],
+                    "未命名",
+                    "已选择 6 个字符",
+                )
+            };
+            r25_paint(&mut app, &headings);
+            assert_eq!(app.workspace.window_title(), tab);
+            assert_eq!(
+                app.workspace.tabs[app.workspace.active].ui_label(&app.workspace.ui),
+                tab
+            );
+            let position = crate::panels::status_position(&app.workspace);
+            assert!(position.contains(count), "{position}");
+            assert!(position.ends_with("UTF-8 · Unix"), "{position}");
+            r25_paint(&mut app, &[&position]);
+        }
+    }
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_picker_and_input_labels_share_the_accessible_text() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(None, "goto_line", &json!({}));
+    r25_paint(&mut app, &["Enter a line number"]);
+    r25_language(&mut app, "zh-Hans");
+    r25_paint(&mut app, &["输入行号"]);
+    assert!(
+        app.accessible_tree()
+            .nodes
+            .iter()
+            .any(|node| node.label == "输入行号")
+    );
+    r25_language(&mut app, "en");
+    r25_paint(&mut app, &["Enter a line number"]);
+    app.panels
+        .show_input_caption(
+            &mut app.workspace,
+            "show_input_panel",
+            &json!({"initial_text":"Save"}),
+            UiText::tr("New name for this entry"),
+            0..0,
+        )
+        .unwrap();
+    for (language, label) in [
+        ("en", "New name for this entry"),
+        ("zh-Hans", "输入新名称"),
+        ("en", "New name for this entry"),
+    ] {
+        r25_language(&mut app, language);
+        r25_paint(&mut app, &[label, "Save"]);
+        let ax = app.accessible_tree();
+        let node = ax
+            .nodes
+            .iter()
+            .find(|node| node.label == label && node.text.is_some())
+            .unwrap();
+        assert_eq!(node.text.as_ref().unwrap().text.to_string(), "Save");
+    }
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_open_appearance_and_symbol_rows_preserve_their_identity() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(None, "select_color_scheme", &json!({}));
+    assert_eq!(app.panels.overlay, Some(crate::panels::Overlay::Appearance));
+    let selected = app.panels.quick.current().unwrap();
+    for (language, label) in [
+        ("en", "Automatic (follow system appearance)"),
+        ("zh-Hans", "自动（跟随系统外观）"),
+        ("en", "Automatic (follow system appearance)"),
+    ] {
+        r25_language(&mut app, language);
+        app.workspace.wait_resources();
+        let viewport = app.viewport();
+        app.panels.poll(&mut app.workspace, viewport);
+        assert_eq!(app.panels.overlay, Some(crate::panels::Overlay::Appearance));
+        assert_eq!(app.panels.quick.current(), Some(selected));
+        assert!(
+            app.panels
+                .quick
+                .items
+                .iter()
+                .any(|item| item.caption == label)
+        );
+    }
+    app.panels.cancel_overlay(&mut app.workspace);
+    let path = data.path().join("symbol.rs");
+    fs::write(&path, "\nfn task() {}\n").unwrap();
+    app.workspace
+        .open(crate::cli::FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    app.run_named(
+        None,
+        "show_overlay",
+        &json!({"overlay":"goto","text":"@task"}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !app
+        .panels
+        .quick
+        .items
+        .iter()
+        .any(|item| item.caption.contains("task"))
+    {
+        app.poll_workspace_model();
+        let viewport = app.viewport();
+        app.panels.poll(&mut app.workspace, viewport);
+        assert!(Instant::now() < deadline, "symbol picker did not publish");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let selected = app.panels.quick.current();
+    for (language, annotation) in [("en", "Line 2"), ("zh-Hans", "第 2 行"), ("en", "Line 2")] {
+        r25_language(&mut app, language);
+        assert!(
+            app.panels
+                .quick
+                .items
+                .iter()
+                .any(|item| item.caption.contains("task") && item.annotation == annotation)
+        );
+        assert_eq!(app.panels.quick.current(), selected);
+    }
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_native_alert_buttons_settings_and_accessible_announcements() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(
+        None,
+        "edit_settings",
+        &json!({"base_file":"Packages/Default/Preferences.sublime-settings"}),
+    );
+    let mut settings = app.opened_settings.pop().unwrap();
+    let mut dialog = app.unsaved_changes_dialog(app.workspace.active);
+    app.panels.set_message(UiText::tr("No matches"));
+    for (language, buttons, title, status, about) in [
+        (
+            "en",
+            ["Save", "Don't Save", "Cancel"],
+            "Settings — Velocity",
+            "No matches",
+            "About Velocity",
+        ),
+        (
+            "zh-Hans",
+            ["保存", "不保存", "取消"],
+            "设置 — Velocity",
+            "无匹配项",
+            "关于 Velocity",
+        ),
+        (
+            "en",
+            ["Save", "Don't Save", "Cancel"],
+            "Settings — Velocity",
+            "No matches",
+            "About Velocity",
+        ),
+    ] {
+        r25_language(&mut app, language);
+        wait_language(&mut settings, language);
+        dialog.localize(&app.workspace.translations);
+        assert_eq!(
+            dialog
+                .buttons
+                .iter()
+                .map(UiText::as_str)
+                .collect::<Vec<_>>(),
+            buttons
+        );
+        let mut about_model = app.about_dialog();
+        about_model.localize(&app.workspace.translations);
+        assert_eq!(about_model.title, about);
+        assert_eq!(settings.workspace.window_title(), title);
+        let _ = app.scene();
+        assert!(
+            app.accessible_tree()
+                .nodes
+                .iter()
+                .any(|node| node.announcement.as_deref() == Some(status))
+        );
+    }
+    app.workspace.wait_resources();
+}
+
+#[test]
+fn r25_build_headers_relabel_in_the_output_view_without_touching_tool_text() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.run_named(None, "exec", &json!({"cmd":["/bin/echo","[Cancelled]"]}));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.builds.task.is_some() {
+        app.builds.poll(&mut app.panels);
+        assert!(Instant::now() < deadline, "build did not finish");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let original = app.panels.output.clone();
+    assert!(original.starts_with("[Cancelled]\n") && original.contains("[Finished in "));
+    r25_language(&mut app, "zh-Hans");
+    let viewport = app.viewport();
+    app.panels.poll(&mut app.workspace, viewport);
+    r25_paint(&mut app, &["输出"]);
+    assert!(
+        app.panels.output.starts_with("[Cancelled]\n")
+            && app.panels.output.contains("[已完成，用时 ")
+    );
+    r25_language(&mut app, "en");
+    assert_eq!(app.panels.output, original);
+    app.workspace.wait_resources();
+}
+
 fn palette_row<'a>(app: &'a mut App, caption: &str) -> &'a vel_ui::Item {
     let deadline = Instant::now() + Duration::from_secs(10);
     while app.panels.ranking_pending() {
@@ -661,16 +1050,68 @@ fn shipped_catalog_has_all_static_ui_captions() {
         collect(&doc.value, &mut captions);
     }
     let mut app = fixture(None);
-    for row in &role(&app.application_menu(), "application").children {
-        if row.caption != "-" {
-            captions.insert(row.caption.clone());
+    app.workspace
+        .recent_folders
+        .push("/private/tmp/l10n-fixture".into());
+    app.workspace.refresh_file_menus();
+    let model = app.application_menu();
+    captions.extend(
+        rows(&model)
+            .filter(|row| {
+                row.caption != "-"
+                    && !row.caption.bytes().all(|b| b.is_ascii_digit())
+                    && !matches!(
+                        row.command.as_deref(),
+                        Some("open_recent_folder" | "set_file_type")
+                    )
+                    && (row.command.as_deref() != Some("set_build_system")
+                        || row.caption == "Automatic")
+                    && !row.id.starts_with("syntax_")
+            })
+            .filter(|row| catalog.strings.contains_key(&row.caption))
+            .map(|row| row.caption.clone()),
+    );
+
+    let mut settings = app.workspace.settings.clone();
+    // Menu-derived palette captions reuse individual group names, including
+    // the group before a numeric argument (e.g. View: Layout: Columns: 2).
+    for item in &app.workspace.palette {
+        let caption = &item.caption;
+        if !catalog.strings.contains_key(caption) && caption.starts_with("View: Layout: ") {
+            captions.extend(
+                caption
+                    .split(": ")
+                    .filter(|part| catalog.strings.contains_key(*part))
+                    .map(str::to_owned),
+            );
         }
     }
+    settings.set(
+        Layer::User,
+        "package_index_url",
+        json!("https://example.invalid"),
+    );
+    let mut generated = Vec::new();
+    crate::release::extend_commands(&mut generated, &mut [], &settings);
+    captions.extend(generated.into_iter().map(|item| item.caption));
+    let rust_keys: &[&str] = include!(concat!(env!("OUT_DIR"), "/ui_keys.rs"));
+    captions.extend(rust_keys.iter().map(|key| (*key).to_owned()));
+    captions.extend(
+        vel_fileio::ENCODINGS
+            .iter()
+            .map(|(name, _)| (*name).to_owned()),
+    );
     let missing: Vec<_> = captions
         .iter()
         .filter(|key| !catalog.strings.contains_key(*key))
         .collect();
     assert!(missing.is_empty(), "missing: {missing:?}");
+    let orphans: BTreeSet<_> = catalog
+        .strings
+        .keys()
+        .filter(|key| !captions.contains(*key))
+        .collect();
+    assert!(orphans.is_empty(), "orphan catalog keys: {orphans:#?}");
 }
 
 #[test]

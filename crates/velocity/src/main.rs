@@ -55,6 +55,7 @@ mod theme_bench;
 #[cfg(test)]
 mod theme_tests;
 mod theme_ui;
+mod ui_text;
 #[cfg(test)]
 mod user_grammar_tests;
 mod view;

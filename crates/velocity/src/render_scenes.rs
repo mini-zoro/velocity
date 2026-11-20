@@ -648,8 +648,7 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
 
 fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64, query: &str) -> Result<App, String> {
     let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
-    // Scene input, not a CLI switch or a persisted profile setting. Panel labels
-    // intentionally stay English in localization phase 1.
+    // Force Chinese for the original localization coverage scenes.
     app.workspace.settings.set(
         vel_config::settings::Layer::User,
         "ui_language",
@@ -1078,6 +1077,39 @@ fn r26_tabs(fixture: &Fixture, dark: bool, rounded: bool, left: bool) -> Result<
     Ok(app)
 }
 
+fn r25_status_selection(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    let editor = app.workspace.editor_mut();
+    let end = editor.text.char_to_byte(6);
+    editor.set_selection(vel_buffer::Selection::from_regions([
+        vel_buffer::Region::new(0, end),
+    ]));
+    Ok(app)
+}
+
+fn r25_build_output(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    named(
+        &mut app,
+        "show_output_panel",
+        json!({"text":"Compiling demo.rs\nwarning: unused variable: sample\n"}),
+    );
+    app.panels
+        .append_output_ui(crate::build::finish_line_with_signal(
+            Some(0),
+            None,
+            false,
+            Duration::from_millis(1200),
+            false,
+        ));
+    Ok(app)
+}
+
+fn r25_ui2(mut app: App) -> Result<App, String> {
+    set_view(&mut app, "ui_scale", json!(2.));
+    Ok(app)
+}
+
 fn r6_cjk(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_app(fixture, dark)?;
     named(&mut app, "new_file", json!({}));
@@ -1135,14 +1167,15 @@ fn r5_input_panel(fixture: &Fixture, dark: bool) -> Result<App, String> {
         &roots,
         &mut NoPlatform,
     )?;
-    let Some(crate::context_menu::SidebarEffect::Input(invocation)) = effect else {
+    let Some(crate::context_menu::SidebarEffect::Input(invocation, caption)) = effect else {
         return Err("side_bar_rename did not ask for a name".into());
     };
     let viewport = app.viewport();
-    app.panels.action(
+    app.panels.show_input_caption(
         &mut app.workspace,
         &invocation.command,
         &invocation.args,
+        caption,
         viewport,
     )?;
     Ok(app)
@@ -1563,6 +1596,26 @@ const SCENARIOS: &[Scenario] = &[
         build: r5_input_panel,
     },
     Scenario {
+        name: "r25_find_ui2",
+        size: (1200., 800.),
+        build: |f, d| r25_ui2(r5_find(f, d, "find")?),
+    },
+    Scenario {
+        name: "r25_find_in_files_ui2",
+        size: (1200., 800.),
+        build: |f, d| r25_ui2(r5_find(f, d, "find_in_files")?),
+    },
+    Scenario {
+        name: "r25_status_selection",
+        size: (1200., 800.),
+        build: r25_status_selection,
+    },
+    Scenario {
+        name: "r25_build_output",
+        size: (1200., 800.),
+        build: r25_build_output,
+    },
+    Scenario {
         name: "r5_narrow",
         size: (440., 360.),
         build: |f, d| r5_narrow(f, d, "neighbor"),
@@ -1696,7 +1749,7 @@ fn settle(app: &mut App) {
             }
             let editor = &tab.editor;
             if tab.loading.is_some() || tab.binary_loading.is_some() {
-                reasons.push(format!("{} loading", tab.label()));
+                reasons.push(format!("{} loading", tab.ui_label(&app.workspace.ui)));
             }
             if editor.completion.busy() {
                 reasons.push("completion".into());
@@ -1710,7 +1763,7 @@ fn settle(app: &mut App) {
                 .as_ref()
                 .is_some_and(|l| l.busy() || !(l.ready() && l.highlight_complete()))
             {
-                reasons.push(format!("{} highlighting", tab.label()));
+                reasons.push(format!("{} highlighting", tab.ui_label(&app.workspace.ui)));
             }
         }
         if app.view.image_preview.busy() {
@@ -2070,7 +2123,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     settle(&mut app);
                 }
                 if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
-                    || (request.language == Some("zh-Hans") && scenario.name.starts_with("r5_"))
+                    || (request.language == Some("zh-Hans")
+                        && (scenario.name.starts_with("r5_") || scenario.name.starts_with("r25_")))
                 {
                     capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
                 }

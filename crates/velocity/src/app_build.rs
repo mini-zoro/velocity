@@ -75,10 +75,9 @@ impl App {
                             // An automatic build needs a matching definition; the
                             // absence of one isn't a failure of a running build.
                             // https://www.sublimetext.com/docs/build_systems.html#usage
-                            self.panels.set_message(
-                                "No matching build system. Choose one from Tools > Build System."
-                                    .into(),
-                            );
+                            self.panels.set_message(UiText::tr(
+                                "No matching build system. Choose one from Tools > Build System.",
+                            ));
                             return Ok(true);
                         };
                         resolved["build_system"] = json!(name);

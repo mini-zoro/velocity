@@ -8,6 +8,8 @@ use vel_snippet::SnippetFile;
 
 #[path = "build/dispatch.rs"]
 mod dispatch;
+#[path = "build/i18n.rs"]
+mod i18n;
 
 fn main() -> io::Result<()> {
     let root = Path::new("../../third_party/sublime-packages");
@@ -17,6 +19,7 @@ fn main() -> io::Result<()> {
     paths.sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     dispatch::generate(&out)?;
+    i18n::generate(&out)?;
     let mut out = BufWriter::new(fs::File::create(out.join("shipped.rs"))?);
     writeln!(out, "static SHIPPED: &[File] = &[")?;
     for path in paths {

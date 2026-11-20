@@ -149,3 +149,16 @@ pub fn badge_text(badge: Badge) -> (&'static str, &'static str) {
         Badge::Unmerged => ("U!", "Unmerged"),
     }
 }
+
+pub fn badge_tooltip(badge: Badge, tr: &vel_i18n::Translator) -> std::borrow::Cow<'static, str> {
+    match badge {
+        Badge::Ignored => tr.tr("Ignored"),
+        Badge::Untracked => tr.tr("Untracked"),
+        Badge::Modified => tr.tr("Modified"),
+        Badge::Missing => tr.tr("Missing"),
+        Badge::StagedAddition => tr.tr("Staged Addition"),
+        Badge::StagedModification => tr.tr("Staged Modification"),
+        Badge::StagedDeletion => tr.tr("Staged Deletion"),
+        Badge::Unmerged => tr.tr("Unmerged"),
+    }
+}

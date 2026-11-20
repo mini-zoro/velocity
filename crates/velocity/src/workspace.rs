@@ -348,20 +348,26 @@ impl Tab {
         }
         self.classify_image_file(revision, path, root);
     }
+    #[cfg(test)]
     pub fn label(&self) -> String {
+        self.ui_label(&crate::ui_text::Chrome::new(
+            &vel_i18n::Translator::default(),
+        ))
+    }
+    pub fn ui_label(&self, ui: &crate::ui_text::Chrome) -> String {
         if let Some(title) = self
             .editor
             .settings
             .get("velocity_html_sheet_title")
             .and_then(Value::as_str)
         {
-            return title.into();
+            return self.settings_title(ui, title);
         }
-        let name = self.name();
+        let name = self.ui_name(ui);
         format!(
             "{name}{}{}{}{}",
             if self.editor.binary.is_some() && (self.image_failed || !self.is_image_file()) {
-                " [hex]"
+                &ui.hex_tab
             } else {
                 ""
             },
@@ -371,15 +377,56 @@ impl Tab {
                 && !self.deleted
                 && !self.editor.read_only
             {
-                " [new]"
+                &ui.new_file
             } else {
                 ""
             },
-            if self.deleted { " [deleted]" } else { "" },
+            if self.deleted {
+                ui.deleted.as_ref()
+            } else {
+                ""
+            },
             if self.dirty() { " •" } else { "" }
         )
     }
     pub fn name(&self) -> String {
+        self.name_with_untitled("Untitled")
+    }
+    pub fn ui_name(&self, ui: &crate::ui_text::Chrome) -> String {
+        if let Some(title) = self
+            .editor
+            .settings
+            .get("velocity_settings_label")
+            .and_then(Value::as_str)
+        {
+            return self.settings_title(ui, title);
+        }
+        self.name_with_untitled(&ui.untitled)
+    }
+    fn settings_title(&self, ui: &crate::ui_text::Chrome, title: &str) -> String {
+        if let Some(label) = self
+            .editor
+            .settings
+            .get("velocity_settings_label")
+            .and_then(Value::as_str)
+        {
+            let default = self
+                .editor
+                .settings
+                .get("velocity_settings_resource")
+                .is_some();
+            let (suffix, template) = if default {
+                (" (Default)", &ui.default_settings)
+            } else {
+                (" (User)", &ui.user_settings)
+            };
+            if let Some(name) = label.strip_suffix(suffix) {
+                return vel_i18n::format_named(template, &[("name", name)]);
+            }
+        }
+        title.into()
+    }
+    fn name_with_untitled(&self, untitled: &str) -> String {
         if self.path.is_none()
             && let Some(name) = &self.suggested_name
         {
@@ -399,7 +446,7 @@ impl Tab {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| {
                 if !self.editor.settings.bool("set_unsaved_view_name", true) {
-                    return "Untitled".into();
+                    return untitled.into();
                 }
                 let name: String = self
                     .editor
@@ -411,7 +458,7 @@ impl Tab {
                     .collect();
                 let name = name.trim_end().to_owned();
                 if name.is_empty() {
-                    "Untitled".into()
+                    untitled.into()
                 } else {
                     name
                 }
@@ -688,6 +735,7 @@ pub struct Workspace {
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
     pub(crate) translations: vel_i18n::Translator,
+    pub(crate) ui: crate::ui_text::Chrome,
     pub(crate) menu_revision: u64,
     pub(crate) palette_revision: u64,
     /// Macro filenames from the background resource overlay; contents are loaded on demand.
@@ -1881,6 +1929,7 @@ impl Workspace {
             context_menus,
             mousemap,
             palette,
+            ui: crate::ui_text::Chrome::new(&localizer),
             translations: localizer,
             menu_revision: 0,
             palette_revision: 0,
@@ -1985,18 +2034,28 @@ impl Workspace {
     }
     pub(crate) fn sync_ui_language(&mut self) -> bool {
         let language = vel_i18n::Language::from_setting(self.global_string("ui_language", "en"));
-        self.translations.select(language)
+        self.translations.select(language);
+        if self.ui.revision == self.translations.revision() {
+            return false;
+        }
+        self.ui = crate::ui_text::Chrome::new(&self.translations);
+        true
     }
     pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
         let tr = &self.translations;
+        if tr.language() == vel_i18n::Language::En {
+            return None;
+        }
         let caption = item.caption.as_str();
         // Only the UI prefix is translated; names can contain colons and can
         // even be identical to catalog keys.
         let prefix = match item.invocation.command.as_str() {
-            "set_file_type" => Some("Set Syntax"),
-            "insert_snippet" if caption.starts_with("Snippet: ") => Some("Snippet"),
+            "set_file_type" => Some(("Set Syntax", tr.tr("Set Syntax"))),
+            "insert_snippet" if caption.starts_with("Snippet: ") => {
+                Some(("Snippet", tr.tr("Snippet")))
+            }
             "set_build_system" if item.invocation.args["name"] != "Automatic" => {
-                Some("Tools: Build System")
+                Some(("Tools: Build System", tr.tr("Tools: Build System")))
             }
             "run_macro_file" if caption.starts_with("Macro: ") => {
                 let name = macro_name(caption);
@@ -2004,8 +2063,12 @@ impl Workspace {
                     .palette_caption("Macro")
                     .map(|prefix| format!("{prefix}：{name}"));
             }
-            "set_indentation" if item.invocation.args["width"].is_u64() => Some("Tab Width"),
-            "set_dictionary" if caption.starts_with("System: ") => Some("System"),
+            "set_indentation" if item.invocation.args["width"].is_u64() => {
+                Some(("Tab Width", tr.tr("Tab Width")))
+            }
+            "set_dictionary" if caption.starts_with("System: ") => {
+                Some(("System", tr.tr("System")))
+            }
             "open_project" | "build"
                 if caption == item.invocation.args["file"]
                     || item.invocation.args["_build_picker"] == true =>
@@ -2014,11 +2077,9 @@ impl Workspace {
             }
             _ => None,
         };
-        if let Some(prefix) = prefix {
+        if let Some((prefix, localized)) = prefix {
             let name = caption.strip_prefix(prefix)?.strip_prefix(": ")?;
-            return tr
-                .palette_caption(prefix)
-                .map(|prefix| format!("{prefix}：{name}"));
+            return (localized != prefix).then(|| format!("{localized}：{name}"));
         }
         tr.palette_caption(caption)
     }

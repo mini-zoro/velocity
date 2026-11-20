@@ -55,7 +55,7 @@ fn execute(name: &str, args: &Value, root: &Path, platform: &mut TestPlatform) -
         .unwrap()
 }
 fn callback(effect: SidebarEffect, text: &str) -> Invocation {
-    let SidebarEffect::Input(prompt) = effect else {
+    let SidebarEffect::Input(prompt, _) = effect else {
         panic!("expected input panel");
     };
     assert_eq!(prompt.command, "show_input_panel");
@@ -373,7 +373,7 @@ fn rename_prompts_reject_existing_targets_and_retarget_prefixes_componentwise() 
         root,
         &mut platform,
     );
-    let SidebarEffect::Input(ref invocation) = prompt else {
+    let SidebarEffect::Input(ref invocation, _) = prompt else {
         panic!("input");
     };
     assert_eq!(invocation.args["initial_text"], "old.txt");

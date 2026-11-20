@@ -114,6 +114,11 @@ impl Translator {
         self.revision
     }
 
+    /// The active presentation language.
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
     /// Looks up a resource label without allocating.
     pub fn caption<'a>(&'a self, source: &'a str) -> &'a str {
         if self.language == Language::ZhHans {
@@ -140,7 +145,13 @@ impl Translator {
         let mut output = strings.get(parts.next()?)?.clone();
         for part in parts {
             output.push('：');
-            output.push_str(strings.get(part)?);
+            if let Some(translation) = strings.get(part) {
+                output.push_str(translation);
+            } else if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+                output.push_str(part);
+            } else {
+                return None;
+            }
         }
         Some(output)
     }
@@ -157,19 +168,23 @@ impl Translator {
 
     /// Translates, then interpolates named arguments without reprocessing their values.
     pub fn tr_fmt(&self, source: &'static str, args: &[(&str, String)]) -> String {
-        let caption = self.caption(source);
-        let mut out = String::with_capacity(caption.len());
-        let mut at = 0;
-        for (start, name) in tokens(caption) {
-            if let Some((_, value)) = args.iter().find(|(key, _)| *key == name) {
-                out.push_str(&caption[at..start]);
-                out.push_str(value);
-                at = start + name.len() + 2;
-            }
-        }
-        out.push_str(&caption[at..]);
-        out
+        format_named(self.caption(source), args)
     }
+}
+
+/// Interpolates a template already resolved for the current language revision.
+pub fn format_named(caption: &str, args: &[(&str, impl AsRef<str>)]) -> String {
+    let mut out = String::with_capacity(caption.len());
+    let mut at = 0;
+    for (start, name) in tokens(caption) {
+        if let Some((_, value)) = args.iter().find(|(key, _)| *key == name) {
+            out.push_str(&caption[at..start]);
+            out.push_str(value.as_ref());
+            at = start + name.len() + 2;
+        }
+    }
+    out.push_str(&caption[at..]);
+    out
 }
 
 fn tokens(s: &str) -> impl Iterator<Item = (usize, &str)> {

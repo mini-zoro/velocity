@@ -6,11 +6,14 @@ const TABS: Id = 101;
 const COMPLETIONS: Id = 1 << 46;
 const OTHER_EDITOR: Id = 1 << 45;
 
-fn tab_label(tab: &crate::workspace::Tab) -> String {
+fn tab_label(workspace: &crate::workspace::Workspace, tab: &crate::workspace::Tab) -> String {
+    let name = tab.ui_name(&workspace.ui);
     if tab.dirty() {
-        format!("{}, edited", tab.name())
+        workspace
+            .translations
+            .tr_fmt("{name}, edited", &[("name", name)])
     } else {
-        tab.name()
+        name
     }
 }
 impl App {
@@ -19,13 +22,15 @@ impl App {
     }
     fn accessibility_model(&self, include_text: bool) -> Tree {
         let mut tree = Tree::default();
+        let ws = &self.workspace;
+        let tr = &ws.translations;
         if self.panels.overlay.is_none() {
             if !self.tab_hits.is_empty() {
                 tree.nodes.push(Node::new(
                     TABS,
                     None,
                     Role::TabGroup,
-                    "Documents",
+                    tr.tr("Documents"),
                     self.workbench_bounds,
                 ));
                 for (sheet, frame) in &self.tab_hits {
@@ -34,7 +39,7 @@ impl App {
                             1000 + sheet * 2,
                             Some(TABS),
                             Role::Tab,
-                            tab_label(tab),
+                            tab_label(ws, tab),
                             *frame,
                         );
                         node.region = Some(Region::Tabs);
@@ -60,7 +65,7 @@ impl App {
                             1001 + sheet * 2,
                             Some(TABS),
                             Role::Button,
-                            format!("Close {}", tab_label(tab)),
+                            tr.tr_fmt("Close {name}", &[("name", tab_label(ws, tab))]),
                             *frame,
                         );
                         node.region = Some(Region::Tabs);
@@ -81,7 +86,7 @@ impl App {
                 EDITOR,
                 None,
                 Role::TextArea,
-                format!("Editor, {}", tab_label(active)),
+                tr.tr_fmt("Editor, {name}", &[("name", tab_label(ws, active))]),
                 self.content,
             );
             node.region = Some(Region::Editor);
@@ -114,23 +119,23 @@ impl App {
                 node.editable = !e.read_only
                     && model.document_offset == 0
                     && model.text.len_utf16() == e.text.len_utf16();
-                node.help = format!(
-                    "Primary selection of {}. Cmd+F6 moves focus; Cmd+Shift+F6 moves backward. {}",
-                    e.regions().len(),
-                    if model.document_offset > 0 || model.text.len_utf16() < e.text.len_utf16() {
-                        format!(
-                            "Windowed document text; UTF-16 document offset {}, first document line {}. Move the caret to navigate beyond this window.",
-                            model.document_offset,
-                            model.first_line + 1
-                        )
-                    } else {
-                        String::new()
-                    }
+                node.help = tr.tr_fmt(
+                    "Primary selection of {count}. Cmd+F6 moves focus; Cmd+Shift+F6 moves backward.",
+                    &[("count", e.regions().len().to_string())],
                 );
+                if model.document_offset > 0 || model.text.len_utf16() < e.text.len_utf16() {
+                    node.help.push(' ');
+                    node.help.push_str(&tr.tr_fmt(
+                        "Windowed document text; UTF-16 document offset {offset}, first document line {line}. Move the caret to navigate beyond this window.",
+                        &[("offset", model.document_offset.to_string()), ("line", (model.first_line + 1).to_string())],
+                    ));
+                }
                 node.text = Some(model);
             } else if e.binary.is_some() {
-                node.label = "Read-only hex document".into();
-                node.help = "Hex rendering; text selection is unavailable".into();
+                node.label = tr.tr("Read-only hex document").into_owned();
+                node.help = tr
+                    .tr("Hex rendering; text selection is unavailable")
+                    .into_owned();
             }
             tree.nodes.push(node);
             for (&sheet, &frame) in &self.sheet_bounds {
@@ -148,7 +153,7 @@ impl App {
                     OTHER_EDITOR + sheet,
                     None,
                     Role::TextArea,
-                    format!("Editor, {}", tab_label(tab)),
+                    tr.tr_fmt("Editor, {name}", &[("name", tab_label(ws, tab))]),
                     frame,
                 );
                 node.region = Some(Region::Editor);
@@ -190,7 +195,7 @@ impl App {
                 COMPLETIONS,
                 None,
                 Role::List,
-                "Completions",
+                tr.tr("Completions"),
                 bounds,
             ));
             if let Some(list) = &completion.list {
@@ -212,11 +217,13 @@ impl App {
                     node.selected = first + row == completion.selected;
                     node.region = Some(Region::Panel);
                     if node.selected {
-                        node.announcement = Some(format!(
-                            "{}, {} of {}",
-                            node.label,
-                            first + row + 1,
-                            list.items.len()
+                        node.announcement = Some(tr.tr_fmt(
+                            "{name}, {index} of {count}",
+                            &[
+                                ("name", node.label.clone()),
+                                ("index", (first + row + 1).to_string()),
+                                ("count", list.items.len().to_string()),
+                            ],
                         ));
                     }
                     node.activation = Some((
