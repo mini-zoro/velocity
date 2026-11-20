@@ -6513,15 +6513,21 @@ impl Panels {
             if tab.find_results && language == "Find Results" {
                 language = workspace.ui.find_results.to_string();
             }
-            // Bytes and pictures have no syntax or indentation to show or change.
+            // Hex has a format label, but not a selectable text syntax.
             let text_document = editor.binary.is_none();
             let candidates = [
                 (
-                    details::StatusItem::Syntax,
+                    if text_document {
+                        details::StatusItem::Syntax
+                    } else {
+                        details::StatusItem::Binary
+                    },
                     if text_document {
                         language
-                    } else {
+                    } else if tab.is_image_file() {
                         String::new()
+                    } else {
+                        workspace.translations.tr("Binary").into_owned()
                     },
                     0.,
                 ),
@@ -6609,7 +6615,7 @@ impl Panels {
                     details::StatusItem::Indentation => Some(6),
                     details::StatusItem::Syntax => Some(7),
                     details::StatusItem::Git => Some(8),
-                    details::StatusItem::Indexing => None,
+                    details::StatusItem::Binary | details::StatusItem::Indexing => None,
                 };
                 let item_style = id.map(|id| style(id, None, &mut theme));
                 if let Some(button) = &item_style {

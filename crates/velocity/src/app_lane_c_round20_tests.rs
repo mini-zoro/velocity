@@ -337,6 +337,155 @@ fn r20_two_windows_recents_frame_and_close_rule() {
 }
 
 #[test]
+fn r32_status_labels_binary_without_offering_text_syntax() {
+    use crate::panels::STATUS;
+    let files = tempfile::tempdir().unwrap();
+    let bin = files.path().join("data.bin");
+    std::fs::write(&bin, [0, 255, 0, 33]).unwrap();
+    let mut a = app("", None, sessions());
+    a.open_received_paths(&[bin]).unwrap();
+    until(&mut a, |a| a.workspace.editor().binary.is_some());
+    for (lang, label) in [("en", "Binary"), ("zh-Hans", "二进制")] {
+        a.workspace
+            .settings
+            .set(Layer::User, "ui_language", json!(lang));
+        a.workspace.sync_ui_language();
+        a.content = a.panels.layout(a.window_size);
+        let mut scene = vel_render::scene::Scene::default();
+        a.panels.paint(&a.workspace, &mut scene);
+        let top = a.window_size.height - STATUS * a.panels.ui_scale;
+        let run = scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .find(|run| f64::from(run.baseline) > top && run.text.as_str() == label)
+            .expect(label);
+        a.handle_mouse_event(
+            None,
+            MouseEvent {
+                button: 0,
+                kind: MouseKind::Down,
+                position: Point {
+                    x: f64::from(run.x) + 1.,
+                    y: top + 5.,
+                },
+                click_count: 1,
+                modifiers: Modifiers(0),
+                timestamp: 0.,
+            },
+        );
+        assert!(
+            a.panels.overlay.is_none(),
+            "{lang}: binary label is not a syntax control"
+        );
+    }
+}
+
+#[test]
+fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
+    let profile = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let first = files.path().canonicalize().unwrap().join("first:2.txt");
+    let second = first.with_file_name("second.txt");
+    std::fs::write(&first, "alpha\nbeta\n").unwrap();
+    std::fs::write(&second, "second\n").unwrap();
+    let mut a = app_with_profile("", None, sessions(), Some(profile.path().into()));
+    assert_eq!(a.workspace.tabs.len(), 1);
+    assert!(a.workspace.tabs[0].path.is_none());
+    assert!(a.workspace.editor().text.is_empty());
+    assert!(a.panels.side_visible);
+    assert!(a.panels.overlay.is_none() && a.panels.panel.is_none());
+
+    let invalid = files.path().join("socket");
+    let _listener = std::os::unix::net::UnixListener::bind(&invalid).unwrap();
+    a.open_file_choices = Some(vec![first.clone(), invalid, second.clone()]);
+    key(&mut a, "super+o");
+    assert!(
+        a.session_due.is_some(),
+        "valid paths still update the window"
+    );
+    assert!(a.panels.message.contains("only regular files and folders"));
+    until(&mut a, |a| {
+        a.workspace.tabs.len() == 2 && a.workspace.tabs.iter().all(|t| t.loading.is_none())
+    });
+    let first_index = a
+        .workspace
+        .tabs
+        .iter()
+        .position(|t| t.path.as_ref() == Some(&first))
+        .unwrap();
+    let second_index = a.workspace.active;
+    let first_sheet = a.workspace.tabs[first_index].sheet;
+    assert_eq!(a.workspace.tabs[second_index].path.as_ref(), Some(&second));
+    a.workspace.select(first_index);
+    a.sync_active_view();
+    a.workspace.take_pending_center();
+    a.workspace
+        .editor_mut()
+        .set_selection(vel_buffer::Selection::from_regions([
+            vel_buffer::Region::new(6, 9),
+        ]));
+    let selection = a.workspace.editor().regions();
+    let open_recent = a
+        .application_menu()
+        .into_iter()
+        .find(|row| row.id == "file")
+        .unwrap()
+        .children
+        .into_iter()
+        .find(|row| row.id == "open_recent")
+        .unwrap()
+        .children
+        .into_iter()
+        .flat_map(|row| row.children)
+        .find(|row| {
+            row.command.as_deref() == Some("open_recent_file")
+                && row.caption == first.display().to_string()
+        })
+        .unwrap();
+    let args = serde_json::from_str(&open_recent.args).unwrap();
+    for from_menu in [false, true] {
+        a.workspace.select(second_index);
+        a.sync_active_view();
+        if from_menu {
+            a.run_named(None, open_recent.command.as_deref().unwrap(), &args);
+        } else {
+            a.open_file_choices = Some(vec![first.clone()]);
+            key(&mut a, "super+o");
+        }
+        assert_eq!(a.workspace.tabs.len(), 2);
+        assert_eq!(a.workspace.tabs[a.workspace.active].sheet, first_sheet);
+        assert_eq!(a.workspace.editor().regions(), selection);
+        assert!(!a.workspace.take_pending_center());
+    }
+    let location = crate::cli::FileLocation::parse(&format!("{}:1:2", first.display()));
+    assert!(
+        crate::open_requests::open_locations(&mut a.workspace, &mut a.panels, [location])
+            .is_empty()
+    );
+    assert_eq!(a.workspace.editor().caret, 1);
+}
+
+#[test]
+fn r32_cmd_w_keeps_a_named_project_without_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("empty.sublime-project");
+    std::fs::write(&project, r#"{"folders":[]}"#).unwrap();
+    for (project, should_close) in [(Some(project), false), (None, true)] {
+        let mut a = app("", project.clone(), sessions());
+        a.workspace
+            .settings
+            .set(Layer::User, "close_windows_when_empty", json!(true));
+        assert!(a.workspace.folders.is_empty());
+        assert_eq!(a.workspace.project_path().is_some(), project.is_some());
+        assert_eq!(a.workspace.tabs.len(), 1);
+        key(&mut a, "super+w");
+        assert!(a.workspace.is_empty());
+        assert_eq!(a.empty_close_requested, should_close, "{project:?}");
+    }
+}
+
+#[test]
 fn r20_menu_roles_and_line_ending_state() {
     let mut a = app("text", None, sessions());
     let menu = a.application_menu();

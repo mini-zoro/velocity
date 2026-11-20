@@ -259,7 +259,7 @@ pub(crate) struct Chrome {
     pub appearance_footer: Cow<'static, str>,
     pub jump_footer: Cow<'static, str>,
     pub indexing: Cow<'static, str>,
-    pub large_file_hints: [Cow<'static, str>; 6],
+    pub large_file_hints: [Cow<'static, str>; 5],
     pub vintage_modes: [Cow<'static, str>; 7],
     pub recording: Cow<'static, str>,
     pub hex: Cow<'static, str>,
@@ -336,7 +336,6 @@ impl Chrome {
             large_file_hints: [
                 tr.tr("viewport syntax"),
                 tr.tr("indexing off"),
-                tr.tr("wrap off"),
                 tr.tr("spelling off"),
                 tr.tr("disk diff off"),
                 tr.tr("sampled minimap"),

@@ -1,5 +1,7 @@
 //! Find in Files through real workers, loaders and panel key bindings.
 use super::*;
+use crate::panels::{STATUS, status_position};
+use vel_render::scene::Scene;
 use vel_search::files::Row;
 
 fn wait_for(a: &mut App, ready: impl Fn(&App) -> bool) {
@@ -459,6 +461,67 @@ fn results_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     std::fs::write(&first, "before\n世界 foo\nafter\n").unwrap();
     std::fs::write(&second, "prefix foo foo\ntail\n").unwrap();
     (dir, first, second)
+}
+
+#[test]
+fn r32_find_results_and_plain_text_do_not_advertise_wrap_off() {
+    let (_dir, first, _) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    key(&mut a, "super+shift+f");
+    a.panels.query.set("foo");
+    key(&mut a, "enter");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    assert!(a.workspace.tabs[a.workspace.active].find_results);
+    assert!(!a.workspace.editor().features.word_wrap);
+
+    fn check(a: &mut App) {
+        a.panels.message.clear();
+        a.panels.layout(Size {
+            width: 1200.,
+            height: 600.,
+        });
+        let mut scene = Scene::default();
+        a.panels.paint(&a.workspace, &mut scene);
+        let top = 600. - STATUS * a.panels.ui_scale;
+        let status: Vec<_> = scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .filter(|run| f64::from(run.baseline) > top)
+            .map(|run| run.text.as_str())
+            .collect();
+        let position = status_position(&a.workspace);
+        assert!(
+            status.iter().any(|label| label.contains(&position)),
+            "{status:?}"
+        );
+        assert!(
+            !status
+                .iter()
+                .any(|label| label.contains("wrap off") || label.contains("已停用自动换行")),
+            "{status:?}"
+        );
+    }
+
+    for language in ["en", "zh-Hans"] {
+        a.workspace.settings.set(
+            vel_config::settings::Layer::User,
+            "ui_language",
+            json!(language),
+        );
+        a.workspace.sync_ui_language();
+        assert_eq!(a.workspace.translations.language().as_str(), language);
+        check(&mut a);
+    }
+    key(&mut a, "super+n");
+    named(
+        &mut a,
+        "set_setting",
+        json!({"setting":"word_wrap","value":false}),
+    );
+    assert!(!a.workspace.editor().features.word_wrap);
+    check(&mut a);
 }
 
 #[test]

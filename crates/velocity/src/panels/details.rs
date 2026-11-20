@@ -23,6 +23,7 @@ pub(super) struct FindSizing {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusItem {
     Syntax,
+    Binary,
     Indentation,
     Git,
     Indexing,

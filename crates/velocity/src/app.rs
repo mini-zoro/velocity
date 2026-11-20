@@ -134,6 +134,8 @@ pub struct App {
     close_decisions: std::collections::VecDeque<tab_adapter::CloseDecision>,
     #[cfg(test)]
     overwrite_decisions: std::collections::VecDeque<bool>,
+    #[cfg(test)]
+    open_file_choices: Option<Vec<PathBuf>>,
     pending_menu: Option<context_adapter::PendingMenu>,
     menu_cache: Option<((u64, u64, u64), Vec<MenuEntry>)>,
     pending_utf8_saves: std::collections::VecDeque<(u64, Option<std::path::PathBuf>, String)>,
@@ -318,6 +320,8 @@ impl App {
             close_decisions: Default::default(),
             #[cfg(test)]
             overwrite_decisions: Default::default(),
+            #[cfg(test)]
+            open_file_choices: None,
             pending_menu: None,
             menu_cache: None,
             pending_utf8_saves: Default::default(),
@@ -1461,10 +1465,12 @@ impl App {
             ],
         );
     }
-    // https://docs.sublimetext.io/reference/settings.html#application-behavior-settings
+    // Sublime Text build 4121 keeps project windows open even without folders:
+    // https://www.sublimetext.com/download
     fn should_close_empty_window(&self) -> bool {
         self.workspace.is_empty()
             && self.workspace.folders.is_empty()
+            && self.workspace.project_path().is_none()
             && self
                 .workspace
                 .editor()
@@ -1872,10 +1878,15 @@ impl App {
                 | "add_folder"
                 | "clear_recent_items"
                 | "reopen_last_file"
+                | "open_recent_file"
+                | "prompt_open_file"
         ) {
-            self.apply_named_action(window, name, args)?;
-            self.named_changed(window, name == "reopen_last_file");
-            return Ok(());
+            let result = self.apply_named_action(window, name, args);
+            // The file picker can open valid paths in a batch that also reports errors.
+            if result.is_ok() || name == "prompt_open_file" {
+                self.named_changed(window, name == "reopen_last_file");
+            }
+            return result;
         }
         match window.map_or(Ok(false), |window| self.context_action(window, name, args)) {
             Ok(true) => {
@@ -2702,6 +2713,25 @@ impl App {
         {
             return self.workspace.open_file_argument(file);
         }
+        if name == "open_recent_file" {
+            let path = Path::new(args["file"].as_str().ok_or("missing file")?);
+            return crate::open_requests::open_paths(
+                &mut self.workspace,
+                &mut self.panels,
+                &[path.to_owned()],
+            );
+        }
+        if name == "prompt_open_file" {
+            let paths = window.map(|w| w.open_files());
+            #[cfg(test)]
+            let paths = paths.or_else(|| self.open_file_choices.take());
+            return match paths {
+                Some(paths) => {
+                    crate::open_requests::open_paths(&mut self.workspace, &mut self.panels, &paths)
+                }
+                None => Ok(()),
+            };
+        }
         if name == "switch_file" {
             return self.workspace.switch_file(&args["extensions"]);
         }
@@ -2972,13 +3002,6 @@ impl App {
         match name {
             "new_file" => self.workspace.new_file()?,
             "exit" => w.request_app_quit(),
-            "open_recent_file" => {
-                self.workspace.open(crate::cli::FileLocation {
-                    path: args["file"].as_str().ok_or("missing file")?.into(),
-                    line: 1,
-                    column: 1,
-                })?;
-            }
             "open_recent_folder" => {
                 self.open_native_window_request(
                     w,
@@ -3007,22 +3030,6 @@ impl App {
                             Some(vel_fileio::load_background_with_options(path, decode)?);
                     }
                     self.workspace.tabs[active].editor.read_only = true;
-                }
-            }
-            "prompt_open_file" => {
-                let errors = crate::open_requests::open_locations(
-                    &mut self.workspace,
-                    &mut self.panels,
-                    w.open_files()
-                        .into_iter()
-                        .map(|path| crate::cli::FileLocation {
-                            path,
-                            line: 1,
-                            column: 1,
-                        }),
-                );
-                if !errors.is_empty() {
-                    self.show_error(w, &errors.join("\n"));
                 }
             }
             "prompt_save_as" => {

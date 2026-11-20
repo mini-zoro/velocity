@@ -111,24 +111,22 @@ pub fn metrics(text: &Text, caret: usize) -> DocumentMetrics {
     }
 }
 pub fn hint(p: FeaturePolicy, ui: &crate::ui_text::Chrome) -> String {
+    let [viewport, indexing, spelling, diff, minimap] = &ui.large_file_hints;
     let mut disabled = Vec::new();
     if p.highlighting == vel_largefile::HighlightMode::Viewport {
-        disabled.push(ui.large_file_hints[0].as_ref());
+        disabled.push(viewport.as_ref());
     }
     if !p.indexing {
-        disabled.push(ui.large_file_hints[1].as_ref());
-    }
-    if !p.word_wrap {
-        disabled.push(ui.large_file_hints[2].as_ref());
+        disabled.push(indexing.as_ref());
     }
     if !p.spell_check {
-        disabled.push(ui.large_file_hints[3].as_ref());
+        disabled.push(spelling.as_ref());
     }
     if !p.diff_against_disk {
-        disabled.push(ui.large_file_hints[4].as_ref());
+        disabled.push(diff.as_ref());
     }
     if p.minimap_stride > 1 {
-        disabled.push(ui.large_file_hints[5].as_ref());
+        disabled.push(minimap.as_ref());
     }
     disabled.join(" · ")
 }
