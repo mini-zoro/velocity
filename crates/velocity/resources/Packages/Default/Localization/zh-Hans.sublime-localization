@@ -6,6 +6,9 @@
 // Selection count = 已选择 N 个字符. Save / Don't Save / Cancel = 保存 / 不保存 / 取消.
 // Resource identities, codec identifiers, syntax names and filenames are not translated.
 {
+  "language_name": "简体中文",
+  "english_name": "Simplified Chinese",
+  "palette_separator": "：",
   "strings": {
     "About Velocity": "关于 Velocity",
     "Add Folder…": "添加文件夹…",
@@ -300,9 +303,7 @@
     "Preferences: Font: Reset": "偏好设置：字体：重置",
     "Preferences: Font: Smaller": "偏好设置：字体：缩小",
     "Preferences: Key Bindings…": "偏好设置：键盘快捷键…",
-    "Preferences: Language: English": "偏好设置：语言：English",
-    "Preferences: Language: Follow System": "偏好设置：语言：跟随系统",
-    "Preferences: Language: Simplified Chinese": "偏好设置：语言：简体中文",
+    "Preferences: Language: {language}": "偏好设置：语言：{language}",
     "Preferences: Mouse Bindings…": "偏好设置：鼠标绑定…",
     "Preferences: Settings – Distraction Free…": "偏好设置：无干扰模式设置…",
     "Preferences: Settings – Syntax Specific…": "偏好设置：当前语法设置…",
@@ -491,7 +492,6 @@
     "Wrap Selected Paragraphs": "重排所选段落",
     "Wrap Selection With Tag": "用标签包裹选区",
     "Zoom": "缩放",
-    "简体中文": "简体中文",
 
     // UI labels assembled at run time.
     "Automatic (follow system appearance)": "自动（跟随系统外观）",

@@ -990,13 +990,12 @@ mod tests {
         std::fs::write(package.join("example.py"), "# not run").unwrap();
         std::fs::write(package.join("Example.sublime-commands"), "[]").unwrap();
         let mut tr = vel_i18n::Translator::default();
-        tr.replace(
-            vel_i18n::Catalog::load(include_str!(
-                "../resources/Packages/Default/Localization/zh-Hans.sublime-localization"
-            ))
-            .unwrap(),
-        );
-        tr.select(vel_i18n::Language::ZhHans);
+        let mut catalogs = vel_i18n::Catalogs::default();
+        for (tag, catalog) in crate::ui_language::shipped_catalogs() {
+            catalogs.insert(tag, catalog);
+        }
+        tr.replace(catalogs);
+        tr.select(tr.resolve("zh-Hans").unwrap());
         let Reply::Choices(rows) = localized_package_job(
             temp.path(),
             "package_list",

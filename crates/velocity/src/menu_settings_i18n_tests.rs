@@ -336,7 +336,7 @@ fn find_in_files_where_menu_sets_scope_without_changing_the_query() {
     let mut app = fixture(None);
     app.workspace
         .translations
-        .select(vel_i18n::Language::ZhHans);
+        .select(vel_i18n::Language::parse("zh-Hans").unwrap());
     app.run_named(
         None,
         "show_panel",
@@ -1176,6 +1176,123 @@ fn unsupported_language_explains_the_fallback_in_the_previous_language() {
 }
 
 #[test]
+fn user_catalog_reloads_menus_palette_panels_status_and_accessibility() {
+    fn language_rows(app: &mut App) -> Vec<(String, String, bool)> {
+        let menu = app.application_menu();
+        role(&role(&menu, "preferences").children, "language")
+            .children
+            .iter()
+            .map(|row| {
+                let tag = serde_json::from_str::<Value>(&row.args).unwrap()["language"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                (
+                    tag,
+                    row.caption.clone(),
+                    app.command_checked("set_ui_language", &row.args),
+                )
+            })
+            .collect()
+    }
+    fn wait_for_catalog(app: &mut App, available: bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while app.workspace.translations.catalog("x-test").is_some() != available {
+            assert!(Instant::now() < deadline, "catalog reload did not publish");
+            app.poll_workspace_model();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    assert!(
+        !language_rows(&mut app)
+            .iter()
+            .any(|(tag, _, _)| tag == "x-test")
+    );
+    let localization = data.path().join("Packages/User/Localization");
+    fs::create_dir_all(&localization).unwrap();
+    let file = localization.join("x-test.sublime-localization");
+    fs::write(
+        &file,
+        r#"{
+        "language_name": "[Pséûdô]",
+        "english_name": "Pseudo",
+        "strings": {
+            "File": "[Fïlê]",
+            "Save": "[Ŝåvé]",
+            "File: Save": "[Fïlê: Ŝåvé]",
+            "Language": "[Långûågê]",
+            "Follow System": "[Föllôw]",
+            "Preferences: Language: {language}": "[Långûågê: {language}]",
+            "Find": "[Fïnd]",
+            "Regular expression": "[Řêgêx]",
+            "Ln {line}, Col {column}": "[Lïné {line}, Çôl {column}]",
+            "Unsupported UI language; using English": "[Ûnsûppôrtêd]"
+        }
+    }"#,
+    )
+    .unwrap();
+    wait_for_catalog(&mut app, true);
+    assert!(language_rows(&mut app).contains(&("x-test".into(), "[Pséûdô]".into(), false)));
+    assert_eq!(
+        app.workspace
+            .translations
+            .resolve_preferred(["x-test", "en"])
+            .as_str(),
+        "x-test"
+    );
+    open_palette(&mut app, "language pseudo");
+    palette_row(&mut app, "Preferences: Language: Pseudo");
+    app.run_named(None, "hide_overlay", &json!({}));
+    app.run_named(None, "show_panel", &json!({"panel":"find"}));
+    r25_paint(&mut app, &["Find", "Ln 1, Col 1 · UTF-8 · Unix"]);
+    app.run_named(None, "set_ui_language", &json!({"language":"x-test"}));
+    assert!(language_rows(&mut app).contains(&("x-test".into(), "[Pséûdô]".into(), true)));
+    assert!(language_rows(&mut app).contains(&("auto".into(), "[Föllôw]".into(), false)));
+    let menu = app.application_menu();
+    assert_eq!(role(&menu, "file").caption, "[Fïlê]");
+    assert!(
+        rows(&menu).any(|row| row.command.as_deref() == Some("save") && row.caption == "[Ŝåvé]")
+    );
+    assert_eq!(
+        role(&menu, "edit").caption,
+        "Edit",
+        "a missing key falls back"
+    );
+    assert_eq!(app.panels.panel, Some(crate::panels::Panel::Find));
+    r25_paint(&mut app, &["[Fïnd]", "[Lïné 1, Çôl 1] · UTF-8 · Unix"]);
+    assert!(
+        app.accessible_tree()
+            .nodes
+            .iter()
+            .any(|node| node.label == "[Řêgêx]")
+    );
+    open_palette(&mut app, "language pseudo");
+    palette_row(&mut app, "[Långûågê: [Pséûdô]]");
+    open_palette(&mut app, "save");
+    palette_row(&mut app, "[Fïlê: Ŝåvé]");
+
+    fs::remove_file(file).unwrap();
+    wait_for_catalog(&mut app, false);
+    assert_eq!(app.panels.message, "[Ûnsûppôrtêd]");
+    assert!(app.workspace.translations.language().is_english());
+    assert_eq!(app.workspace.global_string("ui_language", "en"), "x-test");
+    let choices = language_rows(&mut app);
+    assert!(!choices.iter().any(|(tag, _, _)| tag == "x-test"));
+    assert!(choices.contains(&("en".into(), "English".into(), true)));
+    assert!(
+        !app.workspace
+            .palette
+            .iter()
+            .any(|item| item.invocation.args["language"] == "x-test")
+    );
+    palette_row(&mut app, "File: Save");
+    app.workspace.wait_resources();
+}
+
+#[test]
 fn clear_recent_items_removes_the_cached_submenu_in_both_apps() {
     let sessions = std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None)));
     let mut a = fixture_with_session(None, sessions.clone(), false);
@@ -1251,13 +1368,15 @@ fn in_selection_is_enabled_for_document_find_and_disabled_in_files() {
 }
 
 #[test]
-fn shipped_catalog_has_all_static_ui_captions() {
+fn shipped_catalogs_have_all_static_ui_captions() {
+    for (tag, catalog) in crate::ui_language::shipped_catalogs() {
+        check_static_ui_captions(&tag, &catalog);
+    }
+}
+
+fn check_static_ui_captions(tag: &vel_i18n::Language, catalog: &vel_i18n::Catalog) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/Packages/Default");
-    let catalog = vel_i18n::Catalog::load(
-        &fs::read_to_string(path.join("Localization/zh-Hans.sublime-localization")).unwrap(),
-    )
-    .unwrap();
-    let mut captions = BTreeSet::new();
+    let mut captions = BTreeSet::from(["English".to_owned()]);
     for file in fs::read_dir(path).unwrap() {
         let file = file.unwrap().path();
         if !file
@@ -1336,13 +1455,39 @@ fn shipped_catalog_has_all_static_ui_captions() {
         .iter()
         .filter(|key| !catalog.strings.contains_key(*key))
         .collect();
-    assert!(missing.is_empty(), "missing: {missing:?}");
+    assert!(missing.is_empty(), "{} missing: {missing:?}", tag.as_str());
     let orphans: BTreeSet<_> = catalog
         .strings
         .keys()
         .filter(|key| !captions.contains(*key))
         .collect();
-    assert!(orphans.is_empty(), "orphan catalog keys: {orphans:#?}");
+    assert!(
+        orphans.is_empty(),
+        "{} orphan catalog keys: {orphans:#?}",
+        tag.as_str()
+    );
+}
+
+#[test]
+fn shipped_catalogs_cover_the_assembled_palette() {
+    let mut app = fixture(None);
+    let before = app.workspace.palette.clone();
+    for (tag, _) in crate::ui_language::shipped_catalogs() {
+        app.workspace.translations.select(tag.clone());
+        let missing: Vec<_> = app
+            .workspace
+            .palette
+            .iter()
+            .filter(|item| app.workspace.palette_caption(item).is_none())
+            .map(|item| &item.caption)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} untranslated assembled palette: {missing:?}",
+            tag.as_str()
+        );
+        assert_eq!(app.workspace.palette, before);
+    }
 }
 
 #[test]
@@ -1380,7 +1525,7 @@ fn assembled_palette_has_complete_translations_and_preserves_invocations() {
     let before = app.workspace.palette.clone();
     app.workspace
         .translations
-        .select(vel_i18n::Language::ZhHans);
+        .select(vel_i18n::Language::parse("zh-Hans").unwrap());
     let mut missing = BTreeSet::new();
     for item in &app.workspace.palette {
         let Some(localized) = app.workspace.palette_caption(item) else {
@@ -1459,7 +1604,7 @@ fn round24_localized_menu_walk_preserves_dispatch_and_data() {
     let english = app.application_menu();
     app.workspace
         .translations
-        .select(vel_i18n::Language::ZhHans);
+        .select(vel_i18n::Language::parse("zh-Hans").unwrap());
     let chinese = app.application_menu();
 
     fn walk(en: &[MenuEntry], zh: &[MenuEntry], syntax: bool, depth: usize) {
@@ -1544,7 +1689,7 @@ fn tools_macro_menu_localizes_prefix_but_not_names() {
     let en = app.application_menu();
     app.workspace
         .translations
-        .select(vel_i18n::Language::ZhHans);
+        .select(vel_i18n::Language::parse("zh-Hans").unwrap());
     let zh = app.application_menu();
     fn macros(menu: &[MenuEntry]) -> &[MenuEntry] {
         &role(&role(menu, "tools").children, "macros").children
@@ -1569,7 +1714,7 @@ fn command_icon_does_not_change_when_a_different_caption_alias_wins() {
     assert_eq!(en, vel_ui::ItemIcon::View);
     app.workspace
         .translations
-        .select(vel_i18n::Language::ZhHans);
+        .select(vel_i18n::Language::parse("zh-Hans").unwrap());
     for query in ["toggle tabs", "隐藏选项卡"] {
         open_palette(&mut app, query);
         assert_eq!(palette_row(&mut app, "显示：显示或隐藏选项卡").icon, en);

@@ -6,6 +6,37 @@ use syn::{
 };
 
 pub(super) fn generate(out: &Path) -> io::Result<()> {
+    let packages = Path::new("resources/Packages");
+    println!("cargo:rerun-if-changed={}", packages.display());
+    let mut catalogs = Vec::new();
+    for package in fs::read_dir(packages)? {
+        let dir = package?.path().join("Localization");
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext == "sublime-localization")
+            {
+                let relative = path.strip_prefix(packages).expect("package path");
+                catalogs.push(format!(
+                    "({:?}, include_bytes!({:?}) as &[u8]),\n",
+                    format!("Packages/{}", relative.display()),
+                    path.canonicalize()?
+                ));
+            }
+        }
+    }
+    catalogs.sort_unstable();
+    fs::write(
+        out.join("localizations.rs"),
+        format!("&[{}]", catalogs.concat()),
+    )?;
+
     println!("cargo:rerun-if-changed=src");
     let mut keys = Keys::default();
     walk(Path::new("src"), &mut keys)?;

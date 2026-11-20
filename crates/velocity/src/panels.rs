@@ -138,7 +138,7 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
         .settings
         .bool("show_line_endings", true)
         .then_some(tab.format.line_ending.display_name());
-    if workspace.translations.language() == vel_i18n::Language::En {
+    if workspace.translations.language().is_english() {
         return vel_ui::status::position_mode(
             mode,
             row,
@@ -5776,20 +5776,22 @@ impl Panels {
             theme.surface(&mut layer, &sidebar, cap, cap);
             theme.surface(&mut layer, &sidebar, clip, clip);
             let heading = style(3, Some("sidebar_heading"), &mut theme);
-            let mut heading = heading;
-            if workspace.translations.language() == vel_i18n::Language::ZhHans {
-                heading.case = None;
-            }
-            for (caption, row) in [
-                (workspace.ui.open_files.as_ref(), 0),
+            for (caption, source, row) in [
+                (workspace.ui.open_files.as_ref(), "Open Files", 0),
                 (
                     workspace.ui.folders.as_ref(),
+                    "Folders",
                     self.folder_row_base(workspace) - 1,
                 ),
             ]
             .into_iter()
             .skip(usize::from(!self.open_files_visible))
             {
+                // A localized heading keeps the capitalization chosen by its translator.
+                let mut heading = heading.clone();
+                if caption != source {
+                    heading.case = None;
+                }
                 theme.text_fit(
                     &mut layer,
                     &heading,
@@ -6263,7 +6265,7 @@ impl Panels {
                 (
                     details::StatusItem::Indentation,
                     if text_document {
-                        if workspace.translations.language() == vel_i18n::Language::En {
+                        if workspace.translations.language().is_english() {
                             vel_ui::status::indentation(
                                 editor.preferences.translate_tabs_to_spaces,
                                 editor.preferences.tab_size,

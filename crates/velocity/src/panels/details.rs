@@ -2128,7 +2128,6 @@ mod tests {
     }
     #[test]
     fn every_quick_panel_paints_a_localized_footer_with_mac_key_glyphs() {
-        use vel_i18n::Language::{En, ZhHans};
         let (mut w, mut p) = setup("text");
         p.message = "stale find message".into();
         for (overlays, en, zh) in [
@@ -2161,11 +2160,11 @@ mod tests {
             for &overlay in overlays {
                 p.overlay = Some(overlay);
                 p.layout(size());
-                for (language, expected) in [(En, en), (ZhHans, zh)] {
+                for (language, expected) in [("en", en), ("zh-Hans", zh)] {
                     w.settings.set(
                         vel_config::settings::Layer::User,
                         "ui_language",
-                        json!(if language == ZhHans { "zh-Hans" } else { "en" }),
+                        json!(language),
                     );
                     w.sync_ui_language();
                     let mut scene = Scene::default();

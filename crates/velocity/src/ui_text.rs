@@ -238,6 +238,7 @@ impl Dialog {
 #[derive(Debug)]
 pub(crate) struct Chrome {
     pub revision: u64,
+    pub unsupported_language: Cow<'static, str>,
     pub find_fields: [Cow<'static, str>; 3],
     pub find_buttons: [Cow<'static, str>; 5],
     pub find_options: [Cow<'static, str>; 6],
@@ -295,6 +296,7 @@ impl Chrome {
     pub fn new(tr: &Translator) -> Self {
         Self {
             revision: tr.revision(),
+            unsupported_language: tr.tr("Unsupported UI language; using English"),
             find_fields: [tr.tr("Find"), tr.tr("Replace"), tr.tr("Where")],
             find_buttons: [
                 tr.tr("Find"),

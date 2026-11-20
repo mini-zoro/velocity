@@ -1276,11 +1276,7 @@
         "caption": "Theme…",
         "command": "select_theme"
       },
-      {"caption":"Language","id":"language","children":[
-        {"caption":"English","command":"set_ui_language","args":{"language":"en"}},
-        {"caption":"简体中文","command":"set_ui_language","args":{"language":"zh-Hans"}},
-        {"caption":"Follow System","command":"set_ui_language","args":{"language":"auto"}}
-      ]},
+      {"caption":"Language","id":"language","children":[]},
       {
         "caption": "Customize Color Scheme…",
         "command": "customize_color_scheme"

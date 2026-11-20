@@ -260,7 +260,7 @@
   "dark_theme": "Velocity.sublime-theme",
   "light_theme": "Velocity Light.sublime-theme",
   "ui_scale": 1.0,
-  // Language for menus and the command palette: en, zh-Hans, or auto (macOS preferred language).
+  // UI locale tag (for example en or zh-Hans), or auto (first supported macOS preferred language). Missing strings fall back through parent tags to English.
   "ui_language": "en",
   // Empty uses the theme's UI font. A font family here overrides theme text only.
   "ui_font_face": "",

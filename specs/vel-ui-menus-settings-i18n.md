@@ -52,17 +52,16 @@ Goal: everything Velocity itself shows can appear in Simplified Chinese, switcha
 default and the fallback for anything untranslated.
 
 1. **Setting and switch.**
-   - New setting `ui_language`: `"auto"` (follow macOS preferred languages: Chinese, Simplified → `zh-Hans`,
-     otherwise English), `"en"`, `"zh-Hans"`. Default `"auto"`? — **default `"en"`** to keep today's behaviour for
-     existing users; `"auto"` documented. (Decide after checking how macOS apps usually behave; record the choice.)
-   - Preferences › Language (语言) submenu with three checked rows: English / 简体中文 / Follow System (跟随系统),
-     running `set_ui_language {"language": …}`, which writes the User preference.
-   - Palette entries: "Preferences: Language: English", "Preferences: Language: Simplified Chinese" (and their Chinese
-     captions).
+   - `ui_language` defaults to `"en"`. It accepts a BCP-47 tag or `"auto"`, which selects the first supported
+     macOS preferred language. Try the exact tag, then its parents; English is the final fallback.
+   - Preferences › Language (语言) and "Preferences: Language: …" in the palette are generated from the catalog
+     inventory plus English and Follow System. Picker names come from catalog metadata. The choices run
+     `set_ui_language {"language": …}`, which writes the User preference.
    - Applies live: native menus are rebuilt, panels re-laid out, the palette and status bar update; no relaunch.
 2. **Catalog.**
-   - `Packages/Default/Localization/zh-Hans.sublime-localization` (JSON with comments, our own format):
-     `{"strings": {"File": "文件", "New File": "新建文件", "Replaced {count} occurrences": "已替换 {count} 处", …}}`.
+   - `Packages/<package>/Localization/<tag>.sublime-localization` is JSON with comments. The only shipped catalog is
+     `Packages/Default/Localization/zh-Hans.sublime-localization`; English needs none. Catalogs declare
+     `language_name`, optionally `english_name`, and a `strings` object.
      Keys are the English source text, so menu and palette files need no changes and third-party package captions
      still show (in English) when untranslated.
    - Users and packages may add or override translations: `Packages/User/Localization/zh-Hans.sublime-localization`,
@@ -88,8 +87,8 @@ default and the fallback for anything untranslated.
    captions short.
 7. **Tests.**
    - Catalog completeness: every caption in the shipped menus and palette and every `tr`/`tr_fmt` literal in the
-     source has a `zh-Hans` entry; no orphan entries; placeholder sets match. (Collect `tr` literals with a test that
-     scans the sources, or with a `build.rs`-generated list.)
+     source has an entry in every shipped catalog; no orphan entries; placeholder sets match. Partial third-party
+     catalogs are valid and fall back per key.
    - Switching through the user's path: `run_named("set_ui_language", …)` changes the menu model, the palette rows,
      panel labels and a status message; switching back restores English; an unknown language falls back to English
      with a status note.
@@ -98,6 +97,17 @@ default and the fallback for anything untranslated.
    - Performance: translation lookups must not show up per frame (cache translated strings per language revision);
      retired instructions for typing and scene builds within 1%.
 
+**Round 28 closing status:** The locale framework is data-driven, with English and Simplified Chinese still the
+only shipped languages. A temporary User catalog exercises live resource publication and removal, menu and palette
+generation, fallback, and translated panels, status, and accessibility. Completeness and draw-list audits enumerate
+the shipped catalogs. See [the localization guide](../docs/i18n.md). The existing native VoiceOver and IME review
+items below are unchanged.
+
+The round-27 smoke1 comparison mixed deployment targets. The `e163180` reference targeted macOS 14 and used
+Mach-O chained fixups; the round-27 binary targeted macOS 11 and used legacy rebasing and binding. A
+`proc_pid_rusage` loader probe attributed roughly 5.6 million extra instructions to pre-main startup, not to
+resource loading. Compare release binaries built with the same `MACOSX_DEPLOYMENT_TARGET=14.0` as the package;
+`otool -l` can confirm both the minimum OS and the fixup format. No runtime or minimum-OS change is needed.
 
 ## Review findings (2026-11-19, main `340ca17`)
 

@@ -261,6 +261,7 @@ impl App {
         self.session_id = id;
         self.workspace = workspace;
         self.panels = crate::panels::Panels::new(&self.workspace, true);
+        self.apply_ui_language_notice();
         self.panels.review.native_context = true;
         self.title_theme = None;
         self.view_buffer = None;
@@ -341,6 +342,9 @@ impl App {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
                 panels.message = workspace.take_resource_reports().join("; ").into();
+                if let Some(note) = workspace.ui_language_notice.take() {
+                    panels.set_message(note);
+                }
                 if !matches!(
                     options.mode,
                     Mode::Interactive | Mode::Panels | Mode::ThemeUi
@@ -1598,7 +1602,13 @@ impl App {
             self.refresh_open_palette();
             self.panels.refresh_locale(&self.workspace);
         }
+        self.apply_ui_language_notice();
         changed || transferred
+    }
+    fn apply_ui_language_notice(&mut self) {
+        if let Some(note) = self.workspace.ui_language_notice.take() {
+            self.panels.set_message(note);
+        }
     }
     fn window_chrome_preferences(&self) -> (bool, bool) {
         (
@@ -2444,15 +2454,12 @@ impl App {
             // The preference is app-wide; the ordinary User writer also updates
             // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
             let (language, note) = match args["language"].as_str() {
-                Some(requested @ ("en" | "zh-Hans" | "auto")) => (requested, None),
+                Some(requested) if self.workspace.translations.resolve(requested).is_some() => {
+                    (requested, None)
+                }
                 _ => (
                     "en",
-                    Some(
-                        self.workspace
-                            .translations
-                            .tr("Unsupported UI language; using English")
-                            .into_owned(),
-                    ),
+                    Some(self.workspace.ui.unsupported_language.to_string()),
                 ),
             };
             if self.workspace.global_string("ui_language", "en") != language {
@@ -4754,7 +4761,7 @@ impl AppHandler for App {
             "unexpand_tabs" => !editor.preferences.translate_tabs_to_spaces,
             "show_console" => self.panels.console_visible(),
             "set_ui_language" => {
-                args["language"].as_str() == Some(self.workspace.global_string("ui_language", "en"))
+                args["language"].as_str() == Some(self.workspace.checked_ui_language())
             }
             "toggle_find_option" => args["option"]
                 .as_str()
@@ -5482,7 +5489,13 @@ fn native_menu(
                 && item.platform.as_deref() != Some("Linux")
         })
         .map(|item| MenuEntry {
-            caption: localized_menu_caption(tr, &item.caption, item.command.as_deref()).to_owned(),
+            caption: if item.command.as_deref() == Some("set_ui_language")
+                && !matches!(item.args["language"].as_str(), Some("en" | "auto"))
+            {
+                item.caption.clone()
+            } else {
+                localized_menu_caption(tr, &item.caption, item.command.as_deref()).to_owned()
+            },
             id: item.id.clone(),
             command: item.command.clone(),
             args: item.args.to_string(),

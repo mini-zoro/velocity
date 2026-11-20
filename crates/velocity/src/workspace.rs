@@ -735,6 +735,8 @@ pub struct Workspace {
     pub mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
     pub(crate) translations: vel_i18n::Translator,
+    unsupported_ui_language: Option<String>,
+    pub(crate) ui_language_notice: Option<String>,
     pub(crate) ui: crate::ui_text::Chrome,
     pub(crate) menu_revision: u64,
     pub(crate) palette_revision: u64,
@@ -891,7 +893,7 @@ struct Configuration {
     context_menus: BTreeMap<String, Vec<MenuItem>>,
     mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
-    translations: vel_i18n::Catalog,
+    translations: vel_i18n::Catalogs,
     macro_paths: std::collections::BTreeSet<String>,
     folders: Vec<vel_search::project::Folder>,
     distraction_settings: serde_json::Map<String, Value>,
@@ -1073,12 +1075,6 @@ impl Configuration {
                 include_str!("../resources/Packages/Default/Find in Files.sublime-menu"),
             ),
             (
-                "Localization/zh-Hans.sublime-localization",
-                include_str!(
-                    "../resources/Packages/Default/Localization/zh-Hans.sublime-localization"
-                ),
-            ),
-            (
                 "Velocity.sublime-mousemap",
                 include_str!("../resources/Packages/Default/Velocity.sublime-mousemap"),
             ),
@@ -1112,6 +1108,9 @@ impl Configuration {
                 source.as_bytes().to_vec(),
                 PathBuf::from("<embedded>"),
             );
+        }
+        for &(path, bytes) in crate::ui_language::SHIPPED {
+            resources.insert_embedded(path, bytes, PathBuf::from("<embedded>"));
         }
         let mut resource_messages = Vec::new();
         let mut resource_reports = Vec::new();
@@ -1172,15 +1171,7 @@ impl Configuration {
         // Application-only: https://www.sublimetext.com/docs/settings.html
         // Project files cannot enable/disable packages, including Vintage.
         resources.set_ignored(ignored);
-        // Localizations follow the existing resource order: Default, packages, User.
-        // https://www.sublimetext.com/docs/menus.html#customization
-        let mut translations = vel_i18n::Catalog::default();
-        for resource in resources.matching("/Localization/zh-Hans.sublime-localization") {
-            match resource.text().and_then(vel_i18n::Catalog::load) {
-                Ok(catalog) => translations.merge(catalog),
-                Err(error) => resource_messages.push(format!("{}: {error}", resource.path)),
-            }
-        }
+        let translations = vel_i18n::Catalogs::load(&resources, &mut resource_messages);
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
         let mut syntax_settings = crate::shipped::SyntaxSettings::default();
@@ -1507,7 +1498,7 @@ impl Configuration {
                     .find_map(|layer| settings.layer(layer).get("ui_language"))
                     .and_then(Value::as_str)
                     .unwrap_or("en");
-                tr.select(vel_i18n::Language::from_setting(language));
+                tr.select(tr.resolve(language).unwrap_or_default());
                 tr
             });
             resource_reports.push(tr.tr_fmt(
@@ -1557,6 +1548,8 @@ impl Configuration {
             }
         }
         crate::release::extend_commands(&mut palette, &mut menus, &settings);
+        crate::ui_language::menu_rows(&mut menus, &translations);
+        crate::ui_language::palette_rows(&mut palette, &translations);
         ui::extend_palette(&mut palette, &menus);
         let bundled = crate::language::Assets::bundled()?;
         let assets =
@@ -1950,6 +1943,8 @@ impl Workspace {
             palette,
             ui: crate::ui_text::Chrome::new(&localizer),
             translations: localizer,
+            unsupported_ui_language: None,
+            ui_language_notice: None,
             menu_revision: 0,
             palette_revision: 0,
             macro_paths,
@@ -2052,8 +2047,17 @@ impl Workspace {
         true
     }
     pub(crate) fn sync_ui_language(&mut self) -> bool {
-        let language = vel_i18n::Language::from_setting(self.global_string("ui_language", "en"));
-        self.translations.select(language);
+        let setting = self.global_string("ui_language", "en");
+        let language = self.translations.resolve(setting);
+        if language.is_some() {
+            self.unsupported_ui_language = None;
+        } else if self.unsupported_ui_language.as_deref() != Some(setting) {
+            self.unsupported_ui_language = Some(setting.to_owned());
+            // The previous prepared text survives replacement of the catalog
+            // snapshot, including deletion of the catalog that supplied it.
+            self.ui_language_notice = Some(self.ui.unsupported_language.to_string());
+        }
+        self.translations.select(language.unwrap_or_default());
         if self.ui.revision == self.translations.revision() {
             return false;
         }
@@ -2063,15 +2067,26 @@ impl Workspace {
         }
         true
     }
+    pub(crate) fn checked_ui_language(&self) -> &str {
+        if self.global_string("ui_language", "en") == "auto" {
+            "auto"
+        } else {
+            self.translations.matched_language().as_str()
+        }
+    }
     pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
         let tr = &self.translations;
-        if tr.language() == vel_i18n::Language::En {
+        if tr.language().is_english() {
             return None;
         }
         let caption = item.caption.as_str();
         // Only the UI prefix is translated; names can contain colons and can
         // even be identical to catalog keys.
         let prefix = match item.invocation.command.as_str() {
+            "set_ui_language" => {
+                return crate::ui_language::palette_caption(tr, item)
+                    .or_else(|| tr.palette_caption(caption));
+            }
             "set_file_type" => Some(("Set Syntax", tr.tr("Set Syntax"))),
             "insert_snippet" if caption.starts_with("Snippet: ") => {
                 Some(("Snippet", tr.tr("Snippet")))
@@ -2083,7 +2098,7 @@ impl Workspace {
                 let name = macro_name(caption);
                 return tr
                     .palette_caption("Macro")
-                    .map(|prefix| format!("{prefix}：{name}"));
+                    .map(|prefix| format!("{prefix}{}{name}", tr.palette_separator()));
             }
             "set_indentation" if item.invocation.args["width"].is_u64() => {
                 Some(("Tab Width", tr.tr("Tab Width")))
@@ -2101,7 +2116,8 @@ impl Workspace {
         };
         if let Some((prefix, localized)) = prefix {
             let name = caption.strip_prefix(prefix)?.strip_prefix(": ")?;
-            return (localized != prefix).then(|| format!("{localized}：{name}"));
+            return (localized != prefix)
+                .then(|| format!("{localized}{}{name}", tr.palette_separator()));
         }
         tr.palette_caption(caption)
     }

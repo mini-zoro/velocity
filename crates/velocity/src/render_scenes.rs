@@ -1,7 +1,7 @@
 //! Developer tool: renders real application states offscreen to PNG files.
 //!
 //! `velocity --render-scenes <out-dir> [--scale 1|2] [--appearance dark|light] [--only a,b]
-//! [--language en|zh-Hans] [--audit-text]`
+//! [--language <tag>] [--catalog <file>] [--audit-text]`
 //!
 //! Each scenario builds an actual [`App`] around a [`Workspace`] with synthetic files in a
 //! temporary directory, drives it through the same command, panel and pointer paths as the
@@ -27,9 +27,10 @@ struct Request {
     /// `--first-frames N`: render the first N frames as the native loop produces them
     /// (one worker poll per frame, no settling), e.g. an overlay before ranking finishes.
     first_frames: usize,
-    /// `--language en|zh-Hans`: the `ui_language` of the fixture's User preferences, so every
+    /// `--language <tag>`: the `ui_language` of the fixture's User preferences, so every
     /// scene starts in that language exactly as a user's setting would make it.
-    language: Option<&'static str>,
+    language: Option<String>,
+    catalogs: Vec<PathBuf>,
     audit_text: bool,
 }
 
@@ -48,6 +49,7 @@ impl Request {
             bench: 0,
             first_frames: 0,
             language: None,
+            catalogs: Vec::new(),
             audit_text: false,
         };
         while let Some(arg) = args.next() {
@@ -85,22 +87,18 @@ impl Request {
                     request.bench = value.parse().map_err(|_| "invalid --bench-scene count")?
                 }
                 "--language" => {
-                    request.language = Some(match value.as_str() {
-                        "en" => "en",
-                        "zh-Hans" => "zh-Hans",
-                        _ => return Err("--language must be en or zh-Hans".into()),
-                    });
+                    vel_i18n::Language::parse(value).ok_or("--language needs a locale tag")?;
+                    request.language = Some(value.clone());
                 }
+                "--catalog" => request.catalogs.push(PathBuf::from(value)),
                 _ => return Err(format!("unknown --render-scenes option {arg}")),
             }
         }
         if request.audit_text
-            && (request.language != Some("zh-Hans")
-                || request.first_frames > 0
-                || request.bench > 0)
+            && (request.language.is_none() || request.first_frames > 0 || request.bench > 0)
         {
             return Err(
-                "--audit-text requires --language zh-Hans without a frame or bench mode".into(),
+                "--audit-text requires --language <tag> without a frame or bench mode".into(),
             );
         }
         Ok(request)
@@ -112,6 +110,7 @@ struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
     data: PathBuf,
+    language: Option<String>,
     project: PathBuf,
     file: PathBuf,
     /// Round 5: the sample folder plus a folder of documents with Chinese names (`文档`).
@@ -219,7 +218,7 @@ const R5_DOCS: &[(&str, &str)] = &[
 ];
 
 impl Fixture {
-    fn create(language: Option<&str>) -> Result<Self, String> {
+    fn create(language: Option<&str>, catalogs: &[PathBuf]) -> Result<Self, String> {
         let dir = tempfile::Builder::new()
             .prefix("velocity-render-scenes-")
             .tempdir()
@@ -269,15 +268,33 @@ impl Fixture {
         }
         std::fs::create_dir_all(project_dir.join("target/debug")).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(data.join("Packages/User")).map_err(|e| e.to_string())?;
+        for file in catalogs {
+            let name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("--catalog needs a UTF-8 filename")?;
+            let tag = name
+                .strip_suffix(".sublime-localization")
+                .and_then(vel_i18n::Language::parse)
+                .filter(|tag| !tag.is_english())
+                .ok_or("--catalog needs a non-English <tag>.sublime-localization file")?;
+            let dest = data.join("Packages/User/Localization");
+            std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+            std::fs::copy(
+                file,
+                dest.join(format!("{}.sublime-localization", tag.as_str())),
+            )
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+        }
         // Deterministic chrome: no tree/hover animations, no blinking; the UI language as a
         // user's preference would set it.
-        let language = language.map_or(String::new(), |language| {
-            format!(",\n\t\"ui_language\": \"{language}\"")
+        let language_setting = language.map_or(String::new(), |language| {
+            format!(",\n\t\"ui_language\": {}", json!(language))
         });
         std::fs::write(
             data.join("Packages/User/Preferences.sublime-settings"),
             format!(
-                "{{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"{language}\n}}\n"
+                "{{\n\t\"animation_enabled\": false,\n\t\"tree_animation_enabled\": false,\n\t\"caret_style\": \"solid\"{language_setting}\n}}\n"
             ),
         )
         .map_err(|e| e.to_string())?;
@@ -334,6 +351,7 @@ impl Fixture {
             file: project_dir.join("src/main.rs"),
             root,
             data,
+            language: language.map(str::to_owned),
             project,
             r5_project,
         })
@@ -661,13 +679,15 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
 
 fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64, query: &str) -> Result<App, String> {
     let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
-    // Force Chinese for the original localization coverage scenes.
-    app.workspace.settings.set(
-        vel_config::settings::Layer::User,
-        "ui_language",
-        json!("zh-Hans"),
-    );
-    app.workspace.sync_ui_language();
+    // Keep the original Chinese screenshots when no language was requested.
+    if fixture.language.is_none() {
+        app.workspace.settings.set(
+            vel_config::settings::Layer::User,
+            "ui_language",
+            json!("zh-Hans"),
+        );
+        app.workspace.sync_ui_language();
+    }
     app.workspace.editor_mut().settings.set(
         vel_config::settings::Layer::View,
         "ui_scale",
@@ -1943,8 +1963,14 @@ fn capture_chinese_layout(
             .collect()
     }
     let menus = model(&app.application_menu());
+    let tag = app.workspace.translations.matched_language().as_str();
+    let menu_file = if tag == "zh-Hans" {
+        "zh_hans-menu.json".into()
+    } else {
+        format!("{tag}-menu.json")
+    };
     std::fs::write(
-        out.join("zh_hans-menu.json"),
+        out.join(menu_file),
         serde_json::to_vec_pretty(&menus).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
@@ -2103,7 +2129,7 @@ fn caption_ink(
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let request = Request::parse(args)?;
     std::fs::create_dir_all(&request.out).map_err(|e| e.to_string())?;
-    let fixture = Fixture::create(request.language)?;
+    let fixture = Fixture::create(request.language.as_deref(), &request.catalogs)?;
     let mut renderer: Option<Renderer> = None;
     let mut written = 0;
     for scenario in SCENARIOS {
@@ -2117,6 +2143,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         for &dark in &request.dark {
             for &scale in &request.scales {
                 let mut app = (scenario.build)(&fixture, dark)?;
+                if let Some(tag) = &request.language
+                    && app.workspace.translations.resolve(tag).is_none()
+                {
+                    return Err(format!("no available UI language matches {tag:?}"));
+                }
                 let size = Size {
                     width: scenario.size.0,
                     height: scenario.size.1,
@@ -2156,11 +2187,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     continue;
                 }
                 finish_layout(&mut app, scenario.name);
-                if request.audit_text
-                    || matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
-                    || (request.language == Some("zh-Hans")
-                        && (scenario.name.starts_with("r5_") || scenario.name.starts_with("r25_")))
-                {
+                let chinese_layout = app.workspace.translations.matched_language().as_str()
+                    == "zh-Hans"
+                    && (matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
+                        || scenario.name.starts_with("r5_")
+                        || scenario.name.starts_with("r25_"));
+                if request.audit_text || chinese_layout {
                     capture_chinese_layout(
                         &mut app,
                         &request.out,
@@ -2261,30 +2293,32 @@ fn finish_layout(app: &mut App, name: &str) {
 
 #[cfg(test)]
 #[test]
-fn zh_hans_render_scenes_show_no_unexpected_ascii_copy() {
-    let fixture = Fixture::create(Some("zh-Hans")).unwrap();
+fn shipped_catalogs_pass_draw_list_text_audit() {
     let mut findings = Vec::new();
-    for scenario in SCENARIOS {
-        let mut app = (scenario.build)(&fixture, true).unwrap();
-        let fonts = Fonts::load_named(&app.workspace.editor().preferences.font_face).unwrap();
-        let size = Size {
-            width: scenario.size.0,
-            height: scenario.size.1,
-        };
-        attach(&mut app, fonts, size, 1.).unwrap();
-        finish_layout(&mut app, scenario.name);
-        let scene = app.scene();
-        findings.extend(
-            text_audit::runs(scenario.name, &app, &fixture.root, &scene)
-                .into_iter()
-                .map(|run| format!("{}: {run:?}", scenario.name)),
-        );
+    for (tag, _) in crate::ui_language::shipped_catalogs() {
+        let fixture = Fixture::create(Some(tag.as_str()), &[]).unwrap();
+        for scenario in SCENARIOS {
+            let mut app = (scenario.build)(&fixture, true).unwrap();
+            let fonts = Fonts::load_named(&app.workspace.editor().preferences.font_face).unwrap();
+            let size = Size {
+                width: scenario.size.0,
+                height: scenario.size.1,
+            };
+            attach(&mut app, fonts, size, 1.).unwrap();
+            finish_layout(&mut app, scenario.name);
+            let scene = app.scene();
+            findings.extend(
+                text_audit::runs(scenario.name, &app, &fixture.root, &scene)
+                    .into_iter()
+                    .map(|run| format!("{} {}: {run:?}", tag.as_str(), scenario.name)),
+            );
+        }
     }
     findings.sort_unstable();
     findings.dedup();
     assert!(
         findings.is_empty(),
-        "unexpected zh-Hans draw-list text:\n{}",
+        "unexpected draw-list text:\n{}",
         findings.join("\n")
     );
 }

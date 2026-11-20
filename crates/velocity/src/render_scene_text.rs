@@ -218,6 +218,21 @@ fn is_data(run: &TextRun, word: &str, known_labels: &BTreeSet<String>, source: &
 }
 
 pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> Vec<AsciiRun<'a>> {
+    // A Latin-script catalog can legitimately paint ASCII. Keep the audit's
+    // existing data exceptions and recognize vocabulary from translated copy.
+    let tr = &app.workspace.translations;
+    let localized_words: BTreeSet<_> = tr
+        .catalog(tr.matched_language().as_str())
+        .into_iter()
+        .flat_map(|catalog| catalog.strings.iter())
+        .filter(|(source, translation)| source != translation)
+        .flat_map(|(_, translation)| {
+            // Placeholder names are never drawn and must not whitelist words.
+            translation
+                .split('}')
+                .flat_map(|part| words(part.split_once('{').map_or(part, |(literal, _)| literal)))
+        })
+        .collect();
     let sources = app
         .workspace
         .tabs
@@ -294,6 +309,7 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
     );
     let labels = &labels;
     let sources = sources.as_str();
+    let localized_words = &localized_words;
     scene
         .layers
         .iter()
@@ -303,6 +319,7 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
                 let words = words(&run.text)
                     .filter(|word| {
                         !TECHNICAL.contains(word)
+                            && !localized_words.contains(word)
                             && !literal_measurement(word)
                             && !shortcut_word(word, &run.text)
                             && !is_data(run, word, labels, sources)

@@ -451,7 +451,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `trim_trailing_white_space_on_save` | `` false `` |  | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [vel-fileio/lib.rs](../crates/vel-fileio/src/lib.rs) |
 | `ui_font_face` | `` "" `` |  | Empty uses the theme's UI font. A font family here overrides theme text only. [vel-ui/theme.rs](../crates/vel-ui/src/theme.rs) |
 | `ui_font_size` | `` 12 `` |  | [vel-ui/theme.rs](../crates/vel-ui/src/theme.rs) |
-| `ui_language` | `` "en" `` |  | Language for menus and the command palette: en, zh-Hans, or auto (macOS preferred language). [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
+| `ui_language` | `` "en" `` |  | UI locale tag (for example en or zh-Hans), or auto (first supported macOS preferred language). Missing strings fall back through parent tags to English. [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `ui_scale` | `` 1.0 `` |  | [vel-ui/theme.rs](../crates/vel-ui/src/theme.rs) |
 | `update_system_recent_files` | `` true `` |  | ST4 4143: https://www.sublimetext.com/download [velocity/app.rs](../crates/velocity/src/app.rs) |
 | `use_simple_full_screen` | `` false `` |  | [velocity/app.rs](../crates/velocity/src/app.rs) |
