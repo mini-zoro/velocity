@@ -7,7 +7,7 @@ use std::{
 };
 use vel_buffer::ChangeId;
 use vel_scope::{MatchScore, Scope, ScopeStack, ScopeStackOp, Selector};
-use vel_syntax::{Metadata, MetadataSet, Symbol};
+use vel_syntax::{MetadataSet, Symbol, SymbolMetadata};
 use vel_text::Text;
 
 /// Document-local interned active scope stack. IDs remain valid for the document's lifetime.
@@ -212,12 +212,13 @@ impl ScopeProvider for ScopeSnapshot {
 }
 #[derive(Debug)]
 pub(crate) struct ScopeInterner {
-    ids: HashMap<Vec<Scope>, ScopeStackId, fnv::FnvBuildHasher>,
+    ids: HashMap<Arc<[Scope]>, ScopeStackId, fnv::FnvBuildHasher>,
     pub(crate) stacks: ScopeStacks,
     pub(crate) metadata: Arc<MetadataSet>,
-    selected: Vec<Option<Arc<Metadata>>>,
+    selected: Vec<Option<SymbolMetadata>>,
     styles: Vec<Option<vel_color_scheme::Style>>,
     transitions: HashMap<u64, ScopeTransition, fnv::FnvBuildHasher>,
+    single: HashMap<(ScopeStackId, ScopeStackOp), ScopeStackId, fnv::FnvBuildHasher>,
 }
 #[derive(Debug)]
 struct ScopeTransition {
@@ -234,6 +235,7 @@ impl ScopeInterner {
             selected: Vec::new(),
             styles: Vec::new(),
             transitions: HashMap::default(),
+            single: HashMap::default(),
         };
         value.intern(&ScopeStack::new());
         value
@@ -249,19 +251,12 @@ impl ScopeInterner {
                 .try_into()
                 .expect("scope stack ID overflow"),
         );
-        let metadata = Arc::new(self.metadata.metadata_for(stack));
-        let selected = [
-            "showInSymbolList",
-            "showInIndexedSymbolList",
-            "showInIndexedReferenceList",
-        ]
-        .iter()
-        .any(|key| metadata.boolean(key).unwrap_or(false))
-        .then_some(metadata);
-        self.selected.push(selected);
+        self.selected
+            .push(self.metadata.symbol_metadata(stack.as_slice()));
         self.styles.push(None);
-        Arc::make_mut(&mut self.stacks.0).push(Arc::from(stack.as_slice()));
-        self.ids.insert(stack.as_slice().to_vec(), id);
+        let scopes: Arc<[Scope]> = Arc::from(stack.as_slice());
+        Arc::make_mut(&mut self.stacks.0).push(Arc::clone(&scopes));
+        self.ids.insert(scopes, id);
         id
     }
     pub(crate) fn apply_group(
@@ -270,6 +265,33 @@ impl ScopeInterner {
         stack: &mut ScopeStack,
         ops: &[(usize, ScopeStackOp)],
     ) -> Result<ScopeStackId, vel_scope::ScopeError> {
+        const MAX_TRANSITIONS: usize = 65_536;
+        if let [(_, op)] = ops {
+            match *op {
+                ScopeStackOp::Noop | ScopeStackOp::Pop(0) => return Ok(id),
+                ScopeStackOp::Push(scope) => stack.push(scope),
+                ScopeStackOp::Pop(n) => {
+                    let keep = stack.len().saturating_sub(n);
+                    stack.scopes.truncate(keep);
+                    if keep == 0 {
+                        return Ok(ScopeStackId(0));
+                    }
+                }
+                _ => {
+                    stack.apply(op)?;
+                    return Ok(self.intern(stack));
+                }
+            }
+            let key = (id, *op);
+            if let Some(&next) = self.single.get(&key) {
+                return Ok(next);
+            }
+            let next = self.intern(stack);
+            if self.single.len() + self.transitions.len() < MAX_TRANSITIONS {
+                self.single.insert(key, next);
+            }
+            return Ok(next);
+        }
         let mut hash = fnv::FnvHasher::default();
         id.hash(&mut hash);
         let mut restore = false;
@@ -293,7 +315,7 @@ impl ScopeInterner {
             return Ok(next.after);
         }
         let next = self.intern(stack);
-        if self.transitions.len() < 65_536 {
+        if self.single.len() + self.transitions.len() < MAX_TRANSITIONS {
             self.transitions.insert(
                 key,
                 ScopeTransition {
@@ -325,31 +347,20 @@ impl ScopeInterner {
         text: &Text,
         lines: impl Iterator<Item = (usize, &'a [ScopeRun])>,
     ) -> Result<Vec<Symbol>, crate::Error> {
-        let mut groups: Vec<(Range<usize>, &Metadata)> = Vec::new();
+        let mut groups: Vec<(Range<usize>, &SymbolMetadata)> = Vec::new();
         for (row, runs) in lines {
             if runs.is_empty() {
                 continue;
             }
             let offset = text.line_to_byte(row);
             for run in runs {
-                let Some(m) = self.selected[run.stack.0 as usize].as_deref() else {
+                let Some(m) = self.selected[run.stack.0 as usize].as_ref() else {
                     continue;
                 };
                 let range = offset + run.start as usize..offset + run.end as usize;
-                let flags = |m: &Metadata| {
-                    [
-                        "showInSymbolList",
-                        "showInIndexedSymbolList",
-                        "showInIndexedReferenceList",
-                    ]
-                    .map(|key| m.boolean(key).unwrap_or(false))
-                };
                 if let Some((old, metadata)) = groups.last_mut()
                     && old.end == range.start
-                    && flags(metadata) == flags(m)
-                    && metadata.string("symbolTransformation") == m.string("symbolTransformation")
-                    && metadata.string("symbolIndexTransformation")
-                        == m.string("symbolIndexTransformation")
+                    && *metadata == m
                 {
                     old.end = range.end;
                 } else {
@@ -365,15 +376,15 @@ impl ScopeInterner {
                     range,
                     name: self
                         .metadata
-                        .transform(m, false, &name)
+                        .transform_symbol(m, false, &name)
                         .map_err(|e| crate::Error::Parse(e.to_string()))?,
                     index_name: self
                         .metadata
-                        .transform(m, true, &name)
+                        .transform_symbol(m, true, &name)
                         .map_err(|e| crate::Error::Parse(e.to_string()))?,
-                    local: m.boolean("showInSymbolList").unwrap_or(false),
-                    indexed: m.boolean("showInIndexedSymbolList").unwrap_or(false),
-                    reference: m.boolean("showInIndexedReferenceList").unwrap_or(false),
+                    local: m.local,
+                    indexed: m.indexed,
+                    reference: m.reference,
                 })
             })
             .collect()

@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use vel_regex::{Regex, Region};
-use vel_scope::{Scope, ScopeStack, Selector};
+use vel_scope::{MatchScore, Scope, ScopeStack, Selector};
 
 /// Shared regex for a scope's effective metadata pattern.
 pub type MetadataPattern = Regex;
@@ -31,17 +31,18 @@ impl Metadata {
     }
     /// Accepts plist booleans and the integer/string forms used by public packages.
     pub fn boolean(&self, key: &str) -> Option<bool> {
-        self.settings.get(key).and_then(|v| {
-            v.as_boolean()
-                .or_else(|| v.as_signed_integer().map(|i| i != 0))
-                .or_else(|| {
-                    v.as_string().and_then(|s| match s {
-                        "1" | "true" => Some(true),
-                        "0" | "false" => Some(false),
-                        _ => None,
-                    })
+        self.settings.get(key).and_then(Self::boolean_value)
+    }
+    fn boolean_value(v: &Value) -> Option<bool> {
+        v.as_boolean()
+            .or_else(|| v.as_signed_integer().map(|i| i != 0))
+            .or_else(|| {
+                v.as_string().and_then(|s| match s {
+                    "1" | "true" => Some(true),
+                    "0" | "false" => Some(false),
+                    _ => None,
                 })
-        })
+            })
     }
     fn merge(&mut self, other: &Self) {
         self.shell_variables.extend(other.shell_variables.clone());
@@ -54,10 +55,35 @@ struct Entry {
     selector: Selector,
     metadata: Metadata,
 }
+const SYMBOL_FLAGS: [&str; 3] = [
+    "showInSymbolList",
+    "showInIndexedSymbolList",
+    "showInIndexedReferenceList",
+];
+const SYMBOL_TRANSFORMS: [&str; 2] = ["symbolTransformation", "symbolIndexTransformation"];
+
+/// The effective settings used by the highlighter's symbol collector.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SymbolMetadata {
+    /// Whether the symbol belongs in the document's symbol list.
+    pub local: bool,
+    /// Whether the symbol represents an indexed definition.
+    pub indexed: bool,
+    /// Whether the symbol represents an indexed reference.
+    pub reference: bool,
+    transforms: [Option<Arc<str>>; 2],
+}
+#[derive(Debug)]
+struct SymbolRule {
+    entry: usize,
+    flags: [Option<bool>; 3],
+    transforms: [Option<Option<Arc<str>>>; 2],
+}
 /// Immutable metadata rules with shared effective-setting and regex caches.
 #[derive(Debug, Default)]
 pub struct MetadataSet {
     entries: Vec<Entry>,
+    symbol_rules: Vec<SymbolRule>,
     cache: Mutex<HashMap<Vec<Scope>, Arc<Metadata>>>,
     patterns: Mutex<HashMap<String, Regex>>,
     transforms: Mutex<HashMap<String, Result<SymbolTransformation, MetadataError>>>,
@@ -68,6 +94,64 @@ impl Clone for MetadataError {
     }
 }
 impl MetadataSet {
+    fn push_entry(&mut self, entry: Entry) {
+        let settings = &entry.metadata.settings;
+        // An explicitly ill-typed setting still overrides an earlier setting.
+        let flags = SYMBOL_FLAGS.map(|key| {
+            settings
+                .get(key)
+                .map(|value| Metadata::boolean_value(value).unwrap_or(false))
+        });
+        let transforms = SYMBOL_TRANSFORMS.map(|key| {
+            settings
+                .get(key)
+                .map(|value| value.as_string().map(Arc::from))
+        });
+        if flags.iter().any(Option::is_some) || transforms.iter().any(Option::is_some) {
+            self.symbol_rules.push(SymbolRule {
+                entry: self.entries.len(),
+                flags,
+                transforms,
+            });
+        }
+        self.entries.push(entry);
+    }
+
+    /// Resolves only symbol settings by specificity and then resource order.
+    /// Ordinary indentation and comment preferences do not participate.
+    pub fn symbol_metadata(&self, scopes: &[Scope]) -> Option<SymbolMetadata> {
+        fn update<T: Copy>(
+            result: &mut Option<(MatchScore, T)>,
+            value: Option<T>,
+            score: MatchScore,
+        ) {
+            if let Some(value) = value
+                && result.is_none_or(|(prior, _)| score >= prior)
+            {
+                *result = Some((score, value));
+            }
+        }
+        let mut flags = [None; 3];
+        let mut transforms = [None; 2];
+        for rule in &self.symbol_rules {
+            if let Some(score) = self.entries[rule.entry].selector.does_match(scopes) {
+                for (output, field) in flags.iter_mut().zip(rule.flags) {
+                    update(output, field, score);
+                }
+                for (output, field) in transforms.iter_mut().zip(&rule.transforms) {
+                    update(output, field.as_ref(), score);
+                }
+            }
+        }
+        let [local, indexed, reference] = flags.map(|field| field.is_some_and(|(_, value)| value));
+        (local || indexed || reference).then(|| SymbolMetadata {
+            local,
+            indexed,
+            reference,
+            transforms: transforms.map(|field| field.and_then(|(_, value)| value.clone())),
+        })
+    }
+
     pub(crate) fn for_stacks(&self, stacks: &[&[Scope]]) -> Arc<Metadata> {
         if let [scopes] = stacks {
             return self.shared_for(scopes);
@@ -118,14 +202,10 @@ impl MetadataSet {
             ),
         ] {
             let mut metadata = Metadata::default();
-            for (key, b) in [
-                ("showInSymbolList", local),
-                ("showInIndexedSymbolList", index),
-                ("showInIndexedReferenceList", reference),
-            ] {
+            for (key, b) in SYMBOL_FLAGS.into_iter().zip([local, index, reference]) {
                 metadata.settings.insert(key.into(), Value::Boolean(b));
             }
-            set.entries.push(Entry {
+            set.push_entry(Entry {
                 selector_text: selector.into(),
                 selector: Selector::parse(selector).unwrap(),
                 metadata,
@@ -209,7 +289,7 @@ impl MetadataSet {
                 metadata.settings.insert(k.clone(), v.clone());
             }
         }
-        self.entries.push(Entry {
+        self.push_entry(Entry {
             selector_text: scope.into(),
             selector: Selector::parse(scope).map_err(|e| MetadataError(e.to_string()))?,
             metadata,
@@ -280,12 +360,19 @@ impl MetadataSet {
         index: bool,
         text: &str,
     ) -> Result<String, MetadataError> {
-        let key = if index {
-            "symbolIndexTransformation"
-        } else {
-            "symbolTransformation"
-        };
-        let Some(script) = metadata.string(key) else {
+        self.transform_script(metadata.string(SYMBOL_TRANSFORMS[usize::from(index)]), text)
+    }
+    /// Applies the transformation for one effective symbol selection.
+    pub fn transform_symbol(
+        &self,
+        metadata: &SymbolMetadata,
+        index: bool,
+        text: &str,
+    ) -> Result<String, MetadataError> {
+        self.transform_script(metadata.transforms[usize::from(index)].as_deref(), text)
+    }
+    fn transform_script(&self, script: Option<&str>, text: &str) -> Result<String, MetadataError> {
+        let Some(script) = script else {
             return Ok(text.into());
         };
         let transform = self

@@ -1,13 +1,14 @@
 //! Lazy, bounded multi-pattern candidate machines. Onig remains the exact oracle.
 use crate::{Match, MatcherBackend, OnigSet, PatternMatcher, PatternSet, PatternSpec, SearchCache};
 use regex_automata::{
-    Input, MatchKind,
+    Input, MatchError, MatchKind,
     hybrid::{
         dfa::DFA,
         regex::{Cache, Regex as DfaRegex},
     },
     nfa::thompson::{NFA, WhichCaptures},
 };
+use regex_syntax::hir::{Class, Hir, HirKind};
 use std::{
     collections::HashMap,
     sync::{
@@ -131,6 +132,50 @@ struct Machine {
     exact: Vec<bool>,
     literals: Option<(aho_corasick::AhoCorasick, Vec<usize>)>,
     fallback: Vec<usize>,
+    first_bytes: Vec<u128>,
+}
+type Nominee = (usize, usize, usize);
+type Verified<'a> = (
+    usize,
+    usize,
+    usize,
+    usize,
+    Option<&'a crate::frontend::Candidate>,
+);
+
+// Look assertions only restrict starts. Nullable expressions must be considered
+// at every byte, including end-of-line; their masks are filled at construction.
+fn first_ascii_bytes(hir: &Hir) -> u128 {
+    match hir.kind() {
+        HirKind::Literal(lit) => lit
+            .0
+            .first()
+            .filter(|byte| byte.is_ascii())
+            .map_or(0, |byte| 1 << byte),
+        HirKind::Class(Class::Bytes(bytes)) => bytes
+            .iter()
+            .filter(|range| range.start().is_ascii())
+            .fold(0, |mask, range| {
+                let start = range.start();
+                let end = range.end().min(127);
+                mask | ((u128::MAX >> (127 - (end - start))) << start)
+            }),
+        HirKind::Class(Class::Unicode(_)) => u128::MAX,
+        HirKind::Capture(capture) => first_ascii_bytes(&capture.sub),
+        HirKind::Repetition(repeat) => first_ascii_bytes(&repeat.sub),
+        HirKind::Alternation(parts) => parts.iter().fold(0, |a, p| a | first_ascii_bytes(p)),
+        HirKind::Concat(parts) => {
+            let mut bytes = 0;
+            for part in parts {
+                bytes |= first_ascii_bytes(part);
+                if part.properties().minimum_len().is_some_and(|len| len != 0) {
+                    break;
+                }
+            }
+            bytes
+        }
+        HirKind::Look(_) | HirKind::Empty => 0,
+    }
 }
 impl Machine {
     fn bytes(&self) -> usize {
@@ -139,6 +184,7 @@ impl Machine {
             + self.cache.memory_usage()
             + (self.map.capacity() + self.fallback.capacity()) * size_of::<usize>()
             + self.exact.capacity()
+            + self.first_bytes.capacity() * size_of::<u128>()
             + self.literals.as_ref().map_or(0, |(ac, map)| {
                 ac.memory_usage() + map.capacity() * size_of::<usize>()
             })
@@ -152,7 +198,7 @@ impl Machine {
         let mut fallback = Vec::new();
         let mut exact = Vec::new();
         for (i, pattern) in patterns.iter().enumerate() {
-            if !pattern.regex.0.onig_semantics {
+            if !pattern.regex.0.onig_semantics || pattern.regex.position_dependent() {
                 fallback.push(i);
                 continue;
             }
@@ -245,7 +291,21 @@ impl Machine {
             exact,
             literals,
             fallback,
+            first_bytes: Vec::new(),
         })
+    }
+    fn nominate(&mut self, line: &str, start: usize) -> Result<Option<Nominee>, MatchError> {
+        #[cfg(feature = "profile")]
+        crate::profile::count("candidate_scan");
+        if let Some((ac, map)) = &self.literals {
+            Ok(ac
+                .find(aho_corasick::Input::new(line).span(start..line.len()))
+                .map(|hit| (map[hit.pattern().as_usize()], hit.start(), hit.end())))
+        } else {
+            self.dfa
+                .try_search(&mut self.cache, &Input::new(line).span(start..line.len()))
+                .map(|hit| hit.map(|hit| (hit.pattern().as_usize(), hit.start(), hit.end())))
+        }
     }
 }
 impl Default for MultiDfa {
@@ -329,10 +389,67 @@ struct MultiSet {
 struct Candidate {
     generation: u64,
     from: usize,
-    hit: Option<(usize, usize, usize)>,
+    hit: Option<Nominee>,
 }
 type LineCandidates = HashMap<usize, Candidate, fnv::FnvBuildHasher>;
 impl MultiSet {
+    fn resume_candidates(
+        &self,
+        machine: &mut Machine,
+        line: &str,
+        cache: &mut SearchCache,
+        mut nominee: Nominee,
+    ) -> Result<Option<Verified<'_>>, ()> {
+        if machine.first_bytes.is_empty() {
+            machine.first_bytes = machine
+                .map
+                .iter()
+                .map(|&index| {
+                    let hir = &self.patterns.0[index]
+                        .regex
+                        .0
+                        .candidate
+                        .get()
+                        .and_then(Option::as_ref)
+                        .expect("compiled candidate")
+                        .hir;
+                    if hir.properties().minimum_len() == Some(0) {
+                        u128::MAX
+                    } else {
+                        first_ascii_bytes(hir)
+                    }
+                })
+                .collect();
+        }
+        for _ in 0..3 {
+            let (local, at, _) = nominee;
+            let byte = line.as_bytes().get(at).map(|&b| 1u128 << b);
+            // No earlier projected rule nominated this start. The rejected
+            // rule itself might backtrack to a different end, and a later
+            // rule can still win here, so probe both in original order.
+            let peers = machine.map[local..]
+                .iter()
+                .zip(&machine.first_bytes[local..])
+                .filter(|&(_, mask)| byte.map_or(*mask == u128::MAX, |bit| mask & bit != 0))
+                .map(|(&index, _)| index);
+            if let Some((index, (begin, end))) =
+                self.patterns
+                    .find_candidate_spans(line, at, cache, &[], peers, true)
+            {
+                return Ok(Some((index, begin, end, at, None)));
+            }
+            if at == line.len() {
+                return Ok(None);
+            }
+            let Some(next) = machine.nominate(line, at + 1).map_err(|_| ())? else {
+                return Ok(None);
+            };
+            nominee = next;
+        }
+        // Bound the extra anchored probes on difficult lines.
+        Err(())
+    }
+
     fn query(&self, line: &str, start: usize, cache: &mut SearchCache) -> Option<Match> {
         let id = self.id;
         let mut pool = match self.shared.pool.try_lock() {
@@ -396,23 +513,7 @@ impl MultiSet {
                 crate::profile::count("candidate_cache_hit");
                 Ok(candidate.hit)
             } else {
-                #[cfg(feature = "profile")]
-                crate::profile::count("candidate_scan");
-                if let Some((ac, map)) = &machine.literals {
-                    Ok(ac
-                        .find(aho_corasick::Input::new(line).span(start..line.len()))
-                        .map(|hit| (map[hit.pattern().as_usize()], hit.start(), hit.end())))
-                } else {
-                    machine
-                        .dfa
-                        .try_search(
-                            &mut machine.cache,
-                            &Input::new(line).span(start..line.len()),
-                        )
-                        .map(|hit| {
-                            hit.map(|hit| (hit.pattern().as_usize(), hit.start(), hit.end()))
-                        })
-                }
+                machine.nominate(line, start)
             };
             match hit {
                 Ok(hit) => {
@@ -459,13 +560,15 @@ impl MultiSet {
                                 .map(|(index, (begin, end))| (index, begin, end, at, None))
                         }
                     });
-                    if hit.is_some() && fast.is_none() {
-                        #[cfg(feature = "profile")]
-                        crate::profile::count("candidate_rejected");
-                        // A guard or empty-match policy rejected the superset's winner.
-                        // Resolve the query in original priority order in one pass.
-                        self.patterns.find_earliest(line, start, cache, &[])
-                    } else {
+                    let fast = match hit {
+                        Some(hit) if fast.is_none() => {
+                            #[cfg(feature = "profile")]
+                            crate::profile::count("candidate_rejected");
+                            self.resume_candidates(machine, line, cache, hit)
+                        }
+                        _ => Ok(fast),
+                    };
+                    if let Ok(fast) = fast {
                         #[cfg(feature = "profile")]
                         if !machine.fallback.is_empty() {
                             crate::profile::count("hybrid_fallback_queries");
@@ -519,6 +622,8 @@ impl MultiSet {
                                 self.patterns.capture_match(line, from, index, (begin, end))
                             }
                         })
+                    } else {
+                        self.patterns.find_earliest(line, start, cache, &[])
                     }
                 }
                 Err(_) => self.patterns.find_earliest(line, start, cache, &[]),
@@ -663,6 +768,44 @@ mod tests {
         assert_eq!(alternate.captures.pos(1), Some((3, 5)));
         assert_eq!(set.find_earliest(line, 2, &mut cache), Some(saved));
         assert_eq!(set.find_earliest(line, 5, &mut cache).unwrap().pattern, 2);
+    }
+    #[test]
+    fn rejected_nominee_preserves_backtracking_same_start_priority_and_later_captures() {
+        let backend = MultiDfa::new(MultiDfaConfig {
+            verify_matches: true,
+            ..MultiDfaConfig::default()
+        });
+        let build = |sources: &[&str]| {
+            backend.build(
+                sources
+                    .iter()
+                    .map(|&source| PatternSpec {
+                        regex: crate::Regex::new(source.into()),
+                        allow_empty: true,
+                    })
+                    .collect(),
+            )
+        };
+        let set = build(&[r"(a+)(?!b)", r"(a)(b)?", "m", "n"]);
+        let hit = set
+            .find_earliest("aab", 0, &mut SearchCache::default())
+            .unwrap();
+        assert_eq!((hit.pattern, hit.start, hit.end), (0, 0, 1));
+        assert_eq!(hit.captures.pos(1), Some((0, 1)));
+
+        let set = build(&[r"(?<=x)(a)(z)?", r"(a)(b)?", "m", "n"]);
+        let hit = set
+            .find_earliest("ab xaz", 0, &mut SearchCache::default())
+            .unwrap();
+        assert_eq!((hit.pattern, hit.start, hit.end), (1, 0, 2));
+        assert_eq!(hit.captures.pos(2), Some((1, 2)));
+
+        let set = build(&[r"(?<=x)(a)(z)?", "m", "n", "q"]);
+        let hit = set
+            .find_earliest("ab xaz", 0, &mut SearchCache::default())
+            .unwrap();
+        assert_eq!((hit.pattern, hit.start, hit.end), (0, 4, 6));
+        assert_eq!(hit.captures.pos(2), Some((5, 6)));
     }
     #[test]
     fn small_machines_do_not_evict_each_other_on_admission() {

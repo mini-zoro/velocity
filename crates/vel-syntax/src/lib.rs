@@ -13,10 +13,10 @@ mod tm_language;
 mod yaml_load;
 pub use cache::CacheStatus;
 pub use metadata::{
-    Metadata, MetadataError, MetadataSet, ScopedSpan, Symbol, SymbolTransformation,
+    Metadata, MetadataError, MetadataSet, ScopedSpan, Symbol, SymbolMetadata, SymbolTransformation,
 };
 pub use parser::{ParsingError, ScopeOperations};
-pub use state::{LineOps, ParseState, Rewind};
+pub use state::{LineOps, ParseState, Rewind, SharedLineOps, SharedScopeOperations};
 pub use syntax_definition::SyntaxDefinition;
 pub use syntax_set::{SyntaxReference, SyntaxSet, SyntaxSetBuilder};
 pub use tm_language::TmLanguageError;

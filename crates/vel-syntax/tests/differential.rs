@@ -1,7 +1,7 @@
 //! Every official line is compared, including header/assertion lines and branch rewinds.
 use std::{path::Path, sync::Arc};
 use vel_regex::{MultiDfa, OnigBackend};
-use vel_syntax::{ParseState, SyntaxSet};
+use vel_syntax::{ParseState, SharedLineOps, SyntaxSet};
 
 #[test]
 fn official_line_ops_rewinds_and_memoized_transitions_agree() {
@@ -45,6 +45,7 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
                 .with_line_cache_capacity(0);
         let mut memoized =
             ParseState::new(multi.clone(), multi.find_syntax_by_path(syntax).unwrap());
+        let mut shared = SharedLineOps::default();
         for (row, line) in text.split_inclusive('\n').enumerate() {
             let expected = reference.parse_line(line).unwrap();
             if let Some(digest) = &mut digest {
@@ -67,12 +68,24 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
                 path.display(),
                 row + 1
             );
+            memoized.parse_line_shared(line, &mut shared).unwrap();
+            let corrections: Vec<_> = shared.drain_corrections().collect();
             assert_eq!(
-                memoized.parse_line(line).unwrap(),
-                expected,
-                "memo {}:{}",
+                (
+                    shared.ops.as_ref(),
+                    shared.rewind(),
+                    corrections.as_slice(),
+                    shared.warnings()
+                ),
+                (
+                    expected.ops.as_slice(),
+                    expected.rewind,
+                    expected.corrections.as_slice(),
+                    expected.warnings.as_slice()
+                ),
+                "shared memo {}:{}",
                 path.display(),
-                row + 1
+                row + 1,
             );
             lines += 1;
             rewinds += usize::from(expected.rewind.is_some());

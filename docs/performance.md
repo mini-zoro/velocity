@@ -1,9 +1,10 @@
 # Velocity vs. Sublime Text: public baselines
 
 Measured 2026-11-20 on Apple M1 Pro, 16 GB, arm64 macOS 26.1 (25B78), with
-locked, optimized Rust 1.99 builds. The highlighting rows use the round 29
-candidate and a same-build `4dcbc9c` baseline. Other rows are historical
-round 27 observations (`efe8b5b` plus the round 27 changes).
+locked, optimized Rust 1.99 builds. Round 30 compares against `6cf9be9` in
+its own section below. The source comparison table uses the round 29
+candidate and a same-build `4dcbc9c` baseline for highlighting; other
+rows are historical round 27 observations (`efe8b5b` plus the round 27 changes).
 No Sublime executable, application bundle or package was downloaded or run. No
 window, renderer, drawable or GPU workload was started in this round.
 
@@ -267,7 +268,7 @@ the full line for lookaround and never caches an anchored miss as an unbounded
 miss. Literal prefilters relax only necessary positive assertions and leave real
 regex Unicode escapes alone; no bundled grammar bytes changed.
 
-**Ranked remaining work.** These budgets are elapsed time in one instrumented
+**Ranked inputs to round 30.** These budgets are elapsed time in one instrumented
 warm jQuery 2.1.4 candidate pass (314 ms across all phases). They locate work
 that can be reduced; they do not predict instruction savings.
 
@@ -295,9 +296,11 @@ that can be reduced; they do not predict instruction savings.
 
 **Temporary artifacts.** Each temporary index now holds a private,
 coordinator-owned directory, with process-exit cleanup for detached workers.
-Startup sweeps only regular directories with exact legacy index names, our
-effective UID, and a positive PID that returns `ESRCH`; it never follows
-symlinks. The subprocess tests cover cancel, exit with a running index, and
+The stale sweep runs from the first `TemporaryIndex::new` on a background
+thread behind a process-wide `Once`, not from `main()`. It removes only
+regular directories with exact legacy index names, our effective UID, and a
+positive PID that returns `ESRCH`; it never follows symlinks. The subprocess
+tests cover cancel, exit with a running index, and
 stale/live/non-directory/symlink discrimination. Matrix reports go to stderr
 by default, and benchmark fixtures use RAII with opt-in workbench replay.
 Shared grammar caches and durable save recovery are deliberately not swept.
@@ -319,8 +322,135 @@ matrix or workbench fixture directories remained in the test roots.
 
 Round 29 raw JSONL, own-child counters, and logs: `/tmp/velocity-c29.oe1zlL/`
 (`release-highlight`, `release-instruction`, `gate-release-workspace.log`,
-`syntax-*-digest.log`, and `profile-*.jsonl`). Older sections below describe
-round 27.
+`syntax-*-digest.log`, and `profile-*.jsonl`).
+
+## Round 30 highlighting
+
+The parser, checkpoints, and render cache now share immutable operation
+sequences. The render cache holds the operation allocation for the life of its
+identity key. Only lines that leave the stack's saved clear history unchanged
+can hit that cache. UTF-8 offsets and gradients still use the exact renderer
+where required. Active stack IDs reuse a single owned scope slice; single
+push/pop transitions avoid allocating a group key. Symbol selection evaluates
+only selectors with symbol settings, retaining per-setting specificity and
+resource order and leaving the general preference resolver alone.
+
+On a rejected DFA nominee, the matcher probes the native rules still eligible
+at that exact start. The projected first-byte filter can only exclude rules;
+native search supplies the complete winner, including captures. Earlier
+native-only rules retain priority. If nothing eligible matches, the DFA
+continues one byte later on ASCII input, with a bounded native fallback for
+repeated rejection. No bundled syntax bytes changed.
+
+### Step attribution
+
+Two alternating fresh-process pairs per step (retired instructions in
+billions, before → after; median paired change). The steps were cumulative
+except that the branch experiment was removed. Small swings in the two-pair
+smoke measurements are not a final regression gate; neither smoke benchmark
+parses or colors a document in its timed typing loop.
+
+| Workload | Share operations and render keys | Scope transitions and symbol selection | Resume rejected nominees | Lazy branch prefixes and shared trigger text (discarded) |
+|---|---:|---:|---:|---:|
+| jQuery 2.1.4 | 4.904 → 4.843 (−1.24%) | 4.833 → 4.469 (−7.53%) | 4.411 → 4.132 (−6.32%) | 4.130 → 4.099 (−0.74%) |
+| jQuery 3.7.1 | 5.087 → 5.054 (−0.64%) | 5.020 → 4.599 (−8.39%) | 4.596 → 4.265 (−7.20%) | 4.267 → 4.228 (−0.92%) |
+| `sqlite3.c` | 12.392 → 12.371 (−0.18%) | 12.335 → 12.188 (−1.19%) | 12.131 → 11.688 (−3.65%) | 11.702 → 11.716 (+0.12%) |
+| `rust-10mb.rs` | 55.646 → 55.639 (−0.01%) | 55.676 → 55.096 (−1.04%) | 54.950 → 35.966 (−34.55%) | 35.989 → 36.091 (+0.28%) |
+| `javascript-10mb.js` | 46.021 → 45.991 (−0.06%) | 46.095 → 45.818 (−0.60%) | 45.707 → 41.817 (−8.51%) | 41.969 → 40.323 (−3.92%) |
+| `--headless-view-features` | 215.891 → 219.645 (+1.78%) | 216.161 → 200.738 (−7.15%) | 207.547 → 197.593 (−4.80%) | 197.445 → 193.301 (−2.11%) |
+| `--headless-smoke` | 0.320 → 0.307 (−3.77%) | 0.320 → 0.309 (−3.16%) | 0.306 → 0.320 (+4.46%) | 0.319 → 0.305 (−4.38%) |
+| `--headless-smoke --carets 1000` | 4.139 → 4.254 (+2.76%) | 4.219 → 4.043 (−4.06%) | 4.092 → 4.118 (+0.63%) | 3.942 → 4.087 (+3.92%) |
+
+The branch experiment fell below the 3% stopping threshold on both jQuery
+inputs. No replay or semantic equality changes from that experiment remain.
+The 3.35B target was not met.
+
+In a separate instrumented warm jQuery 2.1.4 pass, the distinct active stack
+count stayed at 13,533. The interner retains one owned scope slice per exact
+stack instead of two, but built style spans rose from 21,710 to 22,370
+(3,224 → 3,214 render hits). The span-count goal is still open. Native span
+searches fell from 72,810 to 66,296 and native capture searches from 1,268
+to 1,142. `literal-variable` and `expression-begin` took 10.1 and 9.6 ms
+in the final profile; render still took 56.3 ms of the 188.4 ms timed
+phases. These profile timings are diagnostic, not the paired measurement.
+
+### Final comparison with `6cf9be9`
+
+Five alternating pairs per workload. Both builds used Rust 1.99.1,
+`cargo build --release --locked -j 6` and `MACOSX_DEPLOYMENT_TARGET=14.0`,
+with the same bundled grammar bytes. Cargo used a disposable offline registry
+snapshot. Each pair shared a disposable home, grammar cache, log directory,
+and a temp root populated with 381 ordinary directories. The load averages
+at process launch ranged from 13.74 to 65.35. Counters cover the whole
+process, including both passes on the five highlight fixtures. Counts are
+side medians; percentages are medians of paired ratios.
+
+| Workload | Retired instructions, before → after | Median paired change |
+|---|---:|---:|
+| jQuery 2.1.4 | 4.885B → 4.165B | −14.64% |
+| jQuery 3.7.1 | 5.115B → 4.333B | −15.34% |
+| `sqlite3.c` | 12.346B → 11.766B | −4.95% |
+| `rust-10mb.rs` | 55.642B → 36.042B | −35.18% |
+| `javascript-10mb.js` | 46.051B → 41.880B | −9.06% |
+| `--headless-view-features` | 203.118B → 190.884B | −10.38% |
+| `--headless-smoke` | 306.775M → 305.702M | −0.67% |
+| `--headless-smoke --carets 1000` | 4.088B → 4.063B | −0.50% |
+
+All eight pass the +1% instruction cap. The 4.165B result is about 1.61×
+fewer instructions than the historical 6.69B, not 2×. In the additional
+19-pair typing series, instructions changed by +0.26% (one caret) and
+−0.19% (1,000 carets). Median paired edit-and-scene p50 changes were
++0.56% and +0.24%; p95 changes were −7.38% and +0.09%, respectively.
+The shorter series' paired p50 changes went in the other direction. These
+busy-host data do not establish a repeatable typing slowdown.
+
+The final Rust 10 MB runs used 5.99 → 3.97 s user CPU and 18.06B → 12.13B
+cycles; warm throughput medians were 91.9k → 137.1k lines/s. Nearly all
+of the instruction gain arrived in the rejected-nominee continuation step.
+The full 10,000,000-byte Rust fixture passed the native reference comparison
+with `--verify-matches`: 297,030 lines, 4,236,666 operations, zero divergences.
+Separately, three same-build `4dcbc9c` → `6cf9be9` pairs at load 47–99
+did not reproduce the round 29 wall regression: 7.34 → 6.67 s user CPU
+and 52.1k → 68.2k warm lines/s. This does not identify the cause of the
+prior slowdown. Two quiet `4dcbc9c` → `6cf9be9` pairs, at one-minute
+load 3.23–3.86 before launch, also did not reproduce it: 5.52 → 5.08 s
+user CPU, 109.2k → 117.8k warm lines/s, and 60.957B → 55.529B retired
+instructions. There is no evidence from these quiet pairs that round 29's
+prefilter introduced a Rust throughput regression.
+
+### Validation and remaining work
+
+The 242-file official assertion gate and the 193,704-line reference,
+multi-matcher and shared-memoized differential passed with prefilter
+verification enabled. Both digests exactly match the same-build baseline:
+
+- Assertion evidence: `6c861d72d9008d749f6a4ab5cc47ee2649e3907a8f554cd30eae6474aba7a83a`
+- Operations, corrections, rewinds and warnings: `1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`
+
+The workspace gate fallback omitted packaging. Formatting, strict workspace
+Clippy, the release build, and rustdoc with warnings denied passed. Unit and
+integration tests: **1,624 passed, 1 failed**. The
+`shipped_catalogs_pass_draw_list_text_audit` failure flagged only the ASCII
+components of the disposable path in the zh-Hans scenes. The first doctest
+run overlapped the diagnostic profile build and hit missing build artifacts;
+all 13 doctests passed in a serial rerun.
+
+Ranked next work:
+
+1. **Scope and span storage.** Share style-span arrays across equivalent
+   visual output without coalescing query-visible scope paths. Measure both
+   retained arrays and built spans, not just cache hits.
+2. **Native lookaheads.** Attribute the remaining native work in
+   `literal-variable` and `expression-begin` to specific guards. Try
+   tighter necessary-condition checks; keep the native captures as the
+   reference and measure Rust and C as well as both jQuery versions.
+3. **Parser state and checkpoints.** Measure state hashing and checkpoint
+   retention separately. Lazy replay prefixes and captured-text sharing as
+   tested here are below the 3% jQuery cutoff.
+
+Round 30 raw records are in `/tmp/velocity-c30.eYn9Fz/`: the four
+`stage-*` directories, `final-pairs/`, `final-typing/`, `rust-exact.json`,
+`rust-quiet-final/`, the corpus digest logs, and the workspace gate logs.
 
 ## Round 27 changes and next measurement
 

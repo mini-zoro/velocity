@@ -57,6 +57,59 @@ fn cdata_and_independent_setting_precedence() {
     assert_eq!(comment.boolean("cancelCompletion"), Some(true));
 }
 #[test]
+fn symbol_only_metadata_matches_the_full_preference_merge() {
+    let mut set = MetadataSet::new();
+    for (selector, plist) in [
+        (
+            "source.fixture",
+            "<key>showInSymbolList</key><true/><key>symbolTransformation</key><string>s/x/global/</string>",
+        ),
+        (
+            "source.fixture meta.special",
+            "<key>symbolTransformation</key><string>s/x/local/</string><key>showInIndexedSymbolList</key><integer>1</integer>",
+        ),
+        (
+            "source.fixture",
+            "<key>showInSymbolList</key><real>1.5</real><key>symbolTransformation</key><string>s/x/later/</string>",
+        ),
+        (
+            "source.fixture meta.special",
+            "<key>symbolTransformation</key><false/><key>symbolIndexTransformation</key><string>s/x/index/</string>",
+        ),
+    ] {
+        set.add_plist(preferences(selector, plist).as_bytes())
+            .unwrap();
+    }
+    for scopes in [
+        "source.fixture meta.special",
+        "source.fixture",
+        "source.other",
+    ] {
+        let stack: ScopeStack = scopes.parse().unwrap();
+        let full = set.metadata_for(&stack);
+        let selected = set.symbol_metadata(stack.as_slice());
+        let flags = [
+            "showInSymbolList",
+            "showInIndexedSymbolList",
+            "showInIndexedReferenceList",
+        ]
+        .map(|key| full.boolean(key).unwrap_or(false));
+        assert_eq!(selected.is_some(), flags.contains(&true));
+        if let Some(selected) = selected {
+            assert_eq!(
+                [selected.local, selected.indexed, selected.reference],
+                flags
+            );
+            for index in [false, true] {
+                assert_eq!(
+                    set.transform_symbol(&selected, index, "x").unwrap(),
+                    set.transform(&full, index, "x").unwrap()
+                );
+            }
+        }
+    }
+}
+#[test]
 fn transformations_handle_global_empty_matches_unicode_and_capture_case() {
     let transform = SymbolTransformation::parse(
         r#"

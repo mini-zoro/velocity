@@ -26,6 +26,31 @@ pub struct LineOps {
     /// Resource and branch-expiry diagnostics.
     pub warnings: Vec<String>,
 }
+/// A shared, immutable sequence of byte-indexed scope operations.
+pub type SharedScopeOperations = Arc<[(usize, crate::ScopeStackOp)]>;
+
+/// Reusable output buffer for consumers that retain operations across lines.
+#[derive(Debug, Default)]
+pub struct SharedLineOps {
+    /// Equal operation sequences may share one allocation, even for different source lines.
+    pub ops: SharedScopeOperations,
+    scratch: LineOps,
+}
+impl SharedLineOps {
+    /// Earliest corrected earlier line.
+    pub fn rewind(&self) -> Option<Rewind> {
+        self.scratch.rewind
+    }
+    /// Takes corrections, retaining their buffer for the next parse.
+    pub fn drain_corrections(&mut self) -> impl Iterator<Item = (usize, ScopeOperations)> + '_ {
+        self.scratch.corrections.drain(..)
+    }
+    /// Resource and branch-expiry diagnostics for the latest line.
+    pub fn warnings(&self) -> &[String] {
+        &self.scratch.warnings
+    }
+}
+
 /// Cheap, immutable-to-clones parser checkpoint bound to one syntax set.
 ///
 /// Feed complete lines including `\n`. Keep a [`crate::ScopeStack`] alongside each
@@ -54,7 +79,7 @@ struct CachedLine {
     before: Arc<InterpreterState>,
     after: Arc<InterpreterState>,
     fingerprint: u64,
-    ops: Arc<[(usize, crate::ScopeStackOp)]>,
+    ops: SharedScopeOperations,
 }
 #[derive(Debug)]
 struct LineCache {
@@ -62,7 +87,8 @@ struct LineCache {
     bytes: usize,
     entries: HashMap<u64, CachedLine>,
     order: VecDeque<u64>,
-    operations: HashSet<Arc<[(usize, crate::ScopeStackOp)]>>,
+    operations: HashSet<SharedScopeOperations>,
+    operation_bytes: usize,
 }
 impl LineCache {
     fn new(capacity: usize) -> Self {
@@ -72,7 +98,21 @@ impl LineCache {
             entries: HashMap::new(),
             order: VecDeque::new(),
             operations: HashSet::new(),
+            operation_bytes: 0,
         }
+    }
+    fn intern_operations(&mut self, ops: &[(usize, crate::ScopeStackOp)]) -> SharedScopeOperations {
+        const BYTES: usize = 4 * 1024 * 1024;
+        if let Some(shared) = self.operations.get(ops) {
+            return shared.clone();
+        }
+        let bytes = std::mem::size_of_val(ops);
+        let shared = Arc::from(ops);
+        if self.operations.len() < self.capacity && bytes <= BYTES - self.operation_bytes {
+            self.operations.insert(Arc::clone(&shared));
+            self.operation_bytes += bytes;
+        }
+        shared
     }
     fn insert(&mut self, key: u64, line: CachedLine) {
         const BYTES: usize = 4 * 1024 * 1024;
@@ -141,6 +181,25 @@ impl ParseState {
     /// Parses a line while retaining the operation and correction vector capacities.
     /// Use this for streaming parsing; ordinary, non-speculative lines reuse storage.
     pub fn parse_line_into(&mut self, line: &str, out: &mut LineOps) -> Result<(), ParsingError> {
+        self.parse_into::<false>(line, out).map(|_| ())
+    }
+    /// Parses a line without copying the operations on a memoized hit. Use this
+    /// when the same immutable operations will be kept by a downstream cache.
+    pub fn parse_line_shared(
+        &mut self,
+        line: &str,
+        out: &mut SharedLineOps,
+    ) -> Result<(), ParsingError> {
+        out.ops = self
+            .parse_into::<true>(line, &mut out.scratch)?
+            .expect("shared parse returns shared operations");
+        Ok(())
+    }
+    fn parse_into<const SHARE: bool>(
+        &mut self,
+        line: &str,
+        out: &mut LineOps,
+    ) -> Result<Option<SharedScopeOperations>, ParsingError> {
         let stable = !self.engine.is_speculative();
         let key = if stable && self.cache_enabled {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -156,15 +215,17 @@ impl ParseState {
                     && entry.before.semantic_eq(&self.engine)
                 {
                     entry.referenced = true;
-                    out.ops.clear();
-                    out.ops.extend_from_slice(&entry.ops);
+                    if !SHARE {
+                        out.ops.clear();
+                        out.ops.extend_from_slice(&entry.ops);
+                    }
                     out.corrections.clear();
                     out.warnings.clear();
                     out.rewind = None;
                     self.engine = entry.after.clone();
                     self.fingerprint = entry.fingerprint;
                     self.next_line += 1;
-                    return Ok(());
+                    return Ok(SHARE.then(|| Arc::clone(&entry.ops)));
                 }
                 Some(key)
             }
@@ -197,15 +258,8 @@ impl ParseState {
             && out.warnings.is_empty()
         {
             let mut cache = self.lines.lock().unwrap_or_else(|e| e.into_inner());
-            let ops = if let Some(shared) = cache.operations.get(out.ops.as_slice()) {
-                shared.clone()
-            } else {
-                let ops: Arc<[_]> = Arc::from(out.ops.as_slice());
-                if cache.operations.len() < cache.capacity {
-                    cache.operations.insert(ops.clone());
-                }
-                ops
-            };
+            let ops = cache.intern_operations(&out.ops);
+            let shared = SHARE.then(|| Arc::clone(&ops));
             cache.insert(
                 key,
                 CachedLine {
@@ -217,8 +271,18 @@ impl ParseState {
                     ops,
                 },
             );
+            return Ok(shared);
         }
-        Ok(())
+        Ok(SHARE.then(|| {
+            if self.cache_enabled {
+                self.lines
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .intern_operations(&out.ops)
+            } else {
+                Arc::from(out.ops.as_slice())
+            }
+        }))
     }
     /// Whether a later `fail` may correct previously emitted operations.
     pub fn is_speculative(&self) -> bool {
