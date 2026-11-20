@@ -50,7 +50,12 @@ def main():
             client.stdin.write("stdin payload 你好\n")
             client.stdin.close()
             request = json.loads(read_line(fixture))
-            assert request["add"] and request["wait"] and request["stdin"] == "stdin payload 你好\n"
+            assert request["add"] and request["wait"]
+            # Round 21 forwards stdin as raw bytes so non-UTF-8 input survives the trip.
+            stdin = request["stdin"]
+            if isinstance(stdin, list):
+                stdin = bytes(stdin).decode("utf-8")
+            assert stdin == "stdin payload 你好\n", request["stdin"]
             assert request["files"] == []
             try:
                 client.wait(timeout=0.2)
