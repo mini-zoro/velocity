@@ -952,6 +952,12 @@ fn write_resource_log(data: Option<&Path>, warnings: &[String], reports: &mut Ve
         }
     }
 }
+/// The palette title of a snippet without a description: its file name without
+/// the `.sublime-snippet` extension.
+fn snippet_title(name: &str) -> &str {
+    let file = name.rsplit('/').next().unwrap_or(name);
+    file.strip_suffix(".sublime-snippet").unwrap_or(file)
+}
 impl Configuration {
     fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
         let mut resources = Resources::default();
@@ -1527,7 +1533,9 @@ impl Configuration {
                 caption: format!(
                     "Snippet: {}",
                     if snippet.description().is_empty() {
-                        name.as_str()
+                        // Without a description, the file name reads like one:
+                        // "Snippet: bench", not its resource path.
+                        snippet_title(name)
                     } else {
                         snippet.description()
                     }
@@ -4038,6 +4046,15 @@ mod round15_tests {
         assert!(w.reopen_encoding("UTF-16 LE with BOM").is_err());
         assert_eq!(w.editor().text, old);
         assert!(w.tabs[0].dirty());
+    }
+    #[test]
+    fn snippets_without_a_description_use_their_file_name() {
+        assert_eq!(
+            snippet_title("Packages/Rust/Snippets/bench.sublime-snippet"),
+            "bench"
+        );
+        assert_eq!(snippet_title("loose.sublime-snippet"), "loose");
+        assert_eq!(snippet_title("Packages/User/odd"), "odd");
     }
     #[test]
     fn disabled_hot_exit_routes_cli_projects_to_a_separate_window() {
