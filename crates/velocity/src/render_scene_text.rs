@@ -149,6 +149,7 @@ fn fixture_label(scene: &str, text: &str, word: &str, root: &Path) -> bool {
         }
         // Search input, named syntax/scope data, and third-party snippet descriptions.
         "find_in_files"
+        | "find_results_tab"
         | "find_in_files_short"
         | "r5_find_in_files"
         | "r25_find_in_files_ui2"

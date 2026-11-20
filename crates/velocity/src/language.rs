@@ -328,6 +328,13 @@ pub struct Assets {
     /// Corpus staging, index loading, cleanup dispatch and concurrent metadata setup, in ms.
     pub startup_ms: [f64; 4],
 }
+const INTERNAL_SYNTAXES: [(&str, &str); 2] = [
+    (PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX),
+    (
+        crate::panels::find_results::SYNTAX,
+        include_str!("../resources/Packages/Default/Find Results.sublime-syntax"),
+    ),
+];
 impl Assets {
     pub fn bundled() -> Result<Arc<Self>, String> {
         static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
@@ -345,15 +352,11 @@ impl Assets {
                     })
                     .map_err(|e| e.to_string())?;
                 let cache = std::env::temp_dir().join("velocity-syntax-cache");
-                // The public corpus has no Plain Text syntax; ours is an in-memory definition
-                // under a virtual package path, so no staging tree is built or cleaned up.
+                // Internal definitions are virtual, so no staging file or cleanup is needed.
                 let phase = std::time::Instant::now();
-                let syntaxes = SyntaxSet::load_cached_roots(
-                    &[root.as_path()],
-                    &[(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)],
-                    &cache,
-                )
-                .map_err(|e| e.to_string());
+                let syntaxes =
+                    SyntaxSet::load_cached_roots(&[root.as_path()], &INTERNAL_SYNTAXES, &cache)
+                        .map_err(|e| e.to_string());
                 let load_ms = phase.elapsed().as_secs_f64() * 1000.;
                 let (metadata, metadata_ms) =
                     metadata.join().map_err(|_| "metadata loader panicked")?;
@@ -389,14 +392,14 @@ impl Assets {
         {
             return Ok(base.clone());
         }
-        if effective.len() + 1 == base.syntaxes.syntaxes().len()
+        if effective.len() + INTERNAL_SYNTAXES.len() == base.syntaxes.syntaxes().len()
             && effective.iter().all(|r| r.origin.starts_with(&root))
             && preferences.iter().all(|r| r.origin.starts_with(&root))
         {
             return Ok(base.clone());
         }
         let mut warnings = Vec::new();
-        let mut grammar = vec![(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)];
+        let mut grammar = INTERNAL_SYNTAXES.to_vec();
         for resource in effective {
             match resource.text() {
                 Ok(text) => grammar.push((resource.path.as_str(), text)),

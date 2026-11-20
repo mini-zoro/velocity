@@ -47,13 +47,10 @@ impl Panels {
             _ => &[],
         }
     }
-    /// Find option toggles shown in a panel, as indices into the six find options
-    /// (regex, case, whole word, wrap, in selection, preserve case). The set depends only on
-    /// the panel: wrap and in-selection do not apply to Find in Files, and preserve case only
-    /// applies where there is a replacement.
+    /// Indices into FIND_OPTIONS. Context and Use Buffer are specific to Find in Files.
     pub(crate) fn find_toggle_options(panel: Panel) -> &'static [usize] {
         match panel {
-            Panel::Files => &[0, 1, 2, 5],
+            Panel::Files => &[0, 1, 2, 5, 6, 7],
             Panel::Replace => &[0, 1, 2, 3, 4, 5],
             Panel::Find | Panel::Incremental => &[0, 1, 2, 3, 4],
             _ => &[],
@@ -497,18 +494,15 @@ impl Panels {
                     .hit_find_options(point)
                     .then(|| workspace.ui.where_menu.to_string());
             }
-            30..=35 => {
+            30..=37 => {
                 let i = (id - 30) as usize;
-                let option = [
-                    "regex",
-                    "case_sensitive",
-                    "whole_word",
-                    "wrap",
-                    "in_selection",
-                    "preserve_case",
-                ][i];
+                let option = FIND_OPTIONS[i];
                 (
-                    workspace.ui.find_options[i].as_ref(),
+                    if option == "use_buffer" {
+                        workspace.ui.show_results_in_tab.as_ref()
+                    } else {
+                        workspace.ui.find_options[i].as_ref()
+                    },
                     Invocation {
                         command: "toggle_find_option".into(),
                         args: json!({ "option": option }),
@@ -1626,7 +1620,7 @@ mod tests {
                                 "{at}"
                             );
                             let mut controls: Vec<(u64, Rect)> = (20..20 + fields as u64)
-                                .chain(30..36)
+                                .chain(30..30 + FIND_OPTIONS.len() as u64)
                                 .chain(50..53)
                                 .chain([CLOSE_ID])
                                 .filter_map(|id| {
@@ -1640,7 +1634,9 @@ mod tests {
                             assert_eq!(
                                 controls
                                     .iter()
-                                    .filter(|(id, _)| (30..36).contains(id))
+                                    .filter(
+                                        |(id, _)| (30..30 + FIND_OPTIONS.len() as u64).contains(id)
+                                    )
                                     .count(),
                                 Panels::find_toggle_options(panel).len(),
                                 "{at}"

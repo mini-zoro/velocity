@@ -1,0 +1,30 @@
+%YAML 1.2
+---
+name: Find Results
+scope: text.find-in-files
+version: 2
+hidden: true
+
+# The text grammar handles the fixed report layout; the worker supplies the
+# exact (possibly regex or multi-line) match spans to the editor as regions.
+contexts:
+  main:
+    - match: '^(?:Searching .*|正在.*|[0-9]+ match(?:es)? across .*|在.*找到.*|Search cancelled|已取消查找|Replaced .*|已替换.*)$'
+      scope: markup.heading.find-in-files
+    - match: '^\s+([0-9]+)(:) '
+      captures:
+        1: constant.numeric.line-number.find-in-files
+        2: punctuation.separator.find-in-files
+      push: match-line
+    - match: '^\s+([0-9]+)  '
+      scope: meta.context-line.find-in-files
+      captures:
+        1: constant.numeric.line-number.find-in-files
+    - match: '^(\S.*)(:)$'
+      captures:
+        1: string.unquoted.path.find-in-files
+        2: punctuation.separator.find-in-files
+  match-line:
+    - meta_scope: meta.match-line.find-in-files
+    - match: $
+      pop: true

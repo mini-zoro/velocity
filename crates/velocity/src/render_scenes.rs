@@ -1428,6 +1428,19 @@ const SCENARIOS: &[Scenario] = &[
         build: |f, d| find_scene(f, d, "find_in_files", "schedule"),
     },
     Scenario {
+        name: "find_results_tab",
+        size: (1200., 800.),
+        build: |f, d| {
+            let mut app = find_scene(f, d, "find_in_files", "schedule")?;
+            named(&mut app, "find_in_files_start", json!({}));
+            settle(&mut app);
+            if !app.panels.file_complete || !app.workspace.tabs[app.workspace.active].find_results {
+                return Err("Find Results tab did not open".into());
+            }
+            Ok(app)
+        },
+    },
+    Scenario {
         name: "find_in_files_short",
         size: (1000., 200.),
         build: |f, d| find_scene(f, d, "find_in_files", "schedule"),

@@ -123,12 +123,12 @@ impl Panels {
                     )
                 }
                 "button" => (
-                    if (30..36).contains(&id) {
+                    if (30..38).contains(&id) {
                         Role::CheckBox
                     } else {
                         Role::Button
                     },
-                    if (30..36).contains(&id) {
+                    if (30..38).contains(&id) {
                         workspace.ui.find_options[(id - 30) as usize].to_string()
                     } else {
                         widget.label.clone()
@@ -157,16 +157,8 @@ impl Panels {
                 _ => Region::Panel,
             });
             if role == Role::CheckBox {
-                node.checked = Some(
-                    [
-                        p.options.regex,
-                        p.options.case_sensitive,
-                        p.options.whole_word,
-                        p.options.wrap,
-                        p.in_selection,
-                        p.options.preserve_case,
-                    ][(id - 30) as usize],
-                );
+                node.checked =
+                    Some(p.find_option_checked(crate::panels::FIND_OPTIONS[(id - 30) as usize]));
             }
             if widget.class == "quick_panel_row"
                 && node.selected

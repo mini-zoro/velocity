@@ -731,7 +731,7 @@ fn r25_find_results_and_replacement_messages_keep_their_arguments() {
     app.run_named(
         None,
         "show_panel",
-        &json!({"panel":"find_in_files", "pattern":"text"}),
+        &json!({"panel":"find_in_files", "pattern":"text", "use_buffer":false}),
     );
     app.panels.where_input.set("<current file>");
     // Give the current-file source a real file name without writing editor contents.

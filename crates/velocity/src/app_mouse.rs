@@ -430,6 +430,33 @@ impl App {
         if event.kind == MouseKind::Up {
             self.drag_select = None;
         }
+        if self.workspace.tabs[self.workspace.active].find_results
+            && event.kind == MouseKind::Down
+            && event.button == 0
+            && !event.modifiers.control()
+            && !event.modifiers.shift()
+            && !event.modifiers.option()
+            && event.click_count == if event.modifiers.command() { 1 } else { 2 }
+            && vel_ui::contains(self.content, event.position)
+        {
+            let point = Point {
+                x: event.position.x - self.content.x,
+                y: event.position.y - self.content.y,
+            };
+            let byte = self.view.hit_test(self.workspace.editor(), point);
+            self.panels.focus_editor_for_context();
+            match self.panels.jump_tab_result(&mut self.workspace, byte) {
+                Ok(true) => {
+                    self.named_changed(w, true);
+                    return;
+                }
+                Err(error) => {
+                    self.named_error(w, &error);
+                    return;
+                }
+                Ok(false) => {}
+            }
+        }
         if matches!(event.kind, MouseKind::Down | MouseKind::Up)
             && let Some((name, mut args)) = self.mouse_binding(
                 event.button + 1,

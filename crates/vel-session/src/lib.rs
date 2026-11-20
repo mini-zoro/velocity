@@ -193,6 +193,12 @@ pub struct Window {
     /// The Find in Files Where menu's Git ignore toggle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub find_in_files_use_gitignore: Option<bool>,
+    /// Find in Files sends results to a scratch tab when omitted or enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find_in_files_use_buffer: Option<bool>,
+    /// Include the source lines around each match in Find in Files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find_in_files_context: Option<bool>,
     /// Distraction-free state.
     pub distraction_free: bool,
     /// Per-window chrome visibility outside distraction-free mode.

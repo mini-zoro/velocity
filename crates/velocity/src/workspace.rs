@@ -55,6 +55,7 @@ pub struct Tab {
     pub(crate) preview_recent_pending: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
+    pub(crate) find_results: bool,
     pub(crate) suggested_name: Option<String>,
     pub format: Format,
     /// Explicit encoding commands set this; automatic detection never does.
@@ -188,6 +189,7 @@ impl Tab {
             preview_recent_pending: false,
             editor,
             path: None,
+            find_results: false,
             suggested_name: None,
             encoding_chosen: false,
             preferred_encoding: None,
@@ -270,7 +272,7 @@ impl Tab {
     }
     /// Includes removed files whose retained contents have no saved disk copy.
     pub fn dirty(&self) -> bool {
-        if self.load_failed {
+        if self.load_failed || self.find_results {
             return false;
         }
         self.deleted
@@ -393,6 +395,9 @@ impl Tab {
         self.name_with_untitled("Untitled")
     }
     pub fn ui_name(&self, ui: &crate::ui_text::Chrome) -> String {
+        if self.find_results {
+            return ui.find_results.to_string();
+        }
         if let Some(title) = self
             .editor
             .settings
@@ -2255,7 +2260,23 @@ impl Workspace {
     pub fn new_file(&mut self) -> Result<(), String> {
         self.new_text_tab(Text::new())
     }
-    fn new_text_tab(&mut self, text: Text) -> Result<(), String> {
+    pub(crate) fn show_find_results(&mut self) -> Result<usize, String> {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.find_results) {
+            self.select(index);
+            return Ok(index);
+        }
+        self.new_file()?;
+        let index = self.active;
+        let tab = &mut self.tabs[index];
+        tab.find_results = true;
+        tab.suggested_name = Some("Find Results".into());
+        tab.editor
+            .settings
+            .set(Layer::View, "word_wrap", Value::Bool(false));
+        self.configure_language(index, Some(crate::panels::find_results::SYNTAX), false)?;
+        Ok(index)
+    }
+    pub(crate) fn new_text_tab(&mut self, text: Text) -> Result<(), String> {
         if self.empty {
             self.tabs.clear();
             self.empty = false;
@@ -2396,6 +2417,7 @@ impl Workspace {
             || (self.tabs.len() == 1
                 && !preview
                 && self.tabs[0].path.is_none()
+                && !self.tabs[0].find_results
                 && !self.tabs[0].editor.buffer.is_dirty()
                 && self.tabs[0].editor.text.len_bytes() == 0)
         {
@@ -2473,6 +2495,11 @@ impl Workspace {
         // explicit encoding command can change the independent preference.
         tab.restored_format_dirty = false;
         tab.tracker.mark_saved(&tab.editor.buffer);
+        if tab.find_results {
+            // An explicit Save As makes the scratch report an ordinary file.
+            tab.find_results = false;
+            tab.suggested_name = None;
+        }
         tab.path = Some(target.clone());
         tab.deleted = false;
         let document = tab.session_document;

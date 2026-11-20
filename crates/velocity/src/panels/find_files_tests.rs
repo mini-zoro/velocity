@@ -416,6 +416,20 @@ fn replace_in_files_releases_recovery_and_undoes_in_open_buffer() {
         assert_eq!((matches, files), (2, 2));
         true
     });
+    assert!(
+        results_tab(&a)
+            .editor
+            .text
+            .to_string()
+            .ends_with("Replaced 2 matches across 2 files\n")
+    );
+    let index = a
+        .workspace
+        .tabs
+        .iter()
+        .position(|tab| tab.path.as_ref() == Some(&open))
+        .unwrap();
+    a.workspace.select(index);
     assert_eq!(a.workspace.editor().text, "before dog\n");
     assert!(!a.workspace.tabs[a.workspace.active].dirty());
     assert_eq!(std::fs::read_dir(root).unwrap().count(), 2);
@@ -427,6 +441,315 @@ fn replace_in_files_releases_recovery_and_undoes_in_open_buffer() {
     assert_eq!(a.workspace.editor().text, "before cat\n");
     assert!(a.workspace.tabs[a.workspace.active].dirty());
     assert_eq!(std::fs::read_to_string(open).unwrap(), "before dog\n");
+}
+
+fn results_tab(a: &App) -> &crate::workspace::Tab {
+    a.workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.find_results)
+        .unwrap()
+}
+
+fn results_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let first = root.join("a.txt");
+    let second = root.join("b.txt");
+    std::fs::write(&first, "before\n世界 foo\nafter\n").unwrap();
+    std::fs::write(&second, "prefix foo foo\ntail\n").unwrap();
+    (dir, first, second)
+}
+
+#[test]
+fn find_results_tab_format_scopes_append_and_reopen() {
+    let (_dir, first, second) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    let tab = results_tab(&a);
+    let sheet = tab.sheet;
+    assert_eq!(tab.name(), "Find Results");
+    assert!(tab.path.is_none() && !tab.dirty() && !tab.editor.read_only);
+    let output = tab.editor.text.to_string();
+    assert_eq!(
+        output,
+        format!(
+            "Searching 2 files for \"foo\" in <project>\n\n{}:\n      1  before\n      2: 世界 foo\n      3  after\n\n{}:\n      1: prefix foo foo\n      2  tail\n\n3 matches across 2 files\n",
+            first.display(),
+            second.display(),
+        ),
+    );
+    let path = output.find(&first.to_string_lossy()[..]).unwrap();
+    let row = output.find("2: 世界").unwrap();
+    let hit = output.find("世界 foo").unwrap() + "世界 ".len();
+    let scopes = tab.editor.exact_scopes(&[path, row]).unwrap();
+    let scope = |name| vel_scope::Scope::new(name).unwrap();
+    assert!(scopes[0].contains(&scope("text.find-in-files")));
+    assert!(scopes[0].contains(&scope("string.unquoted.path.find-in-files")));
+    assert!(scopes[1].contains(&scope("constant.numeric.line-number.find-in-files")));
+    let matches = a
+        .panels
+        .results_tab_matches(&a.workspace.tabs[a.workspace.active], 0..output.len());
+    assert_eq!(matches.len(), 3);
+    assert_eq!(matches[0], hit..hit + 3);
+    assert!(matches.iter().all(|r| &output[r.clone()] == "foo"));
+
+    begin(&mut a, "prefix");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    assert_eq!(results_tab(&a).sheet, sheet);
+    let appended = results_tab(&a).editor.text.to_string();
+    assert!(appended.starts_with(&output));
+    assert!(appended.contains("Searching 2 files for \"prefix\""));
+    assert!(appended.ends_with("1 match across 1 file\n"));
+    assert_eq!(
+        a.workspace.editor().caret,
+        appended.find("Searching 2 files for \"prefix\"").unwrap()
+    );
+
+    input(&mut a, "editable ");
+    assert!(!results_tab(&a).dirty());
+    named(&mut a, "close_file", json!({}));
+    assert!(a.workspace.sheet_index(sheet).is_none());
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    assert_ne!(results_tab(&a).sheet, sheet);
+    assert_eq!(results_tab(&a).editor.text, output.as_str());
+}
+
+#[test]
+fn find_results_tab_return_double_click_and_command_click_follow_edited_regions() {
+    let (_dir, first, second) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    set(&mut a, "open_files_in_new_window", json!("always"));
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    let sheet = results_tab(&a).sheet;
+    a.workspace.editor_mut().set_caret(0, false);
+    input(&mut a, "notes above the results\n");
+    let output = a.workspace.editor().text.to_string();
+    a.workspace
+        .editor_mut()
+        .set_caret(output.find("世界 foo").unwrap(), false);
+    key(&mut a, "enter");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+    assert_eq!(a.workspace.editor().caret, "before\n世界 ".len());
+
+    for (target, word, count, modifiers, caret) in [
+        (&second, "prefix foo foo", 2, 0, "prefix ".len()),
+        (&first, "世界 foo", 1, 1 << 20, "before\n世界 ".len()),
+    ] {
+        a.workspace.select(a.workspace.sheet_index(sheet).unwrap());
+        a.scene();
+        let point = a
+            .view
+            .rect_at(a.workspace.editor(), output.find(word).unwrap());
+        let position = Point {
+            x: a.content.x + point.x + 0.5,
+            y: a.content.y + point.y + a.view.line_height / 2.,
+        };
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            a.handle_mouse_event(
+                None,
+                MouseEvent {
+                    button: 0,
+                    kind,
+                    position,
+                    click_count: count,
+                    modifiers: Modifiers(modifiers),
+                    timestamp: 0.,
+                },
+            );
+        }
+        assert_eq!(
+            a.workspace.tabs[a.workspace.active].path.as_ref(),
+            Some(target)
+        );
+        assert_eq!(a.workspace.editor().caret, caret);
+    }
+}
+
+#[test]
+fn find_results_tab_toggle_persists_and_both_destinations_navigate() {
+    let (_dir, first, second) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    let output = results_tab(&a).editor.text.clone();
+    assert!(a.workspace.tabs[a.workspace.active].find_results);
+    key(&mut a, "f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+    named(&mut a, "next_result", json!({})); // Goto > Results uses this same command.
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&second)
+    );
+    key(&mut a, "shift+f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel": "find_in_files", "pattern": "foo"}),
+    );
+    a.scene();
+    let bounds = a.panels.tree.nodes[&37].rect;
+    a.handle_mouse_event(
+        None,
+        MouseEvent {
+            button: 0,
+            kind: MouseKind::Down,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+            timestamp: 0.,
+            position: Point {
+                x: bounds.x + bounds.width / 2.,
+                y: bounds.y + bounds.height / 2.,
+            },
+        },
+    );
+    assert!(!a.panels.find_option_checked("use_buffer"));
+    named(&mut a, "toggle_find_option", json!({"option": "context"}));
+    let mut state = vel_session::Window::default();
+    a.panels.capture_session(&mut state);
+    let state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+    let mut panels = crate::panels::Panels::default();
+    panels.restore_session(&a.workspace, &state);
+    assert!(!panels.find_option_checked("use_buffer"));
+    assert!(!panels.find_option_checked("context"));
+    key(&mut a, "enter");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    assert_eq!(a.panels.panel, Some(crate::panels::Panel::Results));
+    assert_eq!(results_tab(&a).editor.text, output);
+    assert!(
+        !a.panels
+            .result_view
+            .rows
+            .iter()
+            .any(|r| matches!(r, Row::Line(l) if l.match_count == 0))
+    );
+    key(&mut a, "shift+f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&second)
+    );
+    key(&mut a, "f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel":"find_in_files","pattern":"foo","replace_pattern":"dog"}),
+    );
+    named(&mut a, "replace_in_files", json!({}));
+    wait_for(&mut a, |a| a.panels.replacement_plan.is_some());
+    a.confirm_file_replacements(|m, f| (m, f) == (3, 2));
+    assert_eq!(a.panels.panel, Some(crate::panels::Panel::Results));
+    assert_eq!(results_tab(&a).editor.text, output);
+    assert_eq!(
+        std::fs::read_to_string(&first).unwrap(),
+        "before\n世界 dog\nafter\n"
+    );
+}
+
+#[test]
+fn find_results_tab_records_escape_and_panel_close_cancellation() {
+    let (_dir, first, _) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    for cancel in ["escape", "hide_panel"] {
+        begin(&mut a, "foo");
+        assert!(a.panels.file_task.is_some());
+        if cancel == "escape" {
+            key(&mut a, cancel);
+        } else {
+            named(&mut a, cancel, json!({}));
+        }
+        assert!(a.panels.file_task.is_none() && !a.panels.file_complete);
+        assert!(
+            results_tab(&a)
+                .editor
+                .text
+                .to_string()
+                .ends_with("Search cancelled\n")
+        );
+    }
+    assert_eq!(
+        results_tab(&a)
+            .editor
+            .text
+            .to_string()
+            .matches("Search cancelled")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn find_results_tab_streams_while_typing_within_frame_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for i in 0..4 {
+        std::fs::write(
+            root.join(format!("hits-{i}.txt")),
+            "prefix needle 人\n".repeat(8_000),
+        )
+        .unwrap();
+    }
+    let mut a = app("draft\n", "Plain Text", None);
+    let draft = a.workspace.tabs[a.workspace.active].sheet;
+    add(&mut a, &root);
+    begin(&mut a, "needle");
+    a.workspace.select(a.workspace.sheet_index(draft).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut samples = Vec::new();
+    let mut streamed = false;
+    while !a.panels.file_complete {
+        let start = Instant::now();
+        let viewport = a.viewport();
+        a.panels.poll(&mut a.workspace, viewport);
+        input(&mut a, "x");
+        samples.push(start.elapsed());
+        streamed |= !a.panels.file_complete && results_tab(&a).editor.text.len_lines() > 100;
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    samples.sort_unstable();
+    let p95 = samples[samples.len() * 95 / 100];
+    assert!(streamed && samples.len() > 10);
+    assert!(
+        p95 < Duration::from_millis(16),
+        "typing + streaming p95: {p95:?}"
+    );
+    assert!(
+        a.workspace
+            .editor()
+            .text
+            .to_string()
+            .ends_with(&"x".repeat(samples.len()))
+    );
+    assert!(
+        results_tab(&a)
+            .editor
+            .text
+            .to_string()
+            .ends_with("32000 matches across 4 files\n")
+    );
 }
 
 #[test]

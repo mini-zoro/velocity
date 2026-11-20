@@ -1019,6 +1019,10 @@ impl Workspace {
         if self.empty {
             return self.new_file();
         }
+        if self.tabs[self.active].find_results {
+            // A result sheet is owned by this window's search controller.
+            return self.new_text_tab(self.editor().text.clone());
+        }
         if self.tabs[self.active].loading.is_some()
             || self.tabs[self.active].binary_loading.is_some()
         {
@@ -1296,7 +1300,11 @@ impl Workspace {
             let tab = &self.tabs[index];
             // A preview has no committed tab order until editing/save/double click.
             // https://docs.sublimetext.io/reference/settings.html#global-settings
-            if tab.transient || tab.preview_recent_pending || !assigned.contains(&tab.sheet) {
+            if tab.find_results
+                || tab.transient
+                || tab.preview_recent_pending
+                || !assigned.contains(&tab.sheet)
+            {
                 continue;
             }
             let doc = tab.document;

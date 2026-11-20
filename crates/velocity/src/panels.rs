@@ -26,6 +26,7 @@ use vel_search::{
 };
 mod appearance_selection;
 mod details;
+pub(crate) mod find_results;
 mod goto_files;
 mod quick_icons;
 #[cfg(test)]
@@ -73,6 +74,16 @@ pub(crate) fn tab_icon<'a>(
 }
 
 pub const STATUS: f64 = 24.;
+pub(super) const FIND_OPTIONS: [&str; 8] = [
+    "regex",
+    "case_sensitive",
+    "whole_word",
+    "wrap",
+    "in_selection",
+    "preserve_case",
+    "context",
+    "use_buffer",
+];
 /// Document-format menu model; Lane B connects it to the status hit rectangles.
 pub(crate) fn status_format_menu(
     workspace: &Workspace,
@@ -402,6 +413,9 @@ pub struct Panels {
     files_searched: usize,
     file_matches: usize,
     result_status: UiText,
+    results_tab: Option<find_results::ResultsTab>,
+    result_destination: Option<u64>,
+    result_untitled: BTreeMap<PathBuf, u64>,
     palette_enabled: Vec<bool>,
     palette_accept: Option<Invocation>,
     pub pending_command: Option<Invocation>,
@@ -437,6 +451,8 @@ pub struct Panels {
     pub dragging_tab: Option<usize>,
     pub options: text::Options,
     files_use_gitignore: bool,
+    files_use_buffer: bool,
+    files_context: bool,
     pub in_selection: bool,
     pub highlights: Vec<Range<usize>>,
     pub message: UiText,
@@ -585,6 +601,9 @@ impl Default for Panels {
             files_searched: 0,
             file_matches: 0,
             result_status: UiText::default(),
+            results_tab: None,
+            result_destination: None,
+            result_untitled: BTreeMap::new(),
             palette_enabled: Vec::new(),
             palette_accept: None,
             pending_command: None,
@@ -622,6 +641,8 @@ impl Default for Panels {
             quick_pending: false,
             options: text::Options::default(),
             files_use_gitignore: true,
+            files_use_buffer: true,
+            files_context: true,
             in_selection: false,
             highlights: vec![],
             message: UiText::default(),
@@ -993,6 +1014,8 @@ impl Panels {
         window.find_history = self.find_history.clone();
         window.replace_history = self.replace_history.clone();
         window.find_in_files_use_gitignore = Some(self.files_use_gitignore);
+        window.find_in_files_use_buffer = Some(self.files_use_buffer);
+        window.find_in_files_context = Some(self.files_context);
     }
     pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
         self.side_visible = window.sidebar_visible;
@@ -1003,6 +1026,8 @@ impl Panels {
         self.find_history = window.find_history.clone();
         self.replace_history = window.replace_history.clone();
         self.files_use_gitignore = window.find_in_files_use_gitignore.unwrap_or(true);
+        self.files_use_buffer = window.find_in_files_use_buffer.unwrap_or(true);
+        self.files_context = window.find_in_files_context.unwrap_or(true);
         if let Some(value) = self.find_history.last() {
             self.query.set(value);
         }
@@ -2263,6 +2288,14 @@ impl Panels {
                 {
                     self.set_files_gitignore(use_gitignore);
                 }
+                if self.panel == Some(Panel::Files) {
+                    if let Some(use_buffer) = args["use_buffer"].as_bool() {
+                        self.files_use_buffer = use_buffer;
+                    }
+                    if let Some(context) = args["context"].as_bool() {
+                        self.files_context = context;
+                    }
+                }
                 if matches!(
                     self.panel,
                     Some(Panel::Find | Panel::Replace | Panel::Incremental)
@@ -2421,6 +2454,12 @@ impl Panels {
                     "whole_word" => self.options.whole_word = !self.options.whole_word,
                     "wrap" => self.options.wrap = !self.options.wrap,
                     "preserve_case" => self.options.preserve_case = !self.options.preserve_case,
+                    "use_buffer" if self.panel == Some(Panel::Files) => {
+                        self.files_use_buffer = !self.files_use_buffer;
+                    }
+                    "context" if self.panel == Some(Panel::Files) => {
+                        self.files_context = !self.files_context;
+                    }
                     "use_gitignore" if self.panel == Some(Panel::Files) => {
                         self.set_files_gitignore(!self.files_use_gitignore);
                     }
@@ -2582,8 +2621,14 @@ impl Panels {
     }
     pub(crate) fn find_option_checked(&self, option: &str) -> bool {
         match option {
+            "regex" => self.options.regex,
+            "case_sensitive" => self.options.case_sensitive,
+            "whole_word" => self.options.whole_word,
+            "wrap" => self.options.wrap,
             "in_selection" => self.in_selection,
             "preserve_case" => self.options.preserve_case,
+            "use_buffer" => self.files_use_buffer,
+            "context" => self.files_context,
             "use_gitignore" => self.files_use_gitignore,
             _ => false,
         }
@@ -2661,16 +2706,8 @@ impl Panels {
     fn close_panel(&mut self, workspace: &mut Workspace) {
         self.show_console = false;
         self.finish_find_navigation(workspace);
-        if self.panel == Some(Panel::Results) && self.file_task.take().is_some() {
-            self.file_complete = false;
-            self.result_status = UiText::tr_fmt(
-                "Search cancelled · {count} matches in {files} files",
-                [
-                    ("count", self.file_matches.to_string()),
-                    ("files", self.result_view.matched_files().to_string()),
-                ],
-            );
-            self.set_message(self.result_status.clone());
+        if matches!(self.panel, Some(Panel::Files | Panel::Results)) {
+            self.cancel_files(workspace);
         }
         self.cancel_pending_find();
         self.in_selection = false;
@@ -4098,6 +4135,21 @@ impl Panels {
         if let Some(invocation) = self.review_key(key) {
             return Ok((true, invocation));
         }
+        if !self.captured() && key.modifiers == 0 && workspace.tabs[workspace.active].find_results {
+            match key.name.as_str() {
+                "enter" if workspace.editor().marked.is_none() => {
+                    if self.jump_tab_result(workspace, workspace.editor().caret)? {
+                        return Ok((true, None));
+                    }
+                }
+                "escape" if self.file_task.is_some() => {
+                    self.close_panel(workspace);
+                    self.cancel_files(workspace);
+                    return Ok((true, None));
+                }
+                _ => {}
+            }
+        }
         if !self.captured() {
             return Ok((false, None));
         }
@@ -4394,7 +4446,7 @@ impl Panels {
         }
         Ok((true, None))
     }
-    fn start_files(&mut self, workspace: &Workspace) -> Result<(), String> {
+    fn start_files(&mut self, workspace: &mut Workspace) -> Result<(), String> {
         self.remember_search(false);
         let search = match Search::new(&self.query.value(), self.options) {
             Ok(search) => search,
@@ -4415,9 +4467,11 @@ impl Panels {
             }
         };
         scope.use_gitignore = self.files_use_gitignore;
+        self.cancel_files(workspace);
         self.file_signature = Some(self.files_identity());
         self.replace_rx = None;
         self.replacement_plan = None;
+        let mut untitled = BTreeMap::new();
         let open = workspace
             .tabs
             .iter()
@@ -4430,12 +4484,17 @@ impl Panels {
                     .enumerate()
                     .filter(|(i, _)| *i != workspace.active),
             )
-            .map(|(i, tab)| files::OpenFile {
-                path: tab
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from(format!("Untitled {}", i + 1))),
-                text: tab.editor.text.clone(),
+            .filter(|(i, tab)| !tab.find_results && (scope.open_files || *i == workspace.active))
+            .map(|(i, tab)| {
+                let path = tab.path.clone().unwrap_or_else(|| {
+                    let path = PathBuf::from(format!("Untitled {}", i + 1));
+                    untitled.insert(path.clone(), tab.sheet);
+                    path
+                });
+                files::OpenFile {
+                    path,
+                    text: tab.editor.text.clone(),
+                }
             })
             .collect();
         let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
@@ -4445,17 +4504,39 @@ impl Panels {
                 scope,
                 folders: workspace.folders.clone(),
                 open,
-                context: 1,
+                context: usize::from(self.files_context),
             },
             decode,
         );
-        match task {
-            Ok(task) => self.file_task = Some(task),
+        let task = match task {
+            Ok(task) => task,
             Err(error) => {
                 self.set_message(error);
                 return Ok(());
             }
-        }
+        };
+        self.result_destination = if self.files_use_buffer {
+            let heading = self.files_heading(workspace, 0);
+            let index = workspace.show_find_results()?;
+            let tab = &mut workspace.tabs[index];
+            let results = self
+                .results_tab
+                .get_or_insert_with(|| find_results::ResultsTab::new(tab));
+            if results.sheet != tab.sheet {
+                *results = find_results::ResultsTab::new(tab);
+            }
+            results.begin(tab, heading);
+            // Keep Where/Replace reachable and the panel's close button available
+            // while handing text input and scrolling to the result sheet.
+            self.panel = Some(Panel::Files);
+            self.focus_editor_for_context();
+            Some(tab.sheet)
+        } else {
+            self.panel = Some(Panel::Results);
+            None
+        };
+        self.result_untitled = untitled;
+        self.file_task = Some(task);
         self.search_results_active = true;
         self.result_cursor = None;
         self.files_searched = 0;
@@ -4467,7 +4548,95 @@ impl Panels {
         self.file_complete = false;
         self.result_status = UiText::tr_fmt("Searching {files} files…", [("files", "0".into())]);
         self.set_message(self.result_status.clone());
-        self.panel = Some(Panel::Results);
+        Ok(())
+    }
+
+    fn files_heading(&self, workspace: &Workspace, files: usize) -> String {
+        let query = self.file_signature.as_ref().expect("search signature");
+        let location = if query.where_.trim().is_empty() {
+            workspace.translations.tr("open folders").into_owned()
+        } else {
+            query.where_.escape_debug().to_string()
+        };
+        let mut heading = UiText::tr_fmt(
+            "Searching {files} files for \"{query}\" in {location}",
+            [
+                ("files", files.to_string()),
+                ("query", query.query.escape_debug().to_string()),
+                ("location", location),
+            ],
+        );
+        heading.refresh(&workspace.translations);
+        heading.to_string()
+    }
+
+    fn finish_results_tab(&mut self, workspace: &mut Workspace, mut footer: UiText) {
+        let Some(sheet) = self.result_destination else {
+            return;
+        };
+        let heading = self.files_heading(workspace, self.files_searched);
+        footer.refresh(&workspace.translations);
+        if let (Some(results), Some(index)) = (
+            self.results_tab.as_mut(),
+            Self::results_sheet_index(workspace, sheet),
+        ) {
+            results.finish(&mut workspace.tabs[index].editor, heading, &footer);
+        }
+    }
+
+    fn results_sheet_index(workspace: &Workspace, sheet: u64) -> Option<usize> {
+        workspace
+            .sheet_index(sheet)
+            .filter(|&index| workspace.tabs[index].find_results)
+    }
+
+    fn cancel_files(&mut self, workspace: &mut Workspace) {
+        let Some(task) = self.file_task.take() else {
+            return;
+        };
+        task.cancel();
+        self.files_searched = task.searched_files();
+        self.file_complete = false;
+        self.finish_results_tab(workspace, UiText::tr("Search cancelled"));
+        self.result_status = UiText::tr_fmt(
+            "Search cancelled · {count} matches in {files} files",
+            [
+                ("count", self.file_matches.to_string()),
+                ("files", self.result_view.matched_files().to_string()),
+            ],
+        );
+        self.set_message(self.result_status.clone());
+    }
+
+    pub(crate) fn report_file_replacements(
+        &mut self,
+        workspace: &mut Workspace,
+        count: usize,
+        files: usize,
+    ) -> Result<(), String> {
+        let mut report = UiText::tr_fmt(
+            "Replaced {count} matches across {files} files",
+            [("count", count.to_string()), ("files", files.to_string())],
+        );
+        if let Some(sheet) = self.result_destination {
+            let index = match Self::results_sheet_index(workspace, sheet) {
+                Some(index) => index,
+                None => workspace.show_find_results()?,
+            };
+            let tab = &mut workspace.tabs[index];
+            let results = self
+                .results_tab
+                .get_or_insert_with(|| find_results::ResultsTab::new(tab));
+            if results.sheet != tab.sheet {
+                *results = find_results::ResultsTab::new(tab);
+            }
+            self.result_destination = Some(tab.sheet);
+            report.refresh(&workspace.translations);
+            results.report(&mut tab.editor, &report);
+        } else {
+            self.panel = Some(Panel::Results);
+            self.result_status = report;
+        }
         Ok(())
     }
     fn prepare_files(&mut self, workspace: &Workspace) -> Result<(), String> {
@@ -4534,31 +4703,71 @@ impl Panels {
         }
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        if let Some(files::Row::Line(line)) = self.result_view.rows.get(self.result_selected) {
+            let target = find_results::target(line, &self.result_untitled);
+            self.result_cursor = Some(self.result_selected);
+            self.open_result_target(workspace, target)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn jump_tab_result(
+        &mut self,
+        workspace: &mut Workspace,
+        point: usize,
+    ) -> Result<bool, String> {
+        let sheet = workspace.tabs[workspace.active].sheet;
+        let Some(results) = self.results_tab.as_mut().filter(|r| r.sheet == sheet) else {
+            return Ok(false);
+        };
+        let Some((rank, target)) = results.at(workspace.editor(), point) else {
+            return Ok(false);
+        };
+        if self.result_destination == Some(sheet)
+            && let Some(rank) = rank
+        {
+            self.result_cursor = Some(rank);
+            self.result_selected = rank;
+            self.result_navigated = true;
+        }
+        self.open_result_target(workspace, target)?;
+        Ok(true)
+    }
+    pub(crate) fn results_tab_matches(
+        &mut self,
+        tab: &crate::workspace::Tab,
+        bytes: Range<usize>,
+    ) -> Vec<Range<usize>> {
+        self.results_tab
+            .as_mut()
+            .filter(|r| r.sheet == tab.sheet)
+            .map_or_else(Vec::new, |r| r.matches(&tab.editor, bytes))
+    }
+    fn open_result_target(
+        &mut self,
+        workspace: &mut Workspace,
+        target: find_results::Target,
+    ) -> Result<(), String> {
         workspace.observe_navigation();
         let _navigation =
             crate::editor::navigation::Guard::command(&workspace.jump_history, "find_result");
-        if let Some(files::Row::Line(line)) = self.result_view.rows.get(self.result_selected) {
-            self.result_cursor = Some(self.result_selected);
-            self.reveal = true;
-            if let Some(index) = workspace.tabs.iter().enumerate().position(|(i, t)| {
-                t.path.as_deref() == Some(line.path.as_ref())
-                    || (t.path.is_none()
-                        && *line.path == *Path::new(&format!("Untitled {}", i + 1)))
-            }) {
+        let location = FileLocation {
+            path: target.path.to_path_buf(),
+            line: target.line,
+            column: target.column,
+        };
+        if let Some(sheet) = target.sheet {
+            if let Some(index) = workspace.sheet_index(sheet) {
                 workspace.select(index);
-                workspace.tabs[index].goto(&FileLocation {
-                    path: line.path.to_path_buf(),
-                    line: line.number,
-                    column: line.column(),
-                });
-            } else {
-                workspace.open(FileLocation {
-                    path: line.path.to_path_buf(),
-                    line: line.number,
-                    column: line.column(),
-                })?;
+                workspace.tabs[index].goto(&location);
             }
+        } else if workspace.tabs.iter().any(|t| {
+            t.path.as_deref() == Some(&target.path) && (t.transient || t.preview_recent_pending)
+        }) {
+            workspace.preview(location)?;
+        } else {
+            workspace.open(location)?;
         }
+        self.reveal = true;
         Ok(())
     }
     fn activate_side(&mut self, workspace: &mut Workspace, permanent: bool) -> Result<(), String> {
@@ -5003,6 +5212,16 @@ impl Panels {
             }
             self.finish_pending_find(workspace);
         }
+        if self
+            .results_tab
+            .as_ref()
+            .is_some_and(|results| Self::results_sheet_index(workspace, results.sheet).is_none())
+        {
+            self.results_tab = None;
+            if self.result_destination.is_some() {
+                self.cancel_files(workspace);
+            }
+        }
         if let Some(task) = &self.file_task {
             let searched = task.searched_files();
             if searched != self.files_searched {
@@ -5019,8 +5238,10 @@ impl Panels {
             .file_task
             .as_ref()
             .map(|_| Instant::now() + Duration::from_millis(1));
+        let mut batch = find_results::Batch::default();
+        let mut done = None;
         for index in 0..256 {
-            if index != 0 && deadline.is_some_and(|end| Instant::now() >= end) {
+            if index != 0 && (batch.full() || deadline.is_some_and(|end| Instant::now() >= end)) {
                 break;
             }
             let Some(event) = self
@@ -5034,8 +5255,19 @@ impl Panels {
                 files::Event::Line(line) => {
                     self.file_matches += line.match_count;
                     let inserted = self.result_view.push(line);
-                    if self.result_navigated || self.result_cursor.is_some() {
+                    if self.result_destination.is_some()
+                        || self.result_navigated
+                        || self.result_cursor.is_some()
+                    {
                         let at = self.result_view.rank(inserted);
+                        if self.result_destination.is_some() {
+                            batch.insert(
+                                &self.result_view,
+                                at,
+                                inserted.added,
+                                &self.result_untitled,
+                            );
+                        }
                         if self.result_navigated && at <= self.result_selected {
                             self.result_selected += inserted.added;
                         }
@@ -5049,25 +5281,47 @@ impl Panels {
                     [("detail", error)],
                 )),
                 files::Event::Done { files, .. } => {
-                    self.files_searched = files;
-                    self.result_status = match (self.file_matches, self.result_view.matched_files())
-                    {
-                        (1, 1) => UiText::tr("1 match in 1 file"),
-                        (count, 1) => UiText::tr_fmt(
-                            "{count} matches in 1 file",
-                            [("count", count.to_string())],
-                        ),
-                        (count, files) => UiText::tr_fmt(
-                            "{count} matches in {files} files",
-                            [("count", count.to_string()), ("files", files.to_string())],
-                        ),
-                    };
-                    self.set_message(self.result_status.clone());
-                    self.file_complete = true;
+                    done = Some(files);
                     self.file_task = None;
                 }
             }
             changed = true;
+        }
+        if let Some(sheet) = self.result_destination
+            && let (Some(results), Some(index)) = (
+                self.results_tab.as_mut(),
+                Self::results_sheet_index(workspace, sheet),
+            )
+        {
+            results.write(&mut workspace.tabs[index].editor, batch);
+        }
+        if let Some(files) = done {
+            self.files_searched = files;
+            let matched = self.result_view.matched_files();
+            self.result_status = match (self.file_matches, matched) {
+                (1, 1) => UiText::tr("1 match in 1 file"),
+                (count, 1) => {
+                    UiText::tr_fmt("{count} matches in 1 file", [("count", count.to_string())])
+                }
+                (count, files) => UiText::tr_fmt(
+                    "{count} matches in {files} files",
+                    [("count", count.to_string()), ("files", files.to_string())],
+                ),
+            };
+            let summary = match (self.file_matches, matched) {
+                (1, 1) => UiText::tr("1 match across 1 file"),
+                (count, 1) => UiText::tr_fmt(
+                    "{count} matches across 1 file",
+                    [("count", count.to_string())],
+                ),
+                (count, files) => UiText::tr_fmt(
+                    "{count} matches across {files} files",
+                    [("count", count.to_string()), ("files", files.to_string())],
+                ),
+            };
+            self.finish_results_tab(workspace, summary);
+            self.set_message(self.result_status.clone());
+            self.file_complete = true;
         }
         self.result_scroll.rows = if self.panel == Some(Panel::Output) {
             // The output view's layout supplies the rows when it exists; counting megabytes
@@ -5526,6 +5780,8 @@ impl Panels {
                     self.options.wrap,
                     self.in_selection,
                     self.options.preserve_case,
+                    self.files_context,
+                    self.files_use_buffer,
                 ];
                 // Option toggles under the inputs, buttons at their right (see
                 // `find_controls`); only options that apply to this panel are shown.
@@ -6112,7 +6368,7 @@ impl Panels {
                         &input_style,
                         &mut layer,
                         input,
-                        self.overlay.is_none() && self.focus_input == i,
+                        self.overlay.is_none() && self.panel_focused && self.focus_input == i,
                     );
                 }
                 if panel != Panel::Input {
@@ -6125,6 +6381,8 @@ impl Panels {
                         "icon_wrap",
                         "icon_in_selection",
                         "icon_preserve_case",
+                        "icon_context",
+                        "icon_use_buffer",
                     ]
                     .into_iter()
                     .enumerate()
@@ -6246,12 +6504,15 @@ impl Panels {
                 .then(|| tab.path.as_deref().and_then(|p| workspace.git.status(p)))
                 .flatten()
                 .map(str::to_owned);
-            let language = editor
+            let mut language = editor
                 .language
                 .borrow()
                 .as_ref()
                 .map(|l| l.name.clone())
                 .unwrap_or_else(|| "Plain Text".into());
+            if tab.find_results && language == "Find Results" {
+                language = workspace.ui.find_results.to_string();
+            }
             // Bytes and pictures have no syntax or indentation to show or change.
             let text_document = editor.binary.is_none();
             let candidates = [
@@ -6885,15 +7146,7 @@ impl Panels {
                         }
                     }
                     if let Some(id) = self.tree.hit_test(point) {
-                        if (30..=35).contains(&id) {
-                            let option = [
-                                "regex",
-                                "case_sensitive",
-                                "whole_word",
-                                "wrap",
-                                "in_selection",
-                                "preserve_case",
-                            ][(id - 30) as usize];
+                        if let Some(option) = FIND_OPTIONS.get(id.wrapping_sub(30) as usize) {
                             self.action(
                                 workspace,
                                 "toggle_find_option",

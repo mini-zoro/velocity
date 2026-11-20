@@ -1151,7 +1151,12 @@ impl App {
             // Search replacements are tied to a completed Find in Files request.
             // https://docs.sublimetext.io/reference/commands.html
             "replace_in_files" => return self.panels.file_replace_ready(),
-            "toggle_find_option" if args["option"] == "use_gitignore" => {
+            "toggle_find_option"
+                if matches!(
+                    args["option"].as_str(),
+                    Some("use_gitignore" | "use_buffer" | "context")
+                ) =>
+            {
                 return matches!(self.panels.panel, Some(crate::panels::Panel::Files));
             }
             "toggle_find_option"
@@ -1521,6 +1526,7 @@ impl App {
     fn transferable_tab(&self, index: usize) -> bool {
         let tab = &self.workspace.tabs[index];
         !self.workspace.is_empty()
+            && !tab.find_results
             && tab.loading.is_none()
             && tab.binary_loading.is_none()
             && !self.workspace.stdout_sheets.contains(&tab.sheet)
@@ -1557,19 +1563,32 @@ impl App {
             .groups
             .iter()
             .flat_map(|group| group.sheets.iter().copied())
+            .filter(|sheet| {
+                self.workspace
+                    .sheet_index(*sheet)
+                    .is_some_and(|index| !self.workspace.tabs[index].find_results)
+            })
             .collect();
         if !self
             .sessions
             .borrow()
             .can_receive_tabs(destination, sheets.len())
             || (!self.workspace.is_empty()
-                && (0..self.workspace.tabs.len()).any(|index| !self.transferable_tab(index)))
+                && self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .any(|(index, tab)| !tab.find_results && !self.transferable_tab(index)))
         {
             return Err("This window has tabs that cannot be moved yet.".into());
         }
         if !self.workspace.is_empty() {
             // Materialize before moving anything so errors cannot half-merge a window.
             for index in 0..self.workspace.tabs.len() {
+                if self.workspace.tabs[index].find_results {
+                    continue;
+                }
                 self.workspace.prepare_sheet(index)?;
                 if !self.transferable_tab(index) {
                     return Err("Finish opening files before merging windows.".into());
@@ -3385,6 +3404,7 @@ impl App {
     ) -> Result<(), String> {
         self.check_replacement_targets(&plan)?;
         let mut count = 0;
+        let files = plan.len();
         let mut warnings = Vec::new();
         for change in plan {
             let saved = change.commit().map_err(|e| {
@@ -3396,6 +3416,8 @@ impl App {
             count += change.count;
             warnings.extend(saved.warning);
         }
+        self.panels
+            .report_file_replacements(&mut self.workspace, count, files)?;
         let message = UiText::tr_fmt("Replaced {count} matches.", [("count", count.to_string())]);
         self.panels.set_message(if warnings.is_empty() {
             message
@@ -3622,6 +3644,7 @@ impl App {
                     && self.panels.input().is_none()
                     && !self.panels.side_focused;
                 view.find_matches.clear();
+                view.find_result_matches.clear();
                 if let Some(fonts) = &self.fonts {
                     view.ligatures = fonts.has_ligatures();
                     view.set_font_metrics(
@@ -3659,6 +3682,13 @@ impl App {
                     }
                     self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
                     self.workspace.tabs[index].scroll_line_height = view.line_height;
+                }
+                if self.workspace.tabs[index].find_results {
+                    let tab = &self.workspace.tabs[index];
+                    view.apply_style(&tab.editor);
+                    view.find_result_matches = self
+                        .panels
+                        .results_tab_matches(tab, view.viewport(&tab.editor));
                 }
                 if *sheet == focused
                     && let highlights = self.panels.current_highlights(&self.workspace)

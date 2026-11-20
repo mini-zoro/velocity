@@ -230,6 +230,7 @@ pub struct View {
     pub(crate) fold_header_rope_lookups: usize,
     selection_cache: Option<SelectionCache>,
     pub find_matches: Vec<Range<usize>>,
+    pub find_result_matches: Vec<Range<usize>>,
     pub size: Size,
     pub cell: f64,
     pub ascent: f64,
@@ -951,6 +952,7 @@ impl View {
             fold_header_rope_lookups: 0,
             selection_cache: None,
             find_matches: Vec::new(),
+            find_result_matches: Vec::new(),
             size,
             cell,
             ascent,
@@ -2423,6 +2425,24 @@ impl View {
         let scheme = language.map_or_else(|| fallback_scheme(self.appearance), |l| &*l.scheme);
         let default = scheme.default_style();
         let global = |name: &str| color(scheme, name);
+        let result_match_style = language
+            .filter(|_| !self.find_result_matches.is_empty())
+            .map(|l| {
+                static STACK: std::sync::OnceLock<vel_scope::ScopeStack> =
+                    std::sync::OnceLock::new();
+                let stack = STACK.get_or_init(|| {
+                    vel_scope::ScopeStack::from_vec(
+                        [
+                            "text.find-in-files",
+                            crate::panels::find_results::MATCH_SCOPE,
+                        ]
+                        .into_iter()
+                        .map(|scope| vel_scope::Scope::new(scope).expect("result scope"))
+                        .collect(),
+                    )
+                });
+                vel_color_scheme::Highlighter::new(l.scheme.clone()).style_for(stack)
+            });
         let all = Rect {
             x: 0.,
             y: 0.,
@@ -3359,6 +3379,13 @@ impl View {
                     .get(span)
                     .filter(|s| s.range.contains(&unit.bytes.start))
                     .map_or(default, |s| s.style);
+                let style = result_match_style
+                    .filter(|_| {
+                        self.find_result_matches
+                            .get(self.find_result_matches.partition_point(|r| r.end <= at))
+                            .is_some_and(|r| r.start < start + unit.bytes.end)
+                    })
+                    .unwrap_or(style);
                 let bracket = if bracket_glyphs.is_empty() {
                     None
                 } else {
