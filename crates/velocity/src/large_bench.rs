@@ -152,9 +152,13 @@ pub fn native_step(workspace: &mut Workspace, view: &mut View, step: usize) -> R
         view.reveal(workspace.editor());
     } else if workspace.editor().document_metrics.longest_line_bytes
         >= crate::large::LONG_LINE as u64
+        || workspace.editor().text.len_lines() == 1
+            && workspace.editor().document_metrics.longest_line_bytes >= 10_000
     {
         let e = workspace.editor_mut();
         if step == 0 {
+            e.settings
+                .set(vel_config::settings::Layer::View, "word_wrap", json!(false));
             e.set_caret(e.text.len_bytes() / 2, false);
         }
         if step.is_multiple_of(2) {

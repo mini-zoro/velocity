@@ -2,6 +2,14 @@
 //! Small, dependency-free command-line parser; modes never require human interaction.
 use std::path::PathBuf;
 
+pub const PERF_HELP: &str = "\
+  --headless-perf-startup [FILE]  main -> first App::scene, idle memory; no file or --lines = blank
+  --headless-perf-file FILE  streamed open, first scene, settled memory, typing and scroll
+  --headless-perf-highlight FILE  full bundled syntax parse + color spans (first and warmed pass)
+  --headless-perf-find DIR [DIR...]  literal project search through the production worker
+  --headless-perf-goto    production ranking over 100k prepared paths
+";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Interactive,
@@ -13,6 +21,11 @@ pub enum Mode {
     Headless,
     HeadlessFeatures,
     HeadlessLargeFiles,
+    HeadlessPerfStartup,
+    HeadlessPerfFile,
+    HeadlessPerfHighlight,
+    HeadlessPerfFind,
+    HeadlessPerfGoto,
     LargeFiles,
     HeadlessWorkbench,
     HeadlessReviewHistory,
@@ -34,6 +47,11 @@ impl Mode {
             Self::Memory => "memory",
             Self::Headless => "headless",
             Self::HeadlessLargeFiles => "headless-large-files",
+            Self::HeadlessPerfStartup => "headless-perf-startup",
+            Self::HeadlessPerfFile => "headless-perf-file",
+            Self::HeadlessPerfHighlight => "headless-perf-highlight",
+            Self::HeadlessPerfFind => "headless-perf-find",
+            Self::HeadlessPerfGoto => "headless-perf-goto",
             Self::LargeFiles => "bench-large-files",
             Self::HeadlessFeatures => "headless-view-features",
             Self::HeadlessTheme => "headless-theme-ui",
@@ -158,6 +176,11 @@ impl Options {
                 "--bench-memory" => Some(Mode::Memory),
                 "--headless-smoke" => Some(Mode::Headless),
                 "--headless-large-files" => Some(Mode::HeadlessLargeFiles),
+                "--headless-perf-startup" => Some(Mode::HeadlessPerfStartup),
+                "--headless-perf-file" => Some(Mode::HeadlessPerfFile),
+                "--headless-perf-highlight" => Some(Mode::HeadlessPerfHighlight),
+                "--headless-perf-find" => Some(Mode::HeadlessPerfFind),
+                "--headless-perf-goto" => Some(Mode::HeadlessPerfGoto),
                 "--bench-large-files" => Some(Mode::LargeFiles),
                 "--headless-view-features" => Some(Mode::HeadlessFeatures),
                 "--headless-theme-ui" => Some(Mode::HeadlessTheme),
@@ -304,8 +327,18 @@ impl Options {
                 }
             }
         }
-        if options.mode.automatic() && options.files.len() > 1 {
+        if options.mode.automatic()
+            && options.mode != Mode::HeadlessPerfFind
+            && options.files.len() > 1
+        {
             return Err("benchmarks accept one input file".into());
+        }
+        if matches!(
+            options.mode,
+            Mode::HeadlessPerfFile | Mode::HeadlessPerfHighlight | Mode::HeadlessPerfFind
+        ) && options.file.is_none()
+        {
+            return Err(format!("--{} requires a path", options.mode.name()));
         }
         if options.mode == Mode::Open
             && (options.files.len() != 1 || options.files[0].path == std::path::Path::new("-"))

@@ -125,6 +125,7 @@ impl Default for OnigBackend {
 struct OnigPattern {
     regex: onig::Regex,
     limits: OnigBackend,
+    capture_slots: usize,
 }
 struct Scratch {
     region: onig::Region,
@@ -149,6 +150,7 @@ impl RegexBackend for OnigBackend {
         onig::Regex::with_options(source, options, onig::Syntax::default())
             .map(|regex| {
                 Arc::new(OnigPattern {
+                    capture_slots: regex.captures_len() + 1,
                     regex,
                     limits: *self,
                 }) as Arc<dyn CompiledPattern>
@@ -158,7 +160,7 @@ impl RegexBackend for OnigBackend {
 }
 impl CompiledPattern for OnigPattern {
     fn capture_slots(&self) -> Option<usize> {
-        Some(self.regex.captures_len() + 1)
+        Some(self.capture_slots)
     }
     fn search(
         &self,
@@ -388,10 +390,17 @@ impl Regex {
         allow_empty: bool,
         out: &mut Region,
     ) -> bool {
-        if let Ok(compiled) = self.compiled(allow_empty)
-            && compiled.cached_captures(line, start, line.len(), span, out)
-        {
-            return true;
+        if let Ok(compiled) = self.compiled(allow_empty) {
+            if self.0.onig_semantics && compiled.capture_slots() == Some(1) {
+                // The ordered matcher already proved this span. A rule with
+                // no groups has no other registers to recover.
+                out.spans.clear();
+                out.spans.push(Some(span));
+                return true;
+            }
+            if compiled.cached_captures(line, start, line.len(), span, out) {
+                return true;
+            }
         }
         self.find(line, start, line.len(), Some(out), allow_empty)
             .is_some()
@@ -689,6 +698,23 @@ mod tests {
         );
         fn shareable<T: Send + Sync>() {}
         shareable::<Regex>();
+    }
+
+    #[test]
+    fn winner_preserves_whole_match_and_optional_groups() {
+        let line = "xá a";
+        for (rule, group) in [("á", None), ("(á)(z)?", Some((1, 3)))] {
+            let set = PatternSet::new(vec![Regex::new(rule.into()), Regex::new("a".into())]);
+            // Another matching rule overwrites the native capture scratch;
+            // the first winner still needs its exact byte-offset registers.
+            let hit = set
+                .find_earliest(line, 0, &mut SearchCache::default())
+                .unwrap();
+            assert_eq!((hit.pattern, hit.start, hit.end), (0, 1, 3));
+            assert_eq!(hit.captures.pos(0), Some((1, 3)));
+            assert_eq!(hit.captures.pos(1), group);
+            assert_eq!(hit.captures.pos(2), None);
+        }
     }
 }
 

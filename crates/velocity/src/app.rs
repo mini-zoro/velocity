@@ -12,6 +12,8 @@ mod context_adapter;
 mod lane_c_round20_tests;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
+#[path = "performance_bench.rs"]
+pub(crate) mod performance_bench;
 #[path = "app_print.rs"]
 mod printing;
 #[path = "render_scenes.rs"]

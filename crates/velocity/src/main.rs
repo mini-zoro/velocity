@@ -186,6 +186,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     }
     if options.bench_help {
         print!("{}", cli::BENCH_HELP);
+        print!("{}", cli::PERF_HELP);
         return Ok(());
     }
     let normal_data_dir = options
@@ -385,6 +386,19 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         }
         if options.mode == Mode::HeadlessLargeFiles {
             return large_bench::run(&reporter, &options);
+        }
+        if matches!(
+            options.mode,
+            Mode::HeadlessPerfStartup
+                | Mode::HeadlessPerfFile
+                | Mode::HeadlessPerfHighlight
+                | Mode::HeadlessPerfFind
+                | Mode::HeadlessPerfGoto
+        ) {
+            #[cfg(target_os = "macos")]
+            return app::performance_bench::run(options, clock, &reporter);
+            #[cfg(not(target_os = "macos"))]
+            return Err("headless comparison benchmarks require macOS".into());
         }
         if options.mode == Mode::HeadlessTheme {
             return theme_bench::run(&reporter, &options);

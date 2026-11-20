@@ -345,16 +345,10 @@ impl MultiSet {
         pool.clock += 1;
         let clock = pool.clock;
         if !pool.machines.contains_key(&id) {
-            let reservation = self
-                .shared
-                .config
-                .context_cache_limit
-                .saturating_mul(4)
-                .saturating_add(self.patterns.0.len().saturating_mul(64))
-                .saturating_add(4096);
-            pool.evict_to(self.shared.config.memory_limit.saturating_sub(reservation));
             let start = Instant::now();
-            let machine = Machine::compile(&self.patterns.0, &self.shared.config);
+            let limit = self.shared.config.memory_limit;
+            let machine = Machine::compile(&self.patterns.0, &self.shared.config)
+                .filter(|machine| machine.bytes() <= limit);
             let elapsed = start.elapsed().as_secs_f64() * 1000.;
             pool.stats.compilations += 1;
             if pool.stats.compile_ms.len() < 8192 {
@@ -364,7 +358,13 @@ impl MultiSet {
                 pool.stats.fallbacks += 1;
                 self.disabled.store(true, Ordering::Relaxed);
             }
-            pool.stats.resident_bytes += machine.as_ref().map_or(0, Machine::bytes);
+            if let Some(machine) = &machine {
+                // A temporary build is bounded per context. Charge its actual resident
+                // bytes at admission; a failed or small build must not evict hot machines.
+                let bytes = machine.bytes();
+                pool.evict_to(limit - bytes);
+                pool.stats.resident_bytes += bytes;
+            }
             pool.machines.insert(
                 id,
                 Resident {
@@ -609,6 +609,38 @@ impl PatternMatcher for MultiSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn small_machines_do_not_evict_each_other_on_admission() {
+        let backend = MultiDfa::new(MultiDfaConfig {
+            memory_limit: 128 * 1024,
+            context_cache_limit: 64 * 1024,
+            ..MultiDfaConfig::default()
+        });
+        let make_set = |stem: &str| {
+            backend.build(
+                (0..4)
+                    .map(|i| PatternSpec {
+                        regex: crate::Regex::new(format!("{stem}{i}[0-9]+")),
+                        allow_empty: false,
+                    })
+                    .collect(),
+            )
+        };
+        let a = make_set("foo");
+        let b = make_set("bar");
+        for (matcher, text) in [(&a, "foo2123"), (&b, "bar2123"), (&a, "foo2123")] {
+            let hit = matcher
+                .find_earliest(text, 0, &mut SearchCache::default())
+                .expect("fixture matches");
+            assert_eq!((hit.pattern, hit.start, hit.end), (2, 0, 7));
+        }
+        let stats = backend.stats();
+        assert_eq!(stats.fallbacks, 0);
+        assert_eq!(stats.compilations, 2, "an admitted context was recompiled");
+        assert_eq!(stats.evictions, 0);
+        assert!(stats.peak_bytes <= 128 * 1024);
+    }
+
     #[test]
     fn contention_falls_back_without_waiting_for_another_document() {
         let backend = MultiDfa::new(MultiDfaConfig {
