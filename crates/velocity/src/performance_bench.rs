@@ -219,6 +219,8 @@ fn highlight(options: &Options, reporter: &Reporter) -> Result<(), String> {
         .ok_or("workload has no bundled syntax")?;
     let scheme = Arc::new(vel_color_scheme::ColorScheme::velocity_dark());
     for pass in ["first", "warm"] {
+        #[cfg(feature = "highlight-profile")]
+        vel_syntax::matcher_profile::start();
         let at = Instant::now();
         let mut engine = vel_highlight::DocumentHighlighter::new(
             text.clone(),
@@ -229,6 +231,20 @@ fn highlight(options: &Options, reporter: &Reporter) -> Result<(), String> {
         );
         engine.finish().map_err(|e| e.to_string())?;
         let elapsed = at.elapsed();
+        #[cfg(feature = "highlight-profile")]
+        {
+            let matches = vel_syntax::matcher_profile::finish();
+            let phases = engine.profile();
+            reporter.emit(json!({
+                "kind": "perf_highlight_profile", "pass": pass, "matcher": matches,
+                "phase_ms": {"input": ms(phases.input), "parse": ms(phases.parse),
+                    "render": ms(phases.render), "checkpoint": ms(phases.checkpoint)},
+                "render_hits": phases.render_hits, "render_queries": phases.render_queries,
+                "render_entries": phases.render_entries, "built_spans": phases.built_spans,
+                "interned_stacks": phases.interned_stacks,
+                "checkpoint_scope_copies": phases.checkpoint_scope_copies
+            }))?;
+        }
         let lines = engine.parsed_through();
         if lines != text.len_lines() {
             return Err("highlight did not finish at EOF".into());

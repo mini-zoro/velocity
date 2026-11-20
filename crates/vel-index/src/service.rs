@@ -1,6 +1,7 @@
 use crate::{
     Error, FileAnalysis, Index, SymbolLocation, SymbolMatch, analyze,
     store::{Journal, Stamp},
+    temporary::TemporaryIndex,
 };
 use hashlink::LinkedHashMap;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -156,7 +157,32 @@ impl ProjectIndex {
         metadata: Arc<MetadataSet>,
         options: IndexOptions,
     ) -> Result<Self, Error> {
-        Self::open_folder_with_volume(folder, syntaxes, metadata, options, polling::local_volume)
+        Self::open_folder_with_volume(
+            folder,
+            syntaxes,
+            metadata,
+            options,
+            polling::local_volume,
+            None,
+        )
+    }
+
+    /// Opens an index with a private, disposable cache, even if a persistent cache is configured.
+    pub fn open_folder_temporary(
+        folder: Folder,
+        syntaxes: Arc<SyntaxSet>,
+        metadata: Arc<MetadataSet>,
+        options: IndexOptions,
+    ) -> Result<Self, Error> {
+        let temp = TemporaryIndex::new(&std::env::temp_dir())?;
+        Self::open_folder_with_volume(
+            folder,
+            syntaxes,
+            metadata,
+            options,
+            polling::local_volume,
+            Some(temp),
+        )
     }
 
     fn open_folder_with_volume(
@@ -165,6 +191,7 @@ impl ProjectIndex {
         metadata: Arc<MetadataSet>,
         options: IndexOptions,
         local_volume: fn(&Path) -> std::io::Result<bool>,
+        temp: Option<TemporaryIndex>,
     ) -> Result<Self, Error> {
         let source_root = std::path::absolute(&folder.path)?;
         let root = source_root.canonicalize()?;
@@ -206,12 +233,16 @@ impl ProjectIndex {
         );
         // ST4 cache relocation: https://www.sublimetext.com/download
         // Rebuild here rather than replaying an old Application Support cache.
-        let directory = options.cache_dir.as_ref().map_or_else(
-            || cache_dir().join("Velocity/index"),
-            |base| base.join("velocity/index"),
-        );
-        fs::create_dir_all(&directory)?;
-        let directory = directory.canonicalize()?;
+        let directory = if let Some(temp) = &temp {
+            temp.path().to_owned()
+        } else {
+            let dir = options.cache_dir.as_ref().map_or_else(
+                || cache_dir().join("Velocity/index"),
+                |base| base.join("velocity/index"),
+            );
+            fs::create_dir_all(&dir)?;
+            dir.canonicalize()?
+        };
         let cache = directory.join(format!("{}.v6", hash.finalize().to_hex()));
         let worker = Coordinator {
             #[cfg(test)]
@@ -234,7 +265,10 @@ impl ProjectIndex {
         let idle_counters = worker.idle_counters.clone();
         thread::Builder::new()
             .name("velocity-index".into())
-            .spawn(move || worker.run())?;
+            .spawn(move || {
+                let _temp = temp;
+                worker.run();
+            })?;
         Ok(Self {
             #[cfg(test)]
             idle_counters,
@@ -1671,6 +1705,7 @@ mod idle_tests {
                 ..Default::default()
             },
             |_| Ok(false),
+            None,
         )
         .unwrap();
         index.flush().unwrap();

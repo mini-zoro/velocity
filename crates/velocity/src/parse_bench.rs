@@ -5,25 +5,16 @@ use crate::{
     report::{Reporter, ms},
     workspace::Workspace,
 };
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use vel_text::Text;
-#[derive(Debug)]
-pub struct Fixture(pub PathBuf);
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+pub type Fixture = tempfile::TempDir;
 pub fn prepare(options: &Options) -> Result<(Fixture, Workspace), String> {
     Assets::bundled()?;
-    let root = std::env::temp_dir().join(format!(
-        "velocity-intelligence-fixture-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let fixture = tempfile::Builder::new()
+        .prefix("velocity-intelligence-fixture-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let root = fixture.path();
     for file in 0..10 {
         let source = (0..1000)
             .map(|row| {
@@ -40,7 +31,7 @@ pub fn prepare(options: &Options) -> Result<(Fixture, Workspace), String> {
         std::fs::write(root.join(format!("file{file}.rs")), source).map_err(|e| e.to_string())?;
     }
     if options.review_ui.is_some() {
-        crate::review_bench::repository(&root)?;
+        crate::review_bench::repository(root)?;
     }
     let mut workspace = Workspace::new(Text::new(), options.data_dir.clone(), None, false)?;
     for file in 0..10 {
@@ -50,7 +41,7 @@ pub fn prepare(options: &Options) -> Result<(Fixture, Workspace), String> {
             column: 1,
         })?;
     }
-    Ok((Fixture(root), workspace))
+    Ok((fixture, workspace))
 }
 pub fn wait(workspace: &mut Workspace) -> Result<(), String> {
     let until = Instant::now() + Duration::from_secs(120);

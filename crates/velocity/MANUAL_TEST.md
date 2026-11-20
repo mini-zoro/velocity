@@ -216,7 +216,7 @@ and adds the verifier's plain-save, unreadable recovery and Keep Edits tables.
 Its documents are synthetic; the real `385dcdd` snapshot JSON/byte fixtures are
 embedded and relocated into TempDirs. It never reads a verifier checkout or an
 absolute fixture path. The cross products are ignored; small focused regressions
-remain in the normal gate. Reports default to a process-specific temp directory.
+remain in the normal gate. Reports go to stderr unless R20_MATRIX_REPORT is set.
 
 ```sh
 # Use your fixture HOME/SHELL, CARGO_HOME/RUSTUP_HOME as required by the runner.
@@ -3533,6 +3533,8 @@ do not run these checks in the real user profile or on production network storag
   ready, 107.96 to 88.80 ms; first CPU scene, 108.41 to 89.47 ms. Whole
   `--headless-smoke --carets 1`: 39.88 to 41.53 ms. Earlier first completion / exact Tab
   medians after scope publication: Python 1.44 / 0.97 ms; HTML 0.85 / 0.44 ms (five fresh runs).
+  Set `VELOCITY_KEEP_WORKBENCH_FIXTURES=1` only to retain these fixtures for replay;
+  the default removes the generated fixture tree.
 - Fourth review, APFS overwrite medians against `569cc9c`, without added I/O load
   (11 alternating pairs for 1 KB, seven for 10 MB, three for 1 GB):
 

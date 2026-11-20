@@ -47,7 +47,7 @@ impl Prepared {
         }
         parse_bench::wait(&mut workspace)?;
         let mut panels = Panels::new(&workspace, false);
-        panels.add_folder(&mut workspace, fixture.0.clone())?;
+        panels.add_folder(&mut workspace, fixture.path().to_owned())?;
         let until = Instant::now() + Duration::from_secs(120);
         loop {
             workspace.poll();
@@ -78,7 +78,7 @@ impl Prepared {
             .shared_index()
             .write()
             .unwrap()
-            .replace_file(fixture.0.join("vocabulary.txt"), analysis);
+            .replace_file(fixture.path().join("vocabulary.txt"), analysis);
         workspace.select(
             workspace
                 .tabs
@@ -209,7 +209,11 @@ impl Prepared {
         Ok(())
     }
     pub fn definitions(&mut self) -> Result<Vec<f64>, String> {
-        let root = self.fixture.0.canonicalize().map_err(|e| e.to_string())?;
+        let root = self
+            .fixture
+            .path()
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
         let file = root.join("file9.rs");
         let location = root.join("file0.rs");
         // A real reference in the source buffer resolves to file0's indexed definition.

@@ -359,15 +359,7 @@ impl Intelligence {
                 let catalog = workspace.catalog.clone();
                 let options = IndexOptions {
                     cache_dir: if cfg!(test) {
-                        Some(
-                            workspace
-                                .data_path()
-                                .map(|p| p.join("Cache/Index"))
-                                .unwrap_or_else(|| {
-                                    std::env::temp_dir()
-                                        .join(format!("velocity-index-{}", std::process::id()))
-                                }),
-                        )
+                        workspace.data_path().map(|p| p.join("Cache/Index"))
                     } else {
                         std::env::var_os("VELOCITY_CACHE_DIR").map(PathBuf::from)
                     },
@@ -708,9 +700,18 @@ fn patterns(settings: &vel_config::settings::Settings, key: &str) -> Vec<String>
 fn open_index(
     folder: vel_search::project::Folder,
     assets: &crate::language::Assets,
-    mut options: IndexOptions,
+    options: IndexOptions,
     messages: &mut Vec<String>,
 ) -> Result<ProjectIndex, String> {
+    if cfg!(test) && options.cache_dir.is_none() {
+        return ProjectIndex::open_folder_temporary(
+            folder,
+            assets.syntaxes.clone(),
+            assets.metadata.clone(),
+            options,
+        )
+        .map_err(|e| e.to_string());
+    }
     match ProjectIndex::open_folder(
         folder.clone(),
         assets.syntaxes.clone(),
@@ -722,13 +723,7 @@ fn open_index(
             messages.push(format!(
                 "Index cache unavailable ({error}); using temporary cache"
             ));
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            options.cache_dir = Some(std::env::temp_dir().join(format!(
-                "velocity-index-fallback-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            )));
-            ProjectIndex::open_folder(
+            ProjectIndex::open_folder_temporary(
                 folder,
                 assets.syntaxes.clone(),
                 assets.metadata.clone(),

@@ -14,6 +14,8 @@ use std::{
 mod frontend;
 mod multi;
 pub use multi::{MultiDfa, MultiDfaConfig, MultiDfaStats};
+#[cfg(feature = "profile")]
+pub mod profile;
 
 /// A recoverable compilation failure. Broken patterns never match.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -84,6 +86,12 @@ pub trait CompiledPattern: fmt::Debug + Send + Sync {
         end: usize,
         captures: Option<&mut Region>,
     ) -> Result<Option<(usize, usize)>, CompileError>;
+    /// Matches exactly at the supplied start without truncating the haystack.
+    fn match_at(&self, line: &str, start: usize) -> Result<Option<(usize, usize)>, CompileError> {
+        Ok(self
+            .search(line, start, line.len(), None)?
+            .filter(|span| span.0 == start))
+    }
     /// Optionally copies the previous search's registers for this identical query.
     fn cached_captures(
         &self,
@@ -169,40 +177,10 @@ impl CompiledPattern for OnigPattern {
         end: usize,
         captures: Option<&mut Region>,
     ) -> Result<Option<(usize, usize)>, CompileError> {
-        let mut params = onig::MatchParam::default();
-        params.set_retry_limit_in_match(self.limits.retry_limit);
-        params.set_match_stack_limit(self.limits.stack_limit);
-        SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
-            scratch.owner = self as *const Self as usize;
-            scratch.line = line.as_ptr() as usize;
-            scratch.len = line.len();
-            scratch.start = start;
-            scratch.end = end;
-            scratch.span = None;
-            let region = &mut scratch.region;
-            let result = self
-                .regex
-                .search_with_param(
-                    line,
-                    start,
-                    end,
-                    onig::SearchOptions::SEARCH_OPTION_NONE,
-                    Some(region),
-                    params,
-                )
-                .map_err(|e| CompileError(e.to_string()))?;
-            if result.is_none() {
-                return Ok(None);
-            }
-            let span = region.pos(0);
-            if let Some(out) = captures {
-                out.spans.clear();
-                out.spans.extend((0..region.len()).map(|i| region.pos(i)));
-            }
-            scratch.span = span;
-            Ok(span)
-        })
+        self.find_impl::<false>(line, start, end, captures)
+    }
+    fn match_at(&self, line: &str, start: usize) -> Result<Option<(usize, usize)>, CompileError> {
+        self.find_impl::<true>(line, start, line.len(), None)
     }
     fn cached_captures(
         &self,
@@ -230,9 +208,52 @@ impl CompiledPattern for OnigPattern {
         })
     }
 }
+impl OnigPattern {
+    fn find_impl<const ANCHORED: bool>(
+        &self,
+        line: &str,
+        start: usize,
+        end: usize,
+        captures: Option<&mut Region>,
+    ) -> Result<Option<(usize, usize)>, CompileError> {
+        let mut params = onig::MatchParam::default();
+        params.set_retry_limit_in_match(self.limits.retry_limit);
+        params.set_match_stack_limit(self.limits.stack_limit);
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.owner = self as *const Self as usize;
+            scratch.line = line.as_ptr() as usize;
+            scratch.len = line.len();
+            scratch.start = start;
+            scratch.end = end;
+            scratch.span = None;
+            let region = &mut scratch.region;
+            let options = onig::SearchOptions::SEARCH_OPTION_NONE;
+            let result = if ANCHORED {
+                self.regex
+                    .match_with_param(line, start, options, Some(region), params)
+            } else {
+                self.regex
+                    .search_with_param(line, start, end, options, Some(region), params)
+            }
+            .map_err(|e| CompileError(e.to_string()))?;
+            if result.is_none() {
+                return Ok(None);
+            }
+            let span = region.pos(0);
+            if let Some(out) = captures {
+                out.spans.clear();
+                out.spans.extend((0..region.len()).map(|i| region.pos(i)));
+            }
+            scratch.span = span;
+            Ok(span)
+        })
+    }
+}
 struct Inner {
     onig_semantics: bool,
     position_dependent: bool,
+    nonspace_lookahead: bool,
     prefilter: OnceLock<Option<Prefilter>>,
     source: String,
     backend: Arc<dyn RegexBackend>,
@@ -282,9 +303,11 @@ impl Regex {
     }
     fn make(source: String, backend: Arc<dyn RegexBackend>, onig_semantics: bool) -> Self {
         let position_dependent = source.contains(r"\G") || source.contains(r"\K");
+        let nonspace_lookahead = onig_semantics && source == r"(?=\S)";
         Self(Arc::new(Inner {
             onig_semantics,
             position_dependent,
+            nonspace_lookahead,
             prefilter: OnceLock::new(),
             source,
             backend,
@@ -347,12 +370,53 @@ impl Regex {
         region: Option<&mut Region>,
         allow_empty: bool,
     ) -> Option<(usize, usize)> {
+        self.find_impl::<false>(line, start, end, region, allow_empty)
+    }
+    fn find_impl<const ANCHORED: bool>(
+        &self,
+        line: &str,
+        start: usize,
+        end: usize,
+        region: Option<&mut Region>,
+        allow_empty: bool,
+    ) -> Option<(usize, usize)> {
         if start > end
             || end > line.len()
             || !line.is_char_boundary(start)
             || !line.is_char_boundary(end)
         {
             return None;
+        }
+        if self.0.nonspace_lookahead && end == line.len() {
+            // A common else-pop rule finds the next non-whitespace byte but
+            // consumes nothing. Leave Unicode classification to Oniguruma.
+            let first = line.as_bytes()[start..]
+                .iter()
+                .position(|&b| !matches!(b, b' ' | b'\t'..=b'\r'));
+            if first.is_none_or(|i| line.as_bytes()[start + i].is_ascii()) {
+                let hit = first
+                    .filter(|_| allow_empty)
+                    .map(|i| (start + i, start + i));
+                #[cfg(feature = "verify-prefilters")]
+                assert_eq!(
+                    hit,
+                    self.compiled(allow_empty)
+                        .as_ref()
+                        .ok()?
+                        .search(line, start, end, None)
+                        .ok()?,
+                    "nonspace lookahead on {line:?} at {start}",
+                );
+                #[cfg(feature = "profile")]
+                profile::count("nonspace_shortcut");
+                if let Some(span) = hit
+                    && let Some(region) = region
+                {
+                    region.spans.clear();
+                    region.spans.push(Some(span));
+                }
+                return hit.filter(|span| !ANCHORED || span.0 == start);
+            }
         }
         if self
             .0
@@ -374,7 +438,24 @@ impl Regex {
             return None;
         }
         let compiled = self.compiled(allow_empty).as_ref().ok()?;
-        match compiled.search(line, start, end, region) {
+        #[cfg(feature = "profile")]
+        let captures = region.is_some();
+        let search = || {
+            if ANCHORED {
+                #[cfg(feature = "profile")]
+                profile::count("native_anchored");
+                compiled
+                    .match_at(line, start)
+                    .map(|hit| hit.filter(|span| span.0 == start))
+            } else {
+                compiled.search(line, start, end, region)
+            }
+        };
+        #[cfg(feature = "profile")]
+        let result = profile::with_rule(self.regex_str(), captures, search);
+        #[cfg(not(feature = "profile"))]
+        let result = search();
+        match result {
             Ok(r) => r,
             Err(_) => {
                 SEARCH_ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -577,7 +658,7 @@ impl OnigSet {
         candidates: impl Iterator<Item = usize>,
     ) -> Option<Match> {
         let (pattern, span) =
-            self.find_candidate_spans(line, start, cache, excluded, candidates)?;
+            self.find_candidate_spans(line, start, cache, excluded, candidates, false)?;
         self.capture_match(line, start, pattern, span)
     }
     fn find_candidate_spans(
@@ -587,6 +668,7 @@ impl OnigSet {
         cache: &mut SearchCache,
         excluded: &[usize],
         candidates: impl Iterator<Item = usize>,
+        at_start_only: bool,
     ) -> Option<(usize, (usize, usize))> {
         cache.bind(line);
         let mut best = None;
@@ -606,12 +688,21 @@ impl OnigSet {
                     hit
                 }
                 _ => {
-                    let span = regex.find(line, start, line.len(), None, spec.allow_empty);
-                    cache.entries.insert(key, (start, span));
+                    let only =
+                        at_start_only && regex.0.onig_semantics && !regex.position_dependent();
+                    let span = if only {
+                        regex.find_impl::<true>(line, start, line.len(), None, spec.allow_empty)
+                    } else {
+                        regex.find(line, start, line.len(), None, spec.allow_empty)
+                    };
+                    // An anchored miss doesn't tell us anything about later starts.
+                    if !only || span.is_some() {
+                        cache.entries.insert(key, (start, span));
+                    }
                     span
                 }
             };
-            if let Some(span) = span {
+            if let Some(span) = span.filter(|span| !at_start_only || span.0 == start) {
                 if best.is_none_or(|(_, b): (usize, (usize, usize))| span.0 < b.0) {
                     best = Some((index, span));
                 }
@@ -773,7 +864,7 @@ impl Prefilter {
         }
     }
     fn extract(source: &str) -> Option<Self> {
-        if source.contains(r"\u")
+        if frontend::has_unicode_escape(source)
             || source.split("(?").skip(1).any(|s| {
                 s.chars()
                     .take_while(|c| c.is_ascii_alphabetic() || *c == '-')
@@ -856,5 +947,78 @@ mod backend_scratch_tests {
         cache.backend_state(Vec::<u8>::new).push(42);
         cache.reset_line();
         assert_eq!(cache.backend_state(Vec::<u8>::new).as_slice(), &[42]);
+    }
+}
+
+#[cfg(test)]
+mod lookahead_tests {
+    use super::*;
+
+    #[test]
+    fn nonspace_zero_width_matches_native_for_ascii_unicode_and_empty_policy() {
+        let fast = Regex::new(r"(?=\S)".into());
+        let native = OnigBackend::default();
+        for allow_empty in [false, true] {
+            let reference = native.compile(r"(?=\S)", allow_empty).unwrap();
+            for line in [
+                "",
+                " \t\u{b}\r\n",
+                " \t# x",
+                " \u{a0}word",
+                "  \u{e9}",
+                "x\u{a0}",
+            ] {
+                for start in line.char_indices().map(|(at, _)| at).chain([line.len()]) {
+                    let mut actual = Region::new();
+                    let mut expected = Region::new();
+                    let result = fast.find(line, start, line.len(), Some(&mut actual), allow_empty);
+                    assert_eq!(
+                        result,
+                        reference
+                            .search(line, start, line.len(), Some(&mut expected))
+                            .unwrap()
+                    );
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_positive_guard_prefilter_distinguishes_literal_unicode_escape() {
+        let source = r"(?=(?:\w|\\u[0-9a-f]+)+)(?:(?=\s*=\s*function))";
+        assert!(!frontend::has_unicode_escape(source));
+        assert!(frontend::has_unicode_escape(r"\u{e9}"));
+        let filter = Prefilter::extract(source).expect("required literal in positive guard");
+        assert!(!filter.maybe(b"foo bar baz"));
+        assert!(filter.maybe(b"= function"));
+        let optional = Regex::new(r"(?=foo)(?:x(?=foobar))?|hello".into());
+        assert!(optional.compile_error().is_none());
+        assert!(optional.is_match("hello"));
+    }
+
+    #[test]
+    fn exact_start_probe_preserves_context_and_does_not_memoize_a_later_miss() {
+        let set = OnigSet(vec![PatternSpec {
+            regex: Regex::new(r"(?<=x)([a-z]+)(?=:)".into()),
+            allow_empty: true,
+        }]);
+        let line = " xhello: tail";
+        let mut cache = SearchCache::default();
+        assert!(
+            set.find_candidate_spans(line, 0, &mut cache, &[], 0..1, true)
+                .is_none()
+        );
+        assert!(cache.entries.is_empty());
+        let hit = set.find_earliest(line, 0, &mut cache, &[]).unwrap();
+        assert_eq!((hit.start, hit.end), (2, 7));
+        assert_eq!(hit.captures.pos(1), Some((2, 7)));
+
+        cache.reset_line();
+        let (pattern, span) = set
+            .find_candidate_spans(line, 2, &mut cache, &[], 0..1, true)
+            .unwrap();
+        let anchored = set.capture_match(line, 2, pattern, span).unwrap();
+        assert_eq!(anchored, hit);
     }
 }

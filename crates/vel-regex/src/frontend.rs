@@ -3,6 +3,19 @@
 //! Exact spans, assertions, full folding and Unicode are resolved by Oniguruma.
 use regex_syntax::hir::{Class, ClassBytes, ClassBytesRange, Hir, HirKind, Look};
 
+pub(crate) fn has_unicode_escape(source: &str) -> bool {
+    if !source.contains(r"\u") {
+        return false;
+    }
+    let mut bytes = source.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\\' && bytes.next() == Some(b'u') {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     Dfa,
@@ -746,7 +759,7 @@ impl Candidate {
 pub fn candidate(source: &str) -> Option<Candidate> {
     // Onig supports multi-character case folding even on ASCII input (ß -> ss).
     // Keep these rules in the reference engine rather than guessing equivalence.
-    if source.contains(r"\u")
+    if has_unicode_escape(source)
         || (!source.is_ascii()
             && source.split("(?").skip(1).any(|s| {
                 s.chars()
@@ -925,26 +938,44 @@ pub(crate) fn prefilter_hirs(source: &str) -> Vec<Hir> {
     let Ok(normalized) = normalize(source) else {
         return Vec::new();
     };
-    let parse = |s: &str| relax(s).and_then(|s| regex_syntax::Parser::new().parse(&s).ok());
-    let mut hirs: Vec<_> = parse(&normalized).into_iter().collect();
-    let mut inner = normalized.as_str();
-    let mut wrappers = Vec::new();
-    while let Some((text, flags)) = outer(inner) {
-        wrappers.push(flags.to_owned());
-        inner = text;
-    }
-    if let Some(parts) = atoms(inner)
-        // A guard inside one alternative is not necessary for the other alternatives.
-        && !parts.iter().any(|&(start, end)| &inner[start..end] == "|")
-    {
-        for (start, end) in parts {
-            if let Some(guard) = guard(&inner[start..end], true)
-                && guard.positive
-                && let Some(hir) = parse(&wrap(&guard.expr, &wrappers))
-            {
-                hirs.push(hir);
+    fn collect(source: &str, hirs: &mut Vec<Hir>, budget: &mut usize) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        hirs.extend(relax(source).and_then(|s| regex_syntax::Parser::new().parse(&s).ok()));
+        if !source.contains("(?=") {
+            return;
+        }
+        let mut inner = source;
+        let mut wrappers = Vec::new();
+        while let Some((text, flags)) = outer(inner) {
+            wrappers.push(flags.to_owned());
+            inner = text;
+        }
+        if let Some(parts) = atoms(inner)
+            // A guard in one alternative is not necessary for the other alternatives.
+            && !parts.iter().any(|&(start, end)| &inner[start..end] == "|")
+        {
+            for (start, end) in parts {
+                let mut atom = &inner[start..end];
+                if !atom.starts_with('(') || !atom.contains("(?=") {
+                    continue;
+                }
+                let mut local = wrappers.clone();
+                while let Some((text, flags)) = outer(atom) {
+                    local.push(flags.to_owned());
+                    atom = text;
+                }
+                if let Some(guard) = guard(atom, true)
+                    && guard.positive
+                {
+                    collect(&wrap(&guard.expr, &local), hirs, budget);
+                }
             }
         }
     }
+    let mut hirs = Vec::new();
+    collect(&normalized, &mut hirs, &mut 16);
     hirs
 }

@@ -10,6 +10,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+highlight-profile = ["vel-highlight/profile", "vel-syntax/matcher-profile"]
+
 [dependencies]
 vel-crash = { path = "../vel-crash" }
 vel-packages = { path = "../vel-packages" }

@@ -105,4 +105,18 @@ fn official_assertions_never_regress() {
             "{name}: {got:?}, baseline {expected:?}"
         );
     }
+    if std::env::var_os("VEL_SYNTAX_CORPUS_DIGEST").is_some() {
+        let evidence = serde_json::to_vec(&(
+            actual.loaded,
+            actual.test_files,
+            actual.overall,
+            actual.scope_counts,
+            actual.symbol_counts,
+            actual.reindent_counts,
+            actual.syntaxes,
+            actual.files,
+        ))
+        .unwrap();
+        println!("syntax-assertions-digest {}", blake3::hash(&evidence));
+    }
 }

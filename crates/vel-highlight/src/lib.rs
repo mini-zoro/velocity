@@ -128,6 +128,12 @@ pub struct HighlightProfile {
     pub render_queries: u64,
     /// Number of retained render shapes (bounded independently of source text).
     pub render_entries: usize,
+    /// Number of new style spans built on render cache misses.
+    pub built_spans: usize,
+    /// Distinct active scope stacks stored in the interner.
+    pub interned_stacks: usize,
+    /// New owned end-of-line scope stacks, including branch repairs.
+    pub checkpoint_scope_copies: usize,
 }
 /// Stateful engine, also usable without threads in tests or editor-owned scheduling.
 /// Dense checkpoints (N=1) include every visible line and permit single-line convergence.
@@ -334,6 +340,8 @@ impl DocumentHighlighter {
             render_hits: self.render_cache.hits,
             render_queries: self.render_cache.queries,
             render_entries: self.render_cache.entries.len(),
+            built_spans: self.render_cache.built_spans,
+            interned_stacks: self.scope_interner.stacks.0.len(),
             ..self.profile
         }
     }
@@ -583,6 +591,10 @@ impl DocumentHighlighter {
                 record.end_stack = rendered.end_stack;
                 record.has_symbols = self.scope_interner.has_symbols(&record.runs);
                 record.scopes = Arc::new(scopes.clone());
+                #[cfg(feature = "profile")]
+                {
+                    self.profile.checkpoint_scope_copies += 1;
+                }
                 record.checkpoint = None;
             }
             self.scopes = scopes;
@@ -621,6 +633,10 @@ impl DocumentHighlighter {
         let scopes = if let Some(scopes) = self.scope_cache.get(&self.scopes) {
             scopes.clone()
         } else {
+            #[cfg(feature = "profile")]
+            {
+                self.profile.checkpoint_scope_copies += 1;
+            }
             let scopes = Arc::new(self.scopes.clone());
             if self.scope_cache.len() < 4096 {
                 self.scope_cache.insert(scopes.clone());
@@ -735,6 +751,8 @@ struct RenderCache {
     hits: u64,
     #[cfg(feature = "profile")]
     queries: u64,
+    #[cfg(feature = "profile")]
+    built_spans: usize,
 }
 impl RenderCache {
     fn render(
@@ -774,6 +792,10 @@ impl RenderCache {
         let admit = self.entries.len() < 8192 && self.bytes < 4 * 1024 * 1024;
         let before = admit.then(|| stack.clone());
         let output = style_line(line, ops, stack, resolver, interner)?;
+        #[cfg(feature = "profile")]
+        {
+            self.built_spans += output.spans.len();
+        }
         let bytes = std::mem::size_of_val(ops)
             + std::mem::size_of_val(output.spans.as_ref())
             + std::mem::size_of_val(output.runs.as_ref());

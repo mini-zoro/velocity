@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 profile = ["vel-highlight/profile"]
+matcher-profile = ["vel-regex/profile"]
 
 [dependencies]
 vel-scope = { path = "../vel-scope" }

@@ -20,6 +20,8 @@ pub use state::{LineOps, ParseState, Rewind};
 pub use syntax_definition::SyntaxDefinition;
 pub use syntax_set::{SyntaxReference, SyntaxSet, SyntaxSetBuilder};
 pub use tm_language::TmLanguageError;
+#[cfg(feature = "matcher-profile")]
+pub use vel_regex::profile as matcher_profile;
 pub use vel_scope::{Scope, ScopeOp, ScopeStack, ScopeStackOp};
 pub use yaml_load::ParseSyntaxError;
 

@@ -12,7 +12,9 @@ pub use data::{
 };
 pub use names::fuzzy_score;
 pub use service::{IndexOptions, IndexStatus, ProjectIndex};
+mod temporary;
 use std::{path::Path, sync::Arc};
+pub use temporary::sweep_stale;
 use vel_syntax::{MetadataSet, SyntaxSet};
 /// Indexing, cache, resource or syntax error.
 #[derive(Debug, thiserror::Error)]

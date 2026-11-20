@@ -3,7 +3,7 @@
 //! production snapshot code; embed their bytes and relocate every runtime path
 //! into a TempDir. No verifier checkout, installed packages or external files are read.
 //! Run `cargo test -p velocity --release --locked round20_matrix -- --ignored --nocapture`.
-//! R20_MATRIX_REPORT optionally selects a report directory; the default is in temp_dir().
+//! R20_MATRIX_REPORT optionally persists TSV reports; by default they go to stderr.
 use super::*;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -72,23 +72,26 @@ impl Rep {
 }
 impl Drop for Rep {
     fn drop(&mut self) {
-        let dir = std::env::var_os("R20_MATRIX_REPORT").map_or_else(
-            || std::env::temp_dir().join(format!("velocity-r20-matrix-{}", std::process::id())),
-            PathBuf::from,
-        );
-        let _ = std::fs::create_dir_all(&dir);
         let mut out = format!("CELLS\t{}\tFAILS\t{}\n", self.cells, self.fails);
         for l in &self.lines {
             out.push_str(l);
             out.push('\n');
         }
-        std::fs::write(dir.join(format!("{}.tsv", self.name)), out).unwrap();
-        eprintln!(
-            "{}: {} cells, {} failures",
-            self.name, self.cells, self.fails
-        );
+        if let Some(dir) = std::env::var_os("R20_MATRIX_REPORT").map(PathBuf::from) {
+            // Do not mask an original test panic with a report error in Drop.
+            if let Err(error) = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(dir.join(format!("{}.tsv", self.name)), &out))
+            {
+                eprintln!(
+                    "{}: could not write report to {}: {error}",
+                    self.name,
+                    dir.display()
+                );
+            }
+        }
+        eprint!("{}:\n{out}", self.name);
         if !std::thread::panicking() {
-            assert_eq!(self.fails, 0, "{}: see {}", self.name, dir.display());
+            assert_eq!(self.fails, 0, "{}: see test output", self.name);
         }
     }
 }

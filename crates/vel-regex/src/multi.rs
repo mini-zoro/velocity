@@ -392,8 +392,12 @@ impl MultiSet {
                 && start >= candidate.from
                 && candidate.hit.is_none_or(|(_, at, _)| at >= start)
             {
+                #[cfg(feature = "profile")]
+                crate::profile::count("candidate_cache_hit");
                 Ok(candidate.hit)
             } else {
+                #[cfg(feature = "profile")]
+                crate::profile::count("candidate_scan");
                 if let Some((ac, map)) = &machine.literals {
                     Ok(ac
                         .find(aho_corasick::Input::new(line).span(start..line.len()))
@@ -444,16 +448,28 @@ impl MultiSet {
                             ))
                         } else {
                             self.patterns
-                                .find_candidate_spans(line, at, cache, &[], std::iter::once(index))
-                                .filter(|(_, span)| span.0 == at)
+                                .find_candidate_spans(
+                                    line,
+                                    at,
+                                    cache,
+                                    &[],
+                                    std::iter::once(index),
+                                    true,
+                                )
                                 .map(|(index, (begin, end))| (index, begin, end, at, None))
                         }
                     });
                     if hit.is_some() && fast.is_none() {
+                        #[cfg(feature = "profile")]
+                        crate::profile::count("candidate_rejected");
                         // A guard or empty-match policy rejected the superset's winner.
                         // Resolve the query in original priority order in one pass.
                         self.patterns.find_earliest(line, start, cache, &[])
                     } else {
+                        #[cfg(feature = "profile")]
+                        if !machine.fallback.is_empty() {
+                            crate::profile::count("hybrid_fallback_queries");
+                        }
                         let fallback = self
                             .patterns
                             .find_candidate_spans(
@@ -465,6 +481,7 @@ impl MultiSet {
                                     fast.as_ref()
                                         .is_none_or(|hit| hit.1 != start || *index < hit.0)
                                 }),
+                                fast.as_ref().is_some_and(|hit| hit.1 == start),
                             )
                             .map(|(index, (begin, end))| (index, begin, end, start, None));
                         let winner = match (fast, fallback) {
@@ -589,8 +606,12 @@ impl PatternMatcher for MultiSet {
         }
         cache.bind(line);
         if self.disabled.load(Ordering::Relaxed) || !cache.ascii || !excluded.is_empty() {
+            #[cfg(feature = "profile")]
+            crate::profile::count("native_only_queries");
             return self.patterns.find_earliest(line, start, cache, excluded);
         }
+        #[cfg(feature = "profile")]
+        crate::profile::count("candidate_queries");
         let result = self.query(line, start, cache);
         if self.shared.config.verify_matches {
             let expected =
@@ -609,6 +630,40 @@ impl PatternMatcher for MultiSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchored_candidates_preserve_priority_and_exclusions() {
+        let backend = MultiDfa::new(MultiDfaConfig {
+            verify_matches: true,
+            ..MultiDfaConfig::default()
+        });
+        let sources = [
+            format!(r"(?=(?:ab|\\u[0-9a-f]{{4}}|{}):)", "abcdefgh".repeat(40)),
+            "(ab)".into(),
+            ":".into(),
+            "!".into(),
+        ];
+        let set = backend.build(
+            sources
+                .map(|re| PatternSpec {
+                    regex: crate::Regex::new(re),
+                    allow_empty: true,
+                })
+                .into(),
+        );
+        let line = "0  ab:";
+        let mut cache = SearchCache::default();
+        let saved = set.find_earliest(line, 0, &mut cache).unwrap();
+        assert_eq!((saved.pattern, saved.start, saved.end), (0, 3, 3));
+        assert_eq!(set.find_earliest(line, 2, &mut cache), Some(saved.clone()));
+        let alternate = set
+            .find_earliest_excluding(line, 2, &mut cache, &[0])
+            .unwrap();
+        assert_eq!(alternate.pattern, 1);
+        assert_eq!(alternate.captures.pos(1), Some((3, 5)));
+        assert_eq!(set.find_earliest(line, 2, &mut cache), Some(saved));
+        assert_eq!(set.find_earliest(line, 5, &mut cache).unwrap().pattern, 2);
+    }
     #[test]
     fn small_machines_do_not_evict_each_other_on_admission() {
         let backend = MultiDfa::new(MultiDfaConfig {

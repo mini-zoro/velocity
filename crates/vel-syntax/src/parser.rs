@@ -1088,6 +1088,8 @@ impl InterpreterState {
                 _ => false,
             };
             if fail_that_resolves {
+                #[cfg(feature = "matcher-profile")]
+                vel_regex::profile::count("branch_fail");
                 let level_context = {
                     let id = &self.stack[self.stack.len() - 1].context;
                     syntax_set.get_context(id)?
@@ -1321,11 +1323,21 @@ impl InterpreterState {
                     }
                 }
             }
-            while let Some(hit) =
-                patterns
-                    .matcher
-                    .find_earliest_excluding(haystack, start, search_cache, &excluded)
-            {
+            while let Some(hit) = {
+                let mut search = || {
+                    patterns.matcher.find_earliest_excluding(
+                        haystack,
+                        start,
+                        search_cache,
+                        &excluded,
+                    )
+                };
+                #[cfg(feature = "matcher-profile")]
+                let hit = vel_regex::profile::with_context(&patterns.profile_name, &mut search);
+                #[cfg(not(feature = "matcher-profile"))]
+                let hit = search();
+                hit
+            } {
                 let (context_id, pat_index) = patterns.rules[hit.pattern];
                 let pat_context = syntax_set.get_context(&context_id)?;
                 let match_pat = pat_context.match_at(pat_index)?;
@@ -1460,6 +1472,11 @@ impl InterpreterState {
         // For Branch, we need to snapshot state before executing, then synthesize a Push.
         let is_branch = matches!(pat.operation, MatchOperation::Branch { .. });
         let synthetic_op;
+        let capture_ops = pat
+            .captures
+            .as_ref()
+            .map(|m| build_capture_ops(m, &reg_match.regions, version))
+            .unwrap_or_default();
 
         if is_branch {
             if let MatchOperation::Branch {
@@ -1511,13 +1528,10 @@ impl InterpreterState {
                         }
                         None => ops.clone(),
                     },
-                    capture_ops: pat
-                        .captures
-                        .as_ref()
-                        .map(|m| build_capture_ops(m, &reg_match.regions, version))
-                        .unwrap_or_default()
-                        .into_vec(),
+                    capture_ops: capture_ops.to_vec(),
                 };
+                #[cfg(feature = "matcher-profile")]
+                vel_regex::profile::count("branch_point");
                 self.branch_points.push(bp);
                 // `pop: N + branch:` is a lookahead, like
                 // `pop: N + push:` and not like `set`. This built a synthetic
@@ -1527,16 +1541,9 @@ impl InterpreterState {
                 // `source meta.tail.branch keyword.trigger.branch` — the target's
                 // `meta_scope` alone. So the synthetic is a `Push` carrying the
                 // count, which is where the lookahead unwinding lives.
-                synthetic_op = if pop_count > 0 {
-                    MatchOperation::Push {
-                        ctx_refs: vec![alternatives[0].clone()],
-                        pop_count,
-                    }
-                } else {
-                    MatchOperation::Push {
-                        ctx_refs: vec![alternatives[0].clone()],
-                        pop_count: 0,
-                    }
+                synthetic_op = MatchOperation::Push {
+                    ctx_refs: vec![alternatives[0].clone()],
+                    pop_count,
                 };
             } else {
                 unreachable!()
@@ -1555,31 +1562,19 @@ impl InterpreterState {
         for s in &pat.scope {
             ops.push((match_start, ScopeStackOp::Push(*s)));
         }
-        let capture_ops = pat
-            .captures
-            .as_ref()
-            .map(|m| build_capture_ops(m, &reg_match.regions, version))
-            .unwrap_or_default();
         ops.extend(capture_ops.iter().cloned());
         if !pat.scope.is_empty() {
             ops.push((match_end, ScopeStackOp::Pop(pat.scope.len())));
         }
         self.push_meta_ops(false, match_end, level_context, op_to_use, syntax_set, ops)?;
 
-        if is_branch {
-            // Execute the synthetic Push through perform_op
-            let synthetic_pat = MatchPattern::new(
-                pat.has_captures,
-                pat.regex.regex_str().to_string(),
-                pat.scope.clone(),
-                pat.captures.clone(),
-                synthetic_op,
-                pat.with_prototype.clone(),
-            );
-            self.perform_op(line, &reg_match.regions, &synthetic_pat, syntax_set)
-        } else {
-            self.perform_op(line, &reg_match.regions, pat, syntax_set)
-        }
+        self.perform_op(
+            line,
+            &reg_match.regions,
+            op_to_use,
+            pat.with_prototype.as_ref(),
+            syntax_set,
+        )
     }
 
     /// Handle a `fail` operation by rewinding to the named branch point.
@@ -2900,12 +2895,13 @@ impl InterpreterState {
         &mut self,
         line: &str,
         regions: &Region,
-        pat: &MatchPattern,
+        operation: &MatchOperation,
+        with_prototype: Option<&ContextReference>,
         syntax_set: &SyntaxSet,
     ) -> Result<bool, ParsingError> {
         // filled in by the `Embed` arm below.
         let mut embed_holder: Option<(ContextId, usize)> = None;
-        let (ctx_refs, old_proto_ids, is_embed) = match pat.operation {
+        let (ctx_refs, old_proto_ids, is_embed) = match *operation {
             MatchOperation::Push {
                 ref ctx_refs,
                 pop_count,
@@ -3027,7 +3023,7 @@ impl InterpreterState {
                 // top most on the stack after all the contexts are pushed - this is also
                 // referred to as the "target" of the push by sublimehq - see
                 // https://forum.sublimetext.com/t/dev-build-3111/19240/17 for more info
-                if let Some(ref p) = pat.with_prototype {
+                if let Some(p) = with_prototype {
                     proto_ids.push(p.id_in(syntax_set)?);
                 }
             }
@@ -3064,7 +3060,7 @@ impl InterpreterState {
         }
 
         // For Embed: push an EscapeEntry with the resolved escape regex
-        if is_embed && let MatchOperation::Embed { ref escape, .. } = pat.operation {
+        if is_embed && let MatchOperation::Embed { escape, .. } = operation {
             let resolved_regex = if escape.has_captures {
                 // Resolve backrefs in escape regex using the triggering match's captures
                 let new_regex_str =

@@ -168,10 +168,13 @@ def main():
                     try:
                         usage = read_counters(child.pid)
                     finally:
-                        code = child.wait()
+                        # Reap after proc_pid_rusage has read the zombie's counters.
+                        _, status, rusage = os.wait4(child.pid, 0)
+                        code = child.returncode = os.waitstatus_to_exitcode(status)
                 stem.with_name(stem.name + ".json").write_text(json.dumps({
                     "uptime": uptime, "returncode": code,
-                    "process_ms": (time.monotonic() - at) * 1000, **usage,
+                    "process_ms": (time.monotonic() - at) * 1000,
+                    "user_s": rusage.ru_utime, "system_s": rusage.ru_stime, **usage,
                 }) + "\n")
                 records_ok = code == 0 and records.exists() and any(
                     json.loads(line).get("complete") is True

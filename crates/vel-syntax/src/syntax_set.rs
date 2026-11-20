@@ -24,6 +24,8 @@ fn default_backend() -> Arc<dyn MatcherBackend> {
 pub(crate) struct ContextPatterns {
     pub rules: Vec<(ContextId, usize)>,
     pub matcher: PatternSet,
+    #[cfg(feature = "matcher-profile")]
+    pub profile_name: String,
 }
 type ContextMatcherCache =
     Mutex<HashMap<(ContextId, Option<(Region, String)>, Option<ContextId>), Arc<ContextPatterns>>>;
@@ -1807,18 +1809,18 @@ impl SyntaxSet {
                 allow_empty: !matches!(pattern.operation, MatchOperation::None),
             });
         }
+        let syntax = &self.syntaxes[id.syntax_index];
+        let name = syntax
+            .context_ids()
+            .iter()
+            .find_map(|(name, context)| (*context == id).then_some(name.as_str()))
+            .unwrap_or("<anonymous>");
+        let name = format!("{}::{name}", syntax.name);
         let compiled = Arc::new(ContextPatterns {
             rules,
-            matcher: {
-                let syntax = &self.syntaxes[id.syntax_index];
-                let name = syntax
-                    .context_ids()
-                    .iter()
-                    .find_map(|(name, context)| (*context == id).then_some(name.as_str()))
-                    .unwrap_or("<anonymous>");
-                self.matcher_backend
-                    .build_named(patterns, &format!("{}::{name}", syntax.name))
-            },
+            matcher: self.matcher_backend.build_named(patterns, &name),
+            #[cfg(feature = "matcher-profile")]
+            profile_name: name,
         });
         if is_static {
             let _ = context.compiled.0.set(compiled.clone());

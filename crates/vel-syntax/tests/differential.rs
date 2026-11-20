@@ -27,9 +27,14 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
         .collect();
     files.sort();
     assert_eq!(files.len(), 242);
+    // Optional cross-revision evidence, independent of process-local scope IDs.
+    let mut digest = std::env::var_os("VEL_SYNTAX_CORPUS_DIGEST").map(|_| blake3::Hasher::new());
     let mut lines = 0;
     let mut rewinds = 0;
     for path in files {
+        if let Some(digest) = &mut digest {
+            serde_json::to_writer(&mut *digest, path.strip_prefix(&root).unwrap()).unwrap();
+        }
         let text = std::fs::read_to_string(&path).unwrap().replace('\r', "");
         let syntax = text.lines().next().unwrap().split('"').nth(1).unwrap();
         let mut reference =
@@ -42,6 +47,19 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
             ParseState::new(multi.clone(), multi.find_syntax_by_path(syntax).unwrap());
         for (row, line) in text.split_inclusive('\n').enumerate() {
             let expected = reference.parse_line(line).unwrap();
+            if let Some(digest) = &mut digest {
+                serde_json::to_writer(
+                    &mut *digest,
+                    &(
+                        &expected.ops,
+                        expected.rewind.map(|rewind| rewind.from_line),
+                        &expected.corrections,
+                        &expected.warnings,
+                    ),
+                )
+                .unwrap();
+                digest.update(b"\n");
+            }
             assert_eq!(
                 candidate.parse_line(line).unwrap(),
                 expected,
@@ -64,4 +82,7 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
     assert!(rewinds > 0);
     assert!(backend.stats().classifications > 0);
     assert!(backend.stats().resident_bytes <= 32 * 1024 * 1024);
+    if let Some(digest) = digest {
+        println!("syntax-differential-digest {}", digest.finalize());
+    }
 }

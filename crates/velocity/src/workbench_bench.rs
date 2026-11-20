@@ -14,15 +14,11 @@ use vel_session::{Document, History, Session, Sheet, ViewState, Window};
 use vel_text::Text;
 
 pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
-    let root = std::env::temp_dir().join(format!(
-        "velocity-workbench-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let fixture = tempfile::Builder::new()
+        .prefix("velocity-workbench-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let root = fixture.path();
     let data = options
         .data_dir
         .clone()
@@ -122,7 +118,13 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
         return Err("restored undo failed".into());
     }
     scene_bench(reporter, options)?;
-    reporter.emit(json!({"kind":"complete","complete":true,"fixtures":root,"restore_gui_command":format!("./target/release/velocity --bench-startup --restore-session --data-dir '{}'",data.display())}))
+    if std::env::var_os("VELOCITY_KEEP_WORKBENCH_FIXTURES").is_some() {
+        reporter.emit(json!({"kind":"complete","complete":true,"fixtures":root,"restore_gui_command":format!("./target/release/velocity --bench-startup --restore-session --data-dir '{}'",data.display())}))?;
+        let _ = fixture.keep();
+        Ok(())
+    } else {
+        reporter.emit(json!({"kind":"complete","complete":true,"fixtures_retained":false}))
+    }
 }
 pub fn scene_bench(reporter: &Reporter, options: &Options) -> Result<(), String> {
     let text = Text::from("fn main() { let hello = 1; }\n".repeat(10_000));

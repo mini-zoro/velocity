@@ -270,7 +270,13 @@ impl Journal {
 fn journal_lock(path: &Path) -> io::Result<Option<File>> {
     use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
     let dir = path.parent().expect("journal directory").join(".locks");
-    fs::create_dir_all(&dir)?;
+    // The coordinator has already created the journal directory. Do not recreate
+    // it if a concurrent process-exit cleanup has since removed a temporary cache.
+    if let Err(error) = fs::create_dir(&dir)
+        && error.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(error);
+    }
     let lock = OpenOptions::new()
         .create(true)
         .write(true)

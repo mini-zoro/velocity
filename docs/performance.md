@@ -1,7 +1,9 @@
 # Velocity vs. Sublime Text: public baselines
 
-Measured 2026-11-20 on Apple M1 Pro, 16 GB, arm64 macOS 26.1 (25B78), with a locked,
-optimized Rust 1.99 build from lane C (`efe8b5b` plus changes in this worktree).
+Measured 2026-11-20 on Apple M1 Pro, 16 GB, arm64 macOS 26.1 (25B78), with
+locked, optimized Rust 1.99 builds. The highlighting rows use the round 29
+candidate and a same-build `4dcbc9c` baseline. Other rows are historical
+round 27 observations (`efe8b5b` plus the round 27 changes).
 No Sublime executable, application bundle or package was downloaded or run. No
 window, renderer, drawable or GPU workload was started in this round.
 
@@ -18,12 +20,12 @@ before launching the corresponding processes. Shared load was substantial;
 the workspace gate overlapped parts of the final suite, so wall-time tails
 should not be read as a quiet-machine result.
 
-## Reviewer correction (2026-11-20, read this first)
+## Reviewer correction and round 29 re-measurement
 
 From 11:28 the reviewer demoted the lane processes with `taskpolicy -b` to run GUI
 benchmarks on the same machine; child processes inherited background QoS (efficiency
-cores, throttled). **Every wall time in the table below that was measured by this
-lane after 11:28 is inflated and must not be compared with Sublime.** Retired
+cores, throttled). **Round 27 wall times measured by this lane after 11:28 are
+inflated and must not be compared with Sublime.** Retired
 instruction counts are unaffected. Re-measured by the reviewer at normal priority
 (`/tmp/r14-review/c27`, round 27 binary; machine still busy, LA 95–103, so CPU time is
 the better guide):
@@ -34,17 +36,44 @@ the better guide):
 | jQuery 3.7.1 (10,717 lines) | 866 ms | 0.79–0.81 s | 6.94B | ≈ 0.35 s CPU |
 | SQLite 3.8.7.1 `sqlite3.c` (151,639 lines) | 1,919 ms | 2.02–2.08 s | 14.25B | ≈ 0.9 s CPU ≈ 160k lines/s |
 
-So full JavaScript highlighting is roughly **3–4× ST3's published 98 ms for jQuery 2.1**
-(not 77×); C highlighting is fast. The JavaScript grammar's hot contexts remain the main
-highlighting gap. Quiet-machine wall times for the rows below (startup proxy, Find in Files,
-large-file open, long-line typing) still need to be re-measured.
+Round 27's jQuery 2.1 per-pass CPU estimate was roughly **3–4× ST3's
+published 98 ms** (not 77×). This was a rough historical comparison, not a
+same-machine ST4 result. Quiet-machine wall times for the remaining historical
+rows (startup proxy, Find in Files, large-file open, long-line typing) still
+need to be re-measured.
+
+Round 29 alternated five fresh processes per side for each workload. Both
+binaries used `cargo build --release --locked -j 6 -p velocity` and
+`MACOSX_DEPLOYMENT_TARGET=14.0`; neither was package-built. Runs used disposable
+homes, zsh, and temp/log roots. Cargo builds used an offline snapshot of the
+registry rather than writing to the real Cargo home. Warm-up populated the
+same disposable grammar cache; each measured invocation runs a first and a
+warm full pass with fresh document state. Darwin own-child retired instructions
+and `wait4` CPU user time include **both passes, startup, and teardown**.
+The wall-throughput column is the median second pass, not CPU throughput;
+one-minute load averages ranged from 15.25 to 108.02. Percent changes are
+medians of paired ratios.
+
+| Full highlight | Lines | Instructions, before → after | Paired change | CPU user s, before → after | Warm k lines/s, before → after |
+|---|---:|---:|---:|---:|---:|
+| jQuery 2.1.4 | 9,211 | 6.691B → 5.143B | −23.09% | 0.845 → 0.616 | 19.0 → 25.9 |
+| jQuery 3.7.1 | 10,717 | 6.994B → 5.369B | −23.53% | 0.812 → 0.658 | 23.9 → 30.2 |
+| SQLite `sqlite3.c` | 151,639 | 14.363B → 14.247B | −0.86% | 1.974 → 2.028 | 126.3 → 146.8 |
+| `rust-10mb.rs` | 297,030 | 61.028B → 60.324B | −1.29% | 7.375 → 7.961 | 80.7 → 65.0 |
+| `javascript-10mb.js` | 281,484 | 64.527B → 49.265B | −23.54% | 8.216 → 6.269 | 58.3 → 81.5 |
+
+Both jQuery inputs use about **1.30× fewer instructions**, short of the 2×
+target. The non-JavaScript instruction budget held. User CPU rose for SQLite
+and the Rust median, and Rust warm wall throughput was lower. The median of
+paired CPU ratios was +2.71% for SQLite and +0.21% for Rust; these runs do not
+establish a non-JavaScript latency win or rule out a small CPU regression.
 
 ## Comparison
 
 | Metric | Sublime public value (source, hardware) | Velocity (M1 Pro, macOS 26.1) | Ratio | Comparability | PLAN verdict |
 |---|---|---|---:|---|---|
-| jQuery 2.1.4, full highlight | 98 ms (ST3 dev, [syntect](https://docs.rs/crate/syntect/5.2.0#performance), 2012 MBP) | Warm 7,583 / 9,593 ms (1.2k lines/s p50); first 7,518 / 9,873 ms; LA 10.72–14.79 | 77.4× | Similar jQuery 2.1 workload; legacy build, different hardware and load | Behind historical reference; ST4 target unverified |
-| jQuery 3.7.1, full highlight | No same-file value | Warm 4,924 / 9,129 ms (2.2k lines/s p50); first 6,702 / 8,798 ms; LA 10.33–14.92 | — | Not comparable to the 2.1 timing | Baseline only |
+| jQuery 2.1.4, full highlight | 98 ms (ST3 dev, [syntect](https://docs.rs/crate/syntect/5.2.0#performance), 2012 MBP) | 5.143B instructions and 0.616 s user CPU per process; warm 25.9k lines/s | — | Similar jQuery 2.1 workload; legacy build, different hardware and load | Work reduced; ST4 target unverified |
+| jQuery 3.7.1, full highlight | No same-file value | 5.369B instructions and 0.658 s user CPU per process; warm 30.2k lines/s | — | Not comparable to the 2.1 timing | Local before/after only |
 | Startup, main to first scene | ~400 ms fresh-install mean, [MonoVM](https://monovm.com/blog/best-text-editors/#performance-and-benchmarks) (i5-12400); 557.7 ms one first paint, [ST4 4200 user log](https://github.com/sublimehq/sublime_text/issues/6853) (M4) | Blank 1201.6 / 2255.3 ms; LA 9.98–16.04; 5k 1186.7 / 1562.6 ms; LA 10.14–16.04 | — | Proxy; no GUI or controlled cold caches | Native target unverified |
 | Settled headless memory | ~80 MB RAM, [MonoVM](https://monovm.com/blog/best-text-editors/#performance-and-benchmarks) (i5-12400); counter and idle workload unclear | Blank footprint 27.5 / 27.6 MB, RSS 48.1 / 48.2 MB; 5k footprint 30.9 / 31.4 MB, RSS 52.0 / 52.5 MB | — | Proxy; no renderer or plugin host | Native target unverified |
 | 1M lines, 29 MB | 259.6 MB Activity Monitor; usability pass in 30 s, [Peeknext](https://peeknext.com/benchmarks/) (M2 Pro) | First 704.7 / 857.9 ms; full 702.2 / 850.9 ms; settled footprint 74.7 / 74.8 MB, RSS 98.3 / 99.4 MB; LA 9.79–16.19 | 0.29× footprint | Similar size/language; different bytes, process and highlight policy | Lower memory proxy; equivalent usability unverified |
@@ -60,9 +89,9 @@ large-file open, long-line typing) still need to be re-measured.
 | 250 MB plain log open | ~3 s, [MonoVM](https://monovm.com/blog/best-text-editors/#performance-and-benchmarks) (i5-12400); unpublished bytes/end condition | First 160.5 / 284.5 ms; full 9.93 / 13.81 s; settled footprint 308.1 / 308.3 MB, RSS 291.7 / 328.7 MB; LA 10.03–17.17 | — | Proxy; synthetic log, different system and endpoint | Fast prefix; full-open parity unverified |
 | Find in Files | No credible ST4 timing | 23.13 / 28.74 s; 35,857 searched, 162,864 result lines; LA 10.64–17.63 | — | Not comparable | Baseline only |
 | Goto Anything, 100k prepared paths | No credible ST4 timing | `srcmainrs` 57.3 / 64.7 ms; `tokioruntime` 22.4 / 43.2 ms; LA 10.61–18.03 | — | Not comparable | Baseline only |
-| `sqlite3.c`, full highlight | Not published | Warm 21.05 / 33.18 s (7.2k lines/s p50); first 29.53 / 34.50 s; LA 10.63–18.25 | — | Not comparable | Baseline only |
-| 10 MB Rust, full highlight | Not published | Warm 74.77 / 110.67 s (4.0k lines/s p50); first 94.17 / 101.49 s; LA 10.87–15.22 | — | Not comparable | Baseline only |
-| 10 MB JavaScript, full highlight | Not published | Warm 86.89 / 100.95 s (3.2k lines/s p50); first 73.31 / 135.82 s; LA 10.04–16.87 | — | Not comparable | Baseline only |
+| `sqlite3.c`, full highlight | Not published | 14.247B instructions and 2.028 s user CPU per process; warm 146.8k lines/s | — | Not comparable | Local before/after only |
+| 10 MB Rust, full highlight | Not published | 60.324B instructions and 7.961 s user CPU per process; warm 65.0k lines/s | — | Not comparable | Local before/after only |
+| 10 MB JavaScript, full highlight | Not published | 49.265B instructions and 6.269 s user CPU per process; warm 81.5k lines/s | — | Not comparable | Local before/after only |
 | Typing, input to present-return | No same-endpoint public value | Current not measured; [P0 Fifo prototype](../prototypes/macos-shell/RESULTS.md) 1.748 / 3.188 ms at 2400×1600 on Rust; one run, 500 events, LA 5.7–8 | — | Not comparable to pixel change or physical photons | Current native budget unverified |
 | Near-4K GPU render | 3 ms full render at 4K ([Sublime HQ](https://www.sublimetext.com/blog/articles/hardware-accelerated-rendering), RX560 / 2080 Ti) | Current not measured; [P0 Fifo prototype](../prototypes/macos-shell/RESULTS.md) render pass 1.566 / 2.109 ms at 4096×2178; one run, 600 frames, LA 5.7–8 | — | Similar scale; different stage and hardware | Current native budget unverified |
 
@@ -199,7 +228,101 @@ drawable size (scale/window clamping can prevent an exact 4K run). It reports
 Metal present-handler scanout, injection to queue present-return, CPU and GPU
 time, and both memory metrics with different endpoints. It was **not run** here.
 
-## Changes and next measurement
+## Round 29 attribution
+
+`sample` could not attach to the headless child in the sandbox. An independent
+build with `--features highlight-profile` adds JSONL events for per-context
+queries, per-regex native searches and capture searches, candidate scans,
+cache hits, resolved branch fails, and the existing highlighter phase timers.
+Use the ordinary build for counters and throughput; the diagnostic timers
+and tables perturb execution.
+
+Warm jQuery 2.1.4 before the changes: `expression-begin` was 51.6 ms /
+11,268 queries, `literal-variable` 49.0 ms / 8,059, `statement` 17.4 ms /
+3,764, and `prototype` 15.3 ms / 91,126. Of 197,748 context searches, there were
+132,909 multi-candidate calls (49,517 scans and 83,392 reused nominations),
+14,689 multi-backend native-only calls, and 50,150 direct small-context calls.
+Of the multi-candidate calls, 125,393 had a hybrid fallback list, and 411 had
+a rejected nominee. The actual work was 424,048 native span searches and
+1,764 native capture searches. The largest
+native rules included the identifier/function-assignment lookahead (3,843
+calls, 12.8 ms), the reserved-word lookahead (3,826, 11.7 ms),
+`(?=\S)` (27,788, 6.1 ms), and the identifier-call lookahead (4,569, 5.5 ms).
+jQuery 2.1.4 took 7,861 branch snapshots and performed 51 resolved fails;
+jQuery 3.7.1 took 8,229 and performed 49. Neither rewound a previous line.
+
+| Experiment | jQuery 2.1.4 | jQuery 3.7.1 | Decision |
+|---|---:|---:|---|
+| Broader context-result memoization and nested required literals | 6.657B → 5.317B | 7.038B → 5.556B | SQLite +2.6%; did not keep broad admission |
+| Selective memoization, direct nonspace check, and no synthetic branch regex | 6.674B → 5.250B | 7.010B → 5.478B | SQLite +1.59%; needed another pass |
+| Exact-start native fallback, narrower admission, less filter setup | 6.704B → 5.198B | 7.044B → 5.420B | SQLite −0.13%; keep exact-start and filter setup |
+| Release, without the unused complete-context cache | 6.691B → 5.143B | 6.994B → 5.369B | SQLite −0.86%; Rust and JS corpora pass |
+
+These are cumulative builds, not independent attribution of individual fixes.
+The candidate profile recorded no complete-context memo hits on either jQuery
+file after narrowing admission, so that additional cache was dropped.
+The exact-start probe is only used when a confirmed candidate is already at the
+cursor, or a nominated rule is being checked at its nominated start. It retains
+the full line for lookaround and never caches an anchored miss as an unbounded
+miss. Literal prefilters relax only necessary positive assertions and leave real
+regex Unicode escapes alone; no bundled grammar bytes changed.
+
+**Ranked remaining work.** These budgets are elapsed time in one instrumented
+warm jQuery 2.1.4 candidate pass (314 ms across all phases). They locate work
+that can be reduced; they do not predict instruction savings.
+
+1. **Render reuse and scope allocation (95 ms, 30%).** There were 3,224
+   render hits out of 9,211 calls; the 5,987 misses built 21,710 style spans and
+   the interner stored 13,533 distinct active stacks. Try sharing operation
+   identity between the parse cache and render cache, and make common
+   push/pop transitions cheaper without losing the hidden clear/restore stack.
+2. **Rejected nominees and native lookaheads (53 ms in actual native span
+   searches, 17%).** Native calls fell from 424,048 to 72,810; hybrid calls
+   with a fallback list fell from 125,393 to 37,167. Wider projection raised
+   rejected nominees from 411 to 7,931. `literal-variable` still accounts for
+   32 ms of context time and `expression-begin` about 14 ms. Measure continuing
+   the candidate search after a rejected guard instead of doing a full native
+   retry each time. Preserve same-start priority and verify all captures.
+3. **Parser state and branch snapshots (about 82 ms outside timed context
+   searches, 26%, including profiling overhead).** Only 51 of 7,861 branch
+   snapshots fail; there are no cross-line rewinds on either jQuery version.
+   Test sharing captured trigger text and allocating replay prefixes only
+   when needed. The 82 ms is an upper bound for all non-context parse work,
+   not a measured branch-only cost.
+4. **Line input and checkpoints (15 ms, under 5%).** Only 445 checkpoint
+   scope copies were needed. Measure sharing operation storage across the
+   parser and renderer before attempting sparser incremental checkpoints.
+
+**Temporary artifacts.** Each temporary index now holds a private,
+coordinator-owned directory, with process-exit cleanup for detached workers.
+Startup sweeps only regular directories with exact legacy index names, our
+effective UID, and a positive PID that returns `ESRCH`; it never follows
+symlinks. The subprocess tests cover cancel, exit with a running index, and
+stale/live/non-directory/symlink discrimination. Matrix reports go to stderr
+by default, and benchmark fixtures use RAII with opt-in workbench replay.
+Shared grammar caches and durable save recovery are deliberately not swept.
+
+**Round 29 validation.** The 242-file official assertions and 193,704-line
+Onig/multi/memoized differential passed with prefilter verification enabled.
+The assertion evidence and serialized operations, corrections, rewinds and
+warnings produced identical BLAKE3 digests to `4dcbc9c`. The final same-build
+instruction gate passed: `features` −0.30% (227.511B → 226.866B),
+`carets1000` −0.15% (4.076B → 4.067B), and `smoke1` +0.17%
+(304.666M → 305.010M).
+
+`/tmp/r14-review/gate.sh` passed formatting and strict workspace Clippy.
+Workspace release tests: 1,624 passed and one failed. The known
+`zh_hans_render_scenes_show_no_unexpected_ascii_copy` audit reported ASCII
+components of the sandbox fixture paths. Rustdoc was not reached by the gate.
+The temp-index tests and default headless workbench cleanup passed; no index,
+matrix or workbench fixture directories remained in the test roots.
+
+Round 29 raw JSONL, own-child counters, and logs: `/tmp/velocity-c29.oe1zlL/`
+(`release-highlight`, `release-instruction`, `gate-release-workspace.log`,
+`syntax-*-digest.log`, and `profile-*.jsonl`). Older sections below describe
+round 27.
+
+## Round 27 changes and next measurement
 
 Native `sample` could not attach to the headless child in the sandbox. The
 existing `regex-bench --bench-only --profile --language javascript` was run
@@ -270,7 +393,7 @@ case uses the indexed path, so this is not a single algorithm's scaling curve.
    Publish the workload and counters even when only third-party ST4 results
    are available.
 
-## Validation
+## Round 27 validation
 
 The focused `vel-regex` release tests and strict workspace Clippy passed.
 For the instruction gate against the original `efe8b5b` binary, nine complete
@@ -304,5 +427,5 @@ Rustdoc was not reached. In serial reruns on the same build:
   new regression against `efe8b5b`; these tests need baseline reruns under
   comparable load before attribution.
 
-The full test log is `/tmp/r14-review/gate-velocity-lane-c.log`. Individual
+The round 27 gate wrote `/tmp/r14-review/gate-velocity-lane-c.log`. Individual
 reruns are in `targeted-*-rerun.log` alongside the timing data.
