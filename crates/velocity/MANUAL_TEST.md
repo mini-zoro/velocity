@@ -3001,6 +3001,40 @@ actual scale/size/refresh and any failure; these rows have not been executed in 
 | Full screen; distraction-free from normal and already-full-screen; customize its settings | Chrome/settings restore correctly and sidebar visibility is remembered per mode | |
 | Quit/relaunch dirty/untitled text, redo, folds, syntax, sidebar and search state | Retained state restored, hidden clean tabs lazy; round-nine native history removes the former private-history limitation | |
 | Hot Exit always / only_on_quit / disabled; remember_open_files false | Close/quit/crash policies follow RUNBOOK; disabled never silently discards dirty project docs | |
+
+### macOS window close and session migration
+
+Use a disposable profile and fixture files for these checks.
+
+| Action | Expected result |
+| --- | --- |
+| Open two windows with multiple tabs; close one, then quit with Command-Q | Only the window left open at Quit returns, with its tabs and groups. Files from the closed window are in Open Recent and available through Reopen Closed File (Command-Shift-T). |
+| Close a window without an explicit project and with unsaved changes | Save writes the file (or asks for a path), Discard closes without changing the file on disk, and Cancel leaves the window and its edits intact. |
+| Close a saved project's window with Hot Exit enabled | The window stays closed on ordinary launch. Explicitly reopen the project to recover its workspace and unsaved edits. If Velocity cannot save the workspace, it prompts before dropping edits. |
+| Close the last window, then quit | The application stays running with no windows after close, for `always`, `only_on_quit`, and `disabled`. The closed window does not come back; the next ordinary launch starts with a blank window if there is nothing else to restore. |
+| Launch with three saved windows, each with files in multiple groups; open a file from Finder or the CLI while restoration runs | Each saved window is restored once, with its groups. An already-open file goes to its restored window; an ordinary new file becomes a tab. Explicit new-window options still apply. |
+
+The [Sublime Text changelog](https://www.sublimetext.com/download) documents the
+last-window modes (4107), layout (4121), the macOS startup-window fix (4126),
+independent project Hot Exit (4142), and minimized-window restoration fixes (4213). The
+[macOS discussion](https://forum.sublimetext.com/t/remember-open-folders-files-when-closing-quitting/73760)
+and [mode definitions](https://forum.sublimetext.com/t/hot-exit-not-working/62422/7)
+clarify that the last-window mode distinction applies on platforms where closing
+the last window exits the app. For macOS window closures, Velocity prompts in
+all three modes unless it can retain edits in an explicit project's workspace
+and Hot Exit is enabled. See the [maintainer's save-prompt explanation](https://forum.sublimetext.com/t/saveall-on-pre-close-window/75965/2)
+and [official project documentation](https://www.sublimetext.com/docs/projects.html).
+The [community settings reference](https://docs.sublimetext.io/reference/settings.html#global-settings)
+describes `remember_open_files` and `close_windows_when_empty`; their existing
+Velocity behavior is unchanged.
+
+**Upgrade from an older session:** The old format did not distinguish open
+windows from closed ones. On first launch they can all appear again, including
+windows with unsaved work. Close the unwanted windows, respond to save prompts,
+and quit with the windows you want to keep still open. The next successful
+session save records that choice; no file on disk is deleted. Recovery snapshots
+left by project switches are now explicitly marked and contain only buffers with
+unsaved work.
 | Edit a dirty document on disk while quit, then restore | Buffer text retained as dirty, restored undo history dropped | |
 | Open/Save As/Close/Edit/Quick Switch Project; nested fresh destination | Folder rules, inline builds and unknown keys preserved; workspace tied to project | |
 | Leave a project idle after editing | Debounced session writes complete without an autosave/settings-reload loop | |

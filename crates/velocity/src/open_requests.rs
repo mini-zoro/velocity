@@ -295,9 +295,10 @@ fn decode_image(path: &Path, cancelled: &AtomicBool) -> ImageResult {
     }))
 }
 
-/// Chooses an already recovered window for an explicit project or directory launch.
+/// Chooses an already recovered window for a launch request.
 /// An explicit new-window request always creates an additional window.
-pub(crate) fn restored_window(windows: &[vel_session::Window], options: &Options) -> Option<usize> {
+pub(crate) fn restored_window(session: &vel_session::Session, options: &Options) -> Option<usize> {
+    let windows = &session.windows;
     if options.new_window
         || (options.mode != crate::cli::Mode::Interactive && !options.restore_session)
     {
@@ -321,6 +322,28 @@ pub(crate) fn restored_window(windows: &[vel_session::Window], options: &Options
                     .any(|folder| same_path(folder, &directory.path))
             })
         });
+    }
+    let files: Vec<_> = options.files.iter().filter(|f| !f.path.is_dir()).collect();
+    if !files.is_empty() {
+        // The command-line invocation that starts the primary should reuse the
+        // same window as an invocation forwarded to an existing instance.
+        let documents: std::collections::BTreeMap<_, _> = session
+            .documents
+            .iter()
+            .filter_map(|d| d.path.as_deref().map(|path| (d.id, path)))
+            .collect();
+        if let Some(index) = windows.iter().position(|w| {
+            !w.retained_closed
+                && files.iter().all(|file| {
+                    w.sheets.iter().any(|sheet| {
+                        documents
+                            .get(&sheet.document)
+                            .is_some_and(|path| same_path(path, &file.path))
+                    })
+                })
+        }) {
+            return Some(index);
+        }
     }
     (!windows.is_empty()).then_some(0)
 }
@@ -517,6 +540,32 @@ pub struct WindowRoute {
     pub untouched: bool,
 }
 impl WindowRoute {
+    pub fn from_snapshot(
+        window: &vel_session::Window,
+        documents: &[vel_session::Document],
+    ) -> Self {
+        let project_spelling = window.project.clone();
+        let folder_spellings = window.folders.clone();
+        let mut folders: Vec<_> = folder_spellings
+            .iter()
+            .map(|path| canonical_route_path(path))
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+        Self {
+            project: project_spelling.as_deref().map(canonical_route_path),
+            project_spelling,
+            folders,
+            folder_spellings,
+            files: documents
+                .iter()
+                .filter_map(|doc| doc.path.clone())
+                .collect(),
+            // A reserved window is not an untouched startup window; it has
+            // not been constructed yet and is reserved for its saved contents.
+            untouched: false,
+        }
+    }
     pub fn update(&mut self, workspace: &Workspace, startup: bool) {
         if self.project_spelling.as_deref() != workspace.project_path() {
             self.project_spelling = workspace.project_path().map(Path::to_owned);
@@ -1180,26 +1229,30 @@ mod review15_tests {
                 ..Default::default()
             },
         ];
+        let session = vel_session::Session {
+            windows,
+            ..Default::default()
+        };
         let mut options = Options {
             project: Some(project),
             ..Default::default()
         };
-        assert_eq!(restored_window(&windows, &options), Some(1));
+        assert_eq!(restored_window(&session, &options), Some(1));
         options.project = None;
         options.files.push(crate::cli::FileLocation {
             path: dir.path().into(),
             line: 1,
             column: 1,
         });
-        assert_eq!(restored_window(&windows, &options), Some(1));
+        assert_eq!(restored_window(&session, &options), Some(1));
         options.new_window = true;
-        assert_eq!(restored_window(&windows, &options), None);
+        assert_eq!(restored_window(&session, &options), None);
         options.new_window = false;
         options.add_to_window = true;
-        assert_eq!(restored_window(&windows, &options), Some(0));
+        assert_eq!(restored_window(&session, &options), Some(0));
         options.add_to_window = false;
         options.project = Some(dir.path().join("other.sublime-project"));
-        assert_eq!(restored_window(&windows, &options), None);
+        assert_eq!(restored_window(&session, &options), None);
     }
     #[cfg(unix)]
     #[test]
@@ -1210,23 +1263,27 @@ mod review15_tests {
         fs::write(root.join("app.sublime-project"), "{}").unwrap();
         let alias = dir.path().join("alias");
         std::os::unix::fs::symlink(&root, &alias).unwrap();
-        let windows = [vel_session::Window {
+        let windows = vec![vel_session::Window {
             project: Some(root.join("app.sublime-project")),
             folders: vec![root],
             ..Default::default()
         }];
+        let session = vel_session::Session {
+            windows,
+            ..Default::default()
+        };
         let mut options = Options {
             project: Some(alias.join("app.sublime-project")),
             ..Default::default()
         };
-        assert_eq!(restored_window(&windows, &options), Some(0));
+        assert_eq!(restored_window(&session, &options), Some(0));
         options.project = None;
         options.files.push(crate::cli::FileLocation {
             path: alias,
             line: 1,
             column: 1,
         });
-        assert_eq!(restored_window(&windows, &options), Some(0));
+        assert_eq!(restored_window(&session, &options), Some(0));
     }
     #[test]
     fn relay_quiet_period_starts_after_the_last_request_and_ack_and_errors_name_paths() {

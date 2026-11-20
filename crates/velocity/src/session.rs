@@ -84,12 +84,11 @@ pub struct Sessions {
     recent_heads: BTreeMap<u64, [Option<PathBuf>; 3]>,
     forgotten_recent: [BTreeSet<PathBuf>; 3],
     recent_opened: Vec<PathBuf>,
+    closed_window_files: Vec<PathBuf>,
     system_recent_enabled: Option<bool>,
-    hot: HotExit,
-    remember: bool,
     pub messages: Vec<String>,
     windows: BTreeMap<u64, (Window, Vec<Document>)>,
-    closed: Vec<(Window, Vec<Document>)>,
+    departing: Vec<(Window, Vec<Document>)>,
     writer: Option<Writer>,
     profile: Option<PathBuf>,
     workspaces: BTreeMap<PathBuf, Writer>,
@@ -126,6 +125,7 @@ impl Sessions {
             }
         });
         Self {
+            closed_window_files: recovery.session.closed_window_files.clone(),
             restored: recovery.session,
             original,
             instance: None,
@@ -135,11 +135,9 @@ impl Sessions {
             forgotten_recent: Default::default(),
             recent_opened: Vec::new(),
             system_recent_enabled: None,
-            hot: HotExit::Always,
-            remember: true,
             messages,
             windows: BTreeMap::new(),
-            closed: vec![],
+            departing: vec![],
             writer,
             profile: data.map(Path::to_owned),
             workspaces: BTreeMap::new(),
@@ -214,7 +212,7 @@ impl Sessions {
             let mut window = self.restored.windows[index].clone();
             let referenced: BTreeSet<_> =
                 window.sheets.iter().map(|sheet| sheet.document).collect();
-            let retained = self
+            let retained: Vec<_> = self
                 .restored
                 .documents
                 .iter()
@@ -235,11 +233,22 @@ impl Sessions {
                 id,
                 std::array::from_fn(|index| self.recent[index].first().cloned()),
             );
+            self.open_windows.insert(
+                id,
+                crate::open_requests::WindowRoute::from_snapshot(&window, &retained),
+            );
             self.windows.insert(id, (window, retained));
             reserved.push(id);
         }
         self.active_window = reserved.first().copied().or(self.active_window);
         reserved
+    }
+    pub fn activate_reserved(&mut self, provisional: u64, reserved: u64) {
+        if provisional != reserved {
+            self.live.remove(&provisional);
+            self.recent_heads.remove(&provisional);
+        }
+        self.active_window = Some(reserved);
     }
     pub fn publish(
         &mut self,
@@ -249,21 +258,39 @@ impl Sessions {
         recent: [Vec<PathBuf>; 3],
         policy: Policy,
     ) -> Result<(), String> {
-        self.hot = policy.hot;
-        self.remember = policy.remember;
+        window.retained_closed = false;
         repair_window(&mut window, &documents);
         self.windows.insert(id, (window.clone(), documents.clone()));
         self.record_recents(id, recent);
-        let mut session = self.collect(self.recent.clone());
         let hot = if !policy.quitting && !policy.closing && policy.hot == HotExit::OnlyOnQuit {
             HotExit::Always
         } else {
             policy.hot
         };
-        session.apply_policy(hot, policy.quitting, policy.remember);
+        self.publish_application(hot, policy.quitting, policy.remember)?;
+        self.publish_project(window, documents, hot, policy.quitting, policy.remember)
+    }
+    fn publish_application(
+        &self,
+        hot: HotExit,
+        quitting: bool,
+        remember: bool,
+    ) -> Result<(), String> {
         if let Some(writer) = &self.writer {
+            let mut session = self.collect(self.recent.clone());
+            session.apply_policy(hot, quitting, remember);
             writer.changed(session)?;
         }
+        Ok(())
+    }
+    fn publish_project(
+        &mut self,
+        window: Window,
+        documents: Vec<Document>,
+        hot: HotExit,
+        quitting: bool,
+        remember: bool,
+    ) -> Result<(), String> {
         if self.persist_project_workspaces
             && let Some(project) = &window.project
         {
@@ -283,9 +310,32 @@ impl Sessions {
                 documents,
                 ..Session::default()
             };
-            session.apply_policy(hot, policy.quitting, policy.remember);
+            session.apply_policy(hot, quitting, remember);
             self.workspaces[&path].changed(session)?;
         }
+        Ok(())
+    }
+    pub fn save_closing_project(
+        &mut self,
+        mut window: Window,
+        documents: Vec<Document>,
+        hot: HotExit,
+        remember: bool,
+    ) -> Result<(), String> {
+        let path = vel_session::project::workspace_path(
+            window
+                .project
+                .as_deref()
+                .ok_or("No project to checkpoint")?,
+        );
+        repair_window(&mut window, &documents);
+        // A project workspace is independent of the application session. On macOS
+        // either enabled Hot Exit mode can retain project changes here.
+        self.publish_project(window, documents, hot, true, remember)?;
+        self.workspaces
+            .get(&path)
+            .ok_or("No project workspace writer")?
+            .flush()?;
         Ok(())
     }
     // ST4 builds 4143 and 4152: application recents are global, closed views are local.
@@ -370,7 +420,7 @@ impl Sessions {
         let mut docs = BTreeMap::new();
         let mut windows = Vec::new();
         let mut sheets = BTreeSet::new();
-        for (window, documents) in self.windows.values().chain(self.closed.iter()) {
+        for (window, documents) in self.windows.values().chain(self.departing.iter()) {
             let mut window = window.clone();
             repair_window(&mut window, documents);
             for sheet in &mut window.sheets {
@@ -409,54 +459,72 @@ impl Sessions {
             recent_files,
             recent_folders,
             recent_projects,
+            closed_window_files: self.closed_window_files.clone(),
             ..Session::default()
         }
     }
-    pub fn close(&mut self, id: u64, retain: bool) {
+    pub fn close(
+        &mut self,
+        id: u64,
+        hot: HotExit,
+        remember: bool,
+        files: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<(), String> {
         self.live.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
         self.menu_merges
             .retain(|source, destination| *source != id && *destination != id);
         self.recent_heads.remove(&id);
-        if let Some(window) = self.windows.remove(&id)
-            && retain
-        {
-            self.closed.push(window);
+        self.windows.remove(&id);
+        for path in files {
+            crate::workbench::remember(&mut self.closed_window_files, path);
         }
         if self.active_window == Some(id) {
-            self.active_window = self.windows.keys().next_back().copied();
+            self.active_window = self.live.last().copied();
         }
+        // Closing one window still checkpoints the other windows for crash recovery.
+        self.publish_application(
+            if hot == HotExit::OnlyOnQuit {
+                HotExit::Always
+            } else {
+                hot
+            },
+            false,
+            remember,
+        )?;
         if let Some(writer) = &self.writer {
-            let mut session = self.collect(self.recent.clone());
-            session.apply_policy(
-                if self.hot == HotExit::OnlyOnQuit {
-                    HotExit::Always
-                } else {
-                    self.hot
-                },
-                false,
-                self.remember,
-            );
-            let _ = writer.changed(session);
+            writer.flush()?;
         }
+        Ok(())
+    }
+    pub fn has_closed_window_files(&self) -> bool {
+        !self.closed_window_files.is_empty()
+    }
+    pub fn pop_closed_window_file(&mut self) -> Option<PathBuf> {
+        (!self.closed_window_files.is_empty()).then(|| self.closed_window_files.remove(0))
     }
     /// Retain a departing window independently before its live ID is reused by a project.
     /// The application has already published and flushed the old snapshot at this point.
     pub fn retain_departing(&mut self, id: u64, retain: bool) {
-        if let Some((window, documents)) = self.windows.remove(&id)
+        if let Some((mut window, mut documents)) = self.windows.remove(&id)
             && retain
-            && documents.iter().any(|document| {
+            && !(self.persist_project_workspaces && window.project.is_some())
+        {
+            documents.retain(|document| {
                 document.dirty
                     || (document.path.is_none()
                         && document.history.as_ref().is_some_and(|history| {
-                            history
-                                .current_text()
-                                .is_ok_and(|text| text.len_bytes() > 0)
+                            history.current_text().is_ok_and(|text| !text.is_empty())
                         }))
-            })
-        {
-            self.closed.push((window, documents));
+            });
+            if !documents.is_empty() {
+                let ids: BTreeSet<_> = documents.iter().map(|d| d.id).collect();
+                window.sheets.retain(|s| ids.contains(&s.document));
+                window.retained_closed = true;
+                repair_window(&mut window, &documents);
+                self.departing.push((window, documents));
+            }
         }
     }
     pub fn clear_recent(&mut self, id: u64) {
@@ -645,7 +713,7 @@ mod tests {
         assert_eq!(sessions.register(), 1);
     }
     #[test]
-    fn independent_windows_and_closed_hot_exit_windows_survive_fresh_storage() {
+    fn independent_windows_survive_fresh_storage_but_closed_windows_do_not() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("missing/profile");
         let mut sessions = Sessions::new(Some(&data));
@@ -692,14 +760,16 @@ mod tests {
             recovered.session.recent_files,
             vec![PathBuf::from("recent-b"), PathBuf::from("recent-a")]
         );
-        sessions.close(a, true);
+        sessions.close(a, HotExit::Always, true, []).unwrap();
         assert_eq!(sessions.active_window, Some(b));
-        sessions.close(b, false);
-        assert_eq!(sessions.active_window, None);
-        sessions.flush().unwrap();
         let recovered = vel_session::load(&path);
         assert_eq!(recovered.session.windows.len(), 1);
+        assert_eq!(recovered.session.documents.len(), 1);
         assert!(recovered.session.documents[0].dirty);
+        assert!(!recovered.session.windows[0].retained_closed);
+        sessions.close(b, HotExit::Always, true, []).unwrap();
+        assert_eq!(sessions.active_window, None);
+        assert!(vel_session::load(&path).session.windows.is_empty());
     }
     #[test]
     fn only_on_quit_crash_recovery_and_disabled_close_rules_differ() {
@@ -728,7 +798,7 @@ mod tests {
                 !recovered.session.documents.is_empty(),
                 hot == HotExit::OnlyOnQuit
             );
-            sessions.close(id, false);
+            sessions.close(id, hot, true, []).unwrap();
             sessions.flush().unwrap();
             assert!(
                 vel_session::load(&dir.path().join("Sessions/Session.sublime-session"))
@@ -877,7 +947,7 @@ mod review15_tests {
             sessions.windows.insert(id, (window, documents));
             sessions.retain_departing(id, true);
         }
-        assert!(sessions.closed.is_empty());
+        assert!(sessions.departing.is_empty());
         for dirty in [false, true] {
             let mut unsaved =
                 Workspace::new(Text::from("untitled content"), None, None, false).unwrap();
@@ -890,7 +960,7 @@ mod review15_tests {
             sessions.windows.insert(id, unsaved.snapshot().unwrap());
             sessions.retain_departing(id, true);
         }
-        assert_eq!(sessions.closed.len(), 2);
+        assert_eq!(sessions.departing.len(), 2);
         let (window, documents) = w.snapshot().unwrap();
         sessions
             .publish(
@@ -910,6 +980,12 @@ mod review15_tests {
         let persisted = vel_session::load(&dir.path().join("Sessions/Session.sublime-session"));
         assert!(persisted.messages.is_empty(), "{:?}", persisted.messages);
         assert_eq!(persisted.session.windows.len(), 3);
+        assert!(!persisted.session.windows[0].retained_closed);
+        assert!(
+            persisted.session.windows[1..]
+                .iter()
+                .all(|w| w.retained_closed)
+        );
         persisted.session.validate().unwrap();
     }
 }

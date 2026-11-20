@@ -2611,7 +2611,7 @@ impl Workspace {
         Ok(())
     }
     /// Reopens the most recently closed path with its selection, folds and viewport.
-    pub fn reopen_last_file(&mut self) -> Result<(), String> {
+    pub fn reopen_last_file(&mut self) -> Result<bool, String> {
         while let Some((path, state)) = self.closed_files.pop() {
             // A deleted file is skipped, rather than reopened as a new named buffer.
             if matches!(path.try_exists(), Ok(false)) {
@@ -2632,9 +2632,9 @@ impl Workspace {
                 tab.editor.restore_folded_view_state(&state, tab.editor.id);
                 tab.editor.sync();
             }
-            break;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
     /// Reopens a saved file with an explicit codec. Failed decoding leaves edits intact.
     // The Sublime changelogs document `revert` scroll position (dev build 4063),

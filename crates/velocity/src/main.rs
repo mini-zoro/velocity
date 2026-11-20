@@ -488,7 +488,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             let mut restored_ui = None;
             let restored = sessions.borrow().restored.clone();
             let reserved = sessions.borrow_mut().reserve_recovered();
-            let selected = open_requests::restored_window(&restored.windows, &options);
+            let selected = open_requests::restored_window(&restored, &options);
             let first = selected.map(|index| restored.windows[index].clone());
             let project = options.project.clone().or_else(|| {
                 first
@@ -612,15 +612,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             }
             // The selected recovery keeps its reserved live ID. Restore every other window
             // exactly once, including when the explicit project matched a non-first window.
-            let (windows, ids) = restored
-                .windows
-                .into_iter()
-                .zip(reserved)
-                .enumerate()
-                .filter(|(index, _)| Some(*index) != selected)
-                .map(|(_, pair)| pair)
-                .unzip();
-            app.restore_remaining_reserved(windows, ids);
+            app.restore_remaining_reserved(restored.windows, reserved, selected);
             app.set_instance(instance);
             app.set_crash(crash);
             app.set_restore_safety(restore_safety);

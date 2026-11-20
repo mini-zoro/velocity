@@ -23,7 +23,7 @@ use vel_ui::workbench::Workbench;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotExit {
-    /// Retain dirty windows on close and quit.
+    /// Retain dirty buffers when the app exits and allow project hot exit.
     #[default]
     Always,
     /// Retain dirty buffers only when quitting the application.
@@ -155,6 +155,10 @@ pub struct Sheet {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Window {
+    /// Recovery-only window left behind by a project switch. Pre-marker sessions
+    /// cannot distinguish previously closed windows from those open at quit.
+    #[serde(default)]
+    pub retained_closed: bool,
     /// Project file, if any.
     pub project: Option<PathBuf>,
     /// Added folders, including unsaved projects.
@@ -238,6 +242,9 @@ pub struct Session {
     pub recent_folders: Vec<PathBuf>,
     /// Recent projects, newest first.
     pub recent_projects: Vec<PathBuf>,
+    /// Files from explicitly closed windows, newest first. Never opened at startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_window_files: Vec<PathBuf>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -248,6 +255,7 @@ impl Default for Session {
             recent_files: vec![],
             recent_folders: vec![],
             recent_projects: vec![],
+            closed_window_files: vec![],
         }
     }
 }

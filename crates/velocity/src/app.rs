@@ -33,6 +33,9 @@ mod settings_entry;
 mod status_adapter;
 #[path = "app_tabs.rs"]
 mod tab_adapter;
+#[cfg(test)]
+#[path = "app_window_close_tests.rs"]
+mod window_close_tests;
 use crate::{
     bench::{Bench, SCROLL_FRAMES, TYPING_INSERTIONS},
     cli::{Mode, Options},
@@ -192,8 +195,7 @@ pub struct App {
     sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
     session_id: u64,
     session_due: Option<Instant>,
-    restored_windows: Vec<vel_session::Window>,
-    restored_reserved_ids: std::collections::VecDeque<u64>,
+    restored_windows: Vec<(vel_session::Window, u64)>,
     waiters: Vec<crate::instance::Waiter>,
     cli_commands: std::collections::VecDeque<PendingCliCommand>,
     restore_safety: crate::safe_mode::Startup,
@@ -235,7 +237,7 @@ impl App {
         let directory = self.workspace.data_path().map(Path::to_owned);
         let mut sessions = crate::session::Sessions::new(directory.as_deref());
         let restored = sessions.restored.clone();
-        let mut reserved = sessions.reserve_recovered().into_iter();
+        let reserved = sessions.reserve_recovered();
         let first = restored.windows.first().cloned();
         let project = first
             .as_ref()
@@ -250,7 +252,10 @@ impl App {
         workspace.recent_folders = restored.recent_folders;
         workspace.recent_projects = restored.recent_projects;
         workspace.messages.append(&mut sessions.messages);
-        let id = reserved.next().unwrap_or_else(|| sessions.register());
+        let id = reserved
+            .first()
+            .copied()
+            .unwrap_or_else(|| sessions.register());
         sessions.instance = Some(instance);
         self.sessions = std::rc::Rc::new(std::cell::RefCell::new(sessions));
         self.session_id = id;
@@ -263,8 +268,7 @@ impl App {
         if let Some(window) = &first {
             self.restore_ui(window);
         }
-        self.restored_windows = restored.windows.into_iter().skip(1).collect();
-        self.restored_reserved_ids = reserved.collect();
+        self.restore_remaining_reserved(restored.windows, reserved, first.as_ref().map(|_| 0));
         self.options.forward_native_opens = false;
         Ok(())
     }
@@ -323,7 +327,6 @@ impl App {
             session_id,
             session_due: Some(Instant::now()),
             restored_windows: Vec::new(),
-            restored_reserved_ids: Default::default(),
             waiters: Vec::new(),
             cli_commands: Default::default(),
             restore_safety: Default::default(),
@@ -417,12 +420,24 @@ impl App {
         self.window_frame = window.frame;
     }
     pub fn restore_session_id(&mut self, id: u64) {
+        self.sessions
+            .borrow_mut()
+            .activate_reserved(self.session_id, id);
         self.session_id = id;
-        self.sessions.borrow_mut().active_window = Some(id);
     }
-    pub fn restore_remaining_reserved(&mut self, windows: Vec<vel_session::Window>, ids: Vec<u64>) {
-        self.restored_windows = windows;
-        self.restored_reserved_ids = ids.into();
+    pub fn restore_remaining_reserved(
+        &mut self,
+        windows: Vec<vel_session::Window>,
+        ids: Vec<u64>,
+        selected: Option<usize>,
+    ) {
+        debug_assert_eq!(windows.len(), ids.len());
+        self.restored_windows = windows
+            .into_iter()
+            .zip(ids)
+            .enumerate()
+            .filter_map(|(i, pair)| (Some(i) != selected).then_some(pair))
+            .collect();
     }
     pub(crate) fn open_received_paths(
         &mut self,
@@ -433,9 +448,12 @@ impl App {
         }
         // A secondary native recipient can become primary if the old GUI
         // exits. Normalize project paths just as for any other forwarded open.
-        let mut request = crate::open_requests::native_request(paths)?;
-        let _ = self.route_open(&mut request);
-        let result = self.accept_request(crate::instance::Incoming::local(request));
+        self.publish_open_route();
+        let request = crate::open_requests::native_request(paths)?;
+        let result = match self.route_or_queue_open(crate::instance::Incoming::local(request))? {
+            Some((_, incoming)) => self.accept_request(incoming),
+            None => Ok(()),
+        };
         self.sync_recents();
         result
     }
@@ -483,8 +501,7 @@ impl App {
                     sessions.restored = recovery.session;
                     let ids = sessions.reserve_recovered();
                     self.restored_windows
-                        .extend(sessions.restored.windows.iter().cloned());
-                    self.restored_reserved_ids.extend(ids);
+                        .extend(sessions.restored.windows.iter().cloned().zip(ids));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.skipped_recovery = None;
@@ -521,15 +538,7 @@ impl App {
         // this window's documents. Completion still waits until their sheets close.
         self.waiters
             .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
-        let active = self.workspace.active;
-        self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
-        self.workspace.tabs[active].scroll_line_height = self.view.line_height;
-        let (mut window, documents) = self.workspace.snapshot()?;
-        self.panels.capture_session(&mut window);
-        window.normal_sidebar = Some(self.normal_sidebar);
-        window.distraction_sidebar = self.distraction_sidebar;
-        window.fullscreen_before_distraction = self.fullscreen_before_distraction;
-        window.frame = self.window_frame;
+        let (window, documents) = self.capture_session_window()?;
         let hot = self.hot_exit();
         let remember = self.workspace.global_bool("remember_open_files", true);
         self.sessions.borrow_mut().publish(
@@ -550,6 +559,82 @@ impl App {
         )?;
         self.session_due = None;
         Ok(())
+    }
+    fn capture_session_window(
+        &mut self,
+    ) -> Result<(vel_session::Window, Vec<vel_session::Document>), String> {
+        let active = self.workspace.active;
+        self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
+        self.workspace.tabs[active].scroll_line_height = self.view.line_height;
+        let (mut window, documents) = self.workspace.snapshot()?;
+        self.panels.capture_session(&mut window);
+        window.normal_sidebar = Some(self.normal_sidebar);
+        window.distraction_sidebar = self.distraction_sidebar;
+        window.fullscreen_before_distraction = self.fullscreen_before_distraction;
+        window.frame = self.window_frame;
+        Ok((window, documents))
+    }
+    fn prepare_window_close(&mut self, window: Option<&WindowHandle>) -> bool {
+        let hot = self.hot_exit();
+        let remember = self.workspace.global_bool("remember_open_files", true);
+        let project = self.workspace.project_path().is_some()
+            && self.sessions.borrow().persist_project_workspaces;
+        let project_hot_exit = project && hot.retain(true);
+        let indices: Vec<_> = (0..self.workspace.tabs.len()).collect();
+        // The last macOS window is not a Quit. Only an explicit project has
+        // somewhere to keep unsaved buffers other than the application session.
+        if !project_hot_exit && !self.can_close_many(window, &indices) {
+            return false;
+        }
+        if project {
+            let result = self.capture_session_window().and_then(|(snapshot, docs)| {
+                self.sessions
+                    .borrow_mut()
+                    .save_closing_project(snapshot, docs, hot, remember)
+            });
+            if let Err(error) = result {
+                if let Some(window) = window {
+                    self.show_error(
+                        window,
+                        &format!("Could not save project workspace: {error}"),
+                    );
+                }
+                if project_hot_exit && !self.can_close_many(window, &indices) {
+                    return false;
+                }
+            }
+        }
+        self.sync_recents();
+        // Remember paths, not buffers or groups. Put the focused file at the
+        // top of the reopen list, followed by the other files in this window.
+        let active = self.workspace.active;
+        let paths = self
+            .workspace
+            .closed_files
+            .iter()
+            .map(|(path, _)| path)
+            .chain(
+                (0..self.workspace.tabs.len())
+                    .filter(|&index| index != active)
+                    .chain([active])
+                    .map(|index| &self.workspace.tabs[index])
+                    .filter(|tab| !tab.transient || tab.dirty())
+                    .filter_map(|tab| tab.path.as_ref()),
+            )
+            .cloned();
+        let result = self
+            .sessions
+            .borrow_mut()
+            .close(self.session_id, hot, remember, paths);
+        if let Err(error) = result {
+            eprintln!("Could not checkpoint after closing a window: {error}");
+        }
+        // A closed window's files are no longer open for CLI --wait clients.
+        for waiter in &mut self.waiters {
+            waiter.finish(&mut self.workspace);
+        }
+        self.waiters.clear();
+        true
     }
     fn prepare_quit(&mut self, window: Option<&WindowHandle>) -> bool {
         if self.options.mode != Mode::Interactive {
@@ -575,9 +660,7 @@ impl App {
                 self.panels.message = error.into();
             }
         } else {
-            if !window.is_some_and(|w| {
-                self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
-            }) {
+            if !self.can_close_many(window, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {
                 return false;
             }
             if let Err(error) = self.save_workspace_checkpoint() {
@@ -666,13 +749,6 @@ impl App {
                 .global_bool("update_system_recent_files", true),
             |path| w.system_recent_document(path),
         );
-        let remaining = std::mem::take(&mut self.restored_windows);
-        for window in remaining {
-            let id = self.restored_reserved_ids.pop_front();
-            if let Err(e) = self.open_native_window(w, Some(window), id, false) {
-                self.workspace.messages.push(e);
-            }
-        }
         let requests = {
             let sessions = self.sessions.borrow();
             if sessions
@@ -691,6 +767,11 @@ impl App {
         for incoming in requests {
             if let Err(e) = self.receive_request(w, incoming) {
                 self.workspace.messages.push(format!("CLI request: {e}"));
+            }
+        }
+        for (window, id) in std::mem::take(&mut self.restored_windows) {
+            if let Err(e) = self.open_native_window(w, Some(window), Some(id), false) {
+                self.workspace.messages.push(e);
             }
         }
         let routed = self
@@ -724,25 +805,36 @@ impl App {
     fn receive_request(
         &mut self,
         w: &WindowHandle,
-        mut incoming: crate::instance::Incoming,
+        incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         use crate::open_requests::Route;
-        let route = self.route_open(&mut incoming.request);
+        let Some((route, incoming)) = self.route_or_queue_open(incoming)? else {
+            return Ok(());
+        };
         if route == Route::New {
             self.open_request_in_new_window(w, incoming)?;
-        } else if let Route::Window(id) = route {
-            if id == self.session_id {
-                self.apply_open_request(w, incoming)?;
-            } else {
-                let mut sessions = self.sessions.borrow_mut();
-                let inbox = sessions.open_inbox.entry(id).or_default();
-                if inbox.len() >= 16 {
-                    return Err("target window's open queue is full".into());
-                }
-                inbox.push(incoming);
-            }
+        } else {
+            self.apply_open_request(w, incoming)?;
         }
         Ok(())
+    }
+    fn route_or_queue_open(
+        &self,
+        mut incoming: crate::instance::Incoming,
+    ) -> Result<Option<(crate::open_requests::Route, crate::instance::Incoming)>, String> {
+        let route = self.route_open(&mut incoming.request);
+        if let crate::open_requests::Route::Window(id) = route
+            && id != self.session_id
+        {
+            let mut sessions = self.sessions.borrow_mut();
+            let inbox = sessions.open_inbox.entry(id).or_default();
+            if inbox.len() >= 16 {
+                return Err("target window's open queue is full".into());
+            }
+            inbox.push(incoming);
+            return Ok(None);
+        }
+        Ok(Some((route, incoming)))
     }
     fn app_for_new_window(&self, incoming: crate::instance::Incoming) -> Result<Self, String> {
         let workspace = Workspace::new(
@@ -1034,7 +1126,10 @@ impl App {
                 return self.transferable_tab(target);
             }
             "merge_all_windows" => return !self.merge_sources().is_empty(),
-            "reopen_last_file" if self.workspace.closed_files.is_empty() => return false,
+            "reopen_last_file" => {
+                return !self.workspace.closed_files.is_empty()
+                    || self.sessions.borrow().has_closed_window_files();
+            }
             "reopen" | "reopen_encoding" | "revert"
                 if self.workspace.tabs[target].path.is_none() =>
             {
@@ -1737,9 +1832,10 @@ impl App {
                 | "open_url"
                 | "add_folder"
                 | "clear_recent_items"
+                | "reopen_last_file"
         ) {
             self.apply_named_action(window, name, args)?;
-            self.named_changed(window, false);
+            self.named_changed(window, name == "reopen_last_file");
             return Ok(());
         }
         match window.map_or(Ok(false), |window| self.context_action(window, name, args)) {
@@ -2181,7 +2277,7 @@ impl App {
         }
         self.can_close_document(w, index)
     }
-    fn can_close_many(&mut self, w: &WindowHandle, indices: &[usize]) -> bool {
+    fn can_close_many(&mut self, w: Option<&WindowHandle>, indices: &[usize]) -> bool {
         self.sync_workspace_after_panels();
         let mut seen = std::collections::BTreeSet::new();
         for index in indices {
@@ -2196,8 +2292,16 @@ impl App {
             {
                 continue;
             }
-            if !self.can_close_document(w, *index) {
-                return false;
+            if !self.needs_document_close_decision(*index) {
+                continue;
+            }
+            match self.decide_close_document_with(w, *index, Self::needs_document_close_decision) {
+                Ok(true) => (),
+                Ok(false) => return false,
+                Err(error) => {
+                    self.panels.message = error.into();
+                    return false;
+                }
             }
         }
         true
@@ -2211,6 +2315,18 @@ impl App {
             }
         }
     }
+    fn needs_document_close_decision(&self, index: usize) -> bool {
+        let tab = &self.workspace.tabs[index];
+        self.workspace.document_dirty(tab)
+            || (tab.path.is_none()
+                && !tab.editor.read_only
+                && (!tab.editor.text.is_empty()
+                    || tab.lazy.as_ref().is_some_and(|(doc, _)| {
+                        doc.history.as_ref().is_some_and(|history| {
+                            history.current_text().is_ok_and(|text| !text.is_empty())
+                        })
+                    })))
+    }
     // The provider supplies only the UI answer. Native and headless callers share
     // dirty checks, save-as cancellation, I/O errors and the actual save path.
     fn decide_close_document(
@@ -2219,15 +2335,24 @@ impl App {
         index: usize,
         contents_only: bool,
     ) -> Result<bool, String> {
+        self.decide_close_document_with(window, index, |app, index| {
+            let tab = &app.workspace.tabs[index];
+            if contents_only {
+                app.workspace.document_contents_dirty(tab)
+            } else {
+                app.workspace.document_dirty(tab)
+            }
+        })
+    }
+    fn decide_close_document_with(
+        &mut self,
+        window: Option<&WindowHandle>,
+        index: usize,
+        needs_decision: impl FnOnce(&Self, usize) -> bool,
+    ) -> Result<bool, String> {
         self.workspace.prepare_sheet(index)?;
         self.workspace.tabs[index].editor.unmark();
-        let dirty = if contents_only {
-            self.workspace
-                .document_contents_dirty(&self.workspace.tabs[index])
-        } else {
-            self.workspace.document_dirty(&self.workspace.tabs[index])
-        };
-        if !dirty {
+        if !needs_decision(self, index) {
             return Ok(true);
         }
         let decision = if let Some(window) = window {
@@ -2480,6 +2605,23 @@ impl App {
         if name == "new_file" {
             return self.workspace.new_file();
         }
+        if name == "reopen_last_file" {
+            if self.workspace.reopen_last_file()? {
+                return Ok(());
+            }
+            loop {
+                let path = self.sessions.borrow_mut().pop_closed_window_file();
+                let Some(path) = path else { return Ok(()) };
+                if matches!(path.try_exists(), Ok(false)) {
+                    continue;
+                }
+                return self.workspace.open(crate::cli::FileLocation {
+                    path,
+                    line: 1,
+                    column: 1,
+                });
+            }
+        }
         if name == "move_tab_to_window" {
             let sheet = args["sheet"]
                 .as_u64()
@@ -2697,8 +2839,10 @@ impl App {
                     });
                 if let Some(path) = path {
                     if !self.hot_exit().retain(false)
-                        && !self
-                            .can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+                        && !self.can_close_many(
+                            Some(w),
+                            &(0..self.workspace.tabs.len()).collect::<Vec<_>>(),
+                        )
                     {
                         return Ok(());
                     }
@@ -2726,7 +2870,10 @@ impl App {
             }
             "close_project" => {
                 if !self.hot_exit().retain(false)
-                    && !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+                    && !self.can_close_many(
+                        Some(w),
+                        &(0..self.workspace.tabs.len()).collect::<Vec<_>>(),
+                    )
                 {
                     return Ok(());
                 }
@@ -2788,7 +2935,6 @@ impl App {
         let active = self.workspace.active;
         match name {
             "new_file" => self.workspace.new_file()?,
-            "reopen_last_file" => self.workspace.reopen_last_file()?,
             "exit" => w.request_app_quit(),
             "open_recent_file" => {
                 self.workspace.open(crate::cli::FileLocation {
@@ -5252,38 +5398,7 @@ impl AppHandler for App {
         if self.options.mode != Mode::Interactive {
             return self.on_quit_requested(w);
         }
-        let retain = self.hot_exit().retain(false);
-        if retain {
-            if let Err(error) = self
-                .checkpoint_reason(false, true)
-                .and_then(|()| self.sessions.borrow().flush())
-            {
-                if self
-                    .workspace
-                    .tabs
-                    .iter()
-                    .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
-                {
-                    self.show_error(w, &format!("Could not save closed window: {error}"));
-                    return false;
-                }
-                self.panels.message = error.into();
-            }
-        } else {
-            if !self.can_close_many(w, &(0..self.workspace.tabs.len()).collect::<Vec<_>>()) {
-                return false;
-            }
-            let _ = self.checkpoint_reason(false, true);
-        }
-        self.sessions.borrow_mut().close(self.session_id, retain);
-        // Closing a window closes its sheets even when Hot Exit retains their buffers.
-        // The retained Dock template must not keep CLI -w clients blocked.
-        for waiter in &mut self.waiters {
-            waiter.finish(&mut self.workspace);
-        }
-        self.waiters.clear();
-        let _ = self.sessions.borrow().flush();
-        true
+        self.prepare_window_close(Some(w))
     }
     fn text_input_state(&self) -> TextInputState {
         if let Some(input) = self.panels.input() {
