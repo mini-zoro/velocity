@@ -37,6 +37,19 @@ struct HighlightFrontend {
     complete: Arc<std::sync::atomic::AtomicBool>,
     latest: Arc<AtomicU64>,
 }
+
+pub(crate) fn viewport_options(
+    settings: &vel_config::settings::Settings,
+) -> vel_highlight::ViewportOptions {
+    vel_highlight::ViewportOptions {
+        max_line_bytes: settings.usize("large_file.max_line_bytes", 16 * 1024),
+        max_viewport_lines: settings.usize("large_file.max_viewport_lines", 512),
+        max_lookback_lines: settings.usize("large_file.max_lookback_lines", 256),
+        checkpoint_interval: settings.usize("large_file.checkpoint_interval", 1024),
+        max_checkpoints: settings.usize("large_file.max_checkpoints", 128),
+    }
+}
+
 impl HighlightFrontend {
     fn viewport(
         text: Text,
@@ -53,13 +66,7 @@ impl HighlightFrontend {
         let ready = complete.clone();
         let latest = Arc::new(AtomicU64::new(version.0));
         let current = latest.clone();
-        let options = vel_highlight::ViewportOptions {
-            max_line_bytes: settings.usize("large_file.max_line_bytes", 16 * 1024),
-            max_viewport_lines: settings.usize("large_file.max_viewport_lines", 512),
-            max_lookback_lines: settings.usize("large_file.max_lookback_lines", 256),
-            checkpoint_interval: settings.usize("large_file.checkpoint_interval", 1024),
-            max_checkpoints: settings.usize("large_file.max_checkpoints", 128),
-        };
+        let options = viewport_options(settings);
         std::thread::Builder::new()
             .name("velocity-viewport-highlight".into())
             .spawn(move || {

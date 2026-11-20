@@ -1926,6 +1926,18 @@ impl Panels {
         }
         self.hover_point = point;
     }
+    #[cfg(test)]
+    pub(crate) fn has_pending_definition_hover(&self) -> bool {
+        !self.hover_term.is_empty()
+    }
+    #[cfg(test)]
+    pub(crate) fn sidebar_animates(&self) -> bool {
+        self.tree_motion.is_some()
+    }
+    #[cfg(test)]
+    pub(crate) fn sidebar_has_row(&self, path: &Path) -> bool {
+        self.side_rows.iter().any(|row| row.path == path)
+    }
     pub fn click_definition(
         &mut self,
         workspace: &mut Workspace,
@@ -2811,8 +2823,13 @@ impl Panels {
                 }
             }
             Some(Err(error)) => {
+                let detail = if error.lines().last() == Some("error: unclosed group") {
+                    UiText::tr("Unclosed group")
+                } else {
+                    error.into()
+                };
                 self.find_status =
-                    UiText::tr_fmt("Invalid regular expression: {detail}", [("detail", error)]);
+                    UiText::compose("Invalid regular expression: {detail}", [("detail", detail)]);
                 self.find_error = Some(self.find_status.clone());
                 self.set_message(self.find_status.clone());
                 self.search = None;
@@ -8570,14 +8587,21 @@ impl Panels {
         let mut source = String::from(
             "<style>body{margin:0}h3{font-size:0.85rem;margin:6px 0 2px 0;color:color(var(--foreground) alpha(0.6))}div{margin:2px 0}</style>",
         );
+        let tr = &workspace.translations;
+        let heading = |source: &mut String, text: &str| {
+            source.push_str("<h3>");
+            source.push_str(&escape_html(text));
+            source.push_str("</h3>");
+        };
+        let open_location = escape_html(&tr.tr("Open location"));
         for (i, location) in self.hover.iter().take(16).enumerate() {
             if i == 0 && self.hover_definitions > 0 {
-                source.push_str("<h3>Definitions</h3>");
+                heading(&mut source, &tr.tr("Definitions"));
             }
             if i == self.hover_definitions {
-                source.push_str("<h3>References</h3>");
+                heading(&mut source, &tr.tr("References"));
             }
-            source.push_str(&format!("<div><a href='definition:{i}' title='Open location'><b>{}</b></a> <code>{}:{}</code></div>",
+            source.push_str(&format!("<div><a href='definition:{i}' title='{open_location}'><b>{}</b></a> <code>{}:{}</code></div>",
                 escape_html(&location.name), escape_html(&location.file.file_name().unwrap_or_default().to_string_lossy()), location.row + 1));
         }
 

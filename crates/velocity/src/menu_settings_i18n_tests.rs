@@ -917,6 +917,114 @@ fn palette_row<'a>(app: &'a mut App, caption: &str) -> &'a vel_ui::Item {
 }
 
 #[test]
+fn copy_as_html_dispatches_a_single_rich_item_from_menu_and_palette() {
+    use std::cell::RefCell;
+    use vel_buffer::{Region, Selection};
+    #[derive(Default)]
+    struct Clipboard(RefCell<Vec<(String, String)>>);
+    impl RichClipboard for Clipboard {
+        fn set_clipboard_html(&self, html: &str, plain_text: &str) -> bool {
+            self.0.borrow_mut().push((html.into(), plain_text.into()));
+            true
+        }
+    }
+    let clipboard = Clipboard::default();
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    app.workspace.set_file_type("Rust").unwrap();
+    let source = "let 我 = 1;\n\t// 猫 <&>\nlast\n";
+    let editor = app.workspace.editor_mut();
+    editor.run("select_all", &json!({})).unwrap();
+    editor.run("insert", &json!({"characters":source})).unwrap();
+    editor.set_selection(Selection::from_regions([
+        Region::new(3, 0),
+        Region::new(source.find("last").unwrap(), source.find('\t').unwrap()),
+    ]));
+    app.workspace.tabs[app.workspace.active].format.line_ending = vel_fileio::LineEnding::CrLf;
+    r25_language(&mut app, "zh-Hans");
+    let model = app.application_menu();
+    let menu = rows(&model)
+        .find(|r| r.command.as_deref() == Some("copy_as_html"))
+        .unwrap();
+    let command = menu.command.as_deref().unwrap();
+    assert_eq!(menu.caption, "拷贝为 HTML");
+    let args = serde_json::from_str(&menu.args).unwrap();
+    assert!(app.command_enabled(command, &menu.args));
+    app.dispatch_named(None, Some(&clipboard), command, &args, 0)
+        .unwrap();
+    let context = &app.workspace.context_menus["Context.sublime-menu"];
+    assert!(
+        context
+            .iter()
+            .any(|row| row.command.as_deref() == Some("copy_as_html"))
+    );
+    {
+        let results = clipboard.0.borrow();
+        let [(html, plain)] = results.as_slice() else {
+            panic!("{results:?}")
+        };
+        assert_eq!(plain, "let\r\n\t// 猫 <&>\r\n");
+        assert!(html.contains("<span style=\"color:"));
+        assert!(html.contains("// 猫 &lt;&amp;&gt;"));
+        assert!(!html.contains('\t') && !html.contains("last"));
+        let active = app.workspace.editor().language.borrow();
+        let color = active.as_ref().unwrap().scheme.default_style().background;
+        assert!(html.contains(&format!(
+            "background-color:#{:02x}{:02x}{:02x}",
+            color.r, color.g, color.b
+        )));
+    }
+    app.workspace.editor_mut().set_caret(0, false);
+    open_palette(&mut app, "copy as html");
+    let _ = palette_row(&mut app, "编辑：拷贝为 HTML");
+    let viewport = app.viewport();
+    let (_, inv) = app
+        .panels
+        .key(&mut app.workspace, &Key::parse("enter").unwrap(), viewport)
+        .unwrap();
+    let inv = inv.unwrap();
+    assert_eq!(inv.command, "copy_as_html");
+    app.dispatch_named(None, Some(&clipboard), &inv.command, &inv.args, 0)
+        .unwrap();
+    let results = clipboard.0.borrow();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[1].1, source.replace('\n', "\r\n"));
+    assert!(results[1].0.contains('我') && results[1].0.contains("last"));
+}
+
+#[test]
+fn copy_as_html_rejects_a_ten_megabyte_document_without_changing_the_clipboard() {
+    struct NoWrite;
+    impl RichClipboard for NoWrite {
+        fn set_clipboard_html(&self, _: &str, _: &str) -> bool {
+            panic!("large export must not touch the pasteboard")
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("large.txt");
+    fs::write(&path, vec![b'x'; 10 * 1024 * 1024]).unwrap();
+    let mut app = fixture(None);
+    app.workspace
+        .open(crate::cli::FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    assert_eq!(
+        app.workspace.editor().buffer.text().len_bytes(),
+        10 * 1024 * 1024
+    );
+    app.workspace.editor_mut().clipboard = "keep me".into();
+    assert_eq!(
+        app.dispatch_named(None, Some(&NoWrite), "copy_as_html", &json!({}), 0)
+            .unwrap_err(),
+        "Selection is too large to copy as HTML"
+    );
+    assert_eq!(app.workspace.editor().clipboard, "keep me");
+}
+
+#[test]
 fn unsupported_language_explains_the_fallback_in_the_previous_language() {
     let data = tempfile::tempdir().unwrap();
     let mut app = fixture(Some(data.path()));

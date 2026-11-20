@@ -1,6 +1,18 @@
 //! Injectable operating-system services for file commands.
 use std::path::Path;
 
+/// A single clipboard item with interchangeable HTML and plain-text representations.
+pub trait RichClipboard {
+    /// Replaces the clipboard with one item containing both representations.
+    fn set_clipboard_html(&self, html: &str, plain_text: &str) -> bool;
+}
+
+impl RichClipboard for crate::WindowHandle {
+    fn set_clipboard_html(&self, html: &str, plain_text: &str) -> bool {
+        self.write_clipboard_html(html, plain_text)
+    }
+}
+
 /// Native operations used by file commands; tests can inject an in-memory fake.
 /// Confirmation and error presentation belong to the caller, before/after this API.
 pub trait NativeFileOperations {

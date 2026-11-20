@@ -1485,6 +1485,7 @@ impl Configuration {
                 Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
+        let report_locale = std::cell::OnceCell::new();
         for (package, (count, shipped)) in resources.plugins() {
             if shipped {
                 // Shipped packages have a known compatibility level, presented
@@ -1498,8 +1499,26 @@ impl Configuration {
                 .and_then(|s| Document::parse(s).ok())
                 .and_then(|doc| doc.value["version"].as_str().map(str::to_owned));
             // Reports are deduplicated by package/version, not by the individual missing commands.
-            resource_reports.push(format!("Package {}: {count} Python files not run; {keys} bindings / {items} menu items reference unavailable commands",
-                version.map_or_else(|| package.to_owned(), |v| format!("{package} ({v})"))));
+            let tr = report_locale.get_or_init(|| {
+                let mut tr = vel_i18n::Translator::default();
+                tr.replace(translations.clone());
+                let language = [Layer::User, Layer::Platform, Layer::Default]
+                    .into_iter()
+                    .find_map(|layer| settings.layer(layer).get("ui_language"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("en");
+                tr.select(vel_i18n::Language::from_setting(language));
+                tr
+            });
+            resource_reports.push(tr.tr_fmt(
+                "Package {name}: {count} Python files not run; {keys} bindings / {items} menu items reference unavailable commands",
+                &[
+                    ("name", version.map_or_else(|| package.to_owned(), |v| format!("{package} ({v})"))),
+                    ("count", count.to_string()),
+                    ("keys", keys.to_string()),
+                    ("items", items.to_string()),
+                ],
+            ));
         }
         for resource in resources.matching(".sublime-mousemap") {
             match resource.text().and_then(ui::parse_mousemap_with_warnings) {
@@ -2039,6 +2058,9 @@ impl Workspace {
             return false;
         }
         self.ui = crate::ui_text::Chrome::new(&self.translations);
+        for tab in &mut self.tabs {
+            tab.editor.translations = self.translations.clone();
+        }
         true
     }
     pub(crate) fn palette_caption(&self, item: &PaletteItem) -> Option<String> {
@@ -3305,6 +3327,7 @@ impl Workspace {
         }
         let tab = &mut self.tabs[index];
         tab.editor.theme = self.themes.ui.clone();
+        tab.editor.translations = self.translations.clone();
         if tab.loading.is_some() || tab.binary_loading.is_some() || tab.editor.binary.is_some() {
             *tab.editor.language.borrow_mut() = None;
             tab.needs_detection = false;

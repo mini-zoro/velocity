@@ -46,6 +46,12 @@ impl UiText {
             "No profile directory for saving macros" => {
                 Self::tr("No profile directory for saving macros")
             }
+            "Selection is too large to copy as HTML" => {
+                Self::tr("Selection is too large to copy as HTML")
+            }
+            "Could not highlight the selection" => Self::tr("Could not highlight the selection"),
+            "Syntax highlighting is unavailable" => Self::tr("Syntax highlighting is unavailable"),
+            "Could not write to the clipboard" => Self::tr("Could not write to the clipboard"),
             _ => detail.into(),
         }
     }

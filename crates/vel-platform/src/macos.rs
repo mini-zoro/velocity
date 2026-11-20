@@ -43,8 +43,8 @@ pub(super) fn activate_pid(pid: i32) {
     }
 }
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSFileManager, NSNotification, NSObject,
-    NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSFileManager, NSNotification,
+    NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
     NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_metal::MTLDrawable;
@@ -664,6 +664,19 @@ impl WindowHandle {
         p.clearContents();
         // SAFETY: the exported pasteboard type is immutable and both strings live through the call.
         p.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString })
+    }
+    pub(crate) fn write_clipboard_html(&self, html: &str, plain_text: &str) -> bool {
+        let item = NSPasteboardItem::new();
+        // SAFETY: these AppKit constants are immutable for the life of the process.
+        let (html_type, text_type) = unsafe { (NSPasteboardTypeHTML, NSPasteboardTypeString) };
+        if !item.setData_forType(&NSData::with_bytes(html.as_bytes()), html_type)
+            || !item.setString_forType(&NSString::from_str(plain_text), text_type)
+        {
+            return false;
+        }
+        let p = NSPasteboard::generalPasteboard();
+        p.clearContents();
+        p.writeObjects(&NSArray::from_slice(&[ProtocolObject::from_ref(&*item)]))
     }
     /// Invalidates the native IME's cached candidate-window geometry.
     pub fn invalidate_character_coordinates(&self) {

@@ -3414,6 +3414,7 @@ dependencies = [
  "vel-config",
  "vel-crash",
  "vel-diff",
+ "vel-export",
  "vel-fileio",
  "vel-git",
  "vel-highlight",

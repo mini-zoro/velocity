@@ -716,12 +716,22 @@ impl View {
             mix(0.12),
         );
         let bytes = e.binary.as_ref().map(|b| b.view.len_bytes());
-        let mut caption = format!("{w} × {h} pixels");
+        let tr = &e.translations;
+        let separator = tr.tr(" · ");
+        let mut caption = tr.tr_fmt(
+            "{width} × {height} pixels",
+            &[("width", w.to_string()), ("height", h.to_string())],
+        );
         if let Some(bytes) = bytes {
-            caption.push_str(" · ");
-            caption.push_str(&file_size(bytes));
+            caption.push_str(&separator);
+            if bytes < 1_000 {
+                caption.push_str(&tr.tr_fmt("{count} bytes", &[("count", bytes.to_string())]));
+            } else {
+                caption.push_str(&file_size(bytes));
+            }
         }
-        caption.push_str(&format!(" · {}%", (scale * 100.).round()));
+        caption.push_str(&separator);
+        caption.push_str(&format!("{}%", (scale * 100.).round()));
         let mut theme = e.theme.borrow_mut();
         let path = [
             vel_theme::Element::new("window", &[]),
@@ -840,8 +850,8 @@ impl View {
             let mut label =
                 theme.style(e.ui_id(0xE304), &vel_theme::ElementPath(&path), &e.settings);
             label.foreground = colors.muted;
-            let text = crate::app::IMAGE_FALLBACK_NOTE;
-            let width = theme.advance(&label, text) + 20. * s;
+            let text = crate::app::image_fallback_note(&e.translations);
+            let width = theme.advance(&label, &text) + 20. * s;
             let height = (22. * s).round();
             let rect = Rect {
                 x: (16. + 18. * self.cell - self.scroll_x - 10. * s).round(),
@@ -860,7 +870,7 @@ impl View {
                 theme.text(
                     &mut note,
                     &label,
-                    text,
+                    &text,
                     rect.x + 10. * s,
                     rect.y + (height + f64::from(label.size) * 0.7) / 2.,
                     rect,

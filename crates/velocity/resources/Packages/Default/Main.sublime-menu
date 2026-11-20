@@ -155,6 +155,10 @@
         "command": "copy"
       },
       {
+        "caption": "Copy as HTML",
+        "command": "copy_as_html"
+      },
+      {
         "caption": "Paste",
         "command": "paste"
       },

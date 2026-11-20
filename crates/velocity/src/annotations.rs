@@ -75,6 +75,11 @@ impl Config {
         }
     }
 }
+#[cfg(test)]
+pub(crate) fn worker_configuration(settings: &Settings) -> impl std::fmt::Debug {
+    Config::new(settings, None, None, 0)
+}
+
 #[derive(Clone, Debug)]
 pub struct Publication {
     pub identity: (BufferId, ChangeId),

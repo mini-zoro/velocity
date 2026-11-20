@@ -305,20 +305,21 @@ impl Editor {
 
     fn scope_popup_content(&self) -> String {
         use vel_highlight::ScopeProvider;
+        let tr = &self.translations;
         let language = self.language.borrow();
         let snapshot = language
             .as_ref()
             .and_then(|l| l.scope_snapshot_at(self.caret));
         let Some(scopes) = snapshot.as_ref().and_then(|s| s.scopes_at(self.caret)) else {
-            return "<p>Scopes not ready yet</p>".into();
+            return format!("<p>{}</p>", escape(&tr.tr("Scopes not ready yet")));
         };
         let scopes: Vec<_> = scopes.iter().map(|s| s.build_string()).collect();
-        let escape = |s: &str| {
+        fn escape(s: &str) -> String {
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
                 .replace('\'', "&#39;")
-        };
+        }
         // One monospace block, outermost scope first; the innermost one (the scope the caret
         // is in) reads strongest. The link copies the whole stack as one line.
         let (inner, outer) = scopes
@@ -336,12 +337,16 @@ impl Editor {
              .outer{{color:color(var(--foreground) alpha(0.62))}}\
              .meta{{color:color(var(--foreground) alpha(0.62))}}</style>\
              <div class='scopes'><span class='outer'>{outer}</span><b>{inner}</b></div>\
-             <div><a href='subl:copy_scope_name {args}'>Copy scope</a> \
+             <div><a href='subl:copy_scope_name {args}'>{}</a> \
              <span class='meta'>· {}</span></div>",
-            match scopes.len() {
-                1 => "1 scope".to_owned(),
-                n => format!("{n} scopes, outermost first"),
-            }
+            escape(&tr.tr("Copy scope")),
+            escape(&match scopes.len() {
+                1 => tr.tr("1 scope").into_owned(),
+                n => tr.tr_fmt(
+                    "{count} scopes, outermost first",
+                    &[("count", n.to_string())]
+                ),
+            })
         )
     }
 }

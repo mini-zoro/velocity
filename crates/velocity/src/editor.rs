@@ -68,6 +68,7 @@ pub struct Editor {
     pub vintage: Option<crate::vintage::State>,
     pub vintage_requests: Vec<vel_config::keymap::Invocation>,
     pub theme: std::rc::Rc<RefCell<vel_ui::theme::ThemeUi>>,
+    pub(crate) translations: vel_i18n::Translator,
     pub html: RefCell<crate::html_ui::ViewHtml>,
     pub annotation_view: ViewId,
     pub annotations: std::rc::Rc<RefCell<crate::annotations::Annotations>>,
@@ -145,6 +146,7 @@ impl Editor {
         for name in [
             "set_clipboard",
             "set_indentation",
+            "copy_as_html",
             "save_and_close",
             "new_html_sheet",
             "open_url",
@@ -224,6 +226,7 @@ impl Editor {
             vintage: None,
             vintage_requests: Vec::new(),
             theme: crate::theme_ui::default_ui(),
+            translations: Default::default(),
             html: Default::default(),
             annotation_view: id,
             annotations: std::rc::Rc::new(RefCell::new(crate::annotations::Annotations::new(

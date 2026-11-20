@@ -426,6 +426,10 @@
     "command": "copy"
   },
   {
+    "caption": "Edit: Copy as HTML",
+    "command": "copy_as_html"
+  },
+  {
     "caption": "Edit: Paste",
     "command": "paste"
   },

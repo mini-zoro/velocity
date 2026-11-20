@@ -3,6 +3,8 @@ use crate::app_scene_translate as translate_scene;
 use crate::ui_text::{Dialog, UiText};
 #[path = "app_a11y.rs"]
 mod accessibility_adapter;
+#[path = "app_clipboard.rs"]
+mod clipboard;
 #[path = "app_context.rs"]
 mod context_adapter;
 #[cfg(test)]
@@ -213,7 +215,12 @@ pub struct App {
     waiting_since: Option<Instant>,
 }
 /// Shown when an image file cannot be decoded and its bytes are shown instead.
+#[cfg(test)]
 pub(crate) const IMAGE_FALLBACK_NOTE: &str = "Not shown as an image: unsupported or damaged";
+
+pub(crate) fn image_fallback_note(tr: &vel_i18n::Translator) -> std::borrow::Cow<'static, str> {
+    tr.tr("Not shown as an image: unsupported or damaged")
+}
 impl App {
     /// Restores retained documents before a temporary native receiver can write the profile.
     pub(crate) fn take_over_native_primary(
@@ -978,6 +985,12 @@ impl App {
             return false;
         }
         match name {
+            "copy_as_html" => {
+                let editor = &self.workspace.tabs[target].editor;
+                return !self.workspace.is_empty()
+                    && editor.binary.is_none()
+                    && editor.language.borrow().is_some();
+            }
             "native_minimize" | "native_zoom" | "native_bring_all_to_front" => return false,
             "refresh_folder_list" | "close_folder_list" => {
                 return !self.workspace.folders.is_empty();
@@ -1563,6 +1576,23 @@ impl App {
         args: &Value,
         depth: usize,
     ) -> Result<(), String> {
+        self.dispatch_named(
+            window,
+            window.map(|w| w as &dyn RichClipboard),
+            name,
+            args,
+            depth,
+        )
+    }
+
+    fn dispatch_named(
+        &mut self,
+        window: Option<&WindowHandle>,
+        clipboard: Option<&dyn RichClipboard>,
+        name: &str,
+        args: &Value,
+        depth: usize,
+    ) -> Result<(), String> {
         // https://docs.sublimetext.io/reference/commands.html
         let name = match name {
             "prompt_add_folder" => "add_folder",
@@ -1609,9 +1639,13 @@ impl App {
             let commands = args["commands"].as_array().ok_or("chain needs commands")?;
             for command in commands {
                 let (name, child) = vel_commands::chain_entry(command)?;
-                if let Err(error) =
-                    self.run_named_depth(window, name, &context_child_args(args, child), depth + 1)
-                {
+                if let Err(error) = self.dispatch_named(
+                    window,
+                    clipboard,
+                    name,
+                    &context_child_args(args, child),
+                    depth + 1,
+                ) {
                     if self.workspace.editor().registry.playback_depth() > 0 {
                         return Err(error);
                     }
@@ -1633,6 +1667,11 @@ impl App {
             return Ok(());
         }
         if !palette_accept && !self.command_enabled_args(name, args) {
+            return Ok(());
+        }
+        if name == "copy_as_html" {
+            self.copy_as_html(clipboard)?;
+            self.named_changed(window, false);
             return Ok(());
         }
         if name == "reveal_in_side_bar" {
@@ -2977,7 +3016,7 @@ impl App {
             let [width, height] = image.logical_size;
             Some(format!("{width} × {height}"))
         } else if self.view.image_preview.failed && (synced || switched) {
-            Some(IMAGE_FALLBACK_NOTE.to_owned())
+            Some(image_fallback_note(&self.workspace.translations).into_owned())
         } else {
             None
         };
@@ -3844,10 +3883,13 @@ impl App {
             return;
         }
         self.title_theme = Some(key);
+        let (appearance, background) = self.title_bar_style();
+        w.set_title_bar_theme(appearance, background);
+    }
+    fn title_bar_style(&self) -> (Option<Appearance>, Option<[f32; 4]>) {
         let settings = &self.workspace.editor().settings;
         if !settings.bool("themed_title_bar", true) {
-            w.set_title_bar_theme(None, None);
-            return;
+            return (None, None);
         }
         let style = self.workspace.themes.ui.borrow_mut().style(
             crate::panels::StyleId::TitleBar.at(0),
@@ -3862,7 +3904,7 @@ impl App {
             Some(vel_theme::Keyword::Light) => Some(Appearance::Light),
             _ => None,
         };
-        w.set_title_bar_theme(appearance, style.background);
+        (appearance, style.background)
     }
     fn log_input(&self, kind: &str, event: impl std::fmt::Debug) {
         if self.options.log_input {

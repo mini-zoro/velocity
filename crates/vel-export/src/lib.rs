@@ -59,6 +59,9 @@ pub enum Error {
     /// Font size must be positive and finite; tab size must be 1..=256.
     #[error("invalid export options")]
     Options,
+    /// The clipboard representation would exceed the in-memory output limit.
+    #[error("HTML clipboard output exceeds its size limit")]
+    Size,
 }
 
 /// Exports a half-open UTF-8 byte range, including an empty range at EOF.
@@ -69,7 +72,20 @@ pub fn export_range(
     scheme: &ColorScheme,
     options: &Options,
 ) -> Result<HtmlExport, Error> {
-    render(text, &[range], highlighted, scheme, options)
+    render(text, &[range], highlighted, scheme, options, false)
+}
+
+/// Exports explicit source ranges with inline styles: rich paste targets may
+/// import the body and discard the document's stylesheet. Caps HTML at 2 MiB;
+/// callers must separately bound input size and syntax analysis.
+pub fn export_clipboard(
+    text: &Text,
+    ranges: &[Range<usize>],
+    highlighted: &[StyledLine],
+    scheme: &ColorScheme,
+    options: &Options,
+) -> Result<HtmlExport, Error> {
+    render(text, ranges, highlighted, scheme, options, true)
 }
 
 /// Copies nonempty selections in document order, separated by LF.
@@ -106,6 +122,7 @@ pub fn copy_as_html(
         highlighted,
         scheme,
         options,
+        false,
     )
 }
 
@@ -208,7 +225,16 @@ fn render(
     highlighted: &[StyledLine],
     scheme: &ColorScheme,
     options: &Options,
+    clipboard: bool,
 ) -> Result<HtmlExport, Error> {
+    const MAX_CLIPBOARD_HTML: usize = 2 * 1024 * 1024;
+    let check_size = |size| {
+        if clipboard && size > MAX_CLIPBOARD_HTML {
+            Err(Error::Size)
+        } else {
+            Ok(())
+        }
+    };
     if !options.font_size.is_finite()
         || options.font_size <= 0.
         || !(1..=256).contains(&options.tab_size)
@@ -244,6 +270,7 @@ fn render(
     let mut plain_text = String::new();
     // One class per resolved style. Schemes typically have only a few dozen styles.
     let mut styles = Vec::new();
+    let mut inline_styles = Vec::new();
     let mut columns = Vec::new();
     for (index, range) in ranges.iter().enumerate() {
         if index > 0 && !plain_text.ends_with('\n') {
@@ -297,9 +324,16 @@ fn render(
                 };
                 let style_id = styles.iter().position(|s| *s == style).unwrap_or_else(|| {
                     styles.push(style);
+                    if clipboard {
+                        inline_styles.push(style_css(style));
+                    }
                     styles.len() - 1
                 });
-                write!(body, "<span class=\"s{style_id}\">").unwrap();
+                if clipboard {
+                    write!(body, "<span style=\"{}\">", inline_styles[style_id]).unwrap();
+                } else {
+                    write!(body, "<span class=\"s{style_id}\">").unwrap();
+                }
                 let mut tail = local;
                 for (offset, c) in source[local..stop].char_indices() {
                     if c == '\t' {
@@ -308,15 +342,15 @@ fn render(
                             .partition_point(|(p, _)| *p <= local + offset)
                             .saturating_sub(1);
                         let col = columns[i].1;
-                        body.extend(std::iter::repeat_n(
-                            ' ',
-                            options.tab_size - col % options.tab_size,
-                        ));
+                        let width = options.tab_size - col % options.tab_size;
+                        check_size(body.len() + width)?;
+                        body.extend(std::iter::repeat_n(' ', width));
                         tail = local + offset + 1;
                     }
                 }
                 escape(&mut body, &source[tail..stop]);
                 body.push_str("</span>");
+                check_size(body.len())?;
                 local = stop;
             }
             if end == range.end {
@@ -327,6 +361,22 @@ fn render(
     }
     let mut html = String::from("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>");
     escape(&mut html, &options.title);
+    if clipboard {
+        html.push_str("</title></head><body><pre style=\"");
+        let pre = format!(
+            "margin:0;white-space:pre;color:{};background-color:{};font-family:{},monospace;font-size:{}pt;",
+            color(default.foreground),
+            color(default.background),
+            css_string(&options.font_family),
+            options.font_size,
+        );
+        escape(&mut html, &pre);
+        html.push_str("\">");
+        check_size(html.len() + body.len() + "</pre></body></html>\n".len())?;
+        html.push_str(&body);
+        html.push_str("</pre></body></html>\n");
+        return Ok(HtmlExport { html, plain_text });
+    }
     html.push_str("</title><style>\n");
     write!(html, "body{{margin:0;padding:1em;color:{};background-color:{};}}\npre{{margin:0;white-space:pre;font-family:{},monospace;font-size:{}pt;line-height:1.4;tab-size:{};}}\n",color(default.foreground),color(default.background),css_string(&options.font_family),options.font_size,options.tab_size).unwrap();
     let gutter = scheme

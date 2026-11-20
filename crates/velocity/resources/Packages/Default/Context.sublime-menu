@@ -11,6 +11,11 @@
     "id": "velocity_copy"
   },
   {
+    "caption": "Copy as HTML",
+    "command": "copy_as_html",
+    "id": "velocity_copy_as_html"
+  },
+  {
     "caption": "Paste",
     "command": "paste",
     "id": "velocity_paste"

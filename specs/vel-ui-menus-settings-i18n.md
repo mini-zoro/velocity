@@ -244,6 +244,70 @@ The Find in Files Where button shares Close's center line and hover treatment
 and has a localized tooltip. Other panels, the status bar, dialogs, window
 titles and accessibility remain out of scope for this pass.
 
+## Closing status (round 26)
+
+The round-24 menu decisions supersede earlier placement suggestions. “Done” refers to the
+implemented behavior and the checked model; it does not imply a live AppKit test. Software
+package names, paths, syntax and scope names, author content, and underlying compiler or
+third-party diagnostics are data, not catalog strings.
+
+| Finding | Status | Evidence or remaining work |
+| --- | --- | --- |
+| Menu bar 1: key equivalents | Partly | Round 23 derives single-chord shortcuts from the live keymap, including exact arguments and contexts; AppKit does not own command dispatch. Check the display and dispatch on real non-US layouts. |
+| Menu bar 2: app menu | Done in round 24 | Settings, Services, the Hide family and Quit are grouped in native order; Settings uses the Preferences ID. |
+| Menu bar 3: Window menu | Done in round 23 | Close Window, Move Tab to New Window and Merge All Windows are wired; availability follows the transferable sheets and destination windows. |
+| Menu bar 4: Help menu | Done in round 23 | Help is registered with AppKit; the model includes Documentation, Release Notes and Open Crash Reports. |
+| Menu bar 5: contents and dynamic rows | Done in round 24 | File/Folder/Project recents, encoding conversion, layout, display state, dynamic macros and Preferences are in the reviewed locations. Split View ultimately belongs in File. |
+| Menu bar 6: checks | Done in round 24 | Layout, bookmarks, indentation and display checks use effective state. |
+| Menu bar 7: availability | Done in round 24 | Save As for untitled files, Add Folder prompting, and the comment, fold, replace, macro and new-group guards are wired. |
+| Menu bar 8: context menus | Partly | Mount, Where and Widget menus are loaded and routed; Clipboard captions and Copy as HTML are done. A per-search Use .gitignore control needs a real option threaded through traversal; no inert row is shown. |
+| Settings 1: `set_translate_tabs` | Done in round 23 | The conversion updates the indentation preference when requested. |
+| Settings 2: status format defaults | Done in round 23 | Both encoding and line endings default to visible and have status-menu tests. |
+| Settings 3: syntax defaults editor | Done in round 23 | The read-only side shows the syntax's own defaults rather than the general preferences. |
+| Settings 4: invalid types and JSON | Done in round 23 | Known type mismatches are reported once; JSON diagnostics identify the source and position. |
+| Settings 5: missing keys | Partly | Supported file, build, UI and next-window preferences are shipped. `show_at_startup` was removed as undocumented rather than shipped as a no-op; adding it would require defining a real startup behavior. |
+| Settings 6: reference | Done in round 26 (lane C) | Generated reader-linked reference, explicit lifecycle notes and a stale-reference check. |
+| Settings 7: setting effects | Partly | The round-26 matrix applies all 184 shipped keys with readers, compares scenes, and runs actual save, build and session operations. Full-screen mode is documented as next native window transition. Some worker settings are checked at their resolved engine inputs; full behavioral coverage would require per-option completion, index, highlighting and annotation fixtures. |
+| Settings 8: macOS overlay | Done in round 23 | Platform preferences document the deliberate macOS scroll/animation defaults rather than copying the Sublime package. |
+| UI text: debug enum captions | Done in round 26 | Authored display names replace debug enum spellings, including package inventory resource kinds. |
+| UI text: internal error copy | Partly | Common action and settings errors use readable messages. Raw lower-level or third-party details can still surface; structured diagnostics are needed for further translation without losing the cause. |
+| UI text: terminology | Done in round 24 | Side Bar, Find in Files, Reveal in Finder, and Find/Replace labels are consistent on reviewed surfaces. |
+| UI text: status separators and abbreviations | Done in round 25 | Localized status templates assemble format, position and selection pieces; codec IDs remain standard. |
+| Chinese 1: menu IDs | Done in round 23 | View/Syntax and Preferences/Help are role- or ID-based. |
+| Chinese 2: inventory | Done in round 26 | The generated literal, menu and palette checks are backed by the draw-list audit with a commented data allow-list. |
+| Chinese 3: interpolated, fragment and minihtml copy | Partly | Named templates, status fragments and the definition/scope popups are localized. Raw diagnostics and HTML authored by packages are not translated; untranslated app-owned error paths outside the fixtures still need review. |
+| Chinese 4: live switching | Partly | Menus, palette, panels, status, titles and accessibility model update live. An already-open scope popup or an already-produced package report/choice list can retain its original text; refresh those snapshots on the language revision. |
+| Chinese 5: catalog and precedence | Done in round 23 | Default, package and User translations use validated named placeholders and revision-based lookup. |
+| Chinese 6: bilingual palette | Done in round 24 | Caption and English alias both match, with word-aligned alias highlights and command identity preserved. |
+| Chinese 7: CJK rendering | Done in round 26 | Bilingual offscreen scenes, measured CJK advances, and layout regression checks; the separate design lane owns the final visual review. |
+| Chinese 8: sequencing and accessibility | Partly | Model coverage includes translated labels and announcements. Live VoiceOver speech and the IME candidate window were not run: test with VoiceOver and a Simplified Chinese IME in a native window at both scales. |
+| Round 24: Velocity / Window | Done in round 24 | AppKit-owned roles and native menu grouping were retained. |
+| Round 24: File organization | Done in round 24 | Split View, Save/Open/Close groups, and Revert confirmation/caption match the reviewed model. |
+| Round 24: Print | Not done | Needs a native print or print-preview workflow and lifecycle-managed HTML (the exporter alone does not print). |
+| Round 24: Open Folder in New Window | Not done | Needs a folder-only picker and a new-workspace request that transfers the chosen root without adding it to the current window. |
+| Round 24: Edit / Selection | Done in round 26 | Round-24 reshuffle and availability checks plus Copy as HTML in Edit, the editor popup and the palette. |
+| Round 24: Find / Find in Files | Partly | Selection scope, Where shortcuts and Preserve Case are done. Per-search .gitignore policy is still missing; the control is intentionally absent. |
+| Round 24: View | Done in round 24 | Layout, groups, wrapping and other display checks follow the view model; duplicate controls removed. |
+| Round 24: Goto / Tools | Done in round 24 | Search and build results share Goto › Results; build and macro menus remain dynamic. |
+| Round 24: Project | Done in round 24 | Project requirements and history predicates gate the corresponding rows. |
+| Round 24: Preferences / Help | Done in round 24 | Native menu roles, settings entry points and dialog ellipses are in place. |
+| Round 24: editor, sidebar, mount and tab popups | Done in round 24 | Shared labels and targeted actions; spelling/history/package data are unchanged. |
+| Round 24: palette icons | Done in round 24 | Authored command-family masks with theme tint and neutral fallback. |
+| Round 24: zh-Hans pass | Done in round 26 | Rounds 25–26 added the ancillary UI copy and audit beyond the original menu/palette pass. Live checks and snapshot exceptions are recorded above. |
+
+Copy as HTML exports nonempty regions in document order (a caret-only selection means the
+whole document). It preserves tabs and the document's line-ending convention in plain text
+and uses inline styles in HTML because consumers can discard the document stylesheet.
+The synchronous path caps the required syntax prefix at 256 KiB and 4,096 lines, uses a
+250 ms cooperative syntax budget, and limits HTML to 2 MiB. If it cannot produce a complete
+highlighted item within those bounds, it leaves the clipboard intact. Plain Copy remains
+available for a bigger selection. Native consumer-by-consumer paste (Mail, Pages, Notes) was
+not exercised in this headless round.
+
+For the text audit, run `velocity --render-scenes DIR --language zh-Hans --audit-text`.
+It writes `cjk_runs` and unexpected `ascii_runs` into the layout JSON, without Metal or
+windows. The Rust regression uses the same classifier.
+
 ## Rules
 
 - One codex lane implements A, B and D after lanes A and C merge (it touches many files). The design agent styles C

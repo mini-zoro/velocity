@@ -16,7 +16,7 @@ use vel_config::{
     ui::{MenuItem, PaletteItem},
 };
 use vel_packages::{
-    PackageManager,
+    PackageManager, ResourceKind, Support,
     cli::{CliInstallOutcome, CliInstallPlan, install_cli, install_directories},
     https::HttpsClient,
 };
@@ -324,7 +324,10 @@ impl Actions {
                     .get("package_index_url")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                self.start(move || package_job(&data, &name, &args, ignored, index))?;
+                let tr = workspace.translations.clone();
+                self.start(move || {
+                    localized_package_job(&data, &name, &args, ignored, index, &tr)
+                })?;
                 panels.set_message(UiText::tr("Working on packages…"));
             }
             _ => return Ok(false),
@@ -495,6 +498,7 @@ fn open_folder(path: &Path) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+#[cfg(test)]
 fn package_job(
     data: &Path,
     command: &str,
@@ -502,6 +506,19 @@ fn package_job(
     ignored: BTreeSet<String>,
     index: Option<String>,
 ) -> Result<Reply, String> {
+    localized_package_job(data, command, args, ignored, index, &Default::default())
+}
+
+fn localized_package_job(
+    data: &Path,
+    command: &str,
+    args: &Value,
+    ignored: BTreeSet<String>,
+    index: Option<String>,
+    tr: &vel_i18n::Translator,
+) -> Result<Reply, String> {
+    let disabled_suffix = tr.tr(" (disabled)");
+    let unknown_version = tr.tr("unknown version");
     let mut manager = PackageManager::new(data);
     let client = HttpsClient::default();
     let result = match command {
@@ -582,10 +599,10 @@ fn package_job(
                                 u.available.name,
                                 u.installed_version
                                     .map(|v| v.to_string())
-                                    .unwrap_or_else(|| "unknown version".into()),
+                                    .unwrap_or_else(|| unknown_version.to_string()),
                                 u.available.version,
                                 if ignored.contains(&u.available.name) {
-                                    " (disabled)"
+                                    &disabled_suffix
                                 } else {
                                     ""
                                 }
@@ -635,11 +652,11 @@ fn package_job(
                     let disabled = ignored.contains(&p.name);
                     let prefix = format!("Packages/{}/", p.name);
                     let extra = [
-                        (".sublime-menu", "Menu"),
-                        (".sublime-commands", "Command palette"),
-                        (".sublime-mousemap", "Mouse bindings"),
-                        (".tmPreferences", "Metadata"),
-                        (".hidden-color-scheme", "Color scheme"),
+                        (".sublime-menu", tr.tr("Menu")),
+                        (".sublime-commands", tr.tr("Command palette")),
+                        (".sublime-mousemap", tr.tr("Mouse bindings")),
+                        (".tmPreferences", tr.tr("Metadata")),
+                        (".hidden-color-scheme", tr.tr("Color scheme")),
                     ]
                     .into_iter()
                     .flat_map(|(suffix, kind)| {
@@ -649,40 +666,57 @@ fn package_job(
                             .filter_map(|r| {
                                 r.path
                                     .strip_prefix(&prefix)
-                                    .map(|path| format!("{kind}: {path}"))
+                                    .map(|path| inventory_resource(tr, &kind, path))
                             })
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
 
+                    let support = match p.support() {
+                        Support::Declarative => tr.tr("declarative resources supported"),
+                        Support::PartialNoPluginApi => tr.tr("partially supported: no plugin API"),
+                    };
                     let detail = format!(
                         "{} {} — {}\n{}\n{}",
                         p.name,
                         p.version
                             .as_ref()
                             .map(ToString::to_string)
-                            .unwrap_or_else(|| "unknown version".into()),
-                        if disabled { "disabled" } else { "enabled" },
-                        p.support().label(),
+                            .unwrap_or_else(|| unknown_version.to_string()),
+                        if disabled {
+                            tr.tr("disabled")
+                        } else {
+                            tr.tr("enabled")
+                        },
+                        support,
                         p.contributions
                             .iter()
-                            .map(|c| format!("{:?}: {}", c.kind, c.path))
+                            .map(|c| inventory_resource(tr, &resource_kind(tr, c.kind), &c.path))
                             .chain(extra.iter().cloned())
-                            .chain(
-                                p.python_plugins
-                                    .iter()
-                                    .map(|p| format!("Python (not executed): {p}"))
-                            )
+                            .chain(p.python_plugins.iter().map(|p| inventory_resource(
+                                tr,
+                                &tr.tr("Python (not executed)"),
+                                p
+                            )))
                             .chain(p.error.iter().cloned())
                             .collect::<Vec<_>>()
                             .join("\n")
                     );
-                    let caption = format!(
-                        "{}{} — {} resource(s); {}",
-                        p.name,
-                        if disabled { " (disabled)" } else { "" },
-                        p.contributions.len() + extra.len(),
-                        p.error.as_deref().unwrap_or_else(|| p.support().label())
+                    let caption = tr.tr_fmt(
+                        "{name}{state} — {count} resource(s); {support}",
+                        &[
+                            ("name", p.name.clone()),
+                            (
+                                "state",
+                                if disabled {
+                                    disabled_suffix.to_string()
+                                } else {
+                                    String::new()
+                                },
+                            ),
+                            ("count", (p.contributions.len() + extra.len()).to_string()),
+                            ("support", p.error.as_deref().unwrap_or(&support).to_owned()),
+                        ],
                     );
                     choice(
                         caption,
@@ -722,15 +756,19 @@ fn package_job(
                     })
                 {
                     let disabled = ignored.contains(&name);
-                    let support = plugins
-                        .get(name.as_str())
-                        .map_or_else(String::new, |(count, _)| {
-                            format!("; {count} Python files not run")
-                        });
+                    let support =
+                        plugins
+                            .get(name.as_str())
+                            .map_or_else(String::new, |(count, _)| {
+                                tr.tr_fmt(
+                                    "; {count} Python files not run",
+                                    &[("count", count.to_string())],
+                                )
+                            });
                     choices.push(choice(
                         format!(
                             "{name}{}{support}",
-                            if disabled { " (disabled)" } else { "" }
+                            if disabled { &disabled_suffix } else { "" }
                         ),
                         command,
                         json!({"name":name,"enabled":disabled}),
@@ -741,6 +779,41 @@ fn package_job(
         }
     };
     Ok(result)
+}
+fn resource_kind(tr: &vel_i18n::Translator, kind: ResourceKind) -> std::borrow::Cow<'static, str> {
+    match kind {
+        ResourceKind::Syntax => tr.tr("Syntax"),
+        ResourceKind::ColorScheme => tr.tr("Color scheme"),
+        ResourceKind::Theme => tr.tr("Theme"),
+        ResourceKind::Keymap => tr.tr("Key Bindings"),
+        ResourceKind::Snippet => tr.tr("Snippet"),
+        ResourceKind::Completions => tr.tr("Completions"),
+        ResourceKind::BuildSystem => tr.tr("Build System"),
+    }
+}
+
+fn inventory_resource(tr: &vel_i18n::Translator, kind: &str, path: &str) -> String {
+    tr.tr_fmt(
+        "{kind}: {path}",
+        &[("kind", kind.to_owned()), ("path", path.to_owned())],
+    )
+}
+
+/// Offline inventory used by the same scene fixtures as other quick panels.
+#[cfg(target_os = "macos")]
+pub(crate) fn inventory_scene(workspace: &Workspace) -> Result<Vec<PaletteItem>, String> {
+    let Reply::Choices(rows) = localized_package_job(
+        workspace.data_path().ok_or("missing fixture data")?,
+        "package_list",
+        &json!({}),
+        workspace.ignored_packages(),
+        None,
+        &workspace.translations,
+    )?
+    else {
+        unreachable!("inventory always produces choices")
+    };
+    Ok(rows)
 }
 fn suggested_package_name(source: &str) -> Option<&str> {
     let filename = source.split(['?', '#']).next()?.rsplit('/').next()?;
@@ -872,7 +945,7 @@ mod tests {
             items[0].invocation.args["detail"]
                 .as_str()
                 .unwrap()
-                .contains("BuildSystem: thing.sublime-build")
+                .contains("Build System: thing.sublime-build")
         );
         assert!(
             package_job(
@@ -907,6 +980,42 @@ mod tests {
         let detail = items[0].invocation.args["detail"].as_str().unwrap();
         assert!(detail.contains("Menu: Main.sublime-menu"));
         assert!(detail.contains("Command palette: Custom.sublime-commands"));
+    }
+
+    #[test]
+    fn package_inventory_localizes_app_copy_but_not_resource_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("Packages/Example");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("example.py"), "# not run").unwrap();
+        std::fs::write(package.join("Example.sublime-commands"), "[]").unwrap();
+        let mut tr = vel_i18n::Translator::default();
+        tr.replace(
+            vel_i18n::Catalog::load(include_str!(
+                "../resources/Packages/Default/Localization/zh-Hans.sublime-localization"
+            ))
+            .unwrap(),
+        );
+        tr.select(vel_i18n::Language::ZhHans);
+        let Reply::Choices(rows) = localized_package_job(
+            temp.path(),
+            "package_list",
+            &json!({}),
+            ["Example".into()].into(),
+            None,
+            &tr,
+        )
+        .unwrap() else {
+            panic!("expected package inventory")
+        };
+        assert_eq!(
+            rows[0].caption,
+            "Example（已停用）：1 个资源；部分支持：不支持插件 API"
+        );
+        let detail = rows[0].invocation.args["detail"].as_str().unwrap();
+        assert!(detail.contains("Example 版本未知 — 已停用"));
+        assert!(detail.contains("命令面板：Example.sublime-commands"));
+        assert!(detail.contains("Python（不执行）：example.py"));
     }
     #[test]
     fn global_worker_orders_preferences_writes_before_package_edits() {

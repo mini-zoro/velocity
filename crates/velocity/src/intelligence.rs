@@ -358,13 +358,6 @@ impl Intelligence {
                 let assets = workspace.assets.clone();
                 let catalog = workspace.catalog.clone();
                 let options = IndexOptions {
-                    index_workers: settings.usize("index_workers", 0),
-                    index_exclude_patterns: patterns(settings, "index_exclude_patterns"),
-                    index_include_patterns: patterns(settings, "index_include_patterns"),
-                    index_exclude_gitignore: settings.bool("index_exclude_gitignore", true),
-                    index_skip_unknown_extensions: settings
-                        .bool("index_skip_unknown_extensions", true),
-                    max_file_size: settings.usize("index_max_file_size", 2 * 1024 * 1024) as u64,
                     cache_dir: if cfg!(test) {
                         Some(
                             workspace
@@ -378,7 +371,7 @@ impl Intelligence {
                     } else {
                         std::env::var_os("VELOCITY_CACHE_DIR").map(PathBuf::from)
                     },
-                    ..IndexOptions::default()
+                    ..index_options(settings)
                 };
                 let (tx, rx) = mpsc::channel();
                 self.loading = Some(rx);
@@ -690,6 +683,18 @@ impl Intelligence {
         result
     }
 }
+pub(crate) fn index_options(settings: &vel_config::settings::Settings) -> IndexOptions {
+    IndexOptions {
+        index_workers: settings.usize("index_workers", 0),
+        index_exclude_patterns: patterns(settings, "index_exclude_patterns"),
+        index_include_patterns: patterns(settings, "index_include_patterns"),
+        index_exclude_gitignore: settings.bool("index_exclude_gitignore", true),
+        index_skip_unknown_extensions: settings.bool("index_skip_unknown_extensions", true),
+        max_file_size: settings.usize("index_max_file_size", 2 * 1024 * 1024) as u64,
+        ..IndexOptions::default()
+    }
+}
+
 fn patterns(settings: &vel_config::settings::Settings, key: &str) -> Vec<String> {
     settings
         .get(key)

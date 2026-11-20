@@ -1,7 +1,7 @@
 //! Developer tool: renders real application states offscreen to PNG files.
 //!
 //! `velocity --render-scenes <out-dir> [--scale 1|2] [--appearance dark|light] [--only a,b]
-//! [--language en|zh-Hans]`
+//! [--language en|zh-Hans] [--audit-text]`
 //!
 //! Each scenario builds an actual [`App`] around a [`Workspace`] with synthetic files in a
 //! temporary directory, drives it through the same command, panel and pointer paths as the
@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+#[path = "render_scene_text.rs"]
+mod text_audit;
 
 /// Parsed `--render-scenes` arguments.
 struct Request {
@@ -28,6 +30,7 @@ struct Request {
     /// `--language en|zh-Hans`: the `ui_language` of the fixture's User preferences, so every
     /// scene starts in that language exactly as a user's setting would make it.
     language: Option<&'static str>,
+    audit_text: bool,
 }
 
 impl Request {
@@ -45,8 +48,13 @@ impl Request {
             bench: 0,
             first_frames: 0,
             language: None,
+            audit_text: false,
         };
         while let Some(arg) = args.next() {
+            if arg == "--audit-text" {
+                request.audit_text = true;
+                continue;
+            }
             let value = args.next().ok_or_else(|| format!("{arg} needs a value"))?;
             match arg.as_str() {
                 "--scale" => {
@@ -86,28 +94,28 @@ impl Request {
                 _ => return Err(format!("unknown --render-scenes option {arg}")),
             }
         }
+        if request.audit_text
+            && (request.language != Some("zh-Hans")
+                || request.first_frames > 0
+                || request.bench > 0)
+        {
+            return Err(
+                "--audit-text requires --language zh-Hans without a frame or bench mode".into(),
+            );
+        }
         Ok(request)
     }
 }
 
 /// Synthetic project on disk. Every name is generic; nothing comes from the user's machine.
 struct Fixture {
+    _dir: tempfile::TempDir,
     root: PathBuf,
     data: PathBuf,
     project: PathBuf,
     file: PathBuf,
     /// Round 5: the sample folder plus a folder of documents with Chinese names (`文档`).
     r5_project: PathBuf,
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.root) {
-            eprintln!(
-                "velocity: could not remove {}: {error}",
-                self.root.display()
-            );
-        }
-    }
 }
 
 const MAIN_RS: &str = r#"//! Tiny task runner used by the renderer's design scenes.
@@ -212,13 +220,12 @@ const R5_DOCS: &[(&str, &str)] = &[
 
 impl Fixture {
     fn create(language: Option<&str>) -> Result<Self, String> {
-        let root = std::env::temp_dir().join("velocity-render-scenes");
-        if root.exists() {
-            std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
-        }
-        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let dir = tempfile::Builder::new()
+            .prefix("velocity-render-scenes-")
+            .tempdir()
+            .map_err(|e| e.to_string())?;
         // Workspace folders are canonical (/private/var/… on macOS).
-        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let root = dir.path().canonicalize().map_err(|e| e.to_string())?;
         let project_dir = root.join("project");
         let data = root.join("data");
         let files: &[(&str, &str)] = &[
@@ -317,7 +324,13 @@ impl Fixture {
         let project = root.join("sample.sublime-project");
         std::fs::write(&project, r#"{"folders":[{"path":"project"}]}"#)
             .map_err(|e| e.to_string())?;
+        let inventory = data.join("Packages/ScenePackage");
+        std::fs::create_dir_all(&inventory).map_err(|e| e.to_string())?;
+        std::fs::write(inventory.join("Example.sublime-menu"), "[]").map_err(|e| e.to_string())?;
+        std::fs::write(inventory.join("plugin.py"), "# Not executed\n")
+            .map_err(|e| e.to_string())?;
         Ok(Self {
+            _dir: dir,
             file: project_dir.join("src/main.rs"),
             root,
             data,
@@ -676,6 +689,13 @@ fn picker_scene(fixture: &Fixture, dark: bool, command: &str) -> Result<App, Str
     Ok(app)
 }
 
+fn package_inventory_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    let items = crate::release::inventory_scene(&app.workspace)?;
+    app.panels.choices(&mut app.workspace, items);
+    Ok(app)
+}
+
 fn completion_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     open(&mut app, &fixture.file)?;
@@ -941,7 +961,15 @@ fn output_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     open(&mut app, &fixture.file)?;
     settle(&mut app);
     app.panels.configure_output(&app.workspace, None, false);
-    app.panels.output = "   Compiling sample v0.1.0 (/tmp/project)\nerror[E0308]: mismatched types\n  --> src/main.rs:55:20\n   |\n55 |         let next = by_name.get(name.as_str()).ok_or(\"unknown dependency\")?;\n   |                    ^^^^^^^ expected `&Task`, found `Option<&&Task>`\n\nerror: could not compile `sample` (bin \"sample\") due to 1 previous error\n[Finished in 0.4s with exit code 101]\n".into();
+    app.panels.output = "   Compiling sample v0.1.0 (/tmp/project)\nerror[E0308]: mismatched types\n  --> src/main.rs:55:20\n   |\n55 |         let next = by_name.get(name.as_str()).ok_or(\"unknown dependency\")?;\n   |                    ^^^^^^^ expected `&Task`, found `Option<&&Task>`\n\nerror: could not compile `sample` (bin \"sample\") due to 1 previous error\n".into();
+    app.panels
+        .append_output_ui(crate::build::finish_line_with_signal(
+            Some(101),
+            None,
+            false,
+            Duration::from_millis(400),
+            false,
+        ));
     app.panels.panel = Some(crate::panels::Panel::Output);
     Ok(app)
 }
@@ -1375,6 +1403,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "theme_picker",
         size: (1200., 800.),
         build: |f, d| picker_scene(f, d, "select_theme"),
+    },
+    Scenario {
+        name: "package_inventory",
+        size: (1200., 800.),
+        build: package_inventory_scene,
     },
     Scenario {
         name: "completion",
@@ -1896,6 +1929,7 @@ fn capture_chinese_layout(
     variant: &str,
     dark: bool,
     scale: f32,
+    audit_root: Option<&Path>,
 ) -> Result<(), String> {
     use vel_minihtml::FontMetrics;
     fn model(rows: &[vel_platform::MenuEntry]) -> Vec<vel_config::Value> {
@@ -1987,11 +2021,19 @@ fn capture_chinese_layout(
     }
     let appearance = if dark { "dark" } else { "light" };
     let report = out.join(format!("{variant}-{appearance}@{scale}x-layout.json"));
+    let payload = if let Some(root) = audit_root {
+        json!({"cjk_runs":layout, "ascii_runs":text_audit::runs(variant, app, root, &scene)})
+    } else {
+        json!(layout)
+    };
     std::fs::write(
         &report,
-        serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string())?,
+        serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    if audit_root.is_some() {
+        return Ok(());
+    }
     if variant.starts_with("r5_") {
         // Round-5 scenes under `--language zh-Hans` only report: a scrolled tab or a list row
         // half out of view is clipped on purpose.
@@ -2113,19 +2155,24 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     }
                     continue;
                 }
-                settle(&mut app);
-                let _ = app.scene();
-                after_layout(scenario.name, &mut app);
-                settle(&mut app);
-                if scenario.name == "hover_definition" {
-                    hover_definition(&mut app);
-                    settle(&mut app);
-                }
-                if matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
+                finish_layout(&mut app, scenario.name);
+                if request.audit_text
+                    || matches!(scenario.name, "zh_hans" | "zh_hans_ui2" | "zh_hans_mixed")
                     || (request.language == Some("zh-Hans")
                         && (scenario.name.starts_with("r5_") || scenario.name.starts_with("r25_")))
                 {
-                    capture_chinese_layout(&mut app, &request.out, scenario.name, dark, scale)?;
+                    capture_chinese_layout(
+                        &mut app,
+                        &request.out,
+                        scenario.name,
+                        dark,
+                        scale,
+                        request.audit_text.then_some(&fixture.root),
+                    )?;
+                    if request.audit_text {
+                        written += 1;
+                        continue;
+                    }
                 }
                 if request.bench > 0 {
                     bench_scene(&mut app, scenario.name, dark, scale, request.bench);
@@ -2199,4 +2246,45 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     }
     eprintln!("velocity: rendered {written} scenes");
     Ok(())
+}
+
+fn finish_layout(app: &mut App, name: &str) {
+    settle(app);
+    let _ = app.scene();
+    after_layout(name, app);
+    settle(app);
+    if name == "hover_definition" {
+        hover_definition(app);
+        settle(app);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn zh_hans_render_scenes_show_no_unexpected_ascii_copy() {
+    let fixture = Fixture::create(Some("zh-Hans")).unwrap();
+    let mut findings = Vec::new();
+    for scenario in SCENARIOS {
+        let mut app = (scenario.build)(&fixture, true).unwrap();
+        let fonts = Fonts::load_named(&app.workspace.editor().preferences.font_face).unwrap();
+        let size = Size {
+            width: scenario.size.0,
+            height: scenario.size.1,
+        };
+        attach(&mut app, fonts, size, 1.).unwrap();
+        finish_layout(&mut app, scenario.name);
+        let scene = app.scene();
+        findings.extend(
+            text_audit::runs(scenario.name, &app, &fixture.root, &scene)
+                .into_iter()
+                .map(|run| format!("{}: {run:?}", scenario.name)),
+        );
+    }
+    findings.sort_unstable();
+    findings.dedup();
+    assert!(
+        findings.is_empty(),
+        "unexpected zh-Hans draw-list text:\n{}",
+        findings.join("\n")
+    );
 }

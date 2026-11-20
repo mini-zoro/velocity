@@ -69,6 +69,26 @@ fn all_carets_copy_distinct_lines_and_mixed_selections_ignore_carets() {
     .unwrap();
     assert_eq!(mixed.plain_text, "a");
 }
+
+#[test]
+fn rich_pasteboard_rejects_tab_expansion_past_its_output_budget() {
+    let text = Text::from("\t".repeat(9_000));
+    let options = Options {
+        tab_size: 256,
+        ..Options::default()
+    };
+    let range = 0..text.len_bytes();
+    assert_eq!(
+        vel_export::export_clipboard(
+            &text,
+            std::slice::from_ref(&range),
+            &[],
+            &scheme(),
+            &options
+        ),
+        Err(Error::Size),
+    );
+}
 #[test]
 fn hostile_title_font_and_source_cannot_break_out_of_html_or_css() {
     let source = "</pre><script>alert('&')</script>\r\0";

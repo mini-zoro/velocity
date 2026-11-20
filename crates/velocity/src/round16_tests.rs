@@ -446,8 +446,8 @@ fn menus_and_palette_have_registered_commands_and_matching_arguments() {
     .unwrap();
     let e = Editor::new(Text::from("abc"));
     let mut registry = vel_commands::Registry::standard();
-    // The template command is hosted by the application, like its tab lifecycle commands.
-    for command in ["new_build_system", "new_snippet"] {
+    // These commands are hosted by the application, not the standalone registry.
+    for command in ["new_build_system", "new_snippet", "copy_as_html"] {
         registry.register(command, vel_commands::Kind::WindowCommand, None);
     }
     let resolved = ui::resolve_menu(&menu, "OSX", &json!({}), |i| CommandState {

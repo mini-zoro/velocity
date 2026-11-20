@@ -2528,6 +2528,9 @@ pub fn remember_copy(text: &str, parts: Vec<String>, whole_lines: bool) {
 pub fn last_copy(clipboard: &str) -> Option<LastCopy> {
     LAST_COPY.with(|c| c.borrow().clone().filter(|c| c.text == clipboard))
 }
+pub fn forget_copy() {
+    LAST_COPY.with(|c| c.borrow_mut().take());
+}
 /// Converts CRLF and lone CR line breaks to LF.
 pub fn normalize_line_breaks(text: &str) -> String {
     if text.contains('\r') {

@@ -599,10 +599,18 @@ impl Completion {
                     },
                 ));
             }
+            let kind_name = if item.kind.category == vel_complete::KindId::Variable
+                && item.kind.letter == "v"
+                && item.kind.name == "Word"
+            {
+                editor.translations.tr("Word")
+            } else {
+                std::borrow::Cow::Borrowed(item.kind.name.as_str())
+            };
             theme.text(
                 &mut footer_layer,
                 &detail,
-                &item.kind.name,
+                &kind_name,
                 rect.x + 10. * s,
                 separator + 17. * s,
                 rect,
@@ -811,7 +819,7 @@ pub fn popup_bounds(caret: Rect, area: Rect, width: f64, height: f64) -> Rect {
     }
 }
 
-fn settings(editor: &Editor) -> CompletionSettings {
+pub(crate) fn settings(editor: &Editor) -> CompletionSettings {
     let s = &editor.settings;
     let d = CompletionSettings::default();
     CompletionSettings {

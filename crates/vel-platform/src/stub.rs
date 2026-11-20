@@ -161,6 +161,9 @@ impl WindowHandle {
     pub fn set_clipboard_text(&self, _text: &str) -> bool {
         false
     }
+    pub(crate) fn write_clipboard_html(&self, _html: &str, _plain_text: &str) -> bool {
+        false
+    }
     /// Invalidates native IME candidate coordinates.
     pub fn invalidate_character_coordinates(&self) {}
     /// Stops the native application.

@@ -4,6 +4,9 @@ use vel_config::settings::Layer as SettingsLayer;
 use vel_render::scene::Surface;
 use vel_text::Text;
 
+#[path = "settings_effect_tests.rs"]
+mod effects;
+
 fn app(data: Option<&Path>) -> App {
     let workspace = Workspace::new(
         Text::from("line\n".repeat(80).as_str()),
