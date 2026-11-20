@@ -311,6 +311,10 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
     let sources = sources.as_str();
     let localized_words = &localized_words;
     let settings = app.workspace.settings_page.as_deref();
+    let settings_path_label = settings.map(|_| tr.tr("User file: {path}"));
+    let settings_path_label = settings_path_label
+        .as_deref()
+        .and_then(|label| label.split_once("{path}"));
     let root_text = root.to_string_lossy();
     let root_text = root_text.as_ref();
     scene
@@ -322,6 +326,11 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
                 if settings.is_some_and(|page| page.is_row_data(&run.text, tr)) {
                     return None;
                 }
+                // The displayed path can start with ~, or omit intermediate components.
+                // Only exempt the substituted value; the surrounding caption is UI chrome.
+                let settings_path = settings_path_label.and_then(|(prefix, suffix)| {
+                    run.text.strip_prefix(prefix)?.strip_suffix(suffix)
+                });
                 let words = words(&run.text)
                     .filter(|word| {
                         !TECHNICAL.contains(word)
@@ -329,6 +338,8 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
                             && !literal_measurement(word)
                             && !shortcut_word(word, &run.text)
                             && !is_data(run, word, labels, sources)
+                            && !settings_path
+                                .is_some_and(|path| words(path).any(|part| part == *word))
                             && !fixture_label(name, &run.text, word, root)
                             && !settings.is_some_and(|page| {
                                 word.starts_with(root_text)

@@ -27,7 +27,7 @@ impl App {
                 .settings_page
                 .as_ref()
                 .unwrap()
-                .accessibility(&self.workspace.translations);
+                .accessibility(&self.workspace.translations, include_text);
         }
         let mut tree = Tree::default();
         let ws = &self.workspace;
@@ -276,6 +276,54 @@ impl App {
         let Some(node) = self.accessible_tree().node(id).cloned() else {
             return;
         };
+        if self.settings_page_has_focus() {
+            if !node.enabled {
+                return;
+            }
+            if matches!(request, Request::Press) {
+                self.press_accessible(Some(w), &node);
+                return;
+            }
+            let Some((point, _)) = node.activation else {
+                return;
+            };
+            let mut page = self.workspace.settings_page.take().unwrap();
+            page.ax_focus(&mut self.workspace, point);
+            if let Some(model) = node.text {
+                match request {
+                    Request::Select(range) if node.editable => {
+                        if let Some(input) = page.input_mut() {
+                            let bytes = model.document_range(range).bytes(input.buffer.text());
+                            input.buffer.set_selection(
+                                input.view,
+                                vel_buffer::Selection::from_regions([vel_buffer::Region::new(
+                                    bytes.start,
+                                    bytes.end,
+                                )]),
+                            );
+                            input.reveal();
+                        }
+                    }
+                    Request::SetValue(text) if node.editable => {
+                        page.text_input(
+                            &self.workspace.translations,
+                            TextInput::Insert {
+                                text,
+                                replacement: Some(
+                                    model
+                                        .document_range(Utf16Range::new(0, model.text.len_utf16())),
+                                ),
+                            },
+                            Instant::now(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            self.workspace.settings_page = Some(page);
+            self.settings_redraw(Some(w));
+            return;
+        }
         match request {
             Request::Press => {
                 self.press_accessible(Some(w), &node);
@@ -345,6 +393,15 @@ impl App {
     }
     pub(super) fn accessible_range_rect(&self, id: Id, range: Utf16Range) -> Rect {
         let document = range;
+        if self.settings_page_has_focus() {
+            return self
+                .workspace
+                .settings_page
+                .as_ref()
+                .unwrap()
+                .ax_text_input(id)
+                .map_or(Rect::default(), |input| input.range_rect(document).0);
+        }
         if let Some(input) = self.panels.accessibility_input(id) {
             return input.range_rect(document).0;
         }

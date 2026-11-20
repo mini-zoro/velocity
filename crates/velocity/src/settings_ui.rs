@@ -1,11 +1,15 @@
 //! The graphical User-preferences sheet. Nothing here is initialized by editor windows
 //! until the sheet is opened.
 #[cfg(target_os = "macos")]
+#[path = "settings_ui_file.rs"]
+mod file;
+#[cfg(target_os = "macos")]
 #[path = "settings_ui_view.rs"]
 mod view;
 
 #[cfg(target_os = "macos")]
 mod model {
+    use super::file::{FileSession, Issue, Mutation, Snapshot};
     use crate::{workbench, workspace::Workspace};
     use serde::Deserialize;
     use std::{
@@ -16,8 +20,8 @@ mod model {
     };
     use vel_config::{Value, json::Document, settings::Layer};
     use vel_i18n::Translator;
-    use vel_platform::{Command, Rect, TextInput};
-    use vel_ui::{Scroll, input::Input};
+    use vel_platform::{Command, Point, Rect, TextInput};
+    use vel_ui::{Item, QuickPanel, Scroll, input::Input};
 
     const METADATA: &str = include_str!("../resources/Packages/Default/settings-ui.json");
     const REFERENCE: &str = include_str!("settings_reference.json");
@@ -81,6 +85,28 @@ mod model {
         #[serde(default)]
         aliases: Vec<String>,
         name: Option<String>,
+        #[serde(default)]
+        choices: Vec<Value>,
+        #[serde(default)]
+        show_when: BTreeMap<String, Condition>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    enum Condition {
+        Not { not: Value },
+        Any(Vec<Value>),
+        Equals(Value),
+    }
+
+    impl Condition {
+        fn matches(&self, value: &Value) -> bool {
+            match self {
+                Self::Not { not } => not != value,
+                Self::Any(values) => values.contains(value),
+                Self::Equals(expected) => expected == value,
+            }
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -171,9 +197,10 @@ mod model {
         pub(super) modified: bool,
         pub(super) name: String,
         pub(super) description: String,
-        pub(super) effect: String,
+        pub(super) effect: Option<String>,
         search: String,
         pub(super) compatibility: bool,
+        visible: bool,
     }
 
     impl Row {
@@ -185,18 +212,29 @@ mod model {
             self.def.meta.control
         }
 
+        pub(super) fn next_window(&self) -> bool {
+            matches!(self.def.effect, Effect::NextWindow)
+        }
+
         pub(super) fn editable(&self) -> bool {
             !self.compatibility
                 && match self.control() {
                     Control::Bool => self.value.is_boolean(),
                     Control::Number => self.value.is_number(),
                     Control::Text => self.value.is_string(),
+                    Control::Enum => !self.choices().is_empty(),
+                    Control::Array => self.value.is_array() || self.key() == "rulers",
                     _ => false,
                 }
         }
 
         pub(super) fn display(&self, tr: &Translator) -> String {
-            match &self.value {
+            Self::label(&self.value, tr)
+        }
+
+        pub(super) fn label(value: &Value, tr: &Translator) -> String {
+            match value {
+                Value::String(s) if s == "auto" => tr.tr("Automatic").into_owned(),
                 Value::Bool(true) => tr.tr("On").into_owned(),
                 Value::Bool(false) => tr.tr("Off").into_owned(),
                 Value::String(s) if s.is_empty() => tr.tr("Empty").into_owned(),
@@ -206,7 +244,60 @@ mod model {
             }
         }
 
-        fn edit_value(&self) -> String {
+        pub(super) fn choices(&self) -> &[Value] {
+            &self.def.meta.choices
+        }
+
+        pub(super) fn tags(&self) -> &[Value] {
+            self.value.as_array().map_or_else(
+                || {
+                    if self.key() == "rulers" && self.value.is_number() {
+                        std::slice::from_ref(&self.value)
+                    } else {
+                        &[]
+                    }
+                },
+                Vec::as_slice,
+            )
+        }
+
+        pub(super) fn tag_label(value: &Value) -> String {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned)
+        }
+
+        fn parse_tag(&self, source: &str, tr: &Translator) -> Result<Value, String> {
+            let source = source.trim();
+            if source.is_empty() || source.chars().any(char::is_control) {
+                return Err(tr.tr("Enter a nonempty, single-line value.").into_owned());
+            }
+            if self.key() == "rulers" {
+                return source
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .map(Value::from)
+                    .ok_or_else(|| tr.tr("Enter a positive column number.").into_owned());
+            }
+            let value = Value::String(source.to_owned());
+            if !self.choices().is_empty() && !self.choices().contains(&value) {
+                return Err(tr.tr_fmt(
+                    "Choose one of: {values}.",
+                    &[(
+                        "values",
+                        self.choices()
+                            .iter()
+                            .map(Self::tag_label)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )],
+                ));
+            }
+            Ok(value)
+        }
+
+        pub(super) fn edit_value(&self) -> String {
             self.value
                 .as_str()
                 .map_or_else(|| self.value.to_string(), str::to_owned)
@@ -277,20 +368,28 @@ mod model {
         Sidebar,
         List,
         Edit,
+        Action(Target),
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum Target {
         Search,
         Modified,
         Json,
         Repair,
+        ResetAll,
+        Reload,
         Category(Option<Group>),
         #[allow(dead_code)] // Also used by the native application.
         Row(usize),
         Control(usize),
         Step(usize, bool),
         Reset(usize),
+        RowJson(usize),
+        NewWindow(usize),
+        RemoveTag(usize, usize),
+        MoreTags(usize),
+        PopupItem(usize),
     }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -300,6 +399,7 @@ mod model {
         Close,
         Json,
         Repair,
+        NewWindow,
     }
 
     #[derive(Debug)]
@@ -309,11 +409,32 @@ mod model {
         pub(super) error: Option<String>,
         // Latest validated draft only. Preedit never becomes a publication.
         pending: Option<(Instant, Value)>,
+        base: (Option<Value>, Value),
+        dirty: bool,
+        pub(super) conflict: bool,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Popup {
+        pub(super) row: usize,
+        pub(super) tags: bool,
+        pub(super) panel: QuickPanel,
+        pub(super) bounds: Rect,
+        value: Value,
+    }
+
+    #[derive(Debug)]
+    struct Change {
+        id: u64,
+        row: usize,
+        previous: Option<Value>,
+        applied: Option<Value>,
     }
 
     #[derive(Debug)]
     pub(crate) struct Page {
         pub(super) path: Option<PathBuf>,
+        pub(super) home: Option<PathBuf>,
         pub(super) rows: Vec<Row>,
         pub(super) filtered: Vec<usize>,
         pub(super) groups: BTreeMap<Group, usize>,
@@ -325,6 +446,16 @@ mod model {
         pub(super) search: Input,
         pub(super) edit: Option<Edit>,
         pub(super) error: Option<String>,
+        pub(super) notice: Option<String>,
+        pub(super) popup: Option<Popup>,
+        pub(super) hovered: Option<Point>,
+        pub(super) hover_since: Option<Instant>,
+        pub(super) tooltips: Vec<(Rect, String)>,
+        pub(super) heading_bounds: Rect,
+        pub(super) heading: String,
+        pub(super) row_list: Rect,
+        pub(super) announcement: Option<String>,
+        pub(super) conflicts: BTreeMap<usize, String>,
         pub(super) scroll: Scroll,
         pub(super) category_scroll: Scroll,
         pub(super) hits: Vec<(Rect, Target)>,
@@ -333,12 +464,18 @@ mod model {
         pub(super) bounds: Rect,
         value_revision: Option<(u64, u64, u64)>,
         file_revision: Option<u64>,
+        file: FileSession,
+        history: Vec<Change>,
+        next_change: u64,
+        restoring: bool,
+        reloading: bool,
     }
 
     impl Page {
         pub(crate) fn new(workspace: &Workspace) -> Self {
             let mut page = Self {
                 path: workspace.data_path().map(workbench::preferences_path),
+                home: std::env::var_os("HOME").map(PathBuf::from),
                 rows: Vec::new(),
                 filtered: Vec::new(),
                 groups: BTreeMap::new(),
@@ -350,6 +487,16 @@ mod model {
                 search: Input::default(),
                 edit: None,
                 error: None,
+                notice: None,
+                popup: None,
+                hovered: None,
+                hover_since: None,
+                tooltips: Vec::new(),
+                heading_bounds: Rect::default(),
+                heading: String::new(),
+                row_list: Rect::default(),
+                announcement: None,
+                conflicts: BTreeMap::new(),
                 scroll: Scroll::default(),
                 category_scroll: Scroll::default(),
                 hits: Vec::new(),
@@ -358,37 +505,83 @@ mod model {
                 bounds: Rect::default(),
                 value_revision: None,
                 file_revision: None,
+                file: FileSession::new(None),
+                history: Vec::new(),
+                next_change: 0,
+                restoring: false,
+                reloading: false,
             };
+            page.file = FileSession::new(page.read_file(&workspace.translations));
+            page.file_revision = Some(workspace.resource_revision);
             page.refresh(workspace);
             page
         }
 
-        fn check_file(&mut self, tr: &Translator) {
-            self.error = match &self.path {
-                Some(path) => workbench::user_preferences_source(path)
-                    .and_then(|text| Document::parse(&text))
-                    .and_then(|doc| {
-                        doc.value.is_object().then_some(()).ok_or_else(|| {
-                            tr.tr("Expected a JSON object at line 1, column 1.")
-                                .into_owned()
-                        })
-                    })
-                    .err(),
-                None => Some(tr.tr("No User preferences file is available.").into_owned()),
-            };
-            if self.error.is_some() {
-                if self.focus == Focus::Edit {
-                    self.focus = Focus::List;
+        fn read_file(&mut self, tr: &Translator) -> Option<Snapshot> {
+            let snapshot = self
+                .path
+                .as_deref()
+                .ok_or_else(|| tr.tr("No User preferences file is available.").into_owned())
+                .and_then(Snapshot::read);
+            self.error = snapshot
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|file| file.object())
+                .err()
+                .map(|error| {
+                    if error == "Expected a JSON object at line 1, column 1." {
+                        tr.tr("Expected a JSON object at line 1, column 1.")
+                            .into_owned()
+                    } else {
+                        error
+                    }
+                });
+            snapshot.ok()
+        }
+
+        fn sync_writes(&mut self, tr: &Translator) -> bool {
+            let (pending, failures) = self.file.results();
+            let restored = self.restoring && !pending;
+            if restored {
+                self.restoring = false;
+                if failures.is_empty() {
+                    self.history.clear();
+                    self.notice = None;
+                    self.announcement = Some(tr.tr("Settings restored").into_owned());
                 }
-                self.edit = None;
             }
+            let changed = restored || !failures.is_empty();
+            for failure in failures {
+                self.history.retain(|change| Some(change.id) != failure.id);
+                self.notice = Some(match failure.issue {
+                    Issue::Outside => tr.tr("The file was changed outside Settings").into_owned(),
+                    Issue::Io(error) => {
+                        tr.tr_fmt("Could not save Settings: {detail}", &[("detail", error)])
+                    }
+                });
+                if let Some((row, draft)) = failure.draft {
+                    if let Some(edit) = self.edit.as_mut().filter(|edit| edit.row == row) {
+                        if !edit.dirty && self.rows[row].control() == Control::Array {
+                            edit.input.set(&draft);
+                        }
+                        edit.conflict = true;
+                        edit.pending = None;
+                    } else {
+                        self.conflicts.insert(row, draft);
+                    }
+                }
+            }
+            changed
         }
 
         pub(crate) fn refresh(&mut self, workspace: &Workspace) {
             let tr = &workspace.translations;
+            self.sync_writes(tr);
             if self.file_revision != Some(workspace.resource_revision) {
                 self.file_revision = Some(workspace.resource_revision);
-                self.check_file(tr);
+                self.reloading = false;
+                let snapshot = self.read_file(tr);
+                self.file.observe(snapshot.as_ref());
             }
             let settings = &workspace.settings;
             let revision = (
@@ -407,6 +600,11 @@ mod model {
             let user = settings.layer(Layer::User);
             let platform = settings.layer(Layer::Platform);
             let defaults = settings.layer(Layer::Default);
+            let effective = |key| {
+                user.get(key)
+                    .or_else(|| platform.get(key))
+                    .or_else(|| defaults.get(key))
+            };
             for def in DEFINITIONS.iter() {
                 let key = def.key.as_str();
                 let modified = user.contains_key(key);
@@ -424,26 +622,53 @@ mod model {
                 }
                 self.rows.push(Row {
                     def,
-                    value: user
-                        .get(key)
-                        .or_else(|| platform.get(key))
-                        .or_else(|| defaults.get(key))
-                        .cloned()
-                        .unwrap_or_default(),
+                    value: effective(key).cloned().unwrap_or_default(),
                     name,
                     description,
-                    effect: tr.tr_fmt(
-                        "Takes effect: {time}",
-                        &[("time", def.effect.label(tr).into_owned())],
-                    ),
+                    effect: (!matches!(def.effect, Effect::Immediate)).then(|| {
+                        tr.tr_fmt(
+                            "Takes effect: {time}",
+                            &[("time", def.effect.label(tr).into_owned())],
+                        )
+                    }),
                     search: search.to_lowercase(),
                     modified,
                     compatibility: def
                         .description
                         .contains("accepted for compatibility, no effect in Velocity"),
+                    visible: def.meta.show_when.iter().all(|(key, condition)| {
+                        effective(key.as_str()).is_some_and(|value| condition.matches(value))
+                    }),
                 });
             }
+            if let Some(edit) = &mut self.edit {
+                let row = &self.rows[edit.row];
+                let base = (user.get(row.key()).cloned(), row.value.clone());
+                if self.error.is_some() || edit.base != base {
+                    if edit.dirty || edit.input.composing() || edit.conflict {
+                        edit.conflict = true;
+                        edit.pending = None;
+                    } else {
+                        edit.base = base;
+                        if row.control() != Control::Array {
+                            edit.input.set(&row.edit_value());
+                        }
+                    }
+                }
+            }
             self.filter(selected);
+            if let Some(edit) = &self.edit
+                && !self.filtered.contains(&edit.row)
+            {
+                self.stash_edit();
+            }
+            if self.popup.as_ref().is_some_and(|popup| {
+                self.error.is_some()
+                    || !self.filtered.contains(&popup.row)
+                    || popup.value != self.rows[popup.row].value
+            }) {
+                self.popup = None;
+            }
         }
 
         fn filter(&mut self, selected: Option<usize>) {
@@ -451,7 +676,8 @@ mod model {
             self.filtered.clear();
             self.filtered
                 .extend(self.rows.iter().enumerate().filter_map(|(i, row)| {
-                    ((!self.modified_only || row.modified)
+                    (row.visible
+                        && (!self.modified_only || row.modified)
                         && if query.trim().is_empty() {
                             self.category
                                 .is_none_or(|group| group == row.def.meta.group)
@@ -487,25 +713,34 @@ mod model {
         }
 
         pub(crate) fn focus_search(&mut self, workspace: &mut Workspace) {
+            self.popup = None;
             if !self.finish_edit(workspace) {
-                self.edit = None;
+                self.stash_edit();
             }
             self.focus = Focus::Search;
             self.search.command(Command::SelectAll);
         }
 
         pub(crate) fn input(&self) -> Option<&Input> {
+            if self.popup.is_some() {
+                return None;
+            }
             match self.focus {
                 Focus::Search => Some(&self.search),
-                Focus::Edit => self.edit.as_ref().map(|edit| &edit.input),
+                Focus::Edit if self.error.is_none() => self.edit.as_ref().map(|edit| &edit.input),
                 _ => None,
             }
         }
 
         pub(crate) fn input_mut(&mut self) -> Option<&mut Input> {
+            if self.popup.is_some() {
+                return None;
+            }
             match self.focus {
                 Focus::Search => Some(&mut self.search),
-                Focus::Edit => self.edit.as_mut().map(|edit| &mut edit.input),
+                Focus::Edit if self.error.is_none() => {
+                    self.edit.as_mut().map(|edit| &mut edit.input)
+                }
                 _ => None,
             }
         }
@@ -530,6 +765,11 @@ mod model {
                 if edit.input.composing() || after == before {
                     return;
                 }
+                edit.dirty = true;
+                if edit.conflict || self.rows[edit.row].control() == Control::Array {
+                    edit.error = None;
+                    return;
+                }
                 match self.rows[edit.row].parse(&after, tr) {
                     Ok(value) => {
                         edit.error = None;
@@ -549,9 +789,10 @@ mod model {
         }
 
         pub(crate) fn flush_due(&mut self, workspace: &mut Workspace, now: Instant) -> bool {
+            let changed = self.sync_writes(&workspace.translations);
             self.refresh(workspace);
             if !self.deadline().is_some_and(|due| due <= now) {
-                return false;
+                return changed;
             }
             if let Some((row, value)) = self
                 .edit
@@ -563,23 +804,187 @@ mod model {
             true
         }
 
-        fn write(&mut self, workspace: &mut Workspace, row: usize, value: Option<Value>) {
-            let key = self.rows[row].key();
-            let previous = workspace.settings.layer(Layer::User).get(key);
-            if previous == value.as_ref() || self.error.is_some() {
-                return;
+        pub(super) fn writable(&self) -> bool {
+            self.error.is_none() && !self.restoring && !self.reloading
+        }
+
+        pub(super) fn can_reload(&self) -> bool {
+            self.path.is_some() && !self.file.pending() && !self.reloading
+        }
+
+        fn base(&self, workspace: &Workspace, row: usize) -> (Option<Value>, Value) {
+            let row = &self.rows[row];
+            (
+                workspace
+                    .settings
+                    .layer(Layer::User)
+                    .get(row.key())
+                    .cloned(),
+                row.value.clone(),
+            )
+        }
+
+        fn write(&mut self, workspace: &mut Workspace, row: usize, value: Option<Value>) -> bool {
+            let previous = self.base(workspace, row).0;
+            if previous == value {
+                return true;
             }
-            self.check_file(&workspace.translations);
-            if self.error.is_some() {
-                return;
-            }
-            if let Err(error) = workspace.set_user_preference(key, value) {
-                self.error = Some(error);
-                self.edit = None;
-                self.focus = Focus::List;
+            let id = self.next_change;
+            self.next_change += 1;
+            self.history.push(Change {
+                id,
+                row,
+                previous: previous.clone(),
+                applied: value.clone(),
+            });
+            if self.write_change(workspace, row, previous, value, id) {
+                true
             } else {
-                workspace.sync_ui_language();
+                self.history.retain(|change| change.id != id);
+                false
+            }
+        }
+
+        fn write_change(
+            &mut self,
+            workspace: &mut Workspace,
+            row: usize,
+            previous: Option<Value>,
+            value: Option<Value>,
+            id: u64,
+        ) -> bool {
+            let Some(path) = self.path.clone().filter(|_| self.writable()) else {
+                return false;
+            };
+            let file = self.read_file(&workspace.translations);
+            if file.is_none() || self.error.is_some() {
+                if let Some(edit) = &mut self.edit {
+                    edit.conflict = true;
+                }
+                return false;
+            }
+            let key = self.rows[row].key();
+            let draft = self
+                .edit
+                .as_ref()
+                .filter(|edit| edit.row == row && edit.dirty)
+                .map(|edit| (row, edit.input.value()));
+            let mutation = Mutation::Key {
+                key,
+                previous,
+                value: value.clone(),
+            };
+            if let Err(error) = self.file.queue(workspace, path, mutation, Some(id), draft) {
+                self.notice = Some(
+                    workspace
+                        .translations
+                        .tr_fmt("Could not save Settings: {detail}", &[("detail", error)]),
+                );
+                return false;
+            }
+            let value_revision = workspace.settings.cache_identity();
+            workspace.apply_user_preference(key, value.clone());
+            let settings = &workspace.settings;
+            if let Some(edit) = self.edit.as_mut().filter(|edit| edit.row == row) {
+                let effective = value
+                    .as_ref()
+                    .or_else(|| settings.layer(Layer::Platform).get(key))
+                    .or_else(|| settings.layer(Layer::Default).get(key))
+                    .cloned()
+                    .unwrap_or_default();
+                edit.base = (value, effective);
+                edit.dirty = false;
+            }
+            workspace.sync_ui_language();
+            if value_revision != workspace.settings.cache_identity() {
                 self.refresh(workspace);
+            }
+            let row = &self.rows[row];
+            let tr = &workspace.translations;
+            let value = match row.value.as_bool() {
+                Some(true) => tr.tr("on").into_owned(),
+                Some(false) => tr.tr("off").into_owned(),
+                _ => row.display(tr),
+            };
+            self.announcement = Some(tr.tr_fmt(
+                "{name}, {value}",
+                &[("name", row.name.clone()), ("value", value)],
+            ));
+            true
+        }
+
+        fn undo(&mut self, workspace: &mut Workspace) {
+            if !self.writable() {
+                return;
+            }
+            let Some(change) = self.history.pop() else {
+                return;
+            };
+            if self.base(workspace, change.row).0 != change.applied {
+                self.notice = Some(
+                    workspace
+                        .translations
+                        .tr("The file was changed outside Settings")
+                        .into_owned(),
+                );
+                self.history.push(change);
+            } else {
+                if self
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.row == change.row)
+                {
+                    self.stash_edit();
+                }
+                self.write_change(
+                    workspace,
+                    change.row,
+                    change.applied,
+                    change.previous,
+                    change.id,
+                );
+            }
+        }
+
+        fn reset_all(&mut self, workspace: &mut Workspace) {
+            let Some(path) = self.path.clone().filter(|_| self.writable()) else {
+                return;
+            };
+            self.popup = None;
+            if let Err(error) = self
+                .file
+                .queue(workspace, path, Mutation::Restore, None, None)
+            {
+                self.notice = Some(
+                    workspace
+                        .translations
+                        .tr_fmt("Could not save Settings: {detail}", &[("detail", error)]),
+                );
+                return;
+            }
+            self.restoring = true;
+        }
+
+        fn reload(&mut self, workspace: &mut Workspace) {
+            if self.can_reload() {
+                self.file = FileSession::new(self.read_file(&workspace.translations));
+                self.notice = None;
+                self.history.clear();
+                self.focus = Focus::List;
+                self.reloading = true;
+                self.stash_edit();
+                workspace.request_resource_reload();
+            }
+        }
+
+        fn stash_edit(&mut self) {
+            if let Some(edit) = self.edit.take() {
+                if edit.conflict {
+                    self.conflicts.insert(edit.row, edit.input.value());
+                }
+                if self.focus == Focus::Edit {
+                    self.focus = Focus::List;
+                }
             }
         }
 
@@ -587,14 +992,16 @@ mod model {
             let Some(edit) = &mut self.edit else {
                 return true;
             };
-            if edit.error.is_some() || edit.input.composing() {
+            if edit.error.is_some() || edit.conflict || edit.input.composing() {
                 return false;
             }
-            let edit = self.edit.take().unwrap();
-            self.focus = Focus::List;
-            if let Some((_, value)) = edit.pending {
-                self.write(workspace, edit.row, Some(value));
+            if let Some((_, value)) = edit.pending.take()
+                && !self.write(workspace, self.edit.as_ref().unwrap().row, Some(value))
+            {
+                return false;
             }
+            self.edit = None;
+            self.focus = Focus::List;
             true
         }
 
@@ -605,20 +1012,28 @@ mod model {
             }
         }
 
-        fn begin_edit(&mut self, row: usize) {
+        fn begin_edit(&mut self, workspace: &Workspace, row: usize) {
             self.focus = Focus::Edit;
             let mut input = Input::default();
-            input.set(&self.rows[row].edit_value());
+            let saved = self.conflicts.remove(&row);
+            if let Some(draft) = &saved {
+                input.set(draft);
+            } else if self.rows[row].control() != Control::Array {
+                input.set(&self.rows[row].edit_value());
+            }
             self.edit = Some(Edit {
                 row,
                 input,
                 error: None,
                 pending: None,
+                base: self.base(workspace, row),
+                dirty: saved.is_some(),
+                conflict: saved.is_some(),
             });
         }
 
         fn activate(&mut self, workspace: &mut Workspace, row: usize, toggle_only: bool) {
-            if self.error.is_some() || !self.rows[row].editable() {
+            if !self.writable() || !self.rows[row].editable() {
                 return;
             }
             match self.rows[row].control() {
@@ -626,13 +1041,19 @@ mod model {
                     let next = !self.rows[row].value.as_bool().unwrap();
                     self.write(workspace, row, Some(Value::Bool(next)));
                 }
-                Control::Number | Control::Text if !toggle_only => self.begin_edit(row),
+                Control::Number | Control::Text | Control::Array if !toggle_only => {
+                    self.begin_edit(workspace, row)
+                }
+                Control::Enum => self.open_popup(&workspace.translations, row, false),
                 _ => {}
             }
         }
 
         fn step(&mut self, workspace: &mut Workspace, row: usize, up: bool, now: Instant) {
-            if self.error.is_some() || !self.rows[row].editable() {
+            if !self.writable()
+                || !self.rows[row].editable()
+                || self.edit.as_ref().is_some_and(|edit| edit.conflict)
+            {
                 return;
             }
             let edit = self.edit.as_ref();
@@ -655,7 +1076,7 @@ mod model {
                 format!("{next:.0}")
             };
             if self.edit.as_ref().is_none_or(|edit| edit.row != row) {
-                self.begin_edit(row);
+                self.begin_edit(workspace, row);
             }
             if let Some(edit) = &mut self.edit {
                 let before = edit.input.value();
@@ -671,6 +1092,203 @@ mod model {
             self.filter(None);
         }
 
+        fn open_popup(&mut self, tr: &Translator, row: usize, tags: bool) {
+            if !self.writable() || !self.rows[row].editable() {
+                return;
+            }
+            let value = &self.rows[row];
+            let entries = if tags { value.tags() } else { value.choices() };
+            let mut panel = QuickPanel::default();
+            panel.set_items(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, entry)| Item {
+                        caption: if tags {
+                            format!("×  {}", Row::tag_label(entry))
+                        } else {
+                            format!(
+                                "{}{}",
+                                if entry == &value.value { "✓  " } else { "" },
+                                Row::label(entry, tr)
+                            )
+                        },
+                        value: i,
+                        ..Item::default()
+                    })
+                    .collect(),
+            );
+            if entries.is_empty() {
+                return;
+            }
+            if !tags {
+                panel.selected = entries
+                    .iter()
+                    .position(|entry| entry == &value.value)
+                    .unwrap_or(0);
+            }
+            self.popup = Some(Popup {
+                row,
+                tags,
+                panel,
+                bounds: Rect::default(),
+                value: value.value.clone(),
+            });
+        }
+
+        fn choose(&mut self, workspace: &mut Workspace, item: usize) {
+            let Some(popup) = self.popup.take() else {
+                return;
+            };
+            if popup.tags {
+                self.remove_tag(workspace, popup.row, item);
+            } else if let Some(choice) = self.rows[popup.row].choices().get(item).cloned()
+                && choice != self.rows[popup.row].value
+            {
+                self.write(workspace, popup.row, Some(choice));
+            }
+        }
+
+        fn add_tag(&mut self, workspace: &mut Workspace) {
+            let Some(edit) = self.edit.as_mut().filter(|edit| !edit.conflict) else {
+                return;
+            };
+            let source = edit.input.value();
+            if source.trim().is_empty() {
+                self.finish_edit(workspace);
+                return;
+            }
+            let row = edit.row;
+            match self.rows[row].parse_tag(&source, &workspace.translations) {
+                Ok(tag) => {
+                    let mut tags = self.rows[row].tags().to_vec();
+                    tags.push(tag);
+                    if self.write(workspace, row, Some(Value::Array(tags)))
+                        && let Some(edit) = &mut self.edit
+                        && !edit.conflict
+                    {
+                        edit.input.set("");
+                        edit.error = None;
+                    }
+                }
+                Err(error) => edit.error = Some(error),
+            }
+        }
+
+        fn remove_tag(&mut self, workspace: &mut Workspace, row: usize, index: usize) {
+            if !self.writable()
+                || self
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.row == row && edit.conflict)
+            {
+                return;
+            }
+            let mut tags = self.rows[row].tags().to_vec();
+            if index < tags.len() {
+                tags.remove(index);
+                self.write(workspace, row, Some(Value::Array(tags)));
+            }
+        }
+
+        fn target_at(&self, point: Point) -> Option<Target> {
+            self.hits
+                .iter()
+                .rev()
+                .find_map(|(bounds, target)| vel_ui::contains(*bounds, point).then_some(*target))
+        }
+
+        pub(crate) fn ax_focus(&mut self, workspace: &mut Workspace, point: Point) {
+            let Some(target) = self.target_at(point) else {
+                return;
+            };
+            if let Target::PopupItem(index) = target
+                && let Some(popup) = &mut self.popup
+            {
+                popup.panel.selected = index;
+                popup.panel.scroll.reveal(index);
+                return;
+            }
+            self.popup = None;
+            if matches!(target, Target::Control(row) if self.edit.as_ref().is_some_and(|edit| edit.row == row))
+            {
+                return;
+            }
+            if !self.finish_edit(workspace) {
+                self.stash_edit();
+            }
+            match target {
+                Target::Search => self.focus = Focus::Search,
+                Target::Row(row) => {
+                    self.select(row);
+                    self.focus = Focus::List;
+                }
+                Target::Control(row) => {
+                    self.select(row);
+                    if self.writable()
+                        && matches!(
+                            self.rows[row].control(),
+                            Control::Text | Control::Number | Control::Array
+                        )
+                    {
+                        self.begin_edit(workspace, row);
+                    } else {
+                        self.focus = Focus::Action(target);
+                    }
+                }
+                target => self.focus = Focus::Action(target),
+            }
+        }
+
+        fn use_target(
+            &mut self,
+            workspace: &mut Workspace,
+            target: Target,
+            now: Instant,
+        ) -> Navigation {
+            use Target::*;
+            match target {
+                Search => self.focus = Focus::Search,
+                Modified => self.show_modified(),
+                Category(group) => {
+                    self.focus = Focus::Sidebar;
+                    self.category(group);
+                }
+                Row(row) | Control(row) => {
+                    self.focus = Focus::List;
+                    self.select(row);
+                    if target == Control(row) {
+                        self.activate(workspace, row, false);
+                    }
+                }
+                Step(row, up) => {
+                    self.select(row);
+                    self.step(workspace, row, up, now);
+                }
+                Reset(row) => {
+                    if !self.writable() {
+                        return Navigation::Stay;
+                    }
+                    self.focus = Focus::List;
+                    self.select(row);
+                    self.conflicts.remove(&row);
+                    self.write(workspace, row, None);
+                }
+                RemoveTag(row, index) => self.remove_tag(workspace, row, index),
+                MoreTags(row) => {
+                    self.select(row);
+                    self.open_popup(&workspace.translations, row, true);
+                }
+                PopupItem(item) => self.choose(workspace, item),
+                ResetAll => self.reset_all(workspace),
+                Reload => self.reload(workspace),
+                Json | RowJson(_) => return Navigation::Json,
+                Repair => return Navigation::Repair,
+                NewWindow(_) => return Navigation::NewWindow,
+            }
+            Navigation::Stay
+        }
+
         pub(crate) fn pointer(
             &mut self,
             workspace: &mut Workspace,
@@ -680,24 +1298,34 @@ mod model {
         ) -> Navigation {
             self.refresh(workspace);
             use Target::*;
-            let Some(target) =
-                self.hits.iter().rev().find_map(|(bounds, target)| {
-                    vel_ui::contains(*bounds, point).then_some(*target)
-                })
-            else {
+            let target = self.target_at(point);
+            if let Some(popup) = &self.popup {
+                if let Some(PopupItem(item)) = target {
+                    self.choose(workspace, item);
+                } else if !vel_ui::contains(popup.bounds, point) {
+                    self.popup = None;
+                }
+                return Navigation::Stay;
+            }
+            let Some(target) = target else {
                 return Navigation::Stay;
             };
             match target {
                 Repair => return Navigation::Repair,
-                Json => {
+                Reload => {
+                    self.reload(workspace);
+                    return Navigation::Stay;
+                }
+                Json | RowJson(_) => {
                     if !self.finish_edit(workspace) {
-                        self.edit = None;
-                        self.focus = Focus::List;
+                        self.stash_edit();
                     }
                     return Navigation::Json;
                 }
                 Control(row) if self.edit.as_ref().is_some_and(|edit| edit.row == row) => {
-                    self.edit.as_mut().unwrap().input.click_at(point, extend);
+                    if let Some(input) = self.input_mut() {
+                        input.click_at(point, extend);
+                    }
                     return Navigation::Stay;
                 }
                 Step(row, up) if self.edit.as_ref().is_some_and(|edit| edit.row == row) => {
@@ -708,58 +1336,91 @@ mod model {
                     self.edit = None;
                     self.focus = Focus::List;
                 }
+                RemoveTag(row, _) | MoreTags(row)
+                    if self.edit.as_ref().is_some_and(|edit| edit.row == row) => {}
                 _ => {
                     if !self.finish_edit(workspace) {
-                        return Navigation::Stay;
+                        if self.edit.as_ref().is_some_and(|edit| edit.conflict) {
+                            self.stash_edit();
+                        } else {
+                            return Navigation::Stay;
+                        }
                     }
                 }
             }
-            match target {
-                Search => {
-                    self.focus = Focus::Search;
-                    self.search.click_at(point, extend);
-                }
-                Modified => {
-                    self.show_modified();
-                }
-                Category(group) => {
-                    self.focus = Focus::Sidebar;
-                    self.category(group);
-                }
-                Row(row) => {
-                    self.focus = Focus::List;
-                    self.select(row);
-                }
-                Control(row) => {
-                    self.focus = Focus::List;
-                    self.select(row);
-                    self.activate(workspace, row, false);
-                }
-                Step(row, up) => {
-                    self.select(row);
-                    self.step(workspace, row, up, now);
-                }
-                Reset(row) => {
-                    self.focus = Focus::List;
-                    self.select(row);
-                    self.write(workspace, row, None);
-                }
-                Json | Repair => unreachable!(),
+            if target == Search {
+                self.search.click_at(point, extend);
             }
-            Navigation::Stay
+            self.use_target(workspace, target, now)
         }
 
-        pub(crate) fn toggle(&mut self, workspace: &mut Workspace) {
-            if self.focus == Focus::List
+        pub(crate) fn space(&mut self, workspace: &mut Workspace, now: Instant) -> Navigation {
+            self.refresh(workspace);
+            if let Some(popup) = &self.popup {
+                if let Some(item) = popup.panel.current() {
+                    self.choose(workspace, item);
+                }
+            } else if let Focus::Action(target) = self.focus {
+                return self.use_target(workspace, target, now);
+            } else if self.focus == Focus::List
                 && let Some(row) = self.selected_row()
             {
                 self.activate(workspace, row, true);
             }
+            Navigation::Stay
         }
 
         pub(crate) fn show_modified(&mut self) {
             self.modified_only = !self.modified_only;
             self.filter(self.selected_row());
+        }
+
+        fn tab(&mut self, backwards: bool) {
+            let mut order = vec![
+                Focus::Search,
+                Focus::Action(Target::Modified),
+                Focus::Action(Target::Json),
+            ];
+            if self.writable() {
+                order.push(Focus::Action(Target::ResetAll));
+            }
+            order.push(Focus::Sidebar);
+            order.push(Focus::List);
+            if let Some(row) = self.selected_row() {
+                order.push(Focus::Action(Target::RowJson(row)));
+                if self.writable() {
+                    if self.rows[row].next_window() {
+                        order.push(Focus::Action(Target::NewWindow(row)));
+                    }
+                    for &(_, target) in &self.hits {
+                        if matches!(target, Target::RemoveTag(owner, _) | Target::MoreTags(owner) if owner == row)
+                        {
+                            order.push(Focus::Action(target));
+                        }
+                    }
+                    if self.rows[row].modified {
+                        order.push(Focus::Action(Target::Reset(row)));
+                    }
+                }
+            }
+            if self.error.is_some() && self.path.is_some() {
+                order.push(Focus::Action(Target::Repair));
+            }
+            if self.notice.is_some() && self.can_reload() {
+                order.push(Focus::Action(Target::Reload));
+            }
+            let index = order
+                .iter()
+                .position(|&focus| self.focus == focus)
+                .unwrap_or(0);
+            self.focus = if backwards {
+                order[(index + order.len() - 1) % order.len()]
+            } else {
+                order[(index + 1) % order.len()]
+            };
+            if self.focus == Focus::List {
+                self.scroll.reveal(self.selected);
+            }
         }
 
         pub(crate) fn command(
@@ -769,31 +1430,60 @@ mod model {
             now: Instant,
         ) -> Navigation {
             self.refresh(workspace);
+            use Command::*;
+            if let Some(popup) = &mut self.popup {
+                match cmd {
+                    Up(false) | Backtab => {
+                        popup.panel.navigate(-1);
+                    }
+                    Down(false) | Tab => {
+                        popup.panel.navigate(1);
+                    }
+                    PageUp => {
+                        popup.panel.navigate(-5);
+                    }
+                    PageDown => {
+                        popup.panel.navigate(5);
+                    }
+                    Cancel => self.popup = None,
+                    Newline | LiteralNewline => {
+                        if let Some(item) = popup.panel.current() {
+                            self.choose(workspace, item);
+                        }
+                    }
+                    Undo => {
+                        self.popup = None;
+                        self.undo(workspace);
+                    }
+                    _ => {}
+                }
+                return Navigation::Stay;
+            }
             if self.input().is_some_and(Input::composing) {
                 if cmd == Command::Cancel {
                     self.input_mut().unwrap().cancel_composition();
                 }
                 return Navigation::Stay;
             }
-            use Command::*;
             match cmd {
                 Cancel => match self.focus {
                     Focus::Edit => {
                         self.edit = None;
                         self.focus = Focus::List;
                     }
+                    Focus::Action(_) => self.focus = Focus::List,
                     Focus::List => self.focus = Focus::Sidebar,
                     Focus::Search | Focus::Sidebar => return Navigation::Close,
                 },
                 Tab | Backtab => {
+                    if self.edit.as_ref().is_some_and(|edit| edit.conflict) {
+                        self.stash_edit();
+                    }
                     if self.finish_edit(workspace) {
-                        self.focus = match (self.focus, cmd) {
-                            (Focus::Search, Tab) | (Focus::List, Backtab) => Focus::Sidebar,
-                            (Focus::Sidebar, Tab) | (Focus::Search, Backtab) => Focus::List,
-                            _ => Focus::Search,
-                        };
+                        self.tab(cmd == Backtab);
                     }
                 }
+                Undo => self.undo(workspace),
                 Up(false) | Down(false) if self.focus == Focus::Sidebar => {
                     let categories: Vec<_> = std::iter::once(None)
                         .chain(self.groups.keys().copied().map(Some))
@@ -840,7 +1530,15 @@ mod model {
                 }
                 Newline | LiteralNewline => match self.focus {
                     Focus::Edit => {
-                        self.finish_edit(workspace);
+                        if self
+                            .edit
+                            .as_ref()
+                            .is_some_and(|edit| self.rows[edit.row].control() == Control::Array)
+                        {
+                            self.add_tag(workspace);
+                        } else {
+                            self.finish_edit(workspace);
+                        }
                     }
                     Focus::Search | Focus::Sidebar => {
                         self.focus = Focus::List;
@@ -851,6 +1549,7 @@ mod model {
                             self.activate(workspace, row, false);
                         }
                     }
+                    Focus::Action(target) => return self.use_target(workspace, target, now),
                 },
                 DeleteBackward | DeleteForward if self.focus == Focus::List => {
                     if let Some(row) = self.selected_row() {
@@ -869,17 +1568,43 @@ mod model {
         }
 
         pub(crate) fn scroll_at(&mut self, point: vel_platform::Point, delta: f64) {
-            if vel_ui::contains(self.sidebar_bounds, point) {
+            if let Some(popup) = &mut self.popup {
+                popup.panel.scroll.scroll(delta);
+            } else if vel_ui::contains(self.sidebar_bounds, point) {
                 self.category_scroll.scroll(delta);
             } else if self.focus != Focus::Edit {
                 self.scroll.scroll(delta);
             }
         }
 
+        pub(crate) fn hover(&mut self, point: Point, now: Instant) -> bool {
+            let previous = self.hovered;
+            let at = |point| {
+                self.tooltips
+                    .iter()
+                    .rposition(|(rect, _)| vel_ui::contains(*rect, point))
+            };
+            let changed = previous.is_none_or(|previous| at(previous) != at(point));
+            self.hovered = Some(point);
+            if changed {
+                self.hover_since = Some(now);
+            }
+            changed
+        }
+
+        pub(crate) fn hover_deadline(&self) -> Option<Instant> {
+            self.hover_since
+                .map(|since| since + Duration::from_millis(650))
+        }
+
         pub(crate) fn search_for(&mut self, query: &str) {
             self.search.set(query);
             self.scroll.offset = 0.;
             self.filter(None);
+        }
+
+        pub(crate) fn use_fixture_home(&mut self, home: PathBuf) {
+            self.home = Some(home);
         }
 
         #[cfg(test)]
@@ -895,6 +1620,10 @@ mod model {
 
         /// The text audit excludes setting data, but still checks every piece of chrome.
         pub(crate) fn is_row_data(&self, drawn: &str, tr: &Translator) -> bool {
+            let drawn = drawn
+                .strip_prefix("✓  ")
+                .or_else(|| drawn.strip_prefix("×  "))
+                .unwrap_or(drawn);
             let prefix = drawn.strip_suffix('…');
             let matches = |s: &str| {
                 let s = s.replace(['\n', '\r', '\t'], " ");
@@ -907,6 +1636,11 @@ mod model {
                         || matches(&row.name)
                         || matches(&row.description)
                         || matches(&row.display(tr))
+                        || row.tags().iter().any(|tag| matches(&Row::tag_label(tag)))
+                        || row
+                            .choices()
+                            .iter()
+                            .any(|choice| matches(&Row::label(choice, tr)))
                 })
         }
     }
@@ -949,9 +1683,10 @@ mod model {
                     modified: false,
                     name: String::new(),
                     description: String::new(),
-                    effect: String::new(),
+                    effect: None,
                     search: String::new(),
                     compatibility: false,
+                    visible: true,
                 };
                 match row.control() {
                     Control::Bool => {
@@ -997,16 +1732,52 @@ mod model {
                     }
                 }
                 editable_count += usize::from(row.editable());
-                if let Some(conditions) = meta[key]["show_when"].as_object() {
-                    for condition in conditions.keys() {
+                for (parent, condition) in &definition.meta.show_when {
+                    assert!(
+                        defaults.contains_key(parent),
+                        "{key}: unshipped dependency {parent}"
+                    );
+                    let values = match condition {
+                        Condition::Not { not } => std::slice::from_ref(not),
+                        Condition::Any(values) => values,
+                        Condition::Equals(value) => std::slice::from_ref(value),
+                    };
+                    assert!(!values.is_empty(), "{key}: empty dependency {parent}");
+                    for value in values {
+                        assert!(!value.is_object(), "{key}: invalid dependency {parent}");
+                        let mut layer =
+                            serde_json::Map::from_iter([(parent.clone(), value.clone())]);
                         assert!(
-                            defaults.contains_key(condition),
-                            "{key}: {condition} not shipped"
+                            validate_layer(&mut layer, defaults).is_empty(),
+                            "{key}: bad operand for {parent}: {value}"
                         );
                     }
                 }
             }
             assert!(editable_count > 100);
+            fn acyclic<'a>(definition: &'a Definition, path: &mut Vec<&'a str>) {
+                assert!(
+                    !path.contains(&definition.key.as_str()),
+                    "show_when cycle: {path:?}"
+                );
+                path.push(&definition.key);
+                for key in definition.meta.show_when.keys() {
+                    acyclic(
+                        DEFINITIONS.iter().find(|def| &def.key == key).unwrap(),
+                        path,
+                    );
+                }
+                path.pop();
+            }
+            for definition in DEFINITIONS.iter() {
+                acyclic(definition, &mut Vec::new());
+            }
+            for key in ["wrap_width", "wrap_width_style"] {
+                let definition = DEFINITIONS.iter().find(|def| def.key == key).unwrap();
+                let wrap = &definition.meta.show_when["word_wrap"];
+                assert!(!wrap.matches(&json!(false)));
+                assert!(wrap.matches(&json!(true)) && wrap.matches(&json!("auto")));
+            }
         }
 
         #[test]

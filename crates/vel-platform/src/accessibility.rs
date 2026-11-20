@@ -25,12 +25,16 @@ pub enum Role {
     Row,
     /// Quick-panel results or completion suggestions.
     List,
+    /// A section heading in a content list.
+    Heading,
     /// Noninteractive status text.
     Status,
     /// Action button.
     Button,
     /// A checked/unchecked toggle.
     CheckBox,
+    /// An on/off preference.
+    Switch,
     /// Opens a choice list.
     PopupButton,
     /// Navigates from a visible minihtml link.
@@ -48,9 +52,11 @@ impl Role {
             Self::Outline => "AXOutline",
             Self::Row => "AXRow",
             Self::List => "AXList",
+            Self::Heading => "AXHeading",
             Self::Status => "AXStaticText",
             Self::Button => "AXButton",
             Self::CheckBox => "AXCheckBox",
+            Self::Switch => "AXSwitch",
             Self::PopupButton => "AXPopUpButton",
             Self::Link => "AXLink",
         }

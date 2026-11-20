@@ -1011,7 +1011,11 @@ fn settings_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
 
 fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App, String> {
     // The broken-file scene must not affect the render fixture for any other scene.
-    let data = tempfile::tempdir_in(&fixture.root)
+    let support = fixture.root.join("Library/Application Support");
+    std::fs::create_dir_all(&support).map_err(|e| e.to_string())?;
+    let data = tempfile::Builder::new()
+        .prefix("Velocity-")
+        .tempdir_in(&support)
         .map_err(|e| e.to_string())?
         .keep();
     let path = crate::workbench::preferences_path(&data);
@@ -1023,6 +1027,14 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
     settings["tab_size"] = json!(8);
     settings["translate_tabs_to_spaces"] = json!(true);
     settings["word_separators"] = json!(":/.");
+    if variant == "array" {
+        settings["file_exclude_patterns"] = json!([
+            "*.log", "*.bak", "*.o", "*.pyc", "*.swp", "*.cache", "*.tmp"
+        ]);
+    } else if variant == "dependent" {
+        settings["word_wrap"] = json!(true);
+        settings["wrap_width"] = json!(96);
+    }
     std::fs::write(&path, settings.to_string()).map_err(|e| e.to_string())?;
     let mut workspace = Workspace::new(vel_text::Text::new(), Some(data), None, false)?;
     workspace.set_appearance(dark)?;
@@ -1031,21 +1043,43 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
         std::fs::write(&path, "{\n  \"tab_size\": ,\n}\n").map_err(|e| e.to_string())?;
     }
     named(&mut app, "show_settings", json!({}));
-    let page = app
+    let mut page = app
         .workspace
         .settings_page
-        .as_mut()
+        .take()
         .ok_or("Settings sheet not opened")?;
-    if variant == "modified" {
-        page.show_modified();
-    } else if variant == "search" {
-        let query = if app.workspace.translations.matched_language().as_str() == "zh-Hans" {
-            "换行"
-        } else {
-            "wrap"
-        };
-        page.search_for(query);
+    page.use_fixture_home(fixture.root.clone());
+    match variant {
+        "modified" => page.show_modified(),
+        "search" => page.search_for(
+            if app.workspace.translations.matched_language().as_str() == "zh-Hans" {
+                "换行"
+            } else {
+                "wrap"
+            },
+        ),
+        "enum" | "array" | "dependent" => {
+            page.search_for(match variant {
+                "enum" => "word_wrap",
+                "array" => "file_exclude_patterns",
+                _ => "wrap_width",
+            });
+            page.command(
+                &mut app.workspace,
+                vel_platform::Command::Newline,
+                Instant::now(),
+            );
+            if variant != "dependent" {
+                page.command(
+                    &mut app.workspace,
+                    vel_platform::Command::Newline,
+                    Instant::now(),
+                );
+            }
+        }
+        _ => {}
     }
+    app.workspace.settings_page = Some(page);
     Ok(app)
 }
 
@@ -1620,7 +1654,7 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "settings_ui",
-        size: (900., 650.),
+        size: (900., 800.),
         build: |f, d| settings_ui_scene(f, d, "default"),
     },
     Scenario {
@@ -1637,6 +1671,21 @@ const SCENARIOS: &[Scenario] = &[
         name: "settings_ui_broken",
         size: (900., 650.),
         build: |f, d| settings_ui_scene(f, d, "broken"),
+    },
+    Scenario {
+        name: "settings_ui_enum",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "enum"),
+    },
+    Scenario {
+        name: "settings_ui_array",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "array"),
+    },
+    Scenario {
+        name: "settings_ui_dependent",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "dependent"),
     },
     Scenario {
         name: "distraction_free",
@@ -2349,6 +2398,63 @@ fn finish_layout(app: &mut App, name: &str) {
     if name == "hover_definition" {
         hover_definition(app);
         settle(app);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_scales() {
+    for (language, search, repair, add_tag) in [
+        ("en", "Search settings", "Edit JSON to fix", "Add tag…"),
+        ("zh-Hans", "搜索设置", "在 JSON 中修复", "添加标签…"),
+    ] {
+        let fixture = Fixture::create(Some(language), &[]).unwrap();
+        let settings: Vec<_> = SCENARIOS
+            .iter()
+            .filter(|s| s.name.starts_with("settings_ui"))
+            .collect();
+        assert_eq!(settings.len(), 7);
+        for scenario in settings {
+            for dark in [true, false] {
+                for density in [1., 2.] {
+                    let mut app = (scenario.build)(&fixture, dark).unwrap();
+                    let fonts =
+                        Fonts::load_named(&app.workspace.editor().preferences.font_face).unwrap();
+                    let size = Size {
+                        width: scenario.size.0,
+                        height: scenario.size.1,
+                    };
+                    attach(&mut app, fonts, size, density).unwrap();
+                    let scene = app.scene();
+                    let texts: Vec<_> = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.text)
+                        .map(|run| run.text.as_str())
+                        .collect();
+                    let expected = match scenario.name {
+                        "settings_ui" => search,
+                        "settings_ui_search" | "settings_ui_enum" => "word_wrap",
+                        "settings_ui_modified" => "tab_size",
+                        "settings_ui_broken" => repair,
+                        "settings_ui_array" => add_tag,
+                        "settings_ui_dependent" => "wrap_width_style",
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        texts.contains(&expected),
+                        "{} {language} dark={dark} @{density}: missing {expected}: {texts:?}",
+                        scenario.name
+                    );
+                    if scenario.name == "settings_ui_enum" {
+                        assert!(texts.iter().any(|text| text.starts_with("✓  ")));
+                    }
+                    if scenario.name == "settings_ui_array" {
+                        assert!(texts.contains(&"*.log"));
+                    }
+                }
+            }
+        }
     }
 }
 

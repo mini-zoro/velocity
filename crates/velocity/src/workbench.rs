@@ -174,6 +174,18 @@ pub(crate) fn user_preferences_source(path: &Path) -> Result<String, String> {
     Ok(source)
 }
 
+pub(crate) fn update_preference(
+    source: &str,
+    key: &str,
+    value: Option<&Value>,
+) -> Result<String, String> {
+    let doc = vel_config::json::Document::parse(source)?;
+    match value {
+        Some(value) => doc.set(key, value),
+        None => doc.remove(key),
+    }
+}
+
 impl Workspace {
     /// The owning buffer's dirty state, rather than an unsynchronized clone's.
     pub(crate) fn document_dirty(&self, tab: &Tab) -> bool {
@@ -214,12 +226,8 @@ impl Workspace {
                 let diagnostic =
                     |e: String| vel_config::json::source_diagnostic(&path.to_string_lossy(), &e);
                 let before = user_preferences_source(&path).map_err(diagnostic)?;
-                let doc = vel_config::json::Document::parse(&before).map_err(diagnostic)?;
-                let source = match &pending {
-                    Some(value) => doc.set(&owned_key, value),
-                    None => doc.remove(&owned_key),
-                }
-                .map_err(diagnostic)?;
+                let source =
+                    update_preference(&before, &owned_key, pending.as_ref()).map_err(diagnostic)?;
                 if before == source {
                     return Ok(());
                 }
@@ -231,6 +239,11 @@ impl Workspace {
             })?;
             self.track_settings_write(rx, &[(key.to_owned(), value.clone())]);
         }
+        self.apply_user_preference(key, value);
+        Ok(())
+    }
+
+    pub(crate) fn apply_user_preference(&mut self, key: &str, value: Option<Value>) {
         let apply = |settings: &mut vel_config::settings::Settings| {
             if let Some(value) = &value {
                 settings.set(Layer::User, key, value.clone());
@@ -250,11 +263,11 @@ impl Workspace {
                 view.remove(key);
                 tab.editor
                     .settings
-                    .replace(Layer::View, Value::Object(view))?;
+                    .replace(Layer::View, Value::Object(view))
+                    .expect("object");
             }
             tab.editor.sync();
         }
-        Ok(())
     }
     /// Converts a preview to an ordinary tab and records it in recent files once.
     pub fn make_permanent(&mut self, index: usize) {

@@ -34,6 +34,15 @@ impl App {
         if self.settings_page_has_focus() {
             if event.kind == MouseKind::Down && event.button == 0 && !event.is_context_click() {
                 self.settings_pointer(w, event.position, event.modifiers.shift(), Instant::now());
+            } else if event.kind == MouseKind::Move
+                && self
+                    .workspace
+                    .settings_page
+                    .as_mut()
+                    .unwrap()
+                    .hover(event.position, Instant::now())
+            {
+                self.settings_redraw(w);
             }
             return;
         }

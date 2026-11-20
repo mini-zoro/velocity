@@ -37,6 +37,15 @@ impl App {
             {
                 window.request_frame_at(due);
             }
+            if let Some(due) = self
+                .workspace
+                .settings_page
+                .as_ref()
+                .and_then(|p| p.hover_deadline())
+                && due > Instant::now()
+            {
+                window.request_frame_at(due);
+            }
         }
     }
 
@@ -86,6 +95,11 @@ impl App {
             Navigation::Close => {
                 self.workspace.settings_page = None;
                 self.named_changed(window, false);
+            }
+            Navigation::NewWindow => {
+                if let Some(window) = window {
+                    self.run_named(Some(window), "new_window", &json!({}));
+                }
             }
             Navigation::Json | Navigation::Repair => {
                 let result = self.apply_settings_action(
@@ -166,9 +180,9 @@ impl App {
                     .is_none() =>
             {
                 let mut page = self.workspace.settings_page.take().unwrap();
-                page.toggle(&mut self.workspace);
+                let nav = page.space(&mut self.workspace, now);
                 self.workspace.settings_page = Some(page);
-                self.settings_redraw(window);
+                self.settings_navigation(window, nav);
                 return true;
             }
             ("a", 8) => SelectAll,
