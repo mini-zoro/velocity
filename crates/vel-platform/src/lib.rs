@@ -14,7 +14,7 @@ pub mod mouse;
 mod requests;
 mod services;
 pub use display::{DisplayStatus, display_status};
-pub use services::{NativeFileOperations, RichClipboard};
+pub use services::{BrowserOpener, NativeFileOperations, RichClipboard};
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod metrics;

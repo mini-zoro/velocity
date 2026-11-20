@@ -186,6 +186,9 @@ pub struct Window {
     pub find_history: Vec<String>,
     /// Replacement strings, oldest first.
     pub replace_history: Vec<String>,
+    /// The Find in Files Where menu's Git ignore toggle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub find_in_files_use_gitignore: Option<bool>,
     /// Distraction-free state.
     pub distraction_free: bool,
     /// Per-window chrome visibility outside distraction-free mode.

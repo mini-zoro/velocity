@@ -353,7 +353,8 @@ fn find_in_files_where_menu_sets_scope_without_changing_the_query() {
             "仅查找打开的文件",
             "仅查找打开的文件夹",
             "-",
-            "保留大小写"
+            "保留大小写",
+            "遵循 .gitignore"
         ]
     );
     for (row, scope) in options
@@ -366,6 +367,127 @@ fn find_in_files_where_menu_sets_scope_without_changing_the_query() {
         assert_eq!(app.panels.where_input.value(), scope);
         assert_eq!(app.panels.query.value(), "plain");
     }
+    let row = options.last().unwrap();
+    let name = row.command.as_deref().unwrap();
+    assert!(app.command_enabled(name, &row.args));
+    assert!(app.command_checked(name, &row.args));
+    app.run_named(None, name, &serde_json::from_str(&row.args).unwrap());
+    assert!(!app.command_checked(name, &row.args));
+    let mut session = vel_session::Window::default();
+    app.panels.capture_session(&mut session);
+    let session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+    let mut restored = crate::panels::Panels::new(&app.workspace, false);
+    restored.restore_session(&app.workspace, &session);
+    assert!(!restored.find_option_checked("use_gitignore"));
+    restored.restore_session(&app.workspace, &serde_json::from_str("{}").unwrap());
+    assert!(restored.find_option_checked("use_gitignore"));
+    assert_eq!(app.panels.query.value(), "plain");
+}
+
+#[test]
+fn print_exports_current_selection_or_document_and_reaps_the_browser_file() {
+    use std::cell::RefCell;
+    use vel_buffer::{Region, Selection};
+    #[derive(Default)]
+    struct Browser(RefCell<Vec<PathBuf>>);
+    impl vel_platform::BrowserOpener for Browser {
+        fn open_browser_file(&self, path: &Path) -> bool {
+            assert!(path.is_file());
+            self.0.borrow_mut().push(path.to_owned());
+            true
+        }
+    }
+    let mut app = fixture(None);
+    app.workspace.set_file_type("Rust").unwrap();
+    r25_language(&mut app, "zh-Hans");
+    let menu = app.application_menu();
+    let item = rows(&menu)
+        .find(|r| r.command.as_deref() == Some("print"))
+        .unwrap();
+    assert_eq!(item.caption, "打印…");
+    assert!(app.command_enabled("print", &item.args));
+    open_palette(&mut app, "print");
+    let _ = palette_row(&mut app, "文件：打印…");
+    app.run_named(None, "hide_overlay", &json!({}));
+    let source = "fn main() {\n    // 猫 <&>\n}\n";
+    let editor = app.workspace.editor_mut();
+    editor.run("select_all", &json!({})).unwrap();
+    editor
+        .run("insert", &json!({"characters": source}))
+        .unwrap();
+    let background = editor
+        .language
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .scheme
+        .default_style()
+        .background;
+    let browser = Browser::default();
+    for selection_only in [true, false] {
+        if selection_only {
+            let start = source.find("//").unwrap();
+            app.workspace
+                .editor_mut()
+                .set_selection(Selection::from_regions([Region::new(
+                    start,
+                    source.rfind('}').unwrap(),
+                )]));
+        } else {
+            app.workspace.editor_mut().set_caret(0, false);
+        }
+        app.start_print().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(result) = app.print_jobs.poll(&browser, Instant::now()) {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let path = browser.0.borrow_mut().pop().unwrap();
+        assert_eq!(path.extension().unwrap(), "html");
+        let html = fs::read_to_string(&path).unwrap();
+        assert!(html.contains("window.print()"));
+        assert!(html.contains("charset=\"utf-8\"") && html.contains("猫 &lt;&amp;&gt;"));
+        assert!(html.contains("<span class=\"s"));
+        let (_, body) = html.split_once("</head>").unwrap();
+        assert_eq!(body.contains("main"), !selection_only);
+        assert!(html.contains(&format!(
+            "background-color:#{:02x}{:02x}{:02x}",
+            background.r, background.g, background.b
+        )));
+        assert!(path.exists());
+        app.print_jobs
+            .poll(&browser, Instant::now() + Duration::from_secs(601));
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn folder_picker_request_mounts_only_in_a_new_workspace() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    let menu = app.application_menu();
+    let row = rows(&menu)
+        .find(|row| row.command.as_deref() == Some("prompt_open_folder_in_new_window"))
+        .unwrap();
+    assert!(app.command_enabled("prompt_open_folder_in_new_window", &row.args));
+    open_palette(&mut app, "open folder in new window");
+    let _ = palette_row(&mut app, "File: Open Folder in New Window…");
+    assert!(App::folder_window_request(None).unwrap().is_none());
+    let request = App::folder_window_request(Some(dir.path().canonicalize().unwrap()))
+        .unwrap()
+        .unwrap();
+    let new = app.app_for_new_window(request).unwrap();
+    assert_eq!(new.workspace.folders.len(), 1);
+    assert_eq!(
+        new.workspace.folders[0].path,
+        dir.path().canonicalize().unwrap()
+    );
+    assert!(app.workspace.folders.is_empty());
 }
 
 #[test]
@@ -385,6 +507,7 @@ fn enabled_menu_rows_are_safe_to_dispatch() {
         "native_quit",
         "open_url",
         "prompt_open_file",
+        "prompt_open_folder_in_new_window",
         "prompt_open_project",
         "save_project_as",
         "open_crash_reports",

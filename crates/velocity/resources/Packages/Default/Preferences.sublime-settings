@@ -191,6 +191,10 @@
   "index_exclude_patterns": ["*.log"],
   "index_include_patterns": [],
   "index_exclude_gitignore": true,
+  // Filter the Goto Anything file list independently of symbol indexing and Find in Files.
+  "goto_anything_exclude_gitignore": false,
+  // Escape selected buffer text when prefilling a regular-expression search.
+  "regex_auto_escape": true,
   "index_skip_unknown_extensions": true,
   "show_definitions": true,
   "auto_complete": true,

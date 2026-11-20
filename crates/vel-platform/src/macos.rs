@@ -518,6 +518,22 @@ impl WindowHandle {
             Err(format!("could not open {}", path.display()))
         }
     }
+    pub(crate) fn open_local_html(&self, path: &Path) -> bool {
+        // Resolve the HTTPS handler without opening a network URL. The default
+        // handler for the HTML *file type* could be Velocity or another editor.
+        let Some(browser) = NSURL::URLWithString(&NSString::from_str("https://example.invalid"))
+            .and_then(|url| NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url))
+            .and_then(|url| path_from_url(&url))
+        else {
+            return false;
+        };
+        std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(browser)
+            .arg(path)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
     /// Opens a native multi-file chooser.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {
         let panel = NSOpenPanel::openPanel(self.0.mtm);
@@ -1767,6 +1783,7 @@ fn windowless_command(name: &str) -> bool {
             | "open_url"
             | "open_crash_reports"
             | "prompt_open_file"
+            | "prompt_open_folder_in_new_window"
             | "open_recent_file"
             | "open_recent_folder"
             | "open_project"

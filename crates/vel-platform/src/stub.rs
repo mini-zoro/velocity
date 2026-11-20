@@ -88,6 +88,9 @@ impl WindowHandle {
     pub fn show_directory(&self, _path: &std::path::Path) -> Result<(), String> {
         Err("opening directories requires macOS".into())
     }
+    pub(crate) fn open_local_html(&self, _path: &std::path::Path) -> bool {
+        false
+    }
     /// No native chooser on this platform.
     pub fn open_files(&self) -> Vec<std::path::PathBuf> {
         Vec::new()

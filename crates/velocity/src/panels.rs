@@ -26,6 +26,7 @@ use vel_search::{
 };
 mod appearance_selection;
 mod details;
+mod goto_files;
 mod quick_icons;
 #[cfg(test)]
 pub(crate) use details::StatusItem;
@@ -338,6 +339,13 @@ struct FindIdentity {
     options: text::Options,
     in_selection: bool,
 }
+#[derive(Debug, PartialEq, Eq)]
+struct FilesIdentity {
+    query: String,
+    options: text::Options,
+    where_: String,
+    use_gitignore: bool,
+}
 #[derive(Clone, Debug)]
 pub struct SideRow {
     pub path: PathBuf,
@@ -426,6 +434,7 @@ pub struct Panels {
     side_anchor: Option<PathBuf>,
     pub dragging_tab: Option<usize>,
     pub options: text::Options,
+    files_use_gitignore: bool,
     pub in_selection: bool,
     pub highlights: Vec<Range<usize>>,
     pub message: UiText,
@@ -435,9 +444,9 @@ pub struct Panels {
     pub result_scroll: Scroll,
     pub file_task: Option<files::Task>,
     pub file_complete: bool,
-    file_signature: Option<(String, text::Options, String)>,
+    file_signature: Option<FilesIdentity>,
     replace_rx: Option<mpsc::Receiver<Result<Vec<files::FileChange>, String>>>,
-    replace_signature: Option<(String, text::Options, String, String)>,
+    replace_signature: Option<(FilesIdentity, String)>,
     pub replacement_plan: Option<Vec<files::FileChange>>,
     pub output: String,
     pub(crate) indexing_output: bool,
@@ -489,6 +498,7 @@ pub struct Panels {
     paths: Arc<Vec<PathBuf>>,
     file_paths: Arc<Vec<PathBuf>>,
     file_candidates: Arc<Vec<fuzzy::Candidate>>,
+    goto_filter: Option<goto_files::Filter>,
     index: Option<Index>,
     folder_key: Vec<Folder>,
     extra_paths: Vec<PathBuf>,
@@ -609,6 +619,7 @@ impl Default for Panels {
             result_view: files::Results::default(),
             quick_pending: false,
             options: text::Options::default(),
+            files_use_gitignore: true,
             in_selection: false,
             highlights: vec![],
             message: UiText::default(),
@@ -661,6 +672,7 @@ impl Default for Panels {
             paths: Arc::new(vec![]),
             file_paths: Arc::new(vec![]),
             file_candidates: Arc::new(vec![]),
+            goto_filter: None,
             index: None,
             folder_key: Vec::new(),
             extra_paths: Vec::new(),
@@ -729,6 +741,8 @@ impl Panels {
         self.rebuild_side(workspace);
     }
     fn reset_index(&mut self, workspace: &Workspace) {
+        self.goto_filter = None;
+        self.prepared.clear();
         self.recursive_expansion = None;
         self.index = (!workspace.folders.is_empty()).then(|| Index::new(workspace.folders.clone()));
         self.directory_cancel.store(true, Ordering::Release);
@@ -976,6 +990,7 @@ impl Panels {
         window.sidebar_scroll = self.side_scroll.offset;
         window.find_history = self.find_history.clone();
         window.replace_history = self.replace_history.clone();
+        window.find_in_files_use_gitignore = Some(self.files_use_gitignore);
     }
     pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
         self.side_visible = window.sidebar_visible;
@@ -985,6 +1000,7 @@ impl Panels {
         self.side_scroll.offset = window.sidebar_scroll;
         self.find_history = window.find_history.clone();
         self.replace_history = window.replace_history.clone();
+        self.files_use_gitignore = window.find_in_files_use_gitignore.unwrap_or(true);
         if let Some(value) = self.find_history.last() {
             self.query.set(value);
         }
@@ -1666,9 +1682,9 @@ impl Panels {
             self.queue_find(workspace, FindNavigation::Preview(origin));
         }
     }
-    fn set_query_from_buffer(&mut self, text: &str) {
+    fn set_query_from_buffer(&mut self, text: &str, escape_regex: bool) {
         // https://www.sublimetext.com/download (escape patterns taken from a file).
-        if self.options.regex {
+        if self.options.regex && escape_regex {
             self.query.set(&text::escape_literal(text));
         } else {
             self.query.set(text);
@@ -2240,6 +2256,11 @@ impl Panels {
                 self.query.set_multiline(self.find_panel_visible());
                 self.replace
                     .set_multiline(matches!(self.panel, Some(Panel::Replace | Panel::Files)));
+                if self.panel == Some(Panel::Files)
+                    && let Some(use_gitignore) = args["use_gitignore"].as_bool()
+                {
+                    self.set_files_gitignore(use_gitignore);
+                }
                 if matches!(
                     self.panel,
                     Some(Panel::Find | Panel::Replace | Panel::Incremental)
@@ -2327,7 +2348,10 @@ impl Panels {
                         // https://docs.sublimetext.io/reference/settings.html#automatic-behavior
                         // Public docs establish selection seeding, not empty-caret word seeding.
                         if !selected.chars().any(|c| matches!(c, '\n' | '\r')) {
-                            self.set_query_from_buffer(&selected.to_string());
+                            self.set_query_from_buffer(
+                                &selected.to_string(),
+                                workspace.editor().settings.bool("regex_auto_escape", true),
+                            );
                         }
                     }
                     if let Some(replacement) = args["replace_pattern"].as_str() {
@@ -2395,6 +2419,9 @@ impl Panels {
                     "whole_word" => self.options.whole_word = !self.options.whole_word,
                     "wrap" => self.options.wrap = !self.options.wrap,
                     "preserve_case" => self.options.preserve_case = !self.options.preserve_case,
+                    "use_gitignore" if self.panel == Some(Panel::Files) => {
+                        self.set_files_gitignore(!self.files_use_gitignore);
+                    }
                     "in_selection" => {
                         if !self.document_find_visible() {
                             // From the palette, open Find and retain the editor's scope.
@@ -2439,7 +2466,10 @@ impl Panels {
                 if name == "slurp_replace_string" {
                     self.replace.set(&value);
                 } else {
-                    self.set_query_from_buffer(&value);
+                    self.set_query_from_buffer(
+                        &value,
+                        editor.settings.bool("regex_auto_escape", true),
+                    );
                     self.refresh_find(workspace, viewport);
                 }
                 if matches!(name, "find_under" | "find_under_prev") {
@@ -2552,7 +2582,16 @@ impl Panels {
         match option {
             "in_selection" => self.in_selection,
             "preserve_case" => self.options.preserve_case,
+            "use_gitignore" => self.files_use_gitignore,
             _ => false,
+        }
+    }
+    fn set_files_gitignore(&mut self, use_gitignore: bool) {
+        if self.files_use_gitignore != use_gitignore {
+            self.files_use_gitignore = use_gitignore;
+            self.replace_rx = None;
+            self.replace_signature = None;
+            self.replacement_plan = None;
         }
     }
     pub(crate) fn can_find_in_selection(&self, workspace: &Workspace) -> bool {
@@ -3432,27 +3471,52 @@ impl Panels {
                 Target::File => {}
             }
         }
-        if self.prepared == "files" {
+        let filter_gitignore = Self::goto_filters_gitignore(workspace);
+        let source = if filter_gitignore {
+            "git-files"
+        } else {
+            "files"
+        };
+        if self.prepared == source {
             self.fuzzy_worker.query(query.file, 100);
             return;
         }
-        self.prepared = "files".into();
+        let (paths, candidates) = if filter_gitignore {
+            let filter = self
+                .goto_filter
+                .get_or_insert_with(|| goto_files::Filter::start(workspace.folders.clone()));
+            let Some((paths, candidates)) = &filter.files else {
+                self.quick.set_items(Vec::new());
+                self.quick_ready = false;
+                return;
+            };
+            (paths.clone(), candidates.clone())
+        } else {
+            self.goto_filter = None;
+            (self.file_paths.clone(), self.file_candidates.clone())
+        };
+        self.prepared = source.into();
         self.quick_ready = true;
         self.local_generation += 1;
         self.local = None;
         let mut extra = Vec::new();
         for tab in &workspace.tabs {
             if let Some(path) = &tab.path
-                && self.file_paths.binary_search(path).is_err()
+                && paths.binary_search(path).is_err()
+                && (!filter_gitignore
+                    || !workspace
+                        .folders
+                        .iter()
+                        .any(|folder| path.starts_with(&folder.path)))
                 && !extra.contains(path)
             {
                 extra.push(path.clone());
             }
         }
-        self.paths = self.file_paths.clone();
+        let indexed = paths.len();
+        self.paths = paths;
         self.local_positions.clear();
-        let indexed = self.file_paths.len();
-        self.candidates = self.file_candidates.clone();
+        self.candidates = candidates;
         self.extra_paths = extra;
         self.extra_candidates = Arc::new(
             self.extra_paths
@@ -3489,6 +3553,13 @@ impl Panels {
         self.paths
             .get(index)
             .or_else(|| self.extra_paths.get(index.saturating_sub(self.paths.len())))
+    }
+    fn goto_filters_gitignore(workspace: &Workspace) -> bool {
+        // A transient preview may change the active view's syntax and settings.
+        !workspace.folders.is_empty()
+            && workspace
+                .settings
+                .bool("goto_anything_exclude_gitignore", false)
     }
     fn publish_quick(&mut self, workspace: &Workspace, hits: Vec<fuzzy::Hit>) {
         let palette = matches!(
@@ -3750,6 +3821,7 @@ impl Panels {
         }
     }
     pub(crate) fn cancel_overlay(&mut self, workspace: &mut Workspace) {
+        self.goto_filter = None;
         self.intel.cancel_query();
         if self.appearance_selection.take().is_some() {
             workspace.cancel_appearance_preview();
@@ -4333,14 +4405,15 @@ impl Panels {
             .folders
             .first()
             .map_or(Path::new("."), |f| f.path.as_path());
-        let scope = match files::Where::parse(&self.where_input.value(), base) {
+        let mut scope = match files::Where::parse(&self.where_input.value(), base) {
             Ok(scope) => scope,
             Err(error) => {
                 self.set_message(error);
                 return Ok(());
             }
         };
-        self.file_signature = Some((self.query.value(), self.options, self.where_input.value()));
+        scope.use_gitignore = self.files_use_gitignore;
+        self.file_signature = Some(self.files_identity());
         self.replace_rx = None;
         self.replacement_plan = None;
         let open = workspace
@@ -4400,9 +4473,7 @@ impl Panels {
         if !self.file_complete {
             return Err("Finish Find in Files before preparing replacements".into());
         }
-        if self.file_signature.as_ref()
-            != Some(&(self.query.value(), self.options, self.where_input.value()))
-        {
+        if self.file_signature.as_ref() != Some(&self.files_identity()) {
             return Err(
                 "Find in Files options changed; run the search again before replacing".into(),
             );
@@ -4429,12 +4500,7 @@ impl Panels {
         let replacement = self.replace.value();
         let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
         let (tx, rx) = mpsc::channel();
-        self.replace_signature = Some((
-            self.query.value(),
-            self.options,
-            self.where_input.value(),
-            replacement.clone(),
-        ));
+        self.replace_signature = Some((self.files_identity(), replacement.clone()));
         std::thread::spawn(move || {
             let result = paths
                 .into_iter()
@@ -4455,15 +4521,15 @@ impl Panels {
         Ok(())
     }
     pub(crate) fn file_replace_ready(&self) -> bool {
-        self.file_complete
-            && self
-                .file_signature
-                .as_ref()
-                .is_some_and(|(query, options, where_)| {
-                    *query == self.query.value()
-                        && *options == self.options
-                        && *where_ == self.where_input.value()
-                })
+        self.file_complete && self.file_signature.as_ref() == Some(&self.files_identity())
+    }
+    fn files_identity(&self) -> FilesIdentity {
+        FilesIdentity {
+            query: self.query.value(),
+            options: self.options,
+            where_: self.where_input.value(),
+            use_gitignore: self.files_use_gitignore,
+        }
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
         workspace.observe_navigation();
@@ -4765,12 +4831,7 @@ impl Panels {
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
             if self.replace_signature.as_ref()
-                == Some(&(
-                    self.query.value(),
-                    self.options,
-                    self.where_input.value(),
-                    self.replace.value(),
-                ))
+                == Some(&(self.files_identity(), self.replace.value()))
             {
                 match result {
                     Ok(plan) => self.replacement_plan = Some(plan),
@@ -4793,11 +4854,24 @@ impl Panels {
         if let Some(snapshot) = self.index.as_ref().and_then(Index::poll) {
             self.file_paths = snapshot.files;
             self.file_candidates = snapshot.candidates;
+            self.goto_filter = None;
             self.prepared.clear();
             workspace.messages.extend(snapshot.errors);
             if self.overlay == Some(Overlay::Goto) {
                 self.query_quick(workspace);
             }
+            changed = true;
+        }
+        if self.overlay == Some(Overlay::Goto)
+            && self.quick_target == "files"
+            && (self
+                .goto_filter
+                .as_mut()
+                .is_some_and(goto_files::Filter::poll)
+                || self.goto_filter.is_some() != Self::goto_filters_gitignore(workspace))
+        {
+            self.prepared.clear();
+            self.query_quick(workspace);
             changed = true;
         }
         if let Some(index) = &self.index {
@@ -7984,6 +8058,124 @@ mod tests {
 mod intelligence_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn find_in_files_gitignore_controls_disk_walk_not_open_files_and_invalidates_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.txt\n!keep.txt\n").unwrap();
+        std::fs::write(root.join("nested/.gitignore"), "drop.rs\n").unwrap();
+        for path in ["hidden.txt", "keep.txt", "nested/drop.rs", "nested/show.rs"] {
+            std::fs::write(root.join(path), "haystack\nunique needle\n").unwrap();
+        }
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels.add_folder(&mut workspace, root.clone()).unwrap();
+        for (use_gitignore, where_, expected) in [
+            (false, "<project>", 4),
+            (true, "<project>", 2),
+            (true, "nested/", 1),
+        ] {
+            panels.action(&mut workspace, "show_panel", &json!({
+                "panel": "find_in_files", "pattern": "needle", "use_gitignore": use_gitignore
+            }), 0..10).unwrap();
+            let scope = if where_ == "nested/" {
+                root.join("nested").display().to_string()
+            } else {
+                where_.into()
+            };
+            panels.where_input.set(&scope);
+            panels
+                .action(&mut workspace, "find_in_files_start", &json!({}), 0..10)
+                .unwrap();
+            wait(&mut workspace, &mut panels, |_, p| p.file_complete);
+            assert_eq!(panels.file_matches, expected);
+        }
+        assert!(panels.file_replace_ready());
+        panels
+            .action(
+                &mut workspace,
+                "show_panel",
+                &json!({"panel": "find_in_files"}),
+                0..10,
+            )
+            .unwrap();
+        panels
+            .action(
+                &mut workspace,
+                "toggle_find_option",
+                &json!({"option": "use_gitignore"}),
+                0..10,
+            )
+            .unwrap();
+        assert!(!panels.file_replace_ready());
+        workspace
+            .open(FileLocation {
+                path: root.join("hidden.txt"),
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        panels
+            .action(
+                &mut workspace,
+                "show_panel",
+                &json!({"panel":"find_in_files","pattern":"needle","use_gitignore":true}),
+                0..10,
+            )
+            .unwrap();
+        panels.where_input.set("<open files>");
+        panels
+            .action(&mut workspace, "find_in_files_start", &json!({}), 0..10)
+            .unwrap();
+        wait(&mut workspace, &mut panels, |_, p| p.file_complete);
+        assert_eq!(panels.file_matches, 1);
+    }
+
+    #[test]
+    fn goto_anything_gitignore_is_opt_in_and_cannot_readd_ignored_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join(".gitignore"), "excluded*\n").unwrap();
+        for name in ["excluded.rs", "included.rs"] {
+            std::fs::write(root.join(name), "fn fun() {}\n").unwrap();
+        }
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        panels.add_folder(&mut workspace, root.clone()).unwrap();
+        workspace
+            .open(FileLocation {
+                path: root.join("excluded.rs"),
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        wait(&mut workspace, &mut panels, |_, p| {
+            p.file_paths.contains(&root.join("excluded.rs"))
+        });
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto", "text":"included"}),
+                0..10,
+            )
+            .unwrap();
+        assert!(panels.paths.contains(&root.join("excluded.rs")));
+        workspace.settings.set(
+            vel_config::settings::Layer::User,
+            "goto_anything_exclude_gitignore",
+            json!(true),
+        );
+        wait(&mut workspace, &mut panels, |_, p| {
+            p.prepared == "git-files"
+        });
+        assert!(panels.paths.contains(&root.join("included.rs")));
+        assert!(!panels.paths.contains(&root.join("excluded.rs")));
+        assert!(!panels.extra_paths.contains(&root.join("excluded.rs")));
+        assert!(panels.file_paths.contains(&root.join("excluded.rs")));
+    }
     #[track_caller]
     fn wait(
         workspace: &mut Workspace,

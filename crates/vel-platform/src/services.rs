@@ -1,6 +1,18 @@
 //! Injectable operating-system services for file commands.
 use std::path::Path;
 
+/// Opens a local HTML document in the user's default web browser.
+pub trait BrowserOpener {
+    /// Requests the open. The caller must keep the file alive after success.
+    fn open_browser_file(&self, path: &Path) -> bool;
+}
+
+impl BrowserOpener for crate::WindowHandle {
+    fn open_browser_file(&self, path: &Path) -> bool {
+        self.open_local_html(path)
+    }
+}
+
 /// A single clipboard item with interchangeable HTML and plain-text representations.
 pub trait RichClipboard {
     /// Replaces the clipboard with one item containing both representations.

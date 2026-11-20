@@ -166,7 +166,8 @@ official build documentation. No application package or proprietary resource was
 | `tree_animation_enabled` | `true`; boolean | Interpolate folder-row positions on expand/collapse, restart from current positions, and hit-test the drawn rows. False, disabled global animations, or native Reduce Motion make changes immediate. Detailed reference establishes true. |
 | `scroll_speed` | `1.0`; nonnegative number | Keyboard page/recenter/Goto line animation only; zero jumps immediately. Wheel/trackpad and Reduce Motion remain immediate. Endpoints use visual rows to survive zoom/scale changes. Both references establish the speed range; detailed reference establishes 1.0. |
 | `binary_file_patterns` | documented array of 13 globs | `*.jpg`, `*.jpeg`, `*.png`, `*.gif`, `*.ttf`, `*.tga`, `*.dds`, `*.ico`, `*.eot`, `*.pdf`, `*.swf`, `*.jar`, `*.zip`. Search/Goto omit them; sidebar retains them. Detailed reference establishes the array. |
-| `index_exclude_gitignore` | `true`; boolean | Symbol indexing only. File lists still include gitignored paths. ST4 notes confirm the enabled default. |
+| `index_exclude_gitignore` | `true`; boolean | Symbol indexing only. ST4 notes confirm the enabled default. |
+| `goto_anything_exclude_gitignore` | `false`; boolean | Filters Goto Anything project file candidates. The workspace setting applies independently of indexing and the Find in Files session toggle. |
 | `index_files` | `true`; boolean | Application-global off cancels symbol indexing without changing file lists. Both indexing/reference documentation establish true. |
 
 Build environment resolution expands environment variables and file/project variables without
@@ -215,6 +216,16 @@ those declared WindowCommand names only, without implementing the pickers in thi
   Other User keymap names produce a notice and are ignored. `Packages/User` may be a directory symlink.
 
 ## Live changes and when they apply
+
+Find in Files has its own **Where > Use .gitignore** toggle. New windows and
+sessions without the option start checked; the choice is saved with the window
+session. It applies to the next search of project folders or explicit disk
+locations, not an explicit open/current buffer scope. Changing it invalidates
+pending replacements from the old search. Goto Anything's
+`goto_anything_exclude_gitignore` is a separate workspace setting, default
+`false`, and `index_exclude_gitignore` controls symbol indexing.
+`regex_auto_escape` defaults to `true` and applies when text from an editor
+selection seeds a regex query, not to typed or explicit command patterns.
 
 Preferences › Settings uses the same `edit_settings` pair as other Settings
 commands: the bundled file is read-only and the User file is editable. Save the
@@ -316,10 +327,11 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `find_selected_text` | `` true `` |  | Seed Find, Replace and Incremental Find from a single-line selection. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `fold_buttons` | `` true `` |  | [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `folder_exclude_patterns` | `` [".svn", ".git", ".hg", "CVS", ".Trash", ".Trash-*"] `` |  | https://docs.sublimetext.io/reference/settings.html#global-settings User arrays replace this list, including the .git exclusion. [velocity/panels.rs](../crates/velocity/src/panels.rs), [velocity/workbench.rs](../crates/velocity/src/workbench.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
-| `font_face` | `` "Menlo" `` | `` "Menlo" `` | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/render_scenes.rs](../crates/velocity/src/render_scenes.rs) |
+| `font_face` | `` "Menlo" `` | `` "Menlo" `` | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/app_print.rs](../crates/velocity/src/app_print.rs), [velocity/render_scenes.rs](../crates/velocity/src/render_scenes.rs) |
 | `font_options` | `` [] `` |  | Lane B: drawing, font and window preferences. [velocity/view.rs](../crates/velocity/src/view.rs) |
-| `font_size` | `` 13 `` |  | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/html_ui.rs](../crates/velocity/src/html_ui.rs), [velocity/view.rs](../crates/velocity/src/view.rs), [velocity/workbench.rs](../crates/velocity/src/workbench.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
+| `font_size` | `` 13 `` |  | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/app_print.rs](../crates/velocity/src/app_print.rs), [velocity/html_ui.rs](../crates/velocity/src/html_ui.rs), [velocity/view.rs](../crates/velocity/src/view.rs), [velocity/workbench.rs](../crates/velocity/src/workbench.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `git_diff_target` | `` "index" `` |  | [velocity/annotations.rs](../crates/velocity/src/annotations.rs) |
+| `goto_anything_exclude_gitignore` | `` false `` |  | Filter the Goto Anything file list independently of symbol indexing and Find in Files. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `gutter` | `` true `` |  | [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `hide_new_tab_button` | `` false `` |  | Hide theme-provided tab-strip controls. [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme), [velocity/app_chrome.rs](../crates/velocity/src/app_chrome.rs) |
 | `hide_tab_scrolling_buttons` | `` false `` |  | [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme), [velocity/app_chrome.rs](../crates/velocity/src/app_chrome.rs) |
@@ -387,6 +399,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `overlay_scroll_bars` | `` "system" `` |  | "system" follows macOS Show scroll bars; "enabled" overlays editor text and fades when idle, while "disabled" reserves space for an always-visible bar. [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme), [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `package_index_url` | `` null `` |  | Explicit HTTPS index; no registry, timer or network request is enabled by default. [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/release.rs](../crates/velocity/src/release.rs) |
 | `preview_on_click` | `` true `` |  | Preview a sidebar file on one click; false selects it, and "only_left" restricts previews to left clicks. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
+| `regex_auto_escape` | `` true `` |  | Escape selected buffer text when prefilling a regular-expression search. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `relative_line_numbers` | `` false `` |  | [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `reload_file_on_change` | `` true `` |  | Build 4107: opt out to ask before replacing even an unchanged buffer. https://www.sublimetext.com/download [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `remember_open_files` | `` true `` |  | [velocity/app.rs](../crates/velocity/src/app.rs) |
@@ -428,7 +441,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `sublime_merge_path` | `` "" `` |  | [velocity/review_ui.rs](../crates/velocity/src/review_ui.rs) |
 | `syntax` | Not shipped |  | [velocity/workbench.rs](../crates/velocity/src/workbench.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `tab_completion` | `` true `` |  | Tab completes the word before the caret; false limits Tab to exact snippet triggers. [velocity/completion.rs](../crates/velocity/src/completion.rs) |
-| `tab_size` | `` 4 `` |  | [vel-commands/lib.rs](../crates/vel-commands/src/lib.rs), [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/appearance.rs](../crates/velocity/src/appearance.rs), [velocity/completion.rs](../crates/velocity/src/completion.rs), [velocity/editing.rs](../crates/velocity/src/editing.rs), [velocity/editor.rs](../crates/velocity/src/editor.rs), [velocity/language.rs](../crates/velocity/src/language.rs), [velocity/large.rs](../crates/velocity/src/large.rs), [velocity/details.rs](../crates/velocity/src/panels/details.rs), [velocity/panels.rs](../crates/velocity/src/panels.rs), [velocity/view.rs](../crates/velocity/src/view.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
+| `tab_size` | `` 4 `` |  | [vel-commands/lib.rs](../crates/vel-commands/src/lib.rs), [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app_clipboard.rs](../crates/velocity/src/app_clipboard.rs), [velocity/app_print.rs](../crates/velocity/src/app_print.rs), [velocity/appearance.rs](../crates/velocity/src/appearance.rs), [velocity/completion.rs](../crates/velocity/src/completion.rs), [velocity/editing.rs](../crates/velocity/src/editing.rs), [velocity/editor.rs](../crates/velocity/src/editor.rs), [velocity/language.rs](../crates/velocity/src/language.rs), [velocity/large.rs](../crates/velocity/src/large.rs), [velocity/details.rs](../crates/velocity/src/panels/details.rs), [velocity/panels.rs](../crates/velocity/src/panels.rs), [velocity/view.rs](../crates/velocity/src/view.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `theme` | `` "auto" `` |  | [velocity/theme_ui.rs](../crates/velocity/src/theme_ui.rs) |
 | `themed_title_bar` | `` true `` |  | [velocity/app.rs](../crates/velocity/src/app.rs) |
 | `translate_tabs_to_spaces` | `` false `` |  | [vel-commands/lib.rs](../crates/vel-commands/src/lib.rs), [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/completion.rs](../crates/velocity/src/completion.rs), [velocity/editing.rs](../crates/velocity/src/editing.rs), [velocity/large.rs](../crates/velocity/src/large.rs), [velocity/details.rs](../crates/velocity/src/panels/details.rs), [velocity/panels.rs](../crates/velocity/src/panels.rs) |

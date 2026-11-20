@@ -20,6 +20,7 @@
         "caption": "Open…",
         "command": "prompt_open_file"
       },
+      {"caption":"Open Folder in New Window…","command":"prompt_open_folder_in_new_window"},
       { "caption": "Open Recent", "id": "open_recent" },
       { "caption": "Reopen Closed File", "command": "reopen_last_file" },
       { "caption": "Revert File…", "command": "revert" },
@@ -123,6 +124,7 @@
         "caption": "Save All",
         "command": "save_all"
       },
+      {"caption":"Print…","command":"print"},
       {"caption":"-"},
       {
         "caption": "Close File",

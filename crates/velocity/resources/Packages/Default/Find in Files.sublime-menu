@@ -4,5 +4,6 @@
   {"caption":"Only Open Files","command":"find_in_files_where","args":{"scope":"open_files"}},
   {"caption":"Only Open Folders","command":"find_in_files_where","args":{"scope":"open_folders"}},
   {"caption":"-"},
-  {"caption":"Preserve Case","command":"toggle_find_option","args":{"option":"preserve_case"}}
+  {"caption":"Preserve Case","command":"toggle_find_option","args":{"option":"preserve_case"}},
+  {"caption":"Use .gitignore","command":"toggle_find_option","args":{"option":"use_gitignore"},"checkbox":true}
 ]

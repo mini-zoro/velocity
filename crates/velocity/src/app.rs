@@ -12,6 +12,8 @@ mod context_adapter;
 mod lane_c_round20_tests;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
+#[path = "app_print.rs"]
+mod printing;
 #[path = "render_scenes.rs"]
 pub(crate) mod render_scenes;
 #[cfg(test)]
@@ -114,6 +116,7 @@ type PendingCliCommand = (
 
 #[derive(Debug)]
 pub struct App {
+    print_jobs: printing::Jobs,
     /// A playback may edit only the workbench sheet that started it, including nested chains.
     macro_origin: Option<u64>,
     opened_settings: Vec<App>,
@@ -368,6 +371,7 @@ impl App {
             hovered_close: None,
             hovered_tab_button: None,
             revealed_tabs: Vec::new(),
+            print_jobs: Default::default(),
             dragging_splitter: None,
             drag_select: None,
             drag_text: None,
@@ -723,36 +727,7 @@ impl App {
         use crate::open_requests::Route;
         let route = self.route_open(&mut incoming.request);
         if route == Route::New {
-            let workspace = Workspace::new(
-                vel_text::Text::new(),
-                self.workspace.data_path().map(Path::to_owned),
-                None,
-                true,
-            )?;
-            let mut options = self.options.clone();
-            options.background = incoming.request.background;
-            options.files.clear();
-            options.file = None;
-            options.project = None;
-            let mut app = App::new(
-                options.clone(),
-                Clock::new(Instant::now(), std::time::SystemTime::now()),
-                self.reporter.clone(),
-                workspace,
-                Arc::new(AtomicBool::new(false)),
-                self.sessions.clone(),
-            );
-            app.accept_request(incoming)?;
-            w.new_window(
-                WindowOptions {
-                    title: "Velocity".into(),
-                    size: Size {
-                        width: options.width as f64,
-                        height: options.height as f64,
-                    },
-                },
-                app,
-            )?;
+            self.open_request_in_new_window(w, incoming)?;
         } else if let Route::Window(id) = route {
             if id == self.session_id {
                 self.apply_open_request(w, incoming)?;
@@ -766,6 +741,63 @@ impl App {
             }
         }
         Ok(())
+    }
+    fn app_for_new_window(&self, incoming: crate::instance::Incoming) -> Result<Self, String> {
+        let workspace = Workspace::new(
+            vel_text::Text::new(),
+            self.workspace.data_path().map(Path::to_owned),
+            None,
+            true,
+        )?;
+        let mut options = self.options.clone();
+        options.background = incoming.request.background;
+        options.files.clear();
+        options.file = None;
+        options.project = None;
+        let mut app = App::new(
+            options,
+            Clock::new(Instant::now(), std::time::SystemTime::now()),
+            self.reporter.clone(),
+            workspace,
+            Arc::new(AtomicBool::new(false)),
+            self.sessions.clone(),
+        );
+        app.accept_request(incoming)?;
+        Ok(app)
+    }
+    fn open_request_in_new_window(
+        &self,
+        w: &WindowHandle,
+        incoming: crate::instance::Incoming,
+    ) -> Result<(), String> {
+        let app = self.app_for_new_window(incoming)?;
+        w.new_window(
+            WindowOptions {
+                title: "Velocity".into(),
+                size: Size {
+                    width: app.options.width as f64,
+                    height: app.options.height as f64,
+                },
+            },
+            app,
+        )
+        .map(|_| ())
+    }
+    fn folder_window_request(
+        path: Option<PathBuf>,
+    ) -> Result<Option<crate::instance::Incoming>, String> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let mut request = crate::instance::Request::new(&Options::default(), None)?;
+        request.new_window = true;
+        request.native_open = true;
+        request.files.push(crate::cli::FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        });
+        Ok(Some(crate::instance::Incoming::local(request)))
     }
     fn route_open(&self, incoming: &mut crate::instance::Request) -> crate::open_requests::Route {
         use crate::open_requests::{OpenWindow, RouteRequest, route};
@@ -985,7 +1017,7 @@ impl App {
             return false;
         }
         match name {
-            "copy_as_html" => {
+            "copy_as_html" | "print" => {
                 let editor = &self.workspace.tabs[target].editor;
                 return !self.workspace.is_empty()
                     && editor.binary.is_none()
@@ -1016,10 +1048,11 @@ impl App {
             // Search replacements are tied to a completed Find in Files request.
             // https://docs.sublimetext.io/reference/commands.html
             "replace_in_files" => return self.panels.file_replace_ready(),
+            "toggle_find_option" if args["option"] == "use_gitignore" => {
+                return matches!(self.panels.panel, Some(crate::panels::Panel::Files));
+            }
             "toggle_find_option"
-                if args["option"] == "use_gitignore"
-                    || (args["_context_menu"] == "find_in_files"
-                        && args["option"] == "in_selection") =>
+                if args["_context_menu"] == "find_in_files" && args["option"] == "in_selection" =>
             {
                 return false;
             }
@@ -1672,6 +1705,13 @@ impl App {
         if name == "copy_as_html" {
             self.copy_as_html(clipboard)?;
             self.named_changed(window, false);
+            return Ok(());
+        }
+        if name == "print" {
+            if let Some(window) = window {
+                self.start_print()?;
+                window.request_frame();
+            }
             return Ok(());
         }
         if name == "reveal_in_side_bar" {
@@ -2583,6 +2623,11 @@ impl App {
             return Ok(());
         }
         match name {
+            "prompt_open_folder_in_new_window" => {
+                if let Some(request) = Self::folder_window_request(w.open_directory())? {
+                    self.open_request_in_new_window(w, request)?;
+                }
+            }
             "open_url" => {
                 let url = args["url"].as_str().ok_or("missing URL")?;
                 if matches!(
@@ -4382,7 +4427,11 @@ impl AppHandler for App {
                     }
                 };
                 let paths: Vec<PathBuf> = match name {
-                    "new_window" | "edit_settings" | "open_url" | "open_crash_reports" => {
+                    "new_window"
+                    | "edit_settings"
+                    | "open_url"
+                    | "open_crash_reports"
+                    | "prompt_open_folder_in_new_window" => {
                         self.run_named(Some(w), name, &parsed);
                         return;
                     }
@@ -4785,6 +4834,9 @@ impl AppHandler for App {
             self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
             changed |= self.workspace.themes.ui.borrow().metrics.poll_images();
             changed |= self.builds.poll(&mut self.panels);
+            if self.print_jobs.active() {
+                changed |= self.poll_print(w, Instant::now());
+            }
             if session_changed
                 && self.options.mode == Mode::Interactive
                 && self.session_due.is_none()

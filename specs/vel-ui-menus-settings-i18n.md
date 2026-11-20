@@ -308,6 +308,16 @@ For the text audit, run `velocity --render-scenes DIR --language zh-Hans --audit
 It writes `cjk_runs` and unexpected `ascii_runs` into the layout JSON, without Metal or
 windows. The Rust regression uses the same classifier.
 
+## Parity follow-up (lane B)
+
+File > Print opens an active-scheme HTML snapshot in the default browser. The worker
+handles the current selection or the whole document, and the window gives the browser
+a grace period before reclaiming the temporary file. Open Folder in New Window uses
+the folder picker and constructs a separate workspace without mounting in the origin.
+The Where menu's Use .gitignore check defaults on, persists in the window session, and
+filters disk traversal without filtering explicit live-buffer scopes.
+See [parity evidence](../docs/parity.md) for tests and separate Goto Anything behavior.
+
 ## Rules
 
 - One codex lane implements A, B and D after lanes A and C merge (it touches many files). The design agent styles C

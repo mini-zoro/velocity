@@ -147,6 +147,8 @@ impl Editor {
             "set_clipboard",
             "set_indentation",
             "copy_as_html",
+            "print",
+            "prompt_open_folder_in_new_window",
             "save_and_close",
             "new_html_sheet",
             "open_url",

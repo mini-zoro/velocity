@@ -421,13 +421,19 @@ fn edit_probe(app: &mut App, key: &str) -> String {
 fn find_probe(app: &mut App, key: &str) -> String {
     use vel_buffer::{Region, Selection};
     app.panels = crate::panels::Panels::new(&app.workspace, false);
+    if key == "regex_auto_escape" {
+        app.run_named(None, "toggle_find_option", &json!({"option":"regex"}));
+    }
     let e = app.workspace.editor_mut();
-    let end = if key == "auto_find_in_selection" {
-        e.text.line_to_byte(2)
-    } else {
-        12
+    let (start, end) = match key {
+        "auto_find_in_selection" => (3, e.text.line_to_byte(2)),
+        "regex_auto_escape" => {
+            let at = e.text.to_string().find('(').unwrap();
+            (at, at + 2)
+        }
+        _ => (3, 12),
     };
-    e.set_selection(Selection::from_regions([Region::new(3, end)]));
+    e.set_selection(Selection::from_regions([Region::new(start, end)]));
     app.run_named(
         None,
         "show_panel",
@@ -452,6 +458,41 @@ fn find_probe(app: &mut App, key: &str) -> String {
 
 fn observe_ui(app: &mut App, key: &str, root: &Path) -> String {
     match key {
+        "goto_anything_exclude_gitignore" => {
+            fs::write(root.join(".gitignore"), "/goto-setting-probe-ignored.txt\n").unwrap();
+            for name in [
+                "goto-setting-probe-visible.txt",
+                "goto-setting-probe-ignored.txt",
+            ] {
+                fs::write(root.join(name), "").unwrap();
+            }
+            app.panels = crate::panels::Panels::new(&app.workspace, true);
+            app.run_named(
+                None,
+                "show_overlay",
+                &json!({"overlay":"goto","text":"goto-setting-probe"}),
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let seen = loop {
+                let viewport = app.viewport();
+                app.panels.poll(&mut app.workspace, viewport);
+                let items = format!("{:?}", app.panels.quick.items);
+                if items.contains("goto-setting-probe-visible.txt") {
+                    break items.contains("goto-setting-probe-ignored.txt");
+                }
+                assert!(Instant::now() < deadline, "Goto fixture did not publish");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            app.run_named(None, "hide_overlay", &json!({}));
+            for name in [
+                ".gitignore",
+                "goto-setting-probe-visible.txt",
+                "goto-setting-probe-ignored.txt",
+            ] {
+                fs::remove_file(root.join(name)).unwrap();
+            }
+            seen.to_string()
+        }
         "default_dir" => format!("{:?}", app.save_dialog_directory(app.workspace.active)),
         "new_window_settings" => {
             user_file(
@@ -1004,6 +1045,7 @@ fn exercise(app: &mut App, key: &str, root: &Path) -> String {
         | "word_separators" => edit_probe(app, key),
         "auto_find_in_selection"
         | "find_selected_text"
+        | "regex_auto_escape"
         | "close_find_after_find_all"
         | "close_find_after_replace_all" => find_probe(app, key),
         "fold_buttons"

@@ -1,4 +1,6 @@
 //! Shared ignore-aware project traversal for the index, side bar and file search.
+/// Control flow for consumers of the parallel project walker.
+pub use ignore::WalkState as WalkFlow;
 use ignore::{WalkBuilder, WalkState};
 use notify::{RecursiveMode, Watcher};
 use std::{
@@ -440,18 +442,26 @@ pub struct Folder {
 impl Folder {
     /// Prepares an ignore-aware walker, also respecting .gitignore outside a git repository.
     pub fn walker(&self, start: &Path, depth: Option<usize>, searchable: bool) -> WalkBuilder {
+        self.walker_with_gitignore(start, depth, searchable, !searchable)
+    }
+    /// Builds the same traversal with an explicit Git ignore policy. The
+    /// searchable policy still controls project/binary patterns independently.
+    pub fn walker_with_gitignore(
+        &self,
+        start: &Path,
+        depth: Option<usize>,
+        searchable: bool,
+        use_gitignore: bool,
+    ) -> WalkBuilder {
         let mut walk = WalkBuilder::new(start);
         let root = self.path.clone();
         let rules = self.rules.clone();
         let admits_start = self.admits(start);
-        // https://www.sublimetext.com/docs/indexing.html: index_exclude_gitignore
-        // controls symbol indexing, not Goto Anything / Find in Files. Preserve the
-        // side bar's ignore policy; searchable file lists use explicit project rules.
-        walk.git_ignore(!searchable)
-            .git_global(!searchable)
-            .git_exclude(!searchable)
+        walk.git_ignore(use_gitignore)
+            .git_global(use_gitignore)
+            .git_exclude(use_gitignore)
             .ignore(!searchable)
-            .parents(!searchable)
+            .parents(!searchable || use_gitignore)
             .hidden(false)
             .require_git(false)
             .follow_links(self.follow_links)

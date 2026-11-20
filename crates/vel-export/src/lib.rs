@@ -75,6 +75,17 @@ pub fn export_range(
     render(text, &[range], highlighted, scheme, options, false)
 }
 
+/// Exports explicit source ranges with stylesheet-based highlighting.
+pub fn export_ranges(
+    text: &Text,
+    ranges: &[Range<usize>],
+    highlighted: &[StyledLine],
+    scheme: &ColorScheme,
+    options: &Options,
+) -> Result<HtmlExport, Error> {
+    render(text, ranges, highlighted, scheme, options, false)
+}
+
 /// Exports explicit source ranges with inline styles: rich paste targets may
 /// import the body and discard the document's stylesheet. Caps HTML at 2 MiB;
 /// callers must separately bound input size and syntax analysis.
@@ -140,6 +151,26 @@ pub fn write_print_file(export: &HtmlExport) -> std::io::Result<PathBuf> {
     file.flush()?;
     let (_, path) = file.keep().map_err(|e| e.error)?;
     Ok(path)
+}
+
+/// Writes a print page and returns its cleanup guard. Hold it until the browser
+/// has had time to load the file. Only this disk export gets an executable script.
+pub fn temporary_print_file(export: &HtmlExport) -> std::io::Result<tempfile::TempPath> {
+    let (head, body) = export
+        .html
+        .split_once("</head>")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing HTML head"))?;
+    let mut file = tempfile::Builder::new()
+        .prefix("velocity-print-")
+        .suffix(".html")
+        .tempfile()?;
+    file.write_all(head.as_bytes())?;
+    file.write_all(
+        b"<script>addEventListener('load', () => window.print(), {once: true});</script></head>",
+    )?;
+    file.write_all(body.as_bytes())?;
+    file.flush()?;
+    Ok(file.into_temp_path())
 }
 
 fn full_line_end(text: &Text, line: usize) -> usize {

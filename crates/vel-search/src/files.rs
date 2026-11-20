@@ -36,6 +36,8 @@ pub struct Where {
     pub open_files: bool,
     /// Search the first live buffer supplied in the request (the active file).
     pub current_file: bool,
+    /// Filter disk traversal by Git's ignore rules; explicit live scopes remain searchable.
+    pub use_gitignore: bool,
     include: Patterns,
     exclude: Patterns,
 }
@@ -460,7 +462,12 @@ impl Task {
                         break;
                     }
                     folder
-                        .walker(&folder.path, None, true)
+                        .walker_with_gitignore(
+                            &folder.path,
+                            None,
+                            true,
+                            request.scope.use_gitignore,
+                        )
                         .build_parallel()
                         .run(|| {
                             let mut reader = vel_fileio::search::Reader::default();

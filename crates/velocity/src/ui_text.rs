@@ -24,6 +24,9 @@ impl UiText {
     /// error messages here; underlying diagnostics and paths are opaque.
     pub fn command_error(detail: &str) -> Self {
         match detail {
+            "Document or selection is too large to print" => {
+                Self::tr("Document or selection is too large to print")
+            }
             "document is read only" => Self::tr("document is read only"),
             "A target has unsaved edits; save it before replacing in files" => {
                 Self::tr("A target has unsaved edits; save it before replacing in files")
