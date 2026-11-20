@@ -22,9 +22,18 @@ pub struct Document {
     /// Spans include the value token, excluding surrounding trivia.
     pub spans: BTreeMap<String, Range<usize>>,
 }
+struct Member {
+    key: String,
+    body: Range<usize>,
+}
+
 impl Document {
     /// Accepts a UTF-8 BOM, both JSON comment styles, and trailing commas.
     pub fn parse(source: &str) -> Result<Self, String> {
+        Self::parse_members(source, None)
+    }
+
+    fn parse_members(source: &str, members: Option<&mut Vec<Member>>) -> Result<Self, String> {
         let mut bytes = source.as_bytes().to_vec();
         let mut i = if source.starts_with('\u{feff}') {
             bytes[..3].fill(b' ');
@@ -97,7 +106,15 @@ impl Document {
                     .iter()
                     .copied()
                     .find(|b| !b.is_ascii_whitespace());
-                if matches!(next, Some(b'}' | b']')) {
+                // A trailing comma must follow a value. Don't turn an empty
+                // member or double comma into an accepted document.
+                if matches!(next, Some(b'}' | b']'))
+                    && bytes[..i]
+                        .iter()
+                        .rev()
+                        .find(|b| !b.is_ascii_whitespace())
+                        .is_some_and(|b| !matches!(b, b'{' | b'[' | b':' | b','))
+                {
                     bytes[i] = b' ';
                 }
             }
@@ -117,13 +134,108 @@ impl Document {
             format!("{}:{}: {message}", e.line(), e.column())
         })?;
         let mut spans = BTreeMap::new();
-        scan(&clean, &mut 0, "", &mut spans)?;
+        scan(&clean, &mut 0, "", &mut spans, members)?;
         Ok(Self {
             source: source.into(),
             trivia,
             value,
             spans,
         })
+    }
+    /// Removes a root property (including duplicate spellings of that key).
+    /// Comments and existing blank lines are retained. An absent key is a no-op.
+    pub fn remove(&self, key: &str) -> Result<String, String> {
+        let object = self.value.as_object().ok_or("settings must be an object")?;
+        if !object.contains_key(key) {
+            return Ok(self.source.clone());
+        }
+        let mut members = Vec::new();
+        Self::parse_members(&self.source, Some(&mut members))?;
+        let comma_after = |end: usize| {
+            let mut at = end;
+            ws(&self.trivia, &mut at);
+            (self.trivia.as_bytes().get(at) == Some(&b',')).then_some(at)
+        };
+        let trailing = members
+            .last()
+            .and_then(|m| comma_after(m.body.end))
+            .is_some();
+        let last_kept = members.iter().rposition(|m| m.key != key);
+        let mut edits = Vec::new();
+        if !trailing
+            && let Some(i) = last_kept
+            && i + 1 < members.len()
+            && let Some(comma) = comma_after(members[i].body.end)
+        {
+            edits.push((comma..comma + 1, String::new()));
+        }
+        for member in members.iter().filter(|m| m.key == key) {
+            let Range { start, mut end } = member.body;
+            if let Some(comma) = comma_after(end) {
+                if self.source[end..comma]
+                    .bytes()
+                    .all(|b| matches!(b, b' ' | b'\t'))
+                {
+                    end = comma + 1;
+                } else {
+                    edits.push((comma..comma + 1, String::new()));
+                }
+            }
+            let line_start = self.source[..start].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = self.source[end..].find('\n').map(|i| end + i + 1);
+            if self.source[start..end] == self.trivia[start..end] {
+                // Drop a property-only line, but never eat a pre-existing blank or comment line.
+                if let Some(line_end) = line_end
+                    && self.source[line_start..start]
+                        .bytes()
+                        .all(|b| matches!(b, b' ' | b'\t'))
+                    && self.source[end..line_end]
+                        .bytes()
+                        .all(|b| b.is_ascii_whitespace())
+                {
+                    edits.push((line_start..line_end, String::new()));
+                } else {
+                    edits.push((start..end, String::new()));
+                }
+            } else {
+                // A comment between the colon and value, or inside a removed container,
+                // becomes a freestanding comment. Distinguish it from text in a string.
+                let source = &self.source[start..end];
+                let trivia = &self.trivia.as_bytes()[start..end];
+                let mut kept = String::new();
+                let mut at = 0;
+                while at < source.len() {
+                    let rest = &source.as_bytes()[at..];
+                    let len = if trivia[at] == b' ' && rest.starts_with(b"//") {
+                        rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len())
+                    } else if trivia[at] == b' ' && rest.starts_with(b"/*") {
+                        rest.windows(2)
+                            .position(|p| p == b"*/")
+                            .expect("parsed comment")
+                            + 2
+                    } else {
+                        0
+                    };
+                    if len != 0 {
+                        kept.push_str(&source[at..at + len]);
+                        at += len;
+                    } else {
+                        if rest[0].is_ascii_whitespace() {
+                            kept.push(char::from(rest[0]));
+                        }
+                        at += 1;
+                    }
+                }
+                edits.push((start..end, kept));
+            }
+        }
+        edits.sort_unstable_by_key(|(range, _)| range.start);
+        let mut source = self.source.clone();
+        for (range, replacement) in edits.into_iter().rev() {
+            source.replace_range(range, &replacement);
+        }
+        Self::parse(&source)?;
+        Ok(source)
     }
     /// Exact unmodified source, including BOM and trivia.
     pub fn source(&self) -> &str {
@@ -275,6 +387,7 @@ fn scan(
     at: &mut usize,
     pointer: &str,
     spans: &mut BTreeMap<String, Range<usize>>,
+    mut members: Option<&mut Vec<Member>>,
 ) -> Result<(), String> {
     ws(s, at);
     let start = *at;
@@ -289,7 +402,13 @@ fn scan(
                     serde_json::from_str(&s[key_start..*at]).map_err(|e| e.to_string())?;
                 ws(s, at);
                 *at += 1;
-                scan(s, at, &format!("{pointer}/{}", escape(&key)), spans)?;
+                scan(s, at, &format!("{pointer}/{}", escape(&key)), spans, None)?;
+                if let Some(members) = &mut members {
+                    members.push(Member {
+                        key,
+                        body: key_start..*at,
+                    });
+                }
                 ws(s, at);
                 if s.as_bytes()[*at] == b',' {
                     *at += 1;
@@ -303,7 +422,7 @@ fn scan(
             ws(s, at);
             let mut index = 0;
             while s.as_bytes()[*at] != b']' {
-                scan(s, at, &format!("{pointer}/{index}"), spans)?;
+                scan(s, at, &format!("{pointer}/{index}"), spans, None)?;
                 index += 1;
                 ws(s, at);
                 if s.as_bytes()[*at] == b',' {
@@ -322,4 +441,61 @@ fn scan(
     }
     spans.insert(pointer.into(), start..*at);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Document;
+
+    #[test]
+    fn remove_top_level_key_preserves_comments_crlf_and_blank_lines() {
+        let before = concat!(
+            "\u{feff}{\r\n",
+            "  // User preferences\r\n",
+            "  \"font_size\": 19,\r\n",
+            "\r\n",
+            "  \"unrelated\": { \"font_size\": 7, }, // keep exactly\r\n",
+            "  \"tab_size\": 2,\r\n",
+            "}\r\n",
+        );
+        let source = Document::parse(before).unwrap();
+        let output = source.remove("font_size").unwrap();
+        assert_eq!(output, before.replace("  \"font_size\": 19,\r\n", ""));
+        let doc = Document::parse(&output).unwrap();
+        assert_eq!(doc.value["unrelated"]["font_size"], 7);
+        assert_eq!(doc.remove("absent").unwrap(), output);
+        assert_eq!(
+            doc.remove("tab_size").unwrap(),
+            output.replace("  \"tab_size\": 2,\r\n", "")
+        );
+    }
+
+    #[test]
+    fn remove_last_and_duplicate_keys_without_removing_comments() {
+        let before = "{\n  \"keep\": \"// literal\", /* next */\n  \"a/b~\": 1,\n  \"a\\u002fb~\": [/* nested */ 2] // tail\n}\n";
+        let output = Document::parse(before).unwrap().remove("a/b~").unwrap();
+        assert_eq!(
+            output,
+            "{\n  \"keep\": \"// literal\" /* next */\n   /* nested */  // tail\n}\n"
+        );
+        assert_eq!(
+            Document::parse("{ \"only\": true, /* trailing */ }")
+                .unwrap()
+                .remove("only")
+                .unwrap(),
+            "{  /* trailing */ }"
+        );
+    }
+
+    #[test]
+    fn trailing_commas_do_not_hide_missing_values() {
+        for broken in ["{,}", "[,]", "[0,,]", "{\n\"missing\": ,\n}"] {
+            assert!(Document::parse(broken).is_err(), "{broken}");
+        }
+        assert!(
+            Document::parse("{\n\"missing\": ,\n}")
+                .unwrap_err()
+                .starts_with("2:"),
+        );
+    }
 }

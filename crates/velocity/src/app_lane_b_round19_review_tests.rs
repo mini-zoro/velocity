@@ -282,7 +282,11 @@ fn r19_review_quit_salvages_dirty_documents_and_other_windows() {
 fn r19_review_settings_identity_syntax_readonly_survive_real_session() {
     let data = tempfile::tempdir().unwrap();
     let mut a = app(Some(data.path()));
-    key(&mut a, "super+,");
+    named(
+        &mut a,
+        "edit_settings",
+        crate::app::settings_entry::preferences_json_args(),
+    );
     let mut settings = a.opened_settings.pop().unwrap();
     settings.save_workspace_checkpoint().unwrap();
     let session = vel_session::load(&data.path().join("Sessions/Session.sublime-session")).session;

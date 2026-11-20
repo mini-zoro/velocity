@@ -291,7 +291,11 @@ fn r19_close_deleted_checks_disk_and_keeps_existing_and_untitled() {
 fn r19_edit_settings_key_path_groups_readonly_creation_and_live_reload() {
     let data = tempfile::tempdir().unwrap();
     let mut a = app(Some(data.path()));
-    assert!(key(&mut a, "super+,"));
+    named(
+        &mut a,
+        "edit_settings",
+        super::settings_entry::preferences_json_args(),
+    );
     let child = a.opened_settings.pop().unwrap();
     assert_ne!(child.session_id, a.session_id);
     assert!(std::rc::Rc::ptr_eq(&child.sessions, &a.sessions));
@@ -521,7 +525,11 @@ fn r19_status_clicks_offer_encoding_and_checked_line_endings() {
 fn r19_bad_user_json_reports_file_and_line_without_modal() {
     let data = tempfile::tempdir().unwrap();
     let mut a = app(Some(data.path()));
-    key(&mut a, "super+,");
+    named(
+        &mut a,
+        "edit_settings",
+        super::settings_entry::preferences_json_args(),
+    );
     let mut w = a.opened_settings.pop().unwrap().workspace;
     let index = w.active;
     for (source, expected, error) in [

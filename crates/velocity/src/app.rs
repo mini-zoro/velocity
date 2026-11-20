@@ -29,6 +29,8 @@ mod round21_lane_b_tests;
 mod round26_settings_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
+#[path = "app_settings_ui.rs"]
+mod settings_ui_adapter;
 #[path = "app_status.rs"]
 mod status_adapter;
 #[path = "app_tabs.rs"]
@@ -1291,6 +1293,11 @@ impl App {
         received: Instant,
         viewport: std::ops::Range<usize>,
     ) -> bool {
+        if self.settings_page_has_focus()
+            && !matches!((key.name.as_str(), key.modifiers), (",", 8) | ("p", 12))
+        {
+            return self.settings_key(window, key, received);
+        }
         if key.name == "escape" {
             self.keyboard_center = None;
         }
@@ -1739,6 +1746,9 @@ impl App {
             "prompt_select_project" => "prompt_open_project",
             other => other,
         };
+        if self.settings_page_has_focus() && self.settings_named(window, name) {
+            return Ok(());
+        }
         if !self.macro_view_active() {
             return Ok(());
         }
@@ -3395,7 +3405,9 @@ impl App {
         Ok(())
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
-        self.sync_active_view();
+        if self.workspace.settings_page.is_none() {
+            self.sync_active_view();
+        }
         if !self.workspace.themes.ui.borrow().metrics.native_enabled() {
             let result = self
                 .workspace
@@ -3407,6 +3419,9 @@ impl App {
             if let Err(e) = result {
                 self.workspace.messages.push(e);
             }
+        }
+        if self.workspace.settings_page.is_some() {
+            return self.settings_scene();
         }
         let settings = &self.workspace.tabs[self.workspace.active].editor.settings;
         if let Err(e) = self.workspace.themes.select(settings, self.workspace.dark) {
@@ -4144,6 +4159,12 @@ impl App {
             self.external_input += 1;
             return;
         }
+        if self.settings_page_has_focus() {
+            let page = self.workspace.settings_page.as_mut().unwrap();
+            page.text_input(&self.workspace.translations, event, Instant::now());
+            self.settings_redraw(window);
+            return;
+        }
         if self.region_blocks_text() {
             return;
         }
@@ -4541,11 +4562,15 @@ impl AppHandler for App {
         let Some(key) = crate::editor::binding_key(&event) else {
             return false;
         };
-        if self
-            .panels
-            .input()
-            .is_some_and(vel_ui::input::Input::composing)
-        {
+        let input = if self.settings_page_has_focus() {
+            self.workspace
+                .settings_page
+                .as_ref()
+                .and_then(|page| page.input())
+        } else {
+            self.panels.input()
+        };
+        if input.is_some_and(vel_ui::input::Input::composing) {
             return false;
         }
         let viewport = self.viewport();
@@ -4583,6 +4608,7 @@ impl AppHandler for App {
                 };
                 let paths: Vec<PathBuf> = match name {
                     "new_window"
+                    | "show_settings"
                     | "edit_settings"
                     | "open_url"
                     | "open_crash_reports"
@@ -4801,6 +4827,10 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        if self.settings_page_has_focus() {
+            self.settings_command(Some(w), command, Instant::now());
+            return;
+        }
         if self.region_blocks_text() {
             if command == Command::Cancel {
                 self.leave_region_focus();
@@ -4979,6 +5009,9 @@ impl AppHandler for App {
             let active_was_loading = self.workspace.tabs[self.workspace.active].loading.is_some();
             let session_changed = self.poll_workspace_model() || focus_changed;
             let mut changed = session_changed;
+            if self.workspace.settings_page.is_some() {
+                changed |= self.poll_settings_input(Instant::now());
+            }
             self.publish_resource_reports();
             self.workspace
                 .themes
@@ -5382,6 +5415,7 @@ impl AppHandler for App {
         Ok(())
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
+        self.finish_settings_input();
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
         self.prepare_quit(Some(w))
@@ -5400,6 +5434,7 @@ impl AppHandler for App {
         }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        self.finish_settings_input();
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
         if self.options.mode != Mode::Interactive {
@@ -5408,6 +5443,14 @@ impl AppHandler for App {
         self.prepare_window_close(Some(w))
     }
     fn text_input_state(&self) -> TextInputState {
+        if self.settings_page_has_focus() {
+            return self
+                .workspace
+                .settings_page
+                .as_ref()
+                .and_then(|p| p.input())
+                .map_or_else(TextInputState::default, |input| input.state());
+        }
         if let Some(input) = self.panels.input() {
             return input.state();
         }
@@ -5424,6 +5467,14 @@ impl AppHandler for App {
         }
     }
     fn text_input_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
+        if self.settings_page_has_focus() {
+            return self
+                .workspace
+                .settings_page
+                .as_ref()
+                .and_then(|p| p.input())
+                .map_or_else(|| (Rect::default(), range), |input| input.range_rect(range));
+        }
         if let Some(input) = self.panels.input() {
             return input.range_rect(range);
         }
@@ -5433,6 +5484,14 @@ impl AppHandler for App {
         (rect, range)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
+        if self.settings_page_has_focus() {
+            return self
+                .workspace
+                .settings_page
+                .as_ref()?
+                .input()
+                .map(|input| input.utf16_at_point(point));
+        }
         if self.panels.input().is_none() && self.workspace.editor().binary.is_some() {
             return None;
         }
@@ -5556,7 +5615,8 @@ fn localized_menu_caption<'a>(
 
 fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Translator) {
     // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#App-menu
-    // Settings edits defaults beside the User file: https://www.sublimetext.com/docs/settings.html.
+    // Keep the platform shortcut in the application menu and the explicit
+    // graphical entry beside Settings – JSON under Preferences.
     let settings = entries
         .iter_mut()
         .find(|item| item.id == "preferences")
@@ -5565,7 +5625,13 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
                 .children
                 .iter()
                 .position(|entry| entry.id == "settings")?;
-            Some(item.children.remove(index))
+            if item.children[index].command.as_deref() == Some("show_settings") {
+                let settings = item.children[index].clone();
+                item.children[index].shortcut = None;
+                Some(settings)
+            } else {
+                Some(item.children.remove(index))
+            }
         });
     let mut rows = Vec::new();
     for (caption, command, shortcut) in [

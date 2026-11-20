@@ -86,7 +86,7 @@ pub(super) fn command(item: &PaletteItem) -> ItemIcon {
         "show_overlay" if item.invocation.args["overlay"] == "syntax" => return Syntax,
         "show_overlay" if item.invocation.args["overlay"] == "goto" => return Goto,
         _ if name.starts_with("package_") => return Package,
-        "edit_settings" | "edit_syntax_settings" => return Settings,
+        "show_settings" | "edit_settings" | "edit_syntax_settings" => return Settings,
         _ => {}
     }
     match group {

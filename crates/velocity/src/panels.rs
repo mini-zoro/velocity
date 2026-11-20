@@ -225,6 +225,8 @@ pub(crate) enum StyleId {
     HoverPopup,
     QuickScroll,
     StatusButton,
+    SettingsLabel,
+    SettingsInput,
     SideGuide,
 }
 impl StyleId {
@@ -8745,7 +8747,7 @@ impl Panels {
     }
 }
 
-fn paint_themed_input(
+pub(crate) fn paint_themed_input(
     theme: &vel_ui::theme::ThemeUi,
     style: &vel_ui::theme::Style,
     layer: &mut Layer,

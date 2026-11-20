@@ -1009,6 +1009,46 @@ fn settings_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     Ok(settings)
 }
 
+fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App, String> {
+    // The broken-file scene must not affect the render fixture for any other scene.
+    let data = tempfile::tempdir_in(&fixture.root)
+        .map_err(|e| e.to_string())?
+        .keep();
+    let path = crate::workbench::preferences_path(&data);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let original = crate::workbench::user_preferences_source(&crate::workbench::preferences_path(
+        &fixture.data,
+    ))?;
+    let mut settings = vel_config::json::Document::parse(&original)?.value;
+    settings["tab_size"] = json!(8);
+    settings["translate_tabs_to_spaces"] = json!(true);
+    settings["word_separators"] = json!(":/.");
+    std::fs::write(&path, settings.to_string()).map_err(|e| e.to_string())?;
+    let mut workspace = Workspace::new(vel_text::Text::new(), Some(data), None, false)?;
+    workspace.set_appearance(dark)?;
+    let mut app = new_app(workspace)?;
+    if variant == "broken" {
+        std::fs::write(&path, "{\n  \"tab_size\": ,\n}\n").map_err(|e| e.to_string())?;
+    }
+    named(&mut app, "show_settings", json!({}));
+    let page = app
+        .workspace
+        .settings_page
+        .as_mut()
+        .ok_or("Settings sheet not opened")?;
+    if variant == "modified" {
+        page.show_modified();
+    } else if variant == "search" {
+        let query = if app.workspace.translations.matched_language().as_str() == "zh-Hans" {
+            "换行"
+        } else {
+            "wrap"
+        };
+        page.search_for(query);
+    }
+    Ok(app)
+}
+
 fn distraction_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     open(&mut app, &fixture.file)?;
@@ -1579,6 +1619,26 @@ const SCENARIOS: &[Scenario] = &[
         build: settings_scene,
     },
     Scenario {
+        name: "settings_ui",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "default"),
+    },
+    Scenario {
+        name: "settings_ui_search",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "search"),
+    },
+    Scenario {
+        name: "settings_ui_modified",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "modified"),
+    },
+    Scenario {
+        name: "settings_ui_broken",
+        size: (900., 650.),
+        build: |f, d| settings_ui_scene(f, d, "broken"),
+    },
+    Scenario {
         name: "distraction_free",
         size: (1200., 800.),
         build: distraction_scene,
@@ -2133,11 +2193,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let mut renderer: Option<Renderer> = None;
     let mut written = 0;
     for scenario in SCENARIOS {
-        if request
-            .only
-            .as_ref()
-            .is_some_and(|only| !only.iter().any(|n| n == scenario.name))
-        {
+        if request.only.as_ref().is_some_and(|only| {
+            !only.iter().any(|n| {
+                n == scenario.name
+                    || (n == "settings_ui" && scenario.name.starts_with("settings_ui_"))
+            })
+        }) {
             continue;
         }
         for &dark in &request.dark {

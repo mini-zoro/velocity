@@ -11,6 +11,10 @@ use vel_config::{Value, json, resources::Resources};
 use vel_platform::{Size, WindowHandle, WindowOptions};
 use vel_text::Text;
 
+pub(super) fn preferences_json_args() -> Value {
+    json!({"base_file": "Packages/Default/Preferences.sublime-settings", "default": "{\n\t$0\n}\n"})
+}
+
 fn expand(path: &str, data: &Path) -> String {
     // Public platform names: https://docs.sublimetext.io/guide/customization/settings.html
     path.replace("${platform}", "OSX")
@@ -197,6 +201,10 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<bool, String> {
+        if name == "show_settings" {
+            self.show_settings_page(window);
+            return Ok(true);
+        }
         if !matches!(
             name,
             "edit_settings"

@@ -690,6 +690,8 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    /// A workspace sheet with its own input and drawing, independent of document tabs.
+    pub(crate) settings_page: Option<Box<crate::settings_ui::Page>>,
     pending_revert: Option<PendingRevert>,
     pub(crate) jump_history: crate::editor::navigation::Shared,
     pub(crate) appearance: appearance::Catalog,
@@ -766,10 +768,10 @@ pub struct Workspace {
     config_rx: Option<std::sync::mpsc::Receiver<Result<Configuration, String>>>,
     last_config_check: Option<Instant>,
     reload_requested: bool,
-    settings_writes: Vec<std::sync::mpsc::Receiver<Result<(), String>>>,
+    settings_writes: Vec<(std::sync::mpsc::Receiver<Result<(), String>>, u64)>,
     settings_write_generation: u64,
     config_write_generation: (u64, bool),
-    settings_write_overrides: BTreeMap<String, Option<Value>>,
+    settings_write_overrides: BTreeMap<String, (u64, Option<Value>)>,
     settings_reload_deferred: bool,
     pub resource_revision: u64,
 }
@@ -1972,6 +1974,7 @@ impl Workspace {
             config_rx: None,
             last_config_check: None,
             reload_requested: false,
+            settings_page: None,
             settings_writes: Vec::new(),
             settings_write_generation: 0,
             config_write_generation: (0, false),
@@ -2127,9 +2130,17 @@ impl Workspace {
         overrides: &[(String, Option<Value>)],
     ) {
         self.settings_write_generation = self.settings_write_generation.wrapping_add(1);
-        self.settings_write_overrides
-            .extend(overrides.iter().cloned());
-        self.settings_writes.push(rx);
+        let generation = self.settings_write_generation;
+        self.settings_write_overrides.extend(
+            overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), (generation, value.clone()))),
+        );
+        self.settings_writes.push((rx, generation));
+    }
+    #[cfg(test)]
+    pub(crate) fn settings_write_count(&self) -> u64 {
+        self.settings_write_generation
     }
     /// Stops a failed writer's values from surviving an in-flight resource load.
     /// Matching values keep unrelated keys and later writes to the same key intact.
@@ -2138,7 +2149,7 @@ impl Workspace {
             if self
                 .settings_write_overrides
                 .get(*key)
-                .is_some_and(|pending| pending.as_ref() == Some(value))
+                .is_some_and(|(_, pending)| pending.as_ref() == Some(value))
             {
                 self.settings_write_overrides.remove(*key);
             }
@@ -3056,23 +3067,30 @@ impl Workspace {
         }
         self.reconcile_installs();
         let had_pending_writes = !self.settings_writes.is_empty();
-        let mut wrote_settings = false;
-        self.settings_writes.retain(|rx| match rx.try_recv() {
-            Ok(Ok(())) => {
-                wrote_settings = true;
-                false
-            }
-            Ok(Err(error)) => {
-                self.resource_reports.push(error);
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Err(error) => {
-                self.messages.push(error.to_string());
-                false
-            }
-        });
-        if wrote_settings {
+        let mut settled_settings = false;
+        self.settings_writes
+            .retain(|(rx, generation)| match rx.try_recv() {
+                Ok(Ok(())) => {
+                    settled_settings = true;
+                    false
+                }
+                Ok(Err(error)) => {
+                    settled_settings = true;
+                    self.settings_write_overrides
+                        .retain(|_, (id, _)| id != generation);
+                    self.resource_reports.push(error);
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
+                Err(error) => {
+                    settled_settings = true;
+                    self.settings_write_overrides
+                        .retain(|_, (id, _)| id != generation);
+                    self.messages.push(error.to_string());
+                    false
+                }
+            });
+        if settled_settings {
             // Publish one settled load for a batch, not each intermediate file.
             if self.settings_writes.is_empty() {
                 self.reload_requested = true;
@@ -3139,7 +3157,7 @@ impl Workspace {
                         || !self.settings_writes.is_empty()
                     {
                         let mut values = config.settings.layer(Layer::User).clone();
-                        for (key, value) in &self.settings_write_overrides {
+                        for (key, (_, value)) in &self.settings_write_overrides {
                             if let Some(value) = value {
                                 values.insert(key.clone(), value.clone());
                             } else {

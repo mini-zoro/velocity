@@ -10,6 +10,7 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT = ROOT / "crates/velocity/resources/Packages/Default"
 DOC = ROOT / "docs/settings.md"
+UI_REFERENCE = ROOT / "crates/velocity/src/settings_reference.json"
 BEGIN = "<!-- BEGIN GENERATED SETTINGS -->"
 END = "<!-- END GENERATED SETTINGS -->"
 NO_EFFECT = "accepted for compatibility, no effect in Velocity"
@@ -17,13 +18,50 @@ STRINGS = r'"(?:[^"\\]|\\[\s\S])*"'
 CHAR = r"'(?:[^'\\\n]|\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|.))'"
 KEY = r'"([\w.]+)"'
 
+# Used by both the Settings sheet and the generated reference below.
+EFFECTS = {
+    "next_window": ("new_window_settings",),
+    "next_document": ("default_encoding", "default_line_ending"),
+    "next_open": ("fallback_encoding", "detect_indentation", "large_file.load_bytes",
+                  "open_files_in_new_window", "update_system_recent_files"),
+    "next_save": ("atomic_save", "ensure_newline_at_eof_on_save", "default_dir",
+                  "trim_trailing_white_space_on_save", "trim_only_modified_white_space",
+                  "save_on_focus_lost"),
+    "next_build": ("show_panel_on_build", "save_all_on_build", "result_file_regex",
+                   "result_line_regex", "result_base_dir", "build_env"),
+    "next_session": ("hot_exit", "remember_open_files"),
+    "next_full_screen": ("use_simple_full_screen",),
+    "next_vintage_view": ("vintage_start_in_command_mode",),
+}
 
-def jsonc(source):
+EFFECT_LABELS = {
+    "immediate": "Immediately",
+    "next_window": "Next window",
+    "next_document": "Next new document",
+    "next_open": "Next file open",
+    "next_save": "Next save",
+    "next_build": "Next build",
+    "next_session": "Next close or quit",
+    "next_full_screen": "Next full-screen transition",
+    "next_vintage_view": "When a view enters Vintage",
+}
+
+
+def unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"Duplicate JSON property: {key}")
+        obj[key] = value
+    return obj
+
+
+def jsonc(source, *, unique=False):
     tokens = re.compile(STRINGS + r'|//[^\n]*|/\*[\s\S]*?\*/')
     semantic = tokens.sub(lambda m: m[0] if m[0].startswith('"') else "", source)
     commas = re.compile(STRINGS + r'|,(?=\s*[}\]])')
     semantic = commas.sub(lambda m: m[0] if m[0].startswith('"') else "", semantic)
-    return json.loads(semantic)
+    return json.loads(semantic, object_pairs_hook=unique_object if unique else None)
 
 
 def settings_file(name):
@@ -173,13 +211,30 @@ def uncovered_settings(shipped, descriptions, readers):
                       descriptions.get(key, "").lower()))
 
 
+def ui_reference(defaults, descriptions):
+    metadata = jsonc((DEFAULT / "settings-ui.json").read_text(encoding="utf-8"), unique=True)
+    missing, extra = defaults.keys() - metadata.keys(), metadata.keys() - defaults.keys()
+    if missing or extra:
+        raise ValueError(f"Settings UI metadata: missing {sorted(missing)}, extra {sorted(extra)}")
+    timing = unique_object((key, effect) for effect, keys in EFFECTS.items() for key in keys)
+    if extra_timing := timing.keys() - defaults.keys():
+        raise ValueError(f"Unshipped settings in effect table: {sorted(extra_timing)}")
+    data = {}
+    for key, meta in sorted(metadata.items()):
+        description = meta.get("note", descriptions.get(key, ""))
+        if not description:
+            raise ValueError(f"{key}: needs a description in the defaults or Settings UI metadata")
+        data[key] = {"description": description, "effect": timing.get(key, "immediate")}
+    return data
+
+
 def inline(value):
     """One JSON value as a Markdown table cell, including literal pipes/backticks."""
     encoded = json.dumps(value, ensure_ascii=False, separators=(", ", ": ")).replace("|", r"\|")
     return f"`` {encoded} ``"
 
 
-def reference(defaults, mac, descriptions, readers):
+def reference(defaults, mac, descriptions, readers, ui):
     lines = [
         BEGIN,
         "## Shipped and recognized settings",
@@ -188,17 +243,19 @@ def reference(defaults, mac, descriptions, readers):
         "column means the general default applies. Links point to runtime readers,",
         "including typed consumers, shipped theme guards and key-binding contexts.",
         "",
-        "| Setting | General default | macOS override | Description and read sites |",
-        "| --- | --- | --- | --- |",
+        "| Setting | General default | macOS override | Takes effect | Description and read sites |",
+        "| --- | --- | --- | --- | --- |",
     ]
     for key, paths in sorted(readers.items()):
         default = inline(defaults[key]) if key in defaults else "Not shipped"
         platform = inline(mac[key]) if key in mac else ""
-        description = descriptions.get(key, "").replace("|", r"\|")
+        row = ui.get(key)
+        effect = EFFECT_LABELS[row["effect"]] if row else ""
+        description = descriptions.get(key, row["description"] if row else "").replace("|", r"\|")
         refs = ", ".join(
             f"[{path.parts[1]}/{path.name}](../{quote(path.as_posix())})" for path in sorted(paths)
         )
-        lines.append(f"| `{key}` | {default} | {platform} | {f'{description} {refs}'.strip()} |")
+        lines.append(f"| `{key}` | {default} | {platform} | {effect} | {f'{description} {refs}'.strip()} |")
     return "\n".join([*lines, END])
 
 
@@ -214,21 +271,28 @@ def main():
     if missing := uncovered_settings(shipped, descriptions, readers):
         parser.exit(1, f"Shipped settings need a reader or an explicit '{NO_EFFECT}' note: "
                        f"{', '.join(missing)}\n")
-    generated = reference(defaults, mac, descriptions, readers)
+    try:
+        ui = ui_reference(defaults, descriptions)
+    except ValueError as error:
+        parser.exit(1, f"{error}\n")
+    generated = reference(defaults, mac, descriptions, readers, ui)
+    data = "{\n" + ",\n".join(f"  {json.dumps(key)}: {json.dumps(row, ensure_ascii=False)}"
+                              for key, row in ui.items()) + "\n}\n"
     source = DOC.read_text(encoding="utf-8")
     if BEGIN in source:
         result = source[:source.index(BEGIN)] + generated + source[source.index(END) + len(END):]
     else:
         result = source.rstrip() + "\n\n" + generated + "\n"
-    if args.check:
-        if source != result:
-            parser.exit(1, "Settings reference is stale; run crates/velocity/scripts/settings-reference.py\n")
-    elif source != result:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=DOC.parent, delete=False) as out:
-            out.write(result)
+    for path, content in [(DOC, result), (UI_REFERENCE, data)]:
+        if path.exists() and path.read_text(encoding="utf-8") == content:
+            continue
+        if args.check:
+            parser.exit(1, f"{path.relative_to(ROOT)} is stale; run crates/velocity/scripts/settings-reference.py\n")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as out:
+            out.write(content)
             scratch = Path(out.name)
-        scratch.chmod(DOC.stat().st_mode & 0o777)
-        scratch.replace(DOC)
+        scratch.chmod(path.stat().st_mode & 0o777 if path.exists() else 0o644)
+        scratch.replace(path)
 
 
 if __name__ == "__main__":

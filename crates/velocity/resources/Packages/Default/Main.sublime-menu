@@ -1233,6 +1233,10 @@
       {
         "caption": "Settings…",
         "id": "settings",
+        "command": "show_settings"
+      },
+      {
+        "caption": "Settings – JSON",
         "command": "edit_settings",
         "args": {
           "base_file": "${packages}/Default/Preferences.sublime-settings",

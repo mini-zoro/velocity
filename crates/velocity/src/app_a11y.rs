@@ -21,6 +21,14 @@ impl App {
         self.accessibility_model(true)
     }
     fn accessibility_model(&self, include_text: bool) -> Tree {
+        if self.settings_page_has_focus() {
+            return self
+                .workspace
+                .settings_page
+                .as_ref()
+                .unwrap()
+                .accessibility(&self.workspace.translations);
+        }
         let mut tree = Tree::default();
         let ws = &self.workspace;
         let tr = &ws.translations;

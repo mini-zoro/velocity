@@ -99,6 +99,7 @@ pub struct WindowLayers {
 /// The window's effective layer is published in its Settings, before tab creation.
 pub(crate) fn register_commands(registry: &mut vel_commands::Registry) {
     for name in [
+        "show_settings",
         "edit_settings",
         "edit_syntax_settings",
         "open_file_settings",
@@ -155,6 +156,24 @@ pub(crate) fn apply_window_layers(
 
     Ok(())
 }
+
+pub(crate) fn preferences_path(data: &Path) -> std::path::PathBuf {
+    data.join("Packages/User/Preferences.sublime-settings")
+}
+
+/// Read the actual User file, not the resource loader's last valid copy.
+pub(crate) fn user_preferences_source(path: &Path) -> Result<String, String> {
+    if vel_fileio::regular::metadata(path, true)?.is_none() {
+        return Ok("{}".into());
+    }
+    let mut source = String::new();
+    use std::io::Read;
+    vel_fileio::regular::read(path)?
+        .read_to_string(&mut source)
+        .map_err(|e| e.to_string())?;
+    Ok(source)
+}
+
 impl Workspace {
     /// The owning buffer's dirty state, rather than an unsynchronized clone's.
     pub(crate) fn document_dirty(&self, tab: &Tab) -> bool {
@@ -180,46 +199,60 @@ impl Workspace {
             || owner.format != owner.saved_format
     }
     /// Commits a window preference through the one shared, atomic preferences writer.
-    pub fn set_user_preference(&mut self, key: &str, value: Value) -> Result<(), String> {
-        self.settings.set(Layer::User, key, value.clone());
-        for tab in &mut self.tabs {
-            tab.editor.settings.set(Layer::User, key, value.clone());
-            let mut view = tab.editor.settings.layer(Layer::View).clone();
-            view.remove(key);
-            tab.editor
-                .settings
-                .replace(Layer::View, Value::Object(view))?;
-            tab.editor.sync();
-        }
+    pub fn set_user_preference(
+        &mut self,
+        key: &str,
+        value: impl Into<Option<Value>>,
+    ) -> Result<(), String> {
+        let value = value.into();
         if let Some(data) = &self.data_dir {
-            let path = data.join("Packages/User/Preferences.sublime-settings");
+            let path = preferences_path(data);
             self.settings_reports.claim(&path);
-            let key = key.to_owned();
+            let owned_key = key.to_owned();
             let pending = value.clone();
-            let tracked = key.clone();
             let rx = crate::release::enqueue(move || {
-                let source = if vel_fileio::regular::metadata(&path, true)?.is_some() {
-                    use std::io::Read;
-                    let mut source = String::new();
-                    vel_fileio::regular::read(&path)?
-                        .read_to_string(&mut source)
-                        .map_err(|e| format!("{}: {e}", path.display()))?;
-                    source
-                } else {
-                    "{}".into()
-                };
-                let source = vel_config::json::Document::parse(&source)
-                    .and_then(|doc| doc.set(&key, &value))
-                    .map_err(|e| {
-                        vel_config::json::source_diagnostic(&path.to_string_lossy(), &e)
-                    })?;
+                let diagnostic =
+                    |e: String| vel_config::json::source_diagnostic(&path.to_string_lossy(), &e);
+                let before = user_preferences_source(&path).map_err(diagnostic)?;
+                let doc = vel_config::json::Document::parse(&before).map_err(diagnostic)?;
+                let source = match &pending {
+                    Some(value) => doc.set(&owned_key, value),
+                    None => doc.remove(&owned_key),
+                }
+                .map_err(diagnostic)?;
+                if before == source {
+                    return Ok(());
+                }
                 vel_session::atomic_write(&path, |file| {
                     use std::io::Write;
                     file.write_all(source.as_bytes()).map_err(|e| e.to_string())
                 })
-                .map_err(|e| format!("{}: {e}", path.display()))
+                .map_err(diagnostic)
             })?;
-            self.track_settings_write(rx, &[(tracked, Some(pending))]);
+            self.track_settings_write(rx, &[(key.to_owned(), value.clone())]);
+        }
+        let apply = |settings: &mut vel_config::settings::Settings| {
+            if let Some(value) = &value {
+                settings.set(Layer::User, key, value.clone());
+            } else {
+                let mut user = settings.layer(Layer::User).clone();
+                user.remove(key);
+                settings
+                    .replace(Layer::User, Value::Object(user))
+                    .expect("object");
+            }
+        };
+        apply(&mut self.settings);
+        for tab in &mut self.tabs {
+            apply(&mut tab.editor.settings);
+            if tab.editor.settings.layer(Layer::View).contains_key(key) {
+                let mut view = tab.editor.settings.layer(Layer::View).clone();
+                view.remove(key);
+                tab.editor
+                    .settings
+                    .replace(Layer::View, Value::Object(view))?;
+            }
+            tab.editor.sync();
         }
         Ok(())
     }
@@ -283,6 +316,9 @@ impl Workspace {
     }
     /// Active title with explicit full-path/project-relative preferences.
     pub fn window_title(&self) -> String {
+        if self.settings_page.is_some() {
+            return self.translations.tr("Settings").into_owned();
+        }
         // The reference describes show_full_path; the ST4 changelog adds show_rel_path.
         // The detailed reference establishes false on macOS (true on other platforms).
         // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#global-settings

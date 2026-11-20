@@ -45,6 +45,7 @@ mod safe_mode;
 mod session;
 mod session_restore;
 mod settings_reports;
+mod settings_ui;
 mod shared_document;
 mod shipped;
 mod stats;

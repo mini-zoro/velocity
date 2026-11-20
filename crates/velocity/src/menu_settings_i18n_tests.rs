@@ -98,7 +98,7 @@ fn menu_roles_and_exact_shortcuts_survive_renaming_and_reload() {
         vec![
             (Some("native_about"), None),
             (None, None),
-            (Some("edit_settings"), Some("super+,")),
+            (Some("show_settings"), Some("super+,")),
             (None, None),
             (Some("native_services"), None),
             (None, None),

@@ -31,6 +31,12 @@ impl App {
         self.dragging_splitter = None;
     }
     fn route_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent, keep_focus: bool) {
+        if self.settings_page_has_focus() {
+            if event.kind == MouseKind::Down && event.button == 0 && !event.is_context_click() {
+                self.settings_pointer(w, event.position, event.modifiers.shift(), Instant::now());
+            }
+            return;
+        }
         let captured = matches!(event.kind, MouseKind::Drag | MouseKind::Up)
             && (self.view.pointer_gesture_active()
                 || self.drag_select.is_some()
@@ -562,6 +568,15 @@ impl App {
         }
         if self.options.mode.automatic() {
             self.external_input += 1;
+            return;
+        }
+        if self.settings_page_has_focus() {
+            let page = self.workspace.settings_page.as_mut().unwrap();
+            page.scroll_at(
+                event.position,
+                -event.delta_y * if event.precise { 1. } else { 23. },
+            );
+            self.settings_redraw(w);
             return;
         }
         let scale = if event.precise {

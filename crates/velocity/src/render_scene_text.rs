@@ -310,12 +310,18 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
     let labels = &labels;
     let sources = sources.as_str();
     let localized_words = &localized_words;
+    let settings = app.workspace.settings_page.as_deref();
+    let root_text = root.to_string_lossy();
+    let root_text = root_text.as_ref();
     scene
         .layers
         .iter()
         .enumerate()
         .flat_map(|(layer, entry)| {
             entry.text.iter().filter_map(move |run| {
+                if settings.is_some_and(|page| page.is_row_data(&run.text, tr)) {
+                    return None;
+                }
                 let words = words(&run.text)
                     .filter(|word| {
                         !TECHNICAL.contains(word)
@@ -324,6 +330,13 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
                             && !shortcut_word(word, &run.text)
                             && !is_data(run, word, labels, sources)
                             && !fixture_label(name, &run.text, word, root)
+                            && !settings.is_some_and(|page| {
+                                word.starts_with(root_text)
+                                    || page.read_only().is_some_and(|detail| {
+                                        run.text.ends_with(detail)
+                                            && words(detail).any(|raw| raw == *word)
+                                    })
+                            })
                     })
                     .collect::<Vec<_>>();
                 (!words.is_empty()).then_some(AsciiRun {
