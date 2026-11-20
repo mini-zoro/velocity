@@ -21,6 +21,8 @@ pub enum Layer {
     Platform,
     /// User preferences.
     User,
+    /// A snapshot of overrides for this window, supplied by New Window.
+    Window,
     /// Project values. Sublime consults them before syntax-specific settings, so a syntax file
     /// (e.g. `Packages/User/Python.sublime-settings`) overrides the project.
     Project,
@@ -38,7 +40,7 @@ pub struct Settings {
     revision: u64,
     cache_identity: u64,
     single_layer: Option<usize>,
-    layers: [Map<String, Value>; 7],
+    layers: [Map<String, Value>; 8],
     observers: BTreeMap<String, Observer>,
 }
 impl fmt::Debug for Settings {

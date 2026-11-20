@@ -262,6 +262,7 @@ pub struct View {
     scroll_bar_hover: bool,
     scroll_drag_offset: f64,
     bar_overlay: bool,
+    pub(crate) system_scroller_overlay: bool,
     scrolled: Option<Instant>,
     base_cell: f64,
     base_ascent: f64,
@@ -969,6 +970,7 @@ impl View {
             scroll_bar_hover: false,
             scroll_drag_offset: 0.,
             bar_overlay: true,
+            system_scroller_overlay: true,
             scrolled: None,
             base_cell: cell,
             base_ascent: ascent,
@@ -1248,6 +1250,13 @@ impl View {
             layout.geometry_revision,
         ])
     }
+    pub(crate) fn set_system_scroller_overlay(&mut self, overlay: bool) {
+        if self.system_scroller_overlay != overlay {
+            self.system_scroller_overlay = overlay;
+            self.bar_style_key = None;
+            self.style_inputs = None;
+        }
+    }
     pub fn apply_style(&mut self, e: &Editor) {
         let folds = e.folded();
         let inputs = self.style_input_key(e);
@@ -1268,26 +1277,18 @@ impl View {
             }
             same_document
         });
-        // Overlay is a discrete theme property, cached until theme/settings change.
-        // The animated colors and dimensions still resolve for every frame.
+        // Geometry and paint must use the same mode, independent of theme colors.
         let style_key = (
             std::rc::Rc::as_ptr(&e.theme) as usize,
             e.theme.borrow().revision,
-            e.settings.revision(),
+            e.settings.cache_identity(),
         );
         if self.bar_style_key != Some(style_key) {
-            self.bar_overlay = e
-                .theme
-                .borrow_mut()
-                .style(
-                    e.ui_id(0xE300),
-                    &vel_theme::ElementPath(&[
-                        vel_theme::Element::new("window", &[]),
-                        vel_theme::Element::new("scroll_area_control", &[]),
-                    ]),
-                    &e.settings,
-                )
-                .overlay;
+            self.bar_overlay = match e.settings.string("overlay_scroll_bars", "system") {
+                "enabled" => true,
+                "disabled" => false,
+                _ => self.system_scroller_overlay,
+            };
             self.bar_style_key = Some(style_key);
         }
         let scale = e.preferences.font_size / 13.;
@@ -2233,10 +2234,12 @@ impl View {
             self.clamp_scroll(e);
             return Ok(true);
         }
-        self.scroll_bar_hover = point.x >= self.right(e) - 8.
-            && point.x < self.right(e) + if self.bar_overlay { 0. } else { 8. }
-            && point.y >= self.tab_height;
-        self.minimap_hover = point.x >= self.right(e) && point.y >= self.tab_height;
+        let width = 8. * vel_ui::theme::ui_scale(&e.settings);
+        let right = self.right(e);
+        let track_right = right + if self.bar_overlay { 0. } else { width };
+        self.scroll_bar_hover =
+            (track_right - width..track_right).contains(&point.x) && point.y >= self.tab_height;
+        self.minimap_hover = point.x >= right && point.y >= self.tab_height;
         self.gutter_hover = point.x >= 0. && point.x < self.gutter(e);
         if up {
             let consumed = self.minimap_drag;

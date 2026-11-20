@@ -1679,11 +1679,12 @@ impl Workspace {
         restore: bool,
     ) -> Result<(), String> {
         let path = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
-        let mut config = Self::new(
+        let mut config = Self::new_with_window_overrides(
             Text::new(),
             self.data_dir.clone(),
             Some(path.clone()),
             self.watcher.is_some(),
+            Some(self.settings.layer(Layer::Window).clone()),
         )?;
         config.recent_files = self.recent_files.clone();
         config.recent_folders = self.recent_folders.clone();
@@ -1734,11 +1735,12 @@ impl Workspace {
         Ok(())
     }
     pub fn close_project(&mut self) -> Result<(), String> {
-        let mut empty = Self::new(
+        let mut empty = Self::new_with_window_overrides(
             Text::new(),
             self.data_dir.clone(),
             None,
             self.watcher.is_some(),
+            Some(self.settings.layer(Layer::Window).clone()),
         )?;
         empty.recent_files = self.recent_files.clone();
         empty.recent_folders = self.recent_folders.clone();

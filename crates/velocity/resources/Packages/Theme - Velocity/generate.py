@@ -208,6 +208,7 @@ png("edge-top", lambda x, y, s: y < 1)
 png("edge-bottom", lambda x, y, s: y >= 15)
 png("edge-right", lambda x, y, s: x >= 15)
 png("tab-indicator", lambda x, y, s: y < 2)
+png("tab-indicator-rounded", lambda x, y, s: 6 <= x < 10 and y < 2)
 png("tab-divider", lambda x, y, s: x >= 15 and 7 <= y < 9)
 
 
@@ -430,6 +431,12 @@ for cls, setting in (("tab_close_button", "!show_tab_close_buttons"), ("scroll_t
 
 # Where inherits Close's button states; only the mask is different.
 rule("panel_where_button", **{"layer1.texture": "Theme - Velocity/palette-neutral.png"})
+# Only geometry changes in the rounded variant; it inherits the normal accent.
+# The base square geometry is also the fallback for legacy angled tabs.
+rule("tab_control", settings={"file_tab_style": "rounded"}, radius=6)
+rule("tab_control", attributes=["selected", "focused"], settings={"file_tab_style": "rounded"},
+     **{"layer2.texture": "Theme - Velocity/tab-indicator-rounded.png",
+        "layer2.inner_margin": [6, 2, 6, 0]})
 
 def compact(value):
     return json.dumps(value, separators=(", ", ": "))

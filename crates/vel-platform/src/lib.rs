@@ -338,6 +338,8 @@ pub trait AppHandler: 'static {
         _preferences: accessibility::Preferences,
     ) {
     }
+    /// Observe changes to the platform's preferred scroller style.
+    fn on_scroller_style(&mut self, _window: &WindowHandle, _overlay: bool) {}
     /// Return an O(1) text snapshot and document-relative UTF-16 ranges.
     fn text_input_state(&self) -> TextInputState {
         TextInputState::default()

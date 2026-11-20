@@ -79,7 +79,54 @@ The full review gate returned `GATE_OK` with 1,567 passing tests and no
 failures. The focused `cjk_` run passed all 10 tests, and the final strict clippy
 check passed.
 
-Left for later: locale-specific punctuation break rules (a wrapped row can start
-with "。" or "，"; Chinese line breaking keeps those at the end of the previous row)
-and per-glyph advances for custom fonts whose wide classes are not uniform. An
-interactive IME candidate window was not exercised.
+## Round 26: punctuation at soft breaks
+
+The wrap calculation uses the East Asian subset of [UAX #14](https://www.unicode.org/reports/tr14/).
+The [Unicode 17 property files](https://www.unicode.org/Public/17.0.0/ucd/) supply
+opening, closing, nonstarter, and conditional Japanese starter classes, including
+small kana and the prolonged sound mark. Ambiguous horizontal ellipses attach
+in CJK context; Latin-only lines retain the old break policy.
+
+The row keeps closing punctuation if it fits; otherwise the break moves back
+so the preceding grapheme can accompany it on the next row. Opening brackets
+move with their following text. This is not optical hanging beyond
+`wrap_width`. An impossibly narrow row falls back to a grapheme boundary to
+make progress, even if a punctuation group cannot fit intact. A single
+oversize grapheme still stays whole. Tabs, continuation indent, and measured
+advances remain part of the budget, and incremental wrapping uses the same
+boundary decisions.
+
+| Check | Coverage |
+| --- | --- |
+| Chinese, Japanese and mixed text | Four widths with both measured and fixed-grid advances, plus an emergency narrow case |
+| Hit testing and caret movement | Left/right and vertical movement, pointer midpoints and UTF-16 geometry at the adjusted breaks |
+| ASCII | Exact absolute byte endpoints from 723d6ab on `fixtures/intel-project/tools.rs` at widths 9, 17 and 29 |
+| Incremental updates | Full-versus-incremental randomized comparisons, now with brackets, small kana, and ellipses |
+
+The round-26 scene was rebuilt and inspected at 1x and 2x in dark and light
+appearances. The fourth wrapped row now starts with "路"; the "。" fits at the
+end of the third. This session could not acquire a Metal adapter, so both sides
+of this comparison use the offscreen text renderer. The round-25 Metal images
+above are unchanged.
+
+| 2x comparison | 723d6ab | Round 26 |
+| --- | --- | --- |
+| Dark | [Before](before/r26-cjk-zh-dark@2x.png) | [After](after/r26-cjk-zh-dark@2x.png) |
+| Light | [Before](before/r26-cjk-zh-light@2x.png) | [After](after/r26-cjk-zh-light@2x.png) |
+
+### Round 26 instructions
+
+Five alternating process pairs on the same fixtures, with `723d6ab` as the
+baseline. The full-width scan classifies boundaries only after a fixed-grid
+row overflows; this avoids extra work on fitting rows edited at many carets.
+All paired medians met the 2% budget.
+
+| Scenario | Baseline median | Round 26 median | Median paired delta |
+| --- | ---: | ---: | ---: |
+| Features | 223,249,806,089 | 224,074,342,628 | +0.35% |
+| 1,000 carets | 4,037,880,091 | 4,059,590,430 | +0.32% |
+| Single-caret smoke | 308,652,889 | 309,199,423 | +0.13% |
+| CJK typing and scroll | 1,201,435,519 | 1,197,677,826 | -0.30% |
+
+Left for later: per-glyph advances for custom fonts whose wide classes are
+not uniform, and an interactive IME candidate-window check.

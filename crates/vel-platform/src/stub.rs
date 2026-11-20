@@ -4,6 +4,10 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// Without a native preference, use overlay scrollbars.
+    pub fn prefers_overlay_scrollers(&self) -> bool {
+        true
+    }
     /// Unsupported platforms have no native frame.
     pub fn frame(&self) -> Option<crate::Rect> {
         None

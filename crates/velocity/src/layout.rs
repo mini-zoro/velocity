@@ -7,6 +7,9 @@ use vel_render::invisibles::Invisible;
 use vel_render::typography::{WideAdvances, WideColumns};
 use vel_text::Text;
 
+#[path = "cjk_break_data.rs"]
+mod cjk_break_data;
+
 pub const FOLDS: &str = "velocity.folds";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Options {
@@ -727,7 +730,7 @@ impl Layout {
                 .saturating_add(1)
                 .saturating_mul(4)
                 .max(32);
-            let (content_len, units, gaps) = loop {
+            let (content_len, units, gaps, kinds) = loop {
                 let limit = start + at.saturating_add(window).min(len);
                 let mut end = if limit == start + len {
                     limit
@@ -752,25 +755,25 @@ impl Layout {
                 } else {
                     Vec::new()
                 };
-                let (end_unit, _) = wrap_end(
-                    &parts,
-                    0,
-                    if at == 0 { 0 } else { indent },
-                    self.options.width,
-                    |at| {
-                        if GAPS {
-                            Self::invisible_gap(&gaps, at)
-                        } else {
-                            0
-                        }
-                    },
-                );
+                let left = if at == 0 { 0 } else { indent };
+                let extra = |at| {
+                    if GAPS {
+                        Self::invisible_gap(&gaps, at)
+                    } else {
+                        0
+                    }
+                };
+                // Only the existence of overflow matters for selecting a window.
+                // A fitting row has no boundary to tailor, even if it contains CJK.
+                let (end_unit, _) = wrap_end(&parts, 0, left, self.options.width, extra);
                 if end == start + len || end_unit < parts.len() {
+                    let kinds = (end_unit < parts.len() && !content.is_ascii())
+                        .then(|| break_kinds(&parts, false));
                     let parts: Vec<_> = parts
                         .into_iter()
                         .map(|u| (u.bytes, u.width, u.text.chars().all(char::is_whitespace)))
                         .collect();
-                    break (content.len(), parts, gaps);
+                    break (content.len(), parts, gaps, kinds);
                 }
                 window = window.saturating_mul(2);
             };
@@ -782,33 +785,26 @@ impl Layout {
             let mut from = 0;
             while from < units.len() {
                 let left = if at == 0 { 0 } else { indent };
-                let mut col = left;
-                let mut end = from;
-                let mut word = None;
-                while end < units.len() {
-                    let width = units[end].1
+                let cells = |i: usize| {
+                    units[i].1
                         + if GAPS {
-                            Self::invisible_gap(&gaps, units[end].0.start)
+                            Self::invisible_gap(&gaps, units[i].0.start)
                         } else {
                             0
-                        };
-                    if col + width > self.options.width && end > from {
-                        break;
-                    }
-                    col += width;
-                    end += 1;
-                    if units[end - 1].2 {
-                        word = Some(end);
-                    }
-                }
-                let lookahead = base + units[end.min(units.len() - 1)].0.end;
-                if end == units.len() && !eof {
+                        }
+                };
+                let (end, lookahead) = if let Some(kinds) = &kinds {
+                    wrap_end_cjk(kinds, from, left, self.options.width, false, |i| {
+                        (units[i].0.end, cells(i) as f64)
+                    })
+                } else {
+                    wrap_end_grid(units.len(), from, left, self.options.width, |i| {
+                        (units[i].0.end, cells(i), units[i].2)
+                    })
+                };
+                // A word rollback can select a boundary earlier than the tested window end.
+                if lookahead == content_len && !eof && end == units.len() {
                     break;
-                }
-                if end < units.len()
-                    && let Some(boundary) = word
-                {
-                    end = boundary;
                 }
                 let columns = units[from..end].iter().map(|u| u.1).sum::<usize>();
                 if GAPS && !gaps.is_empty() {
@@ -830,7 +826,7 @@ impl Layout {
                     columns,
                 });
                 dependencies.push(Dependency {
-                    end: lookahead,
+                    end: base + lookahead,
                     inspected_until: 0,
                 });
                 column += columns;
@@ -1105,19 +1101,35 @@ impl Layout {
         }
         let mut source_column = 0;
         let advances = self.advances_for(len);
-        let measured = advances.enabled() && !content.is_ascii();
+        let non_ascii = !content.is_ascii();
+        let measured = advances.enabled() && non_ascii;
+        let gap = |at| {
+            self.phantom_gap(start + at)
+                + if GAPS {
+                    Self::invisible_gap(&gaps, at)
+                } else {
+                    0
+                }
+        };
+        // Fixed-grid rows often fit completely (including edits at many carets).
+        // Reuse the first scan in that case and never allocate a break-kind row.
+        let mut grid_first = (!measured && non_ascii && !units.is_empty())
+            .then(|| wrap_end(&units, 0, 0, self.options.width, gap));
+        let kinds = (non_ascii && grid_first.is_none_or(|(end, _)| end < units.len()))
+            .then(|| break_kinds(&units, measured));
         while from < units.len() {
             let left = if from == 0 { 0 } else { indent };
-            let gap = |at| {
-                self.phantom_gap(start + at)
-                    + if GAPS {
-                        Self::invisible_gap(&gaps, at)
-                    } else {
-                        0
-                    }
-            };
-            let (end, lookahead) = if measured {
-                wrap_end_measured(&units, from, left, self.options.width, advances, gap)
+            let (end, lookahead) = if let Some(kinds) = &kinds {
+                wrap_end_cjk(kinds, from, left, self.options.width, measured, |i| {
+                    let unit = &units[i];
+                    (
+                        unit.bytes.end,
+                        (unit.width + gap(unit.bytes.start)) as f64
+                            + advances.adjustment(unit.text, unit.width),
+                    )
+                })
+            } else if let Some(boundary) = grid_first.take() {
+                boundary
             } else {
                 wrap_end(&units, from, left, self.options.width, gap)
             };
@@ -1979,10 +1991,6 @@ impl<'a> ByteReader<'a> {
     }
 }
 
-// The full and incremental paths use the same whitespace/fallback rule.
-// https://docs.sublimetext.io/reference/settings.html#automatic-behavior
-// The reference excludes word wrapping from word_separators; no current source
-// confirms changing today's CJK breaks, so preserve them.
 fn wrap_end(
     units: &[Unit<'_>],
     from: usize,
@@ -2013,42 +2021,127 @@ fn wrap_end(
     (end, lookahead)
 }
 
-fn wrap_end_measured(
-    units: &[Unit<'_>],
+#[inline]
+fn wrap_end_grid(
+    len: usize,
     from: usize,
     left: usize,
     width: usize,
-    advances: WideAdvances,
-    gap: impl Fn(usize) -> usize,
+    cell: impl Fn(usize) -> (usize, usize, bool),
 ) -> (usize, usize) {
-    let mut x = left as f64;
+    let mut col = left;
     let mut end = from;
     let mut word = None;
-    let mut any_content = false;
-    while let Some(unit) = units.get(end) {
-        let next = x
-            + (unit.width + gap(unit.bytes.start)) as f64
-            + advances.adjustment(unit.text, unit.width);
-        if next > width as f64 + 1e-9 && end > from {
-            break;
+    let mut lookahead = 0;
+    while end < len {
+        let (byte_end, cells, space) = cell(end);
+        lookahead = byte_end;
+        if width > 0 && col + cells > width && end > from {
+            return (word.unwrap_or(end), byte_end);
         }
-        x = next;
+        col += cells;
         end += 1;
-        let whitespace = unit.text.chars().all(char::is_whitespace);
-        if whitespace && any_content
-            || (unit.width >= 2 && unit.text.chars().next().is_some_and(char::is_alphanumeric))
-        {
+        if space {
             word = Some(end);
         }
-        any_content |= !whitespace;
-    }
-    let lookahead = units[end.min(units.len() - 1)].bytes.end;
-    if end < units.len()
-        && let Some(boundary) = word
-    {
-        end = boundary;
     }
     (end, lookahead)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreakKind {
+    Other,
+    Space,
+    WideWord,
+    Cjk,
+    Open,
+    NoStart,
+    Inseparable,
+}
+
+impl BreakKind {
+    fn for_char(ch: char) -> Self {
+        let ranges = cjk_break_data::RANGES;
+        let i = ranges.partition_point(|&(_, hi, _)| hi < ch as u32);
+        ranges
+            .get(i)
+            .filter(|&&(lo, _, _)| lo <= ch as u32)
+            .map_or(Self::Other, |&(_, _, kind)| kind)
+    }
+
+    fn cjk(self) -> bool {
+        matches!(self, Self::Cjk | Self::Open | Self::NoStart)
+    }
+}
+
+fn break_kinds(units: &[Unit<'_>], measured: bool) -> Vec<BreakKind> {
+    units
+        .iter()
+        .map(|unit| {
+            if unit.text.chars().all(char::is_whitespace) {
+                return BreakKind::Space;
+            }
+            let ch = unit.text.chars().next().expect("nonempty grapheme");
+            let kind = if ch.is_ascii() {
+                BreakKind::Other
+            } else {
+                BreakKind::for_char(ch)
+            };
+            if kind == BreakKind::Other && measured && unit.width >= 2 && ch.is_alphanumeric() {
+                BreakKind::WideWord
+            } else {
+                kind
+            }
+        })
+        .collect()
+}
+
+// UAX #14's East Asian subset (LB13/14/21/22, with CJ treated as NS).
+// Prefer a legal word/CJK boundary within the budget; if punctuation doesn't
+// fit, take the preceding legal boundary. Impossible narrow rows still progress.
+fn wrap_end_cjk(
+    kinds: &[BreakKind],
+    from: usize,
+    left: usize,
+    width: usize,
+    measured: bool,
+    cell: impl Fn(usize) -> (usize, f64),
+) -> (usize, usize) {
+    let mut x = left as f64;
+    let mut legal = None;
+    let mut word = None;
+    let mut last_content = BreakKind::Space;
+    let mut prev = BreakKind::Space;
+    let mut lookahead = 0;
+    for (end, &kind) in kinds.iter().enumerate().skip(from) {
+        // Ambiguous ellipses only attach to CJK on the current visual row;
+        // incremental wrapping can start at any existing row boundary.
+        let kind = match kind {
+            BreakKind::Inseparable if last_content.cjk() => BreakKind::NoStart,
+            kind => kind,
+        };
+        let (byte_end, cells) = cell(end);
+        lookahead = byte_end;
+        if end > from && last_content != BreakKind::Open && kind != BreakKind::NoStart {
+            legal = Some(end);
+            if (prev == BreakKind::Space && (!measured || last_content != BreakKind::Space))
+                || prev == BreakKind::WideWord
+                || prev.cjk()
+                || (kind.cjk() && last_content != BreakKind::Space)
+            {
+                word = Some(end);
+            }
+        }
+        if x + cells > width as f64 + 1e-9 && end > from {
+            return (word.or(legal).unwrap_or(end), lookahead);
+        }
+        x += cells;
+        prev = kind;
+        if kind != BreakKind::Space {
+            last_content = kind;
+        }
+    }
+    (kinds.len(), lookahead)
 }
 
 /// One row's (or wrapped segment's) display units, for repeated [`Layout::column_in`]
@@ -2217,6 +2310,100 @@ mod tests {
         let first = l.segment(b.text(), 0, 0);
         assert!(b.text().is_char_boundary(first.bytes.end));
         assert!(b.text().slice(first.bytes).to_string().contains("你好"));
+    }
+    #[test]
+    fn cjk_wrap_respects_prohibited_edges_and_the_width_budget() {
+        for source in [
+            "这是中文段落，包含逗号、分号；冒号：问号？叹号！还有（括号）和【方括号】及《书名》与「引号」『双引号』〈篇名〉和省略号……结束。",
+            "きょうは「コーヒー」をゆっくり飲み、カフェでティー（紅茶）を注文した。ﾊｰﾌｶﾅもﾁｪｯｸ。",
+            "Cargo build 输出「中文」和 documentation；next 文字，then 「キャッシュ」 code。",
+        ] {
+            let b = Buffer::new(source);
+            for advances in [WideAdvances::default(), WideAdvances::new([1.5; 8])] {
+                for width in [8, 9, 13, 18] {
+                    let mut l = Layout::default();
+                    l.set_wide_advances(advances);
+                    configure(&mut l, &b, width, &[]);
+                    assert!(l.total() > 1);
+                    for visual in 0..l.total() {
+                        let segment = l.segment(b.text(), 0, visual);
+                        let row = &source[segment.bytes.clone()];
+                        let previous = source[..segment.bytes.start].chars().next_back();
+                        let first = row.chars().next().unwrap();
+                        let last = row.trim_end().chars().next_back();
+                        if visual > 0 {
+                            let first = BreakKind::for_char(first);
+                            assert!(
+                                first != BreakKind::NoStart
+                                    && !(first == BreakKind::Inseparable
+                                        && previous.is_some_and(|c| {
+                                            let kind = BreakKind::for_char(c);
+                                            kind.cjk() || kind == BreakKind::Inseparable
+                                        })),
+                                "{width}: {source:?}: {row:?}"
+                            );
+                        }
+                        if visual + 1 < l.total()
+                            && let Some(last) = last
+                        {
+                            assert!(
+                                BreakKind::for_char(last) != BreakKind::Open,
+                                "{width}: {row:?}"
+                            );
+                        }
+                        let points: f64 = units(row, &[], 4)
+                            .iter()
+                            .map(|u| u.width as f64 + advances.adjustment(u.text, u.width))
+                            .sum();
+                        assert!(points + segment.indent as f64 <= width as f64 + 1e-9);
+                    }
+                }
+            }
+        }
+        let b = Buffer::new("甲乙。丙");
+        let mut l = Layout::default();
+        l.set_wide_advances(WideAdvances::new([1.5; 8]));
+        configure(&mut l, &b, 3, &[]);
+        assert_eq!(l.segment(b.text(), 0, 0).bytes, 0.."甲".len());
+        assert_eq!(l.segment(b.text(), 0, 1).bytes, "甲".len().."甲乙。".len());
+        configure(&mut l, &b, 5, &[]);
+        assert_eq!(l.segment(b.text(), 0, 0).bytes, 0.."甲乙。".len());
+        // Progress even when the budget cannot hold a close and its base glyph.
+        configure(&mut l, &b, 1, &[]);
+        assert_eq!(l.total(), 4);
+    }
+
+    #[test]
+    fn ascii_wrap_positions_match_round_25_fixture() {
+        let fixture = include_str!("../fixtures/intel-project/tools.rs");
+        assert!(fixture.is_ascii());
+        let b = Buffer::new(fixture);
+        let mut l = Layout::default();
+        l.set_wide_advances(WideAdvances::new([1.5; 8]));
+        // Exact absolute byte endpoints from the 723d6ab grid rule.
+        for (width, expected) in [
+            (
+                9,
+                &[
+                    7, 16, 24, 33, 38, 43, 48, 52, 55, 60, 65, 70, 75, 80, 85, 90, 91, 93, 94, 102,
+                    111, 118, 119,
+                ][..],
+            ),
+            (
+                17,
+                &[7, 24, 33, 46, 55, 60, 73, 86, 91, 93, 94, 102, 118, 119],
+            ),
+            (29, &[24, 52, 55, 60, 85, 91, 93, 94, 118, 119]),
+        ] {
+            configure(&mut l, &b, width, &[]);
+            let breaks: Vec<_> = (0..l.total())
+                .map(|visual| {
+                    let (row, segment) = l.locate(visual);
+                    b.text().line_to_byte(row) + l.segment(b.text(), row, segment).bytes.end
+                })
+                .collect();
+            assert_eq!(breaks, expected, "width {width}");
+        }
     }
     #[test]
     fn one_character_rewraps_one_line_and_matches_full_layout() {
@@ -2402,6 +2589,10 @@ mod round20_tests {
             "\t",
             "你好",
             "界",
+            "。",
+            "「",
+            "ー",
+            "…",
             "e\u{301}",
             "\u{301}",
             "👩‍💻",

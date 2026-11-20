@@ -37,10 +37,13 @@
   // Build 4107: https://www.sublimetext.com/download
   "trim_only_modified_white_space": true,
   // "system" (LF on macOS), "unix" or "windows".
+  // Applies to a new document; use the status bar to change an existing document.
   "default_line_ending": "system",
+  // Initial encoding of new documents. Existing documents keep their encoding.
   "default_encoding": "UTF-8",
   // Initial directory for Save As; empty uses the document directory or the system default.
   "default_dir": "",
+  // Used when decoding non-UTF-8 data on the next open or reopen.
   "fallback_encoding": "Western (Windows 1252)",
   // Build 4107: opt out to ask before replacing even an unchanged buffer.
   // https://www.sublimetext.com/download
@@ -67,6 +70,7 @@
   "color_scheme": "auto",
   "dark_color_scheme": "Velocity Dark.sublime-color-scheme",
   "light_color_scheme": "Velocity Light.sublime-color-scheme",
+  // Detects indentation on file open; an already open view keeps its detected or chosen indentation.
   "detect_indentation": true,
   "word_wrap": "auto",
   "wrap_width": 0,
@@ -152,9 +156,8 @@
   "result_base_dir": "",
   // Environment defaults; per-build env and path take precedence.
   "build_env": {},
-  // Reserved. Velocity does not show a welcome page at startup.
-  "show_at_startup": false,
-  // Reserved. Velocity does not yet apply a dictionary of new-window overrides.
+  // File > New Window snapshots this dictionary over User preferences. An edit here
+  // only affects the next New Window. Launch, session restore and Settings do not use it.
   "new_window_settings": {},
   // "enabled" spells out the position; "compact" retains today's abbreviated item; "disabled" hides it.
   "show_line_column": "compact",
@@ -261,10 +264,14 @@
   "animation_enabled": true,
   // Explicit HTTPS index; no registry, timer or network request is enabled by default.
   "package_index_url": null,
+  // "system" follows macOS Show scroll bars; "enabled" overlays editor text and
+  // fades when idle, while "disabled" reserves space for an always-visible bar.
   "overlay_scroll_bars": "system",
   "themed_title_bar": true,
+  // Bundled themes: "rounded" or "square". "angled" (legacy) and unknown styles use square tabs.
   "file_tab_style": "angled",
   "show_tab_close_buttons": true,
+  // Put the close button and dirty marker on the left when the button is enabled.
   "show_tab_close_buttons_on_left": false,
   // Huge documents: inclusive thresholds; explicit view feature commands override degradation.
   "large_file.load_bytes": 67108864,

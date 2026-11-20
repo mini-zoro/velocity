@@ -959,7 +959,16 @@ fn snippet_title(name: &str) -> &str {
     file.strip_suffix(".sublime-snippet").unwrap_or(file)
 }
 impl Configuration {
+    #[cfg(test)]
     fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
+        Self::load_with_window_overrides(data_dir, project, Some(Default::default()))
+    }
+
+    fn load_with_window_overrides(
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        window_overrides: Option<serde_json::Map<String, Value>>,
+    ) -> Result<Self, String> {
         let mut resources = Resources::default();
         crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
@@ -1199,6 +1208,22 @@ impl Configuration {
             }
         }
         settings.replace(Layer::User, Value::Object(user))?;
+        let mut window_overrides = window_overrides.unwrap_or_else(|| {
+            settings
+                .get("new_window_settings")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default()
+        });
+        // A window's settings must not configure the next window recursively.
+        window_overrides.remove("new_window_settings");
+        let issues = vel_config::settings::validate_layer(&mut window_overrides, schema);
+        if !issues.is_empty() {
+            resource_reports.push(format!("new_window_settings: {}", issues.join("; ")));
+        }
+        if !window_overrides.is_empty() {
+            settings.replace(Layer::Window, Value::Object(window_overrides))?;
+        }
         settings.replace(
             Layer::Syntax,
             Value::Object(syntax_settings.values("Plain Text.sublime-syntax", "Plain Text")),
@@ -1749,6 +1774,20 @@ impl Workspace {
         project: Option<PathBuf>,
         watch: bool,
     ) -> Result<Self, String> {
+        Self::new_with_window_overrides(text, data_dir, project, watch, Some(Default::default()))
+    }
+
+    pub(crate) fn new_window(data_dir: Option<PathBuf>, watch: bool) -> Result<Self, String> {
+        Self::new_with_window_overrides(Text::new(), data_dir, None, watch, None)
+    }
+
+    pub(crate) fn new_with_window_overrides(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        watch: bool,
+        window_overrides: Option<serde_json::Map<String, Value>>,
+    ) -> Result<Self, String> {
         let Configuration {
             appearance,
             themes,
@@ -1773,7 +1812,11 @@ impl Workspace {
             messages: resource_messages,
             mut resource_reports,
             ignored_user_keymaps,
-        } = Configuration::load(data_dir.clone(), project.clone())?;
+        } = Configuration::load_with_window_overrides(
+            data_dir.clone(),
+            project.clone(),
+            window_overrides,
+        )?;
         report_ignored_keymaps(
             &IgnoredKeymaps::new(),
             &ignored_user_keymaps,
@@ -2953,10 +2996,15 @@ impl Workspace {
             let (tx, rx) = std::sync::mpsc::channel();
             let data = self.data_dir.clone();
             let project = self.project.clone();
+            let overrides = self.settings.layer(Layer::Window).clone();
             match std::thread::Builder::new()
                 .name("velocity-resources".into())
                 .spawn(move || {
-                    let _ = tx.send(Configuration::load(data, project));
+                    let _ = tx.send(Configuration::load_with_window_overrides(
+                        data,
+                        project,
+                        Some(overrides),
+                    ));
                 }) {
                 Ok(_) => self.config_rx = Some(rx),
                 Err(error) => self.messages.push(error.to_string()),
@@ -3079,8 +3127,13 @@ impl Workspace {
                     self.resources = config.resources;
                     self.config_stamp = config.config_stamp;
                     for tab in &mut self.tabs {
-                        for layer in [Layer::Default, Layer::Platform, Layer::User, Layer::Project]
-                        {
+                        for layer in [
+                            Layer::Default,
+                            Layer::Platform,
+                            Layer::User,
+                            Layer::Window,
+                            Layer::Project,
+                        ] {
                             let values = self.settings.layer(layer).clone();
                             let _ = tab.editor.settings.replace(layer, Value::Object(values));
                         }
@@ -3150,6 +3203,7 @@ impl Workspace {
             Layer::Default,
             Layer::Platform,
             Layer::User,
+            Layer::Window,
             Layer::Project,
             Layer::Syntax,
             Layer::DistractionFree,

@@ -17,6 +17,9 @@ mod round20_invisible_perf;
 #[cfg(test)]
 #[path = "app_round21_lane_b_tests.rs"]
 mod round21_lane_b_tests;
+#[cfg(test)]
+#[path = "app_round26_settings_tests.rs"]
+mod round26_settings_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_status.rs"]
@@ -583,14 +586,15 @@ impl App {
         w: &WindowHandle,
         restored: Option<vel_session::Window>,
         reserved_id: Option<u64>,
+        use_new_window_settings: bool,
     ) -> Result<(WindowHandle, u64), String> {
         let project = restored.as_ref().and_then(|s| s.project.clone());
-        let mut workspace = Workspace::new(
-            vel_text::Text::new(),
-            self.workspace.data_path().map(Path::to_owned),
-            project,
-            true,
-        )?;
+        let data = self.workspace.data_path().map(Path::to_owned);
+        let mut workspace = if use_new_window_settings {
+            Workspace::new_window(data, true)?
+        } else {
+            Workspace::new(vel_text::Text::new(), data, project, true)?
+        };
         workspace.recent_files = self.workspace.recent_files.clone();
         workspace.recent_folders = self.workspace.recent_folders.clone();
         workspace.recent_projects = self.workspace.recent_projects.clone();
@@ -653,7 +657,7 @@ impl App {
         let remaining = std::mem::take(&mut self.restored_windows);
         for window in remaining {
             let id = self.restored_reserved_ids.pop_front();
-            if let Err(e) = self.open_native_window(w, Some(window), id) {
+            if let Err(e) = self.open_native_window(w, Some(window), id, false) {
                 self.workspace.messages.push(e);
             }
         }
@@ -1419,11 +1423,22 @@ impl App {
     }
     fn poll_workspace_model(&mut self) -> bool {
         let transferred = self.receive_tabs();
+        let resources = self.workspace.resource_revision;
+        let old_chrome = self.window_chrome_preferences();
         let before = (
             self.workspace.translations.revision(),
             self.workspace.palette_revision,
         );
         let changed = self.workspace.poll();
+        if self.workspace.resource_revision != resources {
+            let chrome = self.window_chrome_preferences();
+            if old_chrome.0 != chrome.0 {
+                self.panels.side_visible = chrome.0;
+            }
+            if old_chrome.1 != chrome.1 {
+                self.panels.chrome = chrome.1;
+            }
+        }
         if before
             != (
                 self.workspace.translations.revision(),
@@ -1433,6 +1448,12 @@ impl App {
             self.refresh_open_palette();
         }
         changed || transferred
+    }
+    fn window_chrome_preferences(&self) -> (bool, bool) {
+        (
+            self.workspace.window_visible("show_side_bar"),
+            self.workspace.window_visible("show_status_bar"),
+        )
     }
     fn receive_tabs(&mut self) -> bool {
         let incoming = self.sessions.borrow_mut().take_tabs(self.session_id);
@@ -2242,7 +2263,7 @@ impl App {
                 let sheet = self.workspace.tabs[self.workspace.active].sheet;
                 self.workspace.prepare_sheet(self.workspace.active)?;
                 if self.transferable_tab(self.workspace.active) {
-                    let (_, destination) = self.open_native_window(window, None, None)?;
+                    let (_, destination) = self.open_native_window(window, None, None, false)?;
                     self.move_tab_to_window(Some(window), sheet, destination, 0)?;
                 }
             }
@@ -2690,7 +2711,7 @@ impl App {
                 self.select_tab_action(name, args);
             }
             "new_window" => {
-                self.open_native_window(w, None, None)?;
+                self.open_native_window(w, None, None, true)?;
             }
             "close_window" => {
                 w.request_close();
@@ -2814,6 +2835,7 @@ impl App {
         let current = self.workspace.tabs[self.workspace.active].sheet;
         let switched = self.view_buffer != Some(current);
         if switched {
+            let system_overlay = self.view.system_scroller_overlay;
             // An image's size or decode-failure note belongs to the document it was shown for.
             if let Some(status) = self.image_status.take()
                 && self.panels.message == status
@@ -2844,6 +2866,7 @@ impl App {
             if let Some(view) = existing {
                 self.view = view;
             }
+            self.view.set_system_scroller_overlay(system_overlay);
             self.initialize_view_metrics();
             self.view.apply_style(self.workspace.editor());
             self.view_buffer = Some(current);
@@ -3241,6 +3264,7 @@ impl App {
                 };
                 let view = if let Some(view) = other.as_mut() {
                     view.set_wide_advances(self.view.wide_advances);
+                    view.set_system_scroller_overlay(self.view.system_scroller_overlay);
                     view
                 } else {
                     self.content = rect;
@@ -3489,7 +3513,8 @@ impl App {
                     let narrow = rect.width < 48. * s;
                     // Close buttons follow show_tab_close_buttons; narrow fitted tabs keep
                     // their entire target for selecting the tab.
-                    let close_left = tab_style.close_left;
+                    let close_left = settings.bool("show_tab_close_buttons_on_left", false)
+                        || tab_style.close_left;
                     let close_rect = Rect {
                         x: if close_left {
                             rect.x + 6. * s
@@ -4094,6 +4119,8 @@ impl AppHandler for App {
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
+        self.view
+            .set_system_scroller_overlay(w.prefers_overlay_scrollers());
         self.view.set_font_metrics(fonts.metrics, w.scale_factor());
         self.window_size = w.content_size();
         self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
@@ -4159,6 +4186,13 @@ impl AppHandler for App {
         if preferences.reduce_motion {
             self.view
                 .prepare_keyboard_scroll(self.workspace.editor(), Instant::now());
+        }
+        w.request_frame();
+    }
+    fn on_scroller_style(&mut self, w: &WindowHandle, overlay: bool) {
+        self.view.set_system_scroller_overlay(overlay);
+        for view in self.sheet_views.values_mut() {
+            view.set_system_scroller_overlay(overlay);
         }
         w.request_frame();
     }
@@ -4281,7 +4315,7 @@ impl AppHandler for App {
     }
     fn on_reopen(&mut self, w: &WindowHandle) {
         if self.options.mode == Mode::Interactive
-            && let Err(error) = self.open_native_window(w, None, None)
+            && let Err(error) = self.open_native_window(w, None, None, false)
         {
             self.show_error(w, &error);
         }

@@ -16,6 +16,7 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
+use objc2_foundation::NSNotificationCenter;
 
 pub(super) fn option_held_at_launch() -> bool {
     // SAFETY: NSEvent's class method modifierFlags returns the documented bitset.
@@ -326,6 +327,10 @@ impl WindowHandle {
         } else {
             Appearance::Light
         }
+    }
+    /// AppKit's resolved System Settings "Show scroll bars" preference.
+    pub fn prefers_overlay_scrollers(&self) -> bool {
+        NSScroller::preferredScrollerStyle(self.0.mtm) == NSScrollerStyle::Overlay
     }
     /// Whether this native window currently receives keyboard input.
     pub fn is_focused(&self) -> bool {
@@ -685,6 +690,7 @@ enum Event {
     CloseRequested,
     Accessibility(accessibility::Id, accessibility::Request),
     AccessibilityPreferences,
+    ScrollerStyle,
 }
 thread_local! {
     /// Window that installed the current application menu, and the entries it installed.
@@ -772,6 +778,7 @@ impl Host {
                 Event::AccessibilityPreferences => {
                     app.on_accessibility_preferences(&w, a11y::preferences())
                 }
+                Event::ScrollerStyle => app.on_scroller_style(&w, w.prefers_overlay_scrollers()),
                 Event::Key(e) => {
                     app.on_key(&w, e);
                 }
@@ -1066,6 +1073,7 @@ define_class!(
         #[unsafe(method_id(accessibilityFocusedUIElement))] fn ax_focused(&self) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::focused(&h)) }
         #[unsafe(method_id(accessibilityHitTest:))] fn ax_hit(&self, point: NSPoint) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::hit(&h,point)) }
         #[unsafe(method(accessibilityDisplayOptionsChanged:))] fn ax_preferences(&self, _notification: &NSNotification) { if let Some(h)=self.ivars().host.upgrade() { h.dispatch(Event::AccessibilityPreferences); h.flush(); } }
+        #[unsafe(method(preferredScrollerStyleChanged:))] fn scroller_style(&self, _notification: &NSNotification) { if let Some(h)=self.ivars().host.upgrade() { h.dispatch(Event::ScrollerStyle); h.flush(); } }
         #[unsafe(method(isFlipped))] fn is_flipped(&self) -> bool { true }
         #[unsafe(method(acceptsFirstResponder))] fn accepts_first_responder(&self) -> bool { true }
         #[unsafe(method(wantsUpdateLayer))] fn wants_update_layer(&self) -> bool { true }
@@ -1647,6 +1655,12 @@ impl Delegate {
                     Some(NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification),
                     None,
                 );
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &view,
+                sel!(preferredScrollerStyleChanged:),
+                Some(NSPreferredScrollerStyleDidChangeNotification),
+                None,
+            );
         }
         h.dispatch(Event::AccessibilityPreferences);
         window.setAcceptsMouseMovedEvents(true);

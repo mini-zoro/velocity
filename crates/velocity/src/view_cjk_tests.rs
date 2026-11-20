@@ -161,6 +161,52 @@ fn cjk_widest_line_reveal_and_vertical_overscroll() {
 }
 
 #[test]
+fn cjk_adjusted_break_shares_caret_motion_selection_and_hit_testing() {
+    let source = "甲乙。丙丁";
+    let (mut e, mut v) = fixture(source, true, 550.);
+    e.settings.set(SettingsLayer::View, "wrap_width", json!(3));
+    e.sync();
+    v.apply_style(&e);
+    let first = "甲".len();
+    let punctuation = "甲乙".len();
+    let third = "甲乙。".len();
+    let paint = v.rect_at(&e, first);
+    assert!(paint.y > v.rect_at(&e, 0).y);
+    let start = Point {
+        x: paint.x,
+        y: paint.y + paint.height / 2.,
+    };
+    assert_eq!(v.hit_test(&e, start), first);
+    assert_eq!(v.hit_test(&e, point(&v, &e, punctuation, 1.)), punctuation);
+    assert_eq!(
+        v.hit_test(&e, point(&v, &e, punctuation, 11.)),
+        third,
+        "right half of the closing punctuation hits the byte after it"
+    );
+    e.set_caret(0, false);
+    for (by, forward, expected) in [
+        ("characters", true, first),
+        ("characters", true, punctuation),
+        ("characters", true, third),
+        ("characters", false, punctuation),
+    ] {
+        e.run("move", &json!({"by":by,"forward":forward})).unwrap();
+        assert_eq!(e.caret, expected, "{by} {forward}");
+        assert!(e.text.is_char_boundary(e.caret));
+    }
+    e.set_caret(first, false);
+    for (forward, expected) in [(false, 0), (true, first), (true, third)] {
+        e.run("move", &json!({"by":"lines","forward":forward}))
+            .unwrap();
+        assert_eq!(e.caret, expected);
+    }
+    let (r, range) = v.range_rect(&e, Utf16Range::from_bytes(&e.text, first..third));
+    close(r.y, paint.y);
+    close(r.width, 24.);
+    assert_eq!(range, Utf16Range::from_bytes(&e.text, first..third));
+}
+
+#[test]
 fn cjk_wrap_tabs_invisibles_guides_and_rulers() {
     for (prefix, width, columns) in CASES {
         let (mut e, mut v) = fixture(&format!("{prefix}\t x"), false, 550.);
