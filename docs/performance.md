@@ -8,6 +8,12 @@ rows are historical round 27 observations (`efe8b5b` plus the round 27 changes).
 No Sublime executable, application bundle or package was downloaded or run. No
 window, renderer, drawable or GPU workload was started in this round.
 
+**Update 2026-11-21:** with the user's permission, Sublime Text 4215 was later run on this machine
+as a black box only. See
+[Black-box comparison with Sublime Text 4215](#black-box-comparison-with-sublime-text-4215-on-this-machine-2026-11-21).
+At `12879ff`, Velocity reached its first window in 0.61–0.72 s; Sublime took 0.89–0.92 s.
+With `sqlite3.c` open and idle, Velocity's footprint was 224 MB; Sublime's was 173–186 MB.
+
 The [PLAN](PLAN.md#13-公开的性能基线) asks for at most 1.2× ST4 on the **same
 machine and file**, and for lower costs on huge files and long lines. Public data
 cannot establish that target here. Where shown, ratios are **descriptive**
@@ -912,6 +918,26 @@ Findings to fix:
    highlighted 7 MB file). Investigate retained parse/highlight state (checkpoints, scope stacks,
    style spans, layout caches) for files below the large-file threshold.
 3. Large files are already well below Sublime's footprint.
+
+### Re-measurement after rounds 36–38 (`12879ff`)
+
+Same probe, machine and method as above. The packaged build of `12879ff` contains build-time
+grammar linking and deferred services (round 36), the fix that stopped the packaged Find Results
+resource from forcing a full grammar rebuild (`188bc83`), and the round 38 memory work. Every
+Velocity run used a fresh `--data-dir`. Sublime 4215 ran with `--safe-mode`. Runs alternated:
+five empty pairs, then two `sqlite3.c` pairs. Load average was 10–13.
+
+| Measurement | Sublime Text 4215 | Velocity `12879ff` | Before (`b96f0b7`) | Ratio now |
+| --- | --- | --- | --- | ---: |
+| Launch → first window, empty | 0.89–0.92 s (first run 1.68 s, cold) | 0.61–0.72 s | 1.69–2.25 s | ≈ 0.75× |
+| Launch → first window, `sqlite3.c` | 0.90–1.02 s | 0.64–0.69 s | 2.05–3.00 s | ≈ 0.68× |
+| Idle footprint, `sqlite3.c` | 173–186 MB | 223.6–223.8 MB | 362–365 MB | ≈ 1.2–1.3× |
+| Spawn → idle, `sqlite3.c` | 4.0–4.9 s | 4.7 s | — | — |
+
+Findings 1 and 2 are addressed. Velocity now reaches its first window sooner than Sublime.
+The `sqlite3.c` footprint is at the 1.2× target (≈ 230 MB). The remaining gap is about 40–50 MB.
+Large files were not re-measured. Round 38 changed only the representations used for
+fully highlighted files below the large-file threshold.
 
 ## Round 36: interactive startup before AppKit
 
