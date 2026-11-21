@@ -405,6 +405,37 @@ fn nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
 mod input_tests {
     use super::*;
 
+    // Login capture alone can take two seconds before exec. These deadlines
+    // detect hangs; event ordering tests restart independently of scheduling.
+    const WATCHDOG: Duration = Duration::from_secs(30);
+
+    #[track_caller]
+    fn next_event(task: &Task, by: Instant, phase: &str) -> Event {
+        task.events
+            .recv_timeout(by.saturating_duration_since(Instant::now()))
+            .unwrap_or_else(|error| panic!("{phase}: {error}"))
+    }
+
+    #[track_caller]
+    fn expect_stdout(task: &Task, expected: &str, by: Instant, phase: &str) {
+        let mut stdout = String::new();
+        while stdout != expected {
+            match next_event(task, by, phase) {
+                Event::Output {
+                    stream: Stream::Stdout,
+                    text,
+                } => {
+                    stdout.push_str(&text);
+                    assert!(expected.starts_with(&stdout), "{phase}: {stdout:?}");
+                }
+                event @ (Event::Error(_) | Event::Finished { .. } | Event::InputClosed) => {
+                    panic!("{phase} before stdout: {event:?}");
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn r33_child_that_never_reads_does_not_block_input_cancel_or_restart() {
         crate::test_login::install();
@@ -417,51 +448,99 @@ mod input_tests {
             .resolve(&crate::Variables::default())
             .unwrap()
         };
-        let mut task = Task::spawn(&exec(serde_json::json!(["/bin/sleep", "60"]))).unwrap();
+        let mut task = Task::spawn(&exec(serde_json::json!([
+            "/bin/sh",
+            "-c",
+            "printf 'ready\\n'; exec /bin/sleep 60"
+        ])))
+        .unwrap();
+        // A full channel before the child starts only tests the Rust queue.
+        expect_stdout(
+            &task,
+            "ready\n",
+            Instant::now() + WATCHDOG,
+            "old child startup",
+        );
         let line = "x".repeat(MAX_INPUT_LINE);
         let mut queued = 0;
-        for _ in 0..64 {
-            for _ in 0..16 {
-                match task.send_line(&line) {
-                    Ok(()) => queued += 1,
-                    Err(InputError::Full) => break,
-                    Err(e) => panic!("unexpected input status {e:?}"),
+        let fill_by = Instant::now() + WATCHDOG;
+        let mut full_since = None;
+        loop {
+            assert!(
+                Instant::now() < fill_by,
+                "stdin did not saturate after {queued} lines"
+            );
+            match task.send_line(&line) {
+                Ok(()) => {
+                    queued += 1;
+                    full_since = None;
                 }
+                Err(InputError::Full) => {
+                    // Let the worker fill the pipe as well as the channel.
+                    let since = full_since.get_or_insert_with(Instant::now);
+                    if queued > INPUT_QUEUE && since.elapsed() >= Duration::from_millis(100) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("unexpected input status {e:?}"),
             }
-            std::thread::sleep(Duration::from_millis(5));
         }
-        assert!((INPUT_QUEUE..64).contains(&queued), "queued {queued}");
-        assert_eq!(task.send_line(&line), Err(InputError::Full));
         assert_eq!(
             task.send_line(&"x".repeat(MAX_INPUT_LINE + 1)),
             Err(InputError::InvalidLine)
         );
         task.close_input(); // EOF fits even when the queue is full.
         assert_eq!(task.send_line("after EOF"), Err(InputError::Closed));
-        let mut next =
-            Task::spawn_after(&exec(serde_json::json!(["/bin/cat"])), Some(task)).unwrap();
+
+        // Keep the predecessor's join handle unfinished through the replacement's
+        // output. A join in either spawn_after or the new worker breaks this order.
+        let cancelled = task.cancel.clone();
+        let old_worker = task.worker.take().unwrap();
+        let (release_old, hold_old) = mpsc::channel::<()>();
+        let (reaped, cleanup) = mpsc::channel();
+        task.worker = Some(std::thread::spawn(move || {
+            let _ = hold_old.recv();
+            let _ = reaped.send(old_worker.join());
+        }));
+        let cat = exec(serde_json::json!(["/bin/cat"]));
+        let (started, replacement) = mpsc::channel();
+        // Bound even a synchronous join regression. Unwinding drops release_old.
+        let by = Instant::now() + WATCHDOG;
+        let starter = std::thread::spawn(move || {
+            let _ = started.send(Task::spawn_after(&cat, Some(task)));
+        });
+        let mut next = replacement
+            .recv_timeout(by.saturating_duration_since(Instant::now()))
+            .expect("restart waited for the old worker")
+            .unwrap();
+        assert!(cancelled.load(Ordering::Acquire));
         next.send_line("replacement").unwrap();
         next.close_input();
-        let by = Instant::now() + Duration::from_secs(2);
-        let mut echoed = false;
+        expect_stdout(&next, "replacement\n", by, "replacement build");
+        drop(release_old);
         loop {
-            match next
-                .events
-                .recv_timeout(by.saturating_duration_since(Instant::now()))
-                .unwrap()
-            {
-                Event::Output {
-                    stream: Stream::Stdout,
-                    text,
-                } => echoed |= text == "replacement\n",
-                Event::Finished { code, .. } => {
-                    assert_eq!(code, Some(0));
+            match next_event(&next, by, "replacement EOF") {
+                Event::Finished {
+                    code,
+                    signal,
+                    cancelled,
+                    ..
+                } => {
+                    assert_eq!((code, signal, cancelled), (Some(0), None, false));
                     break;
+                }
+                event @ (Event::Error(_) | Event::InputClosed) => {
+                    panic!("replacement EOF: {event:?}")
                 }
                 _ => {}
             }
         }
-        assert!(echoed);
+        cleanup
+            .recv_timeout(WATCHDOG)
+            .expect("cancelled worker did not exit")
+            .unwrap();
+        starter.join().unwrap();
     }
 }
 pub(crate) fn kill_tree(pid: u32) {

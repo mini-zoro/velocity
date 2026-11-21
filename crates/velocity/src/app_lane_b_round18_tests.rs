@@ -47,7 +47,9 @@ fn key(a: &mut App, name: &str) -> bool {
     )
 }
 fn finish(a: &mut App) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // This waits for process output and EOF, not launch performance. A cold
+    // build can spend two seconds on login capture before exec is scheduled.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while a.builds.task.is_some() {
         a.builds.poll(&mut a.panels);
         assert!(Instant::now() < deadline, "build timeout");
