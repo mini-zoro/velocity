@@ -478,7 +478,11 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         if options.mode == Mode::HeadlessWorkbench {
             return workbench_bench::run(&reporter, &options);
         }
-        if options.mode != Mode::Headless && !headless_interactive {
+        // Benchmarks need a frame they can time, so they refuse an asleep display or a
+        // locked screen instead of hanging. An interactive launch (from a terminal over
+        // SSH, or another app while the screen is locked) starts anyway; its window
+        // presents when the display wakes.
+        if options.mode.automatic() && options.mode != Mode::Headless && !headless_interactive {
             vel_platform::display_status().check()?;
             clock.mark("display_preflight_passed");
         }

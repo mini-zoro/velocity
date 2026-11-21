@@ -38,6 +38,19 @@ fn object(host: &Rc<Host>, id: Id) -> Retained<AnyObject> {
     // SAFETY: every Objective-C object is an AnyObject; the retained reference transfers unchanged.
     unsafe { Retained::cast_unchecked(element) }
 }
+/// Text getters that only elements with a text model support.
+const TEXT_SELECTORS: &[&str] = &[
+    "accessibilitySelectedText",
+    "accessibilitySelectedTextRange",
+    "accessibilitySelectedTextRanges",
+    "accessibilityNumberOfCharacters",
+    "accessibilityVisibleCharacterRange",
+    "accessibilityInsertionPointLineNumber",
+    "accessibilityStringForRange:",
+    "accessibilityLineForIndex:",
+    "accessibilityRangeForLine:",
+    "accessibilityFrameForRange:",
+];
 /// The window content group's name, from the app's localized tree.
 pub(super) fn label(host: &Rc<Host>) -> String {
     let tree = tree(host);
@@ -268,6 +281,8 @@ define_class!(
             if name.starts_with("setAccessibilityValue") { self.node().is_some_and(|n|n.editable) }
             else if name.starts_with("setAccessibilitySelectedText") { self.node().is_some_and(|n|n.text.is_some()) }
             else if name=="accessibilityPerformPress" { self.node().is_some_and(|n|n.enabled && n.activation.is_some()) }
+            // Tabs, buttons and rows have no text model; don't advertise empty text attributes.
+            else if TEXT_SELECTORS.contains(&name.as_ref()) { self.node().is_some_and(|n|n.text.is_some()) }
             else { true }
 
         }
