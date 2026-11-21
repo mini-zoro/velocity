@@ -403,6 +403,17 @@ impl Group {
         }
         self.click(id, additive, false);
     }
+    /// Inserts a new sheet immediately after focus, or at the end without focus.
+    pub fn add_after_current(&mut self, id: u64) {
+        if !self.sheets.contains(&id) {
+            let at = self
+                .focused
+                .and_then(|focused| self.sheets.iter().position(|s| *s == focused))
+                .map_or(self.sheets.len(), |at| at + 1);
+            self.sheets.insert(at, id);
+        }
+        self.click(id, false, false);
+    }
     /// Removes a sheet, choosing a neighboring focus when needed.
     pub fn remove(&mut self, id: u64) {
         let at = self.sheets.iter().position(|s| *s == id).unwrap_or(0);

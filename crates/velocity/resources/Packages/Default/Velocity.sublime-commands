@@ -4,6 +4,8 @@
 [
   {"caption":"File: Open as Image","command":"open_as_image"},
   {"caption":"File: Open as Text","command":"open_as_text"},
+  {"caption":"File: Open Terminal","command":"open_terminal"},
+  {"caption":"Selection: Tab Selection: Deselect Focused Tab","command":"unselect_current"},
   {"caption":"File: Print…","command":"print"},
   {"caption":"File: Open Folder in New Window…","command":"prompt_open_folder_in_new_window"},
   {"caption":"File: Revert File…","command":"revert"},

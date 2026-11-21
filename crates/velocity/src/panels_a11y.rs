@@ -267,7 +267,7 @@ impl Panels {
             out.nodes.push(node);
         }
         // Syntax status popup has the exact hit area used by mouse dispatch (as painted).
-        if self.chrome
+        if self.status_visible()
             && self.overlay.is_none()
             && let Some(frame) = self.status_item(super::details::StatusItem::Syntax)
         {
@@ -407,7 +407,7 @@ impl Panels {
                 && matches!(self.panel, Some(Panel::Output | Panel::Results)))
             .then_some(self.panel_bounds),
             98 | 99 => {
-                if !self.chrome || self.overlay.is_some() {
+                if !self.status_visible() || self.overlay.is_some() {
                     return None;
                 }
                 let syntax = self.status_item(super::details::StatusItem::Syntax)?;

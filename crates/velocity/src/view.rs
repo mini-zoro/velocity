@@ -35,6 +35,18 @@ fn invisible_settings(e: &Editor) -> Invisible {
     }
 }
 
+fn gutter_fold(
+    folds: &[crate::language::Fold],
+    start: usize,
+    end: usize,
+) -> Option<&crate::language::Fold> {
+    let at = folds.partition_point(|f| f.range.start < start);
+    folds[at..]
+        .iter()
+        .take_while(|f| f.range.start <= end)
+        .find(|f| !f.attributes)
+}
+
 /// Start/end of the visual row, followed by logical smart-BOL/EOL on repetition.
 /// Hard line commands bypass this function and retain the buffer's logical behavior.
 pub fn visual_line_boundary(editor: &Editor, byte: usize, end: bool, repeated: bool) -> usize {
@@ -586,7 +598,9 @@ impl View {
             color: chip,
             radius: 3.,
         });
-        let label = vel_render::invisibles::label(c);
+        let label = vel_render::invisibles::label_with_style(c, || {
+            e.settings.string("control_character_style", "hex")
+        });
         let ratio = 0.8;
         let advance = label.len() as f64 * self.cell * ratio;
         // Clipped to the chip and to the text area (never into the gutter when scrolled).
@@ -2322,19 +2336,26 @@ impl View {
                 e.set_folded(existing.iter().filter(|r| *r != fold).copied().collect());
                 return Ok(true);
             }
-            let fold = e
-                .language
-                .borrow()
-                .as_ref()
-                .and_then(|l| l.analysis.as_ref())
-                .and_then(|a| {
-                    let at = a.folds.partition_point(|f| f.range.start < start);
-                    a.folds[at..]
-                        .iter()
-                        .take_while(|f| f.range.start <= end)
-                        .find(|f| !f.attributes)
-                })
-                .map(|f| f.range.clone());
+            let fold = {
+                let language = e.language.borrow();
+                let indentation = crate::annotations::fold_state::indentation_folds(e);
+                let candidates = indentation.as_deref().or_else(|| {
+                    language
+                        .as_ref()?
+                        .analysis
+                        .as_ref()
+                        .map(|a| a.folds.as_slice())
+                });
+                candidates
+                    .and_then(|folds| gutter_fold(folds, start, end))
+                    .and_then(|f| {
+                        crate::annotations::fold_state::code_fold_range(
+                            &e.text,
+                            f,
+                            e.settings.bool("fold_include_trailing_newline", false),
+                        )
+                    })
+            };
             if let Some(fold) = fold {
                 let mut folds = existing;
                 folds.push(vel_buffer::Region::from(fold));
@@ -2562,6 +2583,7 @@ impl View {
         }
 
         let bracket_glyphs = self.bracket_glyph_styles(e, language, scheme);
+        let highlight_gutter = e.preferences.gutter && e.settings.bool("highlight_gutter", false);
         let mut selection_border = scheme
             .globals
             .color("selection_border")
@@ -2686,6 +2708,12 @@ impl View {
         let fold_buttons = e.preferences.gutter && e.settings.bool("fold_buttons", true);
         let show_fold_candidates =
             fold_buttons && (self.gutter_hover || !e.settings.bool("fade_fold_buttons", true));
+        let indent_folds = show_fold_candidates
+            .then(|| crate::annotations::fold_state::indentation_folds(e))
+            .flatten();
+        let gutter_candidates = indent_folds
+            .as_deref()
+            .or_else(|| language?.analysis.as_ref().map(|a| a.folds.as_slice()));
         let bookmarks = if e.bookmarks().is_empty() {
             &[]
         } else {
@@ -2830,19 +2858,43 @@ impl View {
 
             let y = self.tab_height + 4. + visual as f64 * self.line_height - self.scroll_y;
             let baseline = self.baseline(e, y);
-            if (e.preferences.highlight_line || e.command_mode()) && caret_visuals.contains(&visual)
+            if (highlight_gutter || e.preferences.highlight_line || e.command_mode())
+                && caret_visuals.contains(&visual)
             {
-                fill(
-                    &mut layer,
-                    Rect {
-                        x: gutter,
-                        y,
-                        width: clip.width,
-                        height: self.line_height,
-                    },
-                    clip,
-                    global("line_highlight"),
-                );
+                if highlight_gutter {
+                    let bounds = Rect {
+                        width: gutter,
+                        ..all
+                    };
+                    let ink = scheme
+                        .globals
+                        .color("gutter_highlight")
+                        .map(rgba)
+                        .unwrap_or_else(|| global("line_highlight"));
+                    fill(
+                        &mut layer,
+                        Rect {
+                            y,
+                            height: self.line_height,
+                            ..bounds
+                        },
+                        bounds,
+                        ink,
+                    );
+                }
+                if e.preferences.highlight_line || e.command_mode() {
+                    fill(
+                        &mut layer,
+                        Rect {
+                            x: gutter,
+                            y,
+                            width: clip.width,
+                            height: self.line_height,
+                        },
+                        clip,
+                        global("line_highlight"),
+                    );
+                }
             }
             if subrow == 0 && e.preferences.gutter {
                 if let Some(p) = publication {
@@ -2950,13 +3002,8 @@ impl View {
                     // keeps its button so hidden lines stay discoverable.
                     let shown = is_folded || show_fold_candidates;
                     let candidate = shown
-                        && language.and_then(|l| l.analysis.as_ref()).is_some_and(|a| {
-                            let at = a.folds.partition_point(|f| f.range.start < start);
-                            a.folds[at..]
-                                .iter()
-                                .take_while(|f| f.range.start <= header_end)
-                                .any(|f| !f.attributes)
-                        });
+                        && gutter_candidates
+                            .is_some_and(|folds| gutter_fold(folds, start, header_end).is_some());
                     if is_folded || candidate {
                         let mut theme = e.theme.borrow_mut();
                         let attrs = if is_folded {

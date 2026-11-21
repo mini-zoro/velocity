@@ -840,7 +840,7 @@ impl Panels {
     }
     pub(crate) fn status_switcher_rect(&self, workspace: &Workspace) -> Option<Rect> {
         let scale = self.ui_scale;
-        (self.chrome
+        (self.status_visible()
             && self.size.width >= 36. * scale
             && workspace
                 .editor()

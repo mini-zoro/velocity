@@ -1114,7 +1114,14 @@ fn shipped_user_settings_change_the_scene_or_operation() {
     let mut unchanged = BTreeSet::new();
     let mut no_scene_diff = BTreeSet::new();
     let mut no_operation_diff = BTreeSet::new();
+    let mut verified = BTreeSet::new();
     for key in shipped_readers() {
+        if let Some((name, test)) = super::super::round34_lane_b_tests::setting_effect(key) {
+            if verified.insert(name) {
+                test();
+            }
+            continue;
+        }
         let value = alternate(key, &defaults[key], root.path());
         let mut candidate = json!({key:value.clone()}).as_object().unwrap().clone();
         assert!(

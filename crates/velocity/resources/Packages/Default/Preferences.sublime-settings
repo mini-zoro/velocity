@@ -276,5 +276,29 @@
   "large_file.max_viewport_lines": 512,
   "large_file.max_lookback_lines": 256,
   "large_file.checkpoint_interval": 1024,
-  "large_file.max_checkpoints": 128
+  "large_file.max_checkpoints": 128,
+
+  // Tabs, window chrome, display, sessions and external actions.
+  "open_tabs_after_current": false,
+  "select_across_groups": false,
+  "sidebar_on_right": false,
+  "auto_hide_tabs": false,
+  "auto_hide_status_bar": false,
+  "show_project_first": false,
+  "click_through": false,
+  "hide_pointer_while_typing": false,
+  "set_unsaved_view_name_for_syntax": true,
+  "selection_description_column_type": "display",
+  "highlight_gutter": false,
+  "control_character_style": "hex",
+  "fold_style": "auto",
+  "fold_include_trailing_newline": false,
+  "hot_exit_projects": true,
+  // "auto" preserves restored splits when Hot Exit is enabled. Set true to
+  // also inherit the current split in new windows, or false to start unsplit.
+  "remember_layout": "auto",
+  // Empty uses Terminal.app. Otherwise [executable, ...arguments]; $dir is
+  // substituted as one argument. Only global preferences can launch a command.
+  "terminal_command": [],
+  "goto_anything_file_preview": true
 }

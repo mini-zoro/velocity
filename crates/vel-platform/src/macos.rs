@@ -98,6 +98,10 @@ fn restore_simple_presentation(mtm: MainThreadMarker) {
     }
 }
 impl WindowHandle {
+    /// Hide the pointer for typing without changing AppKit's cursor hide count.
+    pub fn hide_pointer_until_motion(&self) {
+        NSCursor::setHiddenUntilMouseMoves(true);
+    }
     /// Whether this handle represents the windowless application template.
     pub fn is_closed(&self) -> bool {
         self.0.stopped.get()
@@ -1099,6 +1103,13 @@ define_class!(
     // SAFETY: NSObjectProtocol has no additional requirements.
     unsafe impl NSObjectProtocol for EditorView {}
     impl EditorView {
+        #[unsafe(method(acceptsFirstMouse:))] fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            self.ivars().host.upgrade().is_some_and(|host| {
+                host.app.try_borrow().ok().is_some_and(|app| {
+                    app.as_ref().is_some_and(|app| app.accepts_first_mouse())
+                })
+            })
+        }
         #[unsafe(method(isAccessibilityElement))] fn ax_element(&self) -> bool { true }
         #[unsafe(method_id(accessibilityRole))] fn ax_role(&self) -> Retained<NSString> { NSString::from_str("AXGroup") }
         #[unsafe(method_id(accessibilityLabel))] fn ax_label(&self) -> Retained<NSString> { NSString::from_str("Velocity workspace") }

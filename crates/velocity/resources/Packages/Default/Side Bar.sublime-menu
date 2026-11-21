@@ -33,6 +33,10 @@
     "command": "copy_relative_path"
   },
   {
+    "caption": "Open Terminal",
+    "command": "open_terminal"
+  },
+  {
     "caption": "Reveal in Finder",
     "command": "reveal_in_finder"
   },

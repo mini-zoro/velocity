@@ -2175,7 +2175,13 @@ impl Editor {
             });
         } else {
             let language = self.language.borrow();
-            let Some(analysis) = language.as_ref().and_then(|l| l.analysis.as_ref()) else {
+            let indentation = crate::annotations::fold_state::indentation_folds(self);
+            let Some(candidates) = indentation.as_deref().or_else(|| {
+                language
+                    .as_ref()
+                    .and_then(|l| l.analysis.as_ref())
+                    .map(|a| a.folds.as_slice())
+            }) else {
                 // Folding uses syntax-aware regions, not a guessed block.
                 // https://docs.sublimetext.io/reference/commands.html
                 drop(language);
@@ -2189,14 +2195,17 @@ impl Editor {
                 ));
                 return Ok(());
             };
+            let include_newline = self.settings.bool("fold_include_trailing_newline", false);
+            let range = |f: &crate::language::Fold| {
+                crate::annotations::fold_state::code_fold_range(&self.text, f, include_newline)
+            };
             if name == "fold_by_level" || name == "fold_tag_attributes" {
                 let level = args["level"].as_u64().unwrap_or(1) as usize;
                 if name == "fold_by_level" {
                     current.clear();
                 }
                 current.extend(
-                    analysis
-                        .folds
+                    candidates
                         .iter()
                         .filter(|f| {
                             if name == "fold_tag_attributes" {
@@ -2205,7 +2214,8 @@ impl Editor {
                                 !f.attributes && f.level == level
                             }
                         })
-                        .map(|f| Region::from(f.range.clone())),
+                        .filter_map(range)
+                        .map(Region::from),
                 );
             } else {
                 for selection in selections {
@@ -2213,19 +2223,19 @@ impl Editor {
                         current.push(selection);
                         continue;
                     }
-                    if let Some(fold) = analysis
-                        .folds
+                    if let Some(fold) = candidates
                         .iter()
-                        .filter(|f| {
-                            !f.attributes
-                                && self.text.byte_to_line(f.range.start)
-                                    <= self.text.byte_to_line(selection.b)
-                                && selection.b <= f.range.end
-                                && !current.iter().any(|r| r.to_range() == f.range)
+                        .filter(|f| !f.attributes)
+                        .filter_map(range)
+                        .filter(|range| {
+                            self.text.byte_to_line(range.start)
+                                <= self.text.byte_to_line(selection.b)
+                                && selection.b <= range.end
+                                && !current.iter().any(|r| r.to_range() == *range)
                         })
-                        .min_by_key(|f| f.range.len())
+                        .min_by_key(|range| range.len())
                     {
-                        current.push(Region::from(fold.range.clone()));
+                        current.push(Region::from(fold));
                     }
                 }
             }

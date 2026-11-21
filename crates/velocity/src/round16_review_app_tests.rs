@@ -689,7 +689,10 @@ fn typing_at_visible_closing_lines_keeps_folds_but_hidden_indentation_ends_revea
                         .set_folded(vec![Region::new(4, 14)]);
                 }
                 let fold = a.workspace.editor().folded()[0];
-                a.workspace.editor_mut().set_caret(fold.end(), false);
+                // With the closing newline excluded, the visible delimiter is
+                // on the next line, not at the end of the fold marker.
+                let caret = fold.end() + usize::from(matches!(syntax, "Rust" | "HTML"));
+                a.workspace.editor_mut().set_caret(caret, false);
                 if enter {
                     key(&mut a, "enter");
                 } else {
@@ -703,7 +706,7 @@ fn typing_at_visible_closing_lines_keeps_folds_but_hidden_indentation_ends_revea
                 );
                 assert!(
                     e.text
-                        .slice(fold.end()..e.text.len_bytes())
+                        .slice(caret..e.text.len_bytes())
                         .to_string()
                         .starts_with(if enter { "\n" } else { "Z" })
                 );

@@ -23,13 +23,13 @@ EFFECTS = {
     "next_window": ("new_window_settings",),
     "next_document": ("default_encoding", "default_line_ending"),
     "next_open": ("fallback_encoding", "detect_indentation", "large_file.load_bytes",
-                  "open_files_in_new_window", "update_system_recent_files"),
+                  "open_files_in_new_window", "update_system_recent_files", "open_tabs_after_current"),
     "next_save": ("atomic_save", "ensure_newline_at_eof_on_save", "default_dir",
                   "trim_trailing_white_space_on_save", "trim_only_modified_white_space",
                   "save_on_focus_lost"),
     "next_build": ("show_panel_on_build", "save_all_on_build", "result_file_regex",
                    "result_line_regex", "result_base_dir", "build_env"),
-    "next_session": ("hot_exit", "remember_open_files"),
+    "next_session": ("hot_exit", "remember_open_files", "hot_exit_projects", "remember_layout"),
     "next_full_screen": ("use_simple_full_screen",),
     "next_vintage_view": ("vintage_start_in_command_mode",),
 }
@@ -51,6 +51,7 @@ EFFECT_LABELS = {
 SETTINGS_REFERENCE = "https://docs.sublimetext.io/reference/settings.html"
 ARCHIVED_REFERENCE = "https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html"
 CHANGELOG = "https://www.sublimetext.com/download"
+DEV_CHANGELOG = "https://www.sublimetext.com/dev"
 NOTES = {
     "draw_white_space": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
     "highlight_line": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
@@ -78,6 +79,24 @@ NOTES = {
     "spelling_selector": f"[Scope selector]({ARCHIVED_REFERENCE}#system-and-miscellaneous-settings)",
     "ignored_packages": "[Enabling Vintage](https://www.sublimetext.com/docs/vintage.html#enabling-vintage)",
     "vintage_ctrl_keys": "[Vintage Ctrl keys](https://www.sublimetext.com/docs/vintage.html#ctrl-keys)",
+    "open_tabs_after_current": f"[Build 4142]({CHANGELOG}#build-4142); default keeps appending (U05).",
+    "select_across_groups": f"[Build 4126]({CHANGELOG}#build-4126) describes the old behavior as opt-in. When off, a matching file uses a shared view if a different group already has it.",
+    "sidebar_on_right": f"[Build 4200]({CHANGELOG}#build-4200); default keeps the sidebar on the left.",
+    "auto_hide_tabs": f"[Build 4107]({CHANGELOG}#build-4107); opt-in, independent of Show Tabs.",
+    "auto_hide_status_bar": f"[Build 4107]({CHANGELOG}#build-4107); opt-in, independent of Show Status Bar.",
+    "show_project_first": f"[Build 4107]({CHANGELOG}#build-4107); default keeps the file name first.",
+    "click_through": f"[Build 4213]({CHANGELOG}#build-4213); macOS only. Off keeps the first click for activation.",
+    "hide_pointer_while_typing": f"[Build 4107]({CHANGELOG}#build-4107) documents the typing behavior for Windows/Linux. Velocity uses AppKit on macOS; opt-in.",
+    "set_unsaved_view_name_for_syntax": f"[Build 4200]({CHANGELOG}#build-4200). Opt out for syntax-backed buffers without changing plain text, explicit titles, or the master naming switch.",
+    "selection_description_column_type": f"[Build 4075]({DEV_CHANGELOG}#build-4075); default preserves one-based display columns. Velocity's values are `display`, `character`, `utf16` and `byte`.",
+    "highlight_gutter": f"[Build 4107]({CHANGELOG}#build-4107). Independent of editor-line and line-number highlighting; off preserves the existing gutter.",
+    "control_character_style": f"[Build 4107]({CHANGELOG}#build-4107). Applies to C0/DEL labels when `draw_control_characters` is on. Velocity provides `hex`, `name` and `caret`.",
+    "fold_style": f"[Build 4151]({CHANGELOG}#build-4151); `auto` retains syntax-aware folding with an indentation fallback; `indentation` ignores syntax candidates.",
+    "fold_include_trailing_newline": f"[Builds 4134 and 4145]({DEV_CHANGELOG}#build-4145); excludes the final newline by default. Velocity key; the public notes do not name the option. Manual selection folds are unaffected.",
+    "hot_exit_projects": f"[Build 4142]({CHANGELOG}#build-4142); default follows Hot Exit for project workspaces. Off keeps saved-file references but excludes unsaved contents and prompts before a dirty project window closes. App recovery is separate.",
+    "remember_layout": f"[Build 4121]({CHANGELOG}#build-4121); `auto` keeps saved splits unless Hot Exit is disabled. `true` also inherits splits in new windows without copying tabs; `false` restores in one group.",
+    "terminal_command": f"[Build 4213]({CHANGELOG}#build-4213); global preference, read on each `open_terminal`. An empty list opens macOS Terminal. For a custom executable, use an argument list such as `[\"/path/to/terminal\", \"--directory\", \"$dir\"]`; `$dir` is a literal directory argument, not shell input. The public changelog does not specify the configuration schema.",
+    "goto_anything_file_preview": f"[Build 4180]({CHANGELOG}#build-4180); default keeps the transient tab (U04). When off, file results open only on acceptance. Local line/word/symbol navigation still previews.",
 }
 
 

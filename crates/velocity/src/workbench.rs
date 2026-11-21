@@ -392,6 +392,9 @@ impl Workspace {
             .map_or_else(
                 || title.clone(),
                 |project| {
+                    if self.settings.bool("show_project_first", false) {
+                        return format!("{} — {title}", project.to_string_lossy());
+                    }
                     vel_i18n::format_named(
                         &self.ui.project_title,
                         &[
@@ -1033,13 +1036,17 @@ impl Workspace {
             // A result sheet is owned by this window's search controller.
             return self.new_text_tab(self.editor().text.clone());
         }
-        if self.tabs[self.active].loading.is_some()
-            || self.tabs[self.active].binary_loading.is_some()
-        {
+        self.clone_file_into_group(self.active, self.workbench.active)
+    }
+    pub(crate) fn clone_file_into_group(
+        &mut self,
+        index: usize,
+        group: usize,
+    ) -> Result<(), String> {
+        self.prepare_sheet(index)?;
+        if self.tabs[index].loading.is_some() || self.tabs[index].binary_loading.is_some() {
             return Err("Wait for loading to finish before cloning this tab".into());
         }
-        self.prepare_sheet(self.active)?;
-        let index = self.active;
         let id = self.tabs[index].editor.buffer.new_view();
         let state = vel_session::ViewState::capture(
             &self.tabs[index].editor.buffer,
@@ -1068,7 +1075,8 @@ impl Workspace {
         clone.scroll_line_height = self.tabs[index].scroll_line_height;
         let sheet = clone.sheet;
         self.tabs.push(clone);
-        self.workbench.groups[self.workbench.active].add(sheet, false);
+        self.insert_opened_sheet(group, sheet);
+        self.workbench.active = group;
         self.prepare_sheet(self.tabs.len() - 1)?;
         self.active = self.tabs.len() - 1;
         self.sync_shared();
@@ -1668,6 +1676,9 @@ impl Workspace {
         self.active = 0;
         crate::session_restore::step("groups");
         self.workbench = window.workbench.clone();
+        if !self.remember_layout(self.hot_exit()) {
+            crate::session::forget_layout(&mut self.workbench)?;
+        }
         for g in &mut self.workbench.groups {
             let mut seen = BTreeSet::new();
             g.mru = g
@@ -1738,6 +1749,21 @@ impl Workspace {
             }
         }
         vel_session::HotExit::parse(self.global_string("hot_exit", "always"))
+    }
+    pub(crate) fn remember_layout(&self, hot: vel_session::HotExit) -> bool {
+        self.remember_layout_override()
+            .unwrap_or(hot != vel_session::HotExit::Disabled)
+    }
+    pub(crate) fn remember_layout_override(&self) -> Option<bool> {
+        let value = [Layer::User, Layer::Platform, Layer::Default]
+            .into_iter()
+            .find_map(|layer| self.settings.layer(layer).get("remember_layout"))?;
+        match value {
+            Value::Bool(enabled) => Some(*enabled),
+            Value::String(mode) if mode == "enabled" => Some(true),
+            Value::String(mode) if mode == "disabled" => Some(false),
+            _ => None,
+        }
     }
     pub fn global_string<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
         [Layer::User, Layer::Platform, Layer::Default]

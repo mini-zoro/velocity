@@ -30,14 +30,19 @@ mod round26_settings_tests;
 #[cfg(test)]
 #[path = "app_round32_lane_b_tests.rs"]
 mod round32_lane_b_tests;
+#[cfg(test)]
+#[path = "app_round34_lane_b_tests.rs"]
+mod round34_lane_b_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
 mod settings_ui_adapter;
 #[path = "app_status.rs"]
-mod status_adapter;
+pub(crate) mod status_adapter;
 #[path = "app_tabs.rs"]
 mod tab_adapter;
+#[path = "app_terminal.rs"]
+mod terminal;
 #[cfg(test)]
 #[path = "app_window_close_tests.rs"]
 mod window_close_tests;
@@ -87,6 +92,8 @@ const WINDOW_COMMANDS: &[&str] = &[
     "open_as_text",
     "build_send_input",
     "build_close_input",
+    "unselect_current",
+    "open_terminal",
 ];
 fn image_open_as(name: &str) -> crate::open_requests::OpenAs {
     if name == "open_as_image" {
@@ -141,6 +148,7 @@ pub struct App {
     /// A playback may edit only the workbench sheet that started it, including nested chains.
     macro_origin: Option<u64>,
     opened_settings: Vec<App>,
+    typing_hides_chrome: bool,
     revealed_directory: Option<std::path::PathBuf>,
     format_hits: Vec<(status_adapter::FormatItem, Rect)>,
     last_format_menu: Vec<MenuEntry>,
@@ -341,6 +349,7 @@ impl App {
         Self {
             macro_origin: None,
             opened_settings: Vec::new(),
+            typing_hides_chrome: false,
             revealed_directory: None,
             format_hits: Vec::new(),
             last_format_menu: Vec::new(),
@@ -564,6 +573,22 @@ impl App {
             self.workspace.hot_exit()
         }
     }
+    fn session_policy(&self, quitting: bool, closing: bool) -> crate::session::Policy {
+        let hot = self.hot_exit();
+        crate::session::Policy {
+            hot,
+            quitting,
+            remember: self.workspace.global_bool("remember_open_files", true),
+            closing,
+            project_hot_exit: self.workspace.global_bool("hot_exit_projects", true),
+            remember_layout: self.workspace.remember_layout(hot),
+        }
+    }
+    fn retain_switching_project(&self) -> bool {
+        let policy = self.session_policy(false, true);
+        policy.hot.retain(false)
+            && (self.workspace.project_path().is_none() || policy.project_hot_exit)
+    }
     fn open_project_for_session(&mut self, project: PathBuf) -> Result<(), String> {
         if self.options.safe_mode {
             self.workspace.open_project_with_restore(project, false)
@@ -581,8 +606,7 @@ impl App {
         self.waiters
             .retain_mut(|waiter| !waiter.complete(&mut self.workspace));
         let (window, documents) = self.capture_session_window()?;
-        let hot = self.hot_exit();
-        let remember = self.workspace.global_bool("remember_open_files", true);
+        let policy = self.session_policy(quitting, closing);
         self.sessions.borrow_mut().publish(
             self.session_id,
             window,
@@ -592,12 +616,7 @@ impl App {
                 self.workspace.recent_folders.clone(),
                 self.workspace.recent_projects.clone(),
             ],
-            crate::session::Policy {
-                hot,
-                quitting,
-                remember,
-                closing,
-            },
+            policy,
         )?;
         self.session_due = None;
         Ok(())
@@ -617,11 +636,10 @@ impl App {
         Ok((window, documents))
     }
     fn prepare_window_close(&mut self, window: Option<&WindowHandle>) -> bool {
-        let hot = self.hot_exit();
-        let remember = self.workspace.global_bool("remember_open_files", true);
+        let policy = self.session_policy(false, true);
         let project = self.workspace.project_path().is_some()
             && self.sessions.borrow().persist_project_workspaces;
-        let project_hot_exit = project && hot.retain(true);
+        let project_hot_exit = project && policy.project_hot_exit && policy.hot.retain(true);
         let indices: Vec<_> = (0..self.workspace.tabs.len()).collect();
         // The last macOS window is not a Quit. Only an explicit project has
         // somewhere to keep unsaved buffers other than the application session.
@@ -632,7 +650,7 @@ impl App {
             let result = self.capture_session_window().and_then(|(snapshot, docs)| {
                 self.sessions
                     .borrow_mut()
-                    .save_closing_project(snapshot, docs, hot, remember)
+                    .save_closing_project(snapshot, docs, policy)
             });
             if let Err(error) = result {
                 let message = UiText::tr_fmt(
@@ -671,10 +689,13 @@ impl App {
                     .filter_map(|tab| tab.path.as_ref()),
             )
             .cloned();
-        let result = self
-            .sessions
-            .borrow_mut()
-            .close(self.session_id, hot, remember, paths);
+        let result = self.sessions.borrow_mut().close(
+            self.session_id,
+            policy.hot,
+            policy.remember,
+            policy.remember_layout,
+            paths,
+        );
         if let Err(error) = result {
             eprintln!("Could not checkpoint after closing a window: {error}");
         }
@@ -769,6 +790,10 @@ impl App {
         if let Some(window) = &restored {
             let documents = self.sessions.borrow().restored.documents.clone();
             workspace.restore_window(window, &documents)?;
+        } else if use_new_window_settings && workspace.remember_layout_override() == Some(true) {
+            workspace
+                .workbench
+                .set_layout(self.workspace.workbench.layout.clone())?;
         }
         let mut options = self.options.clone();
         options.background &= restored.is_some();
@@ -1010,8 +1035,14 @@ impl App {
                 .project_path()
                 .is_some_and(|open| crate::open_requests::same_path(open, p))
         }) {
-            let retain = self.hot_exit().retain(false);
+            let retain = self.retain_switching_project();
             let result = (|| {
+                if !retain
+                    && self.workspace.project_path().is_some()
+                    && (0..self.workspace.tabs.len()).any(|i| self.needs_document_close_decision(i))
+                {
+                    return Err("Save changes before switching projects".to_owned());
+                }
                 self.checkpoint_reason(false, true)?;
                 self.sessions.borrow().flush()?;
                 self.open_project_for_session(project.clone())
@@ -1173,6 +1204,18 @@ impl App {
             .is_some_and(|version| version != self.workspace.tabs[target].editor.revision)
         {
             return false;
+        }
+        if name == "open_terminal" {
+            return args["dir"].is_string()
+                || !args["paths"].as_array().is_none_or(Vec::is_empty)
+                || self.workspace.tabs[target].path.is_some()
+                || !self.workspace.folders.is_empty();
+        }
+        if name == "unselect_current" {
+            return self.workspace.workbench.groups[self.workspace.workbench.active]
+                .selected
+                .len()
+                > 1;
         }
         if let Some(state) = self.context_state(name, args) {
             return state.enabled;
@@ -2563,6 +2606,13 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
+        if name == "open_terminal" {
+            let launch = self.terminal_launch(args)?;
+            if window.is_some() {
+                launch.open()?;
+            }
+            return Ok(());
+        }
         if name == "set_ui_language" {
             // The preference is app-wide; the ordinary User writer also updates
             // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
@@ -2989,7 +3039,7 @@ impl App {
                         }
                     });
                 if let Some(path) = path {
-                    if !self.hot_exit().retain(false)
+                    if !self.retain_switching_project()
                         && !self.can_close_many(
                             Some(w),
                             &(0..self.workspace.tabs.len()).collect::<Vec<_>>(),
@@ -2999,7 +3049,7 @@ impl App {
                     }
                     self.checkpoint_reason(false, true)?;
                     self.sessions.borrow().flush()?;
-                    let retain = self.hot_exit().retain(false);
+                    let retain = self.retain_switching_project();
                     self.open_project_for_session(path.clone())
                         .map_err(|error| format!("{}: {error}", path.display()))?;
                     self.sessions
@@ -3021,7 +3071,7 @@ impl App {
                 return Ok(());
             }
             "close_project" => {
-                if !self.hot_exit().retain(false)
+                if !self.retain_switching_project()
                     && !self.can_close_many(
                         Some(w),
                         &(0..self.workspace.tabs.len()).collect::<Vec<_>>(),
@@ -3031,7 +3081,7 @@ impl App {
                 }
                 self.checkpoint_reason(false, true)?;
                 self.sessions.borrow().flush()?;
-                let retain = self.hot_exit().retain(false);
+                let retain = self.retain_switching_project();
                 self.workspace.close_project()?;
                 self.sessions
                     .borrow_mut()
@@ -3149,6 +3199,15 @@ impl App {
         Ok(())
     }
     fn select_tab_action(&mut self, name: &str, args: &Value) -> bool {
+        if name == "unselect_current" {
+            let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
+            if group.selected.len() > 1
+                && let Some(index) = group.focused.and_then(|id| self.workspace.sheet_index(id))
+            {
+                self.workspace.click_sheet(index, true, false);
+            }
+            return true;
+        }
         if name == "select_by_index"
             && let Some(sheet) = args["_dropdown_sheet"].as_u64()
         {
@@ -3368,6 +3427,9 @@ impl App {
         }
     }
     fn set_window_focused(&mut self, focused: bool) {
+        if !focused {
+            self.typing_hides_chrome = false;
+        }
         if !focused && self.panels.overlay == Some(crate::panels::Overlay::Appearance) {
             self.panels.cancel_overlay(&mut self.workspace);
         }
@@ -3637,6 +3699,9 @@ impl App {
                 self.visible_view_keys.clear();
             }
         }
+        self.panels.sidebar_on_right = self.workspace.settings.bool("sidebar_on_right", false);
+        self.panels.chrome_auto_hidden =
+            self.typing_hides_chrome && self.workspace.settings.bool("auto_hide_status_bar", false);
         let mut bounds = self.panels.layout(self.window_size);
         self.workbench_bounds = bounds;
         self.sheet_bounds.clear();
@@ -3669,7 +3734,7 @@ impl App {
             ]),
             &self.workspace.editor().settings,
         );
-        let show_tabs = self.workspace.window_visible("show_tabs");
+        let show_tabs = self.tabs_visible();
         let tab_height = if show_tabs {
             f64::from(tabset_style.tab_height).max(16.)
         } else {
@@ -3739,11 +3804,7 @@ impl App {
                 } else {
                     Appearance::Light
                 };
-                view.tab_height = if !self.workspace.window_visible("show_tabs") {
-                    0.
-                } else {
-                    tab_height
-                };
+                view.tab_height = if !show_tabs { 0. } else { tab_height };
                 view.focused = *sheet == focused
                     && self.window_focused
                     && self.panels.input().is_none()
@@ -4324,12 +4385,40 @@ impl App {
                 w.request_frame_at(Instant::now() + Duration::from_millis(8));
             }
         } else if self.accessibility_focus.is_none() && !self.workspace.editor().read_only {
+            if matches!(&event, TextInput::Insert { text, .. } | TextInput::Marked { text, .. } if !text.is_empty())
+            {
+                self.note_editor_typing(window);
+            }
             if let Some(w) = window {
                 self.input(w, event, Instant::now());
             } else {
                 self.workspace.editor_mut().text_input(event);
                 self.changed_state(Instant::now(), true);
             }
+        }
+    }
+    fn tabs_visible(&self) -> bool {
+        self.workspace.window_visible("show_tabs")
+            && !(self.typing_hides_chrome && self.workspace.settings.bool("auto_hide_tabs", false))
+    }
+    fn note_editor_typing(&mut self, window: Option<&WindowHandle>) {
+        self.typing_hides_chrome = true;
+        if let Some(window) = window
+            && self.hide_pointer_while_typing()
+        {
+            window.hide_pointer_until_motion();
+        }
+    }
+    fn hide_pointer_while_typing(&self) -> bool {
+        self.workspace
+            .settings
+            .bool("hide_pointer_while_typing", false)
+    }
+    fn reveal_typing_chrome(&mut self, window: Option<&WindowHandle>) {
+        if std::mem::take(&mut self.typing_hides_chrome)
+            && let Some(window) = window
+        {
+            window.request_frame();
         }
     }
     fn start_report(&mut self, w: &WindowHandle, p: Presentation) -> Result<(), String> {
@@ -4727,6 +4816,9 @@ impl AppHandler for App {
             self.workspace.editor_mut().clipboard = w.clipboard_text().unwrap_or_default();
         }
         self.dispatch_key_binding(Some(w), &key, event.received, viewport)
+    }
+    fn accepts_first_mouse(&self) -> bool {
+        self.workspace.settings.bool("click_through", false)
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {

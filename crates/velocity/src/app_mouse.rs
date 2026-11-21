@@ -13,6 +13,9 @@ impl App {
     ) {
         // Every exit path releases capture, including overlays/status controls and
         // mouse bindings. Finishing a text move still happens in the normal route.
+        if matches!(event.kind, MouseKind::Move | MouseKind::Down) {
+            self.reveal_typing_chrome(w);
+        }
         let up = event.kind == MouseKind::Up;
         if event.kind == MouseKind::Down {
             self.end_mouse_gesture();
@@ -607,6 +610,7 @@ impl App {
 
 impl App {
     pub(super) fn handle_scroll_event(&mut self, w: Option<&WindowHandle>, event: ScrollEvent) {
+        self.reveal_typing_chrome(w);
         if let Some(w) = w {
             self.cancel_context(w);
         }

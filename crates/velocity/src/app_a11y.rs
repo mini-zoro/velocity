@@ -597,7 +597,7 @@ impl App {
     fn focus_rect(&self, id: Id) -> Option<Rect> {
         if (1000..OTHER_EDITOR).contains(&id) {
             if self.panels.overlay.is_some()
-                || !self.workspace.window_visible("show_tabs")
+                || !self.tabs_visible()
                 || self.workspace.sheet_index((id - 1000) / 2).is_none()
             {
                 return None;

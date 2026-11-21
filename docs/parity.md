@@ -12,20 +12,20 @@ The 1.0 target excludes Python plugins, not declarative packages.
 <!-- BEGIN PARITY TOTALS -->
 | Area | Done | Partial | Missing | Out of scope |
 | --- | ---: | ---: | ---: | ---: |
-| Editing and selection | 53 | 3 | 2 | 0 |
-| Search and navigation | 41 | 9 | 12 | 0 |
-| Files, projects and sessions | 42 | 13 | 8 | 0 |
-| Windows, tabs and display | 54 | 11 | 15 | 1 |
+| Editing and selection | 54 | 3 | 1 | 0 |
+| Search and navigation | 44 | 9 | 10 | 0 |
+| Files, projects and sessions | 48 | 11 | 4 | 0 |
+| Windows, tabs and display | 66 | 14 | 0 | 1 |
 | Language, completion and Vintage | 51 | 12 | 2 | 0 |
 | Customization and resources | 40 | 12 | 1 | 0 |
-| Build, Git and command line | 38 | 12 | 3 | 0 |
+| Build, Git and command line | 39 | 13 | 1 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **319** | **72** | **43** | **6** |
+| **Total** | **342** | **74** | **19** | **6** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
 
-- Snapshot: Velocity lane B, based on `efe8b5b`, with this round's changes.
+- Snapshot: Velocity Round 34 lane B, based on `bc4c141`.
   A **done** row has a runtime reader, executable command or named regression;
   it does not imply pixel parity, native UI automation, or identical performance.
   **Partial** says what works and what still differs. **Missing** means no
@@ -107,7 +107,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `auto_close_tags` | [Settings][settings] | done | `close_tags_table_cold_stale_markup_void_quotes_comments_and_xml_case` | |
 | Record/run/save macro and repeat last command | [Commands][commands], [D4107][releases], [V4075][dev] | done | `registry_domains_chains_macros_repeat_and_window_actions`, `panels/macro_commands.rs` | Includes find commands. |
 | `chain` sequential dispatch | [D4107.121][releases], [V4103.3][dev] | done | `registry_domains_chains_macros_repeat_and_window_actions` | |
-| Sum numeric selections in the status bar | [D4107][releases], [V4050][dev] | missing | Selection reporting in `app_status.rs` and view model | No numeric aggregation reader found. |
+| Sum numeric selections in the status bar | [D4107][releases], [V4050][dev] | done | `app_status::selection_sum`, `Panels` status text; `r34_status_column_units_and_sum` | Automatic for multiple finite numeric selections; no sum for mixed text or empty carets. No setting in the public notes. |
 | Undo jumps / Jump Back and Forward | [D4107][releases] | done | `jump_back`, `jump_forward` in `panels.rs`; `project_symbols_definition_previews_unicode_locations_and_bounded_history` | |
 | `toggle_comment` comment `variant` | [D4142.77][releases], [V4130.16][dev] | done | `editing.rs` selects the requested metadata variant | |
 | `append` with `disable_tab_translation` | [D4107.314][releases], [V4050.109][dev] | missing | Text command registry and edit adapter have no argument reader | |
@@ -160,7 +160,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Goto Anything: `#` fuzzy word | [Goto][goto] | done | `panels.rs::Local::Words`; `vel-search/goto.rs::Target::Word` | |
 | Goto Anything: keep/replace/side-by-side modifier actions | [Tab multi-select][tabs], [D4107][releases] | done | `intelligence::OpenOptions`, `panels.rs` overlay key dispatch | Exact modifier support depends on window/overlay context. |
 | `goto_anything_exclude_gitignore` | [D4142.11][releases], [V4130.6][dev] | done | `goto_anything_gitignore_is_opt_in_and_cannot_readd_ignored_open_tabs` | Default false; worker refreshes on new overlay or changed project file list, not every in-place rule edit. |
-| `goto_anything_file_preview` | [D4180.18][releases], [V4170.6][dev] | missing | `Panels::preview_current` runs without the named reader | |
+| `goto_anything_file_preview` | [D4180.18][releases], [V4170.6][dev] | done | `Panels::show_quick_target`; `r34_goto_file_preview_off_still_accepts_target` and `preview_tabs_do_not_replace_or_lose_original_and_commit_pins` | Off defers file opens until acceptance; local navigation and the default U04 transient tab are unchanged. |
 | Command palette fuzzy filtering and dispatch | [Palette][palette], [V4094.1][dev] | done | `palette_filters_and_rechecks_actual_command_enablement` | Includes original bilingual captions/aliases. |
 | `.sublime-commands` discovery and arguments | [Palette][palette], [Packages][packages] | done | `Configuration::load`; `vel-config/ui.rs` | Python-defined commands excluded. |
 | Goto Symbol in File; location metadata | [D4107][releases], [V4050][dev] | done | `show_overlay` with `@term`; `panels/details.rs` | |
@@ -238,10 +238,10 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `*.ext`, `?`, relative paths, `//` root patterns and directory matching | [File patterns][patterns] | done | `vel-search/project.rs::Patterns`, `vel-search/tests/round20_pattern_timing.rs` | See Where and spell/syntax consumers separately. |
 | Restore open tabs, splits, selections and scroll | [Projects][projects], [D4107][releases] | done | `vel-session/tests/session.rs`, `session_restore.rs`, `legacy_session_pixels_use_the_restored_font_size_and_padding` | |
 | `hot_exit`, including last-window policy | [D4107.74][releases], [V4050.69][dev] | done | `HotExit::retain`, `legacy_hot_exit_false_and_recent_encoding_commands_are_wired` | |
-| `hot_exit_projects` | [D4142.7][releases], [V4136.5][dev] | missing | `session.rs` uses general Hot Exit policy | |
+| `hot_exit_projects` | [D4142.7][releases], [V4136.5][dev] | done | `Sessions::publish_project`, `App::prepare_window_close`; `r34_hot_exit_projects_is_independent` | On follows general Hot Exit; off omits unsaved workspace content and restores the dirty-close prompt. App recovery remains independent. |
 | `remember_open_files` | [Settings][settings] | done | `settings_effect_tests` session exercise; `App::checkpoint_reason` | |
-| `remember_layout` | [V4114.7][dev] | missing | `session.rs`, no independent reader | |
-| `remember_workspace` (OS virtual desktop/space) | [D4107.56][releases], [V4098.1][dev] | missing | `vel-session::Window::frame` stores geometry, not Spaces | |
+| `remember_layout` | [V4114.7][dev], [D4121][releases] | done | `Sessions::publish`, `Workspace::restore_window_inner`, `App::window_app`; `r34_remember_layout_with_and_without_hot_exit` | Auto keeps saved splits unless Hot Exit is off. Explicit true also starts a fresh window with the current split and first group focused. D5 still controls which windows return. |
+| `remember_workspace` (OS virtual desktop/space) | [D4107.56][releases], [V4098.1][dev] | missing | `Window::frame` continues to restore geometry only | Public [AppKit window collection behavior][appkit-spaces] can join all Spaces or follow the active one, but does not expose a stable Space ID or a targeted move. No private APIs or inert preference shipped. |
 | File-specific indentation after restarting | [D4121.32][releases], [V4117.3][dev] | done | `vel-session` sheet settings; `workbench.rs` restore | |
 | Undo history across restart; refuse stale history after external change | [D4213][releases] | done | `vel-session/tests/native_history.rs`, `mismatch_version_mapping_and_corrupt_data_fail_cleanly`, `session_restore.rs` integrity checks | |
 | `open_files_in_new_window` | [D4121][releases], [Settings][settings] | done | `open_requests::OpenWindow::setting`, `two_apps_route_to_existing_folder_project_and_file_without_replacing_dirty_tabs` | |
@@ -260,7 +260,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Jump to the last tab with Cmd+9 | [D4151.3][releases], [V4148.2][dev] | done | `select_by_index` with index -1 in Velocity's keymap | |
 | Tab multi-select with keyboard, drag and mouse | [Tab multi-select][tabs], [D4107][releases], [V4050][dev], [V4097.6][dev] | partial | `App::select_tab_action`, `app_tabs.rs`, `vel-ui/workbench.rs` | Selection and multi-pane layout work; exact Sublime gesture and menu set not established. |
 | Change focus without changing membership | [Tab multi-select][tabs], [V4098.2][dev] | partial | `vel-ui/workbench.rs` group selection/focus | Does not establish both dedicated left/right command variants. |
-| Remove just the focused tab from multi-selection | [Tab multi-select][tabs], [D4186.10][releases], [V4184.6][dev] | missing | `App::select_tab_action`; no `unselect_current` | |
+| Remove just the focused tab from multi-selection | [Tab multi-select][tabs], [D4186.10][releases], [V4184.6][dev] | done | `unselect_current`, palette and `App::select_tab_action`; `r34_tab_insert_and_unselect_current` | Keeps the remaining tabs selected and the last selection intact. No new shortcut or setting. |
 | Replace focused tab, preserve other selected tabs | [Tab multi-select][tabs] | partial | `OpenOptions`, `Panels::accept_overlay` | Goto and symbol pathways do not establish all documented modifier combinations. |
 | Drag tabs to reorder/move and scroll the strip | [Tab multi-select][tabs], [D4213][releases] | done | `app_tabs.rs`; `enable_tab_scrolling` settings sweep | |
 | New Tab button | [D4107.202][releases], [V4095.8][dev] | done | `app_tabs.rs` theme hit targets | |
@@ -268,32 +268,32 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `hide_tab_scrolling_buttons` | [Themes][themes] | done | `app_tabs.rs`; settings effect suite | |
 | `show_tab_close_buttons_on_left` | [D4107.203][releases], [V4075.13][dev] | done | `tab_close_side_moves_target_and_painted_label_without_moving_the_tab` | |
 | `file_tab_style` and dirty tab appearance | [D4107.198][releases], [V4095.1][dev], [Themes][themes] | done | `rounded_and_square_tab_styles_change_the_drawn_tab_not_the_hit_rect` | |
-| `open_tabs_after_current` | [D4142.9][releases], [V4127.11][dev] | missing | `Workspace::new_text_tab` and workbench insertion | |
-| `select_across_groups` | [D4126.17][releases], [V4122.4][dev] | missing | `app_tabs.rs` and sidebar activation | |
+| `open_tabs_after_current` | [D4142.9][releases], [V4127.11][dev] | done | `Workspace::insert_opened_sheet`; `r34_tab_insert_and_unselect_current` | Defaults to append as decided in U05; no public factory value found. |
+| `select_across_groups` | [D4126.17][releases], [V4122.4][dev] | done | `Workspace::open_from_sidebar`; `r34_sidebar_cross_group_and_right_geometry` | Opt into switching groups for a single sidebar file. Off keeps the active group, reusing the buffer through a shared view. |
 | Open Files and folder sidebar, reveal file, refresh/collapse | [Projects][projects], [D4142][releases] | done | `toggle_show_open_files`, `reveal_in_side_bar`, `refresh_folder_list`, `close_folder_list` | |
 | Sidebar create, rename, trash, Reveal in Finder | [Projects][projects], [Commands][commands] | done | `context_menu.rs::sidebar_command`, `NativeFileOperations` tests | |
 | Copy Path in sidebar context menu | [D4166.8][releases], [V4158.5][dev] | done | `copy_file_path`, `context_menu.rs` | |
 | `preview_on_click` (left-only / disabled / enabled) | [D4107.169][releases], [V4075.10][dev] | done | `round18_sidebar_preview_setting_replacement_promotion_and_session_recent_files` | |
-| `sidebar_on_right` | [D4200.1][releases], [V4198.1][dev] | missing | `Panels::layout` places sidebar on left | |
+| `sidebar_on_right` | [D4200.1][releases], [V4198.1][dev] | done | `Panels::layout`; `r34_sidebar_cross_group_and_right_geometry` | Mirrors the sidebar and editor bounds without changing the default left placement. |
 | `tree_animation_enabled` | [Themes][themes] | done | `panels.rs` geometry and Reduce Motion; [reader](settings.md) | |
 | Full screen | [Distraction Free][distraction], [Commands][commands] | done | `toggle_full_screen`, `vel-platform/fullscreen.rs` | |
 | `use_simple_full_screen` | [Distraction Free][distraction], [Settings][settings] | done | `toggle_full_screen_with_mode`; next native transition per [settings](settings.md) | |
 | Distraction Free with its own layout/settings | [Distraction Free][distraction], [Settings][settings] | done | `toggle_distraction_free`; `numeric_ruler_and_distraction_zoom_use_the_real_settings_loader` | |
-| `auto_hide_tabs` | [D4107.205][releases], [V4050.58][dev], [V4067][dev] | missing | `show_tabs` and mode toggles only | |
-| `auto_hide_status_bar` | [D4107.205][releases], [V4050.58][dev] | missing | `toggle_status_bar`; no typing-driven hide | |
+| `auto_hide_tabs` | [D4107.205][releases], [V4050.58][dev], [V4067][dev] | done | `App::tabs_visible`; `r34_typing_chrome_and_native_pointer_policy` | Editor typing hides tabs; pointer activity reveals them unless explicitly hidden. |
+| `auto_hide_status_bar` | [D4107.205][releases], [V4050.58][dev] | done | `Panels::status_visible`; `r34_typing_chrome_and_native_pointer_policy` | Editor typing hides status paint and hit targets without changing the explicit Show Status Bar state. |
 | `auto_hide_menu` / `reveal_menu` | [D4107.205][releases], [D4113.12][releases], [V4050.58][dev], [V4108.7][dev] | out of scope | Native Mac menu bar in `vel-platform/macos.rs` | Windows/Linux window-local menu behaviors. |
 | `themed_title_bar` | [D4107.197][releases], [V4094.3][dev] | done | `app.rs`, `vel-platform/macos.rs` | |
 | `show_rel_path` | [D4107.206][releases], [V4050.59][dev] | done | `workspace.rs` title; [reader](settings.md) | |
 | `show_full_path` | [Settings][settings] | done | `workspace.rs` title; [reader](settings.md) | |
-| `show_project_first` | [D4107.206][releases], [V4050.59][dev] | missing | Existing title format in `workspace.rs` | |
-| `set_unsaved_view_name_for_syntax` | [D4200.16][releases], [V4198.10][dev] | missing | Untitled names in `workspace.rs`; no reader | |
-| `click_through` (macOS inactive window pointer action) | [D4213.34][releases], [V4205.8][dev] | missing | `vel-platform/macos.rs` input; no reader | |
-| `hide_pointer_while_typing` | [D4107.118][releases], [V4074.7][dev] | missing | `vel-platform/macos.rs` pointer dispatch; no reader | |
+| `show_project_first` | [D4107.206][releases], [V4050.59][dev] | done | `Workspace::window_title`; `r34_project_title_and_unsaved_syntax_name` | Opt-in project-first title; preserves the file name, path preferences and dirty marker. |
+| `set_unsaved_view_name_for_syntax` | [D4200.16][releases], [V4198.10][dev] | partial | `Tab::name_with_untitled`; `r34_project_title_and_unsaved_syntax_name` | Boolean opt-out of first-line titles for non-plain syntax; the public release notes name the key but do not describe its exact value contract. |
+| `click_through` (macOS inactive window pointer action) | [D4213.34][releases], [V4205.8][dev] | done | AppKit `acceptsFirstMouse:` on the editor view; `r34_typing_chrome_and_native_pointer_policy` tests the handler decision | Headless up to the native activation boundary. |
+| `hide_pointer_while_typing` | [D4107.118][releases], [V4074.7][dev] | done | Editor text input uses `NSCursor.setHiddenUntilMouseMoves`; `r34_typing_chrome_and_native_pointer_policy` tests the setting | D4107 lists the behavior under Windows/Linux. macOS uses the public AppKit method for the same opt-in behavior; no native event loop in tests. |
 | `show_sidebar_button` | [D4107.134][releases], [V4074.3][dev] | done | `app_status.rs`, settings effect suite | |
 | `show_indentation` | [D4107.134][releases], [V4074.3][dev] | done | `app_status.rs`, settings effect suite | |
 | `show_syntax` | [D4107.134][releases], [V4074.3][dev] | done | `app_status.rs`, settings effect suite | |
 | `show_line_column` | [D4142.10][releases], [V4138.2][dev] | done | `app_status.rs`; [reader](settings.md) | |
-| `selection_description_column_type` | [V4075.11][dev] | missing | `app_status.rs` fixed coordinate convention | |
+| `selection_description_column_type` | [V4075.11][dev] | done | `app_status::selection_column`; `r34_status_column_units_and_sum` | One-based tab-expanded scalar columns remain the default; characters, UTF-16 and bytes are available. Exact Sublime enum spellings are not public in the cited notes. |
 | `show_encoding` | [Settings][settings] | done | `app_status.rs` settings/format tests | |
 | `show_line_endings` | [Settings][settings] | done | `app_status.rs` settings/format tests | |
 | Minimap navigation, drag and visible viewport | [Themes][themes], [D4107][releases] | done | `minimap_drag_reaches_both_ends_without_jumping_in_long_wrapped_and_folded_documents` | |
@@ -306,12 +306,12 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `wrap_width_style` | [D4107.132][releases], [V4092.6][dev] | done | `view.rs`; [reader](settings.md) | |
 | Indent folding and unfold, fold by level | [Commands][commands] | done | `fold`, `unfold`, `fold_by_level`; `view.rs` | |
 | Syntax-based folding, fold and unfold | [D4142.1][releases], [V4130.1][dev] | partial | `vel-highlight` syntax/indent fold model; `view.rs` | Folding works; support for all syntax-specific meta selectors and edge rules not established. |
-| Scope fold trailing-newline option | [V4134.4][dev] | missing | `view.rs` folding, no separate option | |
-| `fold_style` | [D4151.2][releases], [V4145.1][dev] | missing | Fold mode in `view.rs`; [settings inventory](settings.md) | |
+| Scope fold trailing-newline option | [V4134.4][dev], [V4145][dev] | partial | `fold_include_trailing_newline` across fold commands and gutter; `r34_fold_style_and_trailing_newline` | Excludes the last newline by default, includes it when enabled. Public notes do not specify the corresponding setting or syntax metadata spelling. |
+| `fold_style` | [D4151.2][releases], [V4145.1][dev] | done | Indentation candidates in `fold_state.rs`, used by fold commands and gutter; `r34_fold_style_and_trailing_newline` | Can disable syntax-based folding in favor of indentation; auto preserves the existing source of candidates. |
 | `fold_buttons` | [Themes][themes] | done | `view.rs` gutter; settings effect suite | |
 | `relative_line_numbers` | [D4107.116][releases], [V4074.4][dev] | done | `view.rs`; [reader](settings.md) | |
 | `line_numbers` | [Themes][themes] | done | `view.rs`; [reader](settings.md) | |
-| `highlight_gutter` | [D4107.204][releases], [V4050.57][dev] | missing | Gutter styling in `view.rs`; no named reader | |
+| `highlight_gutter` | [D4107.204][releases], [V4050.57][dev] | done | `View::scene` caret-row gutter fill; `r34_gutter_and_control_style_reach_scene` | Independent of text-line and line-number highlighting. |
 | `highlight_line_number` | [D4107.204][releases], [V4050.57][dev] | done | `view.rs` active gutter color; [reader](settings.md) | |
 | `rulers` | [Color schemes][schemes], [Settings][settings] | done | `numeric_ruler_and_distraction_zoom_use_the_real_settings_loader` | |
 | `ruler_style` | [D4142.12][releases], [V4134.8][dev] | done | `view.rs`; settings effect sweep | |
@@ -319,7 +319,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `draw_white_space` leading/trailing/all/selection | [D4107.127][releases], [V4083.2][dev], [V4050.19][dev] | done | `view.rs` drawing and settings scene sweep | |
 | `draw_unicode_white_space` incl. extra invisible glyphs | [D4107.128][releases], [D4126.15][releases], [V4123.10][dev], [V4050.20][dev] | done | `view.rs`; `app_lane_c_round20_tests.rs` Unicode scene coverage | Original glyph rendering; not a claim of identical artwork. |
 | `draw_unicode_bidi` | [D4126.16][releases], [V4122.3][dev] | done | `view.rs`; settings scene sweep | |
-| `control_character_style` | [D4107.119][releases], [V4094.4][dev] | missing | `view.rs` has Unicode diagnostics controls, not this style setting | |
+| `control_character_style` | [D4107.119][releases], [V4094.4][dev] | partial | C0/DEL style in `vel-render::invisibles`; `r34_gutter_and_control_style_reach_scene` | Working hex, name and caret displays; exact Sublime values are not stated in the permitted notes. |
 | `caret_style` blink and style | [D4107.114][releases], [V4050.15][dev], [Font][font] | done | `view.rs`; [reader](settings.md) | |
 | `scroll_context_lines` | [D4107.117][releases], [V4075.9][dev] | done | `view.rs`; settings effect suite | |
 | `scroll_past_end` boolean or fraction | [D4107.123][releases], [V4095.15][dev] | done | `view.rs`; settings effect suite | |
@@ -515,7 +515,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `--safe-mode` isolated clean settings/session | [Safe Mode][safe], [D4107.72][releases], [V4050.68][dev], [CLI][cli] | done | `safe_mode::fresh_run`, `safe_mode_prunes_empty_dead_runs_without_touching_sessions_or_symlinks` | Native Option-start is a separate path below. |
 | Hold Option at launch for Safe Mode | [Safe Mode][safe], [D4107.72][releases] | done | `Platform::option_held_at_launch`, `main.rs` | No native launch in this audit. |
 | Console and `console_max_history_lines` | [D4107.133][releases], [V4088.4][dev], [Commands][commands] | partial | `Panels::console_visible`, `console_messages` bounded storage | Native diagnostic console; no named limit reader and no Python REPL. |
-| `open_terminal` | [D4213.6][releases], [V4205.3][dev] | missing | `app.rs` native file actions; no terminal command | |
+| `open_terminal` | [D4213.6][releases], [V4205.3][dev] | partial | `app_terminal.rs`, palette and context menus; `r34_terminal_uses_context_dir_and_literal_argv` | Opens Terminal.app or a configured executable at a file/folder. Validated to the launch boundary; the public release notes do not specify the exact external-command configuration schema. |
 | Help > Report a Bug | [D4107.73][releases] | partial | Help menu ships docs, release notes, crash report folder | No direct tracker action. |
 | Update dialog theme attributes | [D4142.48][releases], [V4130.11][dev], [Themes][themes] | partial | `release.rs` update UI and themed controls | No identical legacy/Sublime update dialog resource. |
 | Revert to fresh installation and clear cache guidance | [Revert][revert], [Safe Mode][safe] | partial | Fresh isolated Safe Mode; profile paths in `main.rs` | Not a destructive reset command; ST instructions are product-specific. |
@@ -531,6 +531,21 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Maintenance bullets mentioning additions (not new capabilities) | [Download][releases], [Dev Builds][dev], ledger below | out of scope | Scope rule above | Fixes to already-added sheets, files, tokens and analogous conditions do not expand the matrix. |
 
 ## Verification
+
+### Round 34 lane B (`bc4c141`)
+
+The full gate returned `GATE_OK`: formatting, strict release Clippy, 1,711
+workspace tests with no failures, rustdoc, release build, bundle metadata
+checks, and CLI forwarding. The non-reading build-child test timed out on the
+first run and passed on the full rerun. All eleven `r34_` tests passed. AppKit
+click-through, pointer hiding, and terminal launch were tested to the native
+boundary; no GUI windows were opened.
+
+Five alternating release pairs, measured with `proc_pid_rusage` against
+`bc4c141`, differed by **+0.17%** for view features, **-0.41%** for 1,000
+carets, and **+0.41%** for one caret (median paired retired instructions).
+
+### Earlier audit (`efe8b5b`)
 
 Formatting and strict workspace Clippy passed. Focused headless regressions
 passed, including Print with a mocked browser, the static localization catalog,
@@ -555,11 +570,11 @@ one-caret smoke. All are within ±1%. The features workload used the same
 | Priority | Remaining gap family | Estimate |
 | --- | --- | --- |
 | 1 | Search: result sheet/modifiers and context/size/error settings; `current_result`, scrollbar marks and macOS Find pasteboard | 3–6 days |
-| 2 | Tab selection, `unselect_current`, tab focus, insertion order and cross-group selection; Goto preview control | 2–4 days |
+| 2 | Remaining tab-selection and group-layout edge cases | 1–3 days |
 | 3 | Safe flattened PSD preview, remaining image-tab context actions and format edge cases | 2–5 days |
-| 4 | Background reload, project/layout persistence controls, title naming, safe restores and workspace interoperability | 4–8 days |
-| 5 | Font picker, right sidebar, folding controls, gutter/controls and auto-hide behavior; live AppKit and keyboard-layout checks | 4–7 days |
-| 6 | External terminal and Help actions; status formatting, console limit and index status controls | 2–4 days |
+| 4 | Safe session restores, workspace interoperability, and macOS Space placement if a public API becomes available | 4–8 days |
+| 5 | Font picker, remaining scope-fold and control-character compatibility, live AppKit and keyboard-layout checks | 4–7 days |
+| 6 | External terminal configuration compatibility, Help actions, console limit and index status controls | 2–4 days |
 | 7 | Syntax test runner and grammar revisions, stricter theme/file icon/minihtml compatibility, completion and regex edges | 1–3 weeks, depending on fixture breadth |
 | 8 | Git reftables and verified/full Sublime Merge discovery, handoff and context actions | 1–2 weeks |
 | 9 | Renderer/worker policy customization and performance equivalence outside the measured budgets | 1–2 weeks |
@@ -639,6 +654,7 @@ V4075.35, V4075.36, V4074.9, V4072.4, V4072.5, V4050.23, V4050.42, V4050.65.
 [indent]: https://www.sublimetext.com/docs/indentation.html
 [indexing]: https://www.sublimetext.com/docs/indexing.html
 [tabs]: https://www.sublimetext.com/docs/tab_multi-select.html
+[appkit-spaces]: https://developer.apple.com/documentation/appkit/nswindow/collectionbehavior-swift.struct#Spaces
 [projects]: https://www.sublimetext.com/docs/projects.html
 [distraction]: https://www.sublimetext.com/docs/distraction_free.html
 [font]: https://www.sublimetext.com/docs/font.html

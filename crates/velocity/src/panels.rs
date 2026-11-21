@@ -125,15 +125,10 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
             editor.selection().len(),
         )
     } else {
+        let row = editor.text.byte_to_line(editor.caret);
         (
-            editor.text.byte_to_line(editor.caret) + 1,
-            editor.status_column.borrow_mut().column(
-                &editor.text,
-                (editor.buffer.id(), editor.buffer.change_id()),
-                editor.caret,
-                editor.preferences.tab_size,
-                crate::large::LONG_LINE,
-            ),
+            row + 1,
+            crate::app::status_adapter::selection_column(editor, row),
             regions
                 .iter()
                 .filter(|r| !r.empty())
@@ -150,7 +145,10 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
         .settings
         .bool("show_line_endings", true)
         .then_some(tab.format.line_ending.display_name());
-    if workspace.translations.language().is_english() {
+    let sum = (selected > 0)
+        .then(|| crate::app::status_adapter::selection_sum(editor))
+        .flatten();
+    if workspace.translations.language().is_english() && sum.is_none() {
         return vel_ui::status::position_mode(
             mode,
             row,
@@ -187,6 +185,12 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
                 &ui.characters
             },
             &[("count", selected.to_string())],
+        ));
+    }
+    if let Some(sum) = sum {
+        fields.push(vel_i18n::format_named(
+            &workspace.translations.tr("Sum: {sum}"),
+            &[("sum", sum)],
         ));
     }
     fields.extend(encoding.into_iter().chain(endings).map(str::to_owned));
@@ -457,6 +461,7 @@ pub struct Panels {
     pub focus: Focus,
     pub tree: Tree,
     pub side_visible: bool,
+    pub(crate) sidebar_on_right: bool,
     pub open_files_visible: bool,
     pub side_focused: bool,
     pub side_selected: usize,
@@ -476,6 +481,7 @@ pub struct Panels {
     pub find_history: Vec<String>,
     pub replace_history: Vec<String>,
     pub chrome: bool,
+    pub(crate) chrome_auto_hidden: bool,
     choice_items: Vec<vel_config::ui::PaletteItem>,
     side_anchor: Option<PathBuf>,
     pub dragging_tab: Option<usize>,
@@ -650,6 +656,7 @@ impl Default for Panels {
             focus: Focus::default(),
             tree: Tree::default(),
             side_visible: true,
+            sidebar_on_right: false,
             side_focused: false,
             open_files_visible: true,
             side_selected: 0,
@@ -669,6 +676,7 @@ impl Default for Panels {
             find_history: Vec::new(),
             replace_history: Vec::new(),
             chrome: true,
+            chrome_auto_hidden: false,
             choice_items: Vec::new(),
             side_anchor: None,
             dragging_tab: None,
@@ -3845,6 +3853,13 @@ impl Panels {
         self.fuzzy_worker.query(term, 100);
     }
     fn preview_current(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        self.show_quick_target(workspace, false)
+    }
+    fn show_quick_target(
+        &mut self,
+        workspace: &mut Workspace,
+        accepting: bool,
+    ) -> Result<(), String> {
         if self.overlay == Some(Overlay::Appearance) {
             self.preview_appearance(workspace);
             return Ok(());
@@ -3901,6 +3916,9 @@ impl Panels {
         let Some(path) = self.quick_path(index).cloned() else {
             return Ok(());
         };
+        if !accepting && !workspace.settings.bool("goto_anything_file_preview", true) {
+            return Ok(());
+        }
         let target = query.target;
         if self.last_preview.as_ref() == Some(&(path.clone(), target.clone())) {
             match &target {
@@ -4216,7 +4234,7 @@ impl Panels {
                 return Ok(None);
             }
             if keep_open {
-                self.preview_current(workspace)?;
+                self.show_quick_target(workspace, true)?;
                 let active = workspace.active;
                 workspace.make_permanent(active);
                 if let Some(origin) = &mut self.preview
@@ -4253,7 +4271,7 @@ impl Panels {
                         });
                 }
             }
-            self.preview_current(workspace)?;
+            self.show_quick_target(workspace, true)?;
             if let Some(source) = &self.preview
                 && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == source.sheet)
                 && index != workspace.active
@@ -5019,12 +5037,10 @@ impl Panels {
                 line: 1,
                 column: 1,
             };
+            let spelling = location.path.clone();
+            workspace.open_from_sidebar(location, permanent)?;
             if permanent {
-                let spelling = location.path.clone();
-                workspace.open(location)?;
                 self.note_sidebar_spelling(workspace, &spelling);
-            } else {
-                workspace.preview(location)?;
             }
         }
         Ok(())
@@ -5583,6 +5599,9 @@ impl Panels {
         changed |= self.sync_output();
         changed
     }
+    pub(crate) fn status_visible(&self) -> bool {
+        self.chrome && !self.chrome_auto_hidden
+    }
     pub fn layout(&mut self, size: Size) -> Rect {
         self.size = size;
         self.side_scroll.row_height = 24. * self.ui_scale;
@@ -5596,7 +5615,8 @@ impl Panels {
             0.
         };
         // A hidden status bar (distraction free, toggle_status_bar) leaves no unpainted strip.
-        let status = if self.chrome {
+        let editor_x = if self.sidebar_on_right { 0. } else { side };
+        let status = if self.status_visible() {
             STATUS * self.ui_scale
         } else {
             0.
@@ -5620,19 +5640,17 @@ impl Panels {
                 .min((size.height - (80. * self.ui_scale)).max(0.)),
         };
         self.panel_bounds = Rect {
-            x: side,
-            y: size.height
-                - if self.chrome {
-                    STATUS * self.ui_scale
-                } else {
-                    0.
-                }
-                - bottom,
+            x: editor_x,
+            y: size.height - status - bottom,
             width: (size.width - side).max(1.),
             height: bottom,
         };
         self.side_bounds = Rect {
-            x: 0.,
+            x: if self.sidebar_on_right {
+                size.width - side
+            } else {
+                0.
+            },
             y: (30. * self.ui_scale),
             width: side,
             height: (size.height - (30. * self.ui_scale) - status).max(1.),
@@ -5795,7 +5813,7 @@ impl Panels {
         }
         self.tree.focus = self.focus.clone();
         Rect {
-            x: side,
+            x: editor_x,
             y: 0.,
             width: (size.width - side).max(1.),
             height: (size.height - status - bottom).max(32. * self.ui_scale),
@@ -6266,7 +6284,7 @@ impl Panels {
             5,
             "text_area",
             Rect {
-                x: self.side_bounds.width,
+                x: self.panel_bounds.x,
                 y: (30. * self.ui_scale),
                 width: self.size.width - self.side_bounds.width,
                 height: (self.panel_bounds.y - (30. * self.ui_scale)).max(1.),
@@ -6741,7 +6759,7 @@ impl Panels {
                 }
             }
         }
-        if self.chrome {
+        if self.status_visible() {
             let status = self.tree.nodes[&4].rect;
             let status_style = style(4, None, &mut theme);
             theme.surface(&mut layer, &status_style, status, status);
@@ -7404,14 +7422,17 @@ impl Panels {
             return Ok(true);
         }
         self.tree.pointer(point, Some(down));
-        if down && self.overlay.is_none() && self.chrome && contains(self.indentation_rect(), point)
+        if down
+            && self.overlay.is_none()
+            && self.status_visible()
+            && contains(self.indentation_rect(), point)
         {
             self.indentation_choices(workspace);
             return Ok(true);
         }
         if down
             && self.overlay.is_none()
-            && self.chrome
+            && self.status_visible()
             && self
                 .status_item(details::StatusItem::Git)
                 .is_some_and(|rect| contains(rect, point))
@@ -7432,7 +7453,7 @@ impl Panels {
         }
         if down
             && self.overlay.is_none()
-            && self.chrome
+            && self.status_visible()
             && self
                 .status_item(details::StatusItem::Syntax)
                 .is_some_and(|rect| contains(rect, point))
@@ -7627,7 +7648,7 @@ impl Panels {
             self.panel_focused = false;
             self.focus.show(Surface::Panel, false);
         }
-        Ok(self.chrome && point.y >= self.size.height - (STATUS * self.ui_scale))
+        Ok(self.status_visible() && point.y >= self.size.height - (STATUS * self.ui_scale))
     }
     pub fn scroll(&mut self, point: Point, delta: f64) -> bool {
         if self.overlay.is_some() {
@@ -9247,7 +9268,8 @@ impl Panels {
             Some(workspace.translations.tr("Sidebar and Panels").into_owned())
         } else if let Some(tip) = self.panel_tooltip(workspace, point) {
             Some(tip)
-        } else if self.side_visible && point.x >= self.side_bounds.width - 32. {
+        } else if self.side_visible && point.x >= self.side_bounds.x + self.side_bounds.width - 32.
+        {
             self.review_side_path(workspace, point)
                 .and_then(|(path, folder)| workspace.git.badge(&path, folder))
                 .map(|b| crate::git_ui::badge_tooltip(b, &workspace.translations).into_owned())

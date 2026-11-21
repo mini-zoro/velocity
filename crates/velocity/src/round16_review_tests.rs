@@ -120,6 +120,10 @@ fn typing_after_fold_markers_reveals_only_hidden_indentation_endpoints() {
         let mut e = editor(source, syntax);
         let mut v = view();
         e.settings.set(Layer::View, "word_wrap", json!(false));
+        // Include the closing newline so Rust/HTML end at a visible line start.
+        // The indentation fold still ends on a hidden line.
+        e.settings
+            .set(Layer::View, "fold_include_trailing_newline", json!(true));
         e.sync();
         ready(&mut e);
         e.run("fold_by_level", &json!({"level":1})).unwrap();

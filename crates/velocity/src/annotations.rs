@@ -13,7 +13,7 @@ use vel_spell::{DocumentSpelling, Misspelling, SpellChecker};
 use vel_text::Text;
 
 #[path = "fold_state.rs"]
-mod fold_state;
+pub(crate) mod fold_state;
 // Public spelling_selector default (scope facts, not bundled package content):
 // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#system-and-miscellaneous-settings
 pub const SPELLING_SELECTOR: &str = "markup.raw, source string.quoted - punctuation - meta.preprocessor.c.include, source comment - source comment.block.preprocessor, -(source, constant, keyword, storage, support, variable, markup.underline.link, meta.tag)";

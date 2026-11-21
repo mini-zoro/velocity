@@ -4,6 +4,8 @@ use std::{ffi::c_void, time::Instant};
 #[derive(Clone, Debug)]
 pub struct WindowHandle;
 impl WindowHandle {
+    /// No native pointer exists on this platform.
+    pub fn hide_pointer_until_motion(&self) {}
     /// Without a native preference, use overlay scrollbars.
     pub fn prefers_overlay_scrollers(&self) -> bool {
         true

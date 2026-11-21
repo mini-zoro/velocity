@@ -1835,6 +1835,13 @@ mod model {
                 ),
                 ("vintage_ctrl_keys", json!([null, true, false])),
                 ("git_diff_target", json!(["index", "head"])),
+                (
+                    "selection_description_column_type",
+                    json!(["display", "character", "utf16", "byte"]),
+                ),
+                ("control_character_style", json!(["hex", "name", "caret"])),
+                ("fold_style", json!(["auto", "indentation"])),
+                ("remember_layout", json!(["auto", true, false])),
             ];
             for (key, values) in contracts {
                 assert_eq!(&meta[key]["choices"], values, "{key}");

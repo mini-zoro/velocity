@@ -6,6 +6,7 @@
   {"caption":"-"},
   {"caption":"Copy Full Path","command":"copy_file_path"},
   {"caption":"Reveal in Finder","command":"reveal_in_finder"},
+  {"caption":"Open Terminal","command":"open_terminal"},
   {"caption":"Find in This Folder…","command":"side_bar_find_in_folder"},
   {"caption":"Detach Project Folder","command":"side_bar_remove_folder"},
   {"id":"velocity_dynamic"}

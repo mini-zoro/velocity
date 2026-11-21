@@ -247,6 +247,10 @@ pub trait AppHandler: 'static {
     fn activate_on_open(&self) -> bool {
         true
     }
+    /// Whether the editor view handles a click that activates an inactive window.
+    fn accepts_first_mouse(&self) -> bool {
+        false
+    }
     /// Initialize the renderer while the native window is still hidden.
     fn on_start(&mut self, _window: &WindowHandle) -> Result<(), String> {
         Ok(())

@@ -44,6 +44,10 @@
     "command": "reveal_in_side_bar"
   },
   {
+    "caption": "Open Terminal",
+    "command": "open_terminal"
+  },
+  {
     "caption": "Reveal in Finder",
     "command": "reveal_in_finder"
   }

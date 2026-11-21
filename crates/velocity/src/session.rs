@@ -74,6 +74,23 @@ pub struct Policy {
     pub quitting: bool,
     pub remember: bool,
     pub closing: bool,
+    pub project_hot_exit: bool,
+    pub remember_layout: bool,
+}
+
+/// Collapse the groups without reordering tabs or changing the focused document.
+pub(crate) fn forget_layout(workbench: &mut vel_ui::workbench::Workbench) -> Result<(), String> {
+    if workbench.groups.len() > 1 {
+        let focused = workbench
+            .groups
+            .get(workbench.active)
+            .and_then(|g| g.focused);
+        workbench.set_layout(Default::default())?;
+        if let Some(focused) = focused {
+            workbench.groups[0].click(focused, false, false);
+        }
+    }
+    Ok(())
 }
 #[derive(Debug)]
 pub struct Sessions {
@@ -269,18 +286,29 @@ impl Sessions {
         } else {
             policy.hot
         };
-        self.publish_application(hot, policy.quitting, policy.remember)?;
-        self.publish_project(window, documents, hot, policy.quitting, policy.remember)
+        self.publish_application(
+            hot,
+            policy.quitting,
+            policy.remember,
+            policy.remember_layout,
+        )?;
+        self.publish_project(window, documents, Policy { hot, ..policy })
     }
     fn publish_application(
         &self,
         hot: HotExit,
         quitting: bool,
         remember: bool,
+        remember_layout: bool,
     ) -> Result<(), String> {
         if let Some(writer) = &self.writer {
             let mut session = self.collect(self.recent.clone());
             session.apply_policy(hot, quitting, remember);
+            if !remember_layout {
+                for window in &mut session.windows {
+                    forget_layout(&mut window.workbench)?;
+                }
+            }
             writer.changed(session)?;
         }
         Ok(())
@@ -289,9 +317,7 @@ impl Sessions {
         &mut self,
         window: Window,
         documents: Vec<Document>,
-        hot: HotExit,
-        quitting: bool,
-        remember: bool,
+        policy: Policy,
     ) -> Result<(), String> {
         if self.persist_project_workspaces
             && let Some(project) = &window.project
@@ -312,7 +338,17 @@ impl Sessions {
                 documents,
                 ..Session::default()
             };
-            session.apply_policy(hot, quitting, remember);
+            let hot = if policy.project_hot_exit {
+                policy.hot
+            } else {
+                HotExit::Disabled
+            };
+            session.apply_policy(hot, policy.quitting, policy.remember);
+            if !policy.remember_layout {
+                for window in &mut session.windows {
+                    forget_layout(&mut window.workbench)?;
+                }
+            }
             self.workspaces[&path].changed(session)?;
         }
         Ok(())
@@ -321,8 +357,7 @@ impl Sessions {
         &mut self,
         mut window: Window,
         documents: Vec<Document>,
-        hot: HotExit,
-        remember: bool,
+        policy: Policy,
     ) -> Result<(), String> {
         let path = vel_session::project::workspace_path(
             window
@@ -333,7 +368,14 @@ impl Sessions {
         repair_window(&mut window, &documents);
         // A project workspace is independent of the application session. On macOS
         // either enabled Hot Exit mode can retain project changes here.
-        self.publish_project(window, documents, hot, true, remember)?;
+        self.publish_project(
+            window,
+            documents,
+            Policy {
+                quitting: true,
+                ..policy
+            },
+        )?;
         self.workspaces
             .get(&path)
             .ok_or("No project workspace writer")?
@@ -470,6 +512,7 @@ impl Sessions {
         id: u64,
         hot: HotExit,
         remember: bool,
+        remember_layout: bool,
         files: impl IntoIterator<Item = PathBuf>,
     ) -> Result<(), String> {
         self.live.remove(&id);
@@ -494,6 +537,7 @@ impl Sessions {
             },
             false,
             remember,
+            remember_layout,
         )?;
         if let Some(writer) = &self.writer {
             writer.flush()?;
@@ -592,6 +636,8 @@ mod tests {
             quitting: true,
             remember: true,
             closing: false,
+            project_hot_exit: true,
+            remember_layout: true,
         };
         let (window, documents) = snapshot_text("first dirty");
         sessions
@@ -678,6 +724,8 @@ mod tests {
                     hot: HotExit::Always,
                     quitting: false,
                     closing: false,
+                    project_hot_exit: true,
+                    remember_layout: true,
                     remember: true,
                 },
             )
@@ -733,6 +781,8 @@ mod tests {
                     hot: HotExit::Always,
                     quitting: false,
                     closing: false,
+                    project_hot_exit: true,
+                    remember_layout: true,
                     remember: true,
                 },
             )
@@ -748,6 +798,8 @@ mod tests {
                     hot: HotExit::Always,
                     quitting: false,
                     closing: false,
+                    project_hot_exit: true,
+                    remember_layout: true,
                     remember: true,
                 },
             )
@@ -762,14 +814,14 @@ mod tests {
             recovered.session.recent_files,
             vec![PathBuf::from("recent-b"), PathBuf::from("recent-a")]
         );
-        sessions.close(a, HotExit::Always, true, []).unwrap();
+        sessions.close(a, HotExit::Always, true, true, []).unwrap();
         assert_eq!(sessions.active_window, Some(b));
         let recovered = vel_session::load(&path);
         assert_eq!(recovered.session.windows.len(), 1);
         assert_eq!(recovered.session.documents.len(), 1);
         assert!(recovered.session.documents[0].dirty);
         assert!(!recovered.session.windows[0].retained_closed);
-        sessions.close(b, HotExit::Always, true, []).unwrap();
+        sessions.close(b, HotExit::Always, true, true, []).unwrap();
         assert_eq!(sessions.active_window, None);
         assert!(vel_session::load(&path).session.windows.is_empty());
     }
@@ -790,6 +842,8 @@ mod tests {
                         hot,
                         quitting: false,
                         closing: false,
+                        project_hot_exit: true,
+                        remember_layout: true,
                         remember: true,
                     },
                 )
@@ -800,7 +854,7 @@ mod tests {
                 !recovered.session.documents.is_empty(),
                 hot == HotExit::OnlyOnQuit
             );
-            sessions.close(id, hot, true, []).unwrap();
+            sessions.close(id, hot, true, true, []).unwrap();
             sessions.flush().unwrap();
             assert!(
                 vel_session::load(&dir.path().join("Sessions/Session.sublime-session"))
@@ -833,6 +887,8 @@ mod round15_tests {
             quitting: false,
             remember: true,
             closing: false,
+            project_hot_exit: true,
+            remember_layout: true,
         };
         for id in [first, second] {
             sessions
@@ -897,6 +953,8 @@ mod round15_tests {
             quitting: false,
             remember: true,
             closing: true,
+            project_hot_exit: true,
+            remember_layout: true,
         };
         sessions
             .publish(id, window, documents, Default::default(), policy)
@@ -974,6 +1032,8 @@ mod review15_tests {
                     hot: HotExit::Always,
                     quitting: true,
                     closing: false,
+                    project_hot_exit: true,
+                    remember_layout: true,
                     remember: true,
                 },
             )

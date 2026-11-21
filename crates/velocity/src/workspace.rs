@@ -470,6 +470,19 @@ impl Tab {
                 if !self.editor.settings.bool("set_unsaved_view_name", true) {
                     return untitled.into();
                 }
+                if !self
+                    .editor
+                    .settings
+                    .bool("set_unsaved_view_name_for_syntax", true)
+                    && self
+                        .editor
+                        .language
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|l| l.name != "Plain Text")
+                {
+                    return untitled.into();
+                }
                 let name: String = self
                     .editor
                     .text
@@ -2367,14 +2380,20 @@ impl Workspace {
         }
         self.tabs
             .push(Tab::new(text, &self.settings, &self.keymap)?);
-        self.workbench.groups[self.workbench.active]
-            .add(self.tabs.last().expect("tab").sheet, false);
         self.active = self.tabs.len() - 1;
+        self.insert_opened_sheet(self.workbench.active, self.tabs[self.active].sheet);
         // An untitled buffer is already loaded; it has no disk indentation to detect.
         self.tabs[self.active].needs_detection = false;
         self.tabs[self.active].indentation_initialized = true;
         self.configure_language(self.active, None, false)?;
         Ok(())
+    }
+    pub(crate) fn insert_opened_sheet(&mut self, group: usize, sheet: u64) {
+        if self.settings.bool("open_tabs_after_current", false) {
+            self.workbench.groups[group].add_after_current(sheet);
+        } else {
+            self.workbench.groups[group].add(sheet, false);
+        }
     }
     pub(crate) fn open_file_argument(&mut self, argument: &str) -> Result<(), String> {
         let res = argument.strip_prefix("res://").unwrap_or(argument);
@@ -2489,6 +2508,50 @@ impl Workspace {
         }
         self.open_mode(location, true)
     }
+    pub(crate) fn open_from_sidebar(
+        &mut self,
+        location: FileLocation,
+        permanent: bool,
+    ) -> Result<(), String> {
+        let _request = self.navigation_request();
+        // D4126: the legacy single-file sidebar selection may switch groups.
+        if !self.settings.bool("select_across_groups", false) {
+            let group = self.workbench.active;
+            let path = absolute(&location.path)?;
+            let mut matches = self.tabs.iter().enumerate().filter(|(_, tab)| {
+                tab.path.as_ref() == Some(&path) && self.workbench.group_of(tab.sheet).is_some()
+            });
+            if let Some((first, tab)) = matches.next() {
+                let in_group = |tab: &Tab| self.workbench.group_of(tab.sheet) == Some(group);
+                if let Some(index) = if in_group(tab) {
+                    Some(first)
+                } else {
+                    matches
+                        .find(|(_, tab)| in_group(tab))
+                        .map(|(index, _)| index)
+                } {
+                    self.select(index);
+                } else {
+                    self.observe_navigation();
+                    self.clone_file_into_group(first, group)?;
+                    let clone = &mut self.tabs[self.active];
+                    clone.transient = !permanent;
+                    clone.preview_recent_pending = !permanent;
+                }
+                if permanent {
+                    self.make_permanent(self.active);
+                    self.remember_goto_file();
+                }
+                self.observe_navigation();
+                return Ok(());
+            }
+        }
+        if permanent {
+            self.open(location)
+        } else {
+            self.preview(location)
+        }
+    }
     fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
         self.materialize_input();
         let path = absolute(&location.path)?;
@@ -2576,7 +2639,7 @@ impl Workspace {
             self.active = self.tabs.len() - 1;
         }
         self.empty = false;
-        self.workbench.groups[self.workbench.active].add(self.tabs[self.active].sheet, false);
+        self.insert_opened_sheet(self.workbench.active, self.tabs[self.active].sheet);
         if !preview {
             crate::workbench::remember(&mut self.recent_files, path);
         }
@@ -4850,6 +4913,8 @@ mod review15_tests {
                         hot: vel_session::HotExit::Always,
                         quitting: true,
                         closing: false,
+                        project_hot_exit: true,
+                        remember_layout: true,
                         remember: true,
                     },
                 )

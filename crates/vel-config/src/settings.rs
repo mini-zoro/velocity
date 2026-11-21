@@ -281,9 +281,11 @@ pub fn validate_layer(
             | "auto_find_in_selection"
             | "open_files_in_new_window"
             | "hot_exit"
+            | "remember_layout"
             | "auto_complete_preserve_order"
             | "preview_on_click"
             | "trim_trailing_white_space_on_save" => &["a boolean", "a string"],
+            "terminal_command" => &["an array", "a string"],
             "scroll_past_end" => &["a boolean", "a number"],
             "rulers" => &["an array", "a number"],
             "draw_white_space" | "default_completions_selector" | "auto_complete_selector" => {
