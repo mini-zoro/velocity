@@ -55,6 +55,96 @@ fn restored_app(root: &Path, profile: &Profile, window: &vel_session::Window, id
     app
 }
 
+fn cmd_w(app: &mut App) {
+    assert!(app.dispatch_key_binding(
+        None,
+        &vel_config::keymap::Key::parse("super+w").unwrap(),
+        Instant::now(),
+        0..0,
+    ));
+}
+
+#[test]
+fn r32_cmd_w_closes_anonymous_window_without_quitting_or_restoring_it() {
+    for hot in ["always", "only_on_quit", "disabled"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let profile = sessions(root);
+        let mut a = app(root, &profile, None);
+        a.workspace
+            .settings
+            .set(Layer::User, "hot_exit", json!(hot));
+        a.workspace
+            .open(location(&fixture_file(root, "closed.txt")))
+            .unwrap();
+        a.checkpoint(false).unwrap();
+        let old_id = a.session_id;
+
+        cmd_w(&mut a);
+        assert!(a.empty_close_requested && a.workspace.is_empty(), "{hot}");
+        // Complete the requested native close without running a native loop.
+        assert!(a.prepare_window_close(None), "{hot}");
+        assert!(!a.done.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(profile.borrow().active_window.is_none());
+        profile.borrow().flush().unwrap();
+        let disk = vel_session::load(&session_path(root)).session;
+        assert!(
+            disk.windows.is_empty() && disk.documents.is_empty(),
+            "{hot}"
+        );
+
+        // Dock reopen and File > New Window use the same builder with different
+        // new-window settings policies.
+        for new_window in [false, true] {
+            let mut fresh = a.window_app(None, None, new_window).unwrap();
+            assert_ne!(fresh.session_id, old_id);
+            assert_eq!(fresh.workspace.tabs.len(), 1);
+            assert!(fresh.workspace.tabs[0].path.is_none());
+            assert!(fresh.workspace.folders.is_empty());
+            assert!(fresh.workspace.project_path().is_none());
+            assert_eq!(fresh.workspace.editor().text, "");
+            assert!(fresh.prepare_window_close(None));
+        }
+    }
+}
+
+#[test]
+fn r32_cmd_w_default_keeps_project_windows_and_prompts_before_closing_dirty_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("empty.sublime-project");
+    fs::write(&path, "{}").unwrap();
+    let mut named = app(root, &sessions(root), Some(path.clone()));
+    cmd_w(&mut named);
+    assert!(named.workspace.is_empty() && !named.empty_close_requested);
+
+    fs::write(&path, r#"{"folders":[{"path":"."}]}"#).unwrap();
+    let mut folders = app(root, &sessions(root), None);
+    folders
+        .panels
+        .add_folder(&mut folders.workspace, root.to_owned())
+        .unwrap();
+    assert!(folders.workspace.project_path().is_none());
+    cmd_w(&mut folders);
+    assert!(folders.workspace.is_empty() && !folders.empty_close_requested);
+
+    let mut dirty = app(root, &sessions(root), None);
+    dirty.run_named(None, "insert", &json!({"characters":"unsaved"}));
+    dirty
+        .close_decisions
+        .push_back(tab_adapter::CloseDecision::Cancel);
+    cmd_w(&mut dirty);
+    assert!(dirty.close_decisions.is_empty());
+    assert!(!dirty.empty_close_requested);
+    assert_eq!(dirty.workspace.editor().text, "unsaved");
+    dirty
+        .close_decisions
+        .push_back(tab_adapter::CloseDecision::Discard);
+    cmd_w(&mut dirty);
+    assert!(dirty.close_decisions.is_empty());
+    assert!(dirty.empty_close_requested && dirty.workspace.is_empty());
+}
+
 #[test]
 fn closing_clean_window_then_quitting_only_restores_survivor_and_keeps_reopen_path() {
     let root = tempfile::tempdir().unwrap();

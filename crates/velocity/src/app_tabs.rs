@@ -18,7 +18,7 @@ impl App {
         let saved = match self.save_tab_with_path(window, index, false, path) {
             Ok(saved) => saved,
             Err(error) => {
-                self.save_status(error);
+                self.save_failure(window, error);
                 false
             }
         };

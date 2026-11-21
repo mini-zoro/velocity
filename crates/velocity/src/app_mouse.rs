@@ -65,6 +65,8 @@ impl App {
             self.external_input += 1;
             return;
         }
+        self.panels.primary_click = event.modifiers.command();
+        self.panels.alternate_click = event.modifiers.option();
         if event.kind == MouseKind::Move {
             // Hover feedback for the theme-drawn tab close and tab-bar buttons.
             let close = self
@@ -250,7 +252,6 @@ impl App {
             return;
         }
         let viewport = self.viewport();
-        self.panels.primary_click = event.modifiers.command();
         // Picker previews restore the tab's stored scroll; capture the live viewport first.
         let active = self.workspace.active;
         self.workspace.tabs[active].scroll = (self.view.scroll_x, self.view.scroll_y);
@@ -342,11 +343,15 @@ impl App {
                         (self.view.scroll_x, self.view.scroll_y);
                     self.workspace.tabs[self.workspace.active].scroll_line_height =
                         self.view.line_height;
-                    self.workspace.click_sheet(
-                        index,
-                        event.modifiers.command(),
-                        event.modifiers.shift(),
-                    );
+                    if event.modifiers.option() && !event.modifiers.shift() {
+                        self.workspace.replace_focused_sheet(index);
+                    } else {
+                        self.workspace.click_sheet(
+                            index,
+                            event.modifiers.command(),
+                            event.modifiers.shift(),
+                        );
+                    }
                     self.panels.dragging_tab = Some(index);
                     self.tab_click = Some((event.position, sheet));
                     if event.click_count >= 2 {

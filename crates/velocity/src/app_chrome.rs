@@ -1,5 +1,8 @@
 //! Theme-drawn tab controls and their native/headless pointer actions.
 use super::*;
+
+const TAB_DROPDOWN: &str = "tab_dropdown_button";
+
 impl App {
     pub(super) fn paint_tab_buttons(
         &mut self,
@@ -12,6 +15,29 @@ impl App {
         let settings = &self.workspace.editor().settings;
         let mut theme = self.workspace.themes.ui.borrow_mut();
         let mut right = bar.x + bar.width;
+        if count > 1 && bar.width >= 60. {
+            let rect = Rect {
+                x: right - 24.,
+                width: 24.,
+                ..bar
+            };
+            let hovered = self.hovered_tab_button == Some((group, TAB_DROPDOWN));
+            let path = [
+                vel_theme::Element::new("window", &[]),
+                vel_theme::Element::new("tabset_control", &[]),
+                vel_theme::Element::new("tab_label", if hovered { &["hover"] } else { &[] }),
+            ];
+            let style = theme.style(
+                crate::panels::StyleId::TabBarButton.at(group as u64 * 4 + 3),
+                &vel_theme::ElementPath(&path),
+                settings,
+            );
+            let icon = "▾";
+            let x = rect.x + (rect.width - theme.advance(&style, icon)) / 2.;
+            theme.text(layer, &style, icon, x, rect.y + rect.height / 2. + 4., rect);
+            self.tab_button_hits.push((group, TAB_DROPDOWN, rect));
+            right = rect.x;
+        }
         let key = (
             std::rc::Rc::as_ptr(&self.workspace.themes.ui) as usize,
             theme.revision,
@@ -102,7 +128,7 @@ impl App {
         if event.kind != MouseKind::Down || event.button != 0 {
             return false;
         }
-        let Some((group, class, _)) = self
+        let Some((group, class, rect)) = self
             .tab_button_hits
             .iter()
             .copied()
@@ -110,7 +136,9 @@ impl App {
         else {
             return false;
         };
-        if class == "new_tab_button" {
+        if class == TAB_DROPDOWN {
+            self.panels.tab_dropdown(&mut self.workspace, group, rect);
+        } else if class == "new_tab_button" {
             self.workspace.workbench.active = group;
             self.run_named(window, "new_file", &json!({}));
         } else if let Some((_, bar, max)) = self.tab_bars.iter().find(|(g, _, _)| *g == group) {

@@ -457,13 +457,11 @@ impl Actions {
                 }
             }
             Err(error) => {
-                panels.message = error.clone().into();
-                Dialog::new(
-                    UiText::tr("Velocity package / release action"),
-                    error,
-                    [UiText::tr("OK")],
-                )
-                .show(&workspace.translations, w);
+                panels.note_console(&error);
+                panels.set_message(UiText::tr_fmt(
+                    "Package or release action failed: {detail}",
+                    [("detail", error)],
+                ));
             }
         }
         true

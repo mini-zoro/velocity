@@ -244,6 +244,16 @@ impl Input {
     pub fn composing(&self) -> bool {
         self.composition.is_some()
     }
+    /// Whether Right would have no text selection to collapse or caret movement left.
+    pub fn caret_at_end(&self) -> bool {
+        self.buffer
+            .view(self.view)
+            .sel()
+            .primary()
+            .is_some_and(|region| {
+                region.a == region.b && region.b == self.buffer.text().len_bytes()
+            })
+    }
     /// Executes editing/history/clipboard commands through vel-commands.
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
         self.commit_composition();

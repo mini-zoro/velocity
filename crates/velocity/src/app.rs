@@ -27,6 +27,9 @@ mod round21_lane_b_tests;
 #[cfg(test)]
 #[path = "app_round26_settings_tests.rs"]
 mod round26_settings_tests;
+#[cfg(test)]
+#[path = "app_round32_lane_b_tests.rs"]
+mod round32_lane_b_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
@@ -134,6 +137,8 @@ pub struct App {
     close_decisions: std::collections::VecDeque<tab_adapter::CloseDecision>,
     #[cfg(test)]
     overwrite_decisions: std::collections::VecDeque<bool>,
+    #[cfg(test)]
+    data_loss_dialogs: Vec<Dialog>,
     #[cfg(test)]
     open_file_choices: Option<Vec<PathBuf>>,
     pending_menu: Option<context_adapter::PendingMenu>,
@@ -320,6 +325,8 @@ impl App {
             close_decisions: Default::default(),
             #[cfg(test)]
             overwrite_decisions: Default::default(),
+            #[cfg(test)]
+            data_loss_dialogs: Vec::new(),
             #[cfg(test)]
             open_file_choices: None,
             pending_menu: None,
@@ -603,11 +610,18 @@ impl App {
                     .save_closing_project(snapshot, docs, hot, remember)
             });
             if let Err(error) = result {
-                if let Some(window) = window {
-                    self.show_error(
-                        window,
-                        &format!("Could not save project workspace: {error}"),
-                    );
+                let message = UiText::tr_fmt(
+                    "Could not save project workspace: {detail}",
+                    [("detail", error)],
+                );
+                if project_hot_exit
+                    && indices
+                        .iter()
+                        .any(|&i| self.needs_document_close_decision(i))
+                {
+                    self.data_loss_error(window, message);
+                } else {
+                    self.status_error(message);
                 }
                 if project_hot_exit && !self.can_close_many(window, &indices) {
                     return false;
@@ -664,7 +678,10 @@ impl App {
                     .iter()
                     .any(|t| t.dirty() || (t.path.is_none() && t.editor.text.len_bytes() > 0))
                 {
-                    self.save_status(format!("Could not save Hot Exit session: {error}. Save documents or repair the data directory before quitting."));
+                    self.data_loss_error(window, UiText::tr_fmt(
+                        "Could not save Hot Exit session: {detail}. Save documents or repair the data directory before quitting.",
+                        [("detail", error)],
+                    ));
                     return false;
                 }
                 self.panels.message = error.into();
@@ -693,6 +710,26 @@ impl App {
         reserved_id: Option<u64>,
         use_new_window_settings: bool,
     ) -> Result<(WindowHandle, u64), String> {
+        let app = self.window_app(restored, reserved_id, use_new_window_settings)?;
+        let id = app.session_id;
+        w.new_window(
+            WindowOptions {
+                title: "Velocity".into(),
+                size: Size {
+                    width: app.options.width as f64,
+                    height: app.options.height as f64,
+                },
+            },
+            app,
+        )
+        .map(|window| (window, id))
+    }
+    fn window_app(
+        &self,
+        restored: Option<vel_session::Window>,
+        reserved_id: Option<u64>,
+        use_new_window_settings: bool,
+    ) -> Result<Self, String> {
         let project = restored.as_ref().and_then(|s| s.project.clone());
         let data = self.workspace.data_path().map(Path::to_owned);
         let mut workspace = if use_new_window_settings {
@@ -727,18 +764,7 @@ impl App {
         if let Some(id) = reserved_id {
             app.restore_session_id(id);
         }
-        let id = app.session_id;
-        w.new_window(
-            WindowOptions {
-                title: "Velocity".into(),
-                size: Size {
-                    width: options.width as f64,
-                    height: options.height as f64,
-                },
-            },
-            app,
-        )
-        .map(|window| (window, id))
+        Ok(app)
     }
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         self.poll_restore_safety(w);
@@ -1041,21 +1067,13 @@ impl App {
             self.run_named(w, &command.name, &command.args);
         }
     }
-    fn show_error(&mut self, w: &WindowHandle, message: &str) {
-        self.panels.note_console(message);
+    fn status_error(&mut self, mut message: UiText) {
+        message.refresh(&self.workspace.translations);
+        self.panels.note_console(&message);
         let _ = self
             .reporter
-            .emit(json!({"kind":"editor_error","message":message}));
-        if message.contains("only regular files can be used as documents") {
-            self.panels.message = message.to_owned().into();
-        } else {
-            Dialog::new(
-                UiText::tr("Velocity Error"),
-                UiText::command_error(message),
-                [UiText::tr("OK")],
-            )
-            .show(&self.workspace.translations, w);
-        }
+            .emit(json!({"kind":"editor_error","message":message.as_str()}));
+        self.panels.set_message(message);
     }
     fn publish_resource_reports(&mut self) {
         let reports = self.workspace.take_resource_reports();
@@ -1066,11 +1084,36 @@ impl App {
             }
         }
     }
-    fn save_status(&mut self, message: String) {
+    fn data_loss_error(&mut self, window: Option<&WindowHandle>, mut message: UiText) {
+        message.refresh(&self.workspace.translations);
+        self.panels.note_console(&message);
         let _ = self
             .reporter
-            .emit(json!({"kind":"save_diagnostic","message":message}));
-        self.panels.set_message(message);
+            .emit(json!({"kind":"save_diagnostic","message":message.as_str()}));
+        let mut dialog = Dialog::new(UiText::tr("Velocity Error"), message, [UiText::tr("OK")]);
+        if let Some(window) = window {
+            dialog.show(&self.workspace.translations, window);
+        } else {
+            dialog.localize(&self.workspace.translations);
+            #[cfg(test)]
+            self.data_loss_dialogs.push(dialog);
+        }
+    }
+    fn save_failure(&mut self, window: Option<&WindowHandle>, error: String) {
+        // The save dispatcher also reports preflight rejections. Those have
+        // not attempted a write, even when collected by Save All.
+        if error.lines().all(|line| {
+            line.ends_with("document is read only")
+                || line.ends_with("binary/hex documents cannot be saved as text")
+                || line.ends_with("only regular files can be used as documents")
+        }) {
+            self.named_error(window, &error);
+        } else {
+            self.data_loss_error(
+                window,
+                UiText::tr_fmt("Could not save: {detail}", [("detail", error)]),
+            );
+        }
     }
     fn sync_workspace_after_panels(&mut self) {
         // Panels temporarily protect a sidebar preview by clearing transient.
@@ -1475,7 +1518,7 @@ impl App {
                 .workspace
                 .editor()
                 .settings
-                .bool("close_windows_when_empty", false)
+                .bool("close_windows_when_empty", true)
     }
     fn close_empty_window(&mut self, window: Option<&WindowHandle>) {
         if self.should_close_empty_window() {
@@ -1726,10 +1769,9 @@ impl App {
         }
     }
     fn named_error(&mut self, window: Option<&WindowHandle>, message: &str) {
+        self.status_error(UiText::command_error(message));
         if let Some(window) = window {
-            self.show_error(window, message);
-        } else {
-            self.panels.set_message(UiText::command_error(message));
+            window.request_frame();
         }
     }
     fn named_changed(&mut self, window: Option<&WindowHandle>, reveal: bool) {
@@ -2008,7 +2050,7 @@ impl App {
             Ok(saved) => saved,
             Err(error) => {
                 if !self.offer_utf8_save(index, None, &error) {
-                    self.save_status(error);
+                    self.save_failure(Some(w), error);
                 }
                 false
             }
@@ -2257,7 +2299,7 @@ impl App {
                 }
                 self.next_utf8_save();
                 if !failures.is_empty() {
-                    self.save_status(failures.join("\n"));
+                    self.save_failure(window, failures.join("\n"));
                 }
             }
             "save" | "save_encoding" | "save_and_close" | "save_as" | "prompt_save_as" => {
@@ -2294,7 +2336,7 @@ impl App {
                                 self.workspace.tabs[active].encoding_chosen = previous.1;
                                 self.workspace.tabs[active].preferred_encoding = previous.2.clone();
                                 if !self.offer_utf8_save(active, path, &error) {
-                                    self.save_status(error);
+                                    self.save_failure(window, error);
                                 }
                                 false
                             }
@@ -2431,7 +2473,7 @@ impl App {
                 match self.save_tab_with_path(window, index, false, path) {
                     Ok(saved) => Ok(saved),
                     Err(error) => {
-                        self.save_status(error);
+                        self.save_failure(window, error);
                         Ok(false)
                     }
                 }
@@ -2695,7 +2737,7 @@ impl App {
                 }
             }
             if !errors.is_empty() {
-                self.save_status(errors.join("\n"));
+                self.save_failure(window, errors.join("\n"));
             }
             return Ok(());
         }
@@ -2929,8 +2971,9 @@ impl App {
                     .as_str()
                     .map(std::path::PathBuf::from)
                     .or_else(|| self.choose_save_path(w, "project.sublime-project", None))
+                    && let Err(error) = self.workspace.save_project_as(path)
                 {
-                    self.workspace.save_project_as(path)?;
+                    self.save_failure(Some(w), error);
                 }
                 return Ok(());
             }
@@ -3063,6 +3106,18 @@ impl App {
         Ok(())
     }
     fn select_tab_action(&mut self, name: &str, args: &Value) -> bool {
+        if name == "select_by_index"
+            && let Some(sheet) = args["_dropdown_sheet"].as_u64()
+        {
+            if let Some(index) = self.workspace.sheet_index(sheet) {
+                if args["_replace_focused"] == true {
+                    self.workspace.replace_focused_sheet(index);
+                } else {
+                    self.workspace.select(index);
+                }
+            }
+            return true;
+        }
         let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
         let sheet = match name {
             // https://docs.sublimetext.io/reference/commands.html
@@ -4639,7 +4694,7 @@ impl AppHandler for App {
                 let mut request = match crate::instance::Request::new(&Options::default(), None) {
                     Ok(request) => request,
                     Err(e) => {
-                        self.show_error(w, &e);
+                        self.named_error(Some(w), &e);
                         return;
                     }
                 };
@@ -4685,13 +4740,13 @@ impl AppHandler for App {
                 if (request.project.is_some() || !request.files.is_empty())
                     && let Err(e) = self.open_native_window_request(w, request)
                 {
-                    self.show_error(w, &e);
+                    self.named_error(Some(w), &e);
                 }
                 return;
             }
             match serde_json::from_str(args) {
                 Ok(args) => self.run_named(Some(w), name, &args),
-                Err(e) => self.show_error(w, &e.to_string()),
+                Err(e) => self.named_error(Some(w), &e.to_string()),
             }
         }
     }
@@ -4702,20 +4757,20 @@ impl AppHandler for App {
         let request = match crate::open_requests::native_request(paths) {
             Ok(request) => request,
             Err(error) => {
-                self.show_error(w, &error);
+                self.named_error(Some(w), &error);
                 return;
             }
         };
         self.publish_open_route();
         if let Err(error) = self.receive_request(w, crate::instance::Incoming::local(request)) {
-            self.show_error(w, &error);
+            self.named_error(Some(w), &error);
         }
     }
     fn on_reopen(&mut self, w: &WindowHandle) {
         if self.options.mode == Mode::Interactive
             && let Err(error) = self.open_native_window(w, None, None, false)
         {
-            self.show_error(w, &error);
+            self.named_error(Some(w), &error);
         }
     }
     fn on_idle(&mut self, w: &WindowHandle) {
@@ -4733,7 +4788,7 @@ impl AppHandler for App {
             // There is no live key window; route this request into a fresh one.
             incoming.request.new_window = true;
             if let Err(error) = self.receive_request(w, incoming) {
-                self.show_error(w, &error);
+                self.named_error(Some(w), &error);
             }
         }
     }
@@ -4900,7 +4955,7 @@ impl AppHandler for App {
             }
             Ok((false, _)) => {}
             Err(error) => {
-                self.show_error(w, &error);
+                self.named_error(Some(w), &error);
                 return;
             }
         }
@@ -4974,7 +5029,7 @@ impl AppHandler for App {
             .workspace
             .set_appearance(appearance == Appearance::Dark)
         {
-            self.show_error(w, &e);
+            self.named_error(Some(w), &e);
         }
         w.request_frame();
     }
@@ -5153,7 +5208,8 @@ impl AppHandler for App {
                 self.workspace.reload_external(index, reload);
             }
             for message in std::mem::take(&mut self.workspace.messages) {
-                self.show_error(w, &message);
+                self.status_error(UiText::command_error(&message));
+                changed = true;
             }
             let caret_animation = self
                 .workspace
@@ -5199,7 +5255,7 @@ impl AppHandler for App {
                         .ok_or("renderer missing")?
                         .reset_fonts();
                 }
-                Err(error) => self.show_error(w, &error),
+                Err(error) => self.named_error(Some(w), &error),
             }
             self.font_face = name;
         }

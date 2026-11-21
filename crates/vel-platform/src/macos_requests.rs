@@ -185,11 +185,8 @@ pub(super) fn drain() {
                     }
                 });
                 if let Err(error) = result {
-                    let mtm = MainThreadMarker::new().expect("main-thread callback");
-                    let alert = NSAlert::new(mtm);
-                    alert.setMessageText(&NSString::from_str("Could not open a window"));
-                    alert.setInformativeText(&NSString::from_str(&error));
-                    alert.runModal();
+                    // No window exists to host status feedback yet.
+                    eprintln!("Could not open a window: {error}");
                 }
             }
             live = live_hosts();

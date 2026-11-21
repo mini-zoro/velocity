@@ -352,6 +352,13 @@ struct FindIdentity {
     options: text::Options,
     in_selection: bool,
 }
+#[derive(Debug)]
+struct GotoHighlights {
+    snapshot: FindSnapshot,
+    query: vel_buffer::ChangeId,
+    ranges: Vec<Range<usize>>,
+    accepted: bool,
+}
 #[derive(Debug, PartialEq, Eq)]
 struct FilesIdentity {
     query: String,
@@ -369,6 +376,24 @@ pub struct SideRow {
 #[derive(Debug)]
 enum Local {
     Words(u64, Vec<(String, usize)>),
+}
+
+fn each_goto_word(text: &vel_text::Text, mut visit: impl FnMut(&str, usize)) {
+    for (row, line) in text.lines().enumerate() {
+        let offset = text.line_to_byte(row);
+        let text = line.to_string();
+        let mut start = None;
+        for (i, c) in text
+            .char_indices()
+            .chain(std::iter::once((text.len(), ' ')))
+        {
+            if c.is_alphanumeric() || c == '_' {
+                start.get_or_insert(i);
+            } else if let Some(begin) = start.take() {
+                visit(&text[begin..i], offset + begin);
+            }
+        }
+    }
 }
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
@@ -441,6 +466,7 @@ pub struct Panels {
     pub side_rows: Vec<SideRow>,
     tree_motion: Option<(Instant, BTreeMap<PathBuf, f64>)>,
     pub primary_click: bool,
+    pub alternate_click: bool,
     pub build_results: Vec<(usize, FileLocation)>,
     pub build_output_offset: usize,
     pub find_history: Vec<String>,
@@ -526,6 +552,8 @@ pub struct Panels {
     uses: u64,
     preview: Option<Preview>,
     last_preview: Option<(PathBuf, Target)>,
+    goto_highlights: Option<GotoHighlights>,
+    tab_dropdown_anchor: Option<Rect>,
     preview_symbol_version: Option<(u64, vel_buffer::ChangeId)>,
     project_symbol_source: Vec<(PathBuf, usize, usize, usize)>,
     local_kinds: Vec<vel_index::SymbolKind>,
@@ -629,6 +657,7 @@ impl Default for Panels {
             side_rows: vec![],
             tree_motion: None,
             primary_click: false,
+            alternate_click: false,
             build_results: Vec::new(),
             build_output_offset: 0,
             find_history: Vec::new(),
@@ -705,6 +734,8 @@ impl Default for Panels {
             uses: 0,
             preview: None,
             last_preview: None,
+            goto_highlights: None,
+            tab_dropdown_anchor: None,
             preview_symbol_version: None,
             project_symbol_source: Vec::new(),
             local_kinds: Vec::new(),
@@ -978,6 +1009,24 @@ impl Panels {
         self.prepared.clear();
         self.focus.show(Surface::Overlay, true);
         self.query_quick(workspace);
+    }
+    pub fn tab_dropdown(&mut self, workspace: &mut Workspace, group: usize, rect: Rect) {
+        let items = workspace.workbench.groups[group]
+            .sheets
+            .iter()
+            .filter_map(|&sheet| {
+                let tab = &workspace.tabs[workspace.sheet_index(sheet)?];
+                Some(vel_config::ui::PaletteItem {
+                    caption: tab.ui_name(&workspace.ui),
+                    invocation: Invocation {
+                        command: "select_by_index".into(),
+                        args: json!({"_dropdown_sheet": sheet}),
+                    },
+                })
+            })
+            .collect();
+        self.choices(workspace, items);
+        self.tab_dropdown_anchor = Some(rect);
     }
     fn remember_search(&mut self, include_empty_replace: bool) {
         fn push(history: &mut Vec<String>, value: String) {
@@ -2684,6 +2733,13 @@ impl Panels {
     }
     /// Refuse to paint an older snapshot even before the next worker poll.
     pub fn current_highlights(&self, workspace: &Workspace) -> &[Range<usize>] {
+        if self.overlay == Some(Overlay::Goto)
+            && let Some(highlights) = &self.goto_highlights
+            && highlights.query == self.quick_input.buffer.change_id()
+            && highlights.snapshot == FindSnapshot::current(workspace)
+        {
+            return &highlights.ranges;
+        }
         if self
             .search_identity
             .as_ref()
@@ -3486,22 +3542,7 @@ impl Panels {
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
                         let mut words = Vec::new();
-                        let mut offset = 0;
-                        for line in snapshot.lines() {
-                            let text = line.to_string();
-                            let mut start = None;
-                            for (i, c) in text
-                                .char_indices()
-                                .chain(std::iter::once((text.len(), ' ')))
-                            {
-                                if c.is_alphanumeric() || c == '_' {
-                                    start.get_or_insert(i);
-                                } else if let Some(begin) = start.take() {
-                                    words.push((text[begin..i].into(), offset + begin));
-                                }
-                            }
-                            offset += text.len() + 1;
-                        }
+                        each_goto_word(&snapshot, |word, at| words.push((word.into(), at)));
                         let _ = tx.send(Local::Words(generation, words));
                     });
                     self.local = Some(rx);
@@ -3689,7 +3730,14 @@ impl Panels {
                     } else {
                         String::new()
                     },
-                    details: if palette {
+                    details: if self.tab_dropdown_anchor.is_some() {
+                        self.choice_items[index].invocation.args["_dropdown_sheet"]
+                            .as_u64()
+                            .and_then(|sheet| workspace.sheet_index(sheet))
+                            .and_then(|index| workspace.tabs[index].path.as_ref())
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default()
+                    } else if palette {
                         palette_items[index].invocation.command.clone()
                     } else {
                         self.quick_path(hit.index)
@@ -3776,6 +3824,11 @@ impl Panels {
                 return Ok(());
             }
         }
+        if query.file.is_empty()
+            && let Target::Word(term) = &query.target
+        {
+            self.refresh_goto_highlights(workspace, term, false);
+        }
         let Some(index) = self.quick.current() else {
             return Ok(());
         };
@@ -3788,29 +3841,81 @@ impl Panels {
         };
         let target = query.target;
         if self.last_preview.as_ref() == Some(&(path.clone(), target.clone())) {
-            if let Target::Symbol(term) = &target {
-                self.preview_file_symbol(workspace, term);
+            match &target {
+                Target::Symbol(term) => self.preview_file_symbol(workspace, term),
+                Target::Word(term) => {
+                    self.refresh_goto_highlights(workspace, term, true);
+                }
+                _ => {}
             }
             return Ok(());
         }
-        self.last_preview = Some((path.clone(), target.clone()));
         self.preview_symbol_version = None;
         let (line, column) = match &target {
             Target::Line(l, c) => (*l, *c),
             _ => (1, 1),
         };
-        workspace.preview(FileLocation { path, line, column })?;
+        workspace.preview(FileLocation {
+            path: path.clone(),
+            line,
+            column,
+        })?;
+        self.last_preview = Some((path, target.clone()));
         if let Target::Word(term) = target {
-            let text = workspace.editor().text.clone();
-            // Exact first occurrence is a useful initial preview; #term offers fuzzy word rows in the current file.
-            let hits = Search::new(&term, text::Options::default())?.find(&text, &[]);
-            if let Some(hit) = hits.first() {
-                workspace.editor_mut().set_caret(hit.start, false);
-            }
+            self.refresh_goto_highlights(workspace, &term, true);
         } else if let Target::Symbol(term) = target {
             self.preview_file_symbol(workspace, &term);
         }
         Ok(())
+    }
+    fn refresh_goto_highlights(
+        &mut self,
+        workspace: &mut Workspace,
+        term: &str,
+        jump: bool,
+    ) -> bool {
+        let snapshot = FindSnapshot::current(workspace);
+        let query = self.quick_input.buffer.change_id();
+        if self
+            .goto_highlights
+            .as_ref()
+            .is_some_and(|h| h.snapshot == snapshot && h.query == query)
+        {
+            return false;
+        }
+        let mut ranges = Vec::<Range<usize>>::new();
+        if !snapshot.binary && !term.trim().is_empty() {
+            let mut scorer = fuzzy::LabelMatcher::new(term);
+            let mut positions = Vec::new();
+            each_goto_word(&workspace.editor().text, |word, offset| {
+                positions.clear();
+                if scorer.score(word, Some(&mut positions)).is_some() {
+                    positions.sort_unstable();
+                    positions.dedup();
+                    for &at in &positions {
+                        if let Some(c) = word.get(at..).and_then(|s| s.chars().next()) {
+                            let start = offset + at;
+                            let end = start + c.len_utf8();
+                            if let Some(last) = ranges.last_mut().filter(|r| r.end == start) {
+                                last.end = end;
+                            } else {
+                                ranges.push(start..end);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        if jump && let Some(hit) = ranges.first() {
+            workspace.editor_mut().set_caret(hit.start, false);
+        }
+        self.goto_highlights = Some(GotoHighlights {
+            snapshot,
+            query,
+            ranges,
+            accepted: false,
+        });
+        true
     }
     fn preview_file_symbol(&mut self, workspace: &mut Workspace, term: &str) {
         let tab = &workspace.tabs[workspace.active];
@@ -3861,6 +3966,8 @@ impl Panels {
     }
     pub(crate) fn cancel_overlay(&mut self, workspace: &mut Workspace) {
         self.goto_filter = None;
+        self.goto_highlights = None;
+        self.tab_dropdown_anchor = None;
         self.intel.cancel_query();
         if self.appearance_selection.take().is_some() {
             workspace.cancel_appearance_preview();
@@ -3927,6 +4034,15 @@ impl Panels {
         &mut self,
         workspace: &mut Workspace,
         side: bool,
+        viewport: Range<usize>,
+    ) -> Result<Option<Invocation>, String> {
+        self.accept_item(workspace, side, false, viewport)
+    }
+    fn accept_item(
+        &mut self,
+        workspace: &mut Workspace,
+        side: bool,
+        keep_open: bool,
         viewport: Range<usize>,
     ) -> Result<Option<Invocation>, String> {
         if self.overlay == Some(Overlay::Appearance) {
@@ -4017,6 +4133,7 @@ impl Panels {
                 );
             }
             self.overlay = None;
+            self.tab_dropdown_anchor = None;
             if let Some(source) = self.preview.take()
                 && let Some(tab) = workspace.tabs.iter_mut().find(|t| t.sheet == source.sheet)
             {
@@ -4034,6 +4151,22 @@ impl Panels {
                         Target::Line(_, _)
                     ))
             {
+                return Ok(None);
+            }
+            if keep_open {
+                self.preview_current(workspace)?;
+                let active = workspace.active;
+                workspace.make_permanent(active);
+                if let Some(origin) = &mut self.preview
+                    && origin.sheet == workspace.tabs[active].sheet
+                {
+                    origin.transient = false;
+                }
+                workspace.remember_goto_file();
+                if let Some(highlights) = &mut self.goto_highlights {
+                    highlights.ranges.clear();
+                    highlights.accepted = true;
+                }
                 return Ok(None);
             }
             if matches!(
@@ -4089,6 +4222,7 @@ impl Panels {
             self.navigation_options = Default::default();
             workspace.remember_goto_file();
             self.overlay = None;
+            self.goto_highlights = None;
             self.preview = None;
             self.navigation_preview_guard = None;
             self.prepared.clear();
@@ -4346,6 +4480,16 @@ impl Panels {
             }
             return Ok((true, None));
         }
+        // The navigation guide opens a result on Right without dismissing Goto.
+        // Leave ordinary cursor movement, selection and IME input alone.
+        if self.overlay == Some(Overlay::Goto)
+            && key.name == "right"
+            && key.modifiers == 0
+            && !self.quick_input.composing()
+            && self.quick_input.caret_at_end()
+        {
+            return Ok((true, self.accept_item(workspace, false, true, viewport)?));
+        }
         if key.name == "enter" {
             return Ok((
                 true,
@@ -4431,6 +4575,11 @@ impl Panels {
                 Some("ctrl+enter")
             }
             Command::Tab => Some("tab"),
+            Command::Right(false)
+                if self.overlay == Some(Overlay::Goto) && self.quick_input.caret_at_end() =>
+            {
+                Some("right")
+            }
             Command::Up(false) if self.overlay.is_some() || self.find_panel_visible() => Some("up"),
             Command::Down(false) if self.overlay.is_some() || self.find_panel_visible() => {
                 Some("down")
@@ -4874,6 +5023,22 @@ impl Panels {
             let term = term.clone();
             self.preview_file_symbol(workspace, &term);
         }
+        let goto_highlights_changed = self.overlay == Some(Overlay::Goto)
+            && self.goto_highlights.as_ref().is_some_and(|highlights| {
+                let snapshot = FindSnapshot::current(workspace);
+                !highlights.accepted
+                    && highlights.query == self.quick_input.buffer.change_id()
+                    && highlights.snapshot.sheet == snapshot.sheet
+                    && highlights.snapshot != snapshot
+            })
+            && {
+                let query = Query::parse(&self.quick_input.value());
+                if let Target::Word(term) = query.target {
+                    self.refresh_goto_highlights(workspace, &term, !query.file.is_empty())
+                } else {
+                    false
+                }
+            };
         if self
             .hover_source
             .is_some_and(|(sheet, buffer, version, _)| {
@@ -5037,7 +5202,8 @@ impl Panels {
         {
             self.query_quick(workspace);
         }
-        let mut changed = load_notice || intelligence_changed || query_changed;
+        let mut changed =
+            load_notice || intelligence_changed || query_changed || goto_highlights_changed;
         changed |= self.expire_message(Instant::now());
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
@@ -5395,6 +5561,11 @@ impl Panels {
         let width = (size.width * 0.7)
             .clamp(240. * self.ui_scale, 820. * self.ui_scale)
             .min(size.width);
+        let width = if self.tab_dropdown_anchor.is_some() {
+            width.min(360. * self.ui_scale)
+        } else {
+            width
+        };
         // The overlay shrinks to whole rows (input 46 + footer 26 + one row height each), so
         // the list ends exactly where the footer starts. Short windows move it up, then
         // shrink it, so it never extends below the window.
@@ -5409,9 +5580,18 @@ impl Panels {
             .max(1.);
         let rows = (self.quick.items.len() as f64).min(fits);
         let height = (header + footer + row * rows) * self.ui_scale;
-        let y = (54. * self.ui_scale).min((size.height - height).max(0.));
+        let (x, y) = self.tab_dropdown_anchor.map_or(
+            ((size.width - width) / 2., 54. * self.ui_scale),
+            |anchor| {
+                (
+                    (anchor.x + anchor.width - width).clamp(0., (size.width - width).max(0.)),
+                    anchor.y + anchor.height,
+                )
+            },
+        );
+        let y = y.min((size.height - height).max(0.));
         self.quick_bounds = Rect {
-            x: (size.width - width) / 2.,
+            x,
             y,
             width,
             height: height.min(size.height - y).max(0.),
@@ -7059,7 +7239,13 @@ impl Panels {
                 if row < self.quick.items.len() {
                     self.quick.selected = row;
                     self.preview_current(workspace)?;
-                    self.pending_command = self.accept(workspace, false, viewport)?;
+                    let replace =
+                        self.tab_dropdown_anchor.is_some() && self.alternate_click && !extend;
+                    let mut invocation = self.accept(workspace, false, viewport)?;
+                    if replace && let Some(invocation) = &mut invocation {
+                        invocation.args["_replace_focused"] = json!(true);
+                    }
+                    self.pending_command = invocation;
                 }
             }
             return Ok(true);
@@ -7177,7 +7363,11 @@ impl Panels {
                 let row = ((point.y - self.side_bounds.y + self.side_scroll.offset)
                     / (24. * self.ui_scale)) as usize;
                 if (1..=self.visible_open_files(workspace)).contains(&row) {
-                    workspace.click_sheet(row - 1, self.primary_click, extend);
+                    if self.alternate_click && !extend {
+                        workspace.replace_focused_sheet(row - 1);
+                    } else {
+                        workspace.click_sheet(row - 1, self.primary_click, extend);
+                    }
                     self.side_open = Some(row - 1);
                     if double {
                         workspace.make_permanent(workspace.active);
@@ -7217,6 +7407,16 @@ impl Panels {
                                 })?;
                             }
                         }
+                    } else if self.alternate_click
+                        && let Some(row) = self.side_rows.get(self.side_selected)
+                        && !row.directory
+                    {
+                        workspace.open_replacing_focused(FileLocation {
+                            path: row.path.clone(),
+                            line: 1,
+                            column: 1,
+                        })?;
+                        self.side_anchor = self.side_selection.clone();
                     } else if self.primary_click {
                         if let Some(row) = self.side_rows.get(self.side_selected)
                             && !row.directory

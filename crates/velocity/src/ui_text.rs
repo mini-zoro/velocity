@@ -28,6 +28,9 @@ impl UiText {
                 Self::tr("Document or selection is too large to print")
             }
             "document is read only" => Self::tr("document is read only"),
+            "binary/hex documents cannot be saved as text" => {
+                Self::tr("binary/hex documents cannot be saved as text")
+            }
             "A target has unsaved edits; save it before replacing in files" => {
                 Self::tr("A target has unsaved edits; save it before replacing in files")
             }
@@ -55,7 +58,21 @@ impl UiText {
             "Could not highlight the selection" => Self::tr("Could not highlight the selection"),
             "Syntax highlighting is unavailable" => Self::tr("Syntax highlighting is unavailable"),
             "Could not write to the clipboard" => Self::tr("Could not write to the clipboard"),
-            _ => detail.into(),
+            "missing encoding" => Self::tr("missing encoding"),
+            "Could not copy the path" => Self::tr("Could not copy the path"),
+            "Expected a destination window" => Self::tr("Expected a destination window"),
+            "The destination window cannot accept the tab" => {
+                Self::tr("The destination window cannot accept the tab")
+            }
+            _ if let Some(path) =
+                detail.strip_suffix(": only regular files can be used as documents") =>
+            {
+                Self::tr_fmt(
+                    "Only regular files can be used as documents: {path}",
+                    [("path", path.into())],
+                )
+            }
+            _ => Self::tr_fmt("Action failed: {detail}", [("detail", detail.into())]),
         }
     }
 
@@ -170,6 +187,7 @@ impl AsRef<str> for UiText {
 
 /// AppKit receives only the resolved presentation; button indices are kept in
 /// the caller's existing command order.
+#[derive(Debug)]
 pub(crate) struct Dialog {
     pub title: UiText,
     pub detail: UiText,

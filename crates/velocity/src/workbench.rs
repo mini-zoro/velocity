@@ -525,13 +525,23 @@ impl Workspace {
         Ok(())
     }
     pub fn click_sheet(&mut self, index: usize, toggle: bool, extend: bool) {
+        self.click_sheet_with(index, |group, id| group.click(id, toggle, extend));
+    }
+    pub fn replace_focused_sheet(&mut self, index: usize) {
+        self.click_sheet_with(index, |group, id| group.replace_focused(id));
+    }
+    fn click_sheet_with(
+        &mut self,
+        index: usize,
+        click: impl FnOnce(&mut vel_ui::workbench::Group, u64),
+    ) {
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
         let id = tab.sheet;
         if let Some(group) = self.workbench.group_of(id) {
             self.workbench.active = group;
-            self.workbench.groups[group].click(id, toggle, extend);
+            click(&mut self.workbench.groups[group], id);
             if let Err(e) = self.focus_current_group() {
                 self.messages.push(e);
             }
@@ -1835,6 +1845,28 @@ impl Workspace {
             self.workbench.groups[group].selected.extend(selected);
         }
         self.make_permanent(self.active);
+        Ok(())
+    }
+    pub fn open_replacing_focused(&mut self, location: FileLocation) -> Result<(), String> {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.path.as_ref() == Some(&location.path))
+        {
+            self.replace_focused_sheet(index);
+            self.make_permanent(index);
+            return Ok(());
+        }
+        let group = self.workbench.active;
+        let original = &self.workbench.groups[group];
+        let mut peers = original.selected.clone();
+        if let Some(focused) = original.focused {
+            peers.remove(&focused);
+        }
+        self.open(location)?;
+        if self.workbench.active == group {
+            self.workbench.groups[group].selected.extend(peers);
+        }
         Ok(())
     }
 }

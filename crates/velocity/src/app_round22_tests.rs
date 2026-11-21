@@ -82,11 +82,12 @@ fn save_dispatch_default_and_adaptive_mode_keep_the_inode_and_finish_clean() {
         a.run_named(None, "insert", &json!({"characters":"unsaved "}));
         assert!(key(&mut a, "super+s"));
         assert!(a.workspace.tabs[a.workspace.active].dirty());
-        assert!(
-            a.panels.message.contains("Permission denied"),
-            "{}",
-            a.panels.message
-        );
+        let detail = &a
+            .data_loss_dialogs
+            .last()
+            .expect("failed save dialog")
+            .detail;
+        assert!(detail.contains("Permission denied"), "{detail}");
         assert_eq!(fs::read_to_string(&file).unwrap(), "new original");
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
     }

@@ -111,7 +111,7 @@
   "save_on_focus_lost": {"group": "files", "control": "bool", "name": "Save on Focus Loss", "description": "Save modified files when the tab or window loses focus."},
   "reload_file_on_change": {"group": "files", "control": "bool", "name": "Reload Changed Files", "description": "Reload unmodified documents when the file changes on disk."},
   "close_deleted_files": {"group": "files", "control": "bool", "name": "Close Deleted Files", "description": "Close unmodified documents whose files are deleted from disk."},
-  "close_windows_when_empty": {"group": "files", "control": "bool", "name": "Close Empty Windows", "description": "Close the window when you close its last document."},
+  "close_windows_when_empty": {"group": "files", "control": "bool", "name": "Close Empty Windows", "description": "Close a window when you close its last document, unless it has folders or a saved project."},
   "hot_exit": {"group": "files", "control": "enum", "choices": ["always","only_on_quit","disabled",true,false], "name": "Hot Exit", "description": "Choose when to keep unsaved edits for the next session."},
   "remember_open_files": {"group": "files", "control": "bool", "name": "Remember Open Files", "description": "Restore open files from the previous session."},
   "set_unsaved_view_name": {"group": "files", "control": "bool", "name": "Name Untitled Tabs from Text", "description": "Use the first line of text to name untitled tabs."},

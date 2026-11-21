@@ -354,6 +354,20 @@ impl Group {
         }
         self.touch_focus();
     }
+    /// Focuses a tab in place of the focused member without deselecting its peers.
+    pub fn replace_focused(&mut self, id: u64) {
+        if !self.sheets.contains(&id) {
+            return;
+        }
+        if self.selected.insert(id)
+            && let Some(previous) = self.focused
+        {
+            self.selected.remove(&previous);
+        }
+        self.focused = Some(id);
+        self.anchor = Some(id);
+        self.touch_focus();
+    }
     /// Commits the focused sheet as most recently used.
     pub fn touch_focus(&mut self) {
         if let Some(focus) = self.focused
