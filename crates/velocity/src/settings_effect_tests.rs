@@ -758,19 +758,22 @@ fn observe_ui(app: &mut App, key: &str, root: &Path) -> String {
             format!("{:?}|{}|{}", fonts.metrics, fonts.cell, fonts.ascent)
         }
         "close_windows_when_empty" => {
-            let mut empty = Workspace::new(Text::new(), None, None, false).unwrap();
-            empty
-                .editor_mut()
+            // The new window still has an untitled tab. Exercise the actual last-tab close
+            // in a separate App so its close request cannot affect the rest of the sweep.
+            let mut one_tab = super::app(None);
+            one_tab
+                .workspace
                 .settings
                 .replace(
                     Layer::User,
                     Value::Object(app.workspace.settings.layer(Layer::User).clone()),
                 )
                 .unwrap();
-            let original = std::mem::replace(&mut app.workspace, empty);
-            let closes = app.should_close_empty_window();
-            app.workspace = original;
-            closes.to_string()
+            one_tab
+                .run_named_depth(None, "close_file", &json!({}), 0)
+                .unwrap();
+            assert!(one_tab.workspace.is_empty());
+            one_tab.empty_close_requested.to_string()
         }
         "tab_completion" => in_new_tab(app, |app| {
             let e = app.workspace.editor_mut();
@@ -1343,6 +1346,7 @@ fn shipped_user_settings_change_the_scene_or_operation() {
                 | "show_panel_on_build"
                 | "hot_exit"
                 | "remember_open_files"
+                | "close_windows_when_empty"
         ) && fingerprints[0].1 == fingerprints[1].1
         {
             no_operation_diff.insert(key);

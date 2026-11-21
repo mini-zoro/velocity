@@ -43,6 +43,9 @@ mod round36_lane_c_tests;
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
 mod settings_ui_adapter;
+#[cfg(test)]
+#[path = "app_startup_tests.rs"]
+mod startup_tests;
 #[path = "app_status.rs"]
 pub(crate) mod status_adapter;
 #[path = "app_tabs.rs"]
@@ -248,6 +251,7 @@ pub struct App {
     renderer: Option<Renderer>,
     first_present: bool,
     startup_done: bool,
+    startup_services_pending: bool,
     bench: Option<Bench>,
     samples: Vec<Sample>,
     retries: usize,
@@ -298,6 +302,7 @@ impl App {
         self.session_id = id;
         self.workspace = workspace;
         self.panels.reset(&self.workspace);
+        self.startup_services_pending = false;
         self.apply_ui_language_notice();
         self.panels.review.native_context = true;
         self.title_theme = None;
@@ -352,6 +357,8 @@ impl App {
             8.,
             12.,
         );
+        let startup_services_pending =
+            workspace.startup_services_pending() || sessions.borrow().startup_writer_pending();
         let session_id = sessions.borrow_mut().register();
         Self {
             macro_origin: None,
@@ -460,6 +467,7 @@ impl App {
             renderer: None,
             first_present: false,
             startup_done: false,
+            startup_services_pending,
             bench: None,
             samples: Vec::new(),
             retries: 0,
@@ -495,10 +503,13 @@ impl App {
         }))
     }
 
-    fn start_services_after_present(&mut self) -> Result<(), String> {
+    fn finish_startup_services(&mut self, phase: &'static str) -> Result<(), String> {
+        if !std::mem::take(&mut self.startup_services_pending) {
+            return Ok(());
+        }
         let mut phases =
             crate::report::StartupPhases::new(self.clock.entered, self.reporter.is_enabled());
-        phases.mark("post_present_begin");
+        phases.mark(phase);
         self.workspace.start_startup_watcher();
         phases.mark("watchers_started");
         self.panels.start_startup_workers(&self.workspace);
@@ -507,6 +518,15 @@ impl App {
         self.workspace.finish_startup_palette();
         phases.mark("palette_published");
         phases.emit(&self.reporter)
+    }
+    /// A real action, or the first headless poll or scene, need not wait for native scanout.
+    fn ensure_startup_services(&mut self) -> bool {
+        if !self.startup_services_pending {
+            return false;
+        }
+        // A reporting error must not stop the action that needed the services.
+        let _ = self.finish_startup_services("startup_on_demand_begin");
+        true
     }
     pub fn restore_session_id(&mut self, id: u64) {
         self.sessions
@@ -702,6 +722,7 @@ impl App {
         Ok((window, documents))
     }
     fn prepare_window_close(&mut self, window: Option<&WindowHandle>) -> bool {
+        self.ensure_startup_services();
         let policy = self.session_policy(false, true);
         let project = self.workspace.project_path().is_some()
             && self.sessions.borrow().persist_project_workspaces;
@@ -777,6 +798,7 @@ impl App {
             let _=self.reporter.emit(json!({"kind":"error","stage":"user_close","message":"automatic benchmark closed before completion","complete":false}));
             return true;
         }
+        self.ensure_startup_services();
         for tab in &mut self.workspace.tabs {
             if tab.lazy.is_none() {
                 tab.editor.unmark();
@@ -812,6 +834,7 @@ impl App {
         true
     }
     fn save_workspace_checkpoint(&mut self) -> Result<(), String> {
+        self.ensure_startup_services();
         self.checkpoint(true)?;
         self.sessions.borrow().flush()
     }
@@ -960,6 +983,7 @@ impl App {
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         use crate::open_requests::Route;
+        self.ensure_startup_services();
         let Some((route, incoming)) = self.route_or_queue_open(incoming)? else {
             return Ok(());
         };
@@ -1087,6 +1111,7 @@ impl App {
         Ok(())
     }
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
+        self.ensure_startup_services();
         let request = &incoming.request;
         if self.accessibility_focus.is_some()
             && (!request.files.is_empty() || request.project.is_some() || request.stdin.is_some())
@@ -1491,6 +1516,7 @@ impl App {
         received: Instant,
         viewport: std::ops::Range<usize>,
     ) -> bool {
+        self.ensure_startup_services();
         if self.settings_page_has_focus()
             && !matches!((key.name.as_str(), key.modifiers), (",", 8) | ("p", 12))
         {
@@ -1797,13 +1823,14 @@ impl App {
         Ok(())
     }
     fn poll_workspace_model(&mut self) -> bool {
-        let transferred = self.receive_tabs();
-        let resources = self.workspace.resource_revision;
-        let old_chrome = self.window_chrome_preferences();
         let before = (
             self.workspace.translations.revision(),
             self.workspace.palette_revision,
         );
+        let started = self.ensure_startup_services();
+        let transferred = self.receive_tabs();
+        let resources = self.workspace.resource_revision;
+        let old_chrome = self.window_chrome_preferences();
         let changed = self.workspace.poll();
         if self.workspace.resource_revision != resources {
             let chrome = self.window_chrome_preferences();
@@ -1824,7 +1851,7 @@ impl App {
             self.panels.refresh_locale(&self.workspace);
         }
         self.apply_ui_language_notice();
-        changed || transferred
+        changed || transferred || started
     }
     fn apply_ui_language_notice(&mut self) {
         if let Some(note) = self.workspace.ui_language_notice.take() {
@@ -1953,6 +1980,7 @@ impl App {
         args: &Value,
         depth: usize,
     ) -> Result<(), String> {
+        self.ensure_startup_services();
         // https://docs.sublimetext.io/reference/commands.html
         let name = match name {
             "prompt_add_folder" => "add_folder",
@@ -3750,6 +3778,11 @@ impl App {
         Ok(())
     }
     fn scene(&mut self) -> vel_render::scene::Scene {
+        self.ensure_startup_services();
+        self.render_scene()
+    }
+    // A native draw alone does not need the deferred services before scanout.
+    fn render_scene(&mut self) -> vel_render::scene::Scene {
         if self.workspace.settings_page.is_none() {
             self.sync_active_view();
         }
@@ -4528,6 +4561,7 @@ impl App {
             self.external_input += 1;
             return;
         }
+        self.ensure_startup_services();
         if self.settings_page_has_focus() {
             let page = self.workspace.settings_page.as_mut().unwrap();
             page.text_input(&self.workspace.translations, event, Instant::now());
@@ -4648,9 +4682,7 @@ impl App {
                 w.request_frame_at(Instant::now() + Duration::from_millis(16));
             }
             Mode::Interactive => {
-                if self.workspace.startup_services_pending() {
-                    self.start_services_after_present()?;
-                }
+                self.finish_startup_services("post_present_begin")?;
                 w.request_frame_at(Instant::now() + Duration::from_millis(200));
             }
             mode => {
@@ -4938,6 +4970,7 @@ impl AppHandler for App {
         id: accessibility::Id,
         request: accessibility::Request,
     ) {
+        self.ensure_startup_services();
         self.accessibility_action(w, id, request);
     }
     fn accessibility_range_rect(&self, id: accessibility::Id, range: Utf16Range) -> Rect {
@@ -5243,6 +5276,7 @@ impl AppHandler for App {
             self.external_input += 1;
             return;
         }
+        self.ensure_startup_services();
         if self.settings_page_has_focus() {
             self.settings_command(Some(w), command, Instant::now());
             return;
@@ -5626,7 +5660,7 @@ impl AppHandler for App {
             }
         }
         if ctx.reason == FrameReason::StartupPrepare {
-            let scene = self.scene();
+            let scene = self.render_scene();
             self.clock.mark("first_scene_ready");
             self.renderer
                 .as_mut()
@@ -5654,7 +5688,7 @@ impl AppHandler for App {
                 .ok_or("renderer missing")?
                 .has_prepared_frame()
             {
-                let scene = self.scene();
+                let scene = self.render_scene();
                 self.renderer
                     .as_mut()
                     .ok_or("renderer missing")?
@@ -5734,7 +5768,7 @@ impl AppHandler for App {
                 .any(|t| t.loading.is_some() || t.binary_loading.is_some())
             {
                 w.request_frame_at(Instant::now() + Duration::from_millis(8));
-                let scene = self.scene();
+                let scene = self.render_scene();
                 self.renderer.as_mut().ok_or("renderer missing")?.render(
                     &scene,
                     self.fonts.as_mut().ok_or("fonts missing")?,
@@ -5797,7 +5831,7 @@ impl AppHandler for App {
                 query = Some(b.completed as u32);
             }
         }
-        let scene = self.scene();
+        let scene = self.render_scene();
         // Layout can enqueue its first image request after the worker poll above.
         if self.workspace.themes.ui.borrow().metrics.images_pending() {
             w.request_frame_at(Instant::now() + Duration::from_millis(8));

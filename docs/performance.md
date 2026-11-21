@@ -1016,3 +1016,11 @@ Velocity reruns passed all startup checks. The existing
 path appearing in the Chinese draw list. No GUI or packaging steps ran. Gate
 and targeted rerun logs are in the same directory (`gate-*.log` and
 `delivery-*.log`).
+
+The normal native first draw still defers services until scanout. If an action
+arrives first, it publishes the palette and starts the watcher, index workers,
+and session writer before dispatch. These runs report
+`startup_on_demand_begin` instead of `post_present_begin`. The first headless
+App poll or scene does the same; the startup benchmark deliberately stops
+before that step. Index results still arrive asynchronously, as they did with
+eager startup.

@@ -18,6 +18,7 @@ impl App {
         }
         let up = event.kind == MouseKind::Up;
         if event.kind == MouseKind::Down {
+            self.ensure_startup_services();
             self.end_mouse_gesture();
         }
         self.route_mouse_event(w, event, keep_focus);

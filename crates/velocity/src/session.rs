@@ -176,6 +176,10 @@ impl Sessions {
         }
         sessions
     }
+    pub(crate) fn startup_writer_pending(&self) -> bool {
+        self.writer_path.is_some()
+    }
+
     pub(crate) fn start_writer(&mut self) {
         if let Some(path) = self.writer_path.take() {
             match Writer::new(path, Duration::from_millis(400)) {
