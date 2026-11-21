@@ -726,3 +726,36 @@ Rustdoc was not reached. In serial reruns on the same build:
 
 The round 27 gate wrote `/tmp/r14-review/gate-velocity-lane-c.log`. Individual
 reruns are in `targeted-*-rerun.log` alongside the timing data.
+
+## Black-box comparison with Sublime Text 4215 on this machine (2026-11-21)
+
+With the user's permission, Sublime Text build 4215 (official notarized `sublime_text_build_4215_mac.zip`)
+was run **only as a black box**: launched and timed from outside, never opening, reading or copying
+anything inside its bundle (clean-room rule unchanged). Sublime ran with `--safe-mode` (clean
+environment, no plugins, separate data); Velocity ran the packaged build of `b96f0b7` with a fresh
+`--data-dir`. Both were launched through LaunchServices (`open -n -a … --args …`) and measured by the
+same external probe (`scripts/blackbox-launch-probe.swift`): time from spawn until the app's first new
+on-screen window (CGWindowList), then — with a file — physical footprint (`proc_pid_rusage`
+`ri_phys_footprint`) once the app was idle (< 2% of a core for 3 consecutive seconds). M1 Pro, 16 GB,
+macOS 26.1, load average 7–10, alternating runs.
+
+| Measurement | Sublime Text 4215 | Velocity `b96f0b7` | Ratio |
+| --- | --- | --- | ---: |
+| Launch → first window, empty | 0.83–1.03 s (5 runs) | 1.69–2.25 s (5 runs) | ≈ 2× slower |
+| Launch → first window, `sqlite3.c` | 0.98–1.04 s | 2.05–3.00 s | ≈ 2–3× slower |
+| Idle footprint, `sqlite3.c` (151k lines) | 184–193 MB | 362–365 MB | ≈ 1.9× more |
+| Idle footprint, generated 1M-line C (29 MB) | 369 MB | 194–198 MB | ≈ 0.53× |
+| Idle footprint, generated 5M-line C (145 MB) | 1,282–1,285 MB | 311 MB | ≈ 0.24× (Velocity's large-file policy highlights less) |
+| Time to idle, generated 5M-line C | ≈ 11 s | ≈ 4.9 s | — |
+
+Findings to fix:
+1. **Interactive startup**: Velocity's own milestones for this launch show `text_loaded` at 48 ms and
+   `nsapplication_ready` at 1,234 ms after `main` — about 1.2 s is spent before NSApplication starts,
+   in interactive-only setup (`Workspace::new(…, watch = true)`: resources, watchers, services). The
+   `--bench-startup` path does not take that route, which is why its ~650 ms first scanout did not
+   show the problem. Target: first window within Sublime's ~0.9 s; defer everything not needed for the
+   first frame.
+2. **Normal-size highlighted file memory**: `sqlite3.c` costs ~1.9× Sublime's footprint (a fully
+   highlighted 7 MB file). Investigate retained parse/highlight state (checkpoints, scope stacks,
+   style spans, layout caches) for files below the large-file threshold.
+3. Large files are already well below Sublime's footprint.
