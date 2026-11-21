@@ -2,6 +2,8 @@
 // Groups/commands and line-ending arguments: https://docs.sublimetext.io/reference/commands.html
 // Split View and selected sheets: https://www.sublimetext.com/download (4107, 4126).
 [
+  {"caption":"File: Open as Image","command":"open_as_image"},
+  {"caption":"File: Open as Text","command":"open_as_text"},
   {"caption":"File: Print…","command":"print"},
   {"caption":"File: Open Folder in New Window…","command":"prompt_open_folder_in_new_window"},
   {"caption":"File: Revert File…","command":"revert"},

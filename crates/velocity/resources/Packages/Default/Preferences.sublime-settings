@@ -171,7 +171,7 @@
   "draw_unicode_bidi": false,
   "draw_control_characters": false,
   // These are the formats supported by Velocity's decoder.
-  "image_file_patterns": ["*.png", "*.jpg", "*.jpeg", "*.gif"],
+  "image_file_patterns": ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.tga"],
   "show_errors_inline": true,
   "index_files": true,
   "index_workers": 0,

@@ -39,9 +39,7 @@ impl App {
             }
             "build" | "exec" => {
                 if args["cancel"].as_bool() == Some(true) || args["kill"].as_bool() == Some(true) {
-                    if let Some(task) = &self.builds.task {
-                        task.cancel();
-                    }
+                    self.builds.cancel(&mut self.panels);
                 } else {
                     let direct = args.get("cmd").is_some() || args.get("shell_cmd").is_some();
                     let automatic = !direct
@@ -122,10 +120,10 @@ impl App {
                 }
             }
             "cancel_build" => {
-                if let Some(task) = &self.builds.task {
-                    task.cancel();
-                }
+                self.builds.cancel(&mut self.panels);
             }
+            "build_send_input" => self.builds.send_input(&mut self.panels),
+            "build_close_input" => self.builds.close_input(&mut self.panels),
             "next_result" | "prev_result" if window.is_none() => {
                 if self.panels.search_results_active {
                     self.panels

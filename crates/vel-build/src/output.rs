@@ -325,7 +325,19 @@ impl Sender {
         let mut parsing = self.0.parsing.lock().unwrap();
         let (chunk, diagnostics, event) = match event {
             Event::Output { stream, text } => {
-                let diagnostics = parsing.parse(&text, false);
+                let diagnostics = if stream == Stream::Input {
+                    // An input echo can follow a prompt without a newline. Finish the
+                    // output portion of that row, but never parse the user's line itself.
+                    parsing.seen += text.len();
+                    if parsing.pending.is_empty() {
+                        parsing.parser.skip_row();
+                        Vec::new()
+                    } else {
+                        parsing.parse("", true)
+                    }
+                } else {
+                    parsing.parse(&text, false)
+                };
                 (Some(Chunk::new(stream, text)), diagnostics, None)
             }
             event @ Event::Finished { .. } => (None, parsing.parse("", true), Some(event)),

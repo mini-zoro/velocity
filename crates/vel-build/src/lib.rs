@@ -17,7 +17,7 @@ mod output;
 pub use output::{Events, OutputStats, Results};
 mod process;
 pub mod variables;
-pub use process::{Event, Stream, Task};
+pub use process::{Event, InputError, MAX_INPUT_LINE, Stream, Task};
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -165,8 +165,9 @@ impl BuildSystem {
         if shell_cmd.is_none() && cmd.is_empty() {
             return Err("build needs cmd or shell_cmd".into());
         }
-        if self.options.get("interactive").and_then(Value::as_bool) == Some(true) {
-            return Err("Interactive builds are not supported (stdin is closed)".into());
+        let interactive = self.options.get("interactive").and_then(Value::as_bool) == Some(true);
+        if interactive && !cfg!(unix) {
+            return Err("Interactive builds need nonblocking Unix pipes".into());
         }
         let working_dir = string("working_dir")
             .map(|s| variables.expand(s))
@@ -225,6 +226,7 @@ impl BuildSystem {
             env,
             env_source,
             variables: variables.clone(),
+            interactive,
             shell: self
                 .options
                 .get("shell")
@@ -251,6 +253,8 @@ impl BuildSystem {
 /// Resolved invocation, ready to launch without any filesystem writes by Velocity.
 #[derive(Clone, Debug)]
 pub struct Exec {
+    /// Give the child an input pipe and expose a line-oriented input box.
+    pub interactive: bool,
     /// Executable and argv.
     pub cmd: Vec<String>,
     /// Explicit shell source; takes precedence over argv.
@@ -299,6 +303,9 @@ pub struct ResultParser {
     row: usize,
 }
 impl ResultParser {
+    pub(crate) fn skip_row(&mut self) {
+        self.row += 1;
+    }
     /// Compiles regexes once. Syntax is Rust regex (no lookarounds/backreferences).
     pub fn new(file: Option<&str>, line: Option<&str>, base: PathBuf) -> Result<Self, String> {
         let compile = |s: Option<&str>| {

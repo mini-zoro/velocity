@@ -4,7 +4,7 @@ use crate::{
     ui_text::UiText,
     workspace::Workspace,
 };
-use vel_build::{BuildSystem, Diagnostic, Event, Task, Variables};
+use vel_build::{BuildSystem, Diagnostic, Event, InputError, Stream, Task, Variables};
 use vel_config::{Value, json};
 #[cfg(test)]
 thread_local! { pub(crate) static MATCHING_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -167,9 +167,44 @@ impl Builds {
         {
             panels.panel = Some(Panel::Output);
         }
+        if exec.interactive || panels.build_input.is_some() {
+            panels.set_build_input(exec.interactive);
+        }
         panels.result_scroll.offset = 0.;
         panels.build_results.clear();
         Ok(())
+    }
+    pub fn send_input(&self, panels: &mut Panels) {
+        let Some((task, input)) = self.task.as_ref().zip(panels.build_input.as_ref()) else {
+            return;
+        };
+        match task.send_line(&input.value()) {
+            Ok(()) => {
+                panels.set_build_input(true);
+                panels.result_scroll.reveal(usize::MAX);
+            }
+            Err(InputError::Full) => {
+                panels.set_message(UiText::tr("Build input is full"));
+            }
+            Err(InputError::Closed) => panels.set_build_input(false),
+            Err(InputError::InvalidLine) => {
+                panels.set_message(UiText::tr("Build input must be a single line"));
+            }
+        }
+    }
+    pub fn close_input(&mut self, panels: &mut Panels) {
+        if let Some(task) = &mut self.task {
+            task.close_input();
+        }
+        if panels.build_input.is_some() {
+            panels.set_build_input(false);
+        }
+    }
+    pub fn cancel(&mut self, panels: &mut Panels) {
+        if let Some(task) = &self.task {
+            task.cancel();
+        }
+        self.close_input(panels);
     }
     pub fn poll(&mut self, panels: &mut Panels) -> bool {
         let mut changed = false;
@@ -185,10 +220,10 @@ impl Builds {
             };
             changed = true;
             match event {
-                Event::Output { text, .. } => self.append_output(panels, &text),
+                Event::Output { stream, text } => self.append_output(panels, stream, &text),
                 Event::OutputBatch(chunks) => {
-                    for (_, text) in chunks {
-                        self.append_output(panels, &text);
+                    for (stream, text) in chunks {
+                        self.append_output(panels, stream, &text);
                     }
                 }
                 Event::Truncated {
@@ -230,6 +265,7 @@ impl Builds {
                     self.environment_warning = Some(message);
                 }
                 Event::Error(e) => panels.output.push_str(&format!("\n[Build error: {e}]\n")),
+                Event::InputClosed => self.close_input(panels),
                 Event::Finished {
                     code,
                     signal,
@@ -253,6 +289,7 @@ impl Builds {
             changed = true;
         }
         if let Some((code, signal, cancelled, elapsed)) = finish {
+            self.close_input(panels);
             panels.append_output_ui(finish_line_with_signal(
                 code, signal, cancelled, elapsed, self.quiet,
             ));
@@ -326,7 +363,7 @@ impl Builds {
             }
         }
     }
-    fn append_output(&mut self, panels: &mut Panels, text: &str) {
+    fn append_output(&mut self, panels: &mut Panels, stream: Stream, text: &str) {
         self.received_lines += text.matches('\n').count();
         let displayed = if self.discard_partial_line {
             if let Some(end) = text.find('\n') {
@@ -339,7 +376,11 @@ impl Builds {
         } else {
             text
         };
-        panels.output.push_str(displayed);
+        if stream == Stream::Input && !displayed.is_empty() {
+            panels.echo_build_input(displayed);
+        } else {
+            panels.output.push_str(displayed);
+        }
     }
     pub fn navigate(&mut self, workspace: &mut Workspace, forward: bool) -> Result<(), String> {
         if self.diagnostics.is_empty() {
@@ -655,7 +696,7 @@ mod output_mirror_tests {
                     line += 1;
                 }
                 produced += chunk.len();
-                builds.append_output(&mut panels, &chunk);
+                builds.append_output(&mut panels, Stream::Stdout, &chunk);
                 builds.retain_output(&mut panels);
             } else if !panels.busy() {
                 break;

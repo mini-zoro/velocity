@@ -181,10 +181,13 @@ stale scopes needed for embedded selectors use a five-millisecond synchronous bu
 An explicit Tools build-system choice bypasses matching.
 
 The build output `word_wrap` option supports false/true. The public build documentation does
-not establish a default, so Velocity follows the round-18 specification: true. `interactive: true` produces an explicit
-unsupported message instead of waiting on stdin. Output queues, retained output and diagnostics
-are bounded; cancellation/restart kills the old process group before the replacement starts;
-reaping remains asynchronous and pipe drain has a short deadline.
+not establish a default, so Velocity follows the round-18 specification: true.
+The [`interactive` build option](https://www.sublimetext.com/docs/build_systems.html#interactive)
+adds a single-line input box to the output panel on Unix. Return sends a UTF-8 line plus newline,
+Control-D sends EOF after pending input, and Control-C cancels the build. Echoes use
+`markup.inserted.build-input`. A line is limited to 4 KiB and the queue to eight lines, plus one
+in flight. A full queue leaves the draft in place. Noninteractive builds keep stdin closed.
+Cancellation/restart kills the old process group; reaping and pipe drain remain asynchronous.
 The requested finish/cancel/quiet formatting and matching-set Build With memory have headless tests.
 
 Opening or accepting settings/syntax/palette commands preserves parked scroll positions unless
@@ -252,7 +255,7 @@ reopening the window. Indexing options restart the index in the background.
 | `new_window_settings` | The next File › New Window. The new window's per-window and view overrides are a snapshot, below project and syntax settings. They do not change on a User-file reload or persist through session restore. This is a Velocity compatibility feature: Sublime Text replaced the old setting in [build 2091](https://www.sublimetext.com/blog/articles/sublime-text-2-build-2091). |
 | `default_encoding`, `default_line_ending` | The next new document, including in an existing window. Existing documents retain their format; use the status bar to change it. |
 | `fallback_encoding`, `detect_indentation`, `large_file.load_bytes` | The next file open. Reopen a file to choose a different decoding or loading policy. Already-open views retain detected or manually selected indentation. |
-| `image_file_patterns` | Live for previews of open binary files; reopen to change how a document is initially loaded. |
+| `image_file_patterns` | Live for previews of open binary files. File › Open as Image / Open as Text overrides it for that file until Velocity quits. |
 | `vintage_start_in_command_mode` | When a view enters Vintage; an existing command/insert mode is not switched. |
 | `hot_exit`, `remember_open_files` | The next applicable checkpoint, close or quit. Observe restored documents when opening the next session. |
 | `use_simple_full_screen` | The next native window full-screen transition. An already drawn editor scene does not change. |
@@ -354,7 +357,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `hot_exit` | `` "always" `` |  | Next close or quit | Choose when to keep unsaved edits for the next session. | [vel-session/lib.rs](../crates/vel-session/src/lib.rs), [velocity/workbench.rs](../crates/velocity/src/workbench.rs) |
 | `ignored_packages` | `` ["Vintage"] `` |  | Immediately | Disable the packages in this list. | [Enabling Vintage](https://www.sublimetext.com/docs/vintage.html#enabling-vintage) [velocity/vintage.rs](../crates/velocity/src/vintage.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `ignored_words` | `` [] `` |  | Immediately | Do not flag these words as spelling errors. | [vel-spell/lib.rs](../crates/vel-spell/src/lib.rs), [velocity/annotations.rs](../crates/velocity/src/annotations.rs) |
-| `image_file_patterns` | `` ["*.png", "*.jpg", "*.jpeg", "*.gif"] `` |  | Immediately | Open matching files in the image viewer. | These are the formats supported by Velocity's decoder. [Image file selection](https://www.sublimetext.com/download) [velocity/open_requests.rs](../crates/velocity/src/open_requests.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
+| `image_file_patterns` | `` ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.tga"] `` |  | Immediately | Open matching files in the image viewer. | These are the formats supported by Velocity's decoder. WebP uses macOS ImageIO; PSD is not supported. [Build 4180](https://www.sublimetext.com/download#build-4180) [Preview loader](../crates/velocity/src/image_decode.rs) [velocity/open_requests.rs](../crates/velocity/src/open_requests.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `inactive_sheet_dimming` | Not shipped |  |  |  | [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme) |
 | `indent_guide_options` | `` ["draw_normal"] `` |  | Immediately | Choose whether to show all guides or emphasize the active indent. | Add "draw_active" to highlight the current indentation level. [Active-guide default](https://www.sublimetext.com/updates/2/stable/release_notes.html) [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `indent_subsequent_lines` | `` true `` |  | Immediately | Keep the original line’s indentation on wrapped lines. | [velocity/view.rs](../crates/velocity/src/view.rs) |

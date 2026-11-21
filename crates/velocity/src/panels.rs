@@ -240,6 +240,7 @@ pub(crate) enum StyleId {
     SettingsLabel,
     SettingsInput,
     SideGuide,
+    BuildInput,
 }
 impl StyleId {
     pub(crate) const fn at(self, index: u64) -> u64 {
@@ -470,6 +471,8 @@ pub struct Panels {
     pub alternate_click: bool,
     pub build_results: Vec<(usize, FileLocation)>,
     pub build_output_offset: usize,
+    pub(crate) build_input: Option<Input>,
+    pub(crate) build_input_echo: Vec<Range<usize>>,
     pub find_history: Vec<String>,
     pub replace_history: Vec<String>,
     pub chrome: bool,
@@ -660,6 +663,8 @@ impl Default for Panels {
             primary_click: false,
             alternate_click: false,
             build_results: Vec::new(),
+            build_input: None,
+            build_input_echo: Vec::new(),
             build_output_offset: 0,
             find_history: Vec::new(),
             replace_history: Vec::new(),
@@ -885,9 +890,30 @@ impl Panels {
     }
     pub(crate) fn clear_output(&mut self) {
         self.output.clear();
+        self.build_input_echo.clear();
         self.output_ui.clear();
         self.indexing_output = false;
         self.output_reset = true;
+    }
+    pub(crate) fn set_build_input(&mut self, enabled: bool) {
+        self.build_input = enabled.then(|| Input::bounded_line(vel_build::MAX_INPUT_LINE));
+        if self.panel == Some(Panel::Output) && !self.show_console {
+            if enabled {
+                self.panel_focused = true;
+                self.side_focused = false;
+                self.focus.show(Surface::Panel, true);
+            } else if self.panel_focused {
+                self.focus_editor_for_context();
+            }
+        }
+    }
+    pub(crate) fn echo_build_input(&mut self, line: &str) {
+        let start = self.output.len();
+        self.build_input_echo.push(start..start + line.len());
+        self.output.push_str(line);
+    }
+    fn show_build_input(&self) -> bool {
+        self.panel == Some(Panel::Output) && !self.show_console && self.build_input.is_some()
     }
     pub(crate) fn append_output_ui(&mut self, message: UiText) {
         if !message.is_empty() {
@@ -897,6 +923,14 @@ impl Panels {
         }
     }
     pub(crate) fn replace_output_prefix(&mut self, removed: usize, message: UiText) {
+        self.build_input_echo.retain_mut(|range| {
+            if range.end <= removed {
+                return false;
+            }
+            range.start = range.start.saturating_sub(removed) + message.len();
+            range.end = range.end - removed + message.len();
+            true
+        });
         self.output_ui.retain_mut(|(start, text)| {
             if *start < removed {
                 return false;
@@ -928,7 +962,14 @@ impl Panels {
             if text.refresh(tr) {
                 self.output
                     .replace_range(*start..*start + previous_len, text);
-                shift += text.len() as isize - previous_len as isize;
+                let delta = text.len() as isize - previous_len as isize;
+                for range in &mut self.build_input_echo {
+                    if range.start >= *start + previous_len {
+                        range.start = range.start.saturating_add_signed(delta);
+                        range.end = range.end.saturating_add_signed(delta);
+                    }
+                }
+                shift += delta;
                 if *start < self.output_mirrored {
                     self.output_reset = true;
                 }
@@ -1563,6 +1604,8 @@ impl Panels {
     pub fn input(&self) -> Option<&Input> {
         if self.overlay.is_some() {
             Some(&self.quick_input)
+        } else if self.panel_focused && self.show_build_input() {
+            self.build_input.as_ref()
         } else if self.panel_focused
             && matches!(
                 self.panel,
@@ -1583,6 +1626,8 @@ impl Panels {
     pub fn input_mut(&mut self) -> Option<&mut Input> {
         if self.overlay.is_some() {
             Some(&mut self.quick_input)
+        } else if self.panel_focused && self.show_build_input() {
+            self.build_input.as_mut()
         } else if self.panel_focused
             && matches!(
                 self.panel,
@@ -1603,6 +1648,17 @@ impl Panels {
     pub(crate) fn focus_context_input(&mut self, point: Point) -> bool {
         if self.overlay.is_some() {
             return contains(self.quick_input.bounds, point);
+        }
+        if self.show_build_input()
+            && self
+                .build_input
+                .as_ref()
+                .is_some_and(|input| contains(input.bounds, point))
+        {
+            self.panel_focused = true;
+            self.side_focused = false;
+            self.focus.show(Surface::Panel, true);
+            return true;
         }
         let Some(panel) = self.panel else {
             return false;
@@ -1723,6 +1779,10 @@ impl Panels {
         if self.overlay.is_some() {
             if !self.quick_input.composing() {
                 self.query_quick(workspace);
+            }
+        } else if self.show_build_input() {
+            if let Some(input) = &mut self.build_input {
+                input.reveal();
             }
         } else if self.focus_input == 0
             && self.panel != Some(Panel::Input)
@@ -4309,6 +4369,24 @@ impl Panels {
         if key.name == "f4" {
             return Ok((false, None));
         }
+        if self.overlay.is_none()
+            && self.panel_focused
+            && !self.side_focused
+            && self.show_build_input()
+        {
+            let command = match (key.name.as_str(), key.modifiers) {
+                ("enter", 0) => "build_send_input",
+                ("d", 1) => "build_close_input",
+                _ => return Ok((false, None)),
+            };
+            return Ok((
+                true,
+                Some(Invocation {
+                    command: command.into(),
+                    args: json!({}),
+                }),
+            ));
+        }
         if self.side_focused {
             if workspace.is_empty() {
                 self.side_open = None;
@@ -5658,6 +5736,23 @@ impl Panels {
             input.reveal();
         }
         self.quick_input.reveal();
+        let build_input_height = if self.show_build_input() {
+            let input = self.build_input.as_mut().expect("interactive build");
+            let height = (34. * self.ui_scale).min((bottom - 30. * self.ui_scale).max(0.));
+            let inset = (4. * self.ui_scale).min(height / 4.);
+            input.scale = self.ui_scale;
+            input.set_row_pitch(18. * self.ui_scale);
+            input.bounds = Rect {
+                x: self.panel_bounds.x + inset,
+                y: self.panel_bounds.y + bottom - height + inset,
+                width: (self.panel_bounds.width - 2. * inset).max(1.),
+                height: height - 2. * inset,
+            };
+            input.reveal();
+            height
+        } else {
+            0.
+        };
         self.result_scroll.row_height =
             if self.panel == Some(Panel::Output) && self.output_editor.is_some() {
                 self.output_view.line_height
@@ -5665,7 +5760,7 @@ impl Panels {
                 24. * self.ui_scale
             };
         self.result_scroll
-            .set_viewport((bottom - (34. * self.ui_scale)).max(1.));
+            .set_viewport((bottom - (34. * self.ui_scale) - build_input_height).max(1.));
         // Retained controls expose live theme attributes and shared hit testing.
         self.tree.roots.clear();
         for node in self.tree.nodes.values_mut() {
@@ -6923,11 +7018,18 @@ impl Panels {
                     editor.preferences.tab_size,
                 );
             }
+            let top = self.panel_bounds.y + (30. * self.ui_scale);
+            let bottom = self
+                .build_input
+                .as_ref()
+                .map_or(self.panel_bounds.y + self.panel_bounds.height, |input| {
+                    input.bounds.y - 4. * self.ui_scale
+                });
             let body = Rect {
                 x: self.panel_bounds.x,
-                y: self.panel_bounds.y + (30. * self.ui_scale),
+                y: top,
                 width: self.panel_bounds.width,
-                height: (self.panel_bounds.height - (30. * self.ui_scale)).max(1.),
+                height: (bottom - top).max(1.),
             };
             self.output_view.size = Size {
                 width: body.width,
@@ -6937,9 +7039,33 @@ impl Panels {
             self.output_view.apply_style(editor);
             self.result_scroll.row_height = self.output_view.line_height;
             self.result_scroll.rows = editor.layout.borrow().total();
-            let mut output = self.output_view.scene(editor);
+            let mut output = self
+                .output_view
+                .scene_with_build_input(editor, &self.build_input_echo);
             crate::app_scene_translate(&mut output, body.x, body.y);
             scene.layers.extend(output.layers);
+            if let Some(input) = &mut self.build_input
+                && input.bounds.height > 0.
+            {
+                let mut theme = workspace.themes.ui.borrow_mut();
+                let focused = self.panel_focused && self.overlay.is_none() && !self.side_focused;
+                let path = [
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("panel_control output_panel", &[]),
+                    vel_theme::Element::new(
+                        "text_line_control",
+                        if focused { &["focused"] } else { &[] },
+                    ),
+                ];
+                let style = theme.style(
+                    StyleId::BuildInput.at(0),
+                    &vel_theme::ElementPath(&path),
+                    settings,
+                );
+                let mut row = Layer::default();
+                paint_themed_input(&theme, &style, &mut row, input, focused);
+                scene.layers.push(row);
+            }
         }
         if self.overlay.is_some() {
             let mut theme = workspace.themes.ui.borrow_mut();
@@ -7323,6 +7449,15 @@ impl Panels {
             self.panel_focused = true;
             self.focus.show(Surface::Panel, true);
             if down {
+                if !self.show_console
+                    && self.panel == Some(Panel::Output)
+                    && let Some(input) = &mut self.build_input
+                    && contains(input.bounds, point)
+                {
+                    self.side_focused = false;
+                    input.click_at(point, extend);
+                    return Ok(true);
+                }
                 if self.panel == Some(Panel::Output)
                     && double
                     && point.y >= self.panel_bounds.y + (30. * self.ui_scale)

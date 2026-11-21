@@ -1,6 +1,8 @@
 // Tab selection: https://www.sublimetext.com/docs/tab_multi-select.html
 // Close Unmodified/Deleted: https://www.sublimetext.com/blog/feed (public ST4 changelog).
 [
+  {"caption":"Open as Image","command":"open_as_image"},
+  {"caption":"Open as Text","command":"open_as_text"},
   {
     "caption": "Close",
     "command": "close_by_index"

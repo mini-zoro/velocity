@@ -70,7 +70,10 @@ NOTES = {
     "result_file_regex": "[Build system options](https://www.sublimetext.com/docs/build_systems.html#exec-target-options)",
     "update_system_recent_files": f"[Build 4143]({CHANGELOG})",
     "draw_unicode_white_space": f"[Builds 4107 and 4126]({CHANGELOG})",
-    "image_file_patterns": f"[Image file selection]({CHANGELOG})",
+    "image_file_patterns": (
+        f"WebP uses macOS ImageIO; PSD is not supported. [Build 4180]({CHANGELOG}#build-4180) "
+        "[Preview loader](../crates/velocity/src/image_decode.rs)"
+    ),
     "index_exclude_patterns": "[Indexing settings](https://www.sublimetext.com/docs/indexing.html#settings)",
     "spelling_selector": f"[Scope selector]({ARCHIVED_REFERENCE}#system-and-miscellaneous-settings)",
     "ignored_packages": "[Enabling Vintage](https://www.sublimetext.com/docs/vintage.html#enabling-vintage)",

@@ -76,6 +76,7 @@ pub struct Tab {
     pub(crate) binary_document: bool,
     /// An image file whose decode failed: its bytes are shown, so its label ends in `[hex]`.
     pub(crate) image_failed: bool,
+    pub(crate) open_as_choices: Option<crate::open_requests::OpenAsChoices>,
     /// Whether the path matches `image_file_patterns`, with what that decision depends on.
     image_file: std::cell::RefCell<Option<ImageFile>>,
     /// The project folder the patterns match against; the file's own folder until a frame
@@ -207,6 +208,7 @@ impl Tab {
             binary_loading: None,
             binary_document: false,
             image_failed: false,
+            open_as_choices: None,
             image_file: std::cell::RefCell::new(None),
             image_root: std::cell::RefCell::new(None),
             load_failed: false,
@@ -291,6 +293,10 @@ impl Tab {
     /// often), matched against the project folder that `Workspace::sync_image_files` supplies,
     /// the same root the decoder uses; until then against the file's own folder.
     pub(crate) fn is_image_file(&self) -> bool {
+        use crate::open_requests::OpenAs;
+        if let Some(choice) = self.open_as() {
+            return choice == OpenAs::Image;
+        }
         let Some(path) = self.path.as_deref() else {
             return false;
         };
@@ -312,6 +318,13 @@ impl Tab {
             return known.image;
         }
         self.classify_image_file(revision, path, root)
+    }
+    pub(crate) fn open_as(&self) -> Option<crate::open_requests::OpenAs> {
+        self.open_as_choices
+            .as_ref()?
+            .borrow()
+            .get(self.path.as_ref()?)
+            .copied()
     }
     fn classify_image_file(&self, revision: u64, path: &Path, root: &Path) -> bool {
         let image = crate::open_requests::image_matches(self, root, path);
@@ -745,6 +758,7 @@ pub struct Workspace {
     /// An empty window retains an input adapter but has no workbench sheet.
     pub(crate) empty: bool,
     pub(crate) closed_files: Vec<(PathBuf, vel_session::ViewState)>,
+    pub(crate) open_as_choices: crate::open_requests::OpenAsChoices,
     /// Final stdin text is retained until its CLI waiter consumes it.
     pub(crate) closed_text: BTreeMap<u64, Text>,
     pub(crate) stdout_sheets: std::collections::BTreeSet<u64>,
@@ -2001,6 +2015,7 @@ impl Workspace {
             active: 0,
             empty: false,
             closed_files: Vec::new(),
+            open_as_choices: Default::default(),
             closed_text: BTreeMap::new(),
             stdout_sheets: Default::default(),
             menus,
@@ -2377,6 +2392,58 @@ impl Workspace {
         }
         self.open(FileLocation::parse(argument))
     }
+    pub(crate) fn can_open_as(&self, index: usize, mode: crate::open_requests::OpenAs) -> bool {
+        use crate::open_requests::OpenAs;
+        let tab = &self.tabs[index];
+        if tab.path.is_none()
+            || tab.load_failed
+            || tab.deleted
+            || tab.dirty()
+            || tab.find_results
+            || tab.editor.marked.is_some()
+            || tab.loading.is_some()
+            || tab.binary_loading.is_some()
+        {
+            return false;
+        }
+        let binary = tab.editor.binary.is_some();
+        let wants_image = tab.is_image_file();
+        match mode {
+            OpenAs::Text => binary && wants_image,
+            OpenAs::Image => {
+                (binary
+                    || (tab.disk_saved.is_some()
+                        && tab
+                            .path
+                            .as_deref()
+                            .is_some_and(crate::image_decode::known_extension)))
+                    && (!wants_image || (tab.image_failed && tab.open_as().is_none()) || !binary)
+            }
+        }
+    }
+    pub(crate) fn set_open_as(
+        &mut self,
+        index: usize,
+        mode: crate::open_requests::OpenAs,
+    ) -> Result<(), String> {
+        use crate::open_requests::OpenAs;
+        if !self.can_open_as(index, mode) {
+            return Ok(());
+        }
+        let tab = &mut self.tabs[index];
+        let path = tab.path.clone().expect("file-backed tab");
+        if mode == OpenAs::Image && tab.editor.binary.is_none() {
+            tab.load_hex(String::new(), false)?;
+        }
+        self.open_as_choices.borrow_mut().insert(path.clone(), mode);
+        for tab in &mut self.tabs {
+            if tab.path.as_ref() == Some(&path) {
+                tab.open_as_choices = Some(self.open_as_choices.clone());
+                tab.image_failed = false;
+            }
+        }
+        Ok(())
+    }
     pub fn select(&mut self, index: usize) {
         self.observe_navigation();
         if !self.empty
@@ -2455,6 +2522,7 @@ impl Workspace {
         }
         let started = Instant::now();
         let mut tab = Tab::new(Text::new(), &self.settings, &self.keymap)?;
+        tab.open_as_choices = Some(self.open_as_choices.clone());
         tab.transient = preview;
         tab.preview_recent_pending = preview;
         tab.path = Some(path.clone());
@@ -2472,7 +2540,11 @@ impl Workspace {
                     .editor
                     .settings
                     .usize("large_file.load_bytes", 64 * 1024 * 1024) as u64;
-            tab.load_disk(decode, background, false)?;
+            if tab.open_as() == Some(crate::open_requests::OpenAs::Image) {
+                tab.load_hex(String::new(), false)?;
+            } else {
+                tab.load_disk(decode, background, false)?;
+            }
         }
         // Installation suppresses restore-thread filesystem probes. Ordinary
         // opens still need initial stamps for focus-save and deletion handling.

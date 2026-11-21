@@ -751,6 +751,97 @@ mod tests {
             std::thread::park_timeout(std::time::Duration::from_millis(5));
         }
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn r33_open_as_dispatch_enablement_and_session_choice() {
+        use crate::open_requests::OpenAs;
+        let dir = tempfile::tempdir().unwrap();
+        let webp = dir.path().join("test.WeBP");
+        std::fs::write(&webp, crate::image_decode::WEBP_FIXTURE).unwrap();
+        let mut a = clean_tabs(1, 1000., 1., true);
+        open_path(&mut a, &webp);
+        settle_images(&mut a);
+        assert_eq!(
+            a.view.image_preview.image.as_ref().unwrap().logical_size,
+            [240., 144.]
+        );
+        let file_menu = a
+            .application_menu()
+            .into_iter()
+            .find(|m| m.id == "file")
+            .unwrap();
+        let menu_text = file_menu
+            .children
+            .iter()
+            .find(|m| m.command.as_deref() == Some("open_as_text"))
+            .unwrap();
+        assert!(a.command_enabled("open_as_text", &menu_text.args));
+        assert!(!a.command_enabled("open_as_image", "{}"));
+        a.run_named(
+            None,
+            "open_as_text",
+            &serde_json::from_str(&menu_text.args).unwrap(),
+        );
+        settle_images(&mut a);
+        assert!(a.view.image_preview.image.is_none());
+        assert!(a.workspace.editor().binary.is_some());
+        assert_eq!(
+            a.workspace.tabs[a.workspace.active].open_as(),
+            Some(OpenAs::Text)
+        );
+
+        a.workspace.close(a.workspace.active).unwrap();
+        open_path(&mut a, &webp);
+        settle_images(&mut a);
+        assert!(
+            a.workspace.tabs[a.workspace.active]
+                .label()
+                .ends_with("[hex]")
+        );
+        let sheet = a.workspace.tabs[a.workspace.active].sheet;
+        a.workspace.new_file().unwrap();
+        a.scene();
+        assert!(!a.command_enabled("open_as_image", "{}"));
+        assert!(!a.command_enabled("open_as_text", "{}"));
+        let (_, rect) = a.tab_hits.iter().find(|(id, _)| *id == sheet).unwrap();
+        let menu = a.headless_context_menu(Point {
+            x: rect.x + 4.,
+            y: rect.y + 4.,
+        });
+        let image = menu
+            .iter()
+            .find(|m| m.command.as_deref() == Some("open_as_image"))
+            .unwrap();
+        a.run_named(
+            None,
+            "open_as_image",
+            &serde_json::from_str(&image.args).unwrap(),
+        );
+        assert_eq!(a.workspace.tabs[a.workspace.active].sheet, sheet);
+        settle_images(&mut a);
+        assert!(a.view.image_preview.image.is_some());
+
+        a.run_named(None, "show_overlay", &json!({"overlay":"command_palette"}));
+        a.handle_text_input(
+            None,
+            TextInput::Insert {
+                text: "File: Open as Text".into(),
+                replacement: None,
+            },
+        );
+        assert!(a.dispatch_key_binding(
+            None,
+            &vel_config::keymap::Key::parse("enter").unwrap(),
+            Instant::now(),
+            a.viewport()
+        ));
+        settle_images(&mut a);
+        assert_eq!(
+            a.workspace.tabs[a.workspace.active].open_as(),
+            Some(OpenAs::Text)
+        );
+        assert!(a.view.image_preview.image.is_none());
+    }
     /// Image tabs are named by the file, before and after decoding, whether or not they
     /// were ever shown; only an image whose decode failed (and whose bytes are shown) says
     /// "[hex]". The failure note goes away with the document it was shown for.

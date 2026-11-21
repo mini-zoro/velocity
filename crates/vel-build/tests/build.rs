@@ -101,7 +101,8 @@ fn streams_both_pipes_and_preserves_split_utf8() {
             Event::Warning(_)
             | Event::Truncated { .. }
             | Event::OutputBatch(_)
-            | Event::Results(_) => {}
+            | Event::Results(_)
+            | Event::InputClosed => {}
         }
     }
     assert!(stderr);
@@ -128,7 +129,8 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
             Event::Warning(_)
             | Event::Truncated { .. }
             | Event::OutputBatch(_)
-            | Event::Results(_) => {}
+            | Event::Results(_)
+            | Event::InputClosed => {}
             Event::Output { text, .. } => {
                 output.push_str(&text);
                 if output.contains("ready") {
@@ -316,6 +318,7 @@ fn round18_restart_kills_child_and_grandchild_before_new_process_starts() {
             Event::Warning(_)
             | Event::Truncated { .. }
             | Event::OutputBatch(_)
+            | Event::InputClosed
             | Event::Results(_) => {}
         }
     }

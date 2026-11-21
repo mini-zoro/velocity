@@ -20,6 +20,7 @@ mod feature_tests;
 mod git_ui;
 mod gui_launch;
 mod html_ui;
+mod image_decode;
 mod instance;
 mod instance_path;
 mod intelligence;
@@ -85,6 +86,18 @@ use vel_platform::{Platform, Size, WindowOptions};
 use vel_text::Text;
 
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(image_decode::HELPER)) {
+        let ok = args
+            .next()
+            .filter(|_| args.next().is_none())
+            .and_then(|path| image_decode::helper(Path::new(&path), std::io::stdout().lock()))
+            .is_some();
+        if !ok {
+            std::process::exit(1);
+        }
+        return;
+    }
     let entered = Instant::now();
     let wall = SystemTime::now();
     if let Err(e) = run(entered, wall, gui_launch::Startup::take()) {

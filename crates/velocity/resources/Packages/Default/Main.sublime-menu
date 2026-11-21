@@ -22,6 +22,8 @@
       },
       {"caption":"Open Folder in New Window…","command":"prompt_open_folder_in_new_window"},
       { "caption": "Open Recent", "id": "open_recent" },
+      { "caption": "Open as Image", "command": "open_as_image" },
+      { "caption": "Open as Text", "command": "open_as_text" },
       { "caption": "Reopen Closed File", "command": "reopen_last_file" },
       { "caption": "Revert File…", "command": "revert" },
       { "caption": "Reopen with Encoding", "children": [

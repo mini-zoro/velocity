@@ -2368,6 +2368,16 @@ impl View {
         Ok(false)
     }
     pub fn scene(&mut self, e: &Editor) -> Scene {
+        self.scene_impl::<false>(e, &[])
+    }
+    pub(crate) fn scene_with_build_input(&mut self, e: &Editor, input: &[Range<usize>]) -> Scene {
+        if input.is_empty() {
+            self.scene(e)
+        } else {
+            self.scene_impl::<true>(e, input)
+        }
+    }
+    fn scene_impl<const BUILD_INPUT: bool>(&mut self, e: &Editor, input: &[Range<usize>]) -> Scene {
         let mut phase = self.profile.as_ref().map(|_| Instant::now());
         if let Some(image) = self.image_preview.image.clone() {
             return self.image_scene(e, &image);
@@ -2425,6 +2435,25 @@ impl View {
         let scheme = language.map_or_else(|| fallback_scheme(self.appearance), |l| &*l.scheme);
         let default = scheme.default_style();
         let global = |name: &str| color(scheme, name);
+        let input_color = if BUILD_INPUT {
+            static STACK: std::sync::OnceLock<vel_scope::ScopeStack> = std::sync::OnceLock::new();
+            let stack = STACK.get_or_init(|| {
+                vel_scope::ScopeStack::from_vec(
+                    ["text.build-output", "markup.inserted.build-input"]
+                        .map(|scope| vel_scope::Scope::new(scope).expect("build input scope"))
+                        .to_vec(),
+                )
+            });
+            let styled = vel_color_scheme::Highlighter::new(std::sync::Arc::new(scheme.clone()))
+                .style_for(stack);
+            if styled.foreground == default.foreground {
+                global("accent")
+            } else {
+                rgba(styled.foreground)
+            }
+        } else {
+            [0.; 4]
+        };
         let result_match_style = language
             .filter(|_| !self.find_result_matches.is_empty())
             .map(|l| {
@@ -3340,6 +3369,11 @@ impl View {
             );
             let mut previous_span = None;
             let mut span = spans.partition_point(|s| s.range.end <= segment.bytes.start);
+            let mut echo = if BUILD_INPUT {
+                input.partition_point(|r| r.end <= start + segment.bytes.start)
+            } else {
+                0
+            };
             let mut adjustment = 0.;
             for unit in &relevant {
                 let gap = if inline_phantoms {
@@ -3393,7 +3427,14 @@ impl View {
                         .iter()
                         .find(|(range, _, _)| range.contains(&at))
                 };
-                let fg = if selected {
+                if BUILD_INPUT {
+                    while input.get(echo).is_some_and(|r| r.end <= at) {
+                        echo += 1;
+                    }
+                }
+                let fg = if BUILD_INPUT && input.get(echo).is_some_and(|r| r.contains(&at)) {
+                    input_color
+                } else if selected {
                     style.selection_foreground.map(rgba).unwrap_or_else(|| {
                         global(if self.focused {
                             "selection_foreground"

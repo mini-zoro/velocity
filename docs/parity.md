@@ -215,13 +215,13 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Data-driven binary (hex) tab | [D4126][releases] | done | `vel-largefile/hex.rs`, `binary.rs` | Read-only byte view. |
 | Binary syntax label | [D4126][releases] | done | `app_status.rs` format/status model | |
 | Image previews (PNG, JPEG, GIF) | [D4180][releases] | done | `open_requests::decode_image`, `image_ui.rs` | GIF shows a static decoded frame. |
-| TGA preview | [D4107.77][releases], [V4096.4][dev] | missing | Image features in `velocity/Cargo.toml` | |
-| PSD preview | [D4107.77][releases], [V4096.4][dev] | missing | `open_requests::decode_image` has no PSD codec | |
-| WebP preview | [D4151.5][releases] | missing | Image features in `velocity/Cargo.toml` | |
-| `image_file_patterns` | [D4180.19][releases], [V4170.9][dev], [File patterns][patterns] | done | `open_requests::image_matches`, `Tab::sync_image_file` | Works for supported decoders. |
-| Explicit Open File as Image | [D4180.20][releases], [V4170.8][dev] | partial | `image_ui.rs` and `image_file_patterns` provide preview | No equivalent general File override established. |
-| Explicit Open File as Text | [D4180.20][releases], [V4170.8][dev] | partial | Reopen encoding and binary handling in `workspace.rs` | No general File override established. |
-| Image-tab context commands | [D4180.21][releases], [V4170.7][dev] | partial | `app_context.rs` tab popup | Common tab actions work; no full image-specific clipboard/view command suite established. |
+| TGA preview | [D4107.77][releases], [V4096.4][dev] | done | `image_decode.rs`, `r33_tga_preview_and_bounded_bad_headers` | Existing MIT/Apache-2.0 `image` crate, TGA feature; no new dependency. |
+| PSD preview | [D4107.77][releases], [V4096.4][dev] | missing | No verified flattened-composite-only decoder | PSD falls back to the byte view. |
+| WebP preview | [D4151.5][releases] | done | `vel-platform/image_io.rs`, `r33_webp_preview_and_bounded_bad_headers`, `image_webp` | macOS ImageIO, first frame only; no additional Rust codec dependency. |
+| `image_file_patterns` | [D4180.19][releases], [V4170.9][dev], [File patterns][patterns] | done | `open_requests::image_matches`, `Tab::sync_image_file` | WebP/TGA included by default; explicit overrides win. |
+| Explicit Open File as Image | [D4180.20][releases], [V4170.8][dev] | done | `r33_open_as_dispatch_enablement_and_session_choice` | File menu, palette and tab popup; in-memory per-file override; failure falls back to hex. |
+| Explicit Open File as Text | [D4180.20][releases], [V4170.8][dev] | done | `r33_open_as_dispatch_enablement_and_session_choice` | Binary files use the read-only hex view; does not reinterpret binary bytes as editable text. |
+| Image-tab context commands | [D4180.21][releases], [V4170.7][dev] | partial | `app_context.rs` tab popup, `r33_open_as_dispatch_enablement_and_session_choice` | Open-as and common tab actions work; no full image-specific clipboard/view command suite established. |
 | Browser printing (File > Print) | [D4107.109][releases], [V4092.3][dev], [V4093.2][dev] | done | `print_exports_current_selection_or_document_and_reaps_the_browser_file`, `vel-export::temporary_print_file` | Active scheme, including hashed colors; bounded background parse (8 MiB/250k lines, 30 s). No live browser test. |
 | `.sublime-project` folders and project settings | [Projects][projects] | done | `vel-session/project.rs`; `settings_project_view_and_user_keymap_precedence_reload` | |
 | Per-project build systems | [Projects][projects], [Build systems][build] | done | `vel-session/project.rs`, `velocity/build.rs` | |
@@ -477,7 +477,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Build output `word_wrap` | [Build systems][build] | done | `round18_environment_path_working_directory_and_wrap_table` | |
 | Build `file_patterns` and `keyfiles` eligibility | [Build systems][build] | done | `vel-build` eligibility matcher, `velocity/build.rs` | |
 | Build `quiet`, `encoding` and output `syntax` | [Build systems][build] | done | `Exec` options and result panel setup in `build.rs` | |
-| Build `interactive` stdin panel | [D4200.2][releases], [V4198.2][dev], [Build systems][build] | missing | `vel-build` reports unsupported interactive builds | |
+| Build `interactive` stdin panel | [D4200.2][releases], [V4198.2][dev], [Build systems][build] | done | `vel-build/process.rs`, `r33_build_panel_sends_echoes_and_closes_stdin` and cancel/restart/backpressure tests | Line input on Unix; Return and Control-D, scoped echo, bounded nonblocking pipe. Not a terminal emulator. |
 | Alternate/custom build targets | [Build systems][build] | partial | `variant_environment_automatic_selection_and_custom_target_rejection` | Built-in runner; non-Python custom target command compatibility limited. |
 | Build child camera/microphone access on macOS | [D4151.66][releases], [V4145.18][dev] | partial | `vel-build` launches external tools | Dedicated entitlement/prompt behavior not verified; native-only. |
 | Git sidebar status, ignored dimming and ancestor badges | [Git integration][git] | done | `badges_both_layers_blobs_folders_and_literal_incremental_refresh`; `panels.rs` | |
@@ -556,7 +556,7 @@ one-caret smoke. All are within ±1%. The features workload used the same
 | --- | --- | --- |
 | 1 | Search: result sheet/modifiers and context/size/error settings; `current_result`, scrollbar marks and macOS Find pasteboard | 3–6 days |
 | 2 | Tab selection, `unselect_current`, tab focus, insertion order and cross-group selection; Goto preview control | 2–4 days |
-| 3 | File open-as-text/image, WebP/TGA and file menu format coverage; PSD plus format/preview edge tests | 2–5 days |
+| 3 | Safe flattened PSD preview, remaining image-tab context actions and format edge cases | 2–5 days |
 | 4 | Background reload, project/layout persistence controls, title naming, safe restores and workspace interoperability | 4–8 days |
 | 5 | Font picker, right sidebar, folding controls, gutter/controls and auto-hide behavior; live AppKit and keyboard-layout checks | 4–7 days |
 | 6 | External terminal and Help actions; status formatting, console limit and index status controls | 2–4 days |

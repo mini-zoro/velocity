@@ -83,7 +83,18 @@ const WINDOW_COMMANDS: &[&str] = &[
     "native_minimize",
     "native_zoom",
     "native_bring_all_to_front",
+    "open_as_image",
+    "open_as_text",
+    "build_send_input",
+    "build_close_input",
 ];
+fn image_open_as(name: &str) -> crate::open_requests::OpenAs {
+    if name == "open_as_image" {
+        crate::open_requests::OpenAs::Image
+    } else {
+        crate::open_requests::OpenAs::Text
+    }
+}
 fn register_window_commands(editor: &mut crate::editor::Editor) {
     for &name in WINDOW_COMMANDS {
         if editor.registry.kind(name).is_none() {
@@ -297,6 +308,13 @@ impl App {
         if workspace.restore_original.is_none() {
             workspace.restore_original = sessions.borrow().original.clone();
         }
+        let choices = sessions.borrow().open_as_choices.clone();
+        if !std::rc::Rc::ptr_eq(&choices, &workspace.open_as_choices) {
+            choices
+                .borrow_mut()
+                .append(&mut workspace.open_as_choices.borrow_mut());
+        }
+        workspace.open_as_choices = choices;
         if options.mode == Mode::ThemeUi
             && let Err(e) = crate::theme_bench::demo(&mut workspace)
         {
@@ -307,6 +325,9 @@ impl App {
         }
         for tab in &mut workspace.tabs {
             register_window_commands(&mut tab.editor);
+            if tab.path.is_some() {
+                tab.open_as_choices = Some(workspace.open_as_choices.clone());
+            }
         }
         let view = View::new(
             Size {
@@ -1170,6 +1191,9 @@ impl App {
             return false;
         }
         match name {
+            "open_as_image" | "open_as_text" => {
+                return self.workspace.can_open_as(target, image_open_as(name));
+            }
             "copy_as_html" | "print" => {
                 let editor = &self.workspace.tabs[target].editor;
                 return !self.workspace.is_empty()
@@ -2647,6 +2671,17 @@ impl App {
             return Ok(());
         }
         if self.apply_build_action(window, name, args)? {
+            return Ok(());
+        }
+        if matches!(name, "open_as_image" | "open_as_text") {
+            let Some(index) = args["_context_sheet"]
+                .as_u64()
+                .map(|sheet| self.workspace.sheet_index(sheet))
+                .unwrap_or(Some(self.workspace.active))
+            else {
+                return Ok(());
+            };
+            self.workspace.set_open_as(index, image_open_as(name))?;
             return Ok(());
         }
         if name == "show_at_center" {

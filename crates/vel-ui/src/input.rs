@@ -38,6 +38,7 @@ struct Composition {
 /// A widget input. Committed edits use the same registry and buffer transactions as document edits.
 #[derive(Debug)]
 pub struct Input {
+    byte_limit: Option<usize>,
     /// UI scale shared by painting, hit testing, selection and native IME geometry.
     pub scale: f64,
     font: Option<vel_minihtml::TextStyle>,
@@ -73,6 +74,7 @@ impl Input {
             Selection::from_regions([Region::caret(buffer.text().len_bytes())]),
         );
         Self {
+            byte_limit: None,
             scale: 1.,
             font: None,
             metrics: None,
@@ -88,6 +90,31 @@ impl Input {
             clipboard: String::new(),
             composition: None,
         }
+    }
+    /// Creates an empty single-line input with a UTF-8 byte limit.
+    pub fn bounded_line(limit: usize) -> Self {
+        let mut input = Self::new("");
+        input.byte_limit = Some(limit);
+        input.buffer.set_history_limits(vel_buffer::HistoryLimits {
+            entries: 32,
+            bytes: limit * 4,
+            ..Default::default()
+        });
+        input
+    }
+    fn available(&self, replacing: usize) -> usize {
+        self.byte_limit.map_or(usize::MAX, |limit| {
+            limit.saturating_sub(self.buffer.text().len_bytes() - replacing)
+        })
+    }
+    fn selected_len(&self) -> usize {
+        self.buffer
+            .view(self.view)
+            .sel()
+            .primary()
+            .expect("selection")
+            .to_range()
+            .len()
     }
     /// Enables hard line breaks for search and replacement fields only.
     pub fn set_multiline(&mut self, enabled: bool) {
@@ -257,6 +284,16 @@ impl Input {
     /// Executes editing/history/clipboard commands through vel-commands.
     pub fn run(&mut self, name: &str, args: &Value) -> Result<(), String> {
         self.commit_composition();
+        let limited;
+        let args = if self.byte_limit.is_some()
+            && name == "insert"
+            && let Some(text) = args["characters"].as_str()
+        {
+            limited = serde_json::json!({"characters": &text[..text.floor_char_boundary(self.available(self.selected_len()).min(text.len()))]});
+            &limited
+        } else {
+            args
+        };
         let mut registry = self.registry.take_for_dispatch();
         let result = registry.run(name, args, self);
         self.registry = registry;
@@ -266,7 +303,7 @@ impl Input {
     pub fn text_input(&mut self, input: TextInput) {
         match input {
             TextInput::Marked {
-                text,
+                mut text,
                 selected,
                 replacement,
             } => {
@@ -314,6 +351,12 @@ impl Input {
                 } else {
                     range
                 };
+                if self.byte_limit.is_some() {
+                    text.truncate(
+                        text.floor_char_boundary(self.available(range.len()).min(text.len())),
+                    );
+                    text.retain(|c| !matches!(c, '\r' | '\n'));
+                }
                 self.composition = Some(Composition {
                     range,
                     text,
@@ -452,7 +495,11 @@ impl Input {
         }
     }
     /// Sets clipboard contents before an editing command.
-    pub fn set_clipboard(&mut self, text: String) {
+    pub fn set_clipboard(&mut self, mut text: String) {
+        if let Some(limit) = self.byte_limit {
+            text.truncate(text.floor_char_boundary(limit.min(text.len())));
+            text.shrink_to_fit();
+        }
         self.clipboard = text;
     }
     /// Clipboard contents after copy/cut.
@@ -605,7 +652,11 @@ impl Host for Input {
         if self.multiline {
             normalize_breaks(&self.clipboard)
         } else {
-            self.clipboard.replace(['\n', '\r'], " ")
+            let end = self.clipboard.floor_char_boundary(
+                self.available(self.selected_len())
+                    .min(self.clipboard.len()),
+            );
+            self.clipboard[..end].replace(['\n', '\r'], " ")
         }
     }
     fn set_clipboard(&mut self, text: &str) {

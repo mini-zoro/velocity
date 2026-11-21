@@ -3644,3 +3644,38 @@ do not run these checks in the real user profile or on production network storag
   closed: the focus ring must track geometry without building document values.
   Design handoff: the only focus paint remains the existing border in
   `app_a11y.rs:paint_accessibility_focus`.
+## Round 33 lane B: image previews and interactive builds
+
+- [ ] Run `target/release/velocity --render-scenes /tmp/velocity-r33-images --only image_webp --appearance both`
+  for offscreen Metal captures. Check the transparent surround, upright image, 240 × 144
+  source dimensions, and appearance in dark/light. No editor window is needed.
+- [ ] Open a WebP or TGA, then choose File › Open as Text. Verify hex, close and reopen the
+  file, then use the tab context menu or the palette to switch back. Repeat with
+  `image_file_patterns: []`; the explicit choice wins. Check the File and tab captions
+  with `ui_language: "zh-Hans"`. PNG/JPEG/GIF should still preview; PSD and broken images
+  should remain readable as bytes.
+- [ ] Run a build with `{"cmd":["/bin/cat"],"interactive":true}`. Verify that the input
+  box at the bottom gets focus, Return submits a line, and the submitted line is styled
+  differently from cat's output. Ctrl+D sends EOF and removes the input row. Ctrl+C
+  cancels; starting again clears unsent input. A noninteractive build must have no input box.
+  The box follows the [public build-system option](https://www.sublimetext.com/docs/build_systems.html#interactive)
+  and [Build 4200](https://www.sublimetext.com/download#build-4200); the key handling and
+  echo scope are Velocity behavior covered headlessly.
+
+Preview bounds: 64 MiB encoded bytes, at most 8,192 pixels per side and 16 Mi pixels
+total, 2,048 pixels per texture side, and a two-second helper deadline on Unix. The
+worker kills and reaps a stalled helper; failed previews fall back to hex. TGA enables
+the existing MIT/Apache-2.0 Rust codec under [CONTRIBUTING](../../CONTRIBUTING.md)’s
+license policy. WebP uses the system ImageIO codec with a RIFF preflight and adds no
+registry dependency. PSD is excluded because there is no verified flattened-only path.
+
+Sandbox verification: the full gate passed (1,693 tests, zero failures), including the
+CLI forwarding acceptance test. `image_webp --appearance both` completed on the CPU
+scene path (`--bench-scene 2`); the sandbox exposes no Metal adapter, so no PNGs were
+captured. Keep the Metal check above open.
+
+Median retired instructions versus `b740212`, from three alternating pairs measured
+with Darwin `proc_pid_rusage(RUSAGE_INFO_V4)` before reaping each child: view features
+**+0.16%**, 1,000-caret smoke **+0.71%**, and single-caret smoke **+0.20%**. All medians
+are within the ±1% gate. The standard `time -l` script could not read `kern.clockrate`
+in the sandbox.

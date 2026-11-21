@@ -331,6 +331,11 @@ impl Fixture {
         }
         write_png(&scratch.join("logo.png"), width, height, &pixels)?;
         std::fs::write(
+            scratch.join("preview.webp"),
+            crate::image_decode::WEBP_FIXTURE,
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(
             scratch.join("damaged.png"),
             b"\x89PNG\r\n\x1a\nnot really an image",
         )
@@ -761,6 +766,9 @@ fn image_scene(fixture: &Fixture, dark: bool, name: &str) -> Result<App, String>
     open(&mut app, &fixture.file)?;
     open(&mut app, &fixture.scratch(name))?;
     settle(&mut app);
+    if name == "preview.webp" && app.view.image_preview.image.is_none() {
+        return Err("image_webp: the preview did not decode".into());
+    }
     Ok(app)
 }
 
@@ -1569,6 +1577,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "image_view",
         size: (1000., 640.),
         build: |f, d| image_scene(f, d, "logo.png"),
+    },
+    Scenario {
+        name: "image_webp",
+        size: (1000., 640.),
+        build: |f, d| image_scene(f, d, "preview.webp"),
     },
     Scenario {
         name: "image_fallback",

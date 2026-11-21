@@ -431,7 +431,7 @@ fn round18_build_with_choices_filter_and_remember_variants() {
     assert!(a.builds.choice.is_none());
 }
 #[test]
-fn round18_build_output_format_table_and_unsupported_stdin() {
+fn round18_build_output_format_table() {
     for (code, cancel, quiet, expected) in [
         (Some(0), false, false, "\n[Finished in 300ms]\n"),
         (
@@ -450,18 +450,85 @@ fn round18_build_output_format_table_and_unsupported_stdin() {
             expected
         );
     }
-    let mut a = app("", None);
+}
+
+#[cfg(unix)]
+#[test]
+fn r33_build_panel_sends_echoes_and_closes_stdin() {
+    let mut a = app("editor contents", None);
     named(
         &mut a,
         "exec",
-        json!({"cmd":["/bin/cat"],"interactive":true}),
+        json!({
+            "shell_cmd": "printf 'name? '; /usr/bin/sed 's/^/received /'; printf 'saw EOF\\nerror.rs:2: actual\\n'",
+            "interactive":true, "file_regex": "^((?:error|fake)\\.rs):(\\d+): (.*)$"
+        }),
     );
-    assert!(a.builds.task.is_none());
+    a.scene();
+    let input = a.panels.input().expect("focused build input");
+    assert!(input.bounds.height > 0.);
+    type_into_build(&mut a, "fake.rs:1: café");
+    assert!(key(&mut a, "enter"));
+    assert_eq!(a.panels.input().unwrap().value(), "");
+    type_into_build(&mut a, "fake.rs:2: second echo");
+    assert!(key(&mut a, "enter"));
+    assert!(key(&mut a, "ctrl+d"));
+    assert!(a.panels.build_input.is_none());
+    finish(&mut a);
     assert!(
-        a.panels
-            .output
-            .contains("Interactive builds are not supported")
+        a.panels.output.contains("received fake.rs:1: café\n"),
+        "{}",
+        a.panels.output
     );
+    assert!(a.panels.output.contains("saw EOF\n"));
+    assert_eq!(a.panels.build_input_echo.len(), 2);
+    assert_eq!(
+        &a.panels.output[a.panels.build_input_echo[0].clone()],
+        "fake.rs:1: café\n"
+    );
+    assert_eq!(a.builds.diagnostics.len(), 1);
+    let diagnostic = &a.builds.diagnostics[0];
+    assert_eq!(
+        a.panels.output.lines().nth(diagnostic.output_line),
+        Some("error.rs:2: actual")
+    );
+    assert_eq!(a.workspace.editor().text.to_string(), "editor contents");
+}
+
+#[cfg(unix)]
+fn type_into_build(a: &mut App, text: &str) {
+    a.handle_text_input(
+        None,
+        TextInput::Insert {
+            text: text.into(),
+            replacement: None,
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn r33_build_panel_cancel_and_restart_clear_the_draft_and_pipe() {
+    let mut a = app("", None);
+    let run = json!({"cmd":["/bin/cat"],"interactive":true});
+    named(&mut a, "exec", run.clone());
+    type_into_build(&mut a, "not submitted");
+    assert!(key(&mut a, "ctrl+c"));
+    assert!(a.panels.build_input.is_none());
+    finish(&mut a);
+    assert!(a.panels.output.contains("[Cancelled]"));
+
+    named(&mut a, "exec", run.clone());
+    type_into_build(&mut a, "old draft");
+    named(&mut a, "exec", run);
+    assert_eq!(a.panels.input().unwrap().value(), "");
+    type_into_build(&mut a, "new run");
+    assert!(key(&mut a, "enter"));
+    assert!(key(&mut a, "ctrl+d"));
+    finish(&mut a);
+    assert_eq!(a.panels.output.matches("new run\n").count(), 2);
+    assert!(!a.panels.output.contains("draft"));
+    assert!(a.panels.build_input.is_none());
 }
 
 #[test]

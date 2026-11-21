@@ -8,6 +8,8 @@ pub mod accessibility;
 mod display;
 pub mod fonts;
 pub mod fullscreen;
+#[cfg(target_os = "macos")]
+pub mod image_io;
 mod input;
 pub mod mouse;
 #[cfg(any(target_os = "macos", test))]

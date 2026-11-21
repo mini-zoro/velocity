@@ -75,7 +75,7 @@ Audit totals: **39 same**, **6 differs on purpose**, **13 differs — bug** (4 f
 | CLI `-w`, explicit `file:line:col`, `-` | [CLI][cli]: wait until closed, optional location, and edit stdin (with stdout redirection when requested). | `real_cli_wait_interrupt_is_client_only_and_literal_colon_wins`, `multiple_files_stdin_and_one_based_unicode_locations`, `cli_stdin.rs` and `Workspace::open_stdin`. The picker regression also checks that a supplied CLI position still wins. | **same** (terminal refocus is not tested) |
 | CLI reopen with no position vs explicit `:1:1` | [CLI][cli] documents optional coordinates; [Build 4143][r4143] confirms preserve-position behavior on macOS reopen without naming the CLI route. U03 applies that behavior to the CLI. | `r33_cli_local_forwarded_and_native_reopen_preserve_position` checks bare paths (including literal colons) over the single-instance socket and explicit line/column jumps, including `:1:1`. | **same (fixed in round 33 lane C)** (U03) |
 | Open larger text, binary or a supported image | [Build 4126][r4126] identifies a distinct binary view status; [Build 4180][r4180] documents image views and their file patterns. The notes don't specify large-text thresholds. | `Tab::load_disk` streams large files with a read-only prefix; `r20_real_loader_opens_image_and_keeps_nonmatching_hex` checks decoded PNG vs read-only hex. | **same** (ordinary text/binary/PNG open outcome; threshold policy below) |
-| More image formats and explicit Open as Image/Text | [Build 4107][r4107] (PSD/TGA), [Build 4151][r4151] (WebP), [Build 4180][r4180] (explicit open-as commands). | `open_requests::decode_image`, `image_ui.rs` and the configured codecs support PNG/JPEG/GIF preview; explicit overrides and the listed codecs are missing. | **differs — bug** (B04: scheduled, 3–5 days for bounded WebP/TGA decoding, open-as dispatch and fallback tests; assess PSD separately) |
+| More image formats and explicit Open as Image/Text | [Build 4107][r4107] (PSD/TGA), [Build 4151][r4151] (WebP), [Build 4180][r4180] (explicit open-as commands and image-tab context menu). | B04: bounded TGA and macOS WebP previews; File, palette and tab context commands remember the override by file for the running session. `r33_open_as_dispatch_enablement_and_session_choice` and decoder fixtures cover dispatch, hex fallback and limits. PSD preview is not supported. | **same (fixed in round 33 lane B)** for TGA/WebP and opening as image/text; PSD is excluded. |
 
 ### 3. Tabs
 
@@ -164,7 +164,7 @@ Audit totals: **39 same**, **6 differs on purpose**, **13 differs — bug** (4 f
 | --- | --- | --- | --- |
 | ⌘B with Automatic; explicit system and ⌘⇧B variants | [Build systems][build] documents syntax/file/project eligibility, Automatic, and manual selection; [Mac shortcuts][mac-build] gives the keys. | `round18_build_dispatch_panel_save_all_restart_cancel_and_key_context`, `round18_build_with_choices_filter_and_remember_variants`, `round18_review_build_memory_tracks_matching_sets_and_only_picker_choices`. | **same** |
 | Output panel, F4/⇧F4 to errors, Ctrl+C cancel | [Build systems][build] documents output and file/line regex; [Mac shortcuts][mac-build] gives Ctrl+C. | `round18_build_dispatch_panel_save_all_restart_cancel_and_key_context`, `cancel_after_transport_drop_preserves_already_displayed_output_and_f4_results`: actual process/output and result key action. | **same** (noninteractive builds) |
-| Interactive build input | [Build 4200][r4200] documents interactive builds. | `round18_build_output_format_table_and_unsupported_stdin`: interactive input is rejected, not passed through the output panel. | **differs — bug** (B09: scheduled, 4–6 days for stdin transport, focus, EOF, cancel and restart coverage) |
+| Interactive build input | [Build 4200][r4200] and the [Build systems reference][interactive-build] specify an opt-in input box. | B09: `"interactive": true` adds a single-line field to the output panel. Return submits, Control-D closes stdin after queued lines, and input echoes have their own scope. `r33_build_panel_sends_echoes_and_closes_stdin`, `r33_build_panel_cancel_and_restart_clear_the_draft_and_pipe`, and the non-reading child test exercise the workflow. | **same (fixed in round 33 lane B)** |
 
 ### 11. Command palette and packages
 
@@ -265,6 +265,7 @@ and `/tmp/velocity-r32.uM0iib/paired-confirm`.
 [api-status]: https://www.sublimetext.com/docs/api_reference.html#sublime.status_message
 [api-error]: https://www.sublimetext.com/docs/api_reference.html#sublime.error_message
 [build]: https://www.sublimetext.com/docs/build_systems.html
+[interactive-build]: https://www.sublimetext.com/docs/build_systems.html#interactive
 [cli]: https://www.sublimetext.com/docs/command_line.html
 [column]: https://www.sublimetext.com/docs/column_selection.html
 [commands]: https://docs.sublimetext.io/reference/commands.html

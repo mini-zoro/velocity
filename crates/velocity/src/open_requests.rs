@@ -11,7 +11,6 @@ use std::fs::File;
 use std::{
     collections::VecDeque,
     fs,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
@@ -37,6 +36,13 @@ struct ImageJob {
     cancelled: Arc<AtomicBool>,
     result: mpsc::SyncSender<ImageResult>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenAs {
+    Image,
+    Text,
+}
+pub(crate) type OpenAsChoices =
+    std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<PathBuf, OpenAs>>>;
 #[derive(Default)]
 struct ImageQueue {
     jobs: Mutex<VecDeque<ImageJob>>,
@@ -137,6 +143,7 @@ pub(crate) struct ImagePreview {
     epoch: u64,
     /// Identity of the loaded bytes: a reload from disk decodes again.
     snapshot: usize,
+    wants_image: bool,
     pending: Option<PendingImage>,
     pub image: Option<Arc<vel_render::scene::Image>>,
     /// The file matched the image patterns but could not be decoded; its bytes are shown.
@@ -168,18 +175,24 @@ impl ImagePreview {
         }
         let revision = tab.editor.settings.revision();
         let epoch = tab.editor.revision;
+        let wants_image = path.is_some_and(|path| match tab.open_as() {
+            Some(OpenAs::Image) => true,
+            Some(OpenAs::Text) => false,
+            None => image_matches(tab, image_root(folders, path), path),
+        });
         let snapshot = tab
             .editor
             .binary
             .as_ref()
             .map_or(0, |b| Arc::as_ptr(b) as usize);
         let mut changed = false;
-        if (path, revision, epoch, snapshot)
+        if (path, revision, epoch, snapshot, wants_image)
             != (
                 self.path.as_deref(),
                 self.revision,
                 self.epoch,
                 self.snapshot,
+                self.wants_image,
             )
         {
             // The same file decoded again (settings, zoom, a reload from disk) keeps showing
@@ -190,14 +203,13 @@ impl ImagePreview {
             self.revision = revision;
             self.epoch = epoch;
             self.snapshot = snapshot;
+            self.wants_image = wants_image;
             self.pending = None;
-            let image_file =
-                path.is_some_and(|path| image_matches(tab, image_root(folders, path), path));
-            if !same_file || !image_file {
+            if !same_file || !wants_image {
                 changed = self.image.take().is_some() || self.failed;
                 self.failed = false;
             }
-            if let Some(path) = path.filter(|_| image_file) {
+            if let Some(path) = path.filter(|_| wants_image) {
                 self.pending = Some(ImageQueue::submit(path));
             }
         }
@@ -220,79 +232,12 @@ impl ImagePreview {
         changed
     }
 }
-struct CancelRead<'a, R> {
-    input: R,
-    cancelled: &'a AtomicBool,
-}
-impl<R> CancelRead<'_, R> {
-    fn check(&self) -> io::Result<()> {
-        if self.cancelled.load(Ordering::Acquire) {
-            Err(io::Error::other("image no longer visible"))
-        } else {
-            Ok(())
-        }
-    }
-}
-impl<R: Read> Read for CancelRead<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.check()?;
-        self.input.read(buf)
-    }
-}
-impl<R: Seek> Seek for CancelRead<'_, R> {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.check()?;
-        self.input.seek(pos)
-    }
-}
-impl<R: BufRead> BufRead for CancelRead<'_, R> {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        self.check()?;
-        self.input.fill_buf()
-    }
-    fn consume(&mut self, amount: usize) {
-        self.input.consume(amount);
-    }
-}
-
 fn decode_image(path: &Path, cancelled: &AtomicBool) -> ImageResult {
-    let file = vel_fileio::regular::read(path).ok()?;
-    if file.metadata().ok()?.len() > 64 * 1024 * 1024 {
-        return None;
-    }
-    let mut reader = image::ImageReader::new(CancelRead {
-        input: BufReader::new(file),
-        cancelled,
-    })
-    .with_guessed_format()
-    .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().ok()?;
-    if cancelled.load(Ordering::Acquire) {
-        return None;
-    }
-    let logical_size = [image.width() as f32, image.height() as f32];
-    let image = if image.width().max(image.height()) > 2048 {
-        image.thumbnail(2048, 2048)
-    } else {
-        image
-    };
-    let image = image.into_rgba8();
-    if cancelled.load(Ordering::Acquire) {
-        return None;
-    }
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    Some(Arc::new(vel_render::scene::Image {
-        logical_size,
-        id: NEXT.fetch_add(1, Ordering::Relaxed) | (1 << 63),
-        width: image.width(),
-        height: image.height(),
-        rgba: image.into_raw().into(),
-    }))
+    let image = crate::image_decode::preview(path, cancelled)?;
+    Some(Arc::new(image.into_scene(
+        NEXT.fetch_add(1, Ordering::Relaxed) | (1 << 63),
+    )))
 }
 
 /// Chooses an already recovered window for a launch request.
