@@ -44,7 +44,9 @@ def main():
             assert request["project"] == str(root / "project with spaces.sublime-project")
             assert request["files"] == [
                 {"path": str(root / "hello 世界.rs"), "line": 12, "column": 3},
-                {"path": str(root / "-source"), "line": 1, "column": 1}]
+                # A bare path carries no position (line 0) so an already-open file keeps
+                # its caret; explicit file:line:col positions are sent as given.
+                {"path": str(root / "-source"), "line": 0, "column": 1}]
             client = subprocess.Popen([str(link), "--data-dir", str(profile), "-a", "-w", "-"], cwd=root,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             client.stdin.write("stdin payload 你好\n")
