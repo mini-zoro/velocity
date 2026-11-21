@@ -29,12 +29,19 @@ struct MappingPolicy {
     root: Option<FontVolume>,
     firmlinks: Option<Vec<PathBuf>>,
 }
+/// MobileAsset font locations, including the canonical Data-volume spelling.
+pub fn is_mobile_asset_path(path: &std::path::Path) -> bool {
+    path.starts_with("/System/Library/AssetsV2")
+        || path.starts_with("/System/Volumes/Data/System/Library/AssetsV2")
+}
+
 impl MappingPolicy {
     fn permits(&self, canonical: &std::path::Path, volume: Option<FontVolume>) -> bool {
         let (Some(volume), Some(firmlinks)) = (volume, &self.firmlinks) else {
             return false; // Missing mount information must never make a writable font a mapping.
         };
         !canonical.starts_with("/System/Volumes/Data")
+            && !is_mobile_asset_path(canonical)
             && !firmlinks.iter().any(|path| canonical.starts_with(path))
             && (volume.read_only || self.root.is_some_and(|root| root.fsid == volume.fsid))
     }
@@ -78,7 +85,8 @@ fn mapping_policy() -> &'static MappingPolicy {
             }),
     })
 }
-/// Maps immutable system resources and snapshots replaceable fonts.
+/// Maps immutable system resources and snapshots replaceable fonts in full.
+/// Renderers can read selected MobileAsset collection faces instead.
 pub fn map_font_file(
     path: &std::path::Path,
     files: &mut FontFiles,
@@ -300,11 +308,7 @@ mod tests {
         };
         let policy = MappingPolicy {
             root: Some(root),
-            firmlinks: Some(vec![
-                "/System/Library/AssetsV2".into(),
-                "/Users".into(),
-                "/Library".into(),
-            ]),
+            firmlinks: Some(vec!["/Users".into(), "/Library".into()]),
         };
         // These are the statfs results after canonicalizing each path, including aliases.
         for (path, volume, expected) in [

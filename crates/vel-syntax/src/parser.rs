@@ -709,7 +709,7 @@ impl InterpreterState {
             captures: None,
         };
         InterpreterState {
-            stack: SharedStack(Arc::new(vec![start_state])),
+            stack: SharedStack(Arc::new(vec![start_state]), None),
             base_context: syntax.context_ids()["main"],
             has_while: false,
             first_line: true,
@@ -3279,8 +3279,19 @@ fn escape_str(s: &str) -> String {
 }
 
 /// Context stack storage shared by checkpoints and branch snapshots.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-struct SharedStack(Arc<Vec<StateLevel>>);
+#[derive(Debug, Clone)]
+struct SharedStack(Arc<Vec<StateLevel>>, Option<u64>);
+impl PartialEq for SharedStack {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+impl Eq for SharedStack {}
+impl Hash for SharedStack {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.digest());
+    }
+}
 impl Deref for SharedStack {
     type Target = Vec<StateLevel>;
     fn deref(&self) -> &Self::Target {
@@ -3289,6 +3300,7 @@ impl Deref for SharedStack {
 }
 impl DerefMut for SharedStack {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.1 = None;
         Arc::make_mut(&mut self.0)
     }
 }
@@ -3323,10 +3335,22 @@ impl StackPool {
 }
 static STACK_POOL: LazyLock<Mutex<StackPool>> = LazyLock::new(|| Mutex::new(StackPool::default()));
 impl SharedStack {
-    fn intern(&mut self) {
+    fn digest(&self) -> u64 {
+        if let Some(hash) = self.1 {
+            return hash;
+        }
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut h);
-        let key = h.finish();
+        self.0.hash(&mut h);
+        h.finish()
+    }
+    fn intern(&mut self) {
+        // The same content digest serves both stack interning and the enclosing
+        // parser fingerprint. An unchanged stack is already in the pool.
+        if self.1.is_some() {
+            return;
+        }
+        let key = self.digest();
+        self.1 = Some(key);
         let mut pool = STACK_POOL.lock().unwrap_or_else(|e| e.into_inner());
         pool.sweep_if_needed();
         let bucket = pool.buckets.entry(key).or_default();

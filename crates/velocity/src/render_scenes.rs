@@ -2367,7 +2367,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     None => match Renderer::offscreen(width, height) {
                         Ok(r) => Some(renderer.insert(r)),
                         Err(error)
-                            if scenario.name == "r6-cjk-zh"
+                            if matches!(scenario.name, "r6-cjk-zh" | "r5_sidebar")
                                 || scenario.name.starts_with("settings_ui") =>
                         {
                             eprintln!("velocity: {error}; using flat software text snapshot");

@@ -1737,36 +1737,94 @@ impl Delegate {
         started?;
         h.drain();
         h.ready.set(true);
-        h.render(FrameReason::StartupPrepare, true);
-        if h.stopped.get() {
-            return Ok(());
-        }
-        h.phase("first_frame_prepared_before_order_front");
         let activate = h
             .app
             .borrow()
             .as_ref()
             .is_none_or(|app| app.activate_on_open());
-        if activate {
-            window.makeKeyAndOrderFront(None);
-        } else {
-            window.orderBack(None);
+        let presented = startup_frame(activate, |step| {
+            match step {
+                StartupStep::Prepare => {
+                    h.render(FrameReason::StartupPrepare, true);
+                    if h.stopped.get() {
+                        return false;
+                    }
+                    h.phase("first_frame_prepared_before_order_front");
+                }
+                StartupStep::OrderFront => window.makeKeyAndOrderFront(None),
+                StartupStep::OrderBack => window.orderBack(None),
+                StartupStep::Activate => {
+                    #[allow(deprecated)]
+                    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+                    h.phase("activated_before_first_present");
+                }
+                StartupStep::Present => {
+                    h.visible.set(true);
+                    // No display-link tick or run-loop round trip here.
+                    h.render(FrameReason::StartupPresent, true);
+                }
+            }
+            if matches!(step, StartupStep::OrderFront | StartupStep::OrderBack) {
+                h.phase("ordered_front");
+            }
+            true
+        });
+        if !presented {
+            return Ok(());
         }
-        h.visible.set(true);
-        h.phase("ordered_front");
-        // No display-link tick, redraw notification or run-loop round trip here.
-        h.render(FrameReason::StartupPresent, true);
         h.starting.set(false);
         CATransaction::flush();
-        if activate {
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-        }
         h.phase("launch_callback_finished");
         lifecycle::launched();
         Ok(())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupStep {
+    Prepare,
+    OrderFront,
+    OrderBack,
+    Activate,
+    Present,
+}
+
+fn startup_frame(activate: bool, mut step: impl FnMut(StartupStep) -> bool) -> bool {
+    use StartupStep::*;
+    // Pre-render without a drawable. Acquire one only after AppKit has been
+    // asked to show and activate the window, as in the native floor benchmark.
+    step(Prepare)
+        && if activate {
+            step(OrderFront) && step(Activate)
+        } else {
+            step(OrderBack)
+        }
+        && step(Present)
+}
+
+#[cfg(test)]
+#[test]
+fn startup_prepares_offscreen_and_activates_before_acquire_and_present() {
+    use StartupStep::*;
+    for (activate, expected) in [
+        (true, &[Prepare, OrderFront, Activate, Present][..]),
+        (false, &[Prepare, OrderBack, Present][..]),
+    ] {
+        let mut observed = Vec::new();
+        assert!(startup_frame(activate, |step| {
+            observed.push(step);
+            true
+        }));
+        assert_eq!(observed, expected);
+    }
+    let mut observed = Vec::new();
+    assert!(!startup_frame(true, |step| {
+        observed.push(step);
+        false
+    }));
+    assert_eq!(observed, [Prepare]);
+}
+
 fn screen_rect(frame: NSRect) -> Rect {
     Rect {
         x: frame.origin.x,

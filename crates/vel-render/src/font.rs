@@ -22,10 +22,13 @@ use vel_platform::fonts::{FontFallback, SystemFontFallback, cluster_characters};
 
 #[path = "emoji_presentation.rs"]
 mod emoji;
+#[path = "font_snapshot.rs"]
+mod snapshot;
 
 #[derive(Debug)]
 struct Face {
     bytes: std::sync::Arc<vel_platform::fonts::FontData>,
+    face_snapshot: bool,
     ligatures: bool,
     color_glyphs: bool,
     offset: u32,
@@ -42,44 +45,56 @@ impl Face {
         name: &str,
         native: Option<native::NativeFont>,
         files: &mut HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
+        outlines: bool,
     ) -> Result<Self, String> {
-        let bytes = vel_platform::fonts::map_font_file(path, files)?;
+        let snapshot = snapshot::mobile_asset_face(path, name, native.as_deref(), outlines)?;
+        let face_snapshot = snapshot.is_some();
+        let bytes = match snapshot {
+            Some(bytes) => std::sync::Arc::new(vel_platform::fonts::FontData::Owned(bytes)),
+            None => vel_platform::fonts::map_font_file(path, files)?,
+        };
         let collection = FontDataRef::new(&bytes)
             .ok_or_else(|| format!("{} is not a supported font", path.display()))?;
-        let font = collection
-            .fonts()
-            .find(|f| {
-                f.localized_strings()
-                    .any(|s| s.id() == StringId::PostScript && s.to_string() == name)
-            })
-            .or_else(|| {
-                // Private cascade names need not appear in the file's name table.
-                // Match immutable SFNT tables to identify the exact collection member;
-                // selecting the first member can silently use a different language face.
-                let native = native.as_ref()?;
-                let mut tables = Vec::new();
-                for tag in [
-                    swash::tag_from_bytes(b"name"),
-                    swash::tag_from_bytes(b"cmap"),
-                    swash::tag_from_bytes(b"head"),
-                ] {
-                    // SAFETY: immutable table copied from a retained CTFont.
-                    let table =
-                        unsafe { native.table(tag, objc2_core_text::CTFontTableOptions::empty()) }?;
-                    tables.push((tag, table.to_vec()));
-                }
-                let mut matches = collection.fonts().filter(|f| {
-                    tables
-                        .iter()
-                        .all(|(tag, bytes)| f.table(*tag) == Some(bytes.as_slice()))
-                });
-                let face = matches.next()?;
-                if matches.next().is_some() {
-                    return None;
-                }
-                Some(face)
-            })
-            .ok_or_else(|| format!("{}: exact face {name} unavailable", path.display()))?;
+        let font = if face_snapshot {
+            // Already identified the exact face on the opened file descriptor.
+            collection.fonts().next()
+        } else {
+            collection
+                .fonts()
+                .find(|f| {
+                    f.localized_strings()
+                        .any(|s| s.id() == StringId::PostScript && s.to_string() == name)
+                })
+                .or_else(|| {
+                    // Private cascade names need not appear in the file's name table.
+                    // Match immutable SFNT tables to identify the exact collection member;
+                    // selecting the first member can silently use a different language face.
+                    let native = native.as_ref()?;
+                    let mut tables = Vec::new();
+                    for tag in [
+                        swash::tag_from_bytes(b"name"),
+                        swash::tag_from_bytes(b"cmap"),
+                        swash::tag_from_bytes(b"head"),
+                    ] {
+                        // SAFETY: immutable table copied from a retained CTFont.
+                        let table = unsafe {
+                            native.table(tag, objc2_core_text::CTFontTableOptions::empty())
+                        }?;
+                        tables.push((tag, table.to_vec()));
+                    }
+                    let mut matches = collection.fonts().filter(|f| {
+                        tables
+                            .iter()
+                            .all(|(tag, bytes)| f.table(*tag) == Some(bytes.as_slice()))
+                    });
+                    let face = matches.next()?;
+                    if matches.next().is_some() {
+                        return None;
+                    }
+                    Some(face)
+                })
+        }
+        .ok_or_else(|| format!("{}: exact face {name} unavailable", path.display()))?;
         let actual = font
             .localized_strings()
             .find(|s| s.id() == StringId::PostScript)
@@ -104,6 +119,7 @@ impl Face {
         };
         Ok(Self {
             bytes,
+            face_snapshot,
             ligatures,
             color_glyphs,
             offset,
@@ -197,17 +213,17 @@ impl Fonts {
         let primary = Path::new("/System/Library/Fonts/Menlo.ttc");
         let mut files = HashMap::new();
         let face = if requested == "Menlo" && primary.exists() {
-            Face::load(primary, "Menlo-Regular", None, &mut files)?
+            Face::load(primary, "Menlo-Regular", None, &mut files, true)?
         } else {
             let (path, name, font) = native::font_location(requested)?;
-            Face::load(&path, &name, Some(font), &mut files)?
+            Face::load(&path, &name, Some(font), &mut files, true)?
         };
         Self::from_face(face, files)
     }
     /// Loads a fixture or explicitly selected file without consulting the system service.
     pub fn load_file(path: &Path, name: &str) -> Result<Self, String> {
         let mut files = HashMap::new();
-        let face = Face::load(path, name, None, &mut files)?;
+        let face = Face::load(path, name, None, &mut files, true)?;
         Self::from_face(face, files)
     }
     /// Whether the primary face has a supported default substitution feature.
@@ -269,7 +285,7 @@ impl Fonts {
         if self.faces.len() >= u16::MAX as usize {
             return Err("font face limit".into());
         }
-        let face = Face::load(path, name, native, &mut self.files)?;
+        let face = Face::load(path, name, native, &mut self.files, true)?;
         let id = self.faces.len() as u16;
         self.face_files
             .insert((path.to_owned(), name.to_owned()), id);
@@ -392,7 +408,7 @@ impl Fonts {
     }
     /// Font identities, raster fallback counts and diagnostics.
     pub fn metadata(&self) -> Value {
-        json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_))})).collect::<Vec<_>>(),"warnings":self.warnings})
+        json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
     /// ASCII skips shaping; non-ASCII graphemes use a cached swash shaping path.
     pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
@@ -447,6 +463,7 @@ impl Fonts {
                     &d.postscript_name,
                     d.native.map(vel_platform::fonts::CascadeFont::into_native),
                     &mut self.files,
+                    false,
                 )
                 .ok()
             });

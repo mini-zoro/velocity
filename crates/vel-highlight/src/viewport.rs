@@ -98,6 +98,7 @@ pub struct ViewportHighlighter {
     initial: Checkpoint,
     resolver: Highlighter,
     interner: ScopeInterner,
+    visual: SpanCache,
     options: ViewportOptions,
     checkpoints: BTreeMap<usize, Checkpoint>,
     background: Cursor,
@@ -130,6 +131,7 @@ impl ViewportHighlighter {
             scheme_revision: 0,
             resolver: Highlighter::new(scheme),
             interner: ScopeInterner::new(Arc::new(MetadataSet::new())),
+            visual: SpanCache::default(),
             options,
             checkpoints: BTreeMap::from([(0, initial.clone())]),
             background: Cursor::new(initial.clone(), 0, true),
@@ -354,7 +356,7 @@ impl ViewportHighlighter {
                     exact: false,
                     record: LineRecord {
                         ops: Arc::from([]),
-                        scopes: Arc::new(cursor.scopes.clone()),
+                        scopes: Some(Arc::new(cursor.scopes.clone())),
                         checkpoint: None,
                         spans: default_spans(range.len(), self.resolver.scheme().default_style()),
                         runs: Arc::from([]),
@@ -391,7 +393,12 @@ impl ViewportHighlighter {
                 let mut scopes = if from == first {
                     cursor.anchor.clone()
                 } else {
-                    (*cursor.history[&(from - 1)].record.scopes).clone()
+                    cursor.history[&(from - 1)]
+                        .record
+                        .scopes
+                        .as_deref()
+                        .expect("sparse rewind anchor")
+                        .clone()
                 };
                 for n in from..row {
                     let cached = cursor
@@ -408,11 +415,12 @@ impl ViewportHighlighter {
                         &mut scopes,
                         &mut self.resolver,
                         &mut self.interner,
+                        &mut self.visual,
                     )?;
                     cached.record.spans = rendered.spans;
                     cached.record.runs = rendered.runs;
                     cached.record.end_stack = rendered.end_stack;
-                    cached.record.scopes = Arc::new(scopes.clone());
+                    cached.record.scopes = Some(Arc::new(scopes.clone()));
                 }
                 cursor.scopes = scopes;
                 self.checkpoints.retain(|&n, _| n <= from);
@@ -423,6 +431,7 @@ impl ViewportHighlighter {
                 &mut cursor.scopes,
                 &mut self.resolver,
                 &mut self.interner,
+                &mut self.visual,
             )?;
             cursor.history.insert(
                 row,
@@ -430,7 +439,7 @@ impl ViewportHighlighter {
                     exact: cursor.trusted,
                     record: LineRecord {
                         ops: output.ops.into(),
-                        scopes: Arc::new(cursor.scopes.clone()),
+                        scopes: Some(Arc::new(cursor.scopes.clone())),
                         checkpoint: None,
                         spans: rendered.spans,
                         runs: rendered.runs,
@@ -449,13 +458,15 @@ impl ViewportHighlighter {
             .saturating_add(self.options.max_lookback_lines)
             .max(256);
         while cursor.history.len() > limit {
-            cursor.anchor = (*cursor
+            cursor.anchor = cursor
                 .history
                 .pop_first()
                 .expect("history nonempty")
                 .1
                 .record
-                .scopes)
+                .scopes
+                .as_deref()
+                .expect("sparse history anchor")
                 .clone();
         }
         Ok(())

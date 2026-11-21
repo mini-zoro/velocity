@@ -12,6 +12,7 @@ use std::{
 };
 
 mod frontend;
+mod identifier_guard;
 mod multi;
 pub use multi::{MultiDfa, MultiDfaConfig, MultiDfaStats};
 #[cfg(feature = "profile")]
@@ -425,13 +426,20 @@ impl Regex {
             .as_ref()
             // Keep the full tail for a necessary-literal filter. The native
             // engine applies its own search-range semantics afterwards.
-            .is_some_and(|p| !p.maybe(&line.as_bytes()[start..]))
+            .is_some_and(|p| !p.maybe(&line.as_bytes()[start..], ANCHORED && self.0.onig_semantics))
         {
             #[cfg(any(debug_assertions, feature = "verify-prefilters"))]
             if let Ok(compiled) = self.compiled(allow_empty) {
+                let native = if ANCHORED {
+                    compiled
+                        .match_at(line, start)
+                        .map(|r| r.filter(|s| s.0 == start))
+                } else {
+                    compiled.search(line, start, end, None)
+                };
                 assert!(
-                    !matches!(compiled.search(line, start, end, None), Ok(Some(_))),
-                    "literal prefilter disagreement: {}",
+                    !matches!(native, Ok(Some(_))),
+                    "prefilter disagreement at byte {start}: {} on {line:?}",
                     self.regex_str()
                 );
             }
@@ -852,18 +860,40 @@ impl MatcherBackend for OnigBackend {
 // Literal extraction follows syntect PR #705 (MIT). Unlike that implementation,
 // full case folding and unsupported dialect constructs stay unfiltered.
 #[derive(Debug)]
-enum Prefilter {
+struct Prefilter {
+    literals: Option<LiteralPrefilter>,
+    identifier: Option<identifier_guard::IdentifierGuard>,
+}
+#[derive(Debug)]
+enum LiteralPrefilter {
     One(memchr::memmem::Finder<'static>),
     Any(Box<aho_corasick::AhoCorasick>),
 }
 impl Prefilter {
-    fn maybe(&self, bytes: &[u8]) -> bool {
-        match self {
-            Self::One(f) => f.find(bytes).is_some(),
-            Self::Any(a) => a.is_match(bytes),
+    fn maybe(&self, bytes: &[u8], anchored: bool) -> bool {
+        if anchored && let Some(guard) = &self.identifier {
+            let maybe = guard.maybe(bytes);
+            #[cfg(feature = "profile")]
+            if !maybe {
+                profile::count("identifier_guard_rejected");
+            }
+            return maybe;
+        }
+        match &self.literals {
+            None => true,
+            Some(LiteralPrefilter::One(f)) => f.find(bytes).is_some(),
+            Some(LiteralPrefilter::Any(a)) => a.is_match(bytes),
         }
     }
     fn extract(source: &str) -> Option<Self> {
+        let identifier = identifier_guard::IdentifierGuard::extract(source);
+        let literals = Self::extract_literals(source);
+        (identifier.is_some() || literals.is_some()).then_some(Self {
+            identifier,
+            literals,
+        })
+    }
+    fn extract_literals(source: &str) -> Option<LiteralPrefilter> {
         if frontend::has_unicode_escape(source)
             || source.split("(?").skip(1).any(|s| {
                 s.chars()
@@ -883,9 +913,11 @@ impl Prefilter {
         }
         let (_, literals) = best?;
         if let [literal] = literals.as_slice() {
-            return Some(Self::One(memchr::memmem::Finder::new(literal).into_owned()));
+            return Some(LiteralPrefilter::One(
+                memchr::memmem::Finder::new(literal).into_owned(),
+            ));
         }
-        Some(Self::Any(Box::new(
+        Some(LiteralPrefilter::Any(Box::new(
             aho_corasick::AhoCorasick::new(&literals).ok()?,
         )))
     }
@@ -990,8 +1022,8 @@ mod lookahead_tests {
         assert!(!frontend::has_unicode_escape(source));
         assert!(frontend::has_unicode_escape(r"\u{e9}"));
         let filter = Prefilter::extract(source).expect("required literal in positive guard");
-        assert!(!filter.maybe(b"foo bar baz"));
-        assert!(filter.maybe(b"= function"));
+        assert!(!filter.maybe(b"foo bar baz", false));
+        assert!(filter.maybe(b"= function", false));
         let optional = Regex::new(r"(?=foo)(?:x(?=foobar))?|hello".into());
         assert!(optional.compile_error().is_none());
         assert!(optional.is_match("hello"));

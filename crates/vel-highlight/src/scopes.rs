@@ -216,7 +216,9 @@ pub(crate) struct ScopeInterner {
     pub(crate) stacks: ScopeStacks,
     pub(crate) metadata: Arc<MetadataSet>,
     selected: Vec<Option<SymbolMetadata>>,
-    styles: Vec<Option<vel_color_scheme::Style>>,
+    styles: Vec<Option<u32>>,
+    palette: Vec<vel_color_scheme::Style>,
+    palette_ids: HashMap<vel_color_scheme::Style, u32, fnv::FnvBuildHasher>,
     transitions: HashMap<u64, ScopeTransition, fnv::FnvBuildHasher>,
     single: HashMap<(ScopeStackId, ScopeStackOp), ScopeStackId, fnv::FnvBuildHasher>,
 }
@@ -234,6 +236,8 @@ impl ScopeInterner {
             metadata,
             selected: Vec::new(),
             styles: Vec::new(),
+            palette: Vec::new(),
+            palette_ids: HashMap::default(),
             transitions: HashMap::default(),
             single: HashMap::default(),
         };
@@ -329,14 +333,31 @@ impl ScopeInterner {
     }
     pub(crate) fn invalidate_styles(&mut self) {
         self.styles.fill(None);
+        self.palette.clear();
+        self.palette_ids.clear();
     }
-    pub(crate) fn style(
+    pub(crate) fn style_id(
         &mut self,
         id: ScopeStackId,
-        stack: &ScopeStack,
         resolver: &mut vel_color_scheme::Highlighter,
-    ) -> vel_color_scheme::Style {
-        *self.styles[id.0 as usize].get_or_insert_with(|| resolver.style_for(stack))
+    ) -> u32 {
+        if let Some(style) = self.styles[id.0 as usize] {
+            return style;
+        }
+        let style = resolver.resolve_scopes(self.stacks.get(id).unwrap());
+        let style_id = self.intern_style(style);
+        self.styles[id.0 as usize] = Some(style_id);
+        style_id
+    }
+    pub(crate) fn intern_style(&mut self, style: vel_color_scheme::Style) -> u32 {
+        *self.palette_ids.entry(style).or_insert_with(|| {
+            let id = self.palette.len().try_into().expect("style ID overflow");
+            self.palette.push(style);
+            id
+        })
+    }
+    pub(crate) fn style(&self, id: u32) -> vel_color_scheme::Style {
+        self.palette[id as usize]
     }
     pub(crate) fn has_symbols(&self, runs: &[ScopeRun]) -> bool {
         runs.iter()

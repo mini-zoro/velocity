@@ -65,7 +65,9 @@ impl SharedLineOps {
 pub struct ParseState {
     set: Arc<SyntaxSet>,
     engine: Arc<InterpreterState>,
-    fingerprint: u64,
+    // Speculative states cannot hit the line memo and seldom need to be
+    // compared. Hash their replay history only on an explicit Eq/Hash query.
+    fingerprint: Option<u64>,
     next_line: usize,
     lines: Arc<Mutex<LineCache>>,
     cache_enabled: bool,
@@ -147,7 +149,7 @@ impl ParseState {
         Self {
             set,
             engine,
-            fingerprint,
+            fingerprint: Some(fingerprint),
             next_line: 0,
             lines: Arc::new(Mutex::new(LineCache::new(16384))),
             cache_enabled: true,
@@ -195,6 +197,10 @@ impl ParseState {
             .expect("shared parse returns shared operations");
         Ok(())
     }
+    fn fingerprint(&self) -> u64 {
+        self.fingerprint
+            .unwrap_or_else(|| self.engine.fingerprint())
+    }
     fn parse_into<const SHARE: bool>(
         &mut self,
         line: &str,
@@ -203,7 +209,7 @@ impl ParseState {
         let stable = !self.engine.is_speculative();
         let key = if stable && self.cache_enabled {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
-            self.fingerprint.hash(&mut hash);
+            self.fingerprint().hash(&mut hash);
             line.hash(&mut hash);
             let key = hash.finish();
             let mut cache = self.lines.lock().unwrap_or_else(|e| e.into_inner());
@@ -212,7 +218,8 @@ impl ParseState {
             } else {
                 if let Some(entry) = cache.entries.get_mut(&key)
                     && entry.text.as_ref() == line
-                    && entry.before.semantic_eq(&self.engine)
+                    && (Arc::ptr_eq(&entry.before, &self.engine)
+                        || entry.before.semantic_eq(&self.engine))
                 {
                     entry.referenced = true;
                     if !SHARE {
@@ -223,7 +230,7 @@ impl ParseState {
                     out.warnings.clear();
                     out.rewind = None;
                     self.engine = entry.after.clone();
-                    self.fingerprint = entry.fingerprint;
+                    self.fingerprint = Some(entry.fingerprint);
                     self.next_line += 1;
                     return Ok(SHARE.then(|| Arc::clone(&entry.ops)));
                 }
@@ -238,7 +245,8 @@ impl ParseState {
             engine.relocate(self.next_line);
         }
         let output = engine.parse_line_reusing(line, &self.set, std::mem::take(&mut out.ops));
-        self.fingerprint = engine.fingerprint();
+        self.fingerprint =
+            (self.cache_enabled && !engine.is_speculative()).then(|| engine.fingerprint());
         let output = output?;
         out.corrections.clear();
         out.corrections
@@ -267,7 +275,7 @@ impl ParseState {
                     text: line.into(),
                     before: before.expect("memoization enabled"),
                     after: self.engine.clone(),
-                    fingerprint: self.fingerprint,
+                    fingerprint: self.fingerprint.expect("stable memoized fingerprint"),
                     ops,
                 },
             );
@@ -306,15 +314,16 @@ impl ParseState {
 impl PartialEq for ParseState {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.set, &other.set)
-            && self.fingerprint == other.fingerprint
-            && (Arc::ptr_eq(&self.engine, &other.engine) || self.engine.semantic_eq(&other.engine))
+            && (Arc::ptr_eq(&self.engine, &other.engine)
+                || (self.fingerprint().eq(&other.fingerprint())
+                    && self.engine.semantic_eq(&other.engine)))
     }
 }
 impl Eq for ParseState {}
 impl Hash for ParseState {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (Arc::as_ptr(&self.set) as usize).hash(state);
-        self.fingerprint.hash(state);
+        self.fingerprint().hash(state);
     }
 }
 

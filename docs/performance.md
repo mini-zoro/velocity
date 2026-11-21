@@ -229,6 +229,31 @@ drawable size (scale/window clamping can prevent an exact 4K run). It reports
 Metal present-handler scanout, injection to queue present-return, CPU and GPU
 time, and both memory metrics with different endpoints. It was **not run** here.
 
+## Native GUI runs
+
+The supplied `/tmp/guibench/FINDINGS.md` records native measurements of
+`e163180` on the M1 Pro at 1200×800. In warm runs, Velocity's first
+presented callback arrived at about 257 ms but was skipped
+(`presentedTime == 0`); the first positive `presentedTime` was 363–410 ms,
+about 390 ms median. The native floor's 237 ms median is a callback, not
+a verified scanout. In Velocity's traced run, the window was ordered at
+251 ms, the first present returned at 256 ms, and foreground activation
+was about 19 ms later.
+
+Round 34 still pre-renders offscreen, then orders the window, activates
+the app for a foreground launch, and acquires/presents the first drawable
+in the same callback. A background launch remains ordered back without
+activation. The new `activated_before_first_present` milestone and the
+ordering test verify the call sequence, not compositor acceptance. On the
+next native run, compare skipped drawable count and first **positive**
+`presentedTime` against this trace, and make the floor wait for the same
+endpoint before comparing the two. No native window was opened in this round.
+
+The prior one-caret Fifo typing run recorded 0.99/1.35 ms p50/p95
+injection to present-return, and 178 MB physical footprint / 229 MB RSS
+after typing. These are native endpoints; neither the public Sublime idle
+range nor the windowless font probe is like-for-like.
+
 ## Round 29 attribution
 
 `sample` could not attach to the headless child in the sandbox. An independent
@@ -451,6 +476,148 @@ Ranked next work:
 Round 30 raw records are in `/tmp/velocity-c30.eYn9Fz/`: the four
 `stage-*` directories, `final-pairs/`, `final-typing/`, `rust-exact.json`,
 `rust-quiet-final/`, the corpus digest logs, and the workspace gate logs.
+
+## Round 34 performance
+
+The renderer shares arrays keyed by contiguous byte ends and exact styles,
+not by scope names. Scope runs, selector and symbol queries, and saved
+clear/restore state retain their original identities. For a palette made
+entirely of single-scope alternatives, the theme resolver caches each
+scope's contribution per style field. It always uses the general selector
+resolver for logical/path selectors, unusually long selectors or a stack
+deep enough for specificity to saturate.
+
+The native identifier guards can only reject an exact-start probe. They
+recognize the expanded assignment, call and reserved-word rules; Unicode,
+identifier escapes and uncertain matches still use Oniguruma. There are no
+grammar changes. Parser fingerprints reuse the interned stack's content
+digest, and speculative replay history is hashed only if a caller needs
+equality or a hash. Independently, a dense line checkpoint can use its
+exact interned end path by itself when no saved clear is outstanding.
+
+MobileAsset collections are opened for positioned reads. Only the requested
+face's table directory and table bytes are retained, with offsets rebased for
+Swash. Layout-only advance probes omit outline tables. The original file is
+never mapped; a short or changed read fails safely and an already loaded face
+owns its bytes. Shaping, hinting, outlines and the CoreText fallback path
+are unchanged. Existing sealed fonts are still mapped; custom replaceable
+fonts still use the existing snapshot path.
+
+### Paired work
+
+Five alternating fresh-process pairs, with `b740212` as the control.
+Both sides used `cargo build --release --locked -j 6 -p velocity
+-p vel-render --bin velocity --example font_footprint`,
+`MACOSX_DEPLOYMENT_TARGET=14.0` and the bundled languages at the same pin.
+The archived control has the same diagnostic software renderer selection
+and font probe as the candidate. Builds used a disposable offline Cargo
+registry; runs used a fixture HOME, zsh, temp directory and log directory.
+Counts are side medians; changes are medians of the paired ratios. Counts
+include both full highlight passes, process startup and teardown.
+
+| Full highlight | Before | After | Change |
+|---|---:|---:|---:|
+| jQuery 2.1.4 | 4.185B | 3.254B | −22.28% |
+| jQuery 3.7.1 | 4.360B | 3.384B | −22.45% |
+| SQLite `sqlite3.c` | 11.799B | 10.859B | −7.99% |
+| `rust-10mb.rs` | 36.077B | 34.027B | −5.70% |
+| `javascript-10mb.js` | 41.947B | 35.425B | −15.47% |
+
+jQuery 2.1.4 meets the 3.35B target. In exploratory cumulative five-pair
+stages on jQuery 2.1.4, palette/span reuse reduced instructions by 17.64%,
+parser hashing by another 4.18%, and the exact-start guards by another
+1.18%. Those percentages are paired estimates from separate runs, not
+additive. The separate checkpoint-retention stage saved 0.62% on jQuery
+2.1.4 (3.190B → 3.174B) and 0.69% on jQuery 3.7.1. Independent warm
+profile counts:
+
+| Counter | Before | After |
+|---|---:|---:|
+| Built style spans | 22,370 | 17,500 |
+| Distinct retained style arrays | 5,997 | 3,568 |
+| Exact interned scope paths | 13,533 | 13,533 |
+| Additional per-line scope snapshots | 9,211 | 0 |
+| New owned scope checkpoint copies | 445 | 0 |
+| Native span searches | 66,296 | 61,850 |
+| Native capture searches | 1,142 | 1,113 |
+
+Complete render hits stayed at 3,214; another 2,429 lines reused only the
+style array. The call lookahead fell from 4,668 to 296 native searches
+and the reserved-word lookahead from 2,468 to 839. Some assignment probes
+that previously failed the general literal filter now reach native
+verification; assignment searches rose from 518 to 2,073. Neither
+instrumented profile is a throughput measurement.
+
+### Windowless font footprint
+
+Five fresh processes per side, alternating. The probe measures Darwin
+`TASK_VM_INFO.phys_footprint` after shaping and rasterizing the sample's
+unique glyphs (no atlas, whole editor, GPU or window). Reproduce with
+`target/release/examples/font_footprint ascii`, `… cjk`, and
+`… cjk "$ASSET" PingFangSC-Regular`, where ASSET is the installed
+MobileAsset `PingFang.ttc`. The sandbox's default Chinese cascade resolves
+to the sealed `PingFangUI.ttc`, so it is not a test of the writable asset.
+
+| Font case | Physical footprint before → after | RSS before → after |
+|---|---:|---:|
+| ASCII, default Menlo | 1.66 → 1.62 MB | 7.78 → 7.82 MB |
+| Chinese, sealed system cascade | 5.74 → 5.62 MB | 20.84 → 20.82 MB |
+| Chinese, explicit MobileAsset face | 80.32 → 15.30 MB | 86.38 → 21.41 MB |
+
+The explicit face retains 13,227,080 bytes instead of the collection's
+78,222,888 bytes; neither version maps it. Native app footprint after
+typing has not been remeasured. Eight software text snapshots of
+`r6-cjk-zh` and `r5_sidebar` (zh-Hans, dark/light, 1×/2×) were
+byte-identical. Metal has no adapter in the sandbox. The asset-specific
+test also compares the selected face's shaping and outline tables to the
+original collection and exercises a truncated read separately.
+
+### Validation and next work
+
+The official 242-file assertion gate and the 193,704-line Oniguruma,
+multi-matcher and memoized differential both matched the baseline with
+prefilter verification enabled. Assertion evidence digest:
+`6c861d72d9008d749f6a4ab5cc47ee2649e3907a8f554cd30eae6474aba7a83a`.
+Operations, corrections, rewinds and warnings digest:
+`1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`.
+
+The explicit 10 MB Rust `features` gate gave 192.192B → 196.350B
+instructions (side medians), with a **−0.91% median paired change**. The
+feature workload has asynchronous work; the medians are not an estimate
+of the paired change. The final serial 41-pair typing series gave +0.39%
+for one caret (305.354M → 306.452M) and +0.65% for 1,000 carets
+(4.086B → 4.113B). One-minute host load was 33.45–41.35, despite no
+overlapping builds from this lane. The 1,000-caret result was +0.60% in
+five matched pairs and +1.19% in a separate 19-pair run while builds were
+active. An exploratory series with different selected Cargo targets also
+failed at +2.75%. A 19-pair identical-binary control was −0.45%. The
+final paired gates meet the +1% cap; the shorter series do not establish
+a repeatable slowdown.
+
+Formatting and strict workspace Clippy passed. The workspace gate
+reported **1,691 passed, 1 failed**: the known zh-Hans draw-list path
+audit flagged ASCII parts of the disposable directory name. Rustdoc with
+warnings denied, the four bundle fixture tests, and the CLI forwarding
+acceptance test passed separately. No app was packaged.
+
+Raw records: `/tmp/velocity-c34.OVRveV/`, including
+`highlight-confirmed/`, `checkpoint-pairs/`, `features-confirmed/`,
+`typing-final-41/`, `profile-{before,after}.jsonl`, `memory-confirmed/`,
+`scene-{control,confirm}/`, both syntax logs, `gate.out`,
+`workspace-tests.log` and `forwarding.log`.
+
+Ranked remaining work:
+
+1. **Native startup and memory verification.** Compare first positive
+   `presentedTime` and skipped draws to the original trace and native
+   floor. Re-run native typing memory with ASCII, a single CJK face, and
+   mixed scripts/weights to measure the app-wide working set.
+2. **Highlighting.** Keep the 3.35B cap and exact-output gates. Examine
+   the assignment probes and the remaining native identifier/empty-rule
+   costs before considering more aggressive changes to parser replay.
+3. **Multi-face collection storage.** Measure the working set with
+   multiple regional faces and weights before adding sharing or eviction
+   for their duplicate tables.
 
 ## Round 27 changes and next measurement
 

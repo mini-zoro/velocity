@@ -334,6 +334,24 @@ fn atoms(p: &str) -> Option<Vec<(usize, usize)>> {
     Some(out)
 }
 
+// A single positive assertion whose first two required atoms are \s* and '='.
+// Check the whole group structure so alternation and flags can't bypass it.
+pub(crate) fn guard_starts_with_assignment(source: &str) -> bool {
+    let Ok(normalized) = normalize(source) else {
+        return false;
+    };
+    let Some((guard, "")) = outer(&normalized) else {
+        return false;
+    };
+    if !matches!(atoms(guard).as_deref(), Some([(0, end)]) if *end == guard.len()) {
+        return false;
+    }
+    guard
+        .strip_prefix("(?=")
+        .and_then(|s| s.strip_suffix(')'))
+        .is_some_and(|body| body.starts_with(r"\s*=\s*") && atoms(body).is_some())
+}
+
 fn outer(p: &str) -> Option<(&str, &str)> {
     let a = atoms(p)?;
     if a.len() != 1 || a[0] != (0, p.len()) || !p.ends_with(')') {

@@ -12,7 +12,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use vel_scope::{Scope, ScopeStack, Selector};
+use vel_scope::{Scope, ScopeStack, Selector, lock_global_scope_repo};
 
 /// Invalid scheme or color expression, including malformed overrides.
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +68,7 @@ impl FontStyle {
     }
 }
 /// Fully resolved, cheap-to-copy rendering style. Gradient IDs belong to the owning scheme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Style {
     /// Text color before optional token hashing.
     pub foreground: Color,
@@ -526,32 +526,29 @@ impl ColorScheme {
             adjustment: None,
         }
     }
-    fn resolve(&self, stack: &[Scope]) -> Style {
+    fn patch(&self, stack: &[Scope]) -> StylePatch {
+        let repo = lock_global_scope_repo();
         let mut matching: Vec<_> = self
             .rules
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| r.selector.does_match(stack).map(|s| (s, i, r)))
+            .filter_map(|(i, r)| r.selector.does_match_in(stack, &repo).map(|s| (s, i, r)))
             .collect();
-        matching.sort_by_key(|(s, i, _)| (*s, *i));
-        let mut style = self.default_style();
-        for (_, _, rule) in matching {
-            if let Some(c) = rule.foreground {
-                style.foreground = c;
-                style.hashed_foreground = rule.gradient;
-            }
-            if let Some(c) = rule.background {
-                style.background = c;
-                style.adjustment = rule.adjustment;
-            }
-            if let Some(c) = rule.selection_foreground {
-                style.selection_foreground = Some(c);
-            }
-            if let Some(f) = rule.font_style {
-                style.font_style = f;
-            }
+        drop(repo);
+        matching.sort_unstable_by_key(|(s, i, _)| (*s, *i));
+        let mut patch = StylePatch::default();
+        for (_, _, rule) in matching.into_iter().rev() {
+            patch.fill(StylePatch {
+                foreground: rule.foreground.map(|c| (c, rule.gradient)),
+                background: rule.background.map(|c| (c, rule.adjustment)),
+                selection_foreground: rule.selection_foreground,
+                font_style: rule.font_style,
+            });
         }
-        self.adjust(style)
+        patch
+    }
+    fn resolve(&self, stack: &[Scope]) -> Style {
+        self.adjust(self.patch(stack).apply(self.default_style()))
     }
     fn adjust(&self, mut style: Style) -> Style {
         if let Some(i) = style.adjustment {
@@ -576,6 +573,36 @@ impl ColorScheme {
         style
     }
 }
+
+#[derive(Copy, Clone, Default, Debug)]
+struct StylePatch {
+    foreground: Option<(Color, Option<usize>)>,
+    background: Option<(Color, Option<usize>)>,
+    selection_foreground: Option<Color>,
+    font_style: Option<FontStyle>,
+}
+impl StylePatch {
+    fn fill(&mut self, shallower: Self) {
+        self.foreground = self.foreground.or(shallower.foreground);
+        self.background = self.background.or(shallower.background);
+        self.selection_foreground = self.selection_foreground.or(shallower.selection_foreground);
+        self.font_style = self.font_style.or(shallower.font_style);
+    }
+
+    fn apply(self, mut style: Style) -> Style {
+        if let Some((color, hash)) = self.foreground {
+            style.foreground = color;
+            style.hashed_foreground = hash;
+        }
+        if let Some((color, adjustment)) = self.background {
+            style.background = color;
+            style.adjustment = adjustment;
+        }
+        style.selection_foreground = self.selection_foreground.or(style.selection_foreground);
+        style.font_style = self.font_style.unwrap_or(style.font_style);
+        style
+    }
+}
 /// Scheme-local interned scope-stack identity; only use with the creating highlighter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeStackId(usize);
@@ -585,14 +612,24 @@ pub struct Highlighter {
     scheme: Arc<ColorScheme>,
     stacks: HashMap<Vec<Scope>, ScopeStackId, fnv::FnvBuildHasher>,
     styles: Vec<Style>,
+    atom_patches: Option<HashMap<Scope, StylePatch, fnv::FnvBuildHasher>>,
+    default: Style,
 }
 impl Highlighter {
     /// Creates an empty cache; swap the resolver when a scheme changes.
     pub fn new(scheme: Arc<ColorScheme>) -> Self {
+        let repo = lock_global_scope_repo();
+        let depth_ordered = scheme
+            .rules
+            .iter()
+            .all(|r| r.selector.is_depth_ordered(&repo));
+        let default = scheme.default_style();
         Self {
             scheme,
             stacks: HashMap::default(),
             styles: Vec::new(),
+            atom_patches: depth_ordered.then(HashMap::default),
+            default,
         }
     }
     /// Interns active scopes (pending clears do not affect the style).
@@ -601,7 +638,8 @@ impl Highlighter {
             return *id;
         }
         let id = ScopeStackId(self.styles.len());
-        self.styles.push(self.scheme.resolve(stack.as_slice()));
+        let style = self.resolve_scopes(stack.as_slice());
+        self.styles.push(style);
         self.stacks.insert(stack.as_slice().to_vec(), id);
         id
     }
@@ -609,6 +647,26 @@ impl Highlighter {
     pub fn style_for(&mut self, stack: &ScopeStack) -> Style {
         let id = self.intern(stack);
         self.style_for_id(id)
+    }
+    /// Resolve an active path that the caller already interns. This avoids
+    /// retaining a second copy of the exact same scope path in this resolver.
+    pub fn resolve_scopes(&mut self, stack: &[Scope]) -> Style {
+        let Some(patches) = self
+            .atom_patches
+            .as_mut()
+            .filter(|_| stack.len() <= Selector::UNSATURATED_DEPTHS)
+        else {
+            return self.scheme.resolve(stack);
+        };
+        let mut patch = StylePatch::default();
+        for &scope in stack.iter().rev() {
+            patch.fill(
+                *patches
+                    .entry(scope)
+                    .or_insert_with(|| self.scheme.patch(&[scope])),
+            );
+        }
+        self.scheme.adjust(patch.apply(self.default))
     }
     /// Direct indexed cache hit, useful when render spans already store interned IDs.
     pub fn style_for_id(&self, id: ScopeStackId) -> Style {
@@ -619,6 +677,59 @@ impl Highlighter {
         &self.scheme
     }
 }
+
+#[cfg(test)]
+#[test]
+fn flat_palette_resolves_each_field_at_exact_specificity() {
+    let scheme = Arc::new(
+        ColorScheme::parse(
+            r##"{"rules":[
+            {"scope":"*","background":"#123","font_style":"italic"},
+            {"scope":"source.one, keyword","foreground":["#f00","#00f"]},
+            {"scope":"keyword.control","foreground":"#0f0","selection_foreground":"#f0f"},
+            {"scope":"keyword.control","foreground":"#ff0","font_style":""},
+            {"scope":"comment","foreground":"#ccc"}
+        ]}"##,
+        )
+        .unwrap(),
+    );
+    let mut resolver = Highlighter::new(scheme.clone());
+    let control = Scope::new("keyword.control.fixture").unwrap();
+    let comment = Scope::new("comment.fixture").unwrap();
+    let source = Scope::new("source.one").unwrap();
+    assert!(resolver.atom_patches.is_some());
+    let mut stacks = vec![
+        vec![],
+        vec![source],
+        vec![control, comment],
+        vec![comment, control],
+    ];
+    stacks.push([vec![source; 19], vec![control, comment]].concat());
+    // At saturated depth the more specific shallower rule wins instead.
+    stacks.push([vec![source; 20], vec![control, comment]].concat());
+    for stack in stacks {
+        assert_eq!(resolver.resolve_scopes(&stack), scheme.resolve(&stack));
+    }
+    let deep_stack = [vec![source; 20], vec![control, comment]].concat();
+    assert_eq!(
+        resolver.resolve_scopes(&deep_stack).foreground,
+        Color::rgb(255, 255, 0)
+    );
+
+    let complex = Arc::new(
+        ColorScheme::parse(
+            r##"{"rules":[{"scope":"source.one > keyword - comment","foreground":"#0f0"}]}"##,
+        )
+        .unwrap(),
+    );
+    let mut resolver = Highlighter::new(complex.clone());
+    assert!(resolver.atom_patches.is_none());
+    assert_eq!(
+        resolver.resolve_scopes(&[source, control]),
+        complex.resolve(&[source, control])
+    );
+}
+
 /// Resolves explicit or OS-dependent automatic pair selection from editor settings.
 pub fn selected_scheme(settings: &Value, dark: bool) -> &str {
     match settings.get("color_scheme").and_then(Value::as_str) {

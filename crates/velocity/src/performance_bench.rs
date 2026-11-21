@@ -241,8 +241,10 @@ fn highlight(options: &Options, reporter: &Reporter) -> Result<(), String> {
                     "render": ms(phases.render), "checkpoint": ms(phases.checkpoint)},
                 "render_hits": phases.render_hits, "render_queries": phases.render_queries,
                 "render_entries": phases.render_entries, "built_spans": phases.built_spans,
+                "visual_shapes": phases.visual_shapes, "visual_hits": phases.visual_hits,
                 "interned_stacks": phases.interned_stacks,
-                "checkpoint_scope_copies": phases.checkpoint_scope_copies
+                "checkpoint_scope_copies": phases.checkpoint_scope_copies,
+                "retained_scope_snapshots": phases.retained_scope_snapshots
             }))?;
         }
         let lines = engine.parsed_through();

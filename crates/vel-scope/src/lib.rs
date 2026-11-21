@@ -190,6 +190,10 @@ impl ScopeStack {
     pub fn is_empty(&self) -> bool {
         self.scopes.is_empty()
     }
+    /// Whether a later restore can recover hidden scopes (even an empty clear).
+    pub fn has_pending_clears(&self) -> bool {
+        !self.clear_stack.is_empty()
+    }
     /// Pushes a scope.
     pub fn push(&mut self, scope: Scope) {
         self.scopes.push(scope);
@@ -244,15 +248,35 @@ enum Expr {
 #[derive(Debug, Clone)]
 pub struct Selector(Expr);
 impl Selector {
+    /// Number of successive stack depths that get distinct specificity weights.
+    pub const UNSATURATED_DEPTHS: usize = 21;
+
     /// Parses the complete logical selector syntax including immediate-child `>`.
     pub fn parse(text: &str) -> Result<Self, ParseScopeError> {
         text.parse()
     }
     /// Returns the selector's score on a scope stack, or `None`.
     pub fn does_match(&self, scopes: &[Scope]) -> Option<MatchScore> {
-        self.0
-            .eval(scopes, &lock_global_scope_repo())
-            .map(MatchScore)
+        self.does_match_in(scopes, &lock_global_scope_repo())
+    }
+    /// Matches using an already locked scope repository.
+    pub fn does_match_in(&self, scopes: &[Scope], repo: &ScopeRepository) -> Option<MatchScore> {
+        self.0.eval(scopes, repo).map(MatchScore)
+    }
+    /// Whether every alternative matches a single scope with positive
+    /// specificity below one depth step. Below saturation, any match one
+    /// level deeper out-ranks all shallower matches of this form.
+    pub fn is_depth_ordered(&self, repo: &ScopeRepository) -> bool {
+        fn eligible(expr: &Expr, repo: &ScopeRepository) -> bool {
+            match expr {
+                Expr::Path(path) if path.len() == 1 => path[0]
+                    .0
+                    .is_none_or(|s| (1..64).contains(&repo.sequences[s.0 as usize].len())),
+                Expr::Or(a, b) => eligible(a, repo) && eligible(b, repo),
+                _ => false,
+            }
+        }
+        eligible(&self.0, repo)
     }
     /// True when the selector accepts a stack.
     pub fn matches(&self, scopes: &[Scope]) -> bool {
@@ -308,7 +332,9 @@ fn path_score(
         if let Some(prefix) = prefix {
             // ST-BEHAVIOR: unverified numeric score beyond documented specificity ordering.
             let atoms = scope.map_or(1, |s| repo.sequences[s.0 as usize].len()) as u128;
-            return Some(prefix.saturating_add(atoms.saturating_mul(1u128 << (at.min(20) * 6))));
+            return Some(prefix.saturating_add(
+                atoms.saturating_mul(1u128 << (at.min(Selector::UNSATURATED_DEPTHS - 1) * 6)),
+            ));
         }
     }
     None
