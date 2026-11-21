@@ -912,3 +912,107 @@ Findings to fix:
    highlighted 7 MB file). Investigate retained parse/highlight state (checkpoints, scope stacks,
    style spans, layout caches) for files below the large-file threshold.
 3. Large files are already well below Sublime's footprint.
+
+## Round 36: interactive startup before AppKit
+
+The measured interval starts at `interactive_setup_begin`, just after text
+setup, and ends at `interactive_setup_ready`, immediately before
+`Platform::run_with_options`. `--headless-perf-startup-interactive --data-dir DIR [FILE]`
+uses the same configuration, recovery, file opening and `App` construction as
+an interactive launch. It skips LaunchServices, the instance broker, crash
+hooks, display preflight, native windows and GPU work. Use a disposable profile.
+An interactive `--output FILE.jsonl` run also emits the `startup_phase` records,
+including service startup after the first real scanout. Instruction deltas use
+Darwin `proc_pid_rusage(RUSAGE_INFO_V4)` and include all process threads that
+ran inside the interval. Samples are buffered to exclude JSONL writes from the
+phase timings. Wall times are descriptive; the release regression test checks
+retired instructions and ordering, not milliseconds.
+
+The cold source loader was the dominant cost. It walked the shipped tree and
+linked every grammar before a window could start. This now happens during the
+Cargo build, using the same linker and virtual definitions. At startup the
+binary loads a relocatable index; compressed grammar contexts still load on
+demand. This adds about 3.8 MB to the optimized binary. Profiles that override
+or ignore shipped grammars still use the effective grammar overlay, so the
+stock cold-start result does not apply to an uncached custom grammar set.
+
+Settings, locale catalogs, keymaps, menus, color schemes, theme variants and the
+active syntax stay ready for the first frame. Snippet and completion catalogs
+also stay ready for the first key. Palette rows publish through the existing
+palette revision after first present, or are completed on demand before an
+early query. The file watcher, directory and project index, and session writer
+start after scanout. First use can initialize the index or writer earlier when
+required. Watcher registration catches changes since the file was opened and
+does not probe lazy restored tabs. Git discovery already runs in the post-present
+poll. Session restore preserves the selected and visible views and leaves hidden
+tabs lazy.
+
+To repeat the three workloads with five alternating fresh process pairs:
+
+```sh
+scripts/bench-headless.py target/release/velocity \
+  --before /path/to/instrumented-1826d8a --interactive-startup
+```
+
+The runner creates a fresh profile per process. The restore fixture selects the
+fifth of ten clean C files; the file case opens the existing `sqlite3.c` fixture.
+By default each process also gets a fresh syntax cache directory; add
+`--warm-syntax-cache` to measure the older loader on a cache hit. Neither mode
+attempts to clear the filesystem cache.
+
+Five alternating pairs per row, on the M1 Pro, with optimized locked builds
+and isolated HOME, profile, and log directories. The startup baseline is
+`1826d8a` with only the headless endpoint and phase instrumentation applied.
+One-minute load averages were 115–136; use instruction counts to compare
+work. Numbers are side medians for the instrumented interval, not process
+lifetime or launch-to-window time.
+
+| Profile | Before, cold instructions / ms | After, cold instructions / ms | Before, warm instructions / ms | After, warm instructions / ms |
+| --- | ---: | ---: | ---: | ---: |
+| Empty | 10.626B / 1,164 ms | 0.500B / 45 ms | 0.709B / 81 ms | 0.500B / 58 ms |
+| Restore ten C tabs | 10.711B / 1,119 ms | 0.579B / 52 ms | 0.801B / 70 ms | 0.575B / 54 ms |
+| Open `sqlite3.c` | 10.732B / 1,120 ms | 0.644B / 62 ms | 0.876B / 81 ms | 0.649B / 71 ms |
+
+| Phase (cold, empty unless specified) | Before, instructions / ms | After, instructions / ms | Placement |
+| --- | ---: | ---: | --- |
+| Session load (ten tabs) | 1.50M / 0.27 ms | 1.34M / 0.24 ms | Recovery stays synchronous, writer starts after scanout or on demand |
+| Resource overlay, translations, settings | 12.95M / 1.41 ms; 18.13M / 1.80 ms; 11.06M / 1.18 ms | 12.89M / 1.36 ms; 18.02M / 1.71 ms; 11.08M / 1.29 ms | Still synchronous |
+| Keymap and menus/mousemap | 45.63M / 4.32 ms; 12.96M / 1.07 ms | 45.85M / 4.27 ms; 13.05M / 1.07 ms | Still synchronous |
+| Bundled syntax index | 10.146B / 1,120 ms | 31.36M / 3.44 ms | Build-time grammar linking, lazy runtime contexts |
+| Effective syntax selection | 2.41M / 0.24 ms | 1.07M / 0.14 ms | Check whether installed, loose, or ignored packages change the shipped set |
+| Palette command rows | 8.54M / 0.70 ms | 0.53M / 0.07 ms | Save inputs for post-present assembly or first query |
+| Completion and syntax catalog work | 15.75M / 1.45 ms | 13.33M / 1.19 ms | Retain first-input catalog; syntax and snippet palette rows moved out of this phase |
+| Color schemes and themes | 4.79M / 0.45 ms; 299.31M / 22.27 ms | 4.87M / 0.43 ms; 299.71M / 22.00 ms | Keep correct appearance ready for AppKit |
+| Initial tab, translator, and watcher setup | 20.86M / 1.81 ms | 20.81M / 1.74 ms | Tab and locale stay synchronous; watcher moves past scanout |
+| Restore window (ten tabs) | 86.40M / 9.26 ms | 70.45M / 6.88 ms | Visible views still restored; nine tabs remain lazy |
+| Open `sqlite3.c` | 164.35M / 19.72 ms | 143.14M / 15.83 ms | Same file and detection path; no change to the highlight engine |
+
+The file-open and restore deltas can include document worker instructions;
+they are not standalone I/O savings. The headless run cannot verify the
+0.9 s native window target. Rerun the black-box probe with a fresh profile
+to verify that separately.
+
+The release test `first_frame_setup_is_bounded_with_an_empty_syntax_cache`
+caps both empty and restored setup at 900M instructions and verifies the
+restore selection, lazy tabs, and pre-service ordering. Other startup tests
+cover the first keyboard binding and automatic language and scheme selection,
+an immediate palette query, user grammar overlays, and watcher reconciliation
+for a file changed before registration.
+
+Against a pristine optimized `1826d8a` build, the existing paired instruction
+checks were `features` **-0.42%** and `smoke1` **+0.35%**. The five-pair
+`carets1000` run was noisy (+3.34%, with individual pairs from -9.52% to
+above +3%); the 25-pair focused repeat was **-0.17%**, and a 15-pair
+same-binary control varied by -1.45%. Raw phase logs,
+instruction pairs, and the instrumentation-only baseline patch are in
+`/tmp/velocity-round36.11wFlC/` (`delivery-cold`, `delivery-warm`,
+`delivery-instructions`, `carets25`, `carets-control`, and
+`baseline-instrumentation.patch`).
+
+The headless gate fallback ran formatting, strict workspace Clippy, workspace
+release tests, rustdoc with warnings denied, and the release build. The final
+Velocity reruns passed all startup checks. The existing
+`shipped_catalogs_pass_draw_list_text_audit` failed on the sandbox temporary
+path appearing in the Chinese draw list. No GUI or packaging steps ran. Gate
+and targeted rerun logs are in the same directory (`gate-*.log` and
+`delivery-*.log`).

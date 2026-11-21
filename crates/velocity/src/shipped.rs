@@ -40,6 +40,21 @@ pub(crate) fn register(root: &Path, resources: &mut Resources) {
     }
 }
 
+pub(crate) fn grammars() -> impl Iterator<Item = &'static str> {
+    SHIPPED.iter().map(|file| file.path).filter(|path| {
+        [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+    })
+}
+
+pub(crate) fn grammar_metadata() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    SHIPPED
+        .iter()
+        .filter(|file| file.path.ends_with(".tmPreferences"))
+        .map(|file| (file.path, file.data.expect("metadata resource")))
+}
+
 pub(crate) fn metadata(resource: &Resource) -> Option<(Meta, &'static [u8])> {
     if !resource.shipped() {
         return None;

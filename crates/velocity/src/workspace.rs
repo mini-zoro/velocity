@@ -800,6 +800,7 @@ pub struct Workspace {
     pub mousemap: Vec<MouseBinding>,
     pub scrollbar_mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
+    startup_palette: Option<PaletteSeed>,
     pub(crate) translations: vel_i18n::Translator,
     preferred_languages: crate::ui_language::PreferredLanguages,
     unsupported_ui_language: Option<String>,
@@ -827,6 +828,9 @@ pub struct Workspace {
     pub(crate) settings: Settings,
     pub(crate) keymap: Keymap,
     pub(crate) watcher: Option<Watcher>,
+    /// Only set for the original interactive window, not benchmarks or later windows.
+    startup_watcher: bool,
+    packed_syntaxes: bool,
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) project: Option<PathBuf>,
     config_stamp: ConfigStamps,
@@ -962,6 +966,7 @@ struct Configuration {
     mousemap: Vec<MouseBinding>,
     scrollbar_mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
+    startup_palette: Option<PaletteSeed>,
     translations: vel_i18n::Catalogs,
     macro_paths: std::collections::BTreeSet<String>,
     folders: Vec<vel_search::project::Folder>,
@@ -971,6 +976,77 @@ struct Configuration {
     messages: Vec<String>,
     resource_reports: Vec<String>,
     ignored_user_keymaps: IgnoredKeymaps,
+}
+
+#[derive(Debug)]
+struct PaletteSeed {
+    // Snapshot the authored menu, before native recent-file rows are installed.
+    menus: Vec<MenuItem>,
+    extra: Vec<PaletteItem>,
+    translations: vel_i18n::Catalogs,
+}
+fn load_palette(
+    resources: &Resources,
+    menus: &[MenuItem],
+    extra: Vec<PaletteItem>,
+    translations: &vel_i18n::Catalogs,
+    assets: &crate::language::Assets,
+    catalog: &crate::completion::Catalog,
+    messages: &mut Vec<String>,
+) -> Vec<PaletteItem> {
+    let mut palette = Vec::new();
+    let registry = Editor::command_registry();
+    for resource in resources.matching(".sublime-commands") {
+        match resource.text().and_then(ui::parse::<PaletteItem>) {
+            Ok(mut items) => {
+                if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
+                    items.retain(|item| {
+                        let name = &item.invocation.command;
+                        name == "noop" || registry.kind(name).is_some()
+                    });
+                }
+                palette.extend(items);
+            }
+            Err(e) => messages.push(format!("{}: {e}", resource.path)),
+        }
+    }
+    palette.extend(extra);
+    crate::ui_language::palette_rows(&mut palette, translations);
+    ui::extend_palette(&mut palette, menus);
+    for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
+        palette.push(PaletteItem {
+            caption: format!("Set Syntax: {}", syntax.name),
+            invocation: vel_config::keymap::Invocation {
+                command: "set_file_type".into(),
+                args: serde_json::json!({"syntax": syntax.path}),
+            },
+        });
+    }
+    for (name, snippet) in catalog.snippets.iter() {
+        palette.push(PaletteItem {
+            caption: format!(
+                "Snippet: {}",
+                if snippet.description().is_empty() {
+                    snippet_title(name)
+                } else {
+                    snippet.description()
+                }
+            ),
+            invocation: vel_config::keymap::Invocation {
+                command: "insert_snippet".into(),
+                args: serde_json::json!({"name":name}),
+            },
+        });
+    }
+    palette
+}
+
+#[derive(Clone, Copy, Default)]
+enum ConfigKind {
+    #[default]
+    Eager,
+    FirstFrame,
+    InteractiveReload,
 }
 
 type ConfigStamps = Vec<(PathBuf, Option<(u64, SystemTime)>)>;
@@ -1099,6 +1175,8 @@ impl Configuration {
             project,
             Some(Default::default()),
             Default::default(),
+            ConfigKind::Eager,
+            &mut Default::default(),
         )
         .result
     }
@@ -1108,6 +1186,8 @@ impl Configuration {
         project: Option<PathBuf>,
         window_overrides: Option<serde_json::Map<String, Value>>,
         preferred_languages: crate::ui_language::PreferredLanguages,
+        kind: ConfigKind,
+        phases: &mut crate::report::StartupPhases,
     ) -> ConfigLoad {
         let mut stamps = Vec::new();
         let result = Self::read(
@@ -1116,6 +1196,8 @@ impl Configuration {
             window_overrides,
             preferred_languages,
             &mut stamps,
+            kind,
+            phases,
         );
         stamps.sort_by(|a, b| a.0.cmp(&b.0));
         stamps.dedup_by(|a, b| a.0 == b.0);
@@ -1128,6 +1210,8 @@ impl Configuration {
         window_overrides: Option<serde_json::Map<String, Value>>,
         preferred_languages: crate::ui_language::PreferredLanguages,
         stamps: &mut ConfigStamps,
+        kind: ConfigKind,
+        phases: &mut crate::report::StartupPhases,
     ) -> Result<Self, String> {
         if let Some(path) = &project {
             stamps.push((path.clone(), stamp(path)));
@@ -1295,7 +1379,9 @@ impl Configuration {
         // Application-only: https://www.sublimetext.com/docs/settings.html
         // Project files cannot enable/disable packages, including Vintage.
         resources.set_ignored(ignored);
+        phases.mark("resources_scanned");
         let translations = vel_i18n::Catalogs::load(&resources, &mut resource_messages);
+        phases.mark("translations_ready");
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
         let mut syntax_settings = crate::shipped::SyntaxSettings::default();
@@ -1493,6 +1579,7 @@ impl Configuration {
                 follow_links: folder["follow_symlinks"].as_bool().unwrap_or(true),
             });
         }
+        phases.mark("settings_ready");
         let mut keymap = Keymap::default();
         let registry = Editor::command_registry();
         let known = |name: &str| name == "noop" || registry.kind(name).is_some();
@@ -1501,7 +1588,6 @@ impl Configuration {
         let mut context_menus: BTreeMap<String, Vec<MenuItem>> = BTreeMap::new();
         let mut mousemap = Vec::new();
         let mut scrollbar_mousemap = Vec::new();
-        let mut palette = Vec::new();
         const LEGACY: &str = "Packages/User/Velocity.sublime-keymap";
         let mut keymaps = resources.matching(".sublime-keymap");
         let mut ignored_user_keymaps = IgnoredKeymaps::new();
@@ -1567,6 +1653,7 @@ impl Configuration {
                 Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
+        phases.mark("keymap_ready");
         // The public Menus reference allows Widget.sublime-settings to select
         // another resource by filename. The other surfaces keep their own names.
         let widget_context_menu = resources
@@ -1665,17 +1752,7 @@ impl Configuration {
                 Err(e) => mouse_warnings.push((resource.path.clone(), e)),
             }
         }
-        for resource in resources.matching(".sublime-commands") {
-            match resource.text().and_then(ui::parse::<PaletteItem>) {
-                Ok(mut items) => {
-                    if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
-                        items.retain(|item| known(&item.invocation.command));
-                    }
-                    palette.extend(items);
-                }
-                Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
-            }
-        }
+        phases.mark("menus_mousemap_ready");
         if let Some(tools) = menus.iter_mut().find(|m| m.id == "tools") {
             let choices=std::iter::once("Automatic").chain(build_systems.names()).map(|name|serde_json::json!({"caption":name,"command":"set_build_system","args":{"name":name}})).collect::<Vec<_>>();
             if let Some(item) = tools
@@ -1692,13 +1769,22 @@ impl Configuration {
                 )?);
             }
         }
-        crate::release::extend_commands(&mut palette, &mut menus, &settings);
+        let mut palette_extra = Vec::new();
+        crate::release::extend_commands(&mut palette_extra, &mut menus, &settings);
         crate::ui_language::menu_rows(&mut menus, &translations);
-        crate::ui_language::palette_rows(&mut palette, &translations);
-        ui::extend_palette(&mut palette, &menus);
-        let bundled = crate::language::Assets::bundled()?;
-        let assets =
-            crate::language::Assets::with_user_packages(&bundled, data_dir.as_deref(), &resources)?;
+        let packed = (!matches!(kind, ConfigKind::Eager))
+            .then(crate::language::Assets::packed)
+            .flatten();
+        let using_pack = packed.is_some();
+        let bundled = packed.unwrap_or_else(crate::language::Assets::bundled)?;
+        phases.mark("bundled_syntax_ready");
+        let assets = crate::language::Assets::with_package_overlay(
+            &bundled,
+            data_dir.as_deref(),
+            &resources,
+            using_pack,
+        )?;
+        phases.mark("effective_syntax_ready");
         let user_syntaxes: Vec<_> = resources
             .matching("")
             .into_iter()
@@ -1741,34 +1827,32 @@ impl Configuration {
             &mut resource_reports,
             &mut resource_log,
         );
-        for syntax in assets.syntaxes.syntaxes().iter().filter(|s| !s.hidden) {
-            palette.push(PaletteItem {
-                caption: format!("Set Syntax: {}", syntax.name),
-                invocation: vel_config::keymap::Invocation {
-                    command: "set_file_type".into(),
-                    args: serde_json::json!({"syntax": syntax.path}),
-                },
-            });
-        }
         let catalog = crate::completion::Catalog::load(&resources, &mut resource_messages);
-        for (name, snippet) in catalog.snippets.iter() {
-            palette.push(PaletteItem {
-                caption: format!(
-                    "Snippet: {}",
-                    if snippet.description().is_empty() {
-                        // Without a description, the file name reads like one:
-                        // "Snippet: bench", not its resource path.
-                        snippet_title(name)
-                    } else {
-                        snippet.description()
-                    }
+        phases.mark("catalogs_ready");
+        let (palette, startup_palette) = if matches!(kind, ConfigKind::FirstFrame) {
+            (
+                Vec::new(),
+                Some(PaletteSeed {
+                    menus: menus.clone(),
+                    extra: palette_extra,
+                    translations: translations.clone(),
+                }),
+            )
+        } else {
+            (
+                load_palette(
+                    &resources,
+                    &menus,
+                    palette_extra,
+                    &translations,
+                    &assets,
+                    &catalog,
+                    &mut resource_messages,
                 ),
-                invocation: vel_config::keymap::Invocation {
-                    command: "insert_snippet".into(),
-                    args: serde_json::json!({"name":name}),
-                },
-            });
-        }
+                None,
+            )
+        };
+        phases.mark("palette_commands_ready");
         let mut scheme_resources = Vec::new();
         for suffix in [
             ".sublime-color-scheme",
@@ -1843,6 +1927,7 @@ impl Configuration {
                 schemes.insert(name.to_owned(), Arc::new(scheme));
             }
         }
+        phases.mark("color_schemes_ready");
         let appearance = appearance::Catalog::load(&resources, &schemes, &scheme_errors);
         let themes = crate::theme_ui::Themes::prepare(
             &resources,
@@ -1850,6 +1935,7 @@ impl Configuration {
             &settings,
             &mut resource_messages,
         );
+        phases.mark("theme_prepared");
         let macro_paths = resources
             .matching(".sublime-macro")
             .into_iter()
@@ -1872,6 +1958,7 @@ impl Configuration {
             );
         }
         write_resource_log(data_dir.as_deref(), &resource_log, &mut resource_reports);
+        phases.mark("resource_reports_ready");
         Ok(Self {
             appearance,
             resource_reports,
@@ -1891,6 +1978,7 @@ impl Configuration {
             mousemap,
             scrollbar_mousemap,
             palette,
+            startup_palette,
             translations,
             folders,
             distraction_settings,
@@ -1908,6 +1996,31 @@ impl Workspace {
         watch: bool,
     ) -> Result<Self, String> {
         Self::new_with_window_overrides(text, data_dir, project, watch, Some(Default::default()))
+    }
+
+    pub(crate) fn new_for_startup(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        watch: bool,
+        phases: &mut crate::report::StartupPhases,
+    ) -> Result<Self, String> {
+        Self::new_with_configuration(
+            text,
+            data_dir,
+            project,
+            (
+                watch,
+                if watch {
+                    ConfigKind::FirstFrame
+                } else {
+                    ConfigKind::Eager
+                },
+            ),
+            Some(Default::default()),
+            Default::default(),
+            phases,
+        )
     }
 
     pub(crate) fn new_window(data_dir: Option<PathBuf>, watch: bool) -> Result<Self, String> {
@@ -1928,6 +2041,7 @@ impl Workspace {
             watch,
             window_overrides,
             Default::default(),
+            &mut Default::default(),
         )
     }
 
@@ -1945,6 +2059,7 @@ impl Workspace {
             watch,
             Some(Default::default()),
             crate::ui_language::PreferredLanguages(preferred),
+            &mut Default::default(),
         )
     }
 
@@ -1955,6 +2070,27 @@ impl Workspace {
         watch: bool,
         window_overrides: Option<serde_json::Map<String, Value>>,
         preferred_languages: crate::ui_language::PreferredLanguages,
+        phases: &mut crate::report::StartupPhases,
+    ) -> Result<Self, String> {
+        Self::new_with_configuration(
+            text,
+            data_dir,
+            project,
+            (watch, ConfigKind::Eager),
+            window_overrides,
+            preferred_languages,
+            phases,
+        )
+    }
+
+    fn new_with_configuration(
+        text: Text,
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        (watch, kind): (bool, ConfigKind),
+        window_overrides: Option<serde_json::Map<String, Value>>,
+        preferred_languages: crate::ui_language::PreferredLanguages,
+        phases: &mut crate::report::StartupPhases,
     ) -> Result<Self, String> {
         let ConfigLoad {
             result,
@@ -1964,6 +2100,8 @@ impl Workspace {
             project.clone(),
             window_overrides,
             preferred_languages,
+            kind,
+            phases,
         );
         let Configuration {
             appearance,
@@ -1981,6 +2119,7 @@ impl Workspace {
             mousemap,
             scrollbar_mousemap,
             palette,
+            startup_palette,
             translations,
             macro_paths,
             folders,
@@ -2000,7 +2139,8 @@ impl Workspace {
         let mut localizer = vel_i18n::Translator::default();
         localizer.replace(translations);
         let mut messages = resource_messages;
-        let watcher = if watch {
+        let startup_watcher = watch && matches!(kind, ConfigKind::FirstFrame);
+        let watcher = if watch && !startup_watcher {
             match Watcher::new() {
                 Ok(w) => Some(w),
                 Err(e) => {
@@ -2011,6 +2151,7 @@ impl Workspace {
         } else {
             None
         };
+        phases.mark("watchers_prepared");
         let mut themes = crate::theme_ui::Themes::publish(themes);
         if let Err(e) = themes.select(&settings, true) {
             messages.push(e);
@@ -2058,6 +2199,7 @@ impl Workspace {
             mousemap,
             scrollbar_mousemap,
             palette,
+            startup_palette,
             ui: crate::ui_text::Chrome::new(&localizer),
             translations: localizer,
             preferred_languages,
@@ -2085,6 +2227,8 @@ impl Workspace {
             settings,
             keymap,
             watcher,
+            startup_watcher,
+            packed_syntaxes: !matches!(kind, ConfigKind::Eager),
             data_dir,
             project,
             config_stamp,
@@ -2103,7 +2247,61 @@ impl Workspace {
         workspace.configure_language(0, None, true)?;
         workspace.observe_navigation();
         workspace.sync_ui_language();
+        phases.mark("workspace_ready");
         Ok(workspace)
+    }
+
+    pub(crate) fn startup_services_pending(&self) -> bool {
+        self.startup_watcher
+    }
+
+    pub(crate) fn start_startup_watcher(&mut self) -> bool {
+        if !std::mem::take(&mut self.startup_watcher) {
+            return false;
+        }
+        match Watcher::new() {
+            Ok(mut watcher) => {
+                let paths: std::collections::BTreeSet<_> = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.lazy.is_none())
+                    .filter_map(|tab| tab.path.clone())
+                    .collect();
+                for path in &paths {
+                    if let Err(error) = watcher.watch(path) {
+                        self.load_notices.push(error);
+                    }
+                }
+                self.watcher = Some(watcher);
+                // Registration samples the *current* disk version. Check against the
+                // version read at open so writes between open and present aren't lost.
+                self.apply_file_changes(vec![Ok(paths.into_iter().collect())]);
+            }
+            Err(error) => self
+                .messages
+                .push(format!("file notifications unavailable: {error}")),
+        }
+        true
+    }
+
+    pub(crate) fn palette_pending(&self) -> bool {
+        self.startup_palette.is_some()
+    }
+
+    pub(crate) fn finish_startup_palette(&mut self) {
+        let Some(seed) = self.startup_palette.take() else {
+            return;
+        };
+        self.palette = load_palette(
+            &self.resources,
+            &seed.menus,
+            seed.extra,
+            &seed.translations,
+            &self.assets,
+            &self.catalog,
+            &mut self.messages,
+        );
+        self.palette_revision = self.palette_revision.wrapping_add(1);
     }
     /// Refreshes the resource-defined recent submenu only when its source changes.
     pub fn refresh_file_menus(&mut self) -> bool {
@@ -3531,6 +3729,11 @@ impl Workspace {
             let project = self.project.clone();
             let overrides = self.settings.layer(Layer::Window).clone();
             let preferred_languages = self.preferred_languages;
+            let kind = if self.packed_syntaxes {
+                ConfigKind::InteractiveReload
+            } else {
+                ConfigKind::Eager
+            };
             match std::thread::Builder::new()
                 .name("velocity-resources".into())
                 .spawn(move || {
@@ -3539,6 +3742,8 @@ impl Workspace {
                         project,
                         Some(overrides),
                         preferred_languages,
+                        kind,
+                        &mut Default::default(),
                     ));
                 }) {
                 Ok(_) => self.config_rx = Some(rx),
@@ -3663,6 +3868,7 @@ impl Workspace {
                         self.palette_revision = self.palette_revision.wrapping_add(1);
                     }
                     self.palette = config.palette;
+                    self.startup_palette = None;
                     self.macro_paths = config.macro_paths;
                     self.resources = config.resources;
                     for tab in &mut self.tabs {
@@ -3973,6 +4179,87 @@ mod tests {
         json,
         keymap::{Key, Resolution},
     };
+    #[test]
+    fn first_frame_uses_profile_language_scheme_and_keymap() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("Packages/User");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("Preferences.sublime-settings"),
+            r#"{"ui_language":"auto","color_scheme":"Velocity Light.sublime-color-scheme"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("Default.sublime-keymap"),
+            r#"[{"keys":["super+d"],"command":"insert","args":{"characters":"first"}}]"#,
+        )
+        .unwrap();
+        let preferred = crate::ui_language::PreferredLanguages(&["zh-Hans-CN", "en"]);
+        let mut startup = Workspace::new_with_configuration(
+            Text::new(),
+            Some(dir.path().into()),
+            None,
+            (true, ConfigKind::FirstFrame),
+            Some(Default::default()),
+            preferred,
+            &mut Default::default(),
+        )
+        .unwrap();
+        assert!(startup.startup_services_pending() && startup.palette_pending());
+        assert_eq!(startup.ui_language_setting(), "auto");
+        assert_eq!(startup.translations.matched_language().as_str(), "zh-Hans");
+        assert!(!startup.themes.ui.borrow().palette.is_dark());
+        assert!(
+            startup
+                .editor_mut()
+                .key(&Key::parse("super+d").unwrap())
+                .unwrap()
+        );
+        assert_eq!(startup.editor().text.to_string(), "first");
+
+        let eager = Workspace::new_with_preferred_languages(
+            Text::new(),
+            Some(dir.path().into()),
+            false,
+            &["zh-Hans-CN", "en"],
+        )
+        .unwrap();
+        assert_eq!(
+            startup.assets.syntaxes.warnings(),
+            eager.assets.syntaxes.warnings()
+        );
+        let before = startup.palette_revision;
+        startup.finish_startup_palette();
+        assert_eq!(startup.palette, eager.palette);
+        assert_eq!(startup.palette_revision, before + 1);
+        startup.finish_startup_palette();
+        assert_eq!(startup.palette_revision, before + 1);
+    }
+
+    #[test]
+    fn startup_watcher_reconciles_changes_before_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("watch.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut startup =
+            Workspace::new_for_startup(Text::new(), None, None, true, &mut Default::default())
+                .unwrap();
+        startup
+            .open(FileLocation {
+                path: path.clone(),
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        assert!(startup.watcher.is_none());
+        std::fs::write(path, "changed before present").unwrap();
+        assert!(startup.start_startup_watcher());
+        assert!(startup.watcher.is_some());
+        startup.poll();
+        assert_eq!(startup.editor().text.to_string(), "changed before present");
+        assert!(!startup.start_startup_watcher());
+    }
+
     #[test]
     fn closing_an_earlier_tab_keeps_the_active_tab() {
         let mut workspace = Workspace::new(Text::from("a"), None, None, false).unwrap();
@@ -4326,6 +4613,8 @@ mod tests {
                 None,
                 Some(Default::default()),
                 Default::default(),
+                ConfigKind::Eager,
+                &mut Default::default(),
             );
             let (tx, rx) = std::sync::mpsc::channel();
             tx.send(result).unwrap();

@@ -4,7 +4,7 @@ use super::*;
 use crate::{editor::Editor, workspace::Tab};
 use vel_buffer::{ChangeId, ChangeSet, EditKind, Region};
 
-pub(crate) const SYNTAX: &str = "Packages/Default/Find Results.sublime-syntax";
+pub(crate) use crate::bundled_syntax::FIND_RESULTS_PATH as SYNTAX;
 pub(crate) const MATCH_SCOPE: &str = "markup.inserted.match.find-in-files";
 
 #[derive(Clone, Debug)]

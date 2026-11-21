@@ -48,6 +48,28 @@ fn wait(w: &mut Workspace) {
 }
 
 #[test]
+fn interactive_startup_honors_user_grammar_overlays() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("profile");
+    write(
+        &data.join("Packages/User/Velocity Notes.tmLanguage.json"),
+        JSON,
+    );
+    let file = temp.path().join("sample.vnote");
+    write(&file, "TODO\n");
+    let mut workspace =
+        Workspace::new_for_startup(Text::new(), Some(data), None, true, &mut Default::default())
+            .unwrap();
+    workspace.open(FileLocation::path_only(file)).unwrap();
+    let editor = workspace.editor();
+    assert_eq!(
+        editor.language.borrow().as_ref().unwrap().name,
+        "Velocity Notes"
+    );
+    assert!(workspace.palette_pending());
+}
+
+#[test]
 fn loose_xml_json_detection_picker_scopes_and_nested_add_edit_remove_reload() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");

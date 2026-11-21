@@ -107,6 +107,7 @@ pub struct Sessions {
     windows: BTreeMap<u64, (Window, Vec<Document>)>,
     departing: Vec<(Window, Vec<Document>)>,
     writer: Option<Writer>,
+    writer_path: Option<PathBuf>,
     profile: Option<PathBuf>,
     workspaces: BTreeMap<PathBuf, Writer>,
     next: u64,
@@ -122,6 +123,14 @@ pub struct Sessions {
 }
 impl Sessions {
     pub fn new(data: Option<&Path>) -> Self {
+        Self::recover(data, false)
+    }
+
+    pub(crate) fn new_for_startup(data: Option<&Path>) -> Self {
+        Self::recover(data, true)
+    }
+
+    fn recover(data: Option<&Path>, defer_writer: bool) -> Self {
         let mut messages = Vec::new();
         #[cfg(unix)]
         if data.is_some() {
@@ -135,14 +144,7 @@ impl Sessions {
             .as_deref()
             .and_then(crate::session_restore::original);
         messages.extend(recovery.messages);
-        let writer = path.and_then(|p| match Writer::new(p, Duration::from_millis(400)) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                messages.push(e);
-                None
-            }
-        });
-        Self {
+        let mut sessions = Self {
             closed_window_files: recovery.session.closed_window_files.clone(),
             restored: recovery.session,
             original,
@@ -156,7 +158,8 @@ impl Sessions {
             messages,
             windows: BTreeMap::new(),
             departing: vec![],
-            writer,
+            writer: None,
+            writer_path: path,
             profile: data.map(Path::to_owned),
             workspaces: BTreeMap::new(),
             next: 1,
@@ -167,6 +170,18 @@ impl Sessions {
             open_inbox: BTreeMap::new(),
             menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
+        };
+        if !defer_writer {
+            sessions.start_writer();
+        }
+        sessions
+    }
+    pub(crate) fn start_writer(&mut self) {
+        if let Some(path) = self.writer_path.take() {
+            match Writer::new(path, Duration::from_millis(400)) {
+                Ok(writer) => self.writer = Some(writer),
+                Err(error) => self.messages.push(error),
+            }
         }
     }
     pub fn register(&mut self) -> u64 {
@@ -295,12 +310,14 @@ impl Sessions {
         self.publish_project(window, documents, Policy { hot, ..policy })
     }
     fn publish_application(
-        &self,
+        &mut self,
         hot: HotExit,
         quitting: bool,
         remember: bool,
         remember_layout: bool,
     ) -> Result<(), String> {
+        // An early close or Save Project command can checkpoint before scanout.
+        self.start_writer();
         if let Some(writer) = &self.writer {
             let mut session = self.collect(self.recent.clone());
             session.apply_policy(hot, quitting, remember);
@@ -610,7 +627,8 @@ impl Sessions {
         }
     }
     pub fn poll(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
+        // Startup may have initialized the writer after the first frame.
+        let mut out = std::mem::take(&mut self.messages);
         for writer in self.writer.iter().chain(self.workspaces.values()) {
             out.extend(writer.warnings.try_iter());
             while let Ok(result) = writer.results.try_recv() {

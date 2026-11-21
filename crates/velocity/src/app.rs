@@ -478,6 +478,36 @@ impl App {
         self.fullscreen_before_distraction = window.fullscreen_before_distraction;
         self.window_frame = window.frame;
     }
+    pub(crate) fn report_headless_interactive_startup(&self) -> Result<(), String> {
+        let tabs = &self.workspace.tabs;
+        self.reporter.emit(json!({
+            "kind": "interactive_startup",
+            "complete": true,
+            "gui_started": false,
+            "gpu_started": false,
+            "tabs": if self.workspace.empty { 0 } else { tabs.len() },
+            "lazy_tabs": tabs.iter().filter(|tab| tab.lazy.is_some()).count(),
+            "active_path": tabs[self.workspace.active].path,
+            "ui_language": self.workspace.translations.matched_language().as_str(),
+            "syntax": self.workspace.editor().language.borrow().as_ref().map(|l| &l.syntax),
+            "watcher_started": self.workspace.watcher.is_some(),
+            "palette_deferred": self.workspace.palette_pending(),
+        }))
+    }
+
+    fn start_services_after_present(&mut self) -> Result<(), String> {
+        let mut phases =
+            crate::report::StartupPhases::new(self.clock.entered, self.reporter.is_enabled());
+        phases.mark("post_present_begin");
+        self.workspace.start_startup_watcher();
+        phases.mark("watchers_started");
+        self.panels.start_startup_workers(&self.workspace);
+        self.sessions.borrow_mut().start_writer();
+        phases.mark("index_session_services_started");
+        self.workspace.finish_startup_palette();
+        phases.mark("palette_published");
+        phases.emit(&self.reporter)
+    }
     pub fn restore_session_id(&mut self, id: u64) {
         self.sessions
             .borrow_mut()
@@ -3607,6 +3637,7 @@ impl App {
         }
     }
     fn sync_palette_enabled(&mut self) {
+        self.workspace.finish_startup_palette();
         let enabled = self
             .workspace
             .palette
@@ -4617,6 +4648,9 @@ impl App {
                 w.request_frame_at(Instant::now() + Duration::from_millis(16));
             }
             Mode::Interactive => {
+                if self.workspace.startup_services_pending() {
+                    self.start_services_after_present()?;
+                }
                 w.request_frame_at(Instant::now() + Duration::from_millis(200));
             }
             mode => {
@@ -4847,7 +4881,7 @@ impl AppHandler for App {
         self.panels.review.native_context = true;
         w.set_title(&self.workspace.window_title());
         self.install_native_menu(w, true);
-        self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":self.workspace.palette.len()}))?;
+        self.reporter.emit(json!({"kind":"resources","key_bindings":self.workspace.editor().keymap.len(),"mouse_bindings":self.workspace.mousemap.len(),"palette_entries":(!self.workspace.palette_pending()).then_some(self.workspace.palette.len())}))?;
         let fonts = Fonts::load_named(&self.workspace.editor().settings.editor().font_face)?;
         self.clock.mark("primary_font_ready");
         self.view = View::new(w.content_size(), fonts.cell as f64, fonts.ascent as f64);
@@ -6071,6 +6105,39 @@ mod workbench_scenes {
             Arc::new(AtomicBool::new(false)),
             std::rc::Rc::new(std::cell::RefCell::new(crate::session::Sessions::new(None))),
         )
+    }
+    #[test]
+    fn palette_query_before_first_present_can_accept_a_command() {
+        let workspace = Workspace::new_for_startup(
+            vel_text::Text::new(),
+            None,
+            None,
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
+        let mut app = app(workspace);
+        assert!(!app.startup_done && app.workspace.palette_pending());
+        app.sync_palette_enabled();
+        app.panels
+            .action(
+                &mut app.workspace,
+                "show_overlay",
+                &json!({"overlay":"command_palette", "text":"Open Crash Reports"}),
+                0..4,
+            )
+            .unwrap();
+        let (_, invocation) = app
+            .panels
+            .key(
+                &mut app.workspace,
+                &vel_config::keymap::Key::parse("enter").unwrap(),
+                0..4,
+            )
+            .unwrap();
+        assert_eq!(invocation.unwrap().command, "open_crash_reports");
+        assert!(!app.workspace.palette_pending());
+        assert!(app.workspace.startup_services_pending());
     }
     #[test]
     fn palette_filters_and_rechecks_actual_command_enablement() {

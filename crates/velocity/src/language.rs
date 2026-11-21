@@ -328,14 +328,47 @@ pub struct Assets {
     /// Corpus staging, index loading, cleanup dispatch and concurrent metadata setup, in ms.
     pub startup_ms: [f64; 4],
 }
-const INTERNAL_SYNTAXES: [(&str, &str); 2] = [
-    (PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX),
-    (
-        crate::panels::find_results::SYNTAX,
-        include_str!("../resources/Packages/Default/Find Results.sublime-syntax"),
-    ),
-];
+use crate::bundled_syntax::INTERNAL_SYNTAXES;
 impl Assets {
+    pub(crate) fn packed() -> Option<Result<Arc<Self>, String>> {
+        const INDEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/startup-syntaxes.bin"));
+        static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
+        if INDEX.is_empty() {
+            return None; // Source archive built without the syntax submodule.
+        }
+        Some(
+            ASSETS
+                .get_or_init(|| {
+                    let phase = std::time::Instant::now();
+                    let mut syntaxes: SyntaxSet =
+                        bincode::deserialize(INDEX).map_err(|e| e.to_string())?;
+                    let root = packages_root();
+                    let aliases: Vec<_> = crate::shipped::grammars()
+                        .map(|path| (path, root.join(&path["Packages/".len()..])))
+                        .collect();
+                    syntaxes.bind_resource_paths(
+                        aliases
+                            .iter()
+                            .filter_map(|(p, file)| Some((*p, file.to_str()?))),
+                    );
+                    let syntax_ms = phase.elapsed().as_secs_f64() * 1000.;
+                    let phase = std::time::Instant::now();
+                    let mut metadata = MetadataSet::new();
+                    for (path, bytes) in crate::shipped::grammar_metadata() {
+                        metadata
+                            .add_plist(bytes)
+                            .map_err(|e| format!("{path}: {e}"))?;
+                    }
+                    Ok(Arc::new(Self {
+                        syntaxes: Arc::new(syntaxes),
+                        metadata: Arc::new(metadata),
+                        startup_ms: [0., syntax_ms, 0., phase.elapsed().as_secs_f64() * 1000.],
+                    }))
+                })
+                .clone(),
+        )
+    }
+
     pub fn bundled() -> Result<Arc<Self>, String> {
         static ASSETS: OnceLock<Result<Arc<Assets>, String>> = OnceLock::new();
         ASSETS
@@ -370,10 +403,11 @@ impl Assets {
     }
     /// Loads user YAML/TextMate definitions after the shipped root. Effective archive/loose
     /// resources are virtual extras, retaining resource precedence without extracting archives.
-    pub fn with_user_packages(
+    pub fn with_package_overlay(
         base: &Arc<Self>,
         data: Option<&Path>,
         resources: &vel_config::resources::Resources,
+        packed: bool,
     ) -> Result<Arc<Self>, String> {
         let root = packages_root();
         let effective = [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
@@ -389,10 +423,16 @@ impl Assets {
         {
             return Ok(base.clone());
         }
-        if effective.len() + INTERNAL_SYNTAXES.len() == base.syntaxes.syntaxes().len()
-            && effective.iter().all(|r| r.origin.starts_with(&root))
-            && preferences.iter().all(|r| r.origin.starts_with(&root))
-        {
+        let unchanged = if packed {
+            effective.len() == crate::shipped::grammars().count()
+                && preferences.len() == crate::shipped::grammar_metadata().count()
+                && effective.iter().chain(&preferences).all(|r| r.shipped())
+        } else {
+            effective.len() + INTERNAL_SYNTAXES.len() == base.syntaxes.syntaxes().len()
+                && effective.iter().all(|r| r.origin.starts_with(&root))
+                && preferences.iter().all(|r| r.origin.starts_with(&root))
+        };
+        if unchanged {
             return Ok(base.clone());
         }
         let mut warnings = Vec::new();
@@ -440,10 +480,6 @@ pub(crate) fn packages_root() -> PathBuf {
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/sublime-packages")
 }
-/// Virtual package path of our original Plain Text definition (the public corpus has none).
-const PLAIN_TEXT_PATH: &str = "Packages/Default/Plain Text.sublime-syntax";
-const PLAIN_TEXT_SYNTAX: &str =
-    "name: Plain Text\nfile_extensions: [txt]\nscope: text.plain\ncontexts: { main: [] }\n";
 
 #[derive(Clone, Debug)]
 pub struct Pair {
@@ -1662,12 +1698,8 @@ mod tests {
         )
         .unwrap();
         let load = || {
-            SyntaxSet::load_cached_roots(
-                &[source.path()],
-                &[(PLAIN_TEXT_PATH, PLAIN_TEXT_SYNTAX)],
-                cache.path(),
-            )
-            .unwrap()
+            SyntaxSet::load_cached_roots(&[source.path()], &INTERNAL_SYNTAXES[..1], cache.path())
+                .unwrap()
         };
         let (loaded, _) = load();
         assert!(loaded.find_syntax_by_name("Before").is_some());

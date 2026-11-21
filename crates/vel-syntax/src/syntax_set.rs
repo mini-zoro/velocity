@@ -168,10 +168,8 @@ impl Default for SyntaxSet {
 }
 
 impl SyntaxSet {
-    pub(crate) fn bind_resource_paths<'a>(
-        &mut self,
-        resources: impl Iterator<Item = (&'a str, &'a str)>,
-    ) {
+    /// Rebinds absolute path aliases after deserializing a relocatable syntax index.
+    pub fn bind_resource_paths<'a>(&mut self, resources: impl Iterator<Item = (&'a str, &'a str)>) {
         self.physical_paths.clear();
         for (virtual_path, physical) in resources {
             if let Some((_, index)) = self

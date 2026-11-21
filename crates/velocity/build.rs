@@ -6,6 +6,8 @@ use std::{
 use vel_config::{Value, json::Document};
 use vel_snippet::SnippetFile;
 
+#[path = "src/bundled_syntax.rs"]
+mod bundled_syntax;
 #[path = "build/dispatch.rs"]
 mod dispatch;
 #[path = "build/i18n.rs"]
@@ -14,12 +16,24 @@ mod i18n;
 fn main() -> io::Result<()> {
     let root = Path::new("../../third_party/sublime-packages");
     println!("cargo:rerun-if-changed={}", root.display());
+    println!("cargo:rerun-if-changed=src/bundled_syntax.rs");
+    println!("cargo:rerun-if-changed=resources/Packages/Default/Find Results.sublime-syntax");
     let mut paths = Vec::new();
     inventory(root, root, &mut paths)?;
     paths.sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     dispatch::generate(&out)?;
     i18n::generate(&out)?;
+    let index = fs::File::create(out.join("startup-syntaxes.bin"))?;
+    // Context bodies in this index are already individually compressed and lazy.
+    // The build and the legacy runtime loader use exactly the same corpus/linker.
+    if root.is_dir() {
+        let set = vel_syntax::SyntaxSet::load_roots(&[root], &bundled_syntax::INTERNAL_SYNTAXES)
+            .map_err(io::Error::other)?;
+        let mut index = BufWriter::new(index);
+        bincode::serialize_into(&mut index, &set).map_err(io::Error::other)?;
+        index.flush()?;
+    }
     let mut out = BufWriter::new(fs::File::create(out.join("shipped.rs"))?);
     writeln!(out, "static SHIPPED: &[File] = &[")?;
     for path in paths {

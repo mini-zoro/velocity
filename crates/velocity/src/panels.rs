@@ -633,6 +633,7 @@ pub struct Panels {
     goto_filter: Option<goto_files::Filter>,
     index: Option<Index>,
     folder_key: Vec<Folder>,
+    startup_index_pending: bool,
     extra_paths: Vec<PathBuf>,
     extra_candidates: Arc<Vec<fuzzy::Candidate>>,
     file_recency: BTreeMap<usize, u64>,
@@ -823,6 +824,7 @@ impl Default for Panels {
             goto_filter: None,
             index: None,
             folder_key: Vec::new(),
+            startup_index_pending: false,
             extra_paths: Vec::new(),
             extra_candidates: Arc::default(),
             file_recency: BTreeMap::new(),
@@ -875,6 +877,7 @@ impl Panels {
             ui_scale: vel_ui::theme::ui_scale(&workspace.editor().settings),
             chrome: workspace.window_visible("show_status_bar"),
             side_visible: workspace.editor().settings.bool("show_side_bar", true),
+            startup_index_pending: workspace.startup_services_pending(),
             ..Self::default()
         };
         if workers {
@@ -882,7 +885,16 @@ impl Panels {
         }
         ui
     }
+    pub(crate) fn start_startup_workers(&mut self, workspace: &Workspace) {
+        if std::mem::take(&mut self.startup_index_pending) {
+            self.restart_index(workspace);
+        }
+    }
     fn restart_index(&mut self, workspace: &Workspace) {
+        if self.startup_index_pending {
+            self.rebuild_side(workspace);
+            return;
+        }
         self.folder_key.clone_from(&workspace.folders);
         self.reset_index(workspace);
         self.children.clear();
@@ -1220,8 +1232,12 @@ impl Panels {
         if let Some(value) = self.replace_history.last() {
             self.replace.set(value);
         }
-        for path in &window.sidebar_expanded {
-            self.load_directory(workspace, path);
+        if self.startup_index_pending {
+            self.rebuild_side(workspace);
+        } else {
+            for path in &window.sidebar_expanded {
+                self.load_directory(workspace, path);
+            }
         }
         self.chrome = workspace.window_visible("show_status_bar");
         self.side_visible = workspace.window_visible("show_side_bar");
@@ -1279,6 +1295,9 @@ impl Panels {
         self.pump_directories(workspace);
     }
     fn pump_directories(&mut self, workspace: &Workspace) {
+        if self.startup_index_pending {
+            return;
+        }
         while self.directory_running < 8 {
             let Some(path) = self.directory_pending.pop_first() else {
                 break;
@@ -3544,6 +3563,12 @@ impl Panels {
             Some(Overlay::Appearance) => unreachable!("handled above"),
             None => return,
         };
+        if target == "palette" {
+            workspace.finish_startup_palette();
+        }
+        if matches!(target, "files" | "project_symbols") {
+            self.start_startup_workers(workspace);
+        }
         if self.quick_target != target {
             self.quick_target = target;
             self.quick_ready = false;

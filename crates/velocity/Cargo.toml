@@ -21,6 +21,7 @@ vel-diff = { path = "../vel-diff" }
 vel-git = { path = "../vel-git" }
 vel-spell = { path = "../vel-spell" }
 libc = "=0.2.191"
+bincode = "1.3"
 vel-build = { path = "../vel-build" }
 vel-session = { path = "../vel-session" }
 vel-highlight = { path = "../vel-highlight" }
@@ -55,6 +56,8 @@ vel-theme = { path = "../vel-theme" }
 vel-minihtml = { path = "../vel-minihtml" }
 
 [build-dependencies]
+bincode = "1.3"
+vel-syntax = { path = "../vel-syntax" }
 syn = { version = "=2.0.119", features = ["full", "visit"] }
 vel-config = { path = "../vel-config" }
 vel-snippet = { path = "../vel-snippet" }

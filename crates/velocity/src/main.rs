@@ -6,6 +6,7 @@ mod app;
 mod bench;
 mod binary;
 mod build;
+mod bundled_syntax;
 #[cfg(target_os = "macos")]
 mod cjk_bench;
 mod cli;
@@ -215,6 +216,15 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         print!("{}", cli::BENCH_HELP);
         print!("{}", cli::PERF_HELP);
         return Ok(());
+    }
+    let headless_interactive = options.mode == Mode::HeadlessPerfStartupInteractive;
+    let interactive_setup = options.mode == Mode::Interactive || headless_interactive;
+    if headless_interactive && options.data_dir.is_none() {
+        return Err("--headless-perf-startup-interactive requires --data-dir".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    if headless_interactive {
+        return Err("headless interactive startup requires macOS".into());
     }
     let normal_data_dir = options
         .data_dir
@@ -468,16 +478,13 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         if options.mode == Mode::HeadlessWorkbench {
             return workbench_bench::run(&reporter, &options);
         }
-        if options.mode != Mode::Headless {
+        if options.mode != Mode::Headless && !headless_interactive {
             vel_platform::display_status().check()?;
             clock.mark("display_preflight_passed");
         }
         let (text, source) = if options.restore_session {
             (Text::new(), "restored session".into())
-        } else if matches!(
-            options.mode,
-            Mode::Interactive | Mode::Open | Mode::LargeFiles
-        ) {
+        } else if interactive_setup || matches!(options.mode, Mode::Open | Mode::LargeFiles) {
             (
                 Text::new(),
                 "empty document; files opened through vel-fileio".into(),
@@ -497,6 +504,14 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         let done = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "macos")]
         {
+            let mut phases =
+                report::StartupPhases::new(entered, interactive_setup && reporter.is_enabled());
+            phases.mark("interactive_setup_begin");
+            let mut app_options = options.clone();
+            if headless_interactive {
+                // Session selection and the App constructor must see the live mode.
+                app_options.mode = Mode::Interactive;
+            }
             let mut window = WindowOptions {
                 title: "Velocity".into(),
                 size: Size {
@@ -504,22 +519,23 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     height: options.height as f64,
                 },
             };
-            let sessions = std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(
-                if !options.forward_native_opens
+            let session_data = workspace_data.as_deref().filter(|_| {
+                !options.forward_native_opens
                     && !options.safe_mode
                     && !restore_safety.keep_original_closed
-                    && (options.mode == Mode::Interactive || options.restore_session)
-                {
-                    workspace_data.as_deref()
-                } else {
-                    None
-                },
-            )));
+                    && (interactive_setup || options.restore_session)
+            });
+            let sessions = std::rc::Rc::new(std::cell::RefCell::new(if interactive_setup {
+                session::Sessions::new_for_startup(session_data)
+            } else {
+                session::Sessions::new(session_data)
+            }));
             let mut restored_ui = None;
             let restored = sessions.borrow().restored.clone();
             let reserved = sessions.borrow_mut().reserve_recovered();
-            let selected = open_requests::restored_window(&restored, &options);
+            let selected = open_requests::restored_window(&restored, &app_options);
             let first = selected.map(|index| restored.windows[index].clone());
+            phases.mark("session_loaded");
             let project = options.project.clone().or_else(|| {
                 first
                     .as_ref()
@@ -527,20 +543,22 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     .filter(|p| p.is_file())
                     .cloned()
             });
-            let initial_workspace = workspace::Workspace::new(
+            let initial_workspace = workspace::Workspace::new_for_startup(
                 if stdin.is_some() { Text::new() } else { text },
                 workspace_data.clone(),
                 project.clone(),
-                options.mode == Mode::Interactive,
+                interactive_setup,
+                &mut phases,
             );
             let mut workspace = match initial_workspace {
                 Ok(workspace) => workspace,
                 Err(e) if project.is_some() || first.is_some() => {
-                    let mut workspace = workspace::Workspace::new(
+                    let mut workspace = workspace::Workspace::new_for_startup(
                         Text::new(),
                         workspace_data.clone(),
                         None,
-                        options.mode == Mode::Interactive,
+                        interactive_setup,
+                        &mut phases,
                     )?;
                     workspace.messages.push(format!(
                         "{}: {e}",
@@ -570,7 +588,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                 } else {
                     restored_ui = Some(window.clone());
                 }
-            } else if options.mode == Mode::Interactive
+            } else if interactive_setup
                 && !options.safe_mode
                 && let Some(project) = &options.project
             {
@@ -588,13 +606,11 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     }
                 }
             }
+            phases.mark("windows_restored");
             if let Some(input) = &stdin {
                 workspace.open_stdin(input.as_bytes())?;
             }
-            if matches!(
-                options.mode,
-                Mode::Interactive | Mode::Open | Mode::LargeFiles
-            ) {
+            if interactive_setup || matches!(options.mode, Mode::Open | Mode::LargeFiles) {
                 let mut panels = panels::Panels::new(&workspace, false);
                 let errors = open_requests::open_locations(
                     &mut workspace,
@@ -626,10 +642,11 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             if options.groups > 1 {
                 workbench::configure_groups(&mut workspace, options.groups)?;
             }
+            phases.mark("locations_opened");
             clock.mark("startup_document_configured");
             window.title = workspace.window_title();
             let mut app = app::App::new(
-                options.clone(),
+                app_options,
                 clock,
                 reporter.clone(),
                 workspace,
@@ -648,6 +665,11 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             app.set_instance(instance);
             app.set_crash(crash);
             app.set_restore_safety(restore_safety);
+            phases.mark("interactive_setup_ready");
+            phases.emit(&reporter)?;
+            if headless_interactive {
+                return app.report_headless_interactive_startup();
+            }
             Platform::run_with_options(window, app)?;
             if options.mode == Mode::Interactive {
                 done.store(true, Ordering::Release);

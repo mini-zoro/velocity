@@ -83,6 +83,66 @@ pub fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.
 }
 
+/// Boundary samples are buffered so JSONL writes don't fall inside measured phases.
+/// Instructions are process-wide (including any worker that ran in the interval).
+#[derive(Default)]
+pub(crate) struct StartupPhases {
+    entered: Option<Instant>,
+    boundaries: Vec<(&'static str, Instant, Option<u64>)>,
+}
+impl StartupPhases {
+    pub(crate) fn new(entered: Instant, enabled: bool) -> Self {
+        Self {
+            entered: enabled.then_some(entered),
+            boundaries: Vec::new(),
+        }
+    }
+    pub(crate) fn mark(&mut self, phase: &'static str) {
+        if self.entered.is_some() {
+            self.boundaries
+                .push((phase, Instant::now(), retired_instructions()));
+        }
+    }
+    pub(crate) fn emit(&self, reporter: &Reporter) -> Result<(), String> {
+        let Some(entered) = self.entered else {
+            return Ok(());
+        };
+        for (index, &(phase, at, instructions)) in self.boundaries.iter().enumerate() {
+            let (_, previous, previous_instructions) = self.boundaries[index.saturating_sub(1)];
+            reporter.emit(json!({
+                "kind": "startup_phase",
+                "phase": phase,
+                "main_ms": ms(at - entered),
+                "elapsed_ms": ms(at - previous),
+                "instructions": instructions,
+                "delta_instructions": instructions.zip(previous_instructions)
+                    .and_then(|(now, previous)| now.checked_sub(previous)),
+            }))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn retired_instructions() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
+    // SAFETY: V4 writes exactly a rusage_info_v4 into this aligned out parameter on success.
+    unsafe {
+        (libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V4,
+            usage.as_mut_ptr().cast(),
+        ) == 0)
+            .then(|| usage.assume_init().ri_instructions)
+            .filter(|&instructions| instructions > 0)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn retired_instructions() -> Option<u64> {
+    None
+}
+
 #[derive(Debug)]
 struct Sink {
     file: File,

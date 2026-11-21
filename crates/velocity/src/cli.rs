@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub const PERF_HELP: &str = "\
   --headless-perf-startup [FILE]  main -> first App::scene, idle memory; no file or --lines = blank
+  --headless-perf-startup-interactive [FILE]  interactive setup before AppKit (requires --data-dir)
   --headless-perf-file FILE  streamed open, first scene, settled memory, typing and scroll
   --headless-perf-typing FILE | --headless-perf-scroll FILE | --headless-perf-large FILE
                          replay native benchmark actions through App::scene, without a window
@@ -24,6 +25,7 @@ pub enum Mode {
     HeadlessFeatures,
     HeadlessLargeFiles,
     HeadlessPerfStartup,
+    HeadlessPerfStartupInteractive,
     HeadlessPerfFile,
     HeadlessPerfTyping,
     HeadlessPerfScroll,
@@ -53,6 +55,7 @@ impl Mode {
             Self::Headless => "headless",
             Self::HeadlessLargeFiles => "headless-large-files",
             Self::HeadlessPerfStartup => "headless-perf-startup",
+            Self::HeadlessPerfStartupInteractive => "headless-perf-startup-interactive",
             Self::HeadlessPerfFile => "headless-perf-file",
             Self::HeadlessPerfTyping => "headless-perf-typing",
             Self::HeadlessPerfScroll => "headless-perf-scroll",
@@ -185,6 +188,7 @@ impl Options {
                 "--headless-smoke" => Some(Mode::Headless),
                 "--headless-large-files" => Some(Mode::HeadlessLargeFiles),
                 "--headless-perf-startup" => Some(Mode::HeadlessPerfStartup),
+                "--headless-perf-startup-interactive" => Some(Mode::HeadlessPerfStartupInteractive),
                 "--headless-perf-file" => Some(Mode::HeadlessPerfFile),
                 "--headless-perf-typing" => Some(Mode::HeadlessPerfTyping),
                 "--headless-perf-scroll" => Some(Mode::HeadlessPerfScroll),
