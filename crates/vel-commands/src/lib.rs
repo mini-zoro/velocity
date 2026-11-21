@@ -294,6 +294,7 @@ const WINDOW: &[&str] = &[
     "slurp_find_string",
     "slurp_replace_string",
     "find_in_files",
+    "cancel_find_in_files",
     "replace_in_files",
     "close_split",
     "toggle_find_option",

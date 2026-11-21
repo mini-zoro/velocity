@@ -562,6 +562,10 @@
           "panel": "find_in_files", "toggle": true
         }
       },
+      {
+        "caption": "Cancel Find in Files",
+        "command": "cancel_find_in_files"
+      },
       {"caption":"In Selection","command":"toggle_find_option","args":{"option":"in_selection"}},
       {"caption":"-"},
       {

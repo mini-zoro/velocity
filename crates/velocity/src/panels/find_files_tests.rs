@@ -764,6 +764,63 @@ fn find_results_tab_records_escape_and_panel_close_cancellation() {
 }
 
 #[test]
+fn r33_cancel_find_in_files_from_menu_and_palette() {
+    let (_dir, first, _) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    let command = "cancel_find_in_files";
+    let menu = a
+        .application_menu()
+        .into_iter()
+        .find(|row| row.id == "find")
+        .unwrap()
+        .children
+        .into_iter()
+        .find(|row| row.command.as_deref() == Some(command))
+        .unwrap();
+    assert_eq!(menu.caption, "Cancel Find in Files");
+    assert!(
+        a.workspace
+            .palette
+            .iter()
+            .any(|row| row.invocation.command == command)
+    );
+    assert!(!a.command_enabled(command, &menu.args));
+    let idle_message = a.panels.message.clone();
+    named(&mut a, command, json!({}));
+    assert_eq!(a.panels.message, idle_message);
+
+    begin(&mut a, "foo");
+    assert!(a.command_enabled(command, &menu.args));
+    named(&mut a, command, serde_json::from_str(&menu.args).unwrap());
+    assert!(
+        results_tab(&a)
+            .editor
+            .text
+            .to_string()
+            .ends_with("Search cancelled\n")
+    );
+    assert!(!a.command_enabled(command, &menu.args));
+
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel":"find_in_files","pattern":"foo","use_buffer":false}),
+    );
+    key(&mut a, "enter");
+    assert!(a.command_enabled(command, &menu.args));
+    named(
+        &mut a,
+        "show_overlay",
+        json!({"overlay":"command_palette","text":"Find: Cancel Find in Files"}),
+    );
+    key(&mut a, "enter");
+    assert!(a.panels.file_task.is_none() && !a.panels.file_complete);
+    assert!(a.panels.message.starts_with("Search cancelled"));
+    assert!(!a.command_enabled(command, &menu.args));
+}
+
+#[test]
 fn find_results_tab_streams_while_typing_within_frame_budget() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

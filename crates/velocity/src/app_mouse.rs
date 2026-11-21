@@ -122,6 +122,9 @@ impl App {
             self.show_find_options(w, event.position);
             return;
         }
+        if self.status_switcher_mouse(w, &event) {
+            return;
+        }
         if event.is_context_click()
             && self
                 .mouse_binding(event.button + 1, event.click_count, event.modifiers, true)

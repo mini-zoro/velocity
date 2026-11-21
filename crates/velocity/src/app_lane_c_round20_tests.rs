@@ -387,7 +387,7 @@ fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
     let files = tempfile::tempdir().unwrap();
     let first = files.path().canonicalize().unwrap().join("first:2.txt");
     let second = first.with_file_name("second.txt");
-    std::fs::write(&first, "alpha\nbeta\n").unwrap();
+    std::fs::write(&first, "alpha\nbeta\n".repeat(200)).unwrap();
     std::fs::write(&second, "second\n").unwrap();
     let mut a = app_with_profile("", None, sessions(), Some(profile.path().into()));
     assert_eq!(a.workspace.tabs.len(), 1);
@@ -426,6 +426,8 @@ fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
             vel_buffer::Region::new(6, 9),
         ]));
     let selection = a.workspace.editor().regions();
+    a.view.scroll_y = a.view.line_height * 40.;
+    let scroll = a.view.scroll_y;
     let open_recent = a
         .application_menu()
         .into_iter()
@@ -456,6 +458,7 @@ fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
         assert_eq!(a.workspace.tabs.len(), 2);
         assert_eq!(a.workspace.tabs[a.workspace.active].sheet, first_sheet);
         assert_eq!(a.workspace.editor().regions(), selection);
+        assert_eq!(a.view.scroll_y, scroll);
         assert!(!a.workspace.take_pending_center());
     }
     let location = crate::cli::FileLocation::parse(&format!("{}:1:2", first.display()));
@@ -464,6 +467,237 @@ fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
             .is_empty()
     );
     assert_eq!(a.workspace.editor().caret, 1);
+}
+
+#[test]
+fn r33_cli_local_forwarded_and_native_reopen_preserve_position() {
+    use crate::instance::{Incoming, Instance, Request, Start};
+
+    let profile = tempfile::tempdir().unwrap();
+    let path = profile.path().join("source.txt:42");
+    std::fs::write(&path, "alpha\nbeta\n".repeat(200)).unwrap();
+    let cli = |suffix| {
+        let args = [format!("{}{}", path.display(), suffix)];
+        Options::parse(args).unwrap().unwrap()
+    };
+    let mut a = app("", None, sessions());
+    let options = cli("");
+    assert!(!options.files[0].has_position(), "literal colon filename");
+    assert!(
+        crate::open_requests::open_locations(&mut a.workspace, &mut a.panels, options.files)
+            .is_empty()
+    );
+    a.sync_active_view();
+    let file = a.workspace.active;
+    let sheet = a.workspace.tabs[file].sheet;
+    let bare = Request::new(&cli(""), None).unwrap();
+    let Start::Primary(primary) = Instance::start_fixture(profile.path(), &bare).unwrap() else {
+        panic!("expected fixture primary");
+    };
+    let forwarded = |request: &Request| {
+        assert!(matches!(
+            Instance::start_fixture(profile.path(), request).unwrap(),
+            Start::Forwarded
+        ));
+        let mut requests = primary.drain();
+        assert_eq!(requests.len(), 1);
+        requests.pop().unwrap()
+    };
+    a.workspace.new_file().unwrap();
+    let other = a.workspace.active;
+    a.workspace.select(file);
+    a.sync_active_view();
+    a.workspace.editor_mut().set_caret(4, false);
+    a.view.scroll_y = a.view.line_height * 40.;
+    let scroll = a.view.scroll_y;
+    for incoming in [
+        Incoming::local(bare.clone()),
+        forwarded(&bare),
+        Incoming::local(crate::open_requests::native_request(std::slice::from_ref(&path)).unwrap()),
+    ] {
+        a.workspace.select(other);
+        a.sync_active_view();
+        a.accept_request(incoming).unwrap();
+        a.changed_state(Instant::now(), false);
+        assert_eq!(a.workspace.tabs.len(), 2);
+        assert_eq!(a.workspace.tabs[a.workspace.active].sheet, sheet);
+        assert_eq!(a.workspace.editor().caret, 4);
+        assert_eq!(a.view.scroll_y, scroll);
+        assert!(!a.workspace.take_pending_center());
+    }
+    for (suffix, caret) in [(":1:1", 0), (":2", 6), (":2:2", 7)] {
+        let request = Request::new(&cli(suffix), None).unwrap();
+        a.accept_request(forwarded(&request)).unwrap();
+        assert_eq!(a.workspace.editor().caret, caret);
+        assert!(a.workspace.take_pending_center());
+    }
+}
+
+#[test]
+fn r33_status_fields_and_switcher_follow_settings() {
+    use crate::panels::StatusItem;
+
+    let mut a = app("status controls", None, sessions());
+    a.scene();
+    for (setting, item, other) in [
+        ("show_syntax", StatusItem::Syntax, StatusItem::Indentation),
+        (
+            "show_indentation",
+            StatusItem::Indentation,
+            StatusItem::Syntax,
+        ),
+    ] {
+        assert!(
+            a.panels.status_item(item).is_some(),
+            "{setting} defaults on"
+        );
+        a.workspace
+            .editor_mut()
+            .settings
+            .set(Layer::View, setting, json!(false));
+        a.scene();
+        assert!(a.panels.status_item(item).is_none());
+        assert!(a.panels.status_item(other).is_some());
+        a.workspace
+            .editor_mut()
+            .settings
+            .set(Layer::View, setting, json!(true));
+        a.scene();
+    }
+    let hit = a.panels.status_switcher_rect(&a.workspace).unwrap();
+    let click = |button| MouseEvent {
+        button,
+        kind: MouseKind::Down,
+        position: Point {
+            x: hit.x + hit.width / 2.,
+            y: hit.y + hit.height / 2.,
+        },
+        click_count: 1,
+        modifiers: Modifiers::default(),
+        timestamp: 0.,
+    };
+    let sidebar = a.panels.side_visible;
+    a.handle_mouse_event(None, click(0));
+    assert_ne!(a.panels.side_visible, sidebar);
+    a.handle_mouse_event(None, click(0));
+    assert_eq!(a.panels.side_visible, sidebar);
+
+    a.workspace
+        .settings
+        .set(Layer::User, "ui_language", json!("zh-Hans"));
+    a.workspace.sync_ui_language();
+    a.scene();
+    a.handle_mouse_event(None, click(1));
+    assert_eq!(a.panels.side_visible, sidebar);
+    assert_eq!(a.last_status_switcher_menu[0].caption, "控制台");
+    let build = a.last_status_switcher_menu[1].clone();
+    a.run_named(
+        None,
+        build.command.as_deref().unwrap(),
+        &serde_json::from_str(&build.args).unwrap(),
+    );
+    assert_eq!(a.panels.panel, Some(crate::panels::Panel::Output));
+
+    a.workspace
+        .editor_mut()
+        .settings
+        .set(Layer::View, "show_sidebar_button", json!(false));
+    a.scene();
+    assert!(a.panels.status_switcher_rect(&a.workspace).is_none());
+    a.last_status_switcher_menu.clear();
+    a.handle_mouse_event(None, click(0));
+    a.handle_mouse_event(None, click(1));
+    assert_eq!(a.panels.side_visible, sidebar);
+    assert!(a.last_status_switcher_menu.is_empty());
+}
+
+#[test]
+fn r33_background_reload_clean_active_inactive_and_dirty() {
+    let files = tempfile::tempdir().unwrap();
+    let path = files.path().canonicalize().unwrap().join("watched.txt");
+    for (background, active, dirty) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, false),
+        (false, false, true),
+        (false, true, true),
+    ] {
+        std::fs::write(&path, "original").unwrap();
+        let mut a = app("", None, sessions());
+        let w = &mut a.workspace;
+        w.settings
+            .set(Layer::User, "reload_file_in_background", json!(background));
+        w.open(crate::cli::FileLocation::path_only(path.clone()))
+            .unwrap();
+        let document = w.active;
+        if dirty {
+            w.editor_mut()
+                .run("insert", &json!({"characters":"draft "}))
+                .unwrap();
+        }
+        if !active {
+            w.new_file().unwrap();
+        }
+        std::fs::write(&path, "new file contents").unwrap();
+        w.apply_file_changes(vec![Ok(vec![path.clone()])]);
+        let tab = &w.tabs[document];
+        if dirty {
+            assert_eq!(tab.editor.text, "draft original");
+            assert_eq!(tab.external.as_ref().unwrap().text, "new file contents");
+        } else if background || active {
+            assert_eq!(tab.editor.text, "new file contents");
+        } else {
+            assert_eq!(tab.editor.text, "original");
+            assert!(tab.external.is_none());
+            w.poll();
+            assert_eq!(w.tabs[document].editor.text, "original");
+            // Multiple writes while inactive coalesce, even if the last notification
+            // has not arrived by the time the user returns to the file.
+            std::fs::write(&path, "latest contents on disk").unwrap();
+            w.select(document);
+            w.poll();
+            assert_eq!(w.editor().text, "latest contents on disk");
+        }
+    }
+}
+
+#[test]
+fn r33_background_reload_follows_shared_buffer_across_clones() {
+    let files = tempfile::tempdir().unwrap();
+    let path = files.path().canonicalize().unwrap().join("shared.txt");
+    std::fs::write(&path, "original").unwrap();
+    let mut a = app("", None, sessions());
+    let w = &mut a.workspace;
+    w.settings
+        .set(Layer::User, "reload_file_in_background", json!(false));
+    w.open(crate::cli::FileLocation::path_only(path.clone()))
+        .unwrap();
+    let original = w.active;
+    w.clone_file().unwrap();
+    let clone = w.active;
+    // Rendering another visible clone can temporarily put ownership there.
+    w.prepare_sheet(original).unwrap();
+    assert!(w.tabs[clone].editor.shared_shadow);
+    std::fs::write(&path, "first disk change").unwrap();
+    w.apply_file_changes(vec![Ok(vec![path.clone()])]);
+    w.reconcile_installs();
+    for i in [original, clone] {
+        assert_eq!(w.tabs[i].editor.text, "first disk change");
+    }
+
+    w.select(original);
+    w.new_file().unwrap();
+    std::fs::write(&path, "second, longer disk change").unwrap();
+    w.apply_file_changes(vec![Ok(vec![path])]);
+    for i in [original, clone] {
+        assert_eq!(w.tabs[i].editor.text, "first disk change");
+    }
+    w.select(clone);
+    w.poll();
+    assert_eq!(w.tabs[original].document, w.tabs[clone].document);
+    for i in [original, clone] {
+        assert_eq!(w.tabs[i].editor.text, "second, longer disk change");
+    }
 }
 
 #[test]

@@ -93,7 +93,7 @@ fn real_cli_wait_interrupt_is_client_only_and_literal_colon_wins() {
     let (mut peer, body) = receive(&listener);
     let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(request["files"][0]["path"], file.to_str().unwrap());
-    assert_eq!(request["files"][0]["line"], 1);
+    assert_eq!(request["files"][0]["line"], 0, "bare path on the wire");
     assert_eq!(request["wait"], true);
     peer.write_all(&[1]).unwrap();
     // SAFETY: this sends SIGINT only to the child created by the test, not a group.

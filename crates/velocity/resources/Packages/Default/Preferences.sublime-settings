@@ -46,6 +46,8 @@
   "fallback_encoding": "Western (Windows 1252)",
   // Turn this off to ask before reloading even an unchanged buffer.
   "reload_file_on_change": true,
+  // Turn this off to wait until activation before reloading a clean inactive document.
+  "reload_file_in_background": true,
   "caret_style": "solid",
   "highlight_line": false,
   "auto_match_enabled": true,
@@ -102,6 +104,9 @@
   // Show the document's encoding and line-ending format in the status bar.
   "show_encoding": true,
   "show_line_endings": true,
+  "show_syntax": true,
+  "show_indentation": true,
+  "show_sidebar_button": true,
   "minimap_horizontal_scrolling": false,
   "draw_minimap_border": false,
   // With this off, the viewport marker appears on hover.

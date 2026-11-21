@@ -838,6 +838,21 @@ impl Panels {
             .find(|(i, _)| *i == item)
             .map(|(_, rect)| *rect)
     }
+    pub(crate) fn status_switcher_rect(&self, workspace: &Workspace) -> Option<Rect> {
+        let scale = self.ui_scale;
+        (self.chrome
+            && self.size.width >= 36. * scale
+            && workspace
+                .editor()
+                .settings
+                .bool("show_sidebar_button", true))
+        .then_some(Rect {
+            x: 4. * scale,
+            y: self.size.height - STATUS * scale,
+            width: 28. * scale,
+            height: STATUS * scale,
+        })
+    }
     /// The indentation item's click target (empty when it is not shown).
     pub(super) fn indentation_rect(&self) -> Rect {
         self.status_item(StatusItem::Indentation)

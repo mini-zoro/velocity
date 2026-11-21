@@ -74,6 +74,7 @@ pub(crate) fn tab_icon<'a>(
 }
 
 pub const STATUS: f64 = 24.;
+const STATUS_SWITCHER: u64 = 9;
 pub(super) const FIND_OPTIONS: [&str; 8] = [
     "regex",
     "case_sensitive",
@@ -2457,6 +2458,7 @@ impl Panels {
                 }
                 self.close_panel(workspace);
             }
+            "cancel_find_in_files" => self.cancel_files(workspace),
             "toggle_side_bar" => {
                 self.side_visible = !self.side_visible;
                 workspace.set_window_toggle("show_side_bar", self.side_visible)?;
@@ -6127,23 +6129,34 @@ impl Panels {
             },
             &[],
         );
-        self.widget(6, "status_button", self.indentation_rect(), &[]);
-        self.tree.nodes.get_mut(&6).expect("indentation").label = vel_ui::status::indentation(
-            workspace.editor().preferences.translate_tabs_to_spaces,
-            workspace.editor().preferences.tab_size,
-        );
-        self.tree
-            .nodes
-            .get_mut(&4)
-            .expect("status")
-            .children
-            .push(6);
-        // The syntax and Git items are clickable too; they get hover feedback like it.
-        for (id, item, label) in [
-            (7, details::StatusItem::Syntax, "Syntax"),
-            (8, details::StatusItem::Git, "Git status"),
+        if let Some(rect) = self.status_switcher_rect(workspace) {
+            self.widget(STATUS_SWITCHER, "sidebar_button_control", rect, &[]);
+            self.tree.nodes.get_mut(&STATUS_SWITCHER).unwrap().label =
+                workspace.translations.tr("Sidebar and Panels").into_owned();
+            self.tree
+                .nodes
+                .get_mut(&4)
+                .unwrap()
+                .children
+                .push(STATUS_SWITCHER);
+        }
+        let settings = &workspace.editor().settings;
+        for (id, item, label, shown) in [
+            (
+                6,
+                details::StatusItem::Indentation,
+                "Indentation",
+                settings.bool("show_indentation", true),
+            ),
+            (
+                7,
+                details::StatusItem::Syntax,
+                "Syntax",
+                settings.bool("show_syntax", true),
+            ),
+            (8, details::StatusItem::Git, "Git status", true),
         ] {
-            if let Some(rect) = self.status_item(item) {
+            if shown && let Some(rect) = self.status_item(item) {
                 self.widget(id, "status_button", rect, &[]);
                 self.tree.nodes.get_mut(&id).expect("status item").label = label.into();
                 self.tree
@@ -6638,6 +6651,12 @@ impl Panels {
             let status_style = style(4, None, &mut theme);
             theme.surface(&mut layer, &status_style, status, status);
             let text = style(4, Some("status_container"), &mut theme);
+            let mut left = 10. * self.ui_scale;
+            if let Some(rect) = self.status_switcher_rect(workspace) {
+                let switcher = style(STATUS_SWITCHER, None, &mut theme);
+                theme.icon_surface(&mut layer, &switcher, rect, status);
+                left = rect.x + rect.width + 6. * self.ui_scale;
+            }
             let editor = workspace.editor();
             let tab = &workspace.tabs[workspace.active];
             let document_hint = if let Some(binary) = &editor.binary {
@@ -6702,7 +6721,9 @@ impl Panels {
                     } else {
                         details::StatusItem::Binary
                     },
-                    if text_document {
+                    if !settings.bool("show_syntax", true) {
+                        String::new()
+                    } else if text_document {
                         language
                     } else if tab.is_image_file() {
                         String::new()
@@ -6713,7 +6734,7 @@ impl Panels {
                 ),
                 (
                     details::StatusItem::Indentation,
-                    if text_document {
+                    if text_document && settings.bool("show_indentation", true) {
                         if workspace.translations.language().is_english() {
                             vel_ui::status::indentation(
                                 editor.preferences.translate_tabs_to_spaces,
@@ -6749,7 +6770,6 @@ impl Panels {
                     0.,
                 ),
             ];
-            let left = 10. * s;
             let mut right = status.x + status.width - 6. * s;
             let mut status_items = Vec::new();
             // Item padding comes from the theme's status_button content margin (already
@@ -6861,10 +6881,13 @@ impl Panels {
                 status.y + (17. * s),
                 right - 8. * s - left,
                 Rect {
-                    width: (right - 8. * s).max(0.),
+                    x: left,
+                    width: (right - 8. * s - left).max(0.),
                     ..status
                 },
             );
+        } else {
+            self.status_items = None;
         }
         scene.layers.push(layer);
         let theme_animating = theme.animating();
@@ -7881,18 +7904,13 @@ mod tests {
                     .layers
                     .iter()
                     .flat_map(|l| &l.text)
-                    .find(|r| f64::from(r.baseline) > status_top && r.text.starts_with("Line"))
-                    .or_else(|| {
-                        scene
-                            .layers
-                            .iter()
-                            .flat_map(|l| &l.text)
-                            .find(|r| f64::from(r.baseline) > status_top && r.clip.x == 0.)
-                    })
+                    .find(|r| f64::from(r.baseline) > status_top && f64::from(r.x) < leftmost)
                     .expect("position text");
+                let switcher = panels.status_switcher_rect(&workspace).unwrap();
                 assert!(
-                    position.clip.x + position.clip.width <= leftmost,
-                    "{width} @{scale}: position text runs under the items"
+                    position.clip.x >= switcher.x + switcher.width
+                        && position.clip.x + position.clip.width <= leftmost,
+                    "{width} @{scale}: position text runs under another control"
                 );
                 // Each label is measured with the style it is painted with: it ends inside
                 // its item.
@@ -9085,9 +9103,14 @@ impl Panels {
             self.review.tooltip = text.map(|t| (t, point, Instant::now()));
         }
     }
-    /// Tool tip for the find-panel control or side-bar Git badge under the pointer.
+    /// Tool tip for a status or find-panel control, or side-bar Git badge.
     fn tooltip_text(&self, workspace: &Workspace, point: Point) -> Option<String> {
-        if let Some(tip) = self.panel_tooltip(workspace, point) {
+        if self
+            .status_switcher_rect(workspace)
+            .is_some_and(|r| contains(r, point))
+        {
+            Some(workspace.translations.tr("Sidebar and Panels").into_owned())
+        } else if let Some(tip) = self.panel_tooltip(workspace, point) {
             Some(tip)
         } else if self.side_visible && point.x >= self.side_bounds.width - 32. {
             self.review_side_path(workspace, point)

@@ -113,6 +113,10 @@
     }
   },
   {
+    "caption": "Find: Cancel Find in Files",
+    "command": "cancel_find_in_files"
+  },
+  {
     "caption": "Find: Replace All",
     "command": "replace_all",
     "args": {}

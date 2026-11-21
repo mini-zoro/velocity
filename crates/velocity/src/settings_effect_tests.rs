@@ -983,6 +983,18 @@ fn watched_file_probe(app: &mut App, key: &str, root: &Path) -> String {
         } else {
             fs::write(&path, "replacement content").unwrap();
         }
+        if key == "reload_file_in_background" {
+            app.workspace.new_file().unwrap();
+            let untitled = app.workspace.active;
+            app.workspace
+                .apply_file_changes(vec![Ok(vec![path.canonicalize().unwrap()])]);
+            let text = app.workspace.tabs[app.workspace.sheet_index(sheet).unwrap()]
+                .editor
+                .text
+                .to_string();
+            app.workspace.close(untitled).unwrap();
+            return text;
+        }
         let until = Instant::now() + Duration::from_secs(4);
         loop {
             app.workspace.poll();
@@ -1061,7 +1073,9 @@ fn exercise(app: &mut App, key: &str, root: &Path) -> String {
         | "wrap_width"
         | "wrap_width_style"
         | "indent_subsequent_lines" => shaped_scene_probe(app, key),
-        "close_deleted_files" | "reload_file_on_change" => watched_file_probe(app, key, root),
+        "close_deleted_files" | "reload_file_on_change" | "reload_file_in_background" => {
+            watched_file_probe(app, key, root)
+        }
         _ => observe_ui(app, key, root),
     }
 }

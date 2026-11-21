@@ -1536,6 +1536,11 @@ const SCENARIOS: &[Scenario] = &[
         build: status_scene,
     },
     Scenario {
+        name: "status_switcher",
+        size: (920., 520.),
+        build: status_scene,
+    },
+    Scenario {
         name: "status_narrow",
         size: (520., 340.),
         build: status_scene,
@@ -2412,6 +2417,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
 fn finish_layout(app: &mut App, name: &str) {
     settle(app);
+    if matches!(name, "status_bar" | "status_narrow" | "status_switcher") {
+        // Review the status fields rather than the fixture's package diagnostics.
+        app.panels.message.clear();
+    }
     let _ = app.scene();
     after_layout(name, app);
     settle(app);

@@ -378,14 +378,7 @@ pub fn forward_native_paths(
 pub(crate) fn native_request(paths: &[PathBuf]) -> Result<Request, String> {
     let mut request = Request::new(
         &Options {
-            files: paths
-                .iter()
-                .map(|path| FileLocation {
-                    path: path.clone(),
-                    line: 1,
-                    column: 1,
-                })
-                .collect(),
+            files: paths.iter().cloned().map(FileLocation::path_only).collect(),
             add_to_window: false,
             ..Options::default()
         },
@@ -750,11 +743,7 @@ fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Res
     let path = match fs::canonicalize(path) {
         Ok(path) => path,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return workspace.open(FileLocation {
-                path: path.into(),
-                line: 1,
-                column: 1,
-            });
+            return workspace.open(FileLocation::path_only(path.into()));
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -769,25 +758,8 @@ fn open_path(workspace: &mut Workspace, panels: &mut Panels, path: &Path) -> Res
         panels.add_folder(workspace, path)
     } else if metadata.is_file() {
         vel_fileio::regular::read(&path)?;
-        if let Some(index) = workspace
-            .tabs
-            .iter()
-            .position(|tab| tab.path.as_ref() == Some(&path))
-        {
-            // A Finder/Dock request is explicit navigation even before OS focus
-            // returns. Preserve this tab's current location when selecting duplicates.
-            let _request = workspace.navigation_request();
-            workspace.select(index);
-            workspace.tabs[index].transient = false;
-            panels.note_sidebar_spelling(workspace, spelling);
-            return Ok(());
-        }
         workspace
-            .open(FileLocation {
-                path,
-                line: 1,
-                column: 1,
-            })
+            .open(FileLocation::path_only(path))
             .map(|()| panels.note_sidebar_spelling(workspace, spelling))
     } else {
         Err("only regular files and folders can be opened".into())
@@ -819,7 +791,7 @@ mod tests {
         assert!(request.stdin.is_none());
         assert!(request.files[0].path.is_absolute());
         assert!(request.files[0].path.ends_with("literal:2:3"));
-        assert_eq!((request.files[0].line, request.files[0].column), (1, 1));
+        assert!(!request.files[0].has_position());
     }
     #[test]
     fn before_window_queue_opens_files_folders_and_literal_colon_names_once_ready() {

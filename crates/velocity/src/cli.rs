@@ -397,35 +397,47 @@ impl Named {
     }
 }
 
-/// File path with one-based CLI row/scalar column suffixes.
+/// File path with optional one-based row/scalar column suffixes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileLocation {
     pub path: PathBuf,
+    /// Zero denotes a path without a position, including on the single-instance wire.
     pub line: usize,
     pub column: usize,
 }
 impl FileLocation {
+    pub fn path_only(path: PathBuf) -> Self {
+        Self {
+            path,
+            line: 0,
+            column: 1,
+        }
+    }
+
+    pub fn has_position(&self) -> bool {
+        self.line != 0
+    }
+
     pub fn parse(arg: &str) -> Self {
         // Build 4180 supports literal colon filenames: https://www.sublimetext.com/download
         if arg.contains(':') && std::path::Path::new(arg).exists() {
-            return Self {
-                path: arg.into(),
-                line: 1,
-                column: 1,
-            };
+            return Self::path_only(arg.into());
         }
         let mut path = arg;
-        let mut line = 1;
+        let mut line = 0;
         let mut column = 1;
         if let Some((prefix, last)) = arg.rsplit_once(':')
             && let Ok(number) = last.parse::<usize>()
         {
             path = prefix;
             line = number.max(1);
-            if let Some((prefix, previous)) = prefix.rsplit_once(':')
+            // In "name:42:2", the 42 can be part of an existing filename.
+            // Keep two-position syntax when its base exists or neither base exists.
+            if let Some((base, previous)) = prefix.rsplit_once(':')
                 && let Ok(number) = previous.parse::<usize>()
+                && (!std::path::Path::new(prefix).exists() || std::path::Path::new(base).exists())
             {
-                path = prefix;
+                path = base;
                 column = line;
                 line = number.max(1);
             }
@@ -584,6 +596,11 @@ mod location_tests {
         assert_eq!(options.files[1].line, 4);
         assert_eq!(options.files[1].column, 1);
         assert_eq!(options.files[2].path, PathBuf::from("-"));
+        assert!(!options.files[2].has_position());
+        assert!(!FileLocation::parse("file").has_position());
+        assert!(FileLocation::parse("file:1").has_position());
+        assert!(FileLocation::parse("file:1:1").has_position());
+        assert!(FileLocation::parse("file:0:0").has_position());
         assert_eq!(
             FileLocation::parse("colon:name").path,
             PathBuf::from("colon:name")

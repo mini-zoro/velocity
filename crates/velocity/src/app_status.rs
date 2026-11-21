@@ -7,6 +7,63 @@ pub(super) enum FormatItem {
     LineEndings,
 }
 impl App {
+    pub(super) fn status_switcher_mouse(
+        &mut self,
+        window: Option<&WindowHandle>,
+        event: &MouseEvent,
+    ) -> bool {
+        if event.kind != MouseKind::Down
+            || !self
+                .panels
+                .status_switcher_rect(&self.workspace)
+                .is_some_and(|r| vel_ui::contains(r, event.position))
+        {
+            return false;
+        }
+        if event.is_context_click() {
+            let entries = self.status_switcher_menu();
+            if let Some(window) = window {
+                window.show_context_menu(&entries);
+            }
+            #[cfg(test)]
+            {
+                self.last_status_switcher_menu = entries;
+            }
+        } else if event.button == 0 {
+            self.run_named(window, "toggle_side_bar", &json!({}));
+        } else {
+            return false;
+        }
+        true
+    }
+
+    fn status_switcher_menu(&self) -> Vec<MenuEntry> {
+        let tr = &self.workspace.translations;
+        let item = |caption: std::borrow::Cow<'_, str>, command: &str, args: Value| MenuEntry {
+            caption: caption.into_owned(),
+            command: Some(command.into()),
+            args: args.to_string(),
+            ..Default::default()
+        };
+        let mut items = vec![
+            item(tr.tr("Console"), "show_console", json!({})),
+            item(
+                tr.tr("Build Results"),
+                "show_panel",
+                json!({"panel":"output.exec"}),
+            ),
+            item(
+                tr.tr("Find Results"),
+                "show_panel",
+                json!({"panel":"find_results"}),
+            ),
+        ];
+        if self.panels.panel.is_some() {
+            items.push(item(tr.tr("Hide Panel"), "hide_panel", json!({})));
+        }
+        items
+    }
+
     pub(super) fn capture_format_hits(&mut self, scene: &vel_render::scene::Scene) {
         self.format_hits.clear();
         let editor = self.workspace.editor();

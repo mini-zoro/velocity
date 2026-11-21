@@ -91,6 +91,8 @@ pub struct Tab {
     pub(crate) external_load: bool,
     load_started: Option<Instant>,
     pub(crate) disk_stamp: Option<(u64, SystemTime)>,
+    /// Pending disk change owned by the real buffer, not by its shadow views.
+    reload_deferred: bool,
     pub external: Option<Loaded>,
 }
 /// A remembered `image_file_patterns` decision and what it depends on.
@@ -214,6 +216,7 @@ impl Tab {
             external_load: false,
             load_started: None,
             disk_stamp: None,
+            reload_deferred: false,
             external: None,
         };
         crate::workbench::apply_window_layers(&mut tab, settings)?;
@@ -234,6 +237,7 @@ impl Tab {
         target.previous_document = self.previous_document.take();
         target.external = self.external.take();
         target.external_load = std::mem::take(&mut self.external_load);
+        target.reload_deferred = std::mem::take(&mut self.reload_deferred);
         target.load_started = self.load_started.take();
         target.location = self.location.take();
         target.load_warning = self.load_warning.take();
@@ -485,7 +489,15 @@ impl Tab {
         let prepared =
             prepare_disk_load(&path, options, background, external && !self.load_failed)?;
         self.install_disk_load(prepared, external);
+        self.reload_deferred = false;
         Ok(())
+    }
+
+    fn defer_external_reload(&self, active_document: u64) -> bool {
+        self.session_document != active_document
+            && !self.editor.settings.bool("reload_file_in_background", true)
+            && !self.dirty()
+            && self.editor.marked.is_none()
     }
     pub(crate) fn install_disk_load(&mut self, prepared: PreparedLoad, external: bool) {
         match prepared {
@@ -2431,12 +2443,14 @@ impl Workspace {
             if !preview {
                 self.make_permanent(index);
             }
-            // A duplicate open during background loading must retain the latest location
-            // until the final text is installed, rather than clamp it to the empty prefix.
-            if self.tabs[index].loading.is_some() || self.tabs[index].binary_loading.is_some() {
-                self.tabs[index].location = Some(location.clone());
+            if location.has_position() {
+                // A duplicate open during loading must retain an explicit jump
+                // until the final text is installed. A bare reopen leaves it alone.
+                if self.tabs[index].loading.is_some() || self.tabs[index].binary_loading.is_some() {
+                    self.tabs[index].location = Some(location.clone());
+                }
+                self.tabs[index].goto(&location);
             }
-            self.tabs[index].goto(&location);
             return Ok(());
         }
         let started = Instant::now();
@@ -2444,13 +2458,14 @@ impl Workspace {
         tab.transient = preview;
         tab.preview_recent_pending = preview;
         tab.path = Some(path.clone());
-        tab.location = Some(location);
+        tab.location = location.has_position().then_some(location);
         let decode = fileio::DecodeOptions::from_settings(&tab.editor.preferences);
         let metadata = fileio::regular::metadata(&path, true)?;
         let size = metadata.as_ref().map_or(0, |m| m.len());
         if metadata.is_none() {
-            let location = tab.location.take().expect("open location");
-            tab.goto(&location);
+            if let Some(location) = tab.location.take() {
+                tab.goto(&location);
+            }
         } else {
             let background = size
                 >= tab
@@ -2561,6 +2576,7 @@ impl Workspace {
         tab.deleted = false;
         let document = tab.session_document;
         tab.disk_stamp = stamp(&target);
+        tab.reload_deferred = false;
         tab.disk_saved = vel_session::DiskStamp::read(&target);
         tab.overwrite_allowed = None;
         tab.editor.annotations.borrow_mut().reference(
@@ -2904,6 +2920,115 @@ impl Workspace {
                 .iter()
                 .any(|(path, saved)| stamp(path) != *saved)
     }
+    /// Process watcher notifications and release deferred changes when their document
+    /// becomes active. A visible clone can own the buffer without being the active sheet.
+    pub(crate) fn apply_file_changes(&mut self, events: Vec<Result<Vec<PathBuf>, String>>) -> bool {
+        let mut paths = Vec::new();
+        for event in events {
+            match event {
+                Ok(changes) => paths.extend(changes),
+                Err(e) => self.load_notices.push(e),
+            }
+        }
+        let active_document = self.tabs[self.active].session_document;
+        let mut changed = false;
+        let mut failed = Vec::new();
+        let mut close_deleted = Vec::new();
+        for tab in &mut self.tabs {
+            if tab.loading.is_some()
+                || tab.binary_loading.is_some()
+                || tab.lazy.is_some()
+                || tab.editor.shared_shadow
+            {
+                continue;
+            }
+            let Some(path) = tab.path.as_ref() else {
+                continue;
+            };
+            let notified = paths.contains(path);
+            if !notified && !tab.reload_deferred {
+                continue;
+            }
+            let defer = tab.defer_external_reload(active_document);
+            let ready = tab.reload_deferred && !defer;
+            if !notified && !ready {
+                continue;
+            }
+            let disk_stamp = stamp(path);
+            if !ready && tab.disk_stamp == disk_stamp {
+                continue;
+            }
+            tab.disk_stamp = disk_stamp;
+            tab.reload_deferred = false;
+            if matches!(path.try_exists(), Ok(false)) {
+                if self.settings.bool("close_deleted_files", false) && !tab.dirty() {
+                    close_deleted.push(tab.sheet);
+                }
+                tab.deleted = true;
+                tab.transient = false;
+                tab.external = None;
+                changed = true;
+                continue;
+            }
+            let metadata = match fileio::regular::metadata(path, false) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    self.resource_reports.push(error);
+                    if !tab.dirty() {
+                        failed.push(tab.sheet);
+                    }
+                    changed = true;
+                    continue;
+                }
+            };
+            if tab.deleted {
+                tab.deleted = false;
+                changed = true;
+            }
+            if defer {
+                tab.reload_deferred = true;
+                continue;
+            }
+            if tab.editor.binary.is_some() {
+                match crate::binary::Task::open(path.clone()) {
+                    Ok(task) => tab.binary_loading = Some(task),
+                    Err(e) => self.load_notices.push(e),
+                }
+                continue;
+            }
+            let path = path.clone();
+            let background = metadata.is_some_and(|m| {
+                m.len()
+                    >= tab
+                        .editor
+                        .settings
+                        .usize("large_file.load_bytes", 64 * 1024 * 1024)
+                        as u64
+            });
+            if let Err(error) = tab.load_disk(tab.decode_options(), background, true) {
+                self.resource_reports
+                    .push(fileio::regular::error(&path, error));
+                if !tab.dirty() {
+                    failed.push(tab.sheet);
+                }
+            }
+            changed = true;
+        }
+        for sheet in failed {
+            if let Some(index) = self.sheet_index(sheet) {
+                let _ = self.fail_shared_document(index);
+            }
+        }
+        for sheet in close_deleted {
+            if let Some(index) = self.sheet_index(sheet)
+                && let Err(error) = self.close(index)
+            {
+                self.messages.push(error);
+            }
+        }
+        changed
+    }
+
     /// Polls jobs/notifications and reports whether scene content changed.
     pub fn poll(&mut self) -> bool {
         self.materialize_input();
@@ -3066,89 +3191,12 @@ impl Workspace {
             .as_ref()
             .map(Watcher::changed)
             .unwrap_or_default();
-        let mut close_deleted = Vec::new();
-        for event in events {
-            match event {
-                Err(e) => self.load_notices.push(e),
-                Ok(paths) => {
-                    for path in paths {
-                        for tab in &mut self.tabs {
-                            if tab.loading.is_some()
-                                || tab.binary_loading.is_some()
-                                || tab.lazy.is_some()
-                                || tab.editor.shared_shadow
-                                || tab.path.as_ref() != Some(&path)
-                                || tab.disk_stamp == stamp(&path)
-                            {
-                                continue;
-                            }
-                            tab.disk_stamp = stamp(&path);
-                            if matches!(path.try_exists(), Ok(false)) {
-                                if self.settings.bool("close_deleted_files", false) && !tab.dirty()
-                                {
-                                    close_deleted.push(tab.sheet);
-                                }
-                                tab.deleted = true;
-                                tab.transient = false;
-                                tab.external = None;
-                                changed = true;
-                                continue;
-                            }
-                            if let Err(error) = fileio::regular::metadata(&path, false) {
-                                self.resource_reports.push(error);
-                                if !tab.dirty() {
-                                    failed_documents.push(tab.sheet);
-                                }
-                                changed = true;
-                                continue;
-                            }
-                            if path.is_file() && tab.deleted {
-                                // Deletion is a close/save marker, not an edit to the buffer.
-                                tab.deleted = false;
-                                changed = true;
-                            }
-                            if tab.editor.binary.is_some() {
-                                match crate::binary::Task::open(path.clone()) {
-                                    Ok(task) => tab.binary_loading = Some(task),
-                                    Err(e) => self.load_notices.push(e),
-                                }
-                                continue;
-                            }
-                            let background = std::fs::metadata(&path).is_ok_and(|m| {
-                                m.len()
-                                    >= tab
-                                        .editor
-                                        .settings
-                                        .usize("large_file.load_bytes", 64 * 1024 * 1024)
-                                        as u64
-                            });
-                            if let Err(error) =
-                                tab.load_disk(tab.decode_options(), background, true)
-                            {
-                                self.resource_reports
-                                    .push(fileio::regular::error(&path, error));
-                                if !tab.dirty() {
-                                    failed_documents.push(tab.sheet);
-                                }
-                            }
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
         for sheet in failed_documents {
             if let Some(index) = self.sheet_index(sheet) {
                 let _ = self.fail_shared_document(index);
             }
         }
-        for sheet in close_deleted {
-            if let Some(index) = self.sheet_index(sheet)
-                && let Err(error) = self.close(index)
-            {
-                self.messages.push(error);
-            }
-        }
+        changed |= self.apply_file_changes(events);
         self.reconcile_installs();
         let had_pending_writes = !self.settings_writes.is_empty();
         let mut settled_settings = false;

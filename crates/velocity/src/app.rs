@@ -134,6 +134,8 @@ pub struct App {
     format_hits: Vec<(status_adapter::FormatItem, Rect)>,
     last_format_menu: Vec<MenuEntry>,
     #[cfg(test)]
+    last_status_switcher_menu: Vec<MenuEntry>,
+    #[cfg(test)]
     close_decisions: std::collections::VecDeque<tab_adapter::CloseDecision>,
     #[cfg(test)]
     overwrite_decisions: std::collections::VecDeque<bool>,
@@ -321,6 +323,8 @@ impl App {
             revealed_directory: None,
             format_hits: Vec::new(),
             last_format_menu: Vec::new(),
+            #[cfg(test)]
+            last_status_switcher_menu: Vec::new(),
             #[cfg(test)]
             close_decisions: Default::default(),
             #[cfg(test)]
@@ -958,14 +962,16 @@ impl App {
         w: &WindowHandle,
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
-        let native_open = incoming.request.native_open;
+        let reveal = incoming.request.stdin.is_some();
         let background = incoming.request.background;
         self.accept_request(incoming)?;
         self.publish_open_route();
         if !background {
             w.focus();
         }
-        self.changed(w, Instant::now(), !native_open);
+        // A positioned open schedules its own center. Revealing on every open
+        // would also scroll a bare reopen whose caret was outside the viewport.
+        self.changed(w, Instant::now(), reveal);
         Ok(())
     }
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
@@ -1198,6 +1204,7 @@ impl App {
             // Search replacements are tied to a completed Find in Files request.
             // https://docs.sublimetext.io/reference/commands.html
             "replace_in_files" => return self.panels.file_replace_ready(),
+            "cancel_find_in_files" => return self.panels.file_task.is_some(),
             "toggle_find_option"
                 if matches!(
                     args["option"].as_str(),
@@ -2682,6 +2689,7 @@ impl App {
             || matches!(
                 name,
                 "save_macro"
+                    | "cancel_find_in_files"
                     | "refresh_folder_list"
                     | "close_folder_list"
                     | "toggle_show_open_files"
@@ -4731,11 +4739,7 @@ impl AppHandler for App {
                 };
                 request.files = paths
                     .into_iter()
-                    .map(|path| crate::cli::FileLocation {
-                        path,
-                        line: 1,
-                        column: 1,
-                    })
+                    .map(crate::cli::FileLocation::path_only)
                     .collect();
                 if (request.project.is_some() || !request.files.is_empty())
                     && let Err(e) = self.open_native_window_request(w, request)
