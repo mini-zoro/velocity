@@ -274,6 +274,33 @@ and `/tmp/velocity-r32.uM0iib/paired-confirm`.
 [tabs]: https://www.sublimetext.com/docs/tab_multi-select.html
 [theme]: https://www.sublimetext.com/docs/themes.html
 
+## Decisions on the open questions (user, 2026-11-21)
+
+All 19 questions below were decided by the user. "Keep" means Velocity's current behaviour is
+now the confirmed design.
+
+| # | Decision | Change |
+| --- | --- | --- |
+| U01 | Keep: one empty untitled tab, sidebar visible, no welcome page | none |
+| U02 | Keep: a drop anywhere on the window opens in the window (no per-pane drop zones) | none |
+| U03 | **A**: a bare path from the CLI keeps an already-open file's position; explicit `:line:col` still jumps | to do |
+| U04 | Keep: Goto Anything previews in an italic transient tab | none |
+| U05 | Keep: new tabs are appended at the right of the current group | none |
+| U06 | **B**: `close_windows_when_empty` defaults to `true`: ⌘W on the last tab of a window without a project closes the window (the app keeps running); project windows stay open | to do |
+| U07 | Keep: typing runs are one undo step; an auto-pair is undone with its opening half | none |
+| U08 | Keep: Find shows "N of M" in the panel; no separate wrap notice | none |
+| U09 | Keep: single-line selections seed Find; multi-line selections do not; ⌘E unchanged | none |
+| U10 | Keep: Find in Files results go to the Find Results tab by default (Use Buffer on) | none |
+| U11 | Keep: each search is appended to the window's one Find Results tab | none |
+| U12 | Keep the current report wording | none |
+| U13 | Keep ⌘-click as an extra jump gesture in Find Results | none |
+| U14 | Keep: with `close_deleted_files`, clean tabs close when their file is deleted; dirty tabs are never discarded | none |
+| U15 | Keep the dirty-close prompt (Save / Don't Save / Cancel, default Save, never Don't Save) | none |
+| U16 | Keep ⌘= / ⌘− zoom by one point | none |
+| U17 | Keep encoding and line endings always visible in the status bar (can be turned off) | none |
+| U18 | **B**: recoverable, reversible command failures are reported in the status bar; dialogs only for confirmations and possible data loss | to do |
+| U19 | Keep `atomic_save` off by default | none |
+
 ## To discuss
 
 No behavior changes are made on the basis of these questions. Recommendations are for
