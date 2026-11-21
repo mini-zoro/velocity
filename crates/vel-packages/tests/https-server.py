@@ -3,6 +3,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import ssl
 import sys
+import time
 
 root, certificate, key, ready = map(Path, sys.argv[1:])
 
@@ -10,6 +11,12 @@ root, certificate, key, ready = map(Path, sys.argv[1:])
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         name = self.path.removeprefix("/")
+        forbidden = ("Authorization", "Proxy-Authorization", "Cookie", "Referer")
+        with (root / "requests.log").open("a", encoding="utf-8") as log:
+            print(name, *[key for key in forbidden if key in self.headers], file=log)
+        if name == "stall":
+            time.sleep(60)
+            return
         if "/" in name or ".." in name or not (root / name).is_file():
             self.send_error(404)
             return

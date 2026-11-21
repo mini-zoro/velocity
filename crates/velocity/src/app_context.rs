@@ -237,10 +237,19 @@ impl App {
         pending: &PendingMenu,
         dynamic: &[vel_config::ui::PaletteItem],
     ) -> Vec<MenuEntry> {
-        let resources = self
-            .workspace
-            .context_menus
-            .get(pending.kind.resource_name())
+        let custom = (pending.kind == ContextMenuKind::Widget)
+            .then(|| {
+                self.workspace
+                    .context_menus
+                    .get(&self.workspace.widget_context_menu)
+            })
+            .flatten();
+        let resources = custom
+            .or_else(|| {
+                self.workspace
+                    .context_menus
+                    .get(pending.kind.resource_name())
+            })
             .map(Vec::as_slice)
             .unwrap_or_default();
         let menu = menus::with_dynamic(resources, dynamic);

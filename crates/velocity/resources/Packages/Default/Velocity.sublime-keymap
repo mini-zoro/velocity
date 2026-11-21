@@ -1690,6 +1690,14 @@
     "command": "select_single_tab"
   },
   {
+    "keys": ["super+j", "super+left"],
+    "command": "deselect_tabs_to_left"
+  },
+  {
+    "keys": ["super+j", "super+right"],
+    "command": "deselect_tabs_to_right"
+  },
+  {
     "keys": [
       "super+j",
       "super+shift+["

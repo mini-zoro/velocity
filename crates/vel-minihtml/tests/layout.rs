@@ -292,7 +292,7 @@ fn links_images_tooltips_and_command_data() {
             .any(|r| matches!(&r.target, LinkTarget::Browser(_)))
     );
     let out = render(
-        "<img style='display:block;width:10px' src='data:image/png;base64,AA=='><img src='https://bad' alt='fallback'>",
+        "<img style='display:block;width:10px' src='data:image/png;base64,AA=='><img src='http://bad' alt='fallback'>",
         100.,
     );
     assert_eq!(
@@ -311,6 +311,13 @@ fn links_images_tooltips_and_command_data() {
     ));
     assert!(ImageSource::parse("file:///a.gif").is_some());
     assert!(ImageSource::parse("data:image/jpeg;base64,AA==").is_some());
+    assert_eq!(
+        ImageSource::parse("HTTPS://example.invalid/Case.png"),
+        Some(ImageSource::Https(
+            "https://example.invalid/Case.png".into()
+        ))
+    );
+    assert!(ImageSource::parse("http://example.invalid/pixel.png").is_none());
     assert!(ImageSource::parse("javascript:alert(1)").is_none());
 }
 #[test]

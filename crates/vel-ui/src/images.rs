@@ -34,7 +34,10 @@ impl Default for Images {
 }
 pub(crate) fn key(source: &ImageSource) -> &str {
     match source {
-        ImageSource::File(s) | ImageSource::Resource(s) | ImageSource::Data(s) => s,
+        ImageSource::File(s)
+        | ImageSource::Resource(s)
+        | ImageSource::Data(s)
+        | ImageSource::Https(s) => s,
     }
 }
 impl Images {
@@ -60,6 +63,9 @@ impl Images {
         changed
     }
     pub fn get(&self, source: &ImageSource) -> Option<Arc<Image>> {
+        if let ImageSource::Https(url) = source {
+            return remote::resolve(url, false).1;
+        }
         let key = key(source);
         if let Some(image) = self.ready.borrow().get(key) {
             return image.clone();
@@ -111,6 +117,7 @@ fn decode(source: &ImageSource, resources: &BTreeMap<String, Arc<[u8]>>) -> Opti
                 percent_encoding::percent_decode_str(data).collect()
             }
         }
+        ImageSource::Https(_) => return None,
     };
     if bytes.len() > LIMIT {
         return None;
@@ -143,3 +150,5 @@ fn decode(source: &ImageSource, resources: &BTreeMap<String, Arc<[u8]>>) -> Opti
         rgba: image.into_raw().into(),
     }))
 }
+
+pub(crate) mod remote;

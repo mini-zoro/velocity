@@ -33,6 +33,9 @@ mod round32_lane_b_tests;
 #[cfg(test)]
 #[path = "app_round34_lane_b_tests.rs"]
 mod round34_lane_b_tests;
+#[cfg(test)]
+#[path = "app_round35_lane_b_tests.rs"]
+mod round35_lane_b_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
@@ -210,6 +213,7 @@ pub struct App {
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
     /// Text selection gesture between a press in the text area and its release.
     drag_select: Option<crate::mouse_select::DragSelect>,
+    scrollbar_binding_button: Option<usize>,
     /// Selected text being dragged to a new position.
     drag_text: Option<crate::mouse_select::DragText>,
     text_drag_pressed: Option<Instant>,
@@ -430,6 +434,7 @@ impl App {
             print_jobs: Default::default(),
             dragging_splitter: None,
             drag_select: None,
+            scrollbar_binding_button: None,
             drag_text: None,
             text_drag_pressed: None,
             text_drag_origin: None,
@@ -1966,6 +1971,11 @@ impl App {
         if !palette_accept && !self.command_enabled_args(name, args) {
             return Ok(());
         }
+        if name == "move_to" && args.get("group").is_some() {
+            self.workspace.workbench_action(name, args)?;
+            self.named_changed(window, false);
+            return Ok(());
+        }
         if name == "copy_as_html" {
             self.copy_as_html(clipboard)?;
             self.named_changed(window, false);
@@ -2620,6 +2630,22 @@ impl App {
             }
             return Ok(());
         }
+        if name == "choose_font" {
+            #[cfg(target_os = "macos")]
+            if let Some(w) = window {
+                self.font_choices(w.font_families());
+            }
+            return Ok(());
+        }
+        if name == "set_font_face" {
+            let family = args["family"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .ok_or("Missing font family")?;
+            return self
+                .workspace
+                .set_user_preference("font_face", json!(family));
+        }
         if name == "set_ui_language" {
             // The preference is app-wide; the ordinary User writer also updates
             // other windows via resource reload. https://www.sublimetext.com/docs/settings.html
@@ -3212,6 +3238,29 @@ impl App {
         }
         Ok(())
     }
+    #[cfg(any(target_os = "macos", test))]
+    fn font_choices(&mut self, mut families: Vec<String>) {
+        let current = self.workspace.editor().preferences.font_face.as_str();
+        families.sort_unstable();
+        families.dedup();
+        if let Some(n) = families.iter().position(|name| name == current) {
+            families[..=n].rotate_right(1);
+        } else if !current.is_empty() {
+            families.insert(0, current.to_owned());
+        }
+        let choices = families
+            .into_iter()
+            .map(|family| vel_config::ui::PaletteItem {
+                invocation: vel_config::keymap::Invocation {
+                    command: "set_font_face".into(),
+                    args: json!({"family": family}),
+                },
+                caption: family,
+            })
+            .collect();
+        self.panels.choices(&mut self.workspace, choices);
+    }
+
     fn select_tab_action(&mut self, name: &str, args: &Value) -> bool {
         if name == "unselect_current" {
             let group = &self.workspace.workbench.groups[self.workspace.workbench.active];
@@ -3228,6 +3277,8 @@ impl App {
             if let Some(index) = self.workspace.sheet_index(sheet) {
                 if args["_replace_focused"] == true {
                     self.workspace.replace_focused_sheet(index);
+                } else if args["_toggle_selected"] == true {
+                    self.workspace.click_sheet(index, true, false);
                 } else {
                     self.workspace.select(index);
                 }
@@ -4700,6 +4751,19 @@ impl AppHandler for App {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if self.options.mode == Mode::Interactive
+            && !self.options.safe_mode
+            && let Ok(executable) = std::env::current_exe()
+        {
+            let client = vel_packages::https::HttpsClient {
+                timeout: Duration::from_secs(8),
+                ..Default::default()
+            };
+            vel_ui::minihtml::enable_remote_images(move |url| {
+                crate::remote_image::load(url, &client, &executable, Duration::from_secs(2))
+            });
+        }
         self.panels.find_pasteboard = Some(Box::new(SystemFindPasteboard));
         self.publish_open_route();
         if let Some([x, y, width, height]) = self.window_frame {
@@ -5645,6 +5709,10 @@ impl AppHandler for App {
             }
         }
         let scene = self.scene();
+        // Layout can enqueue its first image request after the worker poll above.
+        if self.workspace.themes.ui.borrow().metrics.images_pending() {
+            w.request_frame_at(Instant::now() + Duration::from_millis(8));
+        }
         self.apply_title_theme(w);
         let result = self.renderer.as_mut().ok_or("renderer missing")?.render(
             &scene,

@@ -134,6 +134,8 @@ pub enum ImageSource {
     Resource(String),
     /// `data:image/png`, `image/jpeg` or `image/gif` URL.
     Data(String),
+    /// HTTPS URL. The host decides whether to fetch it.
+    Https(String),
 }
 impl ImageSource {
     /// Rejects unsupported protocols and MIME types; does not perform I/O.
@@ -142,6 +144,13 @@ impl ImageSource {
             Some(Self::File(source.into()))
         } else if source.starts_with("res://") {
             Some(Self::Resource(source.into()))
+        } else if source.len() <= 4096
+            && source
+                .get(..8)
+                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+        {
+            // Normalize the scheme only; preserve case-sensitive paths and queries.
+            Some(Self::Https(format!("https://{}", &source[8..])))
         } else if [
             "data:image/png;",
             "data:image/png,",

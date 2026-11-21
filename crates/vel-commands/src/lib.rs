@@ -224,6 +224,8 @@ const TEXT: &[&str] = &[
     "show_at_center",
 ];
 const WINDOW: &[&str] = &[
+    "choose_font",
+    "set_font_face",
     "select_color_scheme",
     "select_theme",
     "show_dictionary",
@@ -244,6 +246,7 @@ const WINDOW: &[&str] = &[
     "move_to_group",
     "focus_neighboring_group",
     "move_to_neighboring_group",
+    "move_to_neighbouring",
     "focus_next_control",
     "focus_previous_control",
     "new_pane",
@@ -254,6 +257,8 @@ const WINDOW: &[&str] = &[
     "select_tab",
     "select_tab_to_left",
     "select_tab_to_right",
+    "deselect_tabs_to_left",
+    "deselect_tabs_to_right",
     "focus_selected_tab",
     "close_selected_tabs",
     "toggle_distraction_free",

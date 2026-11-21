@@ -303,6 +303,7 @@ pub enum Overlay {
 struct Preview {
     sheet: u64,
     sheets: BTreeSet<u64>,
+    selected: BTreeSet<u64>,
     buffer: BufferId,
     version: vel_buffer::ChangeId,
     selection: Selection,
@@ -310,6 +311,28 @@ struct Preview {
     transient: bool,
     path: Option<Arc<PathBuf>>,
     position: vel_text::Point,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptTabs {
+    Default,
+    Add,
+    Right,
+    ReplaceFocus,
+}
+
+impl AcceptTabs {
+    fn from_modifiers(primary: bool, shift: bool, option: bool) -> Self {
+        if option {
+            Self::ReplaceFocus
+        } else if primary {
+            Self::Right
+        } else if shift {
+            Self::Add
+        } else {
+            Self::Default
+        }
+    }
 }
 #[derive(Clone, Copy, Debug)]
 enum FindNavigation {
@@ -2421,6 +2444,9 @@ impl Panels {
                 self.preview = Some(Preview {
                     sheet: workspace.tabs[workspace.active].sheet,
                     sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
+                    selected: workspace.workbench.groups[workspace.workbench.active]
+                        .selected
+                        .clone(),
                     buffer: workspace.editor().buffer.id(),
                     version: workspace.editor().buffer.change_id(),
                     scroll: workspace.tabs[workspace.active].scroll,
@@ -2517,6 +2543,7 @@ impl Panels {
                         Preview {
                             sheet: workspace.tabs[workspace.active].sheet,
                             sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
+                            selected: BTreeSet::new(),
                             buffer: editor.buffer.id(),
                             version: editor.buffer.change_id(),
                             selection: editor.buffer.view(editor.id).sel().clone(),
@@ -4259,18 +4286,62 @@ impl Panels {
         self.navigation_preview_guard = None;
         self.navigation_options = Default::default();
     }
-    fn accept(
-        &mut self,
+    fn accept_tab_selection(
         workspace: &mut Workspace,
-        side: bool,
-        viewport: Range<usize>,
-    ) -> Result<Option<Invocation>, String> {
-        self.accept_item(workspace, side, false, viewport)
+        origin: &Preview,
+        action: AcceptTabs,
+    ) -> Result<(), String> {
+        let Some(group) = workspace.workbench.group_of(origin.sheet) else {
+            return Ok(());
+        };
+        let source = workspace
+            .sheet_index(origin.sheet)
+            .expect("preview origin exists");
+        workspace.make_permanent(source);
+        let target = workspace.tabs[workspace.active].sheet;
+        if workspace.workbench.active != group {
+            workspace.clone_file_into_group(workspace.active, group)?;
+        }
+        let target = if workspace.workbench.group_of(target) == Some(group) {
+            target
+        } else {
+            workspace.tabs[workspace.active].sheet
+        };
+        let g = &mut workspace.workbench.groups[group];
+        g.selected = origin
+            .selected
+            .iter()
+            .copied()
+            .filter(|id| g.sheets.contains(id))
+            .collect();
+        if target != origin.sheet {
+            match action {
+                AcceptTabs::ReplaceFocus => {
+                    // Selecting an already displayed tab just gives it focus.
+                    if !g.selected.contains(&target) {
+                        g.selected.remove(&origin.sheet);
+                    }
+                }
+                AcceptTabs::Right => {
+                    g.sheets.retain(|id| *id != target);
+                    let at = g.sheets.iter().position(|id| *id == origin.sheet).unwrap() + 1;
+                    g.selected.retain(|id| g.sheets[..at].contains(id));
+                    g.sheets.insert(at, target);
+                }
+                _ => {}
+            }
+        }
+        g.selected.insert(target);
+        g.focused = Some(target);
+        g.anchor = g.focused;
+        g.touch_focus();
+        Ok(())
     }
+
     fn accept_item(
         &mut self,
         workspace: &mut Workspace,
-        side: bool,
+        tab_action: AcceptTabs,
         keep_open: bool,
         viewport: Range<usize>,
     ) -> Result<Option<Invocation>, String> {
@@ -4427,20 +4498,11 @@ impl Panels {
             {
                 workspace.tabs[index].transient = source.transient;
             }
-            if side
-                && let Some(preview) = &self.preview
-                && let Some(group) = workspace.workbench.group_of(preview.sheet)
+            if tab_action != AcceptTabs::Default
+                && matches!(self.overlay, Some(Overlay::Goto | Overlay::ProjectSymbols))
+                && let Some(origin) = &self.preview
             {
-                if group != workspace.workbench.active {
-                    workspace.workbench.move_selected(group)?;
-                    workspace.focus_current_group()?;
-                }
-                if let Some(index) = workspace.sheet_index(preview.sheet) {
-                    workspace.tabs[index].transient = false;
-                }
-                workspace.workbench.groups[group]
-                    .selected
-                    .insert(preview.sheet);
+                Self::accept_tab_selection(workspace, origin, tab_action)?;
             }
             workspace.tabs[workspace.active].transient = false;
             workspace
@@ -4735,12 +4797,24 @@ impl Panels {
             && !self.quick_input.composing()
             && self.quick_input.caret_at_end()
         {
-            return Ok((true, self.accept_item(workspace, false, true, viewport)?));
+            return Ok((
+                true,
+                self.accept_item(workspace, AcceptTabs::Default, true, viewport)?,
+            ));
         }
         if key.name == "enter" {
             return Ok((
                 true,
-                self.accept(workspace, key.modifiers & 9 != 0, viewport)?,
+                self.accept_item(
+                    workspace,
+                    AcceptTabs::from_modifiers(
+                        key.modifiers & 9 != 0,
+                        key.modifiers & 4 != 0,
+                        key.modifiers & 2 != 0,
+                    ),
+                    false,
+                    viewport,
+                )?,
             ));
         }
         if key.name == "tab" && matches!(key.modifiers, 0 | 4) {
@@ -7623,11 +7697,21 @@ impl Panels {
                 if row < self.quick.items.len() {
                     self.quick.selected = row;
                     self.preview_current(workspace)?;
-                    let replace =
-                        self.tab_dropdown_anchor.is_some() && self.alternate_click && !extend;
-                    let mut invocation = self.accept(workspace, false, viewport)?;
-                    if replace && let Some(invocation) = &mut invocation {
-                        invocation.args["_replace_focused"] = json!(true);
+                    let dropdown = self.tab_dropdown_anchor.is_some();
+                    let replace = dropdown && self.alternate_click && !extend;
+                    let toggle = dropdown && self.primary_click && !extend;
+                    let action = if dropdown {
+                        AcceptTabs::Default
+                    } else {
+                        AcceptTabs::from_modifiers(self.primary_click, extend, self.alternate_click)
+                    };
+                    let mut invocation = self.accept_item(workspace, action, false, viewport)?;
+                    if let Some(invocation) = &mut invocation {
+                        if replace {
+                            invocation.args["_replace_focused"] = json!(true);
+                        } else if toggle {
+                            invocation.args["_toggle_selected"] = json!(true);
+                        }
                     }
                     self.pending_command = invocation;
                 }

@@ -1,121 +1,16 @@
 //! Real loopback TLS tests with a generated private CA. No public service or insecure TLS mode.
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
-};
+use std::{fs, io::Write, path::Path, time::Duration};
 use vel_packages::{Index, PackageManager, https::HttpsClient};
 use zip::{ZipWriter, write::SimpleFileOptions};
+#[path = "support/tls.rs"]
+mod tls;
+use tls::Server;
 
-#[derive(Debug)]
-struct Server {
-    root: tempfile::TempDir,
-    child: Child,
-    base: String,
-    ca: PathBuf,
+fn server() -> Server {
+    Server::start(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/https-server.py"))
 }
-impl Server {
-    fn start() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let ca = root.path().join("certificate.pem");
-        let key = root.path().join("key.pem");
-        let config = root.path().join("openssl.cnf");
-        fs::write(&config, "[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n[dn]\nCN=localhost\n[extensions]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n").unwrap();
-        let status = Command::new(openssl())
-            .args([
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "1", "-config",
-            ])
-            .arg(&config)
-            .arg("-keyout")
-            .arg(&key)
-            .arg("-out")
-            .arg(&ca)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let server_log = root.path().join("server.log");
-        let ready = root.path().join("ready");
-        let python = if cfg!(target_os = "macos") {
-            "/usr/bin/python3"
-        } else {
-            "python3"
-        };
-        let mut child = Command::new(python)
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/https-server.py"))
-            .arg(root.path())
-            .arg(&ca)
-            .arg(&key)
-            .arg(&ready)
-            .current_dir(root.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(&server_log).unwrap())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        // The fixture creates the ready file before it writes the port, so wait until
-        // the content parses instead of only until the file exists.
-        let port: u16 = loop {
-            if let Some(port) = fs::read_to_string(&ready)
-                .ok()
-                .and_then(|text| text.trim().parse().ok())
-            {
-                break port;
-            }
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "OpenSSL server exited: {}",
-                fs::read_to_string(&server_log).unwrap()
-            );
-            assert!(Instant::now() < deadline, "TLS fixture did not bind");
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        Self {
-            root,
-            child,
-            base: format!("https://localhost:{port}"),
-            ca,
-        }
-    }
-    fn response(&self, name: &str, status: &str, headers: &str, body: &[u8]) {
-        let mut file = fs::File::create(self.root.path().join(name)).unwrap();
-        write!(
-            file,
-            "HTTP/1.0 {status}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
-            body.len()
-        )
-        .unwrap();
-        file.write_all(body).unwrap();
-    }
-    fn url(&self, name: &str) -> String {
-        format!("{}/{name}", self.base)
-    }
-    fn client(&self) -> HttpsClient {
-        HttpsClient {
-            ca_certificate: Some(self.ca.clone()),
-            timeout: Duration::from_secs(5),
-        }
-    }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-fn openssl() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "/usr/bin/openssl"
-    } else {
-        "openssl"
-    }
-}
+
 fn package(path: &Path, version: &str) -> Vec<u8> {
     let mut zip = ZipWriter::new(fs::File::create(path).unwrap());
     zip.start_file("package-metadata.json", SimpleFileOptions::default())
@@ -130,7 +25,7 @@ fn package(path: &Path, version: &str) -> Vec<u8> {
 
 #[test]
 fn verified_https_install_upgrade_digest_failures_and_redirect_policy() {
-    let server = Server::start();
+    let server = server();
     let root = tempfile::tempdir().unwrap();
     let archive = root.path().join("fixture.sublime-package");
     let original = package(&archive, "1.0.0");
@@ -248,4 +143,101 @@ fn verified_https_install_upgrade_digest_failures_and_redirect_policy() {
     assert!(Index::parse(&index_bytes).is_ok());
     manager.set_index_url(None).unwrap();
     assert!(manager.check_upgrades(&client).unwrap().is_empty());
+}
+
+#[test]
+fn r35_anonymous_https_bounds_bytes_redirects_and_credentials() {
+    let server = server();
+    let client = HttpsClient {
+        timeout: Duration::from_secs(30),
+        ..server.client()
+    };
+    server.response("pixel", "200 OK", "Set-Cookie: fixture=x\r\n", b"PNG");
+    server.response(
+        "redirect",
+        "302 Found",
+        "Location: /pixel\r\nSet-Cookie: fixture=y\r\n",
+        b"",
+    );
+    assert_eq!(
+        client.fetch_anonymous(&server.url("redirect"), 16).unwrap(),
+        b"PNG"
+    );
+    assert!(client.fetch_anonymous(&server.url("pixel"), 2).is_err());
+    assert!(client.fetch_anonymous(&server.url("pixel"), 16).is_ok());
+    let requests = || fs::read_to_string(server.root.path().join("requests.log")).unwrap();
+    assert!(!requests().contains("Cookie"));
+    assert!(!requests().contains("Referer"));
+
+    server.response("credential-target", "200 OK", "", b"secret");
+    let credential_url =
+        server
+            .url("credential-target")
+            .replacen("https://", "https://alice:secret@", 1);
+    server.response(
+        "credentials",
+        "302 Found",
+        &format!("Location: {credential_url}\r\n"),
+        b"",
+    );
+    assert!(client.fetch_anonymous(&credential_url, 16).is_err());
+    assert!(
+        client
+            .fetch_anonymous(&server.url("credentials"), 16)
+            .is_err()
+    );
+    assert!(!requests().contains("credential-target"));
+    assert!(!requests().contains("Authorization"));
+
+    for i in 0..4 {
+        server.response(
+            &format!("hop{i}"),
+            "302 Found",
+            &format!("Location: /hop{}\r\n", i + 1),
+            b"",
+        );
+    }
+    server.response("hop4", "200 OK", "", b"too far");
+    assert!(client.fetch_anonymous(&server.url("hop0"), 16).is_err());
+    assert!(!requests().contains("hop4"));
+
+    server.response(
+        "downgrade",
+        "302 Found",
+        "Location: http://127.0.0.1:1/no\r\n",
+        b"",
+    );
+    assert!(
+        client
+            .fetch_anonymous(&server.url("downgrade"), 16)
+            .is_err()
+    );
+    assert!(client.fetch_anonymous("http://127.0.0.1:1/no", 16).is_err());
+    assert!(
+        HttpsClient::default()
+            .fetch_anonymous(&server.url("pixel"), 16)
+            .is_err()
+    );
+
+    fs::write(
+        server.root.path().join("chunked"),
+        [
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n40\r\n"
+                .as_slice(),
+            &[b'x'; 64],
+            b"\r\n0\r\n\r\n",
+        ]
+        .concat(),
+    )
+    .unwrap();
+    assert!(client.fetch_anonymous(&server.url("chunked"), 16).is_err());
+
+    let deadline_client = HttpsClient {
+        timeout: Duration::from_secs(8),
+        ..client
+    };
+    let error = deadline_client
+        .fetch_anonymous(&server.url("stall"), 16)
+        .unwrap_err();
+    assert!(error.to_string().contains("exit status: 28"), "{error}");
 }

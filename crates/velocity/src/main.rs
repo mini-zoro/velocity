@@ -10,6 +10,8 @@ mod build;
 mod cjk_bench;
 mod cli;
 mod cli_stdin;
+#[cfg(unix)]
+mod codec_process;
 mod completion;
 mod context_menu;
 mod editing;
@@ -36,6 +38,7 @@ mod open_requests;
 mod panels;
 mod parse_bench;
 mod release;
+mod remote_image;
 mod report;
 mod restore_io;
 mod review_bench;
@@ -87,7 +90,16 @@ use vel_text::Text;
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(std::ffi::OsStr::new(image_decode::HELPER)) {
+    let argument = args.next();
+    if argument.as_deref() == Some(std::ffi::OsStr::new(remote_image::REMOTE_HELPER)) {
+        if args.next().is_some()
+            || remote_image::helper(std::io::stdin().lock(), std::io::stdout().lock()).is_none()
+        {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if argument.as_deref() == Some(std::ffi::OsStr::new(image_decode::HELPER)) {
         let ok = args
             .next()
             .filter(|_| args.next().is_none())

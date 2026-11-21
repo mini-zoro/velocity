@@ -87,7 +87,7 @@ impl Context {
             c.link = LinkTarget::parse(href).ok();
         }
         if let Some(title) = n.attrs.get("title") {
-            c.title = Some(title.clone());
+            c.title = (!title.is_empty()).then(|| title.clone());
         }
         c
     }

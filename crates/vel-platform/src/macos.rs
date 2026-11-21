@@ -98,6 +98,18 @@ fn restore_simple_presentation(mtm: MainThreadMarker) {
     }
 }
 impl WindowHandle {
+    /// Font families currently exposed by AppKit's font manager.
+    pub fn font_families(&self) -> Vec<String> {
+        // SAFETY: a WindowHandle stays on the AppKit thread. Both selectors are
+        // documented NSFontManager methods; the array contains NSStrings.
+        unsafe {
+            let manager: Retained<AnyObject> =
+                msg_send![objc2::class!(NSFontManager), sharedFontManager];
+            let names: Retained<NSArray<NSString>> = msg_send![&*manager, availableFontFamilies];
+            names.iter().map(|name| name.to_string()).collect()
+        }
+    }
+
     /// Hide the pointer for typing without changing AppKit's cursor hide count.
     pub fn hide_pointer_until_motion(&self) {
         NSCursor::setHiddenUntilMouseMoves(true);

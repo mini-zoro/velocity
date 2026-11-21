@@ -15,12 +15,12 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Editing and selection | 55 | 3 | 0 | 0 |
 | Search and navigation | 56 | 7 | 0 | 0 |
 | Files, projects and sessions | 50 | 11 | 1 | 1 |
-| Windows, tabs and display | 66 | 14 | 0 | 1 |
+| Windows, tabs and display | 72 | 8 | 0 | 1 |
 | Language, completion and Vintage | 53 | 12 | 0 | 0 |
-| Customization and resources | 40 | 12 | 1 | 0 |
+| Customization and resources | 42 | 11 | 0 | 0 |
 | Build, Git and command line | 40 | 13 | 0 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **360** | **72** | **2** | **7** |
+| **Total** | **368** | **65** | **1** | **7** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
@@ -253,15 +253,15 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Feature | Sublime source (URL + build) | Velocity status | Evidence | Notes |
 | --- | --- | --- | --- | --- |
 | Multiple native windows, move tab, merge windows | [Tab multi-select][tabs], [Commands][commands] | done | `move_tab_to_new_window`, `merge_all_windows`; menu model tests | Cocoa behavior not live-tested this round. |
-| Tab/window/OS tab family on macOS | [D4107.106][releases], [V4050.46][dev], [D4142][releases] | partial | Window menu and `workbench.rs` editor tab navigation | Editor tabs work; macOS app-tab group shortcuts not established. |
+| Tab/window/OS tab family on macOS | [D4107.106][releases], [V4050.46][dev], [D4142][releases] | partial | (c) Window menu, `workbench.rs`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Editor tabs and window switching are separate. AppKit window tabbing is explicitly disabled; native tab traversal, merge and session behavior are not covered. |
 | Split View shares the buffer; row/column/grid layouts | [Commands][commands], [D4107][releases] | done | `split_view`, `set_layout`; `vel-ui/workbench.rs` | |
 | Focus or move a tab to a group | [Tab multi-select][tabs], [Commands][commands] | done | `focus_group`, `move_to_group`, `workbench.rs` | |
-| Move all selected sheets via `move_to` or `move_to_neighbouring` | [D4126.39][releases], [Tab multi-select][tabs] | partial | Workbench group actions | Named multi-tab commands not established. |
+| Move all selected sheets via `move_to` or `move_to_neighbouring` | [D4126.39][releases], [Tab multi-select][tabs] | done | (a) `r35_move_selected_commands_keep_order_focus_and_caret_move` | The `group` and `direction` forms move selected sheets in order and keep focus. Caret `move_to` and single-sheet `move_to_group` are unchanged. Public release notes do not enumerate the window forms' arguments. |
 | Jump to the last tab with Cmd+9 | [D4151.3][releases], [V4148.2][dev] | done | `select_by_index` with index -1 in Velocity's keymap | |
-| Tab multi-select with keyboard, drag and mouse | [Tab multi-select][tabs], [D4107][releases], [V4050][dev], [V4097.6][dev] | partial | `App::select_tab_action`, `app_tabs.rs`, `vel-ui/workbench.rs` | Selection and multi-pane layout work; exact Sublime gesture and menu set not established. |
-| Change focus without changing membership | [Tab multi-select][tabs], [V4098.2][dev] | partial | `vel-ui/workbench.rs` group selection/focus | Does not establish both dedicated left/right command variants. |
+| Tab multi-select with keyboard, drag and mouse | [Tab multi-select][tabs], [D4107][releases], [V4050][dev], [V4097.6][dev] | done | (a) `r35_tab_chords_add_focus_and_deselect_without_closing`, `r35_tab_dropdown_command_click_toggles_membership`; drag dispatch in `app_mouse.rs` | Command-click toggles membership. Adding an already selected neighbor no longer removes it, and the left/right chords deselect without closing tabs. Native drag presentation is not attested. |
+| Change focus without changing membership | [Tab multi-select][tabs], [V4098.2][dev] | done | (a) `r35_tab_chords_add_focus_and_deselect_without_closing` | Both documented Mac bracket chords move input focus among selected tabs without changing the set. |
 | Remove just the focused tab from multi-selection | [Tab multi-select][tabs], [D4186.10][releases], [V4184.6][dev] | done | `unselect_current`, palette and `App::select_tab_action`; `r34_tab_insert_and_unselect_current` | Keeps the remaining tabs selected and the last selection intact. No new shortcut or setting. |
-| Replace focused tab, preserve other selected tabs | [Tab multi-select][tabs] | partial | `OpenOptions`, `Panels::accept_overlay` | Goto and symbol pathways do not establish all documented modifier combinations. |
+| Replace focused tab, preserve other selected tabs | [Tab multi-select][tabs] | done | (a) `r35_goto_modifiers_keep_expected_tabs_on_acceptance`; `Group::replace_focused` | Goto File and Goto Symbol in Project use the pre-preview selection for Shift append, Command append-and-clear-right, and Option replace-focus. Tab, dropdown and sidebar Option-click replace focus. This does not attest to the distinct Definitions popup modifiers. |
 | Drag tabs to reorder/move and scroll the strip | [Tab multi-select][tabs], [D4213][releases] | done | `app_tabs.rs`; `enable_tab_scrolling` settings sweep | |
 | New Tab button | [D4107.202][releases], [V4095.8][dev] | done | `app_tabs.rs` theme hit targets | |
 | `hide_new_tab_button` | [D4107.202][releases], [V4095.8][dev], [Themes][themes] | done | `app_tabs.rs`; [reader](settings.md) | |
@@ -286,7 +286,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `show_rel_path` | [D4107.206][releases], [V4050.59][dev] | done | `workspace.rs` title; [reader](settings.md) | |
 | `show_full_path` | [Settings][settings] | done | `workspace.rs` title; [reader](settings.md) | |
 | `show_project_first` | [D4107.206][releases], [V4050.59][dev] | done | `Workspace::window_title`; `r34_project_title_and_unsaved_syntax_name` | Opt-in project-first title; preserves the file name, path preferences and dirty marker. |
-| `set_unsaved_view_name_for_syntax` | [D4200.16][releases], [V4198.10][dev] | partial | `Tab::name_with_untitled`; `r34_project_title_and_unsaved_syntax_name` | Boolean opt-out of first-line titles for non-plain syntax; the public release notes name the key but do not describe its exact value contract. |
+| `set_unsaved_view_name_for_syntax` | [D4200.16][releases], [V4198.10][dev] | partial | (b) `Tab::name_with_untitled`; `r34_project_title_and_unsaved_syntax_name` | Boolean opt-out of first-line titles for non-plain syntax; the public notes name the key but do not describe its type, default, or whether it applies to specific syntaxes. |
 | `click_through` (macOS inactive window pointer action) | [D4213.34][releases], [V4205.8][dev] | done | AppKit `acceptsFirstMouse:` on the editor view; `r34_typing_chrome_and_native_pointer_policy` tests the handler decision | Headless up to the native activation boundary. |
 | `hide_pointer_while_typing` | [D4107.118][releases], [V4074.7][dev] | done | Editor text input uses `NSCursor.setHiddenUntilMouseMoves`; `r34_typing_chrome_and_native_pointer_policy` tests the setting | D4107 lists the behavior under Windows/Linux. macOS uses the public AppKit method for the same opt-in behavior; no native event loop in tests. |
 | `show_sidebar_button` | [D4107.134][releases], [V4074.3][dev] | done | `app_status.rs`, settings effect suite | |
@@ -305,8 +305,8 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `wrap_width` | [Settings][settings] | done | `view.rs`; [reader](settings.md) | |
 | `wrap_width_style` | [D4107.132][releases], [V4092.6][dev] | done | `view.rs`; [reader](settings.md) | |
 | Indent folding and unfold, fold by level | [Commands][commands] | done | `fold`, `unfold`, `fold_by_level`; `view.rs` | |
-| Syntax-based folding, fold and unfold | [D4142.1][releases], [V4130.1][dev] | partial | `vel-highlight` syntax/indent fold model; `view.rs` | Folding works; support for all syntax-specific meta selectors and edge rules not established. |
-| Scope fold trailing-newline option | [V4134.4][dev], [V4145][dev] | partial | `fold_include_trailing_newline` across fold commands and gutter; `r34_fold_style_and_trailing_newline` | Excludes the last newline by default, includes it when enabled. Public notes do not specify the corresponding setting or syntax metadata spelling. |
+| Syntax-based folding, fold and unfold | [D4142.1][releases], [V4130.1][dev] | partial | (b) `vel-highlight` syntax/indent fold model; `view.rs` | Scope and indentation folding work. The notes do not specify which scope wins when syntax folds and indentation folds overlap, or how fold levels traverse embedded scopes. |
+| Scope fold trailing-newline option | [V4134.4][dev], [V4145][dev] | partial | (b) `fold_include_trailing_newline` across fold commands and gutter; `r34_fold_style_and_trailing_newline` | Excludes the last newline by default, includes it when enabled. Public notes describe the behavior but not a preference key, default, or syntax metadata schema. |
 | `fold_style` | [D4151.2][releases], [V4145.1][dev] | done | Indentation candidates in `fold_state.rs`, used by fold commands and gutter; `r34_fold_style_and_trailing_newline` | Can disable syntax-based folding in favor of indentation; auto preserves the existing source of candidates. |
 | `fold_buttons` | [Themes][themes] | done | `view.rs` gutter; settings effect suite | |
 | `relative_line_numbers` | [D4107.116][releases], [V4074.4][dev] | done | `view.rs`; [reader](settings.md) | |
@@ -319,19 +319,19 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `draw_white_space` leading/trailing/all/selection | [D4107.127][releases], [V4083.2][dev], [V4050.19][dev] | done | `view.rs` drawing and settings scene sweep | |
 | `draw_unicode_white_space` incl. extra invisible glyphs | [D4107.128][releases], [D4126.15][releases], [V4123.10][dev], [V4050.20][dev] | done | `view.rs`; `app_lane_c_round20_tests.rs` Unicode scene coverage | Original glyph rendering; not a claim of identical artwork. |
 | `draw_unicode_bidi` | [D4126.16][releases], [V4122.3][dev] | done | `view.rs`; settings scene sweep | |
-| `control_character_style` | [D4107.119][releases], [V4094.4][dev] | partial | C0/DEL style in `vel-render::invisibles`; `r34_gutter_and_control_style_reach_scene` | Working hex, name and caret displays; exact Sublime values are not stated in the permitted notes. |
+| `control_character_style` | [D4107.119][releases], [V4094.4][dev] | partial | (b) C0/DEL style in `vel-render::invisibles`; `r34_gutter_and_control_style_reach_scene` | Hex, name and caret displays work. The public notes do not list accepted values, the default, or the set of affected control code points. |
 | `caret_style` blink and style | [D4107.114][releases], [V4050.15][dev], [Font][font] | done | `view.rs`; [reader](settings.md) | |
 | `scroll_context_lines` | [D4107.117][releases], [V4075.9][dev] | done | `view.rs`; settings effect suite | |
 | `scroll_past_end` boolean or fraction | [D4107.123][releases], [V4095.15][dev] | done | `view.rs`; settings effect suite | |
-| System scrollbar click behavior | [D4151.64][releases], [V4149.19][dev] | partial | Scrollbar hit testing in `app_mouse.rs`; Mac prefs in `vel-platform/macos.rs` | Native scrollbar behavior needs live check. |
-| Custom scrollbar mousemap | [V4103.2][dev] | partial | Mousemap contexts in `vel-config/keymap.rs` | No independent Scroll Bar resource/dispatch established. |
+| System scrollbar click behavior | [D4151.64][releases], [V4149.19][dev] | partial | (c) `view.rs` track-hit tests; [native check](manual-checks.md#6-round-35-windows-and-resources) | Model honors the page/jump preference and Option inversion. Live System Settings changes and AppKit overlay hit testing are untested. |
+| Custom scrollbar mousemap | [V4103.2][dev] | done | (a) `r35_scrollbar_mousemap_is_scoped_to_visible_track` | Loads `Scroll Bar.sublime-mousemap` separately. Track bindings can replace the built-in action and keep their release target when the pointer leaves the track. |
 | GPU rendering | [GPU Rendering][gpu], [D4107.11][releases], [V4050.1][dev] | done | `vel-render` Metal/wgpu surface and CPU scene path | GPU backend differs from ST's OpenGL. |
-| `hardware_acceleration` fallback and GPU diagnostics | [GPU Rendering][gpu], [D4107.11][releases], [V4050.1][dev] | partial | `vel-render`, headless modes in `cli.rs` | No Sublime-compatible GUI renderer selector/console diagnostics. |
+| `hardware_acceleration` fallback and GPU diagnostics | [GPU Rendering][gpu], [D4107.11][releases], [V4050.1][dev] | partial | (c) `vel-render` Metal renderer, headless modes in `cli.rs`; [native check](manual-checks.md#6-round-35-windows-and-resources) | CPU-only headless modes are not a software window renderer. Metal initialization failure, software fallback, and equivalent startup console diagnostics are not covered; no inert preference added. |
 | `font_face` | [Font][font] | done | `settings_effect_tests` font probe; `vel-platform/fonts.rs` | |
 | `font_size` and zoom | [Font][font] | done | `Workspace::zoom_font` and `increase_font_size` / `decrease_font_size` | |
 | `default_font_size` | [D4200.14][releases], [V4194.6][dev] | done | `Workspace::zoom_font` reset path; `app_lane_b_round17_tests.rs` | |
-| Select font from Preferences | [D4166.7][releases], [V4156.1][dev], [Font][font] | partial | Zoom and `font_face` settings entry point | No native chooser equivalent established. |
-| `font_options` | [Font][font] | partial | `view.rs` typography; [reader](settings.md) | Common styles and ligature toggles, not all backend-specific antialias/hinting modes. |
+| Select font from Preferences | [D4166.7][releases], [V4156.1][dev], [Font][font] | done | (a) `r35_font_picker_preselects_current_and_writes_on_acceptance` | Preferences > Font > Choose lists installed macOS font families in Velocity's quick panel. Selecting one updates `font_face`; cancel leaves it unchanged. Native enumeration remains a live check. |
+| `font_options` | [Font][font], [Ligatures][ligatures] | partial | (b) `view.rs` typography; [reader](settings.md) | Common style flags and ligature controls work. Font docs do not enumerate macOS antialiasing/hinting options or establish how multiple flags combine on Retina. |
 | Ligatures, opt-out and font fallback | [Ligatures][ligatures], [Font][font] | done | `vel-text` shaping and `vel-platform/fonts.rs`; `font_options` | |
 
 ## Language, completion and Vintage
@@ -416,51 +416,51 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Default/User/syntax-specific Preferences editors | [Settings][settings] | done | `settings_entry.rs`, `settings_user_tab_save_updates_existing_window_and_preserves_explicit_toggles` | |
 | Single-chord and sequence key bindings | [Key bindings][keys] | done | `vel-config/keymap.rs`, `vel-config/tests/config.rs` | |
 | Modifier-only/double modifier key sequences | [Key bindings][keys], [D4107][releases] | done | `vel-config/keymap.rs`; `vel-platform/input.rs` | |
-| Mac keypad keys in bindings | [D4107.105][releases], [V4050.45][dev], [Key bindings][keys] | partial | `keypad_enter` in Velocity's keymap, `vel-platform/input.rs` | Distinct mapping for all keypad keys not confirmed. |
+| Mac keypad keys in bindings | [D4107.105][releases], [V4050.45][dev], [Key bindings][keys] | partial | (c) `editor::binding_key`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Digits, Enter and arithmetic keys have separate identities. Physical keypad events, decimal separator layouts, and labels have not been checked in AppKit. |
 | `noop` key binding blocks fallback | [D4142.70][releases], [V4134.6][dev] | done | `vel-commands/text_ops.rs` registry, `Configuration::load` | |
 | Key contexts: selector, setting, regex, selection/panel state | [Key bindings][keys] | done | `vel-config/keymap.rs`; scoped dispatch tests | Python `on_query_context` excluded. |
 | Mousemaps and mouse context expressions | [D4151.47][releases], [V4149.15][dev], [Key bindings][keys] | done | `vel-config/keymap.rs`, `app_mouse.rs` | Native declarative feature, not Python. |
 | Mouse Bindings Preferences row | [D4166.6][releases], [V4153.3][dev] | done | `edit_settings` Mouse Bindings resource in Main menu | |
 | Mouse Bindings palette entry | [D4180.32][releases], [V4178.1][dev] | done | `Velocity.sublime-commands`, `edit_settings` | |
 | .sublime-menu IDs, submenu merge, availability and checkmarks | [Menus][menus] | done | `vel-config/ui.rs::resolve_menu`, `vel-config/tests/context_menus.rs` | Main/edit/tab/sidebar/mount/Where/widget implemented. |
-| Native shortcut labels match active keymap | [Menus][menus], [Key bindings][keys] | partial | `menu_roles_and_exact_shortcuts_survive_renaming_and_reload` | Non-US native layout behavior not confirmed. |
-| Additional native menu resources (build, console, panel and status-specific variants) | [Menus][menus] | partial | `ContextMenuKind::resource_name`, dynamic app menu model | Not every documented extension point exists. |
+| Native shortcut labels match active keymap | [Menus][menus], [Key bindings][keys] | partial | (c) `menu_roles_and_exact_shortcuts_survive_renaming_and_reload`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Menu model resolves the active binding; AppKit labels and invocation for non-US layouts and after a live input-source change are untested. |
+| Additional native menu resources (build, console, panel and status-specific variants) | [Menus][menus] | partial | (b) `r35_widget_settings_select_named_context_menu_only_for_widget`, `ContextMenuKind::resource_name` | All seven documented menu filenames load, including the widget `context_menu` filename override. The reference does not identify distinct resource names, args or merge precedence for additional build, console and status variants. |
 | Loose and ZIP .sublime-package resources | [Packages][packages] | done | `vel-config/resources.rs`, `vel-packages/tests/packages.rs` | Declarative resources only. |
 | Package priority, User overrides, resource reload | [Packages][packages] | done | `Workspace::poll_resource_reload`, `context_menu_resources_layer_and_hot_reload_with_the_workspace` | |
 | `ignored_packages` and priority rules | [Packages][packages], [V4123][dev] | done | `Configuration::load`, settings effect suite | |
-| Install/update/remove declarative packages | [Packages][packages] | partial | `release.rs`, `vel-packages/tests/https.rs` | Native declarative support; not Python Package Control. |
+| Install/update/remove declarative packages | [Packages][packages] | partial | (b) `release.rs`, `verified_https_install_upgrade_digest_failures_and_redirect_policy` | Velocity installs, upgrades and removes declarative archives. The package docs confirm archive/override behavior, not account, catalog, or upgrade scheduling contracts. Python Package Control is out of scope. |
 | Platform filter in .sublime-commands | [D4107.242][releases], [V4094.9][dev] | done | `palette_menu_deduplication_platform_filter_and_binding_hints`; `vel-config/ui.rs` | |
 | .sublime-color-scheme globals, CSS color formats/functions, variables | [Color schemes][schemes] | done | `css_and_recursive_color_mod`, `overrides_rebind_base_variables_and_merge_properties` | |
 | Legacy .tmTheme | [Color schemes][schemes] | done | `legacy_plist_and_auto_pair` | |
-| Customize/convert hidden .tmTheme resources | [D4107.214][releases], [V4095.25][dev], [V4096.5][dev] | partial | `settings_entry.rs`, `vel-color-scheme` legacy reader | Exact hidden-resource conversion workflow not confirmed. |
+| Customize/convert hidden .tmTheme resources | [D4107.214][releases], [V4095.25][dev], [V4096.5][dev] | partial | (b) `settings_entry.rs`; `real_resource_loader_isolates_bad_syntaxes_schemes_and_archives` | Hidden legacy schemes load when explicitly selected. Notes name converter support but do not give the command arguments or customization output filename, format and visibility rules. |
 | Scheme selectors and hashed highlighting | [Color schemes][schemes], [V4093.2][dev] | done | `gradients_adjustments_and_tie_breaking`; highlighting/export integration | |
 | Scheme style `glow` | [D4107.209][releases], [V4050.62][dev], [Color schemes][schemes] | done | `real_scheme_loader_drives_bracket_glyphs_glow_and_connected_selection_corners` | |
 | Scheme style `underline` | [D4107.210][releases], [V4074.5][dev], [Color schemes][schemes] | done | `vel-color-scheme` font style parser; `view.rs` | |
 | Scheme style `stippled_underline` | [D4107.213][releases], [V4075.16][dev], [Color schemes][schemes] | done | `vel-color-scheme` font style, `vel-render` decorations | |
 | Scheme style `squiggly_underline` | [D4107.213][releases], [V4075.16][dev], [Color schemes][schemes] | done | `vel-color-scheme` font style, `vel-render` decorations | |
 | Scheme `inactive_selection_border` | [D4107.211][releases], [V4074.6][dev], [Color schemes][schemes] | done | `view.rs`, `vel-color-scheme/tests/round17.rs` | |
-| Scheme bracket, tag, gutter, diff, rulers and guide assets/colors | [Color schemes][schemes], [D4107][releases] | partial | `vel-color-scheme/tests/schemes.rs`, `view.rs`, `review_ui.rs` | Main surfaces use scheme properties; not all alternate precedence, CSS and overlay combinations confirmed. |
+| Scheme bracket, tag, gutter, diff, rulers and guide assets/colors | [Color schemes][schemes], [D4107][releases] | partial | (b) `vel-color-scheme/tests/schemes.rs`, `view.rs`, `review_ui.rs` | The main surfaces read these properties. The reference does not specify paint precedence where bracket/tag highlights, diff marks, selections and guides overlap. |
 | Selection-corner style | [V4052.6][dev], [Color schemes][schemes] | done | `borderless_round_selection_reuses_contours_and_square_uses_rectangles` | |
 | .sublime-theme class/attributes/parents/platforms matching | [Themes][themes] | done | `documentation_matching_corpus`, `ordered_distinct_parents_and_negation` | Matching logic distinct from widget coverage. |
 | Theme settings predicates including typed object values | [D4107.218][releases], [V4095.27][dev], [Themes][themes] | done | `cache_settings_platform_state_and_replacement`, `vel-theme/tests/compatibility.rs` | |
 | Theme variables, inheritance and customization commands | [Themes][themes], [D4107.130][releases], [V4095.7][dev] | done | `inheritance_user_rebinding_and_cycles`, `settings_entry.rs` theme/scheme overrides | |
 | Four layered fills/textures, repeat and nine-slice | [Themes][themes], [V4060.3][dev] | done | `vel-theme/textures.rs`, `png_densities_rgba_and_nine_slices` | |
-| Theme transitions, animation and virtual controls | [Themes][themes], [D4107][releases] | partial | `legacy_css_colors_units_and_transitions`; `vel-ui/theme.rs` | Not all theme class/property/transition combinations verified. |
+| Theme transitions, animation and virtual controls | [Themes][themes], [D4107][releases] | partial | (c) `legacy_css_colors_units_and_transitions`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Headless interpolation and matching are tested; live timer cadence, virtual control state changes, and repaint during window activation have not been checked. |
 | OS appearance and separate light/dark scheme and theme | [D4107.54][releases], [V4095.3][dev], [Themes][themes], [Color schemes][schemes] | done | `installed_user_theme_override_reload_appearance_and_corrupt_fallback` | |
 | A bundled dark theme | [D4107.196][releases], [V4095.2][dev] | done | Velocity original theme assets and appearance test | |
 | Theme `title_bar.style` | [D4107.216][releases], [Themes][themes] | done | `vel-theme/registry.rs`, bridge in `app.rs`/platform | Native style use not live-tested. |
 | Theme `sheet_contents` on text/image/HTML | [D4107.219][releases], [V4095.28][dev], [Themes][themes] | done | `app.rs` sheet composition, `vel-theme/registry.rs` | |
 | Theme `sheet_contents.background_modifier` | [D4107.220][releases], [V4095.29][dev], [Themes][themes] | done | `vel-theme/properties.rs`, sheet composition | |
 | Theme `tab_control` focus/selection/state attributes | [D4107.221][releases], [V4095.30][dev], [Themes][themes] | done | `vel-theme/registry.rs`, `app_tabs.rs` scene | |
-| File icon themes | [D4213.5][releases], [V4205.9][dev], [V4206][dev], [Themes][themes] | partial | `file_icons_precedence_and_compound_extensions`, `theme_ui.rs` | Icon selection/layers work; exact 4213 resource compatibility not established. Dev prototype superseded. |
+| File icon themes | [D4213.5][releases], [V4205.9][dev], [V4206][dev], [Themes][themes] | partial | (b) `file_icons_precedence_and_compound_extensions`, `theme_ui.rs` | Global then active-theme mapping works. The 4213 reference does not settle duplicate PNG basenames across packages, path vs. compound-extension collisions, or case sensitivity. |
 | minihtml sheets, popups, phantoms and annotations | [minihtml][minihtml], [D4107.239][releases], [V4065.1][dev] | done | `html_sheet_survives_hot_exit_and_remains_read_only`, `phantoms_reserve_flow_and_track_edits_undo_while_annotations_do_not_add_rows` | Built-in surfaces; Python constructors excluded. |
-| minihtml tags, links and image protocols | [minihtml][minihtml], [V4075.42][dev], [V4073][dev] | partial | `vel-minihtml` layout/protocol tests | Restricted resources; not all URL/tag scenarios match. |
-| Remote minihtml images | [D4186.20][releases], [V4184.12][dev], [minihtml][minihtml] | missing | Resource resolver in `html_ui.rs`, `vel-minihtml` | No general remote image fetch path. |
-| minihtml CSS variables, units, colors, and predefined classes | [minihtml][minihtml] | partial | `css_invalid_values_keep_prior_declarations_and_scheme_css_overrides` | Core subset only. |
+| minihtml tags, links and image protocols | [minihtml][minihtml], [V4075.42][dev], [V4073][dev] | partial | (b) `links_images_tooltips_and_command_data`, `inline_subset_entities_and_bounded_parser` | Core tags, command/browser links and local/data resolution work. URL canonicalization for escaped file/resource paths and animated GIF playback are not specified by the reference. |
+| Remote minihtml images | [D4186.20][releases], [V4184.12][dev], [minihtml][minihtml] | done | (a) `r35_loopback_https_image_decodes_paints_and_reuses_cached_pixels`, `r35_remote_minihtml_placeholder_then_pixels_on_all_three_surfaces`, `r35_anonymous_https_bounds_bytes_redirects_and_credentials` | Verified HTTPS in interactive popups, phantoms and sheets; byte-bounded LRU and placeholders. Public notes announce internet images without a setting, permission gate or limit details. [Velocity policy](../specs/vel-theme-minihtml.md#remote-images). |
+| minihtml CSS variables, units, colors, and predefined classes | [minihtml][minihtml] | partial | (b) `css_invalid_values_keep_prior_declarations_and_scheme_css_overrides`, `dark_light_predefined_variables_fallback_and_cycles` | Basic cascade and palette classes work. Invalid nested color modifiers, custom-property cycles and unit rounding at fractional scales are not established. |
 | minihtml `display: inline-block` and `text-align` | [V4085.6][dev], [minihtml][minihtml] | done | `vel-minihtml/tests/layout.rs`, inline-block golden | |
 | minihtml `white-space: pre` and `pre-wrap` | [D4180.50][releases], [minihtml][minihtml] | done | `preserved_wrapping_nonbreaking_space_and_unicode_remain_intact` | |
-| minihtml `white-space: nowrap` | [D4107.245][releases], [minihtml][minihtml] | partial | `vel-minihtml` CSS/layout | Exact nowrap interactions unverified. |
-| minihtml `title` attribute tooltips | [V4085.7][dev], [minihtml][minihtml] | partial | `vel-minihtml` layout/link model | End-to-end tooltip compatibility not established. |
+| minihtml `white-space: nowrap` | [D4107.245][releases], [minihtml][minihtml] | partial | (b) `lists_whitespace_headings_and_hidden_content` | Basic no-soft-wrap overflow works. Exact break behavior at mixed nowrap/normal inline runs and nested inline-block boundaries is unverified. |
+| minihtml `title` attribute tooltips | [V4085.7][dev], [minihtml][minihtml] | done | (a) `r35_html_sheet_title_hover_is_painted_and_dismissed`, `links_images_tooltips_and_command_data` | HTML sheets paint tooltips from clipped hover regions like popups and phantoms. Empty titles suppress inherited text. No claim of identical hover delay or pixels. |
 
 ## Build, Git and command line
 

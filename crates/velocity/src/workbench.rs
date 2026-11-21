@@ -1188,19 +1188,25 @@ impl Workspace {
                 self.workbench.set_layout(menu_layout(args)?)?;
                 self.focus_current_group()?;
             }
-            "focus_group" | "move_to_group" => {
+            "focus_group" | "move_to_group" | "move_to"
+                if name != "move_to" || args.get("group").is_some() =>
+            {
                 let group = args["group"].as_u64().ok_or("group index required")? as usize;
                 if group >= self.workbench.groups.len() {
                     return Err("unknown group".into());
                 }
                 if name == "move_to_group" {
                     self.workbench.move_active(group)?;
+                } else if name == "move_to" {
+                    // Build 4126: the window form moves all selected sheets, unlike
+                    // move_to_group. The caret form remains a text command.
+                    self.workbench.move_selected(group)?;
                 } else {
                     self.workbench.active = group;
                 }
                 self.focus_current_group()?;
             }
-            "focus_neighboring_group" | "move_to_neighboring_group" => {
+            "focus_neighboring_group" | "move_to_neighboring_group" | "move_to_neighbouring" => {
                 if let Some(group) = self
                     .workbench
                     .layout
@@ -1208,6 +1214,8 @@ impl Workspace {
                 {
                     if name == "move_to_neighboring_group" {
                         self.workbench.move_active(group)?;
+                    } else if name == "move_to_neighbouring" {
+                        self.workbench.move_selected(group)?;
                     } else {
                         self.workbench.active = group;
                     }
@@ -1255,6 +1263,23 @@ impl Workspace {
                 let id = self.tabs[self.active].sheet;
                 self.workbench.groups[self.workbench.active].click(id, false, false);
             }
+            "deselect_tabs_to_left" | "deselect_tabs_to_right" => {
+                let g = &mut self.workbench.groups[self.workbench.active];
+                if let Some(at) = g
+                    .focused
+                    .and_then(|id| g.sheets.iter().position(|s| *s == id))
+                {
+                    let removed = if name == "deselect_tabs_to_left" {
+                        &g.sheets[..at]
+                    } else {
+                        &g.sheets[at + 1..]
+                    };
+                    for id in removed {
+                        g.selected.remove(id);
+                    }
+                    g.anchor = g.focused;
+                }
+            }
             "select_tab" | "select_tab_to_left" | "select_tab_to_right" | "focus_selected_tab" => {
                 let g = &mut self.workbench.groups[self.workbench.active];
                 let ids = if name == "focus_selected_tab" {
@@ -1271,11 +1296,12 @@ impl Workspace {
                         name == "select_tab_to_right" || args["forward"].as_bool().unwrap_or(false);
                     let next = (current as isize + if forward { 1 } else { -1 })
                         .rem_euclid(ids.len() as isize) as usize;
-                    if name == "focus_selected_tab" {
-                        g.focused = Some(ids[next]);
-                    } else {
-                        g.click(ids[next], true, false);
+                    g.focused = Some(ids[next]);
+                    if name != "focus_selected_tab" {
+                        g.selected.insert(ids[next]);
+                        g.anchor = g.focused;
                     }
+                    g.touch_focus();
                     self.focus_current_group()?;
                 }
             }

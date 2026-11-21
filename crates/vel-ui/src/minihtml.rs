@@ -1,16 +1,19 @@
 //! Retained minihtml documents, font metrics, popup lifecycle and clipped hit testing.
+use crate::images::remote;
 use crate::theme::rgba;
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
 };
 use vel_minihtml::{
-    DisplayItem, DisplayList, Document, FontMetrics, LayoutOptions, LinkTarget, TextMetrics,
-    TextStyle,
+    DisplayItem, DisplayList, Document, FontMetrics, ImageSource, LayoutOptions, LinkTarget,
+    TextMetrics, TextStyle,
 };
 use vel_platform::{Point, Rect, Size};
 use vel_render::scene::{FontStyle, Layer, Scene, TextRun, Underline};
+
+pub use crate::images::remote::enable as enable_remote_images;
 
 /// Text measurement shared by minihtml layout and the renderer's proportional shaping path.
 /// The default is deterministic and device-free; native loading is always explicit.
@@ -38,11 +41,11 @@ impl Metrics {
     }
     /// Polls completed image decodes and reports whether layouts should be invalidated.
     pub fn poll_images(&self) -> bool {
-        self.images.poll()
+        self.images.poll() | remote::poll()
     }
     /// Whether the host should schedule a bounded worker poll.
     pub fn images_pending(&self) -> bool {
-        self.images.pending()
+        self.images.pending() || remote::pending()
     }
     /// Whether native text shaping has been explicitly initialized.
     #[cfg(target_os = "macos")]
@@ -122,6 +125,7 @@ pub struct Html {
     pub source: String,
     document: Document,
     images: HashMap<String, std::sync::Arc<vel_render::scene::Image>>,
+    remote: Option<Box<RemoteDocument>>,
     key: Option<(u64, u32, u32)>,
     /// Layout display list in document coordinates.
     pub display: DisplayList,
@@ -132,6 +136,13 @@ pub struct Html {
     /// Horizontal/vertical scroll in logical points.
     pub scroll: Point,
 }
+
+#[derive(Debug, Default)]
+struct RemoteDocument {
+    generation: u64,
+    requested: HashSet<String>,
+}
+
 impl Html {
     /// Parses full minihtml or the restricted completion/quick-panel inline subset.
     pub fn new(source: &str, inline: bool) -> Result<Self, vel_minihtml::Error> {
@@ -144,6 +155,7 @@ impl Html {
             source: source.into(),
             document,
             images: HashMap::new(),
+            remote: None,
             key: None,
             display: DisplayList::default(),
             bounds: Rect::default(),
@@ -166,17 +178,33 @@ impl Html {
             options.max_width.to_bits(),
             options.root_font_size.to_bits(),
         );
-        if self.key == Some(key) {
+        if self.key == Some(key)
+            && self
+                .remote
+                .as_ref()
+                .is_none_or(|d| d.generation == remote::generation())
+        {
             return;
         }
         self.display = vel_minihtml::layout(&self.document, options, metrics);
         self.images.clear();
         for item in &self.display.items {
-            if let DisplayItem::Image { source, .. } = item
-                && let Some(image) = metrics.images.get(source)
-            {
+            let DisplayItem::Image { source, .. } = item else {
+                continue;
+            };
+            if let ImageSource::Https(url) = source {
+                let d = self.remote.get_or_insert_with(Box::default);
+                // Do not let cache eviction cause a fetch/repaint loop when a single
+                // document shows more images than the shared cache can hold.
+                if d.requested.len() < 128 && !d.requested.contains(url) && remote::request(url) {
+                    d.requested.insert(url.clone());
+                }
+            } else if let Some(image) = metrics.images.get(source) {
                 self.images.insert(crate::images::key(source).into(), image);
             }
+        }
+        if let Some(d) = &mut self.remote {
+            d.generation = remote::generation();
         }
         self.key = Some(key);
         self.clamp_scroll();
@@ -397,11 +425,15 @@ impl Html {
                     }
                 }
                 DisplayItem::Image { source, .. } => {
-                    if let Some(image) = self.images.get(crate::images::key(source)) {
+                    let image = match source {
+                        ImageSource::Https(url) => remote::get(url),
+                        _ => self.images.get(crate::images::key(source)).cloned(),
+                    };
+                    if let Some(image) = image {
                         layer.surfaces.push(vel_render::scene::Surface::Image(
                             vel_render::scene::ImageQuad {
-                                image: image.clone(),
                                 source: [0., 0., image.width as f32, image.height as f32],
+                                image,
                                 rect,
                                 clip,
                                 color: [1.; 4],

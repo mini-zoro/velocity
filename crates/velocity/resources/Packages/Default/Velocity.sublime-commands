@@ -910,6 +910,10 @@
     "command": "customize_theme"
   },
   {
+    "caption": "Preferences: Font: Choose…",
+    "command": "choose_font"
+  },
+  {
     "caption": "Preferences: Font: Larger",
     "command": "increase_font_size"
   },

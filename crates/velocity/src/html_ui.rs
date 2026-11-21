@@ -543,7 +543,16 @@ pub fn paint(editor: &Editor, view: &View, scene: &mut Scene) {
             scene.layers.push(edge);
         }
     }
-    if let Some((point, text)) = &html.tooltip {
+    paint_tooltip(editor, scene, viewport, html.tooltip.as_ref());
+}
+
+fn paint_tooltip(
+    editor: &Editor,
+    scene: &mut Scene,
+    viewport: Rect,
+    tooltip: Option<&(Point, String)>,
+) {
+    if let Some((point, text)) = tooltip {
         let mut theme = editor.theme.borrow_mut();
         let style = theme.style(
             editor.ui_id(0xA001),
@@ -553,11 +562,15 @@ pub fn paint(editor: &Editor, view: &View, scene: &mut Scene) {
             ]),
             &editor.settings,
         );
+        let width = 260f64.min(viewport.width);
+        let height = 28f64.min(viewport.height);
         let bounds = Rect {
-            x: point.x.min((view.size.width - 260.).max(0.)),
-            y: (point.y + 20.).min((view.size.height - 28.).max(view.tab_height)),
-            width: 260f64.min(view.size.width),
-            height: 28.,
+            x: point
+                .x
+                .clamp(viewport.x, viewport.x + (viewport.width - width)),
+            y: (point.y + 20.).clamp(viewport.y, viewport.y + (viewport.height - height)),
+            width,
+            height,
         };
         // The label is its own element so the container's shadow is not applied to text.
         let label = theme.style(
@@ -604,15 +617,15 @@ pub fn sheet(editor: &Editor, view: &View) -> Option<Scene> {
         ),
         layers: Vec::new(),
     };
-    sheet.paint(
-        &mut scene,
-        Rect {
-            x: 0.,
-            y: view.tab_height,
-            width: view.size.width,
-            height: (view.size.height - view.tab_height).max(1.),
-        },
-    );
+    let viewport = Rect {
+        x: 0.,
+        y: view.tab_height,
+        width: view.size.width,
+        height: (view.size.height - view.tab_height).max(1.),
+    };
+    sheet.paint(&mut scene, viewport);
+    drop(theme);
+    paint_tooltip(editor, &mut scene, viewport, html.tooltip.as_ref());
     Some(scene)
 }
 

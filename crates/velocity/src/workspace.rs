@@ -796,7 +796,9 @@ pub struct Workspace {
     pub menus: Vec<MenuItem>,
     /// Resource-layered native context menus, keyed by their complete resource filename.
     pub context_menus: BTreeMap<String, Vec<MenuItem>>,
+    pub(crate) widget_context_menu: String,
     pub mousemap: Vec<MouseBinding>,
+    pub scrollbar_mousemap: Vec<MouseBinding>,
     pub palette: Vec<PaletteItem>,
     pub(crate) translations: vel_i18n::Translator,
     preferred_languages: crate::ui_language::PreferredLanguages,
@@ -956,7 +958,9 @@ struct Configuration {
     catalog: Arc<crate::completion::Catalog>,
     menus: Vec<MenuItem>,
     context_menus: BTreeMap<String, Vec<MenuItem>>,
+    widget_context_menu: String,
     mousemap: Vec<MouseBinding>,
+    scrollbar_mousemap: Vec<MouseBinding>,
     palette: Vec<PaletteItem>,
     translations: vel_i18n::Catalogs,
     macro_paths: std::collections::BTreeSet<String>,
@@ -1496,6 +1500,7 @@ impl Configuration {
         let mut menus = Vec::new();
         let mut context_menus: BTreeMap<String, Vec<MenuItem>> = BTreeMap::new();
         let mut mousemap = Vec::new();
+        let mut scrollbar_mousemap = Vec::new();
         let mut palette = Vec::new();
         const LEGACY: &str = "Packages/User/Velocity.sublime-keymap";
         let mut keymaps = resources.matching(".sublime-keymap");
@@ -1562,6 +1567,25 @@ impl Configuration {
                 Err(e) => resource_messages.push(format!("{}: {e}", resource.path)),
             }
         }
+        // The public Menus reference allows Widget.sublime-settings to select
+        // another resource by filename. The other surfaces keep their own names.
+        let widget_context_menu = resources
+            .matching("/Widget.sublime-settings")
+            .into_iter()
+            .rev()
+            .find_map(|resource| {
+                let doc = Document::parse(resource.text().ok()?).ok()?;
+                let name = doc.value["context_menu"].as_str()?.trim();
+                if name.is_empty() || name.contains(['/', '\\']) {
+                    return None;
+                }
+                Some(if name.ends_with(".sublime-menu") {
+                    name.to_owned()
+                } else {
+                    format!("{name}.sublime-menu")
+                })
+            })
+            .unwrap_or_else(|| "Widget Context.sublime-menu".into());
         for resource in resources.matching(".sublime-menu") {
             let name = resource.path.rsplit('/').next().unwrap_or_default();
             let target = match name {
@@ -1572,6 +1596,9 @@ impl Configuration {
                 | "Side Bar Mount Point.sublime-menu"
                 | "Widget Context.sublime-menu"
                 | "Find in Files.sublime-menu" => context_menus.entry(name.to_owned()).or_default(),
+                _ if name == widget_context_menu => {
+                    context_menus.entry(name.to_owned()).or_default()
+                }
                 _ => continue,
             };
             match resource.text().and_then(ui::parse) {
@@ -1628,7 +1655,11 @@ impl Configuration {
         for resource in resources.matching(".sublime-mousemap") {
             match resource.text().and_then(ui::parse_mousemap_with_warnings) {
                 Ok((items, warnings)) => {
-                    mousemap.extend(items);
+                    if resource.path.ends_with("/Scroll Bar.sublime-mousemap") {
+                        scrollbar_mousemap.extend(items);
+                    } else {
+                        mousemap.extend(items);
+                    }
                     mouse_warnings.extend(warnings.into_iter().map(|w| (resource.path.clone(), w)));
                 }
                 Err(e) => mouse_warnings.push((resource.path.clone(), e)),
@@ -1856,7 +1887,9 @@ impl Configuration {
             catalog,
             menus,
             context_menus,
+            widget_context_menu,
             mousemap,
+            scrollbar_mousemap,
             palette,
             translations,
             folders,
@@ -1944,7 +1977,9 @@ impl Workspace {
             catalog,
             menus,
             context_menus,
+            widget_context_menu,
             mousemap,
+            scrollbar_mousemap,
             palette,
             translations,
             macro_paths,
@@ -2019,7 +2054,9 @@ impl Workspace {
             stdout_sheets: Default::default(),
             menus,
             context_menus,
+            widget_context_menu,
             mousemap,
+            scrollbar_mousemap,
             palette,
             ui: crate::ui_text::Chrome::new(&localizer),
             translations: localizer,
@@ -3526,7 +3563,9 @@ impl Workspace {
                     self.keymap = config.keymap;
                     self.menus = config.menus;
                     self.context_menus = config.context_menus;
+                    self.widget_context_menu = config.widget_context_menu;
                     self.mousemap = config.mousemap;
+                    self.scrollbar_mousemap = config.scrollbar_mousemap;
                     if self.palette != config.palette {
                         self.palette_revision = self.palette_revision.wrapping_add(1);
                     }

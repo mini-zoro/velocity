@@ -43,4 +43,37 @@ Add a non-US layout (e.g. German or French) in System Settings › Keyboard and 
       lines don't start with "。" or "，".
 - [ ] Close a window, quit, relaunch: closed windows do not come back; windows open at quit do.
 
+## 6. Round 35 windows and resources
+
+- [ ] **App tabs vs. editor tabs:** With two Velocity windows and multiple editor
+      tabs, check window switching and editor tab cycling separately, including
+      with macOS window tab preference set to Always. Velocity currently disables
+      AppKit tab groups. Native app-tab cycling, merge and restore require separate
+      implementation and validation against the documented macOS behavior.
+- [ ] **Scrollbar system policy:** In a long document with no scrollbar mousemap
+      override, switch between “Jump to the next page” and “Jump to the spot
+      that's clicked” in System Settings. Click the track with and without
+      Option; drag the thumb. Repeat with overlay scrollbars, checking that the
+      hidden track doesn't consume text clicks and that a live setting change
+      affects the open window.
+- [ ] **GPU initialization:** Check startup, resize and mixed-DPI display moves
+      on Apple Silicon and Intel, where available. Record the startup diagnostics
+      and error if the Metal adapter cannot initialize. Do not mark fallback
+      verified: a software window backend and equivalent Console diagnostics
+      are not implemented.
+- [ ] **Font chooser:** Open Preferences › Font › Choose. Confirm the installed
+      families and initial selection, then choose a different family and check
+      the actual glyphs, caret, and wrapping. Cancel a second visit and verify
+      the family stays unchanged. Test a syntax-specific `font_face` override.
+- [ ] **Physical keypad and menu shortcuts:** With a numeric keypad, bind keypad
+      digits, operators, decimal and Enter to distinguishable actions and check
+      that the main keyboard keys remain independent. Repeat with a decimal-comma
+      keyboard layout if available. With a Velocity User keymap override, compare
+      the native menu label and invoked action before and after changing input source.
+- [ ] **Theme transitions:** Install a Velocity fixture theme with tab hover and
+      selection transitions and a tooltip opacity rule. Move quickly between tabs,
+      bring a second window to the front and switch light/dark appearance mid-transition.
+      Check virtual state, animation on the next frame, clipping and final colors
+      with `animation_enabled` both on and off.
+
 Record results in `crates/velocity/MANUAL_TEST.md` (section "Live checks") or tell the agent.

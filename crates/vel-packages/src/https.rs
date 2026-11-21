@@ -2,7 +2,7 @@
 use crate::{Result, invalid};
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -28,10 +28,30 @@ impl HttpsClient {
     /// Writes to an existing temporary file; callers validate and commit it afterwards.
     /// Redirects are restricted to HTTPS, `.curlrc` is ignored, and response bodies are bounded.
     pub fn download(&self, url: &str, destination: &Path, max_bytes: u64) -> Result<()> {
-        validate_url(url)?;
-        if self.timeout.is_zero() || max_bytes == 0 || max_bytes == u64::MAX {
-            return Err(invalid("invalid HTTPS limits"));
-        }
+        self.validate(url, max_bytes)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(destination)?;
+        self.transfer(url, max_bytes, &mut file, false)
+    }
+
+    /// Fetches untrusted content without proxies, cookies, referer, or URL credentials.
+    /// HTTPS redirects are limited to three and subject to the same transport policy.
+    pub fn fetch_anonymous(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        self.validate(url, max_bytes)?;
+        let mut bytes = Vec::new();
+        self.transfer(url, max_bytes, &mut bytes, true)?;
+        Ok(bytes)
+    }
+
+    fn transfer(
+        &self,
+        url: &str,
+        max_bytes: u64,
+        destination: &mut impl Write,
+        anonymous: bool,
+    ) -> Result<()> {
         #[cfg(target_os = "macos")]
         let executable = "/usr/bin/curl";
         #[cfg(not(target_os = "macos"))]
@@ -40,20 +60,25 @@ impl HttpsClient {
         command
             .args([
                 "--disable",
+                "--globoff",
                 "--fail",
                 "--silent",
                 "--show-error",
                 "--location",
                 "--max-redirs",
-                "5",
+                if anonymous { "3" } else { "5" },
                 "--proto",
                 "=https",
                 "--proto-redir",
                 "=https",
                 "--noproxy",
-                "localhost,127.0.0.1,::1",
+                if anonymous {
+                    "*"
+                } else {
+                    "localhost,127.0.0.1,::1"
+                },
                 "--connect-timeout",
-                "10",
+                if anonymous { "3" } else { "10" },
                 "--max-time",
                 &self.timeout.as_secs_f64().to_string(),
                 "--max-filesize",
@@ -62,22 +87,29 @@ impl HttpsClient {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if anonymous {
+            command.arg("--disallow-username-in-url");
+            for key in [
+                "CURL_CA_BUNDLE",
+                "SSL_CERT_FILE",
+                "SSL_CERT_DIR",
+                "SSLKEYLOGFILE",
+            ] {
+                command.env_remove(key);
+            }
+        }
         if let Some(ca) = &self.ca_certificate {
             command.arg("--cacert").arg(ca);
         }
         // Independently bound the stream: older system curls only enforce --max-filesize
-        // when Content-Length is present. Limit disk writes even for chunked responses.
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(destination)?;
+        // when Content-Length is present. Limit writes even for chunked responses.
         let mut child = command.arg("--url").arg(url).spawn()?;
         let mut stream = child
             .stdout
             .take()
             .expect("piped curl stdout")
             .take(max_bytes + 1);
-        let copied = io::copy(&mut stream, &mut file);
+        let copied = io::copy(&mut stream, destination);
         if !copied.as_ref().is_ok_and(|size| *size <= max_bytes) {
             let _ = child.kill();
             let _ = child.wait();
@@ -89,6 +121,14 @@ impl HttpsClient {
             return Err(invalid(format!(
                 "HTTPS download failed (curl status {status})"
             )));
+        }
+        Ok(())
+    }
+
+    fn validate(&self, url: &str, max_bytes: u64) -> Result<()> {
+        validate_url(url)?;
+        if self.timeout.is_zero() || max_bytes == 0 || max_bytes == u64::MAX {
+            return Err(invalid("invalid HTTPS limits"));
         }
         Ok(())
     }

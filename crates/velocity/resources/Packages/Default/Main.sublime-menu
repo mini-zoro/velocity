@@ -1301,6 +1301,13 @@
         "caption": "Font",
         "children": [
           {
+            "caption": "Choose…",
+            "command": "choose_font"
+          },
+          {
+            "caption": "-"
+          },
+          {
             "caption": "Larger",
             "command": "increase_font_size"
           },

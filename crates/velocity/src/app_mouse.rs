@@ -51,6 +51,7 @@ impl App {
         }
         let captured = matches!(event.kind, MouseKind::Drag | MouseKind::Up)
             && (self.view.pointer_gesture_active()
+                || self.scrollbar_binding_button == Some(event.button)
                 || self.drag_select.is_some()
                 || self.drag_text.is_some());
         if event.kind == MouseKind::Down {
@@ -130,9 +131,21 @@ impl App {
         }
         if event.is_context_click()
             && self
-                .mouse_binding(event.button + 1, event.click_count, event.modifiers, true)
+                .mouse_binding(
+                    event.button + 1,
+                    event.click_count,
+                    event.modifiers,
+                    true,
+                    self.point_over_scrollbar(event.position),
+                )
                 .or_else(|| {
-                    self.mouse_binding(event.button + 1, event.click_count, event.modifiers, false)
+                    self.mouse_binding(
+                        event.button + 1,
+                        event.click_count,
+                        event.modifiers,
+                        false,
+                        self.point_over_scrollbar(event.position),
+                    )
                 })
                 .is_none()
         {
@@ -468,12 +481,32 @@ impl App {
                 Ok(false) => {}
             }
         }
+        let over_scrollbar = self.point_over_scrollbar(event.position);
+        let captured_scrollbar = self.scrollbar_binding_button == Some(event.button);
+        let scrollbar = over_scrollbar || (event.kind != MouseKind::Down && captured_scrollbar);
+        if event.kind == MouseKind::Down {
+            self.scrollbar_binding_button = None;
+            if scrollbar
+                && self
+                    .mouse_binding(
+                        event.button + 1,
+                        event.click_count,
+                        event.modifiers,
+                        false,
+                        true,
+                    )
+                    .is_some()
+            {
+                self.scrollbar_binding_button = Some(event.button);
+            }
+        }
         if matches!(event.kind, MouseKind::Down | MouseKind::Up)
             && let Some((name, mut args)) = self.mouse_binding(
                 event.button + 1,
                 event.click_count,
                 event.modifiers,
                 event.kind == MouseKind::Down,
+                scrollbar,
             )
         {
             vel_config::ui::merge_context_arg(
@@ -484,6 +517,15 @@ impl App {
             self.run_named(w, &name, &args);
             if event.kind == MouseKind::Up {
                 self.drag_select = None;
+                self.scrollbar_binding_button = None;
+            } else if scrollbar {
+                self.scrollbar_binding_button = Some(event.button);
+            }
+            return;
+        }
+        if self.scrollbar_binding_button == Some(event.button) {
+            if event.kind == MouseKind::Up {
+                self.scrollbar_binding_button = None;
             }
             return;
         }
@@ -700,9 +742,10 @@ impl App {
             } else {
                 vel_config::ui::SCROLL_DOWN
             };
+            let scrollbar = self.point_over_scrollbar(event.position);
             if let Some((name, args)) = self
-                .mouse_binding(button, 1, event.modifiers, true)
-                .or_else(|| self.mouse_binding(button, 1, event.modifiers, false))
+                .mouse_binding(button, 1, event.modifiers, true, scrollbar)
+                .or_else(|| self.mouse_binding(button, 1, event.modifiers, false, scrollbar))
             {
                 self.run_named(w, &name, &args);
                 return;
@@ -740,14 +783,27 @@ impl App {
 }
 
 impl App {
+    fn point_over_scrollbar(&self, point: Point) -> bool {
+        self.view.hit_scrollbar(Point {
+            x: point.x - self.content.x,
+            y: point.y - self.content.y,
+        })
+    }
+
     fn mouse_binding(
         &mut self,
         button: usize,
         count: usize,
         modifiers: Modifiers,
         press: bool,
+        scrollbar: bool,
     ) -> Option<(String, Value)> {
-        if self.workspace.mousemap.is_empty() {
+        let bindings = if scrollbar {
+            &self.workspace.scrollbar_mousemap
+        } else {
+            &self.workspace.mousemap
+        };
+        if bindings.is_empty() {
             return None;
         }
         // A pointer press may just have moved focus out of a panel. Refresh the
@@ -767,7 +823,12 @@ impl App {
         editor.ui_overlay_visible = self.panels.overlay.is_some();
         editor.ui_panel = panel;
         editor.ui_panel_focused = self.panels.focus.route().0 == vel_ui::Surface::Panel;
-        self.workspace.mousemap.iter().rev().find_map(|binding| {
+        let bindings = if scrollbar {
+            &self.workspace.scrollbar_mousemap
+        } else {
+            &self.workspace.mousemap
+        };
+        bindings.iter().rev().find_map(|binding| {
             let expected = [
                 ("ctrl", modifiers.control()),
                 ("alt", modifiers.option()),

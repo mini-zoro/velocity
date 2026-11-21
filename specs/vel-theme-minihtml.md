@@ -65,6 +65,34 @@ copy the Default/Adaptive themes or their textures; design our own.
 - Budgets: layout of a typical LSP hover popup (≈2 KB HTML) ≤ 0.5 ms; 200 annotations ≤ 5 ms.
 - Tests: golden display lists for documentation-style snippets.
 
+### Remote images
+
+[Stable build 4186](https://www.sublimetext.com/download#changelog) and
+[dev build 4184](https://www.sublimetext.com/dev#changelog) announce that minihtml
+can load internet images. The [minihtml reference](https://www.sublimetext.com/docs/minihtml.html#tags)
+lists PNG, JPEG and GIF for local, resource and data URLs. Neither source
+specifies a remote-image preference, an origin permission rule or transport
+limits, so Velocity does not introduce a purported Sublime settings key.
+
+Velocity loads HTTPS image sources in normal interactive minihtml surfaces,
+including popups, phantoms and sheets. Safe Mode and non-interactive modes leave
+remote loading disabled. Anchor links and local, data and resource images keep
+their existing behavior. These are Velocity's safety and resource limits, not
+claims about Sublime internals:
+
+- No cookies, URL credentials, ambient proxy, referer or downgrade to HTTP.
+  TLS certificates are verified. The client allows three HTTPS redirects, a
+  three-second connection timeout, an eight-second request deadline and at most
+  4 MiB of response data.
+- Up to four fetch/decode workers and 32 queued URLs for the application.
+  Decoding is confined to a child process with a two-second deadline; it accepts
+  PNG, JPEG or GIF, with a 2,048-pixel side limit and at most 2,097,152 pixels.
+- One shared in-memory URL LRU holds at most 128 entries and 24 MiB of decoded
+  pixels. Failed URLs are cached as placeholders. A document does not keep
+  pixels from evicted entries alive or repeatedly request them during repaint.
+- A placeholder uses any explicit image dimensions while the request is
+  pending or has failed. On success, layout can use the decoded dimensions.
+
 ## Rules
 
 - Modify only `crates/vel-theme/`, `crates/vel-minihtml/`, `crates/velocity/resources/Packages/Theme - Velocity/`

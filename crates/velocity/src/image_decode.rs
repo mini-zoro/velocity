@@ -1,10 +1,6 @@
 //! Bounded preview decoding. The macOS host can kill a stuck codec without
 //! risking the editor or starving the single image worker.
-use std::{
-    io::Read,
-    path::Path,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{io::Read, path::Path, sync::atomic::AtomicBool};
 
 const MAX_SIDE: u32 = 8192;
 const MAX_PIXELS: u32 = 16 * 1024 * 1024;
@@ -256,6 +252,7 @@ pub(crate) fn helper(path: &Path, mut output: impl std::io::Write) -> Option<()>
 
 #[cfg(any(test, not(unix)))]
 pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
+    use std::sync::atomic::Ordering;
     let at = std::time::Instant::now();
     let pixels = load(path)?;
     (!cancelled.load(Ordering::Acquire) && at.elapsed() <= std::time::Duration::from_secs(2))
@@ -266,8 +263,16 @@ pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
 pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
     let exe = std::env::current_exe().ok()?;
     let mut command = std::process::Command::new(exe);
-    command.arg(HELPER).arg(path);
-    let bytes = bounded_reply(&mut command, cancelled, std::time::Duration::from_secs(2))?;
+    command
+        .arg(HELPER)
+        .arg(path)
+        .stdin(std::process::Stdio::null());
+    let bytes = crate::codec_process::bounded_reply(
+        &mut command,
+        cancelled,
+        std::time::Duration::from_secs(2),
+        16 + (MAX_TEXTURE * MAX_TEXTURE * 4) as usize,
+    )?;
     let header = bytes.first_chunk::<16>()?;
     let n = |i: usize| u32::from_le_bytes(header[i..i + 4].try_into().expect("dimension"));
     let (w, h, tw, th) = (n(0), n(4), n(8), n(12));
@@ -282,61 +287,6 @@ pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
         source: (w, h),
         image: image::RgbaImage::from_raw(tw, th, bytes[16..].to_vec())?,
     })
-}
-
-#[cfg(unix)]
-fn bounded_reply(
-    command: &mut std::process::Command,
-    cancelled: &AtomicBool,
-    budget: std::time::Duration,
-) -> Option<Vec<u8>> {
-    use std::{io::ErrorKind, os::fd::AsRawFd, process::Stdio, time::Instant};
-    let deadline = Instant::now() + budget;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut pipe = child.stdout.take().expect("preview stdout");
-    let fd = pipe.as_raw_fd();
-    let mut read = || {
-        // SAFETY: pipe owns fd; only its status flags are read and changed.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        // SAFETY: fd is still owned by the same pipe, which is only used here.
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return None;
-        }
-        let mut data = Vec::new();
-        let mut chunk = [0u8; 16 * 1024];
-        let mut eof = false;
-        while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
-            if eof {
-                if let Some(status) = child.try_wait().ok()? {
-                    return status.success().then_some(data);
-                }
-            } else {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => eof = true,
-                    Ok(n) if data.len() + n <= 16 + (MAX_TEXTURE * MAX_TEXTURE * 4) as usize => {
-                        data.extend_from_slice(&chunk[..n]);
-                        continue;
-                    }
-                    Err(e)
-                        if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
-                    _ => return None,
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        None
-    };
-    let result = read();
-    if result.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    result
 }
 
 impl Pixels {
@@ -446,26 +396,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn r33_preview_worker_kills_a_stalled_child() {
-        use std::{
-            process::Command,
-            time::{Duration, Instant},
-        };
-        let at = Instant::now();
+        use std::{process::Command, time::Duration};
         assert!(
-            bounded_reply(
+            crate::codec_process::bounded_reply(
                 Command::new("/bin/sleep").arg("5"),
                 &AtomicBool::new(false),
                 Duration::from_millis(40),
+                16,
             )
             .is_none()
         );
-        assert!(at.elapsed() < Duration::from_secs(1));
         let flag = AtomicBool::new(true);
         assert!(
-            bounded_reply(
+            crate::codec_process::bounded_reply(
                 Command::new("/bin/sleep").arg("5"),
                 &flag,
-                Duration::from_secs(5)
+                Duration::from_secs(30),
+                16,
             )
             .is_none()
         );

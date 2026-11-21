@@ -3807,6 +3807,9 @@ impl View {
     pub(crate) fn scrollbar_rects(&self) -> (Rect, Rect) {
         (self.scroll_bar, self.scroll_puck)
     }
+    pub(crate) fn hit_scrollbar(&self, point: Point) -> bool {
+        vel_ui::contains(self.scroll_bar, point)
+    }
     #[cfg(test)]
     pub(crate) fn minimap_rects(&self, e: &Editor) -> (Rect, Rect) {
         let map = self.minimap_geometry(e);
