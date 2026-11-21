@@ -548,12 +548,20 @@ impl RouteRequest {
     pub fn prepare(request: &mut Request, setting: OpenWindow) -> Self {
         if request.project.is_none()
             && let Some(index) = request.files.iter().position(|f| {
-                f.path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sublime-project"))
+                f.path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("sublime-project")
+                        || ext.eq_ignore_ascii_case("sublime-workspace")
+                })
             })
         {
             request.project = Some(request.files.remove(index).path);
+        }
+        if let Some(project) = &mut request.project
+            && project
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sublime-workspace"))
+        {
+            *project = vel_session::project::project_path(project);
         }
         let (mut dirs, mut files) = (std::collections::BTreeSet::new(), Vec::new());
         for file in &request.files {

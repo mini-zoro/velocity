@@ -821,6 +821,65 @@ fn r33_cancel_find_in_files_from_menu_and_palette() {
 }
 
 #[test]
+fn r36_context_setting_counts_both_sides_and_obeys_context_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().canonicalize().unwrap().join("search.txt");
+    std::fs::write(
+        &path,
+        "out\nleft 1\nleft 2\nneedle\nright 1\nright 2\nout\n",
+    )
+    .unwrap();
+    let mut a = app("", "Plain Text", None);
+    a.workspace.settings.set(
+        vel_config::settings::Layer::User,
+        "find_in_files_context_lines",
+        json!(2),
+    );
+    for (context, expected) in [(true, vec![2, 3, 4, 5, 6]), (false, vec![4])] {
+        named(
+            &mut a,
+            "show_panel",
+            json!({"panel":"find_in_files","pattern":"needle","use_buffer":false,"context":context}),
+        );
+        a.panels.where_input.set(path.to_str().unwrap());
+        key(&mut a, "enter");
+        wait_for(&mut a, |a| a.panels.file_complete);
+        let lines = a
+            .panels
+            .result_view
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Line(line) => Some(line.number),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lines, expected);
+    }
+}
+
+#[test]
+fn r36_console_limit_evicts_oldest_and_zero_disables_history() {
+    let mut a = app("", "Plain Text", None);
+    for (limit, text, expected) in [
+        (2, "one\ntwo\nthree", vec!["two", "three"]),
+        (1, "four", vec!["four"]),
+        (0, "five", vec![]),
+    ] {
+        a.workspace.settings.set(
+            vel_config::settings::Layer::User,
+            "console_max_history_lines",
+            json!(limit),
+        );
+        a.panels.note_console(&a.workspace, text);
+        assert_eq!(
+            a.panels.console_history().iter().collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn r35_find_in_files_input_size_context_and_error_policy() {
     use vel_config::settings::Layer;
     let (_dir, first, second) = results_fixture();

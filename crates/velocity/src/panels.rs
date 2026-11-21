@@ -1848,22 +1848,35 @@ impl Panels {
         self.cancel_overlay(workspace);
         self.finish_find_navigation(workspace);
         let message = self.message.clone();
-        self.note_console(&message);
+        self.note_console(workspace, &message);
         self.show_console = true;
         self.panel = Some(Panel::Output);
         self.panel_focused = true;
         self.focus.show(Surface::Panel, true);
         self.focus.set(Surface::Panel, 2);
     }
-    pub(crate) fn note_console(&mut self, message: &str) {
+    fn console_limit(workspace: &Workspace) -> usize {
+        workspace.settings.usize("console_max_history_lines", 80)
+    }
+    #[cfg(test)]
+    pub(crate) fn console_history(&self) -> &std::collections::VecDeque<String> {
+        &self.console_messages
+    }
+    pub(crate) fn note_console(&mut self, workspace: &Workspace, message: &str) {
         // Diagnostic console only; Velocity does not expose a Python command console.
-        for line in message.lines().filter(|line| !line.is_empty()).take(80) {
-            if self.console_messages.back().is_none_or(|last| last != line) {
-                if self.console_messages.len() == 80 {
-                    self.console_messages.pop_front();
+        let limit = Self::console_limit(workspace);
+        let history = &mut self.console_messages;
+        history.drain(..history.len().saturating_sub(limit));
+        if limit == 0 {
+            return;
+        }
+        for line in message.lines().filter(|line| !line.is_empty()) {
+            let line: String = line.chars().take(2048).collect();
+            if history.back() != Some(&line) {
+                if history.len() == limit {
+                    history.pop_front();
                 }
-                self.console_messages
-                    .push_back(line.chars().take(2048).collect());
+                history.push_back(line);
             }
         }
     }
@@ -4342,6 +4355,7 @@ impl Panels {
         &mut self,
         workspace: &mut Workspace,
         tab_action: AcceptTabs,
+        new_window: bool,
         keep_open: bool,
         viewport: Range<usize>,
     ) -> Result<Option<Invocation>, String> {
@@ -4399,7 +4413,7 @@ impl Panels {
             self.overlay,
             Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
         ) {
-            let invocation = self
+            let mut invocation = self
                 .quick
                 .current()
                 .and_then(|i| {
@@ -4410,6 +4424,12 @@ impl Panels {
                     }
                 })
                 .map(|p| p.invocation.clone());
+            if let Some(action) = &mut invocation
+                && action.command == "open_project"
+                && action.args["_quick_switch"] == true
+            {
+                action.args["new_window"] = json!(new_window);
+            }
             if invocation.is_none() {
                 return Ok(None);
             }
@@ -4799,7 +4819,7 @@ impl Panels {
         {
             return Ok((
                 true,
-                self.accept_item(workspace, AcceptTabs::Default, true, viewport)?,
+                self.accept_item(workspace, AcceptTabs::Default, false, true, viewport)?,
             ));
         }
         if key.name == "enter" {
@@ -4812,6 +4832,7 @@ impl Panels {
                         key.modifiers & 4 != 0,
                         key.modifiers & 2 != 0,
                     ),
+                    key.modifiers & 8 != 0,
                     false,
                     viewport,
                 )?,
@@ -4979,7 +5000,11 @@ impl Panels {
                 scope,
                 folders: workspace.folders.clone(),
                 open,
-                context: usize::from(self.files_context),
+                context: if self.files_context {
+                    settings.usize("find_in_files_context_lines", 1).min(100)
+                } else {
+                    0
+                },
             },
             decode,
             files::Limits {
@@ -6852,6 +6877,9 @@ impl Panels {
                     clip,
                 );
                 if self.console_visible() {
+                    let limit = Self::console_limit(workspace);
+                    let discard = self.console_messages.len().saturating_sub(limit);
+                    self.console_messages.drain(..discard);
                     let pad = 10. * self.ui_scale;
                     let height = 18. * self.ui_scale;
                     let count = ((clip.height - 40. * self.ui_scale) / height).max(0.) as usize + 1;
@@ -7705,7 +7733,10 @@ impl Panels {
                     } else {
                         AcceptTabs::from_modifiers(self.primary_click, extend, self.alternate_click)
                     };
-                    let mut invocation = self.accept_item(workspace, action, false, viewport)?;
+                    // Choosing a project with Command opens it in a new window (Quick Switch Project).
+                    let new_window = self.overlay == Some(Overlay::Choices) && self.primary_click;
+                    let mut invocation =
+                        self.accept_item(workspace, action, new_window, false, viewport)?;
                     if let Some(invocation) = &mut invocation {
                         if replace {
                             invocation.args["_replace_focused"] = json!(true);

@@ -138,6 +138,8 @@
   "find_in_files_max_file_size": {"group":"find","control":"number","range":[0,1099511627776],"step":1,"name":"Find in Files Input Size Limit","description":"Skip files larger than this many bytes. Zero removes the limit."},
   "find_in_files_max_result_size": {"group":"find","control":"number","range":[0,1099511627776],"step":1,"name":"Find in Files Output Size Limit","description":"Limit the displayed result bytes. Zero removes the limit; replacements still include hidden matches."},
   "find_in_files_context_characters": {"group":"find","control":"number","range":[0,2147483648],"step":1,"name":"Find in Files Context Characters","description":"Limit characters per result line. Zero keeps the standard preview."},
+  "find_in_files_context_lines": {"group":"find","control":"number","range":[0,100],"step":1,"name":"Find in Files Context Lines","description":"Set how many lines appear before and after each match when Context is on."},
+  "console_max_history_lines": {"group":"developer","control":"number","range":[0,2147483648],"step":1,"name":"Console History Lines","description":"Keep at most this many recent diagnostic lines. Zero disables history."},
   "find_in_files_suppress_errors": {"group":"find","control":"bool","name":"Hide Find in Files Errors","description":"Hide file access and traversal errors in search results."},
   "find_in_files_side_by_side": {"group":"find","control":"bool","name":"Open Matches Beside Find Results","description":"Keep the Find Results tab visible beside the file opened from a match."},
   "io_workers": {"group":"files","control":"number","range":[0,64],"step":1,"name":"File Read and Write Workers","description":"Limit concurrent document reads and writes per window. Zero keeps standard scheduling."},

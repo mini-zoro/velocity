@@ -384,6 +384,7 @@ mod tests {
             neutral,
             [
                 "Help: Release Notes",          // Opens a help page.
+                "Help: Report a Bug",           // Opens the issue tracker.
                 "Help: Velocity Documentation", // Opens the external manual.
                 "Install Command Line Tool…",   // App integration, not a package install.
                 "Open Crash Reports",           // Opens the diagnostic log folder.

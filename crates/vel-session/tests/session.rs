@@ -196,3 +196,39 @@ fn project_comments_relative_rules_and_fresh_workspace_destination() {
         path.with_extension("sublime-workspace")
     );
 }
+#[test]
+fn r36_foreign_workspace_survives_velocity_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project.sublime-project");
+    let source = project.with_extension("sublime-workspace");
+    std::fs::write(&project, "{}").unwrap();
+    let foreign = b"{\"version\": \"other\", \"opaque_payload\":[1,2,3]}";
+    std::fs::write(&source, foreign).unwrap();
+    let recovery = vel_session::load_project_workspace(&project, Some(dir.path()));
+    assert!(recovery.source.is_none());
+    assert!(
+        recovery
+            .messages
+            .iter()
+            .any(|message| message.contains("kept"))
+    );
+    let writer = vel_session::Writer::for_project(
+        project.clone(),
+        Some(dir.path().to_path_buf()),
+        std::time::Duration::from_secs(30),
+    )
+    .unwrap();
+    let session = vel_session::Session {
+        recent_files: vec![dir.path().join("example.txt")],
+        ..Default::default()
+    };
+    writer.changed(session.clone()).unwrap();
+    writer.flush().unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), foreign);
+    let recovered = vel_session::load_project_workspace(&project, Some(dir.path()));
+    assert_eq!(
+        recovered.source,
+        Some(project.with_extension("velocity-workspace"))
+    );
+    assert_eq!(recovered.session.recent_files, session.recent_files);
+}

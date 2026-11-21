@@ -102,6 +102,7 @@ enum Publication {
 pub struct StatusSource {
     pub indices: Vec<Arc<ProjectIndex>>,
     pub loading: bool,
+    pub enabled: bool,
     pub(crate) labels: crate::ui_text::IndexLabels,
 }
 impl StatusSource {
@@ -557,6 +558,7 @@ impl Intelligence {
             let mut status = self.status_source.lock().unwrap();
             status.indices = self.projects.iter().map(|p| p.index.clone()).collect();
             status.loading = self.loading.is_some();
+            status.enabled = workspace.settings.bool("index_files", true);
         }
         changed
     }
@@ -1052,19 +1054,25 @@ pub fn status_text_localized(
 #[derive(Debug)]
 pub struct StatusWindow {
     source: Arc<Mutex<StatusSource>>,
+    owner: vel_platform::WindowHandle,
     renderer: Option<vel_render::Renderer>,
     fonts: Option<vel_render::font::Fonts>,
     scroll: f64,
 }
 #[cfg(target_os = "macos")]
 impl StatusWindow {
-    pub fn new(source: Arc<Mutex<StatusSource>>) -> Self {
+    pub fn new(source: Arc<Mutex<StatusSource>>, owner: vel_platform::WindowHandle) -> Self {
         Self {
             source,
+            owner,
             renderer: None,
             fonts: None,
             scroll: 0.,
         }
+    }
+    fn toggle(&self, w: &vel_platform::WindowHandle) {
+        self.owner.dispatch_named_command("toggle_indexing", "{}");
+        w.request_frame();
     }
 }
 #[cfg(target_os = "macos")]
@@ -1081,9 +1089,31 @@ impl vel_platform::AppHandler for StatusWindow {
     }
     fn on_scroll(&mut self, w: &vel_platform::WindowHandle, event: vel_platform::ScrollEvent) {
         let lines = self.source.lock().unwrap().text().lines().count() as f64;
-        let maximum = (lines - w.content_size().height / 20.).max(0.);
+        let maximum = (lines - (w.content_size().height - 32.) / 20.).max(0.);
         self.scroll = (self.scroll - event.delta_y / 20.).clamp(0., maximum);
         w.request_frame();
+    }
+    fn on_key(&mut self, w: &vel_platform::WindowHandle, event: vel_platform::KeyEvent) -> bool {
+        if event.state == vel_platform::KeyState::Down
+            && event.characters == " "
+            && !event.repeat
+            && !event.modifiers.command()
+            && !event.modifiers.option()
+            && !event.modifiers.control()
+        {
+            self.toggle(w);
+            return true;
+        }
+        false
+    }
+    fn on_mouse(&mut self, w: &vel_platform::WindowHandle, event: vel_platform::MouseEvent) {
+        if event.kind == vel_platform::MouseKind::Down
+            && event.button == 0
+            && (8. ..32.).contains(&event.position.y)
+            && (8. ..300.).contains(&event.position.x)
+        {
+            self.toggle(w);
+        }
     }
     fn on_resize(&mut self, _: &vel_platform::WindowHandle, size: vel_platform::Size, scale: f64) {
         if let Some(renderer) = &mut self.renderer {
@@ -1099,22 +1129,24 @@ impl vel_platform::AppHandler for StatusWindow {
             height: size.height,
         };
         let mut layer = vel_render::scene::Layer::default();
-        let status_text = {
+        let (status_text, toggle) = {
             let source = self.source.lock().unwrap();
             ctx.window.set_title(&source.labels.title);
-            source.text()
+            let check = if source.enabled { "x" } else { " " };
+            (source.text(), format!("[{check}] {}", source.labels.enable))
         };
+        vel_ui::label(&mut layer, &toggle, 12., 24., clip, [0.85, 0.9, 0.96, 1.]);
         for (i, line) in status_text
             .lines()
             .skip(self.scroll.floor() as usize)
-            .take((size.height / 20.) as usize)
+            .take(((size.height - 32.) / 20.) as usize)
             .enumerate()
         {
             vel_ui::label(
                 &mut layer,
                 line,
                 12.,
-                22. + i as f64 * 20.,
+                54. + i as f64 * 20.,
                 clip,
                 [0.85, 0.9, 0.96, 1.],
             );

@@ -13,19 +13,20 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Area | Done | Partial | Missing | Out of scope |
 | --- | ---: | ---: | ---: | ---: |
 | Editing and selection | 55 | 3 | 0 | 0 |
-| Search and navigation | 56 | 7 | 0 | 0 |
-| Files, projects and sessions | 50 | 11 | 1 | 1 |
+| Search and navigation | 57 | 6 | 0 | 0 |
+| Files, projects and sessions | 54 | 7 | 1 | 1 |
 | Windows, tabs and display | 72 | 8 | 0 | 1 |
-| Language, completion and Vintage | 53 | 12 | 0 | 0 |
+| Language, completion and Vintage | 55 | 10 | 0 | 0 |
 | Customization and resources | 42 | 11 | 0 | 0 |
-| Build, Git and command line | 40 | 13 | 0 | 0 |
+| Build, Git and command line | 42 | 11 | 0 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **368** | **65** | **1** | **7** |
+| **Total** | **377** | **56** | **1** | **7** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
 
-- Snapshot: Velocity Round 34 lane B, based on `bc4c141`.
+- Baseline audit: Velocity Round 34 lane B, based on `bc4c141`. Round 36 lane C
+  rechecks Editing, Search, Files, Language, and Build against `bbf4965`.
   A **done** row has a runtime reader, executable command or named regression;
   it does not imply pixel parity, native UI automation, or identical performance.
   **Partial** says what works and what still differs. **Missing** means no
@@ -67,7 +68,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Expand to indentation | [Commands][commands] | done | `expand_word_line_indentation_and_split` | |
 | Expand to scope | [V4052.5][dev] | done | `expand_selection` with `to: scope`; `editing.rs` | Syntax scopes must be available. |
 | Expand to tag | [Commands][commands] | done | `expand_selection` with `to: tag`; `editing.rs` | |
-| Expand to Block; paragraph as a separate target | [D4121.25][releases] | partial | `expand_selection_to_paragraph`, `expand_selection` | Verify the newer Block/Paragraph distinction against the editor variants. |
+| Expand to Block; paragraph as a separate target | [D4121.25][releases] | partial | `r36_block_command_and_report_a_bug_menu` | Block now has its own menu and palette target for blank-line blocks. 4121 says Block took over the old Paragraph behavior, but does not define the newer Paragraph boundaries for indented prose or comments; Velocity's existing Paragraph behavior is unchanged. |
 | Insert/delete graphemes at many carets | [Multiple selection][multi] | done | `insert_replaces_unicode_multicursors_and_paste_distributes`, `delete_zwj_and_combining_graphemes` | |
 | Word motions and deletion | [Commands][commands] | done | `words_subwords_ends_and_stops`, `delete_words_forward_backward_and_newlines` | |
 | `word_separators` | [Settings][settings] | done | `vel-buffer/ops.rs`; [setting readers](settings.md) | |
@@ -78,7 +79,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Duplicate line or selection | [Commands][commands] | done | `duplicate_selected_text_or_caret_lines` | |
 | Delete line, including multiple selected rows | [Commands][commands] | done | `run_command("delete_line")` via `vel-commands`; `line_commands_transform_separate_selected_blocks` | |
 | Swap lines up/down | [D4107][releases], [V4050][dev] | done | `swap_blocks_and_preserve_final_newline_and_column` | |
-| Join lines | [D4166][releases], [D4213][releases] | partial | `join_preserves_interior_selection_and_legacy_unverified_spacing` | Existing implementation does not establish 4213 right-bracket spacing. |
+| Join lines | [D4166][releases], [D4213][releases] | partial | `join_preserves_interior_selection_and_legacy_unverified_spacing` | Selections stay attached; Velocity inserts a space at each join. 4213 mentions right brackets but does not say which of `)`, `]`, and `}` omit a space or how already padded delimiters behave. |
 | Sort lines | [Commands][commands], [D4107][releases] | done | `sorting_without_a_selection_sorts_the_whole_buffer`, `sort_reverse_multiple_blocks_unicode_no_final_lf` | |
 | Sort selection | [Commands][commands] | done | `sort_selection`; `selected_strings_move_between_variable_length_slots_without_touching_gaps` | |
 | Permute lines: reverse, unique, shuffle | [Commands][commands] | done | `line_permutations_deduplicate_stably_and_preserve_line_structure`, `shuffle_is_reproducible_and_preserves_the_multiset` | |
@@ -86,7 +87,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Upper/lower/title/swap case | [Commands][commands] | done | `unicode_case_length_changes_and_title_swap` | |
 | Convert identifier case (camel, Pascal, snake, kebab and related forms) | [D4142.6][releases], [V4128.1][dev] | done | `identifier_cases_cover_acronyms_unicode_and_multi_caret_overlap` | |
 | Wrap Paragraph | [D4107][releases], [V4050][dev] | done | `paragraphs_wrap_once_with_display_width_and_retain_blank_separators`, `wrapping_prefix_probe_table_keeps_comments_and_code_separate` | |
-| Line and block comment commands | [D4142][releases], [V4130][dev] | partial | `toggle_comment` reads syntax metadata in `editing.rs` | Broad support; no claim of identical embedded-language behavior. |
+| Line and block comment commands | [D4142][releases], [V4130][dev] | partial | `round21_comment_flags_variants_and_round_trip`; `toggle_comment` | Numbered markers, indent and case flags work. The [comment reference][comments] does not specify marker precedence or how a selection crossing host and embedded language boundaries is split. |
 | Mark, kill/yank and exchange mark | [Commands][commands] | done | `named_mark_kills_yank_and_repeat_use_application_state` | |
 | Bookmarks, navigation, clear, and select all | [Commands][commands], [D4166][releases] | done | `bookmark_regions_and_marks_follow_edits_navigation_and_kills`; `toggle_bookmark`, `select_all_bookmarks` | |
 | Paste and paste-and-indent | [Commands][commands] | done | `clipboard_snippets_newline_tabs_and_typing_groups`; `paste_and_indent` | |
@@ -117,7 +118,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Feature | Sublime source (URL + build) | Velocity status | Evidence | Notes |
 | --- | --- | --- | --- | --- |
 | Find next/previous, highlight and match count | [Search][search] | done | `find_next`, `find_prev`, `Panels::update_find_status` | |
-| Literal vs regex Find/Replace | [Search][search] | partial | `vel-search/text.rs`, `vel-search/files/multiline.rs` | Velocity regex support does not imply identical behavior across all Sublime expressions. |
+| Literal vs regex Find/Replace | [Search][search] | partial | `vel-search/text.rs`, `vel-search/files/multiline.rs` | Literal and regex modes work. The guide identifies Boost's regex engine but does not specify its 4213 option set or replacement behavior for zero-width and cross-line captures. |
 | Match case | [Search][search] | done | `text::Options::case_sensitive`; `find_incremental_wrap_skip_whole_word_and_case` | |
 | Whole word | [Search][search] | done | `text::Options::whole_word`; same regression | |
 | Wrap on navigation | [Search][search] | done | `text::Options::wrap`; same regression | |
@@ -137,19 +138,19 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `use_find_clipboard` (macOS system Find pasteboard) | [D4121.49][releases], [V4115.12][dev] | done | `vel-platform::FindPasteboard`; `r35_find_pasteboard_has_its_own_channel_and_respects_seeding` | Default on per the documented opt-out. ⌘E writes the named Find pasteboard; explicit query and single-line selection seeding take precedence on Find focus. |
 | Find in Files parallel traversal and ordered results | [D4151][releases], [V4130][dev] | done | `find_in_files_start`, `vel-search/files.rs::Task` | |
 | Find/Cancel Find in Files menu item | [D4107.190][releases], [V4075.5][dev] | done | `Panels::cancel_files`; `r33_cancel_find_in_files_from_menu_and_palette`; `find_results_tab_records_escape_and_panel_close_cancellation` | Dedicated menu and palette command enabled while searching; closes the worker and records cancellation in the chosen destination. |
-| Find in Files Where locations and include/exclude patterns | [Search][search], [File patterns][patterns], [V4149][dev] | partial | `files::Where::parse`; Where scope menu test | Project/open/current/absolute locations and quoted spaces; not every combination of relative directory and quoting is established. |
+| Find in Files Where locations and include/exclude patterns | [Search][search], [File patterns][patterns], [D4151][releases], [V4149][dev] | partial | `r36_where_combines_scopes_filters_and_unique_live_buffers` | Recognizes explicit `./` roots, including quoted directory names, and searches a live buffer only once even for clones. The docs do not specify the base for relative literals in multi-root projects or escaping for literal quotes and commas. |
 | Find in Files option Use .gitignore / `use_gitignore` | [D4107.186][releases], [V4072.1][dev], [Theme control][themes], [public support discussion][find-default] | done | `find_in_files_gitignore_controls_disk_walk_not_open_files_and_invalidates_replace`; `find_in_files_where_menu_sets_scope_without_changing_the_query` | Default on based on public fresh-install/default reports; independent of symbol indexing and Goto. Explicit live scopes still search unsaved buffers. |
 | Find in Files result buffer vs panel | [Search][search], [Themes][themes], [D3](behavior.md) | done | `panels/find_results.rs`, `Panel::Results`; `find_results_tab_format_scopes_append_and_reopen`, `find_results_tab_toggle_persists_and_both_destinations_navigate` | One editable scratch tab per window, append and reveal each new search. The persistent Use Buffer toggle selects the destination for the next run. |
 | Find Results jumps | [Search][search], [D4166][releases] | done | `Panels::jump_tab_result`, `Panels::jump_result`; `find_results_tab_return_double_click_and_command_click_follow_edited_regions` | Return, double-click, and D3's Command-click follow tracked locations on numbered rows. F4/Shift+F4 and Goto > Results walk the latest search in either destination. |
 | Find in Files Preserve Case and confirmed replace | [D4107.187][releases], [V4095.10][dev] | done | `replace_in_files`, `FileChange::prepare_with_decode`, `Panels::report_file_replacements` | Uses on-disk transaction safeguards; asks to save edited target buffers first. Writes the report to the same search destination. |
-| Find in Files large results and graceful degradation | [D4107][releases], [V4075.7][dev] | partial | `vel-search/files/multiline.rs`; `find_results_tab_streams_while_typing_within_frame_budget` | Bounded worker queue and line previews; the tab gets batched ordered text updates. Sublime's exact time/memory/skip decisions are not reproduced. |
+| Find in Files large results and graceful degradation | [D4107][releases], [V4075.7][dev] | partial | `vel-search/files/multiline.rs`; `find_results_tab_streams_while_typing_within_frame_budget` | Bounded queue, previews and ordered batched output work. The notes do not specify when multiline regex falls back, which oversize rows are skipped, or how much earlier report text is retained under pressure. |
 | `find_in_files_max_file_size` | [D4142.23][releases], [V4134.7][dev] | done | `vel-search::files::Limits`; `r35_find_in_files_input_size_context_and_error_policy` | Skips candidates above the configured byte count before decoding. Existing unlimited default retained. |
 | `find_in_files_max_result_size` | [D4126][releases] | done | `Panels::ResultBudget`; `r35_find_in_files_output_budget_does_not_limit_replacement` | Caps each report without hiding matches from replacement; earlier D3 reports are retained. Default 0 keeps the previous unlimited output. |
 | `find_in_files_context_characters` | [D4166][releases] | done | `vel-search::files::Line::limit_preview`; `r35_find_in_files_input_size_context_and_error_policy` | A positive setting trims Unicode columns without losing the original jump column. Zero keeps the existing disk and live-buffer preview rules. |
-| `find_in_files_context_lines` | [D4151.15][releases], [V4149.5][dev] | partial | `Panels::start_files`, persisted Context toggle | One surrounding line when enabled, none when disabled. No numeric setting reader. |
+| `find_in_files_context_lines` | [D4151.15][releases], [V4149.5][dev] | done | `r36_context_setting_counts_both_sides_and_obeys_context_toggle`; [reader](settings.md) | Applies to the next search and honors Context. Velocity retains one as its default and bounds the value to 100 per side. |
 | `find_in_files_suppress_errors` | [D4151.14][releases], [V4149.5][dev] | done | `vel-search::files::Limits`; `r35_find_in_files_input_size_context_and_error_policy` | Suppresses traversal/read diagnostics only. Default false retains error reporting. |
 | `find_in_files_side_by_side` | [D4151.16][releases], [V4145.4][dev] | done | `Panels::open_result_target`; `r35_current_result_preserves_next_previous_and_opens_beside_tab` | Uses tab multi-select to keep the Find Results tab visible beside opened matches. Opt-in; panel destination unchanged. |
-| Find in Files tab multi-select modifiers | [D4151][releases], [V4145][dev] | partial | `Panels::jump_tab_result` | D3's Command-click jumps; the changelog does not specify the other modifiers' precise tab-selection semantics. |
+| Find in Files tab multi-select modifiers | [D4151][releases], [V4145][dev] | partial | `Panels::jump_tab_result`; [native check](manual-checks.md#6-round-36-parity) | D3's jump gestures stay in place. Check modifier delivery, focus and preview retention with a multi-selected tab group; the changelog does not specify the complete modifier matrix. |
 | Multiline Find/Replace fields | [D4180][releases] | done | `Input::set_multiline` in `panels.rs` | |
 | `show_panel`: `pattern` / `replace_pattern` | [D4126][releases], [V4123][dev], [Commands][commands] | done | `Panels::action` applies both arguments | Native declarative command, not a Python dependency. |
 | Current result (retain position) | [D4166.19][releases], [V4153.11][dev] | done | `Panels::current_result`, `Builds::current_result`; `r35_current_result_preserves_next_previous_and_opens_beside_tab` | Goto > Results and palette reopen the current match without advancing the next/previous cursor. |
@@ -175,8 +176,8 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `index_skip_unknown_extensions` | [Indexing][indexing], [D4107][releases] | done | `intelligence::index_options` | |
 | `index_exclude_patterns` | [Indexing][indexing], [File patterns][patterns] | done | `vel-index/service.rs`; [reader](settings.md) | |
 | `index_include_patterns` | [Indexing][indexing], [File patterns][patterns] | done | `vel-index/service.rs`; [reader](settings.md) | |
-| Index status and pause/resume or enable | [Indexing][indexing], [D4180.30][releases], [V4170.1][dev] | partial | `show_indexing_status`, `intelligence::StatusWindow`, `index_files` | Status and setting work; in-dialog toggle not established. |
-| Indexing logging and diagnostics | [Indexing][indexing] | partial | `Panels::refresh_index_report`, `intelligence.rs` | Status/report exists; equivalent console logging toggle not confirmed. |
+| Index status and pause/resume or enable | [Indexing][indexing], [D4180.30][releases], [V4170.1][dev] | partial | `r36_index_status_toggle_changes_effective_preference`; [native check](manual-checks.md#6-round-36-parity) | Status window has an enable control wired to the User `index_files` preference. Check mouse/Space and worker progress in the live auxiliary window. |
+| Indexing logging and diagnostics | [Indexing][indexing] | partial | `Panels::refresh_index_report`, `intelligence.rs` | Status shows per-root progress and worker logs. The [API][api] documents a Python `log_indexing` switch; the editor guide does not define a distinct non-Python console toggle or message/filter contract. |
 | Switch header/implementation including compound extensions | [Tab multi-select][tabs], [D4107.122][releases], [V4095.14][dev] | done | `switch_file`, `Workspace::switch_file` | |
 | Run Find commands without panel focus | [D4107.177][releases], [V4097.11][dev] | done | `App::apply_named_action`, `Panels::action`, explicit find shortcuts test | |
 
@@ -185,21 +186,21 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Feature | Sublime source (URL + build) | Velocity status | Evidence | Notes |
 | --- | --- | --- | --- | --- |
 | Multi-file Open, New File, Save, Save As and Save All | [Commands][commands] | done | `tabs_cli_positions_edit_save_and_format_dirty_state`, `save_all_skips_clean_tabs_and_continues_after_cancel_and_failure` | |
-| `open_file` with `encoded_position` | [D4142.71][releases], [V4127.18][dev] | partial | `Workspace::open_file_argument`, CLI location parser | Filename positions work; no reader for explicit argument. |
-| `open_file` overrides: transient, force group, clear right, clone | [D4151.49][releases], [V4149.16][dev] | partial | `Workspace::open_file_argument`, `intelligence::OpenOptions` | Some primitives exist; these named arguments are not read as a set. |
-| Fast Save All on large tab sets | [D4213][releases] | partial | `App::save_tab_with_path`, `vel-fileio` | Functionality is tested; Sublime's 4213 throughput is not established. |
+| `open_file` with `encoded_position` | [D4142.71][releases], [V4127.18][dev] | done | `r36_open_file_encoded_position_override_preserves_legacy_suffixes` | True enables row/column parsing; false keeps the path literal. Absent preserves Velocity's legacy shortcut; CLI suffix handling is unchanged. |
+| `open_file` overrides: transient, force group, clear right, clone | [D4151.49][releases], [V4149.16][dev] | partial | `r36_open_file_flags_keep_group_views_and_unselect_without_closing`; [native check](manual-checks.md#6-round-36-parity) | Reads all four flags. Clones share text and clear-to-right only deselects; Velocity makes it additive. Check preview promotion and placement; Velocity uses a provisional preview sheet rather than a guaranteed tabless view. |
+| Fast Save All on large tab sets | [D4213][releases] | partial | `App::save_tab_with_path`, `vel-fileio` | Saves multiple tabs and handles shared documents. 4213 gives neither a target throughput nor the file-count, worker and storage conditions of its improvement. |
 | `io_workers` for file I/O concurrency | [D4213.16][releases], [V4205.7][dev] | done | `vel_fileio::IoWorkers`, `Workspace::open_mode`; `r35_worker_limit_controls_real_job_admission`, `r35_io_workers_and_automatic_syntax_size_setting_reach_file_open` | Positive values bound regular open, reload and save jobs per window (1–64); zero retains the previous scheduling. Restore watchdog, binary preview and traversal have independent workers. |
 | Open Folder in New Window | [D4121.21][releases], [CLI][cli] | done | `prompt_open_folder_in_new_window`; `folder_picker_request_mounts_only_in_a_new_workspace` | New workspace even if current one is empty; native picker is folder-only. |
 | Open Recent files, folders, projects; clear history | [D4142][releases], [D4107][releases], [V4131][dev] | done | `open_recent_file`, `open_recent_folder`, `open_recent_project`, `clear_recent_items` | Native menu populated from process-wide history, including last-window-close state. |
 | Reopen Closed File, window-local history | [D4151][releases], [V4131][dev] | done | `reopen_last_file`, `Workspace::closed_files` | |
-| Recent Projects: remove deleted entries | [D4107.120][releases], [V4092.5][dev] | partial | Project recents and `clear_recent_projects` in `app.rs` | No targeted purge of only missing projects. |
+| Recent Projects: remove deleted entries | [D4107.120][releases], [V4092.5][dev] | done | `r36_remove_deleted_projects_preserves_other_history_and_stale_windows` | Remove Deleted drops missing project paths from shared recents without clearing files, folders or still-present projects. |
 | `update_system_recent_files` | [D4142.5][releases], [D4143][releases], [V4127.2][dev] | done | `App::publish_open_route` / recent-file reader in `app.rs` | macOS document recents. |
 | Revert with unsaved-change confirmation | [D4142][releases] | done | `revert_cancel_confirm_and_failed_load_preserve_work` | |
 | Save/reopen/convert with encoding | [Commands][commands], [D4126][releases] | done | `reopen_encoding`, `save_encoding`, `convert_to_encoding`; `vel-fileio/tests/encodings.rs` | |
 | Central European (Mac) | [D4107.136][releases], [V4075.14][dev] | done | Encoding registry in `vel-fileio`, File menu reader/dispatch | |
 | GB18030 | [D4126.2][releases], [V4123.1][dev], [V4124.1][dev] | done | `vel-fileio/tests/encodings.rs`; Format menu and status | |
-| CP862 | [D4126.3][releases], [V4122.1][dev], [V4124.1][dev] | partial | `vel-fileio/tests/encodings.rs`; codec registry | Codec coverage is separate from menu discoverability; not in the static File encoding list. |
-| Nordic DOS CP865 | [D4142.15][releases], [V4128.2][dev] | partial | `vel-fileio` encoding registry | Codec coverage is separate from menu discoverability; not in the static File encoding list. |
+| CP862 | [D4126.3][releases], [V4122.1][dev], [V4124.1][dev] | done | `r36_dos_codepages_roundtrip_and_strict_save`; File encoding menus | Explicit reopen/save, fallback and format persistence use the Hebrew DOS codec. |
+| Nordic DOS CP865 | [D4142.15][releases], [V4128.2][dev] | done | `r36_dos_codepages_roundtrip_and_strict_save`; File encoding menus | Explicit reopen/save, fallback and format persistence use the Nordic DOS codec. |
 | Newline formats and conversion | [Commands][commands], [D4121][releases] | done | `set_line_ending`, `vel-fileio/tests/io.rs` | LF, CRLF and CR. |
 | `default_encoding` | [Settings][settings] | done | `vel-fileio::DecodeOptions`; [reader](settings.md) | |
 | `fallback_encoding` | [Settings][settings] | done | `vel-fileio/tests/decoding_policy.rs` | |
@@ -221,14 +222,14 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `image_file_patterns` | [D4180.19][releases], [V4170.9][dev], [File patterns][patterns] | done | `open_requests::image_matches`, `Tab::sync_image_file` | WebP/TGA included by default; explicit overrides win. |
 | Explicit Open File as Image | [D4180.20][releases], [V4170.8][dev] | done | `r33_open_as_dispatch_enablement_and_session_choice` | File menu, palette and tab popup; in-memory per-file override; failure falls back to hex. |
 | Explicit Open File as Text | [D4180.20][releases], [V4170.8][dev] | done | `r33_open_as_dispatch_enablement_and_session_choice` | Binary files use the read-only hex view; does not reinterpret binary bytes as editable text. |
-| Image-tab context commands | [D4180.21][releases], [V4170.7][dev] | partial | `app_context.rs` tab popup, `r33_open_as_dispatch_enablement_and_session_choice` | Open-as and common tab actions work; no full image-specific clipboard/view command suite established. |
+| Image-tab context commands | [D4180.21][releases], [V4170.7][dev] | partial | `r33_open_as_dispatch_enablement_and_session_choice`; [native check](manual-checks.md#6-round-36-parity) | Check context menu and targeting for image, binary and text views. The notes do not list a separate image clipboard/zoom menu contract. |
 | Browser printing (File > Print) | [D4107.109][releases], [V4092.3][dev], [V4093.2][dev] | done | `print_exports_current_selection_or_document_and_reaps_the_browser_file`, `vel-export::temporary_print_file` | Active scheme, including hashed colors; bounded background parse (8 MiB/250k lines, 30 s). No live browser test. |
 | `.sublime-project` folders and project settings | [Projects][projects] | done | `vel-session/project.rs`; `settings_project_view_and_user_keymap_precedence_reload` | |
 | Per-project build systems | [Projects][projects], [Build systems][build] | done | `vel-session/project.rs`, `velocity/build.rs` | |
 | Quick Switch Project / open / save / close project | [Projects][projects], [Commands][commands] | done | `quick_switch_project`, `open_project`, `close_project`, `project_save_as_preserves_relative_paths_unknown_folder_keys_and_absent_defaults` | |
-| Quick Switch Project modifier to open a new window | [D4107.131][releases], [V4088.7][dev] | partial | `quick_switch_project`, native window routing | Exact selection modifier not established. |
-| `open_project_or_workspace` file dispatch | [D4107.313][releases], [V4050.108][dev] | partial | `open_project`, `vel-session/project.rs` | Native project save/restore works; exact legacy workspace-file opener not established. |
-| `.sublime-workspace` interoperability | [Projects][projects] | partial | `vel-session` project/window state and legacy reader | Velocity saves its own history/session representation, not complete ST workspace round-trip. |
+| Quick Switch Project modifier to open a new window | [D4107.131][releases], [V4088.7][dev] | partial | `r36_project_choice_modifier_and_companion_dispatch`; [native check](manual-checks.md#6-round-36-parity) | Build 4107 names Command on Mac. The chooser requests a separate window with Command, not Control. Check native click, new-window delivery and existing-window focus. |
+| `open_project_or_workspace` file dispatch | [D4107.313][releases], [V4050.108][dev] | partial | `r36_project_choice_modifier_and_companion_dispatch` | Opens a named project or a same-stem companion and keeps an already active project. The [workspace guide][workspace-guide] describes multiple workspaces but not how a differently named file identifies its project. |
+| `.sublime-workspace` interoperability | [Projects][projects] | partial | `r36_foreign_workspace_survives_velocity_checkpoints` | Recognizes and preserves foreign companion JSON, keeping Velocity checkpoints separately. [Public docs][workspace-guide] describe the stored state, not keys for file paths, unsaved text, layout or selection; no foreign state is imported. |
 | `file_include_patterns` | [Projects][projects], [File patterns][patterns] | done | `vel-search/project.rs::Rules::with_includes` | Per-folder includes. |
 | `file_exclude_patterns` | [Projects][projects], [File patterns][patterns] | done | `Rules::allows`, project settings sweep | |
 | `folder_include_patterns` | [Projects][projects], [File patterns][patterns], [V4067][dev] | done | `Rules::with_includes`, project-root `//` matching | |
@@ -246,7 +247,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Undo history across restart; refuse stale history after external change | [D4213][releases] | done | `vel-session/tests/native_history.rs`, `mismatch_version_mapping_and_corrupt_data_fail_cleanly`, `session_restore.rs` integrity checks | |
 | `open_files_in_new_window` | [D4121][releases], [Settings][settings] | done | `open_requests::OpenWindow::setting`, `two_apps_route_to_existing_folder_project_and_file_without_replacing_dirty_tabs` | |
 | `close_windows_when_empty` | [D4126][releases] | done | `App` close flow; [reader](settings.md) | |
-| Native recents, associations, and document icons | [V4095.41][dev], [D4143][releases] | partial | `crates/velocity/packaging/test_bundle.py`, `vel-platform/macos.rs` native requests | File associations are tested without bundle assembly; document icon coverage not independently confirmed. |
+| Native recents, associations, and document icons | [V4095.41][dev], [D4143][releases] | partial | `crates/velocity/packaging/test_bundle.py`; [native check](manual-checks.md#6-round-36-parity) | Static association metadata and recents routing have headless coverage. Finder icons, Dock file-open delivery and the native recent-documents list require LaunchServices/AppKit. |
 
 ## Windows, tabs and display
 
@@ -341,9 +342,9 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Buffer-word completions | [Completions][completion] | done | `vel-complete::BufferWords`; `completion.rs` popup/commit | |
 | Context-aware project completions | [Completions][completion], [Indexing][indexing], [D4107][releases], [V4050][dev] | done | `vel-complete::CompletionEngine`, `intelligence.rs` | Statistical suggestions, not LSP. |
 | Declarative completion files and scope matching | [Completions][completion], [V4073][dev] | done | `vel-complete` parser tests; `completion.rs` | Uses `.sublime-completions`. |
-| Completion triggers containing tabs | [V4053.7][dev] | partial | `vel-complete` trigger parser; `completion.rs` prefix logic | Tab-containing triggers through UI not confirmed. |
+| Completion triggers containing tabs | [V4053.7][dev] | done | `r36_tab_delimits_annotation_not_inserted_text` | The [completion reference][completion-reference] specifies a tab-delimited annotation. Raw and rich trigger annotations display separately; committed text contains only the completion. |
 | Kind, annotation, details and match highlights | [Completions][completion], [D4107][releases], [V4073][dev] | done | `popup_scene_uses_kind_colors_match_color_and_kind_footer` | Built-in HTML/CSS and JSON resources, not callbacks. |
-| Completion fallback theming | [V4053.8][dev], [Themes][themes] | partial | `Completion::paint`, `vel-ui/theme.rs` | Old-theme compatibility not exhaustive. |
+| Completion fallback theming | [V4053.8][dev], [Themes][themes] | partial | `Completion::paint`, `vel-ui/theme.rs` | Completion draws using fallback styles if theme keys are missing. 4053 does not list the synthesized classes or precedence for mismatches between legacy and newer kind/annotation rules. |
 | `auto_complete`, show, dismiss and commit | [Completions][completion] | done | `completion.rs::intelligence_command`, `poll_completion` | |
 | `auto_complete_delay` | [Completions][completion] | done | `completion.rs` scheduling; [reader](settings.md) | |
 | `auto_complete_size_limit` | [Completions][completion] | done | `completion::settings` to completion worker; [reader](settings.md) | |
@@ -370,28 +371,28 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Language matching by extension, filename and first line | [Syntax][syntax] | done | `vel-highlight::detect_syntax`, `vel-syntax/tests/roots.rs` | |
 | `syntax_detection_size_limit` | [D4113.7][releases], [V4110.2][dev] | done | `Workspace::configure_language`; `r35_io_workers_and_automatic_syntax_size_setting_reach_file_open` | A positive byte limit skips automatic detection above the threshold. Explicit syntax assignments still work; 0 preserves detection. |
 | `set_file_type` and `scope:` names | [D4107][releases], [Commands][commands] | done | `Workspace::set_file_type`, `detect_syntax` | |
-| Show Scope Name details and origin | [D4107.49][releases], [V4087.4][dev], [D4151][releases] | partial | `show_scope_name`, `html_ui.rs` | Scope, colors and metadata shown; clickable grammar context backtrace not established. |
+| Show Scope Name details and origin | [D4107.49][releases], [V4087.4][dev], [D4151][releases] | partial | `round21_scope_popup_and_copy_link`, `html_ui.rs` | Scope stack and copying work. 4142 documents clickable context origins; Velocity still lacks per-frame origin links, and legacy/anonymous context presentation is not specified. |
 | .sublime-syntax contexts, includes, prototypes and variables | [Syntax][syntax], [D4107][releases] | done | `vel-syntax/tests/semantics.rs`, `vel-highlight/tests/scopes.rs` | |
 | Syntax `branch` / `fail` backtracking | [D4107.34][releases], [D4107.38][releases], [V4050.72][dev], [Syntax][syntax] | done | `vel-syntax/tests/semantics.rs`, `vel-highlight/tests/incremental.rs` | |
 | Syntax `version: 2` and v1 compatibility | [D4107.39][releases], [Syntax][syntax], [V4075][dev] | done | `vel-syntax/tests/semantics.rs` | |
 | Syntax `extends` and multiple inheritance | [D4107.40][releases], [Syntax][syntax], [V4075][dev] | done | `vel-syntax/tests/semantics.rs` | |
 | Syntax `hidden_extensions` | [D4107.41][releases], [Syntax][syntax], [V4075][dev] | done | `vel-syntax` header and syntax lookup | |
-| Syntax `embed` / `escape`, lazy embed loading | [D4107][releases], [V4075][dev], [Syntax][syntax] | partial | `vel-syntax/tests/semantics.rs`; asset cache in `language.rs` | Actions work; exact lazy memory/loading policy not asserted. |
+| Syntax `embed` / `escape`, lazy embed loading | [D4107][releases], [V4075][dev], [Syntax][syntax] | partial | `external_embed_is_resolved_only_when_entered`; `dynamic_escape_is_escaped_and_clones_converge` | Embed and escape actions work and external context resolution waits for entry. The notes do not specify parse-cache lifetime, eviction, or what is retained after leaving an embed. |
 | Syntax `pop` plus push/set/embed/branch; `clear_scopes` | [D4107][releases], [V4075][dev], [Syntax][syntax] | done | `vel-syntax/tests/semantics.rs` | |
 | .tmLanguage compatibility | [Syntax][syntax], [D4142][releases] | done | `vel-syntax/tests/tm_language.rs` | |
-| .tmPreferences: comments, indent, folding, symbols | [Syntax][syntax], [Scope naming][scopes] | partial | `vel-syntax/tests/metadata.rs`, `editing.rs`, `vel-index` | Key metadata read; not every consumer is reproduced. |
+| .tmPreferences: comments, indent, folding, symbols | [Syntax][syntax], [Scope naming][scopes] | partial | `cdata_and_independent_setting_precedence`; `symbol_only_metadata_matches_the_full_preference_merge` | Core comment, indent and symbol settings resolve by scope. Edge precedence for conflicting folding selectors and numbered comment sets across nested scopes is not specified. |
 | Built-in TypeScript, TSX, JSX | [D4107.33][releases], [V4075.1][dev], [V4087.5][dev] | done | `language.rs`; corpus registrations in `vel-syntax/tests/roots.rs` | Exact upstream revisions not audited. |
-| Built-in Zsh | [D4200.5][releases], [V4194.4][dev] | partial | Shell syntax lookup in `language.rs`; older corpus | Dedicated 4200 grammar revision not verified. |
-| Built-in TOML | [D4200.5][releases], [V4198.4][dev] | partial | Runtime syntax lookup in `language.rs`; older corpus | 4200 grammar revision not verified. |
-| Later grammar updates incl. Haskell and C# rewrites | [D4142][releases], [D4213][releases], [V4130][dev] | partial | `vel-syntax/tests/roots.rs` and bundled corpora | Release-by-release revisions not asserted. |
-| Syntax test files, scope and symbol expectations | [Syntax][syntax], [V4087.3][dev] | partial | `vel-syntax/tests/corpus.rs`, `vel-syntax/tests/metadata.rs` | Rust fixture runner, not a general app syntax test console. |
-| Syntax test reindent and symbol transformation assertions | [D4107.44][releases], [D4186.17][releases], [V4069.8][dev], [V4184.11][dev] | partial | `vel-syntax/tests/corpus.rs` and metadata tests | Not all assertion syntaxes covered. |
+| Built-in Zsh | [D4200.5][releases], [V4194.4][dev] | partial | `official_assertions_never_regress`; `language.rs` syntax lookup | Zsh is detected and its corpus passes. 4200 announces a built-in grammar but does not specify changes to patterns, scopes or shell embedding relative to earlier grammar revisions. |
+| Built-in TOML | [D4200.5][releases], [V4198.4][dev] | partial | `official_assertions_never_regress`; `language.rs` syntax lookup | TOML works with the checked-in corpus. 4200 does not specify its exact scopes or behavior for incomplete dotted keys and malformed multiline strings. |
+| Later grammar updates incl. Haskell and C# rewrites | [D4142][releases], [D4213][releases], [V4130][dev] | partial | `official_assertions_never_regress`; `vel-syntax/tests/roots.rs` | Both have working highlighting. Release notes announce rewrites but do not publish a scope-by-scope change list or malformed-input recovery expectations for those revisions. |
+| Syntax test files, scope and symbol expectations | [Syntax][syntax], [V4087.3][dev] | partial | `official_assertions_never_regress`; `r35_syntax_tests_menu_palette_output_legacy_and_result_links` | The app runs saved syntax tests and links diagnostics. Scope and symbol assertions work; symbol coverage flags and exact diagnostics for unsupported directives are not fully specified by the public syntax guide. |
+| Syntax test reindent and symbol transformation assertions | [D4107.44][releases], [D4186.17][releases], [V4069.8][dev], [V4184.11][dev] | partial | `reindent_variants_execute_and_detect_a_broken_rule`; `symbol_runner_checks_names_exhaustiveness_and_partial_files` | The runner checks reindent and transformed names. Changelogs name the assertions but do not define all modifier combinations or the expected failure format for mixed local/indexed transformations. |
 | `run_syntax_tests` incl. `syntax` and non-UTF-8 diagnostics | [D4180.33][releases], [V4170.17][dev], [V4170.18][dev] | done | `Builds::start_syntax_tests`; `r35_syntax_tests_menu_palette_output_legacy_and_result_links` | Menu/palette run one saved test file using the existing scope, symbol and indentation runner. Optional syntax override; decodes legacy input with diagnostics and links failures by file/line. |
 | Scope naming and scope-based consumers | [Scope naming][scopes] | done | Highlighting and metadata in `vel-syntax`, `vel-scope`, schemes | Naming is a convention; depends on the grammar. |
 | Selector prefix matching, OR/AND/NOT, grouping | [Selectors][selectors] | done | `vel-scope/src/lib.rs::Selector` parser and tests | |
 | Immediate-child selector `>` | [Selectors][selectors], [D4213][releases] | done | `vel-scope::child_regression` | |
 | Spell Check, suggestions, ignore/add words | [Spell Checking][spell] | done | `vel-spell/tests/spelling.rs`; `review_ui.rs` | |
-| `dictionary` and non-UTF-8 .aff/.dic pairs | [Spell Checking][spell], [D4107.228][releases], [V4070.2][dev] | partial | `vel-spell/tests/spelling.rs`, dictionary loader | Full legacy-encoding matrix not verified. |
+| `dictionary` and non-UTF-8 .aff/.dic pairs | [Spell Checking][spell], [D4107.228][releases], [V4070.2][dev] | done | `r36_legacy_dictionary_set_decodes_words_and_affixes` | Package and system pairs honor supported `SET` codecs; decoding rejects malformed bytes instead of silently substituting. No claim about every Hunspell charset label. |
 | `spelling_selector` | [Spell Checking][spell] | done | `vel-spell` scope filter and settings test | |
 | `spell_check` | [Spell Checking][spell] | done | `review_ui.rs`, `annotations.rs` | |
 | `added_words` | [Spell Checking][spell] | done | `vel-spell/tests/spelling.rs`; [reader](settings.md) | |
@@ -402,7 +403,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `vintage_start_in_command_mode` | [Vintage][vintage] | done | `vintage.rs`; [reader](settings.md) | |
 | `vintage_use_clipboard` | [Vintage][vintage] | done | `vintage.rs`; [reader](settings.md) | |
 | `vintage_ctrl_keys` and macOS bindings | [Vintage][vintage] | done | `vintage.rs`, Velocity Vintage keymap | |
-| Vintage Ex and integration points | [Vintage][vintage] | partial | `indent_contexts_ex_requests_and_clipboard` | Some actions; external VintageEx/Python ecosystem excluded. |
+| Vintage Ex and integration points | [Vintage][vintage] | partial | `indent_contexts_ex_requests_and_clipboard` | `:w`, `:wq`, `:q`, `:e` and clipboard dispatch are tested. The Vintage guide delegates full Ex support to VintageEx and does not define its addressing, ranges, abbreviations or plugin integration. |
 
 ## Customization and resources
 
@@ -478,8 +479,8 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Build `file_patterns` and `keyfiles` eligibility | [Build systems][build] | done | `vel-build` eligibility matcher, `velocity/build.rs` | |
 | Build `quiet`, `encoding` and output `syntax` | [Build systems][build] | done | `Exec` options and result panel setup in `build.rs` | |
 | Build `interactive` stdin panel | [D4200.2][releases], [V4198.2][dev], [Build systems][build] | done | `vel-build/process.rs`, `r33_build_panel_sends_echoes_and_closes_stdin` and cancel/restart/backpressure tests | Line input on Unix; Return and Control-D, scoped echo, bounded nonblocking pipe. Not a terminal emulator. |
-| Alternate/custom build targets | [Build systems][build] | partial | `variant_environment_automatic_selection_and_custom_target_rejection` | Built-in runner; non-Python custom target command compatibility limited. |
-| Build child camera/microphone access on macOS | [D4151.66][releases], [V4145.18][dev] | partial | `vel-build` launches external tools | Dedicated entitlement/prompt behavior not verified; native-only. |
+| Alternate/custom build targets | [Build systems][build] | partial | `variant_environment_automatic_selection_and_custom_target_rejection` | Built-in `exec` and variants work. Public build docs describe Python commands for custom `target`/`cancel`; they specify no portable non-Python execution contract. Python is excluded. |
+| Build child camera/microphone access on macOS | [D4151.66][releases], [V4145.18][dev] | partial | `vel-build` worker; [native check](manual-checks.md#6-round-36-parity) | External builds launch; TCC permission prompts, app attribution and denial/retry behavior need a live macOS check. |
 | Git sidebar status, ignored dimming and ancestor badges | [Git integration][git] | done | `badges_both_layers_blobs_folders_and_literal_incremental_refresh`; `panels.rs` | |
 | `show_git_status` | [Git integration][git] | done | `workspace.rs`; [reader](settings.md) | |
 | Git branch/detached status and ahead/behind | [Git integration][git] | done | `unmerged_index_unborn_detached_worktrees_and_cheap_ahead_behind`, `app_status.rs` | |
@@ -490,12 +491,12 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Revert Diff Hunk | [D4107.150][releases], [V4053.1][dev], [Incremental diff][diff] | done | `revert_hunk`; `vel-diff/tests/incremental.rs` | |
 | `mini_diff` | [Incremental diff][diff] | done | `review_ui.rs`; [reader](settings.md) | |
 | `git_diff_target` | [Git integration][git], [Incremental diff][diff] | done | `review_ui.rs`; [reader](settings.md) | |
-| Git gutter and inline diff style controls | [Incremental diff][diff], [Color schemes][schemes] | partial | `review_ui.rs`, `vel-color-scheme` | Working markers/inline colors, not all scheme differences established. |
-| Open repository in Sublime Merge | [Git integration][git] | partial | `git_open_repository` in `review_ui.rs` | Configured executable; no standard install discovery/handshake coverage. |
-| File history in Sublime Merge | [Git integration][git] | partial | `git_file_history` dispatch | Configured log child process; no live cross-application test. |
-| Folder history in Sublime Merge | [Git integration][git] | partial | `git_folder_history` dispatch | Same limited adapter. |
-| Line history in Sublime Merge | [Git integration][git] | partial | `git_line_history` passes a line | No handoff acceptance tests with Merge. |
-| Blame in Sublime Merge | [Git integration][git] | partial | `git_blame_file` dispatch | Main path only. |
+| Git gutter and inline diff style controls | [Incremental diff][diff], [Color schemes][schemes] | partial | `review_ui.rs`, `vel-color-scheme`; [native check](manual-checks.md#6-round-36-parity) | Markers and inline palettes are wired. Check add/change/delete colors, contrast and deleted-hunk rendering with overridden values in light and dark schemes. |
+| Open repository in Sublime Merge | [Git integration][git] | partial | `git_open_repository`; [native check](manual-checks.md#6-round-36-parity) | Configured executable receives the repository root. The public integration guide does not specify discovery or its handshake; check actual repository activation. |
+| File history in Sublime Merge | [Git integration][git] | partial | `git_file_history`; [native check](manual-checks.md#6-round-36-parity) | Configured executable receives the file path. Check the history view for a file with spaces and multiple commits. |
+| Folder history in Sublime Merge | [Git integration][git] | partial | `git_folder_history`; [native check](manual-checks.md#6-round-36-parity) | Configured executable receives the folder path. Check that the view includes commits for nested descendants as described in 4180. |
+| Line history in Sublime Merge | [Git integration][git] | partial | `git_line_history`; [native check](manual-checks.md#6-round-36-parity) | Passes the file and one-based line; verify that Merge shows the selected line's history rather than just its blame view. |
+| Blame in Sublime Merge | [Git integration][git] | partial | `git_blame_file`; [native check](manual-checks.md#6-round-36-parity) | Passes the file to the configured adapter. Confirm the annotated document is the requested file, including names with spaces. |
 | `sublime_merge_path` | [Git integration][git] | done | `review_ui.rs` command and palette gating, settings effect suite | Empty hides handoff actions. |
 | Install CLI launcher and configure PATH / EDITOR | [CLI][cli] | done | `release.rs` install action, `cli.rs` usage | Tool name is Velocity; no `subl` alias installed. |
 | Open files/folders and handle literal `--` | [CLI][cli] | done | `cli.rs`, `open_requests::open_locations` | |
@@ -514,11 +515,11 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `--help` and `--version` | [CLI][cli] | done | `real_help_version_and_benchmark_help_do_not_start_gui` | |
 | `--safe-mode` isolated clean settings/session | [Safe Mode][safe], [D4107.72][releases], [V4050.68][dev], [CLI][cli] | done | `safe_mode::fresh_run`, `safe_mode_prunes_empty_dead_runs_without_touching_sessions_or_symlinks` | Native Option-start is a separate path below. |
 | Hold Option at launch for Safe Mode | [Safe Mode][safe], [D4107.72][releases] | done | `Platform::option_held_at_launch`, `main.rs` | No native launch in this audit. |
-| Console and `console_max_history_lines` | [D4107.133][releases], [V4088.4][dev], [Commands][commands] | partial | `Panels::console_visible`, `console_messages` bounded storage | Native diagnostic console; no named limit reader and no Python REPL. |
-| `open_terminal` | [D4213.6][releases], [V4205.3][dev] | partial | `app_terminal.rs`, palette and context menus; `r34_terminal_uses_context_dir_and_literal_argv` | Opens Terminal.app or a configured executable at a file/folder. Validated to the launch boundary; the public release notes do not specify the exact external-command configuration schema. |
-| Help > Report a Bug | [D4107.73][releases] | partial | Help menu ships docs, release notes, crash report folder | No direct tracker action. |
-| Update dialog theme attributes | [D4142.48][releases], [V4130.11][dev], [Themes][themes] | partial | `release.rs` update UI and themed controls | No identical legacy/Sublime update dialog resource. |
-| Revert to fresh installation and clear cache guidance | [Revert][revert], [Safe Mode][safe] | partial | Fresh isolated Safe Mode; profile paths in `main.rs` | Not a destructive reset command; ST instructions are product-specific. |
+| Console and `console_max_history_lines` | [D4107.133][releases], [V4088.4][dev], [Commands][commands] | done | `r36_console_limit_evicts_oldest_and_zero_disables_history`; [reader](settings.md) | Diagnostic console retains at most the configured line count. Velocity retains its previous 80-line default; zero disables history. Python REPL is out of scope. |
+| `open_terminal` | [D4213.6][releases], [V4205.3][dev] | partial | `r34_terminal_uses_context_dir_and_literal_argv`; `app_terminal.rs` | Terminal.app and configured executables receive the context directory to the launch boundary. 4213 does not document the custom emulator setting/argument schema or quoting rules. |
+| Help > Report a Bug | [D4107.73][releases] | done | `r36_block_command_and_report_a_bug_menu` | Help opens Velocity's public issue tracker through the existing URL action. |
+| Update dialog theme attributes | [D4142.48][releases], [V4130.11][dev], [Themes][themes] | partial | `release.rs`; [native check](manual-checks.md#6-round-36-parity) | Update UI uses themed controls; verify available, current, and failed states under a legacy-style theme. The changelog does not enumerate the added attribute selectors. |
+| Revert to fresh installation and clear cache guidance | [Revert][revert], [Safe Mode][safe] | partial | [Velocity troubleshooting](settings.md#troubleshooting-a-profile); `safe_mode.rs` | Safe Mode and a fresh data directory isolate settings, sessions and profile caches. Sublime's reset steps name its own data/cache paths; there is no shared destructive reset or documented cache directory contract. |
 
 ## Scope exclusions
 
@@ -531,6 +532,20 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Maintenance bullets mentioning additions (not new capabilities) | [Download][releases], [Dev Builds][dev], ledger below | out of scope | Scope rule above | Fixes to already-added sheets, files, tokens and analogous conditions do not expand the matrix. |
 
 ## Verification
+
+### Round 36 lane C (`bbf4965`)
+
+The full gate returned `GATE_OK`: formatting, strict release Clippy, 1,736
+workspace tests with no failures, rustdoc, release build, static bundle
+metadata, and CLI forwarding. All 13 `r36_` regressions passed. The syntax
+runner reported 126,600 passed, zero failed and zero skipped; the parser
+differential test and the 10 MB syntax benchmark also completed. The live
+checks remain open in [the checklist](manual-checks.md#6-round-36-parity).
+
+Five alternating release pairs against clean `bbf4965` on the same fixture
+gave median retired-instruction changes of **+0.78%** for view features,
+**+0.93%** for 1,000 carets, and **+0.30%** for one caret. No GUI windows or
+packaging commands were run.
 
 ### Round 34 lane B (`bc4c141`)
 
@@ -574,7 +589,7 @@ one-caret smoke. All are within ±1%. The features workload used the same
 | 3 | Remaining image-tab context actions and format edge cases (PSD is out of scope) | 1–3 days |
 | 4 | Safe session restores, workspace interoperability, and macOS Space placement if a public API becomes available | 4–8 days |
 | 5 | Font picker, remaining scope-fold and control-character compatibility, live AppKit and keyboard-layout checks | 3–6 days |
-| 6 | External terminal configuration compatibility, Help actions, console limit and index status controls | 2–4 days |
+| 6 | External terminal configuration compatibility and native Indexing Status checks | 1–2 days |
 | 7 | Syntax test runner and grammar revisions, stricter theme/file icon/minihtml compatibility, completion and regex edges | 1–3 weeks, depending on fixture breadth |
 | 8 | Verified/full Sublime Merge discovery, handoff and context actions | 1–2 weeks |
 | 9 | Renderer/worker policy customization and performance equivalence outside the measured budgets | 1–2 weeks |
@@ -646,6 +661,9 @@ V4075.35, V4075.36, V4074.9, V4072.4, V4072.5, V4050.23, V4050.42, V4050.65.
 [settings]: https://www.sublimetext.com/docs/settings.html
 [patterns]: https://www.sublimetext.com/docs/file_patterns.html
 [commands]: https://docs.sublimetext.io/reference/commands.html
+[comments]: https://docs.sublimetext.io/reference/comments.html
+[completion-reference]: https://docs.sublimetext.io/reference/completions.html
+[workspace-guide]: https://docs.sublimetext.io/guide/usage/file-management/projects.html#workspaces
 [search]: https://docs.sublimetext.io/guide/usage/search-and-replace.html
 [find-default]: https://forum.sublimetext.com/t/st4-find-in-files-not-searching-all-subfolders/58866/12
 [goto]: https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/file_management/file_navigation.html

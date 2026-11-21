@@ -34,6 +34,28 @@ fn view(text: &str) -> ViewSnapshot {
     ViewSnapshot::new(1, ChangeId(7), Text::from(text))
 }
 #[test]
+fn r36_tab_delimits_annotation_not_inserted_text() {
+    let mut engine = CompletionEngine::new();
+    engine
+        .add_completions(
+            r#"{
+      "scope":"source.fixture",
+      "completions":["example\tlegacy", {"trigger":"exampleRich\tlegacy","contents":"inserted"}]
+    }"#,
+        )
+        .unwrap();
+    let list = engine.query(&view("exa"), &[3], &*scopes(7));
+    for (trigger, inserted) in [("example", "example"), ("exampleRich", "inserted")] {
+        let item = list
+            .items
+            .iter()
+            .find(|item| item.trigger == trigger)
+            .unwrap();
+        assert_eq!(item.annotation, "legacy");
+        assert_eq!(item.completion, inserted);
+    }
+}
+#[test]
 fn all_sources_ranking_exact_snippets_rich_items_and_scope_filtering() {
     let mut engine = CompletionEngine::new();
     engine.add_completions(r#"{ // resource comment

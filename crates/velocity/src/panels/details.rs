@@ -1454,7 +1454,7 @@ mod tests {
                 wait(&mut p, &mut w, |p| !p.quick_pending);
             }
             let invocation = p
-                .accept_item(&mut w, AcceptTabs::Default, false, 0..1)
+                .accept_item(&mut w, AcceptTabs::Default, false, false, 0..1)
                 .unwrap()
                 .unwrap();
             assert_eq!(invocation.args["item"], "file");

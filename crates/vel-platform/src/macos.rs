@@ -211,6 +211,13 @@ impl WindowHandle {
     ) -> Result<WindowHandle, String> {
         launch_window(self.0.mtm, options, Box::new(app))
     }
+    /// Dispatches an auxiliary window's command to its owning window.
+    pub fn dispatch_named_command(&self, name: &str, args: &str) {
+        if !self.is_closed() {
+            self.0
+                .dispatch(Event::NamedCommand(name.to_owned(), args.to_owned()));
+        }
+    }
     /// Requests normal per-window close handling, including unsaved changes.
     pub fn request_close(&self) {
         self.0.dispatch(Event::CloseRequested);

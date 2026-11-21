@@ -55,7 +55,9 @@
         {"caption": "Greek (ISO 8859-7)", "command": "reopen_encoding", "args": {"encoding": "Greek (ISO 8859-7)"}},
         {"caption": "Hebrew (Windows 1255)", "command": "reopen_encoding", "args": {"encoding": "Hebrew (Windows 1255)"}},
         {"caption": "Hebrew (ISO 8859-8)", "command": "reopen_encoding", "args": {"encoding": "Hebrew (ISO 8859-8)"}},
+        {"caption": "Hebrew (DOS CP862)", "command": "reopen_encoding", "args": {"encoding": "Hebrew (DOS CP862)"}},
         {"caption": "Nordic (ISO 8859-10)", "command": "reopen_encoding", "args": {"encoding": "Nordic (ISO 8859-10)"}},
+        {"caption": "Nordic (DOS CP865)", "command": "reopen_encoding", "args": {"encoding": "Nordic (DOS CP865)"}},
         {"caption": "Romanian (ISO 8859-16)", "command": "reopen_encoding", "args": {"encoding": "Romanian (ISO 8859-16)"}},
         {"caption": "Turkish (Windows 1254)", "command": "reopen_encoding", "args": {"encoding": "Turkish (Windows 1254)"}},
         {"caption": "Turkish (ISO 8859-9)", "command": "reopen_encoding", "args": {"encoding": "Turkish (ISO 8859-9)"}},
@@ -98,7 +100,9 @@
         {"caption": "Greek (ISO 8859-7)", "command": "save_encoding", "args": {"encoding": "Greek (ISO 8859-7)"}},
         {"caption": "Hebrew (Windows 1255)", "command": "save_encoding", "args": {"encoding": "Hebrew (Windows 1255)"}},
         {"caption": "Hebrew (ISO 8859-8)", "command": "save_encoding", "args": {"encoding": "Hebrew (ISO 8859-8)"}},
+        {"caption": "Hebrew (DOS CP862)", "command": "save_encoding", "args": {"encoding": "Hebrew (DOS CP862)"}},
         {"caption": "Nordic (ISO 8859-10)", "command": "save_encoding", "args": {"encoding": "Nordic (ISO 8859-10)"}},
+        {"caption": "Nordic (DOS CP865)", "command": "save_encoding", "args": {"encoding": "Nordic (DOS CP865)"}},
         {"caption": "Romanian (ISO 8859-16)", "command": "save_encoding", "args": {"encoding": "Romanian (ISO 8859-16)"}},
         {"caption": "Turkish (Windows 1254)", "command": "save_encoding", "args": {"encoding": "Turkish (Windows 1254)"}},
         {"caption": "Turkish (ISO 8859-9)", "command": "save_encoding", "args": {"encoding": "Turkish (ISO 8859-9)"}},
@@ -483,6 +487,11 @@
             "args": {
               "to": "word"
             }
+          },
+          {
+            "caption": "To Block",
+            "command": "expand_selection",
+            "args": {"to": "block"}
           },
           {
             "caption": "To Paragraph",
@@ -1136,6 +1145,7 @@
         "caption": "Recent Projects…",
         "command": "recent_projects"
       },
+      {"caption":"Remove Deleted","command":"remove_deleted_recent_projects"},
       {
         "caption": "Quick Switch Project…",
         "command": "quick_switch_project"
@@ -1228,6 +1238,7 @@
     "children": [
       {"caption":"Velocity Documentation","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/blob/main/README.md"}},
       {"caption":"Release Notes","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/releases"}},
+      {"caption":"Report a Bug","command":"open_url","args":{"url":"https://github.com/mini-zoro/velocity/issues"}},
       {
         "caption": "Indexing Status…",
         "command": "show_indexing_status"

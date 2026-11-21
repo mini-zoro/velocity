@@ -62,6 +62,8 @@ NOTES = {
     "find_in_files_max_file_size": f"[Build 4142]({CHANGELOG}#build-4142). Applies on the next search to disk files and live buffers.",
     "find_in_files_max_result_size": f"[Build 4126]({CHANGELOG}#build-4126). Applies to the next report, not to replacements or previous reports.",
     "find_in_files_context_characters": f"[Build 4166]({CHANGELOG}#build-4166). A positive value uses Unicode scalar columns and preserves the source jump column. Zero uses the previous disk previews and live-buffer formatting.",
+    "find_in_files_context_lines": f"[Build 4151]({CHANGELOG}#build-4151). Applies to the next search with Context enabled; Velocity accepts 0–100 lines on each side and defaults to one.",
+    "console_max_history_lines": f"[Build 4107]({CHANGELOG}#build-4107). Bounds Velocity's diagnostic history, not a Python REPL. The default preserves Velocity's previous 80-line history.",
     "find_in_files_suppress_errors": f"[Build 4151]({CHANGELOG}#build-4151). Applies to the next search; invalid search expressions still report an error.",
     "find_in_files_side_by_side": f"[Build 4151]({CHANGELOG}#build-4151). Only applies when opening a match from a Find Results tab, not the output panel.",
     "io_workers": f"[Build 4213]({CHANGELOG}#build-4213). Applies to regular document opens, reloads and writes submitted by a window. Zero keeps the previous scheduling.",

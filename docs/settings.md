@@ -277,6 +277,16 @@ uses square geometry. The scrollbar default uses
 - `remember_workspace` is not shipped on macOS. Public AppKit APIs do not expose
   a persistent Space identifier and targeted restore; window frames still restore.
 
+### Troubleshooting a profile
+
+Use `velocity --safe-mode` to start with isolated settings and no restored session.
+Use `velocity --data-dir PATH` with a new directory for a persistent clean test profile.
+Neither operation resets the original profile. To rule out a stale renderer cache in a
+disposable profile, quit that instance and move `PATH/Cache/Renderer` aside; leave
+`Packages` and `Sessions` intact. If `VELOCITY_CACHE_DIR` names a custom index cache,
+give the test instance a new directory there too. Do not apply Sublime Text's product-specific
+data or cache deletion steps to Velocity.
+
 <!-- BEGIN GENERATED SETTINGS -->
 ## Shipped and recognized settings
 
@@ -326,6 +336,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `close_find_after_replace_all` | `` true `` |  | Immediately | Close the Replace panel after Replace All. | Close Replace after its Replace All button runs. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `close_windows_when_empty` | `` true `` |  | Immediately | Close a window when you close its last document, unless it has folders or a saved project. | [velocity/app.rs](../crates/velocity/src/app.rs) |
 | `color_scheme` | `` "auto" `` |  | Immediately | Choose an editor color scheme or follow the system appearance. | [vel-color-scheme/lib.rs](../crates/vel-color-scheme/src/lib.rs), [velocity/theme_ui.rs](../crates/velocity/src/theme_ui.rs) |
+| `console_max_history_lines` | `` 80 `` |  | Immediately | Keep at most this many recent diagnostic lines. Zero disables history. | [Build 4107](https://www.sublimetext.com/download#build-4107). Bounds Velocity's diagnostic history, not a Python REPL. The default preserves Velocity's previous 80-line history. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `control_character_style` | `` "hex" `` |  | Immediately | Label control characters with hexadecimal values, names, or caret notation. | [Build 4107](https://www.sublimetext.com/download#build-4107). Applies to C0/DEL labels when `draw_control_characters` is on. Velocity provides `hex`, `name` and `caret`. [velocity/view.rs](../crates/velocity/src/view.rs) |
 | `copy_with_empty_selection` | `` true `` |  | Immediately | Copy or cut the entire line when no text is selected. | Copy and cut with no selection take the whole caret line. [vel-commands/lib.rs](../crates/vel-commands/src/lib.rs), [vel-config/settings.rs](../crates/vel-config/src/settings.rs) |
 | `dark_color_scheme` | `` "Velocity Dark.sublime-color-scheme" `` |  | Immediately | Use this scheme in dark mode when Color Scheme is automatic. | [vel-color-scheme/lib.rs](../crates/vel-color-scheme/src/lib.rs), [velocity/settings_entry.rs](../crates/velocity/src/settings_entry.rs), [velocity/theme_ui.rs](../crates/velocity/src/theme_ui.rs) |
@@ -355,6 +366,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `file_tab_style` | `` "angled" `` |  | Immediately | Choose the shape of document tabs. | Bundled themes: "rounded" or "square". "angled" (legacy) and unknown styles use square tabs. [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme) |
 | `find_highlight_matches_max_size` | `` 0 `` |  | Immediately | Skip automatic literal match highlighting above this many bytes. Zero removes the limit. | [Build 4121](https://www.sublimetext.com/download#build-4121). Explicit Find Next/Previous, Find All and Replace still work. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_context_characters` | `` 0 `` |  | Immediately | Limit characters per result line. Zero keeps the standard preview. | [Build 4166](https://www.sublimetext.com/download#build-4166). A positive value uses Unicode scalar columns and preserves the source jump column. Zero uses the previous disk previews and live-buffer formatting. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
+| `find_in_files_context_lines` | `` 1 `` |  | Immediately | Set how many lines appear before and after each match when Context is on. | [Build 4151](https://www.sublimetext.com/download#build-4151). Applies to the next search with Context enabled; Velocity accepts 0–100 lines on each side and defaults to one. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_max_file_size` | `` 0 `` |  | Immediately | Skip files larger than this many bytes. Zero removes the limit. | [Build 4142](https://www.sublimetext.com/download#build-4142). Applies on the next search to disk files and live buffers. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_max_result_size` | `` 0 `` |  | Immediately | Limit the displayed result bytes. Zero removes the limit; replacements still include hidden matches. | [Build 4126](https://www.sublimetext.com/download#build-4126). Applies to the next report, not to replacements or previous reports. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_side_by_side` | `` false `` |  | Immediately | Keep the Find Results tab visible beside the file opened from a match. | [Build 4151](https://www.sublimetext.com/download#build-4151). Only applies when opening a match from a Find Results tab, not the output panel. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
@@ -392,7 +404,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `indent_to_bracket` | `` false `` |  | Immediately | Align the next line just after an unmatched opening bracket. | Align a new line with the column just after an unmatched parenthesis or bracket. [velocity/editing.rs](../crates/velocity/src/editing.rs) |
 | `index_exclude_gitignore` | `` true `` |  | Immediately | Respect Git ignore rules when building the symbol index. | [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
 | `index_exclude_patterns` | `` ["*.log"] `` |  | Immediately | Skip matching files when building the symbol index. | [Indexing settings](https://www.sublimetext.com/docs/indexing.html#settings) [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
-| `index_files` | `` true `` |  | Immediately | Build a symbol index of project files. | [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
+| `index_files` | `` true `` |  | Immediately | Build a symbol index of project files. | [velocity/app.rs](../crates/velocity/src/app.rs), [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
 | `index_include_patterns` | `` [] `` |  | Immediately | When the list is nonempty, index only matching files. | [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
 | `index_max_file_size` | Not shipped |  |  |  | [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |
 | `index_skip_unknown_extensions` | `` true `` |  | Immediately | Skip files with no known syntax when indexing. | [velocity/intelligence.rs](../crates/velocity/src/intelligence.rs) |

@@ -457,7 +457,7 @@ impl Actions {
                 }
             }
             Err(error) => {
-                panels.note_console(&error);
+                panels.note_console(workspace, &error);
                 panels.set_message(UiText::tr_fmt(
                     "Package or release action failed: {detail}",
                     [("detail", error)],

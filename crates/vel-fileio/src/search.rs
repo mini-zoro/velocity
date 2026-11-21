@@ -179,7 +179,9 @@ impl Windows {
         'attempts: for attempt in plan(&raw[..8192], options)? {
             let mut required = Required::new(filter.as_mut());
             if !attempt.encoding.is_single_byte()
-                && ![UTF_8, UTF_16BE, UTF_16LE].contains(&attempt.encoding)
+                && ![UTF_8, UTF_16BE, UTF_16LE]
+                    .into_iter()
+                    .any(|codec| attempt.encoding == codec)
                 || attempt.encoding == UTF_8 && attempt.replacement
             {
                 // Stateful/multibyte legacy codecs cannot restart at arbitrary

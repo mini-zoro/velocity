@@ -495,7 +495,9 @@ impl CompletionEngine {
         let mut resources = Vec::new();
         for value in values {
             let (trigger, completion, format) = if let Some(text) = value.as_str() {
-                (text, text, CompletionFormat::Text)
+                // A legacy tab introduces annotation, not inserted document text.
+                let literal = text.split_once('\t').map_or(text, |(trigger, _)| trigger);
+                (text, literal, CompletionFormat::Text)
             } else {
                 let trigger = value
                     .get("trigger")

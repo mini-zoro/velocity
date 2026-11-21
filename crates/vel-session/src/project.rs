@@ -167,6 +167,17 @@ pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
 pub fn workspace_path(project: &Path) -> PathBuf {
     project.with_extension("sublime-workspace")
 }
+/// The shareable definition corresponding to a named project or its companion workspace.
+pub fn project_path(path: &Path) -> PathBuf {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("sublime-workspace"))
+    {
+        path.with_extension("sublime-project")
+    } else {
+        path.to_owned()
+    }
+}
 
 #[cfg(test)]
 mod tests {

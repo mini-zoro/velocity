@@ -76,4 +76,22 @@ Add a non-US layout (e.g. German or French) in System Settings › Keyboard and 
       Check virtual state, animation on the next frame, clipping and final colors
       with `animation_enabled` both on and off.
 
+## 7. Round 36 parity
+
+Use a disposable profile and fixtures. These are checks of Velocity’s native behavior,
+not instructions to inspect an installed Sublime Text copy.
+
+| Check | Procedure and expected observation |
+| --- | --- |
+| Find Results modifiers | With three selected tabs in one group, open a match from the Find Results sheet using Return, double-click and Command-click. Repeat with side-by-side on/off. Record selected tabs, focus, source cursor and which preview is replaced. Record Shift/Option/Control separately rather than assuming undocumented bindings. |
+| Indexing Status | Start indexing an offline fixture tree, open Help › Indexing Status, and toggle the checkbox by click and Space. Confirm the old scan stops, a new scan starts after re-enabling, User `index_files` follows the control, and toggle focus remains in the auxiliary window. Repeat after closing the originating window. |
+| `open_file` flags | Use an authored key binding or the CLI named command in a two-group fixture. Verify `force_group` reuses a target-group view, `force_clone` creates another view of the same edits, and `clear_to_right` deselects but never closes tabs. Verify `transient` is not recent until promoted and record its tab-bar/preview placement. |
+| Image tab menu | Open a fixture PNG as Image, then as Text, and right-click each tab, including an inactive tab in another group. Check applicable Open As items, targeting, and that common close/reveal actions still work. |
+| Quick Switch Project | With two different disposable projects in recents, choose the second with Return, Command+Return and Command-click. Plain Return switches in place; Command should use a separate window or activate the target's already-open one. Verify the originating project’s unsaved document stays put. |
+| Native recents and icons | With the test app registered as the opener, double-click a document and a project in Finder and drop a file on the Dock icon. Check routing, icons, the macOS recent list, and that disabling `update_system_recent_files` clears/stops native additions without erasing project history. |
+| Build camera and microphone | Run a local capture fixture as a build child. Observe TCC prompt attribution and status for deny, allow and retry. Do not record personal audio/video or change permissions outside this fixture. |
+| Git gutter and inline colors | On a disposable repository, add, change and delete lines. Override the scheme’s diff colors and check the gutter, selected hunk and inline/deleted rows in light and dark mode. |
+| Merge handoff | Point `sublime_merge_path` at the test integration executable. Use a repository with a spaced path, a modified file, a nested folder and several commits on one line. Test Open Repository, File History, Folder History (descendants included), Line History (one-based requested line) and Blame; record the actual view for each action. |
+| Update dialog theming | Use a local update fixture with current, available and failed responses. Open Check for Updates under a legacy-style theme and check labels, version, changelog link, button states and legibility without installing anything. |
+
 Record results in `crates/velocity/MANUAL_TEST.md` (section "Live checks") or tell the agent.

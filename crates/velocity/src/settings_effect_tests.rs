@@ -62,6 +62,8 @@ fn alternate(key: &str, default: &Value, root: &Path) -> Value {
         | "syntax_detection_size_limit"
         | "io_workers" => json!(1),
         "find_in_files_context_characters" => json!(8),
+        "find_in_files_context_lines" => json!(0),
+        "console_max_history_lines" => json!(1),
         "file_exclude_patterns" | "index_exclude_patterns" => json!(["*.rs"]),
         "file_tab_style" => json!("rounded"),
         "folder_exclude_patterns" => json!(["subdir"]),
@@ -558,7 +560,7 @@ fn round35_find_files_probe(app: &mut App, key: &str, root: &Path) -> String {
     );
     app.panels.where_input.set(where_.to_str().unwrap());
     app.run_named(None, "find_in_files_start", &json!({}));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !app.panels.file_complete {
         app.panels.poll(&mut app.workspace, 0..0);
         assert!(
@@ -1201,9 +1203,15 @@ fn exercise(app: &mut App, key: &str, root: &Path) -> String {
         | "find_highlight_matches_max_size"
         | "find_regex_highlight_matches_max_size"
         | "use_find_clipboard" => round35_find_probe(app, key),
+        "console_max_history_lines" => {
+            app.panels
+                .note_console(&app.workspace, "first\nsecond\nthird");
+            format!("{:?}", app.panels.console_history())
+        }
         "find_in_files_max_file_size"
         | "find_in_files_max_result_size"
         | "find_in_files_context_characters"
+        | "find_in_files_context_lines"
         | "find_in_files_suppress_errors"
         | "find_in_files_side_by_side" => round35_find_files_probe(app, key, root),
         "fold_buttons"

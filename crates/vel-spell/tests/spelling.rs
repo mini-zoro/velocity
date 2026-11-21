@@ -161,6 +161,28 @@ fn package_pairs_load_and_cannot_escape_packages() {
 }
 
 #[test]
+fn r36_legacy_dictionary_set_decodes_words_and_affixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("User");
+    std::fs::create_dir(&user).unwrap();
+    let dic = user.join("latin.dic");
+    let aff = user.join("latin.aff");
+    std::fs::write(&aff, b"SET ISO8859-1\nSFX A Y 1\nSFX A 0 \xe9 .\n").unwrap();
+    std::fs::write(&dic, b"1\ncaf\xe9/A\n").unwrap();
+    for checker in [
+        SpellChecker::from_package(dir.path(), "Packages/User/latin.dic"),
+        SpellChecker::from_system_directory(&user, &dic),
+    ] {
+        let checker = checker.unwrap();
+        assert!(checker.check("café"));
+        assert!(checker.check("caféé"));
+        assert!(!checker.check("cafe"));
+    }
+    std::fs::write(&aff, "SET UTF-8\n").unwrap();
+    assert!(SpellChecker::from_system_directory(&user, &dic).is_err());
+}
+
+#[test]
 fn switching_user_lexicons_invalidates_cached_results() {
     let text = Text::from("// speling mispelled\n");
     let scopes = scopes(text.clone(), 0);

@@ -36,6 +36,9 @@ mod round34_lane_b_tests;
 #[cfg(test)]
 #[path = "app_round35_lane_b_tests.rs"]
 mod round35_lane_b_tests;
+#[cfg(test)]
+#[path = "app_round36_lane_c_tests.rs"]
+mod round36_lane_c_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
@@ -601,6 +604,34 @@ impl App {
             self.workspace.open_project(project)
         }
     }
+    fn switch_to_project(
+        &mut self,
+        window: Option<&WindowHandle>,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        if self
+            .workspace
+            .project_path()
+            .is_some_and(|open| crate::open_requests::same_path(open, &path))
+        {
+            return Ok(());
+        }
+        if !self.retain_switching_project()
+            && !self.can_close_many(window, &(0..self.workspace.tabs.len()).collect::<Vec<_>>())
+        {
+            return Ok(());
+        }
+        self.checkpoint_reason(false, true)?;
+        self.sessions.borrow().flush()?;
+        let retain = self.retain_switching_project();
+        self.open_project_for_session(path.clone())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        self.sessions
+            .borrow_mut()
+            .retain_departing(self.session_id, retain);
+        self.panels.reset(&self.workspace);
+        Ok(())
+    }
     fn checkpoint(&mut self, quitting: bool) -> Result<(), String> {
         self.checkpoint_reason(quitting, false)
     }
@@ -1132,7 +1163,7 @@ impl App {
     }
     fn status_error(&mut self, mut message: UiText) {
         message.refresh(&self.workspace.translations);
-        self.panels.note_console(&message);
+        self.panels.note_console(&self.workspace, &message);
         let _ = self
             .reporter
             .emit(json!({"kind":"editor_error","message":message.as_str()}));
@@ -1143,13 +1174,13 @@ impl App {
         if !reports.is_empty() {
             self.panels.message = reports.join("; ").into();
             for report in &reports {
-                self.panels.note_console(report);
+                self.panels.note_console(&self.workspace, report);
             }
         }
     }
     fn data_loss_error(&mut self, window: Option<&WindowHandle>, mut message: UiText) {
         message.refresh(&self.workspace.translations);
-        self.panels.note_console(&message);
+        self.panels.note_console(&self.workspace, &message);
         let _ = self
             .reporter
             .emit(json!({"kind":"save_diagnostic","message":message.as_str()}));
@@ -1350,7 +1381,7 @@ impl App {
             "edit_project" | "close_project" if self.workspace.project_path().is_none() => {
                 return false;
             }
-            "recent_projects" | "quick_switch_project"
+            "recent_projects" | "quick_switch_project" | "remove_deleted_recent_projects"
                 if self.workspace.recent_projects.is_empty() =>
             {
                 return false;
@@ -2896,7 +2927,7 @@ impl App {
         if name == "open_file"
             && let Some(file) = args["file"].as_str()
         {
-            return self.workspace.open_file_argument(file);
+            return self.workspace.open_file_argument(file, args);
         }
         if name == "open_recent_file" {
             let path = Path::new(args["file"].as_str().ok_or("missing file")?);
@@ -2931,6 +2962,49 @@ impl App {
                 self.install_native_menu(window, false);
             }
             return Ok(());
+        }
+        if name == "remove_deleted_recent_projects" {
+            self.sync_recents();
+            self.sessions.borrow_mut().remove_deleted_recent_projects(
+                self.session_id,
+                &mut self.workspace.recent_projects,
+            );
+            if let Some(window) = window {
+                self.install_native_menu(window, false);
+            }
+            return Ok(());
+        }
+        if name == "toggle_indexing" {
+            let enabled = self.workspace.settings.bool("index_files", true);
+            self.workspace
+                .set_user_preference("index_files", json!(!enabled))?;
+            let mut status = self.panels.intel.status_source.lock().unwrap();
+            status.enabled = self.workspace.settings.bool("index_files", true);
+            return Ok(());
+        }
+        if matches!(name, "quick_switch_project" | "recent_projects") {
+            self.sync_recents();
+            let items = self
+                .workspace
+                .recent_projects
+                .iter()
+                .map(|p| vel_config::ui::PaletteItem {
+                    caption: p.display().to_string(),
+                    invocation: vel_config::keymap::Invocation {
+                        command: "open_project".into(),
+                        args: json!({"file":p, "_quick_switch":name == "quick_switch_project"}),
+                    },
+                })
+                .collect();
+            self.panels.choices(&mut self.workspace, items);
+            return Ok(());
+        }
+        if matches!(name, "open_project" | "open_project_or_workspace")
+            && args["new_window"] != true
+            && let Some(path) = args["file"].as_str()
+        {
+            return self
+                .switch_to_project(window, vel_session::project::project_path(Path::new(path)));
         }
         if matches!(name, "clear_recent_files" | "clear_recent_projects") {
             let kind = if name == "clear_recent_files" {
@@ -3041,7 +3115,11 @@ impl App {
             "show_indexing_status" => {
                 self.panels.refresh_locale(&self.workspace);
                 let source = self.panels.intel.status_source.clone();
-                let title = source.lock().unwrap().labels.title.to_string();
+                let title = {
+                    let mut status = source.lock().unwrap();
+                    status.enabled = self.workspace.settings.bool("index_files", true);
+                    status.labels.title.to_string()
+                };
                 w.new_window(
                     WindowOptions {
                         title,
@@ -3050,7 +3128,7 @@ impl App {
                             height: 480.,
                         },
                     },
-                    crate::intelligence::StatusWindow::new(source),
+                    crate::intelligence::StatusWindow::new(source, w.clone()),
                 )?;
                 return Ok(());
             }
@@ -3064,7 +3142,10 @@ impl App {
                 );
                 return Ok(());
             }
-            "prompt_open_project" | "open_project" | "open_recent_project" => {
+            "prompt_open_project"
+            | "open_project"
+            | "open_recent_project"
+            | "open_project_or_workspace" => {
                 let path = args["file"]
                     .as_str()
                     .map(std::path::PathBuf::from)
@@ -3079,23 +3160,18 @@ impl App {
                         }
                     });
                 if let Some(path) = path {
-                    if !self.retain_switching_project()
-                        && !self.can_close_many(
-                            Some(w),
-                            &(0..self.workspace.tabs.len()).collect::<Vec<_>>(),
-                        )
-                    {
+                    let path = vel_session::project::project_path(&path);
+                    if args["new_window"] == true {
+                        self.open_native_window_request(
+                            w,
+                            crate::instance::Request {
+                                project: Some(path),
+                                ..crate::instance::Request::new(&Options::default(), None)?
+                            },
+                        )?;
                         return Ok(());
                     }
-                    self.checkpoint_reason(false, true)?;
-                    self.sessions.borrow().flush()?;
-                    let retain = self.retain_switching_project();
-                    self.open_project_for_session(path.clone())
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                    self.sessions
-                        .borrow_mut()
-                        .retain_departing(self.session_id, retain);
-                    self.panels.reset(&self.workspace);
+                    return self.switch_to_project(Some(w), path);
                 }
                 return Ok(());
             }
@@ -3139,22 +3215,6 @@ impl App {
                 }
                 return Ok(());
             }
-            "quick_switch_project" | "recent_projects" => {
-                let items = self
-                    .workspace
-                    .recent_projects
-                    .iter()
-                    .map(|p| vel_config::ui::PaletteItem {
-                        caption: p.display().to_string(),
-                        invocation: vel_config::keymap::Invocation {
-                            command: "open_project".into(),
-                            args: json!({"file":p}),
-                        },
-                    })
-                    .collect();
-                self.panels.choices(&mut self.workspace, items);
-                return Ok(());
-            }
             _ => {}
         }
         if matches!(name, "open_dir" | "add_folder") && args["dir"].is_null() {
@@ -3193,7 +3253,7 @@ impl App {
             }
             "open_file" => {
                 if let Some(file) = args["file"].as_str() {
-                    self.workspace.open_file_argument(file)?;
+                    self.workspace.open_file_argument(file, args)?;
                 } else if (args["force"].as_bool().unwrap_or(false) || self.can_close(w, active))
                     && let Some(path) = self.workspace.tabs[active].path.clone()
                 {
@@ -4944,8 +5004,11 @@ impl AppHandler for App {
                         .map(PathBuf::from)
                         .into_iter()
                         .collect(),
-                    "open_project" => {
-                        request.project = parsed["file"].as_str().map(PathBuf::from);
+                    "open_project" | "open_project_or_workspace" => {
+                        request.project = parsed["file"]
+                            .as_str()
+                            .map(Path::new)
+                            .map(vel_session::project::project_path);
                         Vec::new()
                     }
                     _ => return,

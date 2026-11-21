@@ -2131,9 +2131,15 @@ impl Workspace {
             ("Project", &self.recent_projects, "open_project", "file"),
         ] {
             if !paths.is_empty() {
-                let entries: Vec<_> = paths.iter().take(20).map(|path| {
+                let mut entries: Vec<_> = paths.iter().take(20).map(|path| {
                     serde_json::json!({"caption":path.display().to_string(), "command":command, "args":{key:path}})
                 }).collect();
+                if key == "file" && command == "open_project" {
+                    entries.push(serde_json::json!({"caption":"-"}));
+                    entries.push(serde_json::json!({
+                        "caption":"Remove Deleted", "command":"remove_deleted_recent_projects"
+                    }));
+                }
                 children.push(serde_json::json!({"caption":caption,"children":entries}));
             }
         }
@@ -2419,7 +2425,11 @@ impl Workspace {
             self.workbench.groups[group].add(sheet, false);
         }
     }
-    pub(crate) fn open_file_argument(&mut self, argument: &str) -> Result<(), String> {
+    pub(crate) fn open_file_argument(
+        &mut self,
+        argument: &str,
+        args: &Value,
+    ) -> Result<(), String> {
         let res = argument.strip_prefix("res://").unwrap_or(argument);
         if res.starts_with("Packages/") {
             let resource = self
@@ -2433,7 +2443,86 @@ impl Workspace {
             tab.editor.read_only = true;
             return Ok(());
         }
-        self.open(FileLocation::parse(argument))
+        let flag = |key: &str| args[key].as_bool().unwrap_or(false);
+        // Preserve Velocity's existing filename-suffix shortcut for commands
+        // that predate the explicit flag; false requests a literal filename.
+        let location = if args["encoded_position"].as_bool().unwrap_or(true) {
+            FileLocation::parse(argument)
+        } else {
+            FileLocation::path_only(argument.into())
+        };
+        let transient = flag("transient");
+        let force_group = flag("force_group");
+        let force_clone = flag("force_clone");
+        let clear_right = flag("clear_to_right");
+        let additive = clear_right || flag("add_to_selection");
+        if !force_group && !force_clone && !additive {
+            return if transient {
+                self.preview(location)
+            } else {
+                self.open(location)
+            };
+        }
+
+        let _request = self.navigation_request();
+        self.materialize_input();
+        let group = self.workbench.active;
+        let previous = additive.then(|| self.workbench.groups.clone());
+        let path = absolute(&location.path)?;
+        let mut existing = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.path.as_ref() == Some(&path));
+        let first = existing.next().map(|(i, _)| i);
+        let in_group = |i: usize| self.workbench.group_of(self.tabs[i].sheet) == Some(group);
+        let local = first
+            .filter(|&i| in_group(i))
+            .or_else(|| existing.find(|(i, _)| in_group(*i)).map(|(i, _)| i));
+        if let Some(source) = first.filter(|_| force_clone || (force_group && local.is_none())) {
+            self.clone_file_into_group(source, group)?;
+            let tab = &mut self.tabs[self.active];
+            tab.transient = transient;
+            tab.preview_recent_pending = transient;
+            if location.has_position() {
+                tab.goto(&location);
+            }
+            if !transient {
+                crate::workbench::remember(&mut self.recent_files, path);
+            }
+        } else if let Some(index) = local.filter(|&index| force_group && Some(index) != first) {
+            self.select(index);
+            if !transient {
+                self.make_permanent(index);
+            }
+            self.goto_open_tab(index, &location);
+        } else if transient {
+            self.preview(location)?;
+        } else {
+            self.open_mode(location, false)?;
+        }
+        if let Some(previous) = previous {
+            let group = self.workbench.active;
+            let sheet = self.tabs[self.active].sheet;
+            let previous = &previous[group];
+            let end = previous
+                .focused
+                .filter(|_| clear_right)
+                .and_then(|id| previous.sheets.iter().position(|&s| s == id))
+                .map_or(previous.sheets.len(), |i| i + 1);
+            let current = &mut self.workbench.groups[group];
+            current.selected.extend(
+                previous.sheets[..end]
+                    .iter()
+                    .filter(|id| previous.selected.contains(id) && current.sheets.contains(id)),
+            );
+            current.selected.insert(sheet);
+        }
+        if !transient {
+            self.remember_goto_file();
+        }
+        self.observe_navigation();
+        Ok(())
     }
     pub(crate) fn can_open_as(&self, index: usize, mode: crate::open_requests::OpenAs) -> bool {
         use crate::open_requests::OpenAs;
@@ -2597,14 +2686,7 @@ impl Workspace {
             if !preview {
                 self.make_permanent(index);
             }
-            if location.has_position() {
-                // A duplicate open during loading must retain an explicit jump
-                // until the final text is installed. A bare reopen leaves it alone.
-                if self.tabs[index].loading.is_some() || self.tabs[index].binary_loading.is_some() {
-                    self.tabs[index].location = Some(location.clone());
-                }
-                self.tabs[index].goto(&location);
-            }
+            self.goto_open_tab(index, &location);
             return Ok(());
         }
         let started = Instant::now();
@@ -2675,6 +2757,17 @@ impl Workspace {
         }
         self.configure_language(self.active, None, true)?;
         Ok(())
+    }
+    fn goto_open_tab(&mut self, index: usize, location: &FileLocation) {
+        if location.has_position() {
+            let tab = &mut self.tabs[index];
+            // A duplicate open during loading retains the explicit jump until
+            // the final text is installed. A bare reopen leaves it alone.
+            if tab.loading.is_some() || tab.binary_loading.is_some() {
+                tab.location = Some(location.clone());
+            }
+            tab.goto(location);
+        }
     }
     pub fn save(&mut self, index: usize, path: Option<PathBuf>) -> Result<(), String> {
         self.materialize_input();

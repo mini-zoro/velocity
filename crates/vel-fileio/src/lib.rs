@@ -16,6 +16,8 @@ pub use decoding::{
     decoding_for_path,
 };
 use encoding_rs::{CoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+mod codecs;
+pub use codecs::Codec;
 pub use progressive::{
     LoadTask, content_kind, load_background, load_background_for_reload,
     load_background_with_options, load_on_workers, with_cancellation,
@@ -209,7 +211,9 @@ pub const ENCODINGS: &[(&str, &str)] = &[
     ("Greek (ISO 8859-7)", "iso-8859-7"),
     ("Hebrew (Windows 1255)", "windows-1255"),
     ("Hebrew (ISO 8859-8)", "iso-8859-8"),
+    ("Hebrew (DOS CP862)", "cp862"),
     ("Nordic (ISO 8859-10)", "iso-8859-10"),
+    ("Nordic (DOS CP865)", "cp865"),
     ("Romanian (ISO 8859-16)", "iso-8859-16"),
     ("Turkish (Windows 1254)", "windows-1254"),
     ("Turkish (ISO 8859-9)", "windows-1254"),
@@ -223,8 +227,8 @@ pub const ENCODINGS: &[(&str, &str)] = &[
     ("Chinese Simplified (GB18030)", "gb18030"),
     ("Chinese Traditional (Big5)", "big5"),
 ];
-/// Maps display names and standard encoding labels to encoding_rs codecs.
-pub fn encoding(name: &str) -> Result<&'static Encoding, String> {
+/// Maps display names and encoding labels to supported codecs.
+pub fn encoding(name: &str) -> Result<Codec, String> {
     let name = name.trim();
     let name = if name.eq_ignore_ascii_case("Western (Windows-1252)") {
         "Western (Windows 1252)"
@@ -235,11 +239,25 @@ pub fn encoding(name: &str) -> Result<&'static Encoding, String> {
         .iter()
         .find(|(display, _)| display.eq_ignore_ascii_case(name))
         .map_or(name, |(_, label)| *label);
-    Encoding::for_label(label.as_bytes()).ok_or_else(|| format!("unknown encoding {name}"))
+    if ["862", "cp862", "ibm862"]
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case(label))
+    {
+        Ok(Codec::Cp862)
+    } else if ["865", "cp865", "ibm865"]
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case(label))
+    {
+        Ok(Codec::Cp865)
+    } else {
+        Encoding::for_label(label.as_bytes())
+            .map(Codec::Standard)
+            .ok_or_else(|| format!("unknown encoding {name}"))
+    }
 }
 /// Resolves a fallback, returning a diagnostic once per invalid name per process.
 /// Invalid settings use Windows-1252 so a single bad preference cannot block every open.
-pub fn fallback_encoding(name: &str) -> (&'static Encoding, Option<String>) {
+pub fn fallback_encoding(name: &str) -> (Codec, Option<String>) {
     match encoding(name) {
         Ok(codec) => (codec, None),
         Err(error) => {
@@ -252,7 +270,7 @@ pub fn fallback_encoding(name: &str) -> (&'static Encoding, Option<String>) {
                 .expect("encoding diagnostics")
                 .insert(name.into());
             (
-                WINDOWS_1252,
+                Codec::Standard(WINDOWS_1252),
                 first.then(|| format!("{error}; using Western (Windows 1252)")),
             )
         }
@@ -572,7 +590,7 @@ pub fn encode_to(writer: &mut impl Write, text: &Text, format: &Format) -> Resul
 
 struct DecodeReader<'a, R> {
     input: R,
-    decoder: encoding_rs::Decoder,
+    decoder: codecs::Decoder,
     allow_replacement: bool,
     raw: Vec<u8>,
     start: usize,
@@ -591,14 +609,14 @@ struct DecodeReader<'a, R> {
 impl<'a, R: Read> DecodeReader<'a, R> {
     fn new(
         input: R,
-        codec: &'static Encoding,
+        codec: Codec,
         total: u64,
         progress: &'a mut dyn FnMut(Progress),
         default_line_ending: LineEnding,
     ) -> Self {
         Self {
             input,
-            decoder: codec.new_decoder_without_bom_handling(),
+            decoder: codec.decoder(),
             allow_replacement: false,
             raw: vec![0; 128 * 1024],
             start: 0,
@@ -833,7 +851,7 @@ fn write_encoded(
     writer: &mut impl Write,
     text: &Text,
     format: &Format,
-    codec: &'static Encoding,
+    codec: Codec,
 ) -> Result<(), String> {
     if format.bom {
         writer

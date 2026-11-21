@@ -65,9 +65,11 @@ impl Where {
                     } else {
                         let path = Path::new(part);
                         let resolved = base.join(path);
+                        let explicit_relative = part.starts_with("./") || part.starts_with("../");
                         if !part.starts_with("//")
                             && !part.contains(['*', '?'])
                             && (path.is_absolute()
+                                || explicit_relative
                                 || (part.contains('/')
                                     && !part.ends_with('/')
                                     && resolved.exists()))
@@ -471,7 +473,8 @@ impl Task {
                         let root = request
                             .folders
                             .iter()
-                            .find(|f| open.path.starts_with(&f.path))
+                            .filter(|f| open.path.starts_with(&f.path))
+                            .max_by_key(|f| f.path.components().count())
                             .map_or(Path::new(""), |f| f.path.as_path());
                         if !request.scope.allows(&open.path, root)
                             || (limits.max_file_size != 0
@@ -479,7 +482,9 @@ impl Task {
                         {
                             continue;
                         }
-                        seen.lock().expect("seen").insert(open.path.clone());
+                        if !seen.lock().expect("seen").insert(open.path.clone()) {
+                            continue;
+                        }
                         files.fetch_add(1, Ordering::Relaxed);
                         if !send_text_lines(
                             &tx,
@@ -1189,6 +1194,59 @@ mod tests {
         }
         assert_eq!(actual.next(), Some(expected[expected.len() / 2].as_ref()));
         assert!(actual.next_back().is_none());
+    }
+    #[test]
+    fn r36_where_combines_scopes_filters_and_unique_live_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("src, fixture");
+        std::fs::create_dir(&explicit).unwrap();
+        let file = explicit.join("live.rs");
+        let other = explicit.join("disk.rs");
+        std::fs::write(&file, "disk needle").unwrap();
+        std::fs::write(&other, "other needle").unwrap();
+        std::fs::write(explicit.join("ignored.rs"), "do not match needle").unwrap();
+        std::fs::write(explicit.join("ignore.txt"), "do not match needle").unwrap();
+        let relative = Where::parse("./", dir.path()).unwrap();
+        assert_eq!(relative.roots, [dir.path().join(".")]);
+        assert!(!relative.project);
+        let input = r#"<open folders>, <open files>, "./src, fixture/", *.rs, -ignored*"#;
+        let task = Task::start(Request {
+            search: Search::new("needle", crate::text::Options::default()).unwrap(),
+            scope: Where::parse(input, dir.path()).unwrap(),
+            folders: vec![Folder {
+                path: dir.path().into(),
+                name: "root".into(),
+                rules: Rules::default(),
+                follow_links: false,
+            }],
+            open: vec![
+                OpenFile {
+                    path: file.clone(),
+                    text: Text::from("live needle"),
+                },
+                OpenFile {
+                    path: file.clone(),
+                    text: Text::from("live needle"),
+                },
+            ],
+            context: 0,
+        })
+        .unwrap();
+        let mut lines = BTreeSet::new();
+        loop {
+            match task.events.recv_timeout(Duration::from_secs(30)).unwrap() {
+                Event::Line(line) => assert!(lines.insert((line.path.to_path_buf(), line.text))),
+                Event::Error(error) => panic!("{error}"),
+                Event::Done { matches, files } => {
+                    assert_eq!((matches, files), (2, 2));
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            lines,
+            BTreeSet::from([(file, "live needle".into()), (other, "other needle".into())])
+        );
     }
     #[test]
     fn where_stream_formats_context_and_removes_successful_recovery() {

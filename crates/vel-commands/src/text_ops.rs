@@ -27,6 +27,7 @@ pub(super) fn register(registry: &mut Registry) {
         ("select_all_bookmarks", bookmarks),
         ("expand_selection", expand),
         ("expand_selection_to_paragraph", paragraph),
+        ("expand_selection_to_block", block),
         ("trim_trailing_white_space", trim),
         ("trim_trailing_whitespace", trim),
         ("noop", noop),
@@ -163,10 +164,10 @@ fn upper_snake(h: &mut dyn Host, a: &Value) -> Result<(), String> {
     case(h, a, "upper_snake_case", IdentCase::UpperSnake)
 }
 fn expand(h: &mut dyn Host, a: &Value) -> Result<(), String> {
-    if a["to"] == "paragraph" {
-        paragraph(h, a)
-    } else {
-        super::text_command("expand_selection", a, h)
+    match a["to"].as_str() {
+        Some("paragraph") => paragraph(h, a),
+        Some("block") => block(h, a),
+        _ => super::text_command("expand_selection", a, h),
     }
 }
 macro_rules! adapter {
@@ -210,6 +211,13 @@ adapter!(bookmarks, "select_bookmarks", select_bookmarks);
 adapter!(
     paragraph,
     "expand_selection_to_paragraph",
+    expand_selection_to_paragraph
+);
+// Build 4121 names the legacy blank-line-delimited operation "Block"; the
+// release notes do not specify the newer Paragraph boundary rules.
+adapter!(
+    block,
+    "expand_selection_to_block",
     expand_selection_to_paragraph
 );
 adapter!(trim, "trim_trailing_white_space", trim_trailing_white_space);

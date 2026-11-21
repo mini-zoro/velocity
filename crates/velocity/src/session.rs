@@ -582,6 +582,19 @@ impl Sessions {
         self.forgotten_recent[kind].extend(self.recent[kind].drain(..));
         self.recent_heads.entry(id).or_default()[kind] = None;
     }
+    pub fn remove_deleted_recent_projects(&mut self, id: u64, local: &mut Vec<PathBuf>) {
+        let projects = &mut self.recent[2];
+        projects.retain(|path| {
+            let missing = std::fs::metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if missing {
+                self.forgotten_recent[2].insert(path.clone());
+            }
+            !missing
+        });
+        local.clone_from(projects);
+        self.recent_heads.entry(id).or_default()[2] = projects.first().cloned();
+    }
     pub fn flush(&self) -> Result<(), String> {
         // A broken project workspace must not suppress flushes for other windows.
         let mut errors = Vec::new();

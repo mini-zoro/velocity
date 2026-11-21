@@ -1,5 +1,5 @@
 //! The pure document decode decision and its bounded IO adapter.
-use crate::{DecodeOptions, encoding};
+use crate::{Codec, DecodeOptions, encoding};
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
 use std::{io::Read, path::Path};
 
@@ -52,7 +52,8 @@ impl PrefixFacts {
             bom,
             nuls: bytes.contains(&0),
             valid_utf8,
-            utf16: vel_largefile::detect_utf16(bytes).and_then(|name| encoding(name).ok()),
+            utf16: vel_largefile::detect_utf16(bytes)
+                .and_then(|name| Encoding::for_label(name.as_bytes())),
             binary_signature: binary_signature(bytes),
             content: None,
             legacy_text_matches: false,
@@ -113,7 +114,7 @@ impl DecodeNotice {
 #[derive(Clone, Debug)]
 pub struct DecodeAttempt {
     /// Codec to try, without replacement characters.
-    pub encoding: &'static Encoding,
+    pub encoding: Codec,
     /// BOM bytes consumed before this decoder.
     pub skip: usize,
     /// Whether the source carries this codec's BOM.
@@ -229,6 +230,7 @@ pub fn decide_decoding(
         return Ok(decision);
     }
     if let Some((codec, skip)) = facts.bom {
+        let codec = Codec::Standard(codec);
         decision.attempts.push(DecodeAttempt {
             encoding: codec,
             skip,
@@ -247,7 +249,7 @@ pub fn decide_decoding(
         // Preserve the existing lossless legacy fallback for malformed BOM data.
         // It consumes the original bytes (including the invalid marker), names
         // the failed BOM codec, and never becomes a user encoding choice.
-        let fallback = encoding(&state.fallback_encoding).unwrap_or(WINDOWS_1252);
+        let fallback = encoding(&state.fallback_encoding).unwrap_or(Codec::Standard(WINDOWS_1252));
         if fallback != codec {
             decision.attempts.push(DecodeAttempt {
                 encoding: fallback,
@@ -283,7 +285,7 @@ pub fn decide_decoding(
         });
         return Ok(decision);
     }
-    let mut push = |codec: &'static Encoding, explicit: bool| {
+    let mut push = |codec: Codec, explicit: bool| {
         if !decision
             .attempts
             .iter()
@@ -316,11 +318,11 @@ pub fn decide_decoding(
         }
     }
     if facts.valid_utf8 && !facts.nuls {
-        push(UTF_8, false);
+        push(Codec::Standard(UTF_8), false);
     }
     if facts.nuls {
         if let Some(codec) = facts.utf16 {
-            push(codec, false);
+            push(Codec::Standard(codec), false);
         } else {
             decision.binary = Some(DecodeNotice::Binary {
                 ignored_choice: chosen.is_some(),
@@ -329,14 +331,14 @@ pub fn decide_decoding(
     } else {
         // The prefix can be legacy text or valid UTF-8 until a later chunk fails.
         // Try UTF-8 before the configured legacy decoder in either case.
-        push(UTF_8, false);
+        push(Codec::Standard(UTF_8), false);
         // Keep this function pure: reporting an invalid preference is the
         // settings loader's job, not the once-per-process diagnostic registry.
-        let fallback = encoding(&state.fallback_encoding).unwrap_or(WINDOWS_1252);
+        let fallback = encoding(&state.fallback_encoding).unwrap_or(Codec::Standard(WINDOWS_1252));
         push(fallback, false);
     }
     if decision.binary.is_none() {
-        let fallback = encoding(&state.fallback_encoding).unwrap_or(WINDOWS_1252);
+        let fallback = encoding(&state.fallback_encoding).unwrap_or(Codec::Standard(WINDOWS_1252));
         decision.attempts.push(DecodeAttempt {
             encoding: fallback,
             skip: 0,

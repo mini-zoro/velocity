@@ -89,6 +89,54 @@ impl SpellChecker {
             generation: generation(),
         })
     }
+    fn from_files(aff: &Path, dic: &Path) -> Result<Self, Error> {
+        let bytes = fs::read(aff)?;
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+        // Hunspell declares its byte encoding in the ASCII SET directive.
+        // Decode both files before passing them to the UTF-8 dictionary engine.
+        let charset = bytes.split(|&b| b == b'\n').find_map(|line| {
+            let mut fields = line
+                .split(|b| b.is_ascii_whitespace())
+                .filter(|s| !s.is_empty());
+            (fields.next()? == b"SET").then(|| fields.next()).flatten()
+        });
+        let name = match charset {
+            Some(label) => std::str::from_utf8(label)
+                .map_err(|_| Error::Dictionary("invalid SET encoding label".into()))?,
+            None => "UTF-8",
+        };
+        let codec = vel_fileio::encoding(name).map_err(Error::Dictionary)?;
+        let word_bytes = fs::read(dic)?;
+        let word_bytes = if codec.name() == "UTF-8" {
+            word_bytes
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(&word_bytes)
+        } else {
+            &word_bytes
+        };
+        let decode = |path: &Path, input: &[u8]| {
+            codec
+                .decode_without_bom_handling_and_without_replacement(input)
+                .map(|text| text.into_owned())
+                .ok_or_else(|| {
+                    Error::Dictionary(format!("{}: invalid {name} text", path.display()))
+                })
+        };
+        let affixes = decode(aff, bytes)?;
+        let words = decode(dic, word_bytes)?;
+        if codec.name() == "UTF-8" {
+            return Self::new(&affixes, &words);
+        }
+        let mut normalized = String::with_capacity(affixes.len());
+        for line in affixes.split_inclusive('\n') {
+            if line.split_ascii_whitespace().next() == Some("SET") {
+                normalized.push_str("SET UTF-8\n");
+            } else {
+                normalized.push_str(line);
+            }
+        }
+        Self::new(&normalized, &words)
+    }
     /// Loads the shipped permissive US English dictionary once per process.
     pub fn english() -> Result<Self, Error> {
         static DICTIONARY: OnceLock<Result<Arc<Dictionary>, String>> = OnceLock::new();
@@ -126,9 +174,9 @@ impl SpellChecker {
         if !dic.starts_with(&root) || !aff.starts_with(&root) {
             return Err(Error::PackagePath);
         }
-        Self::new(&fs::read_to_string(aff)?, &fs::read_to_string(dic)?)
+        Self::from_files(&aff, &dic)
     }
-    /// Finds available UTF-8 dictionary pairs in immediate `Packages/*/` folders.
+    /// Finds paired dictionaries in immediate `Packages/*/` folders.
     pub fn package_dictionaries(packages_root: &Path) -> Result<Vec<PathBuf>, Error> {
         let mut result = Vec::new();
         for package in fs::read_dir(packages_root)? {
@@ -180,7 +228,7 @@ impl SpellChecker {
         if !dic.starts_with(&root) || !aff.starts_with(&root) {
             return Err(Error::PackagePath);
         }
-        Self::new(&fs::read_to_string(aff)?, &fs::read_to_string(dic)?)
+        Self::from_files(&aff, &dic)
     }
     /// Replaces `ignored_words`. Matching is Unicode lowercase, including capitalized forms.
     pub fn set_ignored_words(&mut self, words: impl IntoIterator<Item = impl AsRef<str>>) {

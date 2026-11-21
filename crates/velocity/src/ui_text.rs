@@ -200,6 +200,7 @@ pub(crate) struct IndexLabels {
     pub heading: Cow<'static, str>,
     pub preparing: Cow<'static, str>,
     pub inactive: Cow<'static, str>,
+    pub enable: Cow<'static, str>,
     pub progress: Cow<'static, str>,
 }
 
@@ -210,6 +211,7 @@ impl IndexLabels {
             heading: tr.tr("Indexing Status"),
             preparing: tr.tr("Preparing project index…"),
             inactive: tr.tr("No project index. Open a folder and enable index_files."),
+            enable: tr.tr("Enable Indexing"),
             progress: tr.tr(
                 "{percent}%  {files} files, {cached} cached, {pending} pending, {skipped} skipped",
             ),

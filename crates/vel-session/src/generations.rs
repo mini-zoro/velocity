@@ -54,6 +54,28 @@ pub(super) struct Project {
     previous: Option<PathBuf>,
 }
 
+// The public project documentation describes what Sublime stores, but does
+// not specify its workspace JSON keys. Never publish a Velocity session over
+// a well-formed JSON object that is not one of our session generations.
+fn foreign_workspace(bytes: &[u8]) -> bool {
+    use serde_json::value::RawValue;
+    #[derive(serde::Deserialize)]
+    struct Header<'a> {
+        #[serde(borrow)]
+        version: Option<&'a RawValue>,
+        #[serde(borrow)]
+        windows: Option<&'a RawValue>,
+        #[serde(borrow)]
+        documents: Option<&'a RawValue>,
+    }
+    bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{')
+        && serde_json::from_slice::<Header<'_>>(bytes).is_ok_and(|header| {
+            header.version.is_none_or(|value| value.get() != "1")
+                || header.windows.is_none()
+                || header.documents.is_none()
+        })
+}
+
 impl Project {
     pub(super) fn new(project: &Path, data: Option<&Path>) -> Self {
         let path = fs::canonicalize(project)
@@ -75,7 +97,24 @@ impl Project {
         if let Some(previous) = &self.previous {
             clean_stale(atomic::parent(previous), &self.prefix, age);
         }
-        recover(path, self.previous.as_deref(), false)
+        if let Ok(Some(bytes)) = read(path)
+            && foreign_workspace(&bytes)
+        {
+            let mut recovery = recover(
+                &path.with_extension("velocity-workspace"),
+                self.previous.as_deref(),
+                false,
+            );
+            if recovery.source.is_none() {
+                recovery.messages.push(format!(
+                    "Workspace format not recognized; kept {} unchanged",
+                    path.display()
+                ));
+            }
+            recovery
+        } else {
+            recover(path, self.previous.as_deref(), false)
+        }
     }
 }
 
@@ -181,6 +220,16 @@ impl Saved {
     // https://www.sublimetext.com/download (4126): avoid losing the session to
     // an interrupted save. Keep a prior valid checkpoint before publishing.
     pub(super) fn write(&mut self, path: &Path, session: &Session) -> Result<(), String> {
+        if self.project.is_some()
+            && path.extension() == Some(OsStr::new("sublime-workspace"))
+            && self
+                .known
+                .as_ref()
+                .is_none_or(|(stamp, _)| super::DiskStamp::read(path).as_ref() != Some(stamp))
+            && read(path)?.is_some_and(|bytes| foreign_workspace(&bytes))
+        {
+            return self.write(&path.with_extension("velocity-workspace"), session);
+        }
         session.validate()?;
         let parent = atomic::parent(path);
         let error = |e| regular::error(path, e);

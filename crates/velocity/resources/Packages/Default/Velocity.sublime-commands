@@ -649,6 +649,11 @@
     }
   },
   {
+    "caption": "Selection: Expand Selection: To Block",
+    "command": "expand_selection",
+    "args": {"to": "block"}
+  },
+  {
     "caption": "Selection: Expand Selection: To Paragraph",
     "command": "expand_selection",
     "args": {

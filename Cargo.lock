@@ -3300,6 +3300,7 @@ dependencies = [
  "vel-buffer",
  "vel-color-scheme",
  "vel-diff",
+ "vel-fileio",
  "vel-highlight",
  "vel-scope",
  "vel-syntax",

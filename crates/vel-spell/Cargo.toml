@@ -18,6 +18,7 @@ vel-scope = { path = "../vel-scope" }
 thiserror = "2"
 unicode-segmentation = "1"
 vel-diff = { path = "../vel-diff" }
+vel-fileio = { path = "../vel-fileio" }
 
 [dev-dependencies]
 serde_json = "1"

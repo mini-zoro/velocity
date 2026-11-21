@@ -1,6 +1,31 @@
 use std::fs;
 use vel_fileio::{self as io, LineEnding};
 use vel_text::Text;
+
+#[test]
+fn r36_dos_codepages_roundtrip_and_strict_save() {
+    let dir = tempfile::tempdir().unwrap();
+    for (codec, bytes, expected) in [
+        ("CP862", b"\x99\x8c\x85\x8d\r\n".as_slice(), "שלום\n"),
+        (
+            "CP865",
+            b"\x92\x9d\x8f\x91\x9b\x86\r\n".as_slice(),
+            "ÆØÅæøå\n",
+        ),
+    ] {
+        let path = dir.path().join(codec);
+        fs::write(&path, bytes).unwrap();
+        let loaded = io::load_with_encoding(&path, codec).unwrap();
+        assert_eq!(loaded.text.to_string(), expected);
+        assert_eq!(loaded.format.encoding, codec);
+        assert_eq!(loaded.format.line_ending, LineEnding::CrLf);
+        assert_eq!(io::load(&path, codec, |_| {}).unwrap().text, expected);
+        let mut output = Vec::new();
+        io::encode_to(&mut output, &loaded.text, &loaded.format).unwrap();
+        assert_eq!(output, bytes);
+        assert!(io::encode_to(&mut Vec::new(), &Text::from("🙂"), &loaded.format).is_err());
+    }
+}
 #[test]
 fn display_names_work_for_defaults_and_roundtrip_saves_including_boms() {
     let dir = tempfile::tempdir().unwrap();

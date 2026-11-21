@@ -14,7 +14,7 @@ pub(super) fn encode(
     output: &mut (dyn Write + Send),
     text: &Text,
     format: &Format,
-    codec: &'static encoding_rs::Encoding,
+    codec: crate::Codec,
 ) -> Result<ContentIdentity, String> {
     std::thread::scope(|scope| {
         let (submit, blocks) = mpsc::sync_channel::<Chunk>(1);
@@ -124,7 +124,7 @@ fn streamed_encoding_preserves_bytes_and_propagates_disk_failure() {
         }
     }
     let text = Text::from("a猫\n".repeat(2 * BLOCK / 5 + 17).as_str());
-    let codec = encoding_rs::UTF_8;
+    let codec = crate::Codec::Standard(encoding_rs::UTF_8);
     let format = Format::default();
     let mut expected = Vec::new();
     write_encoded(&mut expected, &text, &format, codec).unwrap();
