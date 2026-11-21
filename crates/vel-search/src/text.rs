@@ -1,4 +1,4 @@
-//! Rope regex search and atomic buffer replacements, without copying the document.
+//! Rope regex search, bounded Perl fallback and atomic buffer replacements.
 use regex_cursor::{Input, engines::meta::Regex};
 /// Quotes a literal to seed a regex search without interpreting its metacharacters.
 pub fn escape_literal(text: &str) -> String {
@@ -8,13 +8,15 @@ use std::{
     ops::Range,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
 };
 use vel_buffer::{Buffer, Edit, EditKind, Region, Selection, ViewId};
+use vel_regex::PerlRegex;
 use vel_text::{ChunkCursor, Text};
+pub(super) mod perl;
 
 /// Find/replace options shared by the panel and file search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,23 +43,42 @@ impl Default for Options {
         }
     }
 }
-/// Compiled query. Supports regex-crate syntax: no lookaround, backreferences or recursion.
+#[derive(Clone, Debug)]
+enum Engine {
+    Rope(Regex),
+    Perl(Arc<PerlRegex>),
+}
+
+/// Compiled query. Uses the rope engine unless the pattern needs Perl syntax.
 #[derive(Clone, Debug)]
 pub struct Search {
     /// Original panel query.
     pub query: String,
     /// Effective panel flags.
     pub options: Options,
-    re: Regex,
+    engine: Engine,
 }
 impl Search {
+    /// Whether this query needs the bounded, contiguous Perl engine.
+    pub fn uses_perl(&self) -> bool {
+        matches!(self.engine, Engine::Perl(_))
+    }
+
+    pub(super) fn perl(&self) -> Option<&PerlRegex> {
+        match &self.engine {
+            Engine::Rope(_) => None,
+            Engine::Perl(re) => Some(re),
+        }
+    }
+
     pub(super) fn matches_in<'a, C: regex_cursor::Cursor + 'a>(
         &'a self,
         cursor: C,
     ) -> impl Iterator<Item = Range<usize>> + 'a {
-        self.re
-            .find_iter(Input::new(cursor))
-            .map(|m| m.start()..m.end())
+        let Engine::Rope(re) = &self.engine else {
+            unreachable!("only the rope engine searches cursors")
+        };
+        re.find_iter(Input::new(cursor)).map(|m| m.start()..m.end())
     }
 
     pub(super) fn pattern(query: &str, options: Options) -> String {
@@ -87,36 +108,51 @@ impl Search {
         // regex-cursor 0.1.5 can skip or shorten matches at chunk boundaries
         // when its prefilter has unequal-length candidates (e.g. k/K/K or t ?).
         // Both find and captures must use the full rope matcher.
-        let re = Regex::builder()
+        let pattern = Self::pattern(query, options);
+        let engine = match Regex::builder()
             .configure(Regex::config().auto_prefilter(false))
-            .build(&Self::pattern(query, options))
-            .map_err(|_| {
+            .build(&pattern)
+        {
+            Ok(re) => Engine::Rope(re),
+            Err(error)
+                if options.regex
+                    && error
+                        .syntax_error()
+                        .is_some_and(|e| perl::unsupported(e, &pattern)) =>
+            {
+                Engine::Perl(Arc::new(perl::compile(query, options)?))
+            }
+            Err(_) => {
                 // Report the user's expression, never the internal flag/boundary wrapper.
-                regex::RegexBuilder::new(query)
+                return Err(regex::RegexBuilder::new(query)
                     .multi_line(true)
                     .case_insensitive(!options.case_sensitive)
                     .build()
                     .err()
-                    .map_or_else(|| "Invalid regular expression".into(), |e| e.to_string())
-            })?;
+                    .map_or_else(|| "Invalid regular expression".into(), |e| e.to_string()));
+            }
+        };
         Ok(Self {
             query: query.into(),
             options,
-            re,
+            engine,
         })
     }
     /// Returns matches within an optional set of selection/viewport ranges, retaining rope context.
     pub fn find(&self, text: &Text, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
-        self.find_cancel(text, ranges, || false).unwrap_or_default()
+        self.find_cancel(text, ranges, || false)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
-    fn find_cancel(
+    pub(super) fn find_cancel(
         &self,
         text: &Text,
         ranges: &[Range<usize>],
         cancelled: impl Fn() -> bool,
-    ) -> Option<Vec<Range<usize>>> {
+    ) -> Result<Option<Vec<Range<usize>>>, String> {
         if self.query.is_empty() {
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let all = 0..text.len_bytes();
         let ranges = if ranges.is_empty() {
@@ -124,22 +160,36 @@ impl Search {
         } else {
             ranges
         };
-        let mut matches = Vec::new();
-        for range in ranges {
-            let input = Input::new(ChunkCursor::from(text)).range(range.clone());
-            for found in self.re.find_iter(input) {
-                if cancelled() {
-                    return None;
+        let mut matches = match &self.engine {
+            Engine::Perl(re) => {
+                let Some(input) = perl::materialize(text, &cancelled)? else {
+                    return Ok(None);
+                };
+                let Some(matches) = perl::find(re, &input, ranges, &cancelled)? else {
+                    return Ok(None);
+                };
+                matches
+            }
+            Engine::Rope(re) => {
+                let mut matches = Vec::new();
+                for range in ranges {
+                    let input = Input::new(ChunkCursor::from(text)).range(range.clone());
+                    for found in re.find_iter(input) {
+                        if cancelled() {
+                            return Ok(None);
+                        }
+                        matches.push(found.start()..found.end());
+                    }
+                    if cancelled() {
+                        return Ok(None);
+                    }
                 }
-                matches.push(found.start()..found.end());
+                matches
             }
-            if cancelled() {
-                return None;
-            }
-        }
+        };
         matches.sort_by_key(|r| (r.start, r.end));
         matches.dedup();
-        Some(matches)
+        Ok(Some(matches))
     }
     /// Chooses the next/previous match. `current` is skipped, including a zero-width match.
     pub fn next(
@@ -183,15 +233,39 @@ impl Search {
                 .flatten()
         })
     }
-    /// Expands Perl-style captures and case/character escapes, copying only captured substrings.
+    /// Expands captures and escapes. The rope engine copies only captured substrings.
+    /// Returns no edits if the Perl fallback could not finish within its limits.
     pub fn replacements(
         &self,
         text: &Text,
         template: &str,
         ranges: &[Range<usize>],
     ) -> Vec<Replacement> {
+        self.try_replacements(text, template, ranges)
+            .unwrap_or_default()
+    }
+
+    /// Prepares replacements, reporting any Perl fallback resource limit.
+    pub fn try_replacements(
+        &self,
+        text: &Text,
+        template: &str,
+        ranges: &[Range<usize>],
+    ) -> Result<Vec<Replacement>, String> {
+        self.replacements_cancel(text, template, ranges, None, || false)
+            .map(Option::unwrap_or_default)
+    }
+
+    fn replacements_cancel(
+        &self,
+        text: &Text,
+        template: &str,
+        ranges: &[Range<usize>],
+        only: Option<&Range<usize>>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<Vec<Replacement>>, String> {
         if self.query.is_empty() {
-            return Vec::new();
+            return Ok(Some(Vec::new()));
         }
         let all = 0..text.len_bytes();
         let ranges = if ranges.is_empty() {
@@ -199,24 +273,38 @@ impl Search {
         } else {
             ranges
         };
+        let Engine::Rope(re) = &self.engine else {
+            let Some(input) = perl::materialize(text, &cancelled)? else {
+                return Ok(None);
+            };
+            return perl::replacements(
+                self.perl().expect("Perl engine"),
+                &input,
+                template,
+                ranges,
+                only,
+                self.options.preserve_case,
+                &cancelled,
+            );
+        };
         let mut result = Vec::new();
         for range in ranges {
-            for capture in self
-                .re
-                .captures_iter(Input::new(ChunkCursor::from(text)).range(range.clone()))
+            for capture in
+                re.captures_iter(Input::new(ChunkCursor::from(text)).range(range.clone()))
             {
                 let found = capture.get_match().expect("matched capture");
                 let range = found.start()..found.end();
                 let mut replacement = String::new();
                 if self.options.regex {
-                    replacement = expand_format(template, |name| {
+                    replacement = expand_format::<false>(template, 0, |name| {
                         name.parse::<usize>()
                             .ok()
                             .and_then(|n| capture.get_group(n))
                             .or_else(|| capture.get_group_by_name(name))
                             .map(|group| text.slice(group.start..group.end).to_string())
                             .unwrap_or_default()
-                    });
+                    })
+                    .expect("unlimited replacement");
                 } else {
                     replacement.push_str(template);
                 }
@@ -231,11 +319,15 @@ impl Search {
         }
         result.sort_by_key(|r| (r.range.start, r.range.end));
         result.dedup_by(|a, b| a.range == b.range);
-        result
+        Ok(Some(result))
     }
 }
 // Case controls span literal text and captures; Unicode conversions may grow a scalar.
-fn expand_format(template: &str, capture: impl Fn(&str) -> String) -> String {
+fn expand_format<const BOUNDED: bool>(
+    template: &str,
+    max_bytes: usize,
+    capture: impl Fn(&str) -> String,
+) -> Option<String> {
     let mut chars = template.chars().peekable();
     let mut result = String::new();
     let mut case = None;
@@ -306,6 +398,9 @@ fn expand_format(template: &str, capture: impl Fn(&str) -> String) -> String {
                         format!("${}{{{name}", if named { "+" } else { "" })
                             .chars()
                             .for_each(|c| result.push(c));
+                        if BOUNDED && result.len() > max_bytes {
+                            return None;
+                        }
                         continue;
                     }
                     if name.is_empty() {
@@ -323,9 +418,12 @@ fn expand_format(template: &str, capture: impl Fn(&str) -> String) -> String {
                 Some(false) => result.extend(c.to_lowercase()),
                 None => result.push(c),
             }
+            if BOUNDED && result.len() > max_bytes {
+                return None;
+            }
         }
     }
-    result
+    Some(result)
 }
 
 /// A prepared replacement in the original snapshot's byte coordinates.
@@ -395,6 +493,8 @@ pub struct Matches {
     pub revision: u64,
     /// Sorted UTF-8 matches.
     pub ranges: Vec<Range<usize>>,
+    /// A runtime limit prevented this search from completing.
+    pub error: Option<String>,
 }
 #[derive(Debug)]
 enum Work {
@@ -422,14 +522,19 @@ impl Default for Worker {
                         if current.load(Ordering::Acquire) != id {
                             continue;
                         }
-                        if let Some(ranges) = search
-                            .find_cancel(&text, &ranges, || current.load(Ordering::Relaxed) != id)
-                            && current.load(Ordering::Acquire) == id
-                        {
+                        let result = search
+                            .find_cancel(&text, &ranges, || current.load(Ordering::Relaxed) != id);
+                        if current.load(Ordering::Acquire) == id {
+                            let (ranges, error) = match result {
+                                Ok(Some(ranges)) => (ranges, None),
+                                Ok(None) => continue,
+                                Err(error) => (Vec::new(), Some(error)),
+                            };
                             let _ = results.send(Matches {
                                 generation: id,
                                 revision,
                                 ranges,
+                                error,
                             });
                         }
                     }
@@ -466,6 +571,55 @@ impl Drop for Worker {
     }
 }
 
+/// Nonblocking preparation of replacement edits on a stable editor snapshot.
+#[derive(Debug)]
+pub struct ReplacementTask {
+    stop: Arc<AtomicBool>,
+    result: mpsc::Receiver<Result<Vec<Replacement>, String>>,
+}
+
+impl ReplacementTask {
+    /// Starts preparing edits. For Replace Next, only expand the current match.
+    pub fn start(
+        search: Search,
+        text: Text,
+        template: String,
+        ranges: Vec<Range<usize>>,
+        only: Option<Range<usize>>,
+    ) -> Self {
+        let (tx, result) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancelled = stop.clone();
+        thread::spawn(move || {
+            let edits =
+                search.replacements_cancel(&text, &template, &ranges, only.as_ref(), || {
+                    cancelled.load(Ordering::Relaxed)
+                });
+            if !cancelled.load(Ordering::Acquire) {
+                let _ = tx.send(edits.map(Option::unwrap_or_default));
+            }
+        });
+        Self { stop, result }
+    }
+
+    /// Takes the result once ready.
+    pub fn poll(&self) -> Option<Result<Vec<Replacement>, String>> {
+        match self.result.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Replacement worker stopped unexpectedly".into()))
+            }
+        }
+    }
+}
+
+impl Drop for ReplacementTask {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
 /// Converts sorted matches to a multi-selection.
 pub fn select_all(buffer: &mut Buffer, view: ViewId, matches: &[Range<usize>]) {
     if !matches.is_empty() {
@@ -479,6 +633,8 @@ pub fn select_all(buffer: &mut Buffer, view: ViewId, matches: &[Range<usize>]) {
 #[cfg(test)]
 #[path = "text_boundary_tests.rs"]
 mod boundary_tests;
+#[cfg(test)]
+mod perl_tests;
 
 #[cfg(test)]
 mod tests {
@@ -540,49 +696,46 @@ mod tests {
         let matches = search.find(buffer.text(), &[]);
         assert_eq!(search.next(&matches, 100, None, false), Some(0..3));
         assert_eq!(search.next(&matches, 4, Some(&(4..7)), true), Some(0..3));
-        assert!(
-            Search::new(
-                "(?<=x)y",
-                Options {
-                    regex: true,
-                    ..Options::default()
-                }
-            )
-            .is_err()
-        );
     }
     #[test]
     fn perl_replacement_format_table() {
-        let search = Search::new(
-            r"(?P<word>ÉCOLE)(\d)(a)?",
-            Options {
-                regex: true,
-                ..Options::default()
-            },
-        )
-        .unwrap();
-        let text = Text::from("ÉCOLE7");
-        for (template, expected) in [
-            (r"\1:\2:\3", "ÉCOLE:7:"),
-            (r"$&", "ÉCOLE7"),
-            (r"$1px:$1_old:$2px:$2_old", "ÉCOLEpx:ÉCOLE_old:7px:7_old"),
-            (r"$12px:$9_old", "px:_old"),
-            (r"$1:${1}:${word}:$+{word}:$$", "ÉCOLE:ÉCOLE:ÉCOLE:ÉCOLE:$"),
-            (r"\n\t\\", "\n\t\\"),
-            (r"\L$+{word}\E", "école"),
-            (r"\l$1 \uhello", "éCOLE Hello"),
-            (r"\Uhello\E World", "HELLO World"),
-            (r"\LHELLO\E World", "hello World"),
-            (r"\u\L$1\E", "École"),
-            (r"\u${3}hello", "Hello"),
-            (r"${missing}:\9", ":"),
-            (r"\\1", r"\1"),
-        ] {
-            assert_eq!(
-                search.replacements(&text, template, &[])[0].text,
-                expected,
-                "{template}"
-            );
+        for (pattern, perl) in [r"(?P<word>ÉCOLE)(\d)(a)?", r"(?P<word>ÉCOLE)(\d)(a)?(?=\z)"]
+            .into_iter()
+            .zip([false, true])
+        {
+            let search = Search::new(
+                pattern,
+                Options {
+                    regex: true,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(search.uses_perl(), perl);
+            let text = Text::from("ÉCOLE7");
+            for (template, expected) in [
+                (r"\1:\2:\3", "ÉCOLE:7:"),
+                (r"$&", "ÉCOLE7"),
+                (r"$0", "ÉCOLE7"),
+                (r"$1px:$1_old:$2px:$2_old", "ÉCOLEpx:ÉCOLE_old:7px:7_old"),
+                (r"$12px:$9_old", "px:_old"),
+                (r"$1:${1}:${word}:$+{word}:$$", "ÉCOLE:ÉCOLE:ÉCOLE:ÉCOLE:$"),
+                (r"\n\t\\", "\n\t\\"),
+                (r"\L$+{word}\E", "école"),
+                (r"\l$1 \uhello", "éCOLE Hello"),
+                (r"\Uhello\E World", "HELLO World"),
+                (r"\LHELLO\E World", "hello World"),
+                (r"\u\L$1\E", "École"),
+                (r"\u${3}hello", "Hello"),
+                (r"${missing}:\9", ":"),
+                (r"\\1", r"\1"),
+            ] {
+                assert_eq!(
+                    search.replacements(&text, template, &[])[0].text,
+                    expected,
+                    "{template}"
+                );
+            }
         }
         let literal = Search::new("x", Options::default()).unwrap();
         assert_eq!(

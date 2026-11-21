@@ -16,6 +16,7 @@ profile = []
 
 [dependencies]
 onig = { version = "6.5.3", default-features = false }
+onig_sys = { version = "69.9.3", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 regex-syntax = "0.8.11"
 regex-automata = "0.4.18"

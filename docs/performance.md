@@ -1324,3 +1324,35 @@ blanks during the pause nor misses the first scanout after it. In the native
 the sustained workload, particularly 4K FIFO, and no acquire-time or retry
 regression. The headless replay exercises the CPU scene path but cannot
 measure a drawable acquisition or a scanout.
+
+## Round 40: Perl regex fallback
+
+Literal queries and patterns accepted by regex-cursor keep the rope matcher
+and the existing disk grep, contiguous regex and replay paths. Only a known
+unsupported regex token can select Oniguruma. Both engines share the Boost-
+style replacement formatter. Regex-cursor interprets `a++` as nested repeats
+and `(?R)` as its CRLF flag, so those spellings alone do not switch engines.
+Use an atomic group or add a no-op `(?=)` assertion to request Perl semantics.
+
+Fallback scans and document replacement preparation run on workers. They read
+the complete UTF-8 snapshot (one file at a time per traversal worker in Find
+in Files) to preserve assertions and recursion across lines and rope chunks.
+The fallback rejects input above 16 MiB per buffer or file, including decoded
+text and raw disk size; no partial match results or edits are returned for
+an input that hits a limit. A pattern or replacement template is capped at
+16 KiB, a scan at 262,144 matches and replacement output at 16 MiB per input.
+The Replace in Files preview also has a 128 MiB aggregate budget.
+
+The Oniguruma matcher has stack and retry limits and checks cancellation
+between match attempts. In Selection preserves full assertion context and
+rejects matches that would consume text outside the selection. Committed
+atomic or possessive matches cannot backtrack to fit a selection edge.
+The fallback is not a full Boost emulation; Oniguruma's own construct and
+Unicode case-folding rules still apply. Fallback commands are asynchronous
+during macro playback too.
+
+Five alternating release pairs against `0fe1911`, with identical pinned
+grammars, fixture input, `--locked -j 6`, `MACOSX_DEPLOYMENT_TARGET=14.0`, and
+disposable profiles. Median paired retired instructions: `features` -0.05%,
+`carets1000` +0.66%, `smoke1` +0.10%, all within +1%. Raw runs and gate logs:
+`/tmp/velocity-b40.xcEf3r/`.

@@ -877,6 +877,59 @@ impl<'a> Projection<'a> {
     }
 }
 
+pub(super) fn scan_perl(
+    input: vel_fileio::search::Text<'_>,
+    path: &Path,
+    regex: &vel_regex::PerlRegex,
+    (context, context_characters): (usize, usize),
+    stop: &AtomicBool,
+    mut emit: impl FnMut(Line) -> bool,
+) -> io::Result<()> {
+    let cancelled = || stop.load(Ordering::Relaxed);
+    let owned;
+    let text = match input {
+        vel_fileio::search::Text::Slice(s) => s,
+        vel_fileio::search::Text::Windows(source) => {
+            crate::text::perl::check_size(source.len_bytes() as u64).map_err(io::Error::other)?;
+            source.verify()?;
+            let mut decoded = Vec::with_capacity(source.len_bytes());
+            let (mut scratch, mut normal, mut window) = (Vec::new(), Vec::new(), Vec::new());
+            for block in 0..source.blocks() {
+                if cancelled() {
+                    return Ok(());
+                }
+                source.read_block_reuse(block, &mut scratch, &mut normal, &mut window)?;
+                decoded.extend_from_slice(&window);
+            }
+            source.verify()?;
+            owned = String::from_utf8(decoded).map_err(io::Error::other)?;
+            &owned
+        }
+    };
+    let Some(hits) = crate::text::perl::find(
+        regex,
+        text,
+        std::slice::from_ref(&(0..text.len())),
+        &cancelled,
+    )
+    .map_err(io::Error::other)?
+    else {
+        return Ok(());
+    };
+    project(
+        text.len(),
+        text.as_bytes(),
+        hits.into_iter(),
+        Projection::new(path, true, context_characters.saturating_mul(4).max(4096)),
+        context,
+        stop,
+        |mut line| {
+            line.limit_preview(context_characters);
+            emit(line)
+        },
+    )
+}
+
 #[cfg(test)]
 pub(super) fn scan(
     input: vel_fileio::search::Text<'_>,

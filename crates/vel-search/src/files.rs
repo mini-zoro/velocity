@@ -446,13 +446,31 @@ impl Task {
         if request.search.query.is_empty() {
             return Err("Find in Files needs a nonempty query".into());
         }
-        let cross_line = multiline::Multiline::for_search(&request.search);
-        let greps = cross_line
-            .is_none()
-            .then(|| multiline::Greps::new(&request.search))
-            .flatten();
-        let required = multiline::Prefilter::new(&request.search);
-        let contiguous = request.search.contiguous()?;
+        let per_file_limit = if request.search.uses_perl() {
+            let max = crate::text::perl::MAX_INPUT as u64;
+            if limits.max_file_size == 0 {
+                max
+            } else {
+                limits.max_file_size.min(max)
+            }
+        } else {
+            limits.max_file_size
+        };
+        let (contiguous, cross_line, greps, required) = if request.search.uses_perl() {
+            (None, None, None, None)
+        } else {
+            let cross_line = multiline::Multiline::for_search(&request.search);
+            let greps = cross_line
+                .is_none()
+                .then(|| multiline::Greps::new(&request.search))
+                .flatten();
+            (
+                Some(request.search.contiguous()?),
+                cross_line,
+                greps,
+                multiline::Prefilter::new(&request.search),
+            )
+        };
         let (tx, events) = mpsc::sync_channel(128);
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = stop.clone();
@@ -486,7 +504,37 @@ impl Task {
                             continue;
                         }
                         files.fetch_add(1, Ordering::Relaxed);
-                        if !send_text_lines(
+                        if let Some(regex) = request.search.perl() {
+                            let result = crate::text::perl::materialize(&open.text, &|| {
+                                cancelled.load(Ordering::Relaxed)
+                            })
+                            .map_err(io::Error::other)
+                            .and_then(|text| {
+                                if let Some(text) = text {
+                                    multiline::scan_perl(
+                                        vel_fileio::search::Text::Slice(&text),
+                                        &open.path,
+                                        regex,
+                                        (request.context, limits.context_characters),
+                                        &cancelled,
+                                        |line| {
+                                            matches.fetch_add(line.match_count, Ordering::Relaxed);
+                                            send(&tx, &cancelled, Event::Line(line))
+                                        },
+                                    )?;
+                                }
+                                Ok(())
+                            });
+                            if let Err(e) = result
+                                && !limits.suppress_errors
+                            {
+                                send(
+                                    &tx,
+                                    &cancelled,
+                                    Event::Error(format!("{}: {e}", open.path.display())),
+                                );
+                            }
+                        } else if !send_text_lines(
                             &tx,
                             &cancelled,
                             &matches,
@@ -584,14 +632,22 @@ impl Task {
                                         }
                                         let result =
                                             vel_crash::catch_recoverable(AssertUnwindSafe(|| {
-                                                if limits.max_file_size != 0
-                                                    && entry
+                                                if per_file_limit != 0 {
+                                                    let len = entry
                                                         .metadata()
                                                         .map_err(io::Error::other)?
-                                                        .len()
-                                                        > limits.max_file_size
-                                                {
-                                                    return Ok(());
+                                                        .len();
+                                                    if limits.max_file_size != 0
+                                                        && len > limits.max_file_size
+                                                    {
+                                                        return Ok(());
+                                                    }
+                                                    if len > per_file_limit {
+                                                        return Err(io::Error::other(
+                                                            crate::text::perl::check_size(len)
+                                                                .expect_err("Perl input limit"),
+                                                        ));
+                                                    }
                                                 }
                                                 files.fetch_add(1, Ordering::Relaxed);
                                                 let mut contains = |bytes: &[u8]| {
@@ -612,37 +668,47 @@ impl Task {
                                                         decode,
                                                         || stop.load(Ordering::Relaxed),
                                                         filter,
-                                                        limits.max_file_size,
+                                                        per_file_limit,
                                                     )
                                                     .and_then(|input| {
                                                         if let Some(input) = input {
-                                                            let query = multiline::Query {
-                                                                search,
-                                                                regex: &contiguous,
-                                                                multiline: cross_line,
+                                                            let emit = |line: Line| {
+                                                                matches.fetch_add(
+                                                                    line.match_count,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                send(tx, stop, Event::Line(line))
                                                             };
-                                                            multiline::scan_prepared(
-                                                                input,
-                                                                entry.path(),
-                                                                query,
-                                                                greps,
-                                                                (
+                                                            let context = (
+                                                                context,
+                                                                limits.context_characters,
+                                                            );
+                                                            if let Some(regex) = &contiguous {
+                                                                multiline::scan_prepared(
+                                                                    input,
+                                                                    entry.path(),
+                                                                    multiline::Query {
+                                                                        search,
+                                                                        regex,
+                                                                        multiline: cross_line,
+                                                                    },
+                                                                    greps,
                                                                     context,
-                                                                    limits.context_characters,
-                                                                ),
-                                                                stop,
-                                                                |line| {
-                                                                    matches.fetch_add(
-                                                                        line.match_count,
-                                                                        Ordering::Relaxed,
-                                                                    );
-                                                                    send(
-                                                                        tx,
-                                                                        stop,
-                                                                        Event::Line(line),
-                                                                    )
-                                                                },
-                                                            )?;
+                                                                    stop,
+                                                                    emit,
+                                                                )?;
+                                                            } else if let Some(regex) =
+                                                                search.perl()
+                                                            {
+                                                                multiline::scan_perl(
+                                                                    input,
+                                                                    entry.path(),
+                                                                    regex,
+                                                                    context,
+                                                                    stop,
+                                                                    emit,
+                                                                )?;
+                                                            }
                                                         }
                                                         Ok(())
                                                     })
@@ -742,8 +808,14 @@ impl FileChange {
         replacement: &str,
         decode: &DecodeOptions,
     ) -> Result<Self, String> {
+        if search.uses_perl() {
+            let len = std::fs::metadata(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .len();
+            crate::text::perl::check_size(len)?;
+        }
         let loaded = vel_fileio::load_with_options(&path, decode, |_| {})?;
-        let replacements = search.replacements(&loaded.text, replacement, &[]);
+        let replacements = search.try_replacements(&loaded.text, replacement, &[])?;
         let mut buffer = vel_buffer::Buffer::new(loaded.text.clone());
         let view = buffer.new_view();
         apply(&mut buffer, view, &replacements);
@@ -765,6 +837,17 @@ impl FileChange {
     /// The original-coordinate edits, for undo in an open buffer.
     pub fn edits(&self) -> &[crate::text::Replacement] {
         &self.edits
+    }
+    /// Conservative size estimate for a queued replacement preview.
+    pub fn preview_bytes(&self) -> usize {
+        self.before
+            .len_bytes()
+            .saturating_add(self.after.len_bytes())
+            .saturating_add(self.edits.iter().fold(0usize, |bytes, edit| {
+                bytes
+                    .saturating_add(std::mem::size_of::<crate::text::Replacement>())
+                    .saturating_add(edit.text.len())
+            }))
     }
     /// Rechecks the preview and keeps the raw original until saving succeeds.
     pub fn commit(&self) -> Result<Committed, String> {
@@ -860,6 +943,100 @@ impl FileChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perl_lookbehind_search_and_replace_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let long = "x".repeat(4 * 1024 * 1024);
+        for (name, body) in [
+            ("a.txt", "tag cat\ncat\n".to_owned()),
+            ("b.txt", format!("{long}\r\ntag 猫\r\n")),
+            ("c.txt", "untagged cat\n".to_owned()),
+        ] {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        let search = Search::new(
+            r"(?<=tag )(?<animal>\w+)",
+            crate::text::Options {
+                regex: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let task = Task::start(Request {
+            search: search.clone(),
+            scope: Where::parse(root.to_str().unwrap(), root).unwrap(),
+            folders: vec![],
+            open: vec![],
+            context: 0,
+        })
+        .unwrap();
+        let mut hits = Vec::new();
+        loop {
+            match task.events.recv().unwrap() {
+                Event::Line(line) => {
+                    hits.push((line.path.file_name().unwrap().to_owned(), line));
+                }
+                Event::Error(error) => panic!("{error}"),
+                Event::Done { matches, files } => {
+                    assert_eq!((matches, files), (2, 3));
+                    break;
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!((hits[0].1.number, hits[1].1.number), (1, 2));
+        assert_eq!(hits[0].1.highlights, std::slice::from_ref(&(4..7)));
+        assert_eq!(hits[1].1.highlights, std::slice::from_ref(&(4..7)));
+        for (name, _) in hits {
+            let path = root.join(name);
+            let change = FileChange::prepare(path.clone(), &search, "<${animal}>").unwrap();
+            assert_eq!(change.count, 1);
+            change.commit().unwrap();
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert!(saved.ends_with(if saved.contains('猫') {
+                "\r\ntag <猫>\r\n"
+            } else {
+                "tag <cat>\ncat\n"
+            }));
+        }
+    }
+
+    #[test]
+    fn perl_file_search_cancels_with_a_full_queue() {
+        let task = Task::start(Request {
+            search: Search::new(
+                r"(?<=tag )x",
+                crate::text::Options {
+                    regex: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            scope: Where::parse("<open files>", Path::new(".")).unwrap(),
+            folders: vec![],
+            open: vec![OpenFile {
+                path: "dispatch.txt".into(),
+                text: Text::from("tag x\n".repeat(4096).as_str()),
+            }],
+            context: 0,
+        })
+        .unwrap();
+        assert!(matches!(task.events.recv().unwrap(), Event::Line(_)));
+        task.cancel();
+        loop {
+            match task.events.recv().unwrap() {
+                Event::Done { matches, files } => {
+                    assert_eq!(files, 1);
+                    assert!(matches < 4096, "cancel must stop before the remaining rows");
+                    break;
+                }
+                Event::Error(error) => panic!("{error}"),
+                Event::Line(_) => {}
+            }
+        }
+    }
 
     #[test]
     fn task_mutation_and_cancellation_always_send_done_without_crash_reports() {

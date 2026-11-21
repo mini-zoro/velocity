@@ -3201,6 +3201,7 @@ dependencies = [
  "fnv",
  "memchr",
  "onig",
+ "onig_sys",
  "regex-automata",
  "regex-syntax",
  "serde",
@@ -3255,6 +3256,7 @@ dependencies = [
  "vel-buffer",
  "vel-crash",
  "vel-fileio",
+ "vel-regex",
  "vel-text",
 ]
 

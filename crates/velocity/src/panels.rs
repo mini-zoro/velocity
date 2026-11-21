@@ -383,6 +383,13 @@ struct FindIdentity {
     highlight_size_limit: usize,
 }
 #[derive(Debug)]
+struct DocumentReplacement {
+    task: text::ReplacementTask,
+    template: String,
+    only: Option<Range<usize>>,
+    close: bool,
+}
+#[derive(Debug)]
 struct GotoHighlights {
     snapshot: FindSnapshot,
     query: vel_buffer::ChangeId,
@@ -621,6 +628,7 @@ pub struct Panels {
     all_matches_ready: bool,
     find_deferred: bool,
     pending_navigation: VecDeque<FindNavigation>,
+    document_replacement: Option<Box<DocumentReplacement>>,
     fuzzy_worker: fuzzy::Worker,
     candidates: Arc<Vec<fuzzy::Candidate>>,
     palette_indices: Vec<usize>,
@@ -814,6 +822,7 @@ impl Default for Panels {
             all_matches_ready: false,
             find_deferred: false,
             pending_navigation: VecDeque::new(),
+            document_replacement: None,
             fuzzy_worker: fuzzy::Worker::new(),
             candidates: Arc::new(vec![]),
             palette_indices: Vec::new(),
@@ -1999,6 +2008,7 @@ impl Panels {
                 && self.hover_since.elapsed() < Duration::from_millis(250))
             || self.file_task.is_some()
             || self.replace_rx.is_some()
+            || self.document_replacement.is_some()
             || self
                 .output_editor
                 .as_ref()
@@ -2821,16 +2831,16 @@ impl Panels {
                 self.queue_find(workspace, FindNavigation::All { close });
             }
             "replace_next" | "replace_all" => {
-                self.replace_document(workspace, name == "replace_all", viewport)?;
-                if name == "replace_all"
-                    && self.find_error.is_none()
+                let all = name == "replace_all";
+                let close = all
                     && args["_close_panel"].as_bool().unwrap_or_else(|| {
                         workspace
                             .editor()
                             .settings
                             .bool("close_find_after_replace_all", true)
-                    })
-                {
+                    });
+                self.replace_document(workspace, all, close, viewport)?;
+                if close && self.find_error.is_none() && self.document_replacement.is_none() {
                     self.close_panel(workspace);
                 }
             }
@@ -3034,6 +3044,7 @@ impl Panels {
         self.panel.is_none() && self.pending_navigation.iter().any(|action| action.closes())
     }
     fn cancel_pending_find(&mut self) {
+        self.document_replacement = None;
         self.pending_navigation.clear();
         if !self.all_matches_ready {
             self.search_worker.cancel();
@@ -3165,6 +3176,7 @@ impl Panels {
         self.start_find(workspace, self.find_identity(workspace));
     }
     fn start_find(&mut self, workspace: &Workspace, key: FindIdentity) {
+        self.document_replacement = None;
         if self.search_identity.as_ref().is_none_or(|old| {
             old.snapshot.sheet != key.snapshot.sheet
                 || old.query != key.query
@@ -3291,6 +3303,7 @@ impl Panels {
             && workspace.editor().registry.playback_depth() > 1
             && !FindSnapshot::current(workspace).loading
             && let Some(search) = &self.search
+            && !search.uses_perl()
         {
             self.highlights = search.find(&workspace.editor().text, &self.scope());
             self.search_worker.cancel();
@@ -3449,6 +3462,7 @@ impl Panels {
         &mut self,
         workspace: &mut Workspace,
         all: bool,
+        close: bool,
         viewport: Range<usize>,
     ) -> Result<(), String> {
         self.remember_search(true);
@@ -3465,6 +3479,27 @@ impl Panels {
             }
             return Ok(()); // Compilation feedback is inline/status-only.
         };
+        if search.uses_perl() {
+            if self.document_replacement.is_none() {
+                let editor = workspace.editor();
+                let only = (!all).then(|| editor.selection());
+                let template = self.replace.value();
+                self.document_replacement = Some(Box::new(DocumentReplacement {
+                    task: text::ReplacementTask::start(
+                        search.clone(),
+                        editor.text.clone(),
+                        template.clone(),
+                        self.scope(),
+                        only.clone(),
+                    ),
+                    only,
+                    template,
+                    close,
+                }));
+                self.set_message(UiText::tr("Preparing replacement preview…"));
+            }
+            return Ok(());
+        }
         let mut replacements = search.replacements(
             &workspace.editor().text,
             &self.replace.value(),
@@ -3479,6 +3514,16 @@ impl Panels {
                 return Ok(());
             }
         }
+        self.apply_document_replacements(workspace, replacements, all, viewport);
+        Ok(())
+    }
+    fn apply_document_replacements(
+        &mut self,
+        workspace: &mut Workspace,
+        replacements: Vec<text::Replacement>,
+        all: bool,
+        viewport: Range<usize>,
+    ) {
         let count = replacements.len();
         let editor = workspace.editor_mut();
         text::apply(&mut editor.buffer, editor.id, &replacements);
@@ -3495,7 +3540,46 @@ impl Panels {
                 [("count", count.to_string())],
             )
         });
-        Ok(())
+    }
+    fn poll_document_replacement(
+        &mut self,
+        workspace: &mut Workspace,
+        viewport: Range<usize>,
+    ) -> bool {
+        let Some(pending) = &self.document_replacement else {
+            return false;
+        };
+        if self.search_identity.as_ref() != Some(&self.find_identity(workspace))
+            || pending.template != self.replace.value()
+            || pending
+                .only
+                .as_ref()
+                .is_some_and(|range| *range != workspace.editor().selection())
+            || workspace.editor().read_only
+        {
+            self.document_replacement = None;
+            self.set_message(UiText::tr(
+                "Replacement options changed; prepare the preview again",
+            ));
+            return true;
+        }
+        let Some(result) = pending.task.poll() else {
+            return false;
+        };
+        let all = pending.only.is_none();
+        let close = pending.close;
+        self.document_replacement = None;
+        match result {
+            Ok(edits) if !all && edits.is_empty() => self.find_next(workspace, false, false),
+            Ok(edits) => {
+                self.apply_document_replacements(workspace, edits, all, viewport);
+                if close {
+                    self.close_panel(workspace);
+                }
+            }
+            Err(error) => self.set_message(error),
+        }
+        true
     }
     pub(crate) fn refresh_localized_palette(&mut self, workspace: &mut Workspace) {
         match self.overlay {
@@ -5209,6 +5293,7 @@ impl Panels {
         let (tx, rx) = mpsc::channel();
         self.replace_signature = Some((self.files_identity(workspace), replacement.clone()));
         std::thread::spawn(move || {
+            let mut budget = 128 * 1024 * 1024usize;
             let result = paths
                 .into_iter()
                 .map(|path| {
@@ -5219,8 +5304,20 @@ impl Panels {
                         &decode,
                     )
                 })
-                .collect::<Result<Vec<_>, _>>()
-                .map(|changes| changes.into_iter().filter(|c| c.count > 0).collect());
+                .filter_map(|change| match change {
+                    Ok(change) if change.count == 0 => None,
+                    Ok(change) if search.uses_perl() => {
+                        Some(budget.checked_sub(change.preview_bytes()).map_or_else(
+                            || Err("Advanced regex replacement preview exceeded 128 MiB".into()),
+                            |remaining| {
+                                budget = remaining;
+                                Ok(change)
+                            },
+                        ))
+                    }
+                    change => Some(change),
+                })
+                .collect::<Result<Vec<_>, _>>();
             let _ = tx.send(result);
         });
         self.replace_rx = Some(rx);
@@ -5768,20 +5865,28 @@ impl Panels {
         if self.overlay.is_none()
             && (self.document_find_visible() || !self.pending_navigation.is_empty())
         {
-            changed |= self.ensure_find(workspace, viewport);
+            changed |= self.ensure_find(workspace, viewport.clone());
             if let Some(matches) = self.search_worker.poll()
                 && self.search_identity.as_ref().is_some_and(|key| {
                     key.snapshot == FindSnapshot::current(workspace)
                         && key.snapshot.revision == matches.revision
                 })
             {
-                self.highlights = matches.ranges;
                 self.all_matches_ready = true;
-                self.update_find_status();
+                if let Some(error) = matches.error {
+                    self.find_status = error.into();
+                    self.find_error = Some(self.find_status.clone());
+                    self.set_message(self.find_status.clone());
+                    self.search = None;
+                } else {
+                    self.highlights = matches.ranges;
+                    self.update_find_status();
+                }
                 changed = true;
             }
             self.finish_pending_find(workspace);
         }
+        changed |= self.poll_document_replacement(workspace, viewport);
         if self
             .results_tab
             .as_ref()

@@ -14,7 +14,9 @@ use std::{
 mod frontend;
 mod identifier_guard;
 mod multi;
+mod perl;
 pub use multi::{MultiDfa, MultiDfaConfig, MultiDfaStats};
+pub use perl::{PerlMatcher, PerlRegex};
 #[cfg(feature = "profile")]
 pub mod profile;
 

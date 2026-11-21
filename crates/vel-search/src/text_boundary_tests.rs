@@ -188,10 +188,7 @@ fn rope_search_agrees_with_contiguous_over_random_chunkings() {
                 for size in (1..=64).chain([4096]) {
                     let chunks = Split::new(&source, || size);
                     compare(
-                        search
-                            .re
-                            .find_iter(Input::new(chunks))
-                            .map(|m| m.start()..m.end()),
+                        search.matches_in(chunks),
                         &want,
                         (round, options, query, size),
                     );
@@ -200,10 +197,7 @@ fn rope_search_agrees_with_contiguous_over_random_chunkings() {
                 for _ in 0..2 {
                     let chunks = Split::new(&source, || 1 + random(64));
                     compare(
-                        search
-                            .re
-                            .find_iter(Input::new(chunks))
-                            .map(|m| m.start()..m.end()),
+                        search.matches_in(chunks),
                         &want,
                         (round, options, query, "random widths"),
                     );

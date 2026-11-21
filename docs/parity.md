@@ -118,7 +118,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Feature | Sublime source (URL + build) | Velocity status | Evidence | Notes |
 | --- | --- | --- | --- | --- |
 | Find next/previous, highlight and match count | [Search][search] | done | `find_next`, `find_prev`, `Panels::update_find_status` | |
-| Literal vs regex Find/Replace | [Search][search] | partial | `vel-search/text.rs`, `vel-search/files/multiline.rs` | Literal and regex modes work. The guide identifies Boost's regex engine but does not specify its 4213 option set or replacement behavior for zero-width and cross-line captures. |
+| Literal vs regex Find/Replace | [Search][search] | partial | `vel-search/text.rs`, `vel-regex/perl.rs`, `vel-search/files/multiline.rs` | Literal and accepted Rust regexes retain the fast path. The fallback supports lookahead and lookbehind, numeric and named backreferences, atomic groups, `\G`, conditionals and Oniguruma-supported subroutine calls, including possessive repeats when using the fallback. Both engines share replacement formatting. Tests cover Sublime 4215's `(?=b)` to `-` and `^` to `> ` behavior, including the empty line after a final LF. Patterns that Rust already accepts (e.g. `a++` or `(?R)`) keep Rust semantics unless another Perl-only construct selects the fallback. Other Boost-only syntax and dialect differences remain; see [Round 40 limits](performance.md#round-40-perl-regex-fallback). |
 | Match case | [Search][search] | done | `text::Options::case_sensitive`; `find_incremental_wrap_skip_whole_word_and_case` | |
 | Whole word | [Search][search] | done | `text::Options::whole_word`; same regression | |
 | Wrap on navigation | [Search][search] | done | `text::Options::wrap`; same regression | |

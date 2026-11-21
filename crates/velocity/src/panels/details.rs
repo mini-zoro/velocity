@@ -1588,6 +1588,82 @@ mod tests {
         type_query(&mut p, &mut w, "foo", 0..7);
         assert!(p.find_error.is_none());
     }
+
+    #[test]
+    fn r40_perl_incremental_find_next_previous_and_all() {
+        let (mut w, mut p) = setup("ab ac ab");
+        p.options.regex = true;
+        action(
+            &mut p,
+            &mut w,
+            "show_panel",
+            json!({"panel":"incremental_find"}),
+        );
+        type_query(&mut p, &mut w, "(?<=a)b", 0..8);
+        assert_eq!(p.highlights, [1..2, 7..8]);
+        assert_eq!(w.editor().selection(), 1..2);
+        action(&mut p, &mut w, "find_next", json!({}));
+        assert_eq!(w.editor().selection(), 7..8);
+        action(&mut p, &mut w, "find_prev", json!({}));
+        assert_eq!(w.editor().selection(), 1..2);
+        action(&mut p, &mut w, "find_all", json!({"_close_panel":false}));
+        let ranges: Vec<_> = w.editor().regions().iter().map(|r| r.to_range()).collect();
+        assert_eq!(ranges, [1..2, 7..8]);
+    }
+
+    #[test]
+    fn r40_perl_replace_next_and_scoped_replace_all() {
+        let (mut w, mut p) = setup("abc abc\nabc\n");
+        p.options.regex = true;
+        action(
+            &mut p,
+            &mut w,
+            "show_panel",
+            json!({"panel":"replace","text":"(?=b)","replace_pattern":"-"}),
+        );
+        wait(&mut p, &mut w, |p| p.all_matches_ready);
+        action(&mut p, &mut w, "find_next", json!({}));
+        assert_eq!(w.editor().selection(), 1..1);
+        action(&mut p, &mut w, "replace_next", json!({}));
+        assert!(p.document_replacement.is_some());
+        wait(&mut p, &mut w, |p| {
+            p.document_replacement.is_none() && p.all_matches_ready
+        });
+        assert_eq!(w.editor().text.to_string(), "a-bc abc\nabc\n");
+        assert_eq!(w.editor().selection(), 6..6);
+
+        w.editor_mut()
+            .set_selection(Selection::from_regions([Region::new(5, 7)]));
+        action(
+            &mut p,
+            &mut w,
+            "toggle_find_option",
+            json!({"option":"in_selection"}),
+        );
+        type_query(&mut p, &mut w, "(?<=a)(?<letter>b)(?=c)", 0..13);
+        p.replace.set(r"\U$+{letter}\E");
+        action(&mut p, &mut w, "replace_all", json!({"_close_panel":true}));
+        wait(&mut p, &mut w, |p| p.document_replacement.is_none());
+        assert_eq!(w.editor().text.to_string(), "a-bc aBc\nabc\n");
+        assert_eq!(p.panel, None);
+    }
+
+    #[test]
+    fn r40_invalid_perl_query_is_status_only() {
+        let (mut w, mut p) = setup("abc");
+        p.options.regex = true;
+        action(
+            &mut p,
+            &mut w,
+            "show_panel",
+            json!({"panel":"replace","text":"(?=b","replace_pattern":"-"}),
+        );
+        assert!(p.message.contains("Invalid regular expression"));
+        action(&mut p, &mut w, "replace_all", json!({}));
+        assert_eq!(w.editor().text.to_string(), "abc");
+        assert_eq!(p.panel, Some(Panel::Replace));
+        assert!(p.document_replacement.is_none());
+    }
     #[test]
     fn message_clip_stops_before_every_panels_first_button_at_each_scale() {
         let (mut w, mut p) = setup("text");
