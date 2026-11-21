@@ -410,9 +410,18 @@ impl Assets {
         packed: bool,
     ) -> Result<Arc<Self>, String> {
         let root = packages_root();
+        // Our own internal grammars (Plain Text, Find Results) are already in every base set.
+        // The packaged app also ships Find Results as a resource file; an identical copy must
+        // not count as a package override, or every launch rebuilds all grammars (~1.5 s).
+        let internal_copy = |r: &&vel_config::resources::Resource| {
+            INTERNAL_SYNTAXES
+                .iter()
+                .any(|(path, text)| r.path == *path && r.bytes.as_ref() == text.as_bytes())
+        };
         let effective = [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
             .into_iter()
             .flat_map(|suffix| resources.matching(suffix))
+            .filter(|r| !internal_copy(r))
             .collect::<Vec<_>>();
         let preferences = resources.matching(".tmPreferences");
         if effective.is_empty()

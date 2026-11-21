@@ -270,3 +270,53 @@ fn corrupt_grammar_and_cache_keep_valid_grammars_with_readonly_cache_fallback() 
             .is_some()
     );
 }
+
+/// The packaged app ships `Packages/Default/Find Results.sublime-syntax` as a resource file,
+/// identical to the internal grammar. That copy must reuse the shipped syntax set instead of
+/// rebuilding every grammar on each launch (it cost ~1.5 s per launch in the packaged app);
+/// a changed copy is still a real override.
+#[test]
+fn identical_internal_grammar_resource_reuses_the_shipped_syntax_set() {
+    use crate::bundled_syntax::{FIND_RESULTS_PATH, INTERNAL_SYNTAXES};
+    let base = crate::language::Assets::packed()
+        .unwrap_or_else(crate::language::Assets::bundled)
+        .unwrap();
+    let packed = crate::language::Assets::packed().is_some();
+    let shipped_resources = || {
+        let mut resources = vel_config::resources::Resources::default();
+        crate::shipped::register(&crate::language::packages_root(), &mut resources);
+        resources
+    };
+    let find_results = INTERNAL_SYNTAXES
+        .iter()
+        .find(|(path, _)| *path == FIND_RESULTS_PATH)
+        .unwrap()
+        .1;
+
+    let mut identical = shipped_resources();
+    identical.insert(
+        FIND_RESULTS_PATH,
+        find_results.as_bytes().to_vec(),
+        "/Applications/Velocity.app/Contents/Resources/Packages/Default/Find Results.sublime-syntax"
+            .into(),
+    );
+    let reused =
+        crate::language::Assets::with_package_overlay(&base, None, &identical, packed).unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&base, &reused),
+        "an identical internal grammar resource rebuilt the syntax set"
+    );
+
+    let mut changed = shipped_resources();
+    changed.insert(
+        FIND_RESULTS_PATH,
+        format!("{find_results}\n# user edit\n").into_bytes(),
+        "/tmp/profile/Packages/Default/Find Results.sublime-syntax".into(),
+    );
+    let rebuilt =
+        crate::language::Assets::with_package_overlay(&base, None, &changed, packed).unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&base, &rebuilt),
+        "a changed Find Results grammar must still override"
+    );
+}
