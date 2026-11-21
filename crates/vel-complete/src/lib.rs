@@ -230,8 +230,88 @@ impl Default for CompletionSettings {
 }
 #[derive(Debug, Clone, Default)]
 struct Word {
-    positions: Vec<usize>,
+    positions: Positions,
     followed_by_space: usize,
+}
+#[derive(Debug, Clone)]
+enum Positions {
+    Narrow(Vec<u32>),
+    Wide(Vec<usize>),
+}
+impl Default for Positions {
+    fn default() -> Self {
+        Self::Narrow(Vec::new())
+    }
+}
+impl Positions {
+    fn push(&mut self, offset: usize) {
+        match self {
+            Self::Narrow(positions) => {
+                if let Ok(offset) = u32::try_from(offset) {
+                    positions.push(offset);
+                } else {
+                    let mut wide = Vec::with_capacity(positions.len() + 1);
+                    wide.extend(positions.iter().map(|&p| p as usize));
+                    wide.push(offset);
+                    *self = Self::Wide(wide);
+                }
+            }
+            Self::Wide(positions) => positions.push(offset),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Narrow(positions) => positions.len(),
+            Self::Wide(positions) => positions.len(),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Narrow(positions) => positions.capacity() * size_of::<u32>(),
+            Self::Wide(positions) => positions.capacity() * size_of::<usize>(),
+        }
+    }
+
+    fn distance(&self, point: usize) -> usize {
+        fn nearest<T>(positions: &[T], point: usize, offset: impl Fn(&T) -> usize) -> usize {
+            let at = positions.partition_point(|p| offset(p) < point);
+            positions
+                .get(at)
+                .into_iter()
+                .chain(at.checked_sub(1).and_then(|i| positions.get(i)))
+                .map(|p| offset(p).abs_diff(point))
+                .min()
+                .unwrap_or(usize::MAX)
+        }
+        match self {
+            Self::Narrow(positions) => nearest(positions, point, |&p| p as usize),
+            Self::Wide(positions) => nearest(positions, point, |&p| p),
+        }
+    }
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod positions_tests {
+    use super::Positions;
+
+    #[test]
+    fn word_positions_preserve_nearest_distance_across_wide_offsets() {
+        let mut positions = Positions::default();
+        let boundary = u32::MAX as usize;
+        for offset in [7, 11, boundary] {
+            positions.push(offset);
+        }
+        assert!(matches!(positions, Positions::Narrow(_)));
+        assert_eq!(positions.distance(9), 2);
+        assert_eq!(positions.distance(boundary + 1), 1);
+        positions.push(boundary + 4);
+        assert!(matches!(positions, Positions::Wide(_)));
+        assert_eq!(positions.len(), 4);
+        assert_eq!(positions.distance(9), 2);
+        assert_eq!(positions.distance(boundary + 3), 1);
+    }
 }
 /// Prepared current/other-buffer word source. Build on a snapshot publisher/worker, then reuse
 /// it across queries. Position lists support logarithmic nearest-caret scoring.
@@ -240,6 +320,15 @@ pub struct BufferWords {
     words: BTreeMap<String, Word>,
 }
 impl BufferWords {
+    /// Prepared vocabulary and occurrence payload, excluding B-tree node overhead.
+    pub fn estimated_storage_bytes(&self) -> usize {
+        self.words
+            .iter()
+            .map(|(key, word)| {
+                size_of::<(String, Word)>() + key.capacity() + word.positions.bytes()
+            })
+            .sum()
+    }
     /// Tokenizes complete rope lines without flattening the buffer.
     pub fn new(text: &Text) -> Self {
         let mut words: BTreeMap<String, Word> = BTreeMap::new();
@@ -254,7 +343,11 @@ impl BufferWords {
                 if c.is_alphanumeric() || c == '_' {
                     start.get_or_insert(at);
                 } else if let Some(start) = start.take() {
-                    let word = words.entry(line[start..at].into()).or_default();
+                    let key = &line[start..at];
+                    let word = match words.get_mut(key) {
+                        Some(word) => word,
+                        None => words.entry(key.into()).or_default(),
+                    };
                     word.positions.push(offset + start);
                     word.followed_by_space += usize::from(line[at..].starts_with(' '));
                 }
@@ -849,17 +942,8 @@ impl CompletionEngine {
                 if word == primary {
                     continue;
                 }
-                let at = info.positions.partition_point(|p| *p < carets[0]);
-                let distance = info
-                    .positions
-                    .get(at)
-                    .into_iter()
-                    .chain(at.checked_sub(1).and_then(|i| info.positions.get(i)))
-                    .map(|&p| p.abs_diff(carets[0]))
-                    .min()
-                    .unwrap_or(usize::MAX);
                 let proximity = if current {
-                    40 - distance.min(4000) as i64 / 100
+                    40 - info.positions.distance(carets[0]).min(4000) as i64 / 100
                 } else {
                     0
                 };

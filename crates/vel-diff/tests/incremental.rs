@@ -2,6 +2,18 @@ use proptest::prelude::*;
 use vel_buffer::{Change, ChangeId, ChangeSet};
 use vel_diff::{DocumentDiff, HunkKind, InlineMode};
 use vel_text::{Edit, Text};
+
+#[test]
+fn equal_disk_and_buffer_text_share_the_reference_rope() {
+    let source = "one\ntwo\n".repeat(10_000);
+    let reference = Text::from(source.as_str());
+    let buffer = Text::from(source.as_str());
+    assert!(reference.estimated_retained_bytes(&buffer) > 0);
+    let diff = DocumentDiff::new(reference, buffer, ChangeId(0));
+    assert!(diff.hunks().is_empty());
+    assert_eq!(diff.reference().estimated_retained_bytes(diff.text()), 0);
+}
+
 fn assert_script(diff: &DocumentDiff) {
     let mut result = diff.text().clone();
     let plans = diff.revert_all();

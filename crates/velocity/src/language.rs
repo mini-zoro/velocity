@@ -25,6 +25,7 @@ enum HighlightCommand {
     Edit(Text, ChangeId, ChangeSet, usize),
     Scheme(Arc<ColorScheme>, usize),
     Request(ChangeId, Vec<Range<usize>>),
+    Measure(mpsc::Sender<Option<vel_highlight::HighlightMemory>>),
     Stop,
 }
 /// The service's cooperative 2ms request can include an indivisible regex call.
@@ -104,6 +105,9 @@ impl HighlightFrontend {
                             refresh = true;
                         }
                         Ok(HighlightCommand::Request(..)) => {}
+                        Ok(HighlightCommand::Measure(reply)) => {
+                            let _ = reply.send(None);
+                        }
                         Ok(HighlightCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             break;
                         }
@@ -209,6 +213,9 @@ impl HighlightFrontend {
                             pending = lines.iter().cloned().collect();
                             viewport = Some((version, lines));
                             refresh = std::time::Instant::now();
+                        }
+                        Ok(HighlightCommand::Measure(reply)) => {
+                            let _ = reply.send(service.memory_usage());
                         }
                         Ok(HighlightCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                             break;
@@ -528,6 +535,37 @@ pub struct Analysis {
     pub guides: Arc<vel_render::guides::GuideIndex>,
 }
 impl Analysis {
+    pub(crate) fn memory_usage(&self) -> [usize; 4] {
+        let symbols = self.symbols.capacity() * size_of::<(String, usize)>()
+            + self
+                .symbols
+                .iter()
+                .map(|(name, _)| name.capacity())
+                .sum::<usize>()
+            + self.index_symbols.symbols.capacity() * size_of::<vel_syntax::Symbol>()
+            + self
+                .index_symbols
+                .symbols
+                .iter()
+                .map(|s| s.name.capacity() + s.index_name.capacity())
+                .sum::<usize>();
+        let geometry = self.pairs.capacity() * size_of::<Pair>()
+            + self.pair_tree.capacity() * size_of::<usize>()
+            + self.folds.capacity() * size_of::<Fold>()
+            + self.guides.storage_bytes();
+        let minimap = size_of_val(self.minimap.as_ref())
+            + self
+                .minimap
+                .iter()
+                .map(|l| l.tokens.capacity() * size_of::<MiniToken>())
+                .sum::<usize>();
+        [
+            symbols,
+            geometry,
+            minimap,
+            self.words.estimated_storage_bytes(),
+        ]
+    }
     /// Finds the innermost enabled pair in logarithmic time plus active nesting depth.
     pub fn pair_at(
         &self,
@@ -679,6 +717,17 @@ pub struct Language {
 }
 pub type LanguageCell = std::rc::Rc<RefCell<Option<Language>>>;
 impl Language {
+    pub(crate) fn measure_highlighter(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<vel_highlight::HighlightMemory> {
+        let (reply, answer) = mpsc::channel();
+        self.service
+            .tx
+            .send(HighlightCommand::Measure(reply))
+            .ok()?;
+        answer.recv_timeout(timeout).ok().flatten()
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn with_policy(
         assets: Arc<Assets>,
@@ -1124,7 +1173,9 @@ fn add_indent_fold(
 
 fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
     let text = &job.scopes.text;
-    let mut spans = Vec::new();
+    let mut blocks: BTreeMap<Scope, Range<usize>> = BTreeMap::new();
+    let mut block_folds = Vec::new();
+    let mut previous_stack = None;
     let mut stack: Vec<(char, usize)> = Vec::new();
     let mut pairs = Vec::new();
     let mut angles = Vec::new();
@@ -1205,7 +1256,26 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
                     }
                 }
             }
-            spans.push((start + range.start..start + range.end, run.stack));
+            // Track only open blocks, in the same scope order as the old
+            // second pass. Append this group after syntax and indentation folds.
+            if previous_stack != Some(run.stack) {
+                previous_stack = Some(run.stack);
+                blocks.retain(|scope, region| {
+                    if fact.blocks.contains(scope) {
+                        true
+                    } else {
+                        add_block_fold(text, region.clone(), &mut block_folds);
+                        false
+                    }
+                });
+            }
+            let absolute = start + range.start..start + range.end;
+            for &scope in &fact.blocks {
+                blocks
+                    .entry(scope)
+                    .and_modify(|r| r.end = absolute.end)
+                    .or_insert_with(|| absolute.clone());
+            }
         }
         if row % step == 0 {
             minimap.push(MiniLine {
@@ -1215,7 +1285,11 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
             });
         }
     }
-    let source = text.to_string();
+    let source = if facts.iter().flatten().any(|f| f.tag && !f.comment) {
+        text.to_string()
+    } else {
+        String::new()
+    };
     let symbols = job
         .symbols
         .symbols
@@ -1370,32 +1444,10 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
             add_indent_fold(text, header, last, &syntax_headers, &mut folds);
         }
     }
-    // Contiguous block meta scopes contribute regions even without literal braces.
-    let mut blocks: BTreeMap<Scope, Range<usize>> = BTreeMap::new();
-    for span in &spans {
-        let active = &facts[span.1.0 as usize]
-            .as_ref()
-            .expect("visited scope stack")
-            .blocks;
-        let ended: Vec<_> = blocks
-            .keys()
-            .filter(|s| !active.contains(s))
-            .copied()
-            .collect();
-        for scope in ended {
-            let range = blocks.remove(&scope).expect("block");
-            add_block_fold(text, range, &mut folds);
-        }
-        for &scope in active {
-            blocks
-                .entry(scope)
-                .and_modify(|r| r.end = span.0.end)
-                .or_insert(span.0.clone());
-        }
-    }
     for (_, range) in blocks {
-        add_block_fold(text, range, &mut folds);
+        add_block_fold(text, range, &mut block_folds);
     }
+    folds.append(&mut block_folds);
     folds.sort_by_key(|f| (f.range.start, std::cmp::Reverse(f.range.end), f.attributes));
     folds.dedup_by(|a, b| a.range == b.range);
     let mut ends = Vec::new();

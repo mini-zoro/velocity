@@ -1221,6 +1221,21 @@ pub(crate) fn storage_bytes(root: &Arc<Node>) -> usize {
     storage_excluding(root, None)
 }
 
+pub(crate) fn line_index_bytes(root: &Arc<Node>) -> usize {
+    fn visit(node: &Arc<Node>, seen: &mut std::collections::HashSet<*const Node>) -> usize {
+        if !seen.insert(Arc::as_ptr(node)) {
+            return 0;
+        }
+        match &node.kind {
+            Kind::Leaf(Leaf::Flat(leaf)) => leaf.newlines.data.len(),
+            Kind::Leaf(Leaf::Patched(p)) => visit(&p.original, seen),
+            Kind::Leaf(Leaf::Spliced(s)) => visit(&s.original, seen),
+            Kind::Branch(children) => children.iter().map(|c| visit(&c.node, seen)).sum(),
+        }
+    }
+    visit(root, &mut std::collections::HashSet::new())
+}
+
 pub(crate) fn storage_excluding(root: &Arc<Node>, shared: Option<&Arc<Node>>) -> usize {
     if shared.is_some_and(|other| Arc::ptr_eq(root, other)) {
         return 0;

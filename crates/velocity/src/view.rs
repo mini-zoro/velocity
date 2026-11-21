@@ -307,6 +307,33 @@ pub(crate) struct ScrollPosition {
     pub visual_row: f64,
 }
 impl View {
+    /// Ordinary row units and cached text used to construct CPU scenes.
+    pub(crate) fn row_cache_bytes(&self) -> usize {
+        let mut units = std::collections::HashSet::new();
+        let mut bytes = self.units.capacity() * (size_of::<(u64, CachedLine)>() + 1);
+        let mut count = |row: &Arc<[CachedUnit]>| {
+            if units.insert(row.as_ptr()) {
+                size_of_val(row.as_ref()) + 2 * size_of::<usize>()
+            } else {
+                0
+            }
+        };
+        for row in self.units.values() {
+            bytes += row.text.capacity()
+                + row.hidden.capacity() * size_of::<Range<usize>>()
+                + count(&row.units);
+        }
+        if let Some(line) = &self.wrapped_line {
+            bytes += line.rows.capacity() * (size_of::<(usize, Arc<WrappedRow>)>() + 1);
+            for row in line.rows.values() {
+                bytes += size_of::<WrappedRow>()
+                    + 2 * size_of::<usize>()
+                    + row.text.capacity()
+                    + count(&row.units);
+            }
+        }
+        bytes
+    }
     /// Saves the top visual row and its fractional offset, rather than pixel y.
     pub(crate) fn scroll_position(&self) -> ScrollPosition {
         ScrollPosition {

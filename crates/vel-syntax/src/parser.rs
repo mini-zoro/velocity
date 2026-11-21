@@ -699,6 +699,57 @@ fn build_capture_ops(
 // again. This time, the "\w+" wins because it comes first.
 
 impl InterpreterState {
+    pub(crate) fn estimated_checkpoint_bytes(
+        &self,
+        stacks: &mut std::collections::HashSet<usize>,
+    ) -> usize {
+        fn stack_bytes(stack: &SharedStack, seen: &mut std::collections::HashSet<usize>) -> usize {
+            if !seen.insert(Arc::as_ptr(&stack.0) as usize) {
+                return 0;
+            }
+            2 * size_of::<usize>()
+                + size_of::<Vec<StateLevel>>()
+                + stack.capacity() * size_of::<StateLevel>()
+                + stack
+                    .iter()
+                    .map(|level| {
+                        level.prototypes.capacity() * size_of::<ContextId>()
+                            + level
+                                .captures
+                                .as_ref()
+                                .map_or(0, |(_, text)| text.capacity())
+                    })
+                    .sum::<usize>()
+        }
+        size_of::<Self>()
+            + 2 * size_of::<usize>()
+            + stack_bytes(&self.stack, stacks)
+            + self.proto_starts.capacity() * size_of::<usize>()
+            + self.pending_lines.capacity() * size_of::<String>()
+            + self
+                .pending_lines
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>()
+            + self.branch_points.capacity() * size_of::<BranchPoint>()
+            + self
+                .branch_points
+                .iter()
+                .map(|branch| {
+                    branch.name.capacity()
+                        + branch.trigger_captures.1.capacity()
+                        + stack_bytes(&branch.stack_snapshot, stacks)
+                        + branch.alternatives.capacity() * size_of::<ContextReference>()
+                        + branch.proto_starts_snapshot.capacity() * size_of::<usize>()
+                        + branch.pat_scope.capacity() * size_of::<Scope>()
+                        + branch.escape_stack_snapshot.capacity() * size_of::<EscapeEntry>()
+                        + (branch.prefix_ops.capacity() + branch.capture_ops.capacity())
+                            * size_of::<(usize, ScopeStackOp)>()
+                })
+                .sum::<usize>()
+            + self.escape_stack.capacity() * size_of::<EscapeEntry>()
+    }
+
     /// Creates a state from a syntax definition, keeping its own reference-counted point to the
     /// main context of the syntax
     pub fn new(syntax: &SyntaxReference) -> InterpreterState {
@@ -3432,6 +3483,11 @@ impl InterpreterState {
         } else {
             self == other
         }
+    }
+    /// Stable states can be relocated on the next parse. Preserve the sticky
+    /// while-check flag as well as all state used in semantic comparisons.
+    pub(crate) fn can_reuse_stable(&self, other: &Self) -> bool {
+        self.has_while == other.has_while && self.semantic_eq(other)
     }
     pub(crate) fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();

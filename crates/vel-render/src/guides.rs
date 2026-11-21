@@ -18,6 +18,10 @@ pub struct GuideIndex {
     minimum: Vec<u32>,
 }
 impl GuideIndex {
+    /// Retained indentation columns and minimum tree.
+    pub fn storage_bytes(&self) -> usize {
+        (self.columns.capacity() + self.minimum.capacity()) * size_of::<u32>()
+    }
     /// Builds from indentation columns (`None` denotes a blank row).
     pub fn new(rows: impl IntoIterator<Item = Option<usize>>) -> Self {
         let mut columns: Vec<_> = rows

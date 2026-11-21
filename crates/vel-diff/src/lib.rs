@@ -98,7 +98,14 @@ impl DocumentDiff {
         let reference = reference.into();
         let old_count = line_count(&reference);
         let new_count = line_count(&text);
-        let hunks = line_diff(&reference, 0..old_count, &text, 0..new_count);
+        let (reference, hunks) = if reference == text {
+            // The saved version can come from an independent read or Git blob.
+            // A clean buffer needs no second rope and has no hunks to compute.
+            (text.clone(), Vec::new())
+        } else {
+            let hunks = line_diff(&reference, 0..old_count, &text, 0..new_count);
+            (reference, hunks)
+        };
         Self {
             reference,
             text,

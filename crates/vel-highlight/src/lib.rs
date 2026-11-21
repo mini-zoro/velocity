@@ -17,8 +17,10 @@ use vel_scope::{ScopeStack, ScopeStackOp};
 use vel_syntax::{
     MetadataSet, ParseState, SharedLineOps, SharedScopeOperations, SyntaxReference, SyntaxSet,
 };
+mod memory;
 mod scopes;
 mod viewport;
+pub use memory::HighlightMemory;
 use scopes::ScopeInterner;
 pub use scopes::{
     ScopeLines, ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine,
@@ -101,12 +103,12 @@ pub enum Error {
     Disconnected,
 }
 #[derive(Debug, Clone)]
-struct LineRecord {
-    ops: Arc<[(usize, ScopeStackOp)]>,
+struct LineRecord<S = Arc<VisualShape>, O = SharedScopeOperations> {
+    ops: O,
     // If there is no saved clear history, end_stack is the whole checkpoint.
     scopes: Option<Arc<ScopeStack>>,
-    checkpoint: Option<ParseState>,
-    spans: Arc<[StyleSpan]>,
+    checkpoint: Option<Arc<ParseState>>,
+    spans: S,
     runs: Arc<[ScopeRun]>,
     end_stack: ScopeStackId,
     has_symbols: bool,
@@ -122,7 +124,7 @@ pub struct HighlightProfile {
     pub parse: Duration,
     /// Scope operations, selectors, styling, scope runs and branch correction rendering.
     pub render: Duration,
-    /// Operation/stack sharing, dense checkpoints, convergence and record publication.
+    /// Operation/stack sharing, checkpoints, convergence and record publication.
     pub checkpoint: Duration,
     /// Complete rendered-line reuse hits, excluding uncached shapes and token hashes.
     pub render_hits: u64,
@@ -144,7 +146,8 @@ pub struct HighlightProfile {
     pub retained_scope_snapshots: usize,
 }
 /// Stateful engine, also usable without threads in tests or editor-owned scheduling.
-/// Dense checkpoints (N=1) include every visible line and permit single-line convergence.
+/// Line output is exact independently of the parser checkpoint interval.
+/// Small documents retain single-line convergence.
 #[derive(Debug)]
 pub struct DocumentHighlighter {
     text: Text,
@@ -474,24 +477,27 @@ impl DocumentHighlighter {
             old_need
         };
         self.must_parse_to = new_end.max(mapped_need);
-        let mut resume = first.min(self.frontier);
-        while resume > 0
-            && self.records[resume - 1]
-                .as_ref()
-                .and_then(|r| r.checkpoint.as_ref())
-                .is_none()
-        {
-            resume -= 1;
-        }
-        if resume == 0 {
-            self.state = self.initial.clone();
-            self.scopes = ScopeCursor::default();
-        } else {
-            let record = self.records[resume - 1].as_ref().unwrap();
-            self.state = record.checkpoint.clone().unwrap();
-            self.scopes = ScopeCursor::from_record(record, &self.scope_interner.stacks);
-            if !self.state.resume_at(resume) {
-                return Err(Error::Snapshot("cannot relocate speculative prefix"));
+        let mut resume = first.min(old_frontier);
+        if resume != old_frontier {
+            loop {
+                if resume == 0 {
+                    self.state = self.initial.clone();
+                    self.scopes = ScopeCursor::default();
+                    break;
+                }
+                if let Some(record) = &self.records[resume - 1]
+                    && let Some(checkpoint) = record.checkpoint.as_deref()
+                {
+                    let mut state = checkpoint.clone();
+                    // A converged suffix can have shifted past a speculative
+                    // checkpoint. Its replay coordinates cannot be relocated.
+                    if state.resume_at(resume) {
+                        self.state = state;
+                        self.scopes = ScopeCursor::from_record(record, &self.scope_interner.stacks);
+                        break;
+                    }
+                }
+                resume -= 1;
             }
         }
         self.frontier = resume;
@@ -568,7 +574,7 @@ impl DocumentHighlighter {
                 continue;
             }
             if let Some(record) = self.records.get_mut(n).and_then(Option::as_mut) {
-                record.ops = ops.into();
+                record.ops = SharedScopeOperations::new(&ops);
                 record.checkpoint = None;
                 rewind = Some(rewind.map_or(n, |old| old.min(n)));
             }
@@ -636,7 +642,7 @@ impl DocumentHighlighter {
                 self.scopes.matches(old)
                     && old
                         .checkpoint
-                        .as_ref()
+                        .as_deref()
                         .is_some_and(|state| !state.is_speculative() && *state == self.state)
             });
         let scopes = if !self.scopes.stack.has_pending_clears() {
@@ -654,10 +660,15 @@ impl DocumentHighlighter {
             }
             Some(scopes)
         };
+        // Keep sparse snapshots for long documents, including speculative ones
+        // so an edit inside a live branch need not find a non-speculative prefix.
+        let next = row + 1;
+        let save_checkpoint =
+            self.records.len() < 16_384 || next.is_multiple_of(16) || next == self.records.len();
         self.records[row] = Some(LineRecord {
-            ops: Arc::clone(&output.ops),
+            ops: output.ops.clone(),
             scopes,
-            checkpoint: Some(self.state.clone()),
+            checkpoint: save_checkpoint.then(|| Arc::new(self.state.clone())),
             spans: rendered.spans,
             has_symbols: self.scope_interner.has_symbols(&rendered.runs),
             runs: rendered.runs,
@@ -668,7 +679,7 @@ impl DocumentHighlighter {
             let mut to = self.reusable_to.min(self.records.len());
             while to > self.frontier {
                 if let Some(record) = &self.records[to - 1]
-                    && let Some(state) = &record.checkpoint
+                    && let Some(state) = record.checkpoint.as_deref()
                     && !state.is_speculative()
                 {
                     let mut state = state.clone();
@@ -689,14 +700,17 @@ impl DocumentHighlighter {
         }
         Ok(())
     }
-    fn batch(&self, lines: Range<usize>) -> HighlightBatch {
+    fn batch(&mut self, lines: Range<usize>) -> HighlightBatch {
         let end = lines.end.min(self.text.len_lines());
         let start = lines.start.min(end);
         let mut highlighted = Vec::with_capacity(end - start);
         for row in start..end {
             let exact = row < self.frontier;
             let spans = if exact {
-                self.records[row].as_ref().unwrap().spans.clone()
+                self.render_cache.visual.expand(
+                    &self.records[row].as_ref().unwrap().spans,
+                    &self.scope_interner,
+                )
             } else {
                 default_spans(
                     complete_line_range(&self.text, row).len(),
@@ -740,7 +754,7 @@ fn default_spans(len: usize, style: Style) -> Arc<[StyleSpan]> {
 }
 #[derive(Debug, Clone)]
 struct RenderedLine {
-    spans: Arc<[StyleSpan]>,
+    spans: Arc<VisualShape>,
     runs: Arc<[ScopeRun]>,
     end_stack: ScopeStackId,
     text_dependent: bool,
@@ -772,7 +786,7 @@ impl ScopeCursor {
 #[derive(Debug)]
 struct CachedRender {
     // Keep the allocation alive as long as its address is a cache key.
-    _ops: SharedScopeOperations,
+    ops: SharedScopeOperations,
     output: RenderedLine,
 }
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -785,6 +799,7 @@ struct RenderKey {
 struct RenderCache {
     entries: HashMap<RenderKey, CachedRender, fnv::FnvBuildHasher>,
     bytes: usize,
+    ops_scratch: Vec<(usize, ScopeStackOp)>,
     visual: SpanCache,
     #[cfg(feature = "profile")]
     hits: u64,
@@ -806,11 +821,11 @@ impl RenderCache {
         }
         let key = RenderKey {
             active: cursor.active,
-            ops_address: ops.as_ptr() as usize,
+            ops_address: ops.address(),
             len: line.len(),
         };
         if let Some(cached) = self.entries.get(&key)
-            && (line.is_ascii() || ops.iter().all(|(at, _)| line.is_char_boundary(*at)))
+            && (line.is_ascii() || ops.matches_boundaries(line))
         {
             #[cfg(feature = "profile")]
             {
@@ -830,9 +845,10 @@ impl RenderCache {
         // Bound both the number of keys and retained arrays. Uncached shapes
         // continue through the ordinary renderer. Clear/restore operations
         // touch history that is deliberately not part of an active stack ID.
+        let wide = ops.expanded(&mut self.ops_scratch);
         let output = style_line_at(
             line,
-            ops,
+            wide,
             &mut cursor.stack,
             cursor.active,
             resolver,
@@ -840,13 +856,13 @@ impl RenderCache {
             &mut self.visual,
         )?;
         cursor.active = output.end_stack;
-        let bytes = std::mem::size_of_val(ops.as_ref())
+        let bytes = ops.payload_bytes()
             + std::mem::size_of_val(output.spans.as_ref())
             + std::mem::size_of_val(output.runs.as_ref());
         if !output.text_dependent
             && self.entries.len() < 8192
             && self.bytes.saturating_add(bytes) <= 4 * 1024 * 1024
-            && ops
+            && wide
                 .iter()
                 .all(|(_, op)| !matches!(op, ScopeStackOp::Clear(_) | ScopeStackOp::Restore))
         {
@@ -854,7 +870,7 @@ impl RenderCache {
             self.entries.insert(
                 key,
                 CachedRender {
-                    _ops: Arc::clone(ops),
+                    ops: ops.clone(),
                     output: output.clone(),
                 },
             );
@@ -870,12 +886,19 @@ type VisualShape = [(u32, u32)];
 #[derive(Debug, Default)]
 struct SpanCache {
     scratch: Vec<(u32, u32)>,
-    shapes: HashMap<Box<VisualShape>, Arc<[StyleSpan]>, fnv::FnvBuildHasher>,
+    shapes: HashSet<Arc<VisualShape>, fnv::FnvBuildHasher>,
+    expanded: HashMap<usize, ExpandedShape, fnv::FnvBuildHasher>,
+    expanded_bytes: usize,
     bytes: usize,
     #[cfg(feature = "profile")]
     built_spans: usize,
     #[cfg(feature = "profile")]
     hits: usize,
+}
+#[derive(Debug)]
+struct ExpandedShape {
+    shape: Arc<VisualShape>,
+    spans: Arc<[StyleSpan]>,
 }
 impl SpanCache {
     fn push(&mut self, end: usize, style: u32) {
@@ -888,34 +911,64 @@ impl SpanCache {
         }
     }
 
-    fn finish(&mut self, interner: &ScopeInterner, text_dependent: bool) -> Arc<[StyleSpan]> {
+    fn finish(&mut self, text_dependent: bool) -> Arc<VisualShape> {
         let shape = self.scratch.as_slice();
-        if !text_dependent && let Some(spans) = self.shapes.get(shape) {
+        if !text_dependent && let Some(shared) = self.shapes.get(shape) {
             #[cfg(feature = "profile")]
             {
                 self.hits += 1;
             }
-            return Arc::clone(spans);
+            return Arc::clone(shared);
         }
-        let mut start = 0;
-        let spans: Arc<[StyleSpan]> = Arc::from_iter(shape.iter().map(|&(end, style)| StyleSpan {
-            range: std::mem::replace(&mut start, end as usize)..end as usize,
-            style: interner.style(style),
-        }));
+        let shared: Arc<VisualShape> = Arc::from(shape);
         #[cfg(feature = "profile")]
         {
             self.built_spans += shape.len();
         }
-        let bytes = std::mem::size_of_val(shape) + std::mem::size_of_val(spans.as_ref());
+        let bytes = std::mem::size_of_val(shape) + 2 * size_of::<usize>();
         if !text_dependent
             && self.shapes.len() < 8192
             && self.bytes.saturating_add(bytes) <= 4 * 1024 * 1024
         {
-            self.shapes.insert(shape.into(), Arc::clone(&spans));
+            self.shapes.insert(Arc::clone(&shared));
             self.bytes += bytes;
+        }
+        shared
+    }
+
+    fn expand(&mut self, shape: &Arc<VisualShape>, interner: &ScopeInterner) -> Arc<[StyleSpan]> {
+        let key = shape.as_ptr() as usize;
+        if let Some(hit) = self.expanded.get(&key) {
+            return hit.spans.clone();
+        }
+        let spans = expand_shape(shape, interner);
+        let bytes =
+            size_of_val(spans.as_ref()) + size_of_val(shape.as_ref()) + 4 * size_of::<usize>();
+        const LIMIT: usize = 512 * 1024;
+        if bytes <= LIMIT {
+            if self.expanded.len() == 2048 || self.expanded_bytes + bytes > LIMIT {
+                self.expanded.clear();
+                self.expanded_bytes = 0;
+            }
+            self.expanded.insert(
+                key,
+                ExpandedShape {
+                    shape: shape.clone(),
+                    spans: spans.clone(),
+                },
+            );
+            self.expanded_bytes += bytes;
         }
         spans
     }
+}
+
+fn expand_shape(shape: &VisualShape, interner: &ScopeInterner) -> Arc<[StyleSpan]> {
+    let mut start = 0;
+    Arc::from_iter(shape.iter().map(|&(end, style)| StyleSpan {
+        range: std::mem::replace(&mut start, end as usize)..end as usize,
+        style: interner.style(style),
+    }))
 }
 
 fn style_line(
@@ -1005,7 +1058,7 @@ fn style_line_at(
     }
     emit(at..line.len(), active, resolver, interner, visual);
     Ok(RenderedLine {
-        spans: visual.finish(interner, text_dependent),
+        spans: visual.finish(text_dependent),
         runs: runs.into(),
         end_stack: active,
         text_dependent,
@@ -1033,6 +1086,10 @@ pub struct HighlightService {
     default_style: Style,
 }
 impl HighlightService {
+    /// Counts retained payloads if the worker is not currently parsing.
+    pub fn memory_usage(&self) -> Option<HighlightMemory> {
+        Some(self.shared.try_lock().ok()?.memory_usage())
+    }
     /// Starts a named background thread. Construct one service per buffer, share it across views.
     pub fn new(engine: DocumentHighlighter) -> Result<Self, std::io::Error> {
         let text = engine.text.clone();
@@ -1336,7 +1393,7 @@ mod render_tests {
         let mut resolver = Highlighter::new(Arc::new(ColorScheme::velocity_dark()));
         let mut interner = ScopeInterner::new(Arc::new(MetadataSet::new()));
         let keyword = Scope::new("keyword.control.fixture").unwrap();
-        let ops = Arc::from([(1, ScopeStackOp::Push(keyword))]);
+        let ops = SharedScopeOperations::new(&[(1, ScopeStackOp::Push(keyword))]);
         let mut render = |prefix: &str, text: &str| {
             let stack = ScopeStack::from_vec(vec![Scope::new(prefix).unwrap()]);
             let mut cursor = ScopeCursor {
@@ -1380,7 +1437,7 @@ mod render_tests {
         let bare = cursor(&mut interner, false);
         let saved = cursor(&mut interner, true);
         let mut record = LineRecord {
-            ops: Arc::from([]),
+            ops: SharedScopeOperations::default(),
             scopes: None,
             checkpoint: None,
             spans: Arc::from([]),
@@ -1417,7 +1474,7 @@ mod render_tests {
                 active: cursor.active,
                 stack: cursor.stack.clone(),
             };
-            let ops = Arc::from([(1, ScopeStackOp::Restore)]);
+            let ops = [(1, ScopeStackOp::Restore)];
             let expected = style_line(
                 "ab",
                 &ops,
@@ -1428,7 +1485,13 @@ mod render_tests {
             )
             .unwrap();
             let actual = cache
-                .render("ab", &ops, &mut cursor, &mut resolver, &mut interner)
+                .render(
+                    "ab",
+                    &SharedScopeOperations::new(&ops),
+                    &mut cursor,
+                    &mut resolver,
+                    &mut interner,
+                )
                 .unwrap();
             assert_eq!(cursor.stack, expected_cursor.stack);
             assert_eq!(actual.spans, expected.spans);
@@ -1436,7 +1499,7 @@ mod render_tests {
             assert_eq!(actual.end_stack, expected.end_stack);
         }
         assert!(cache.entries.is_empty());
-        let ops = Arc::from([(1, ScopeStackOp::Noop)]);
+        let ops = SharedScopeOperations::new(&[(1, ScopeStackOp::Noop)]);
         cache
             .render(
                 "ab",
@@ -1467,7 +1530,8 @@ mod render_tests {
         let visible = Scope::new("source.visible").unwrap();
         let inner = Scope::new("meta.inner").unwrap();
         let end = Scope::new("meta.end").unwrap();
-        let ops = Arc::from([(0, ScopeStackOp::Pop(1)), (1, ScopeStackOp::Push(end))]);
+        let ops =
+            SharedScopeOperations::new(&[(0, ScopeStackOp::Pop(1)), (1, ScopeStackOp::Push(end))]);
         let mut first = None;
         for saved in ["source.first", "source.second"] {
             let saved = Scope::new(saved).unwrap();
@@ -1511,7 +1575,7 @@ mod render_tests {
             active: id,
             stack: initial.clone(),
         };
-        let ops = Arc::from([]);
+        let ops = SharedScopeOperations::default();
         for line in ["foo", "bar", "éx", "foo"] {
             let actual = cache
                 .render(line, &ops, &mut cursor(), &mut resolver, &mut interner)

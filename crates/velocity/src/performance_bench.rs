@@ -63,6 +63,7 @@ pub(crate) fn run(options: Options, mut clock: Clock, reporter: &Reporter) -> Re
             settle(&mut app);
             reporter.rss("perf_settled", json!({}))?;
         }
+        Mode::HeadlessPerfFile if options.memory_only => memory(options, clock, reporter)?,
         Mode::HeadlessPerfFile => file(options, clock, reporter)?,
         Mode::HeadlessPerfTyping | Mode::HeadlessPerfScroll | Mode::HeadlessPerfLarge => {
             replay_native(options, clock, reporter)?
@@ -282,6 +283,147 @@ fn settle(app: &mut App) {
         app.workspace.poll();
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[derive(Default)]
+#[repr(C)]
+struct MallocStatistics {
+    blocks_in_use: u32,
+    size_in_use: usize,
+    max_size_in_use: usize,
+    size_allocated: usize,
+}
+
+fn malloc_statistics() -> serde_json::Value {
+    unsafe extern "C" {
+        fn malloc_zone_statistics(zone: *mut libc::c_void, stats: *mut MallocStatistics);
+    }
+    let mut stats = MallocStatistics::default();
+    // SAFETY: NULL asks for all zones; stats has the layout of malloc_statistics_t.
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut stats) };
+    json!({
+        "malloc_live_bytes": stats.size_in_use,
+        "malloc_reserved_bytes": stats.size_allocated,
+        "malloc_reserved_minus_live_bytes": stats.size_allocated.saturating_sub(stats.size_in_use),
+        "malloc_live_blocks": stats.blocks_in_use,
+    })
+}
+
+fn memory(options: Options, clock: Clock, reporter: &Reporter) -> Result<(), String> {
+    let path = options.file.clone().ok_or("missing input file")?;
+    let deadline = Instant::now() + Duration::from_secs(options.timeout_seconds);
+    let mut app = app(options, clock, reporter, Text::new())?;
+    black_box(app.scene());
+    reporter.rss("memory_empty", malloc_statistics())?;
+    initialize_fonts(&mut app)?;
+    black_box(app.scene());
+    reporter.rss("memory_empty_fonts", malloc_statistics())?;
+    app.workspace.open(FileLocation {
+        path,
+        line: 1,
+        column: 1,
+    })?;
+    loop {
+        app.workspace.poll();
+        let tab = &app.workspace.tabs[app.workspace.active];
+        if tab.load_failed || tab.editor.binary.is_some() {
+            return Err("memory probe requires a readable text file".into());
+        }
+        if tab.loading.is_none() {
+            let cell = tab.editor.language.borrow();
+            let language = cell.as_ref().ok_or("no document language")?;
+            if language.policy.highlighting != vel_largefile::HighlightMode::Full {
+                return Err("memory probe requires full-file highlighting".into());
+            }
+            if !language.busy() && tab.editor.annotations.borrow().pending == 0 {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for full highlighting and analysis".into());
+        }
+        black_box(app.scene());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    black_box(app.scene());
+    // Publish the open-buffer index and completion data as the native loop
+    // does. This isolated workspace has no project folders to crawl.
+    app.panels.intel.poll(&mut app.workspace);
+    app.panels.intel.flush_publications()?;
+    settle(&mut app);
+    let editor = app.workspace.editor();
+    let mut details = malloc_statistics();
+    details["text_bytes"] = json!(editor.text.len_bytes());
+    details["lines"] = json!(editor.text.len_lines());
+    reporter.rss("memory_highlighted", details)?;
+    let cell = editor.language.borrow();
+    let language = cell.as_ref().ok_or("missing highlight worker")?;
+    let highlight = loop {
+        if let Some(bytes) =
+            language.measure_highlighter(deadline.saturating_duration_since(Instant::now()))
+        {
+            break bytes;
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out counting highlight allocations".into());
+        }
+    };
+    let [symbols, analysis, minimap, words] = language
+        .analysis
+        .as_ref()
+        .ok_or("missing analysis")?
+        .memory_usage();
+    let (layout_index, layout) = editor.layout.borrow().geometry_bytes();
+    let rope_bytes = editor.text.estimated_storage_bytes();
+    let line_index = editor.text.line_index_bytes();
+    let (font_heap, font_mappings) = app
+        .fonts
+        .as_ref()
+        .ok_or("missing fonts")?
+        .file_storage_bytes();
+    let git = &app.workspace.git.snapshots;
+    let diff = editor.annotations.borrow();
+    let mut details = json!({
+        "text_rope": rope_bytes - line_index,
+        "rope_line_index": line_index,
+        "layout_line_index": layout_index,
+        "layout_wrap": layout,
+        "view_row_cache": app.view.row_cache_bytes(),
+        "symbols": symbols,
+        "analysis_geometry": analysis,
+        "word_index": words,
+        "minimap": minimap,
+        "undo": editor.buffer.history_retained_bytes(),
+        "git_repositories": git.len(),
+        "git_indexed_paths": git.values().map(|repo| repo.files.len()).sum::<usize>(),
+        "project_indexes": app.panels.intel.symbol_source().len(),
+        "diff_publication": diff.current.as_ref().map_or(0, |d| {
+            d.reference.estimated_retained_bytes(&editor.text)
+                + size_of_val(d.hunks.as_ref())
+                + d.inline_spans.values().map(|spans| size_of_val(spans.as_ref())).sum::<usize>()
+        }),
+        "font_face_heap": font_heap,
+        "font_face_file_mappings": font_mappings,
+        "glyph_atlas": 0,
+        "renderer_buffers": 0,
+    });
+    details["highlight"] = json!({
+        "line_records": highlight.records,
+        "parser_states": highlight.parser_states,
+        "parser_line_memo": highlight.parser_memo,
+        "scope_ops": highlight.operations,
+        "interned_scopes": highlight.interned_scopes,
+        "scope_runs": highlight.scope_runs,
+        "published_scope_line_table": language.scopes.as_ref().map(|s| s.line_table_bytes()),
+        "style_spans": highlight.style_spans,
+        "render_cache": highlight.render_cache,
+    });
+    reporter.emit(json!({
+        "kind": "memory_breakdown",
+        "method": "reachable allocation payload estimates; font mappings are not resident bytes",
+        "details": details,
+    }))?;
+    Ok(())
 }
 
 fn file(options: Options, clock: Clock, reporter: &Reporter) -> Result<(), String> {

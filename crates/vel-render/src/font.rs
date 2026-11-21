@@ -410,6 +410,27 @@ impl Fonts {
     pub fn metadata(&self) -> Value {
         json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
+    /// Unique face backing bytes: owned heap capacity and mapped file length.
+    /// The latter is not a count of resident pages.
+    pub fn file_storage_bytes(&self) -> (usize, usize) {
+        let mut seen = std::collections::HashSet::new();
+        let mut owned = 0;
+        let mut mapped = 0;
+        for bytes in self
+            .faces
+            .iter()
+            .map(|f| &f.bytes)
+            .chain(self.files.values())
+        {
+            if seen.insert(std::sync::Arc::as_ptr(bytes)) {
+                match bytes.as_ref() {
+                    vel_platform::fonts::FontData::Owned(data) => owned += data.capacity(),
+                    vel_platform::fonts::FontData::Mapped(data) => mapped += data.len(),
+                }
+            }
+        }
+        (owned, mapped)
+    }
     /// ASCII skips shaping; non-ASCII graphemes use a cached swash shaping path.
     pub fn shape(&mut self, text: &str, px: f32) -> Vec<ShapedGlyph> {
         self.shape_styled(text, px, crate::scene::FontStyle::default())

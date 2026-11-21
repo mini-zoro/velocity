@@ -6,6 +6,7 @@ pub const PERF_HELP: &str = "\
   --headless-perf-startup [FILE]  main -> first App::scene, idle memory; no file or --lines = blank
   --headless-perf-startup-interactive [FILE]  interactive setup before AppKit (requires --data-dir)
   --headless-perf-file FILE  streamed open, first scene, settled memory, typing and scroll
+                    --memory-only   sample a fully highlighted file at idle, without edits
   --headless-perf-typing FILE | --headless-perf-scroll FILE | --headless-perf-large FILE
                          replay native benchmark actions through App::scene, without a window
   --headless-perf-highlight FILE  full bundled syntax parse + color spans (first and warmed pass)
@@ -95,6 +96,7 @@ pub struct Options {
     pub safe_mode: bool,
     pub groups: usize,
     pub review_ui: Option<bool>,
+    pub memory_only: bool,
     pub intel_words: usize,
     pub restore_session: bool,
     pub width: u32,
@@ -130,6 +132,7 @@ impl Default for Options {
             safe_mode: false,
             groups: 1,
             review_ui: None,
+            memory_only: false,
             intel_words: 100_000,
             restore_session: false,
             width: 1200,
@@ -236,6 +239,7 @@ impl Options {
                 }
                 "--" => positional_only = true,
                 "--log-input" => options.log_input = true,
+                "--memory-only" => options.memory_only = true,
                 "--restore-session" => options.restore_session = true,
                 "-n" | "--new-window" => options.new_window = true,
                 "-a" | "--add" => options.add_to_window = true,
@@ -359,6 +363,9 @@ impl Options {
         ) && options.file.is_none()
         {
             return Err(format!("--{} requires a path", options.mode.name()));
+        }
+        if options.memory_only && options.mode != Mode::HeadlessPerfFile {
+            return Err("--memory-only requires --headless-perf-file".into());
         }
         if options.mode == Mode::Open
             && (options.files.len() != 1 || options.files[0].path == std::path::Path::new("-"))

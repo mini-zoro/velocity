@@ -1024,3 +1024,120 @@ and session writer before dispatch. These runs report
 App poll or scene does the same; the startup benchmark deliberately stops
 before that step. Index results still arrive asynchronously, as they did with
 eager startup.
+
+## Round 38: memory for fully highlighted C
+
+Five alternating fresh-process pairs on the same machine, against `6640561`.
+Both release builds include the same diagnostic code and used
+`--locked -j 6` and `MACOSX_DEPLOYMENT_TARGET=14.0`. Use the archived
+`spikes/data/sublime-comparison/sqlite3.c`: 5,385,123 UTF-8 bytes and 151,639
+editor rows. The 7,533,858-byte generated C source below is a separate
+regression fixture. Reproduce with a disposable HOME, zsh, and log directory.
+Runs used `RUSTUP_HOME=/Users/zoro/.rustup` and
+`CARGO_HOME=/Users/zoro/.cargo`; builds used a disposable offline Cargo
+registry so the real Cargo home was not written.
+
+```sh
+target/release/velocity --headless-perf-file "$FIXTURE/sqlite3.c" --memory-only \
+  --data-dir "$HOME/profile" --output "$VELOCITY_LOG_DIR/memory.jsonl"
+```
+
+The probe opens the file in a full App, waits for exact highlighting,
+analysis, the visible rows and diff work, drains the open-buffer completion
+publication, and settles without edits or scrolling. The input was outside a
+repository and no project folders were attached. No window, Metal device,
+drawable or native glyph atlas was created. The JSONL records blank, blank
+with fonts, and highlighted footprint and malloc samples, followed by a
+separate allocation breakdown; the detailed count runs **after** the idle
+sample so that deduplication scratch cannot inflate that sample.
+
+Median `TASK_VM_INFO.phys_footprint` fell from **270.8 MB to 147.6 MB**
+(**−123.2 MB, −45.5%**); ranges were 269.6–272.8 MB and 147.3–148.2 MB.
+This is a headless result. It does not establish the 230 MB native budget
+against Sublime: the earlier 362–365 MB included a real window and renderer,
+and neither the native overhead nor its change has been measured here.
+
+The full-document worker keeps exact scope runs and packed replay
+operations. Long documents keep a parser checkpoint every 16 rows and at
+EOF; edits resume from a valid prefix checkpoint and still converge with an
+exact suffix. A shifted speculative checkpoint is not reused at the wrong
+absolute line. The parser memo shares stable state when the start and end
+state are equivalent. Offscreen style runs keep byte ends and palette IDs;
+viewport batches expand to the same renderer spans in a bounded cache.
+Analysis streams block folds without a second whole-document span vector.
+Word positions keep 32-bit offsets when possible, with lossless promotion.
+An equal disk or Git diff reference shares the document rope.
+
+The object counts below are from the first pair and are allocation payload
+estimates, not assignments of physical pages. Identified object bytes (before
+rounding and excluding mappings) total 163.0 MB before and 83.2 MB after.
+Shared identified allocations are counted once; map overhead is estimated,
+and grammar/regex caches, saved scope clears, other app state and scratch
+are not fully attributed. Mapped font lengths are not resident bytes. The
+last three rows are median malloc samples, not additive with the object counts.
+`reserved − live` is reservation slack, not a measurement of physical
+fragmentation; it includes unused virtual pages and allocator metadata.
+
+| Subsystem | Before bytes | After bytes | Change | Check |
+| --- | ---: | ---: | --- | --- |
+| Text rope | 5,617,101 | 5,617,101 | Unchanged | Rope payload excluding LF index |
+| LF index | 172,945 | 172,945 | Unchanged | Leaf index count |
+| Highlight line records | 18,196,680 | 12,131,120 | No inline parser state | Generated C byte budget |
+| Parser checkpoints and context stacks | 40,831,304 | 3,951,792 | Sparse checkpoints; reuse stable state | Incremental rewind and corpus differential |
+| Parser line memo, excluding ops | 5,271,995 | 6,406,142 | Table admits more compact operation keys | Corpus differential |
+| Exact scope operations | 27,967,696 | 13,874,384 | Pack once for memo and highlighter | Operation round-trip and corpus differential |
+| Interned scope paths and lookup tables | 1,000,362 | 1,000,362 | Unchanged | Exact scope queries |
+| Scope runs and published line table | 16,257,880 | 15,421,808 | More run sharing; line table unchanged | Exact scope queries |
+| Style runs and viewport expansion | 16,225,936 | 2,638,160 | Compact byte ends and palette IDs | Recolor, hashed tokens and render comparisons |
+| Render cache keys | 1,444,296 | 1,521,912 | Includes bounded expansion cache | Render comparisons |
+| Layout/wrap and viewport row cache | 77,334 | 77,334 | Unwrapped; no full-document wrap tables | Idle geometry count |
+| Pairs, folds and guides | 11,092,316 | 11,092,316 | Same retained geometry; no temporary span vector | Editor tests |
+| Document/index symbols | 3,535,108 | 3,535,108 | Unchanged; no separate project crawl | Symbol publication |
+| Word index and completion | 9,197,207 | 5,489,823 | Narrow positions, shared with completion | Wide-offset and completion tests |
+| Minimap | 282,128 | 282,128 | Unchanged | Analysis publication |
+| Diff reference | 5,790,046 | 0 | Shares identical text; no Git repository | Equal-reference test |
+| Undo history | 0 | 0 | No edits | History count |
+| Mapped font backing | 315,064,772 | 315,064,772 | Virtual file length; owned face backing 0 | Font map count |
+| Glyph atlas and device buffers | 0 | 0 | Not constructed headlessly | Windowless App |
+| Malloc live | 221,508,720 | 128,130,384 | −93,378,336 | Darwin malloc zones |
+| Malloc reserved | 266,223,616 | 182,272,000 | −83,951,616 | Darwin malloc zones |
+| Reserved minus live | 44,713,232 | 54,141,616 | +9,428,384; not physical fragmentation | Darwin malloc zones |
+
+`full_highlight_retained_byte_budget_for_seven_mb_of_c` finishes the bundled
+C grammar parse and verifies exact styled lines. It counts retained
+highlighter bytes, independent of process RSS and elapsed time: 84,155,329
+on the control and 23,630,086 on the candidate, with a 35,000,000-byte limit.
+
+### Verification
+
+Five alternating whole-process instruction pairs per workload. Both sides
+of `features` used the original 10,000,000-byte Rust corpus passed explicitly
+with `--features-file` because the archived control has no local corpus.
+Percentage changes are medians of paired ratios, not ratios of side medians.
+
+| Workload | Before instructions | After instructions | Median paired change |
+| --- | ---: | ---: | ---: |
+| `features` | 196,996,422,319 | 195,824,893,708 | −0.74% |
+| `carets1000` | 3,789,370,567 | 3,757,623,257 | +0.01% |
+| `smoke1` | 307,693,735 | 306,710,157 | −0.13% |
+
+The official assertion reports were byte-identical: 242 files, 126,600
+passes, no failures or skips. The Onig, multi-matcher and packed-memo
+differential passed and matched the control operations, corrections,
+rewinds and warnings digest
+`1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`.
+The eight software `r5_sidebar` and `r6-cjk-zh` PNGs matched byte-for-byte.
+On the 32 additional Settings PNGs, only the disposable User file path
+differed; a second control run differed in the same pixel rows. The sandbox
+reported no Metal adapter, so this does not verify native frames.
+
+The no-packaging gate passed formatting, strict Clippy, rustdoc with warnings
+denied, and the release build. Release workspace tests: 1,755 passed, 80
+ignored, three failed. The package HTTPS fixture hit a nonblocking lock error
+(`verified_https_install_upgrade_digest_failures_and_redirect_policy`), the
+find-results streaming test missed its frame budget at 20.22 ms p95
+(`find_results_tab_streams_while_typing_within_frame_budget`), and the zh-Hans
+draw-list audit again flagged ASCII components of the disposable path
+(`shipped_catalogs_pass_draw_list_text_audit`). None was modified or rerun.
+
+Raw records, gate output and binaries are in `/tmp/velocity-c38.ZLtoAo/`.

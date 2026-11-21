@@ -3,6 +3,7 @@
 mod cache;
 pub mod indent;
 pub mod metadata;
+mod operations;
 mod parser;
 mod resources;
 mod state;
@@ -15,8 +16,9 @@ pub use cache::CacheStatus;
 pub use metadata::{
     Metadata, MetadataError, MetadataSet, ScopedSpan, Symbol, SymbolMetadata, SymbolTransformation,
 };
+pub use operations::SharedScopeOperations;
 pub use parser::{ParsingError, ScopeOperations};
-pub use state::{LineOps, ParseState, Rewind, SharedLineOps, SharedScopeOperations};
+pub use state::{LineOps, ParseState, Rewind, SharedLineOps};
 pub use syntax_definition::SyntaxDefinition;
 pub use syntax_set::{SyntaxReference, SyntaxSet, SyntaxSetBuilder};
 pub use tm_language::TmLanguageError;

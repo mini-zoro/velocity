@@ -49,9 +49,11 @@ struct Checkpoint {
     state: ParseState,
     scopes: ScopeStack,
 }
+type WideOperations = [(usize, ScopeStackOp)];
+
 #[derive(Debug, Clone)]
 struct Cached {
-    record: LineRecord,
+    record: LineRecord<Arc<[StyleSpan]>, Arc<WideOperations>>,
     exact: bool,
 }
 #[derive(Debug)]
@@ -423,7 +425,7 @@ impl ViewportHighlighter {
                         &mut self.interner,
                         &mut self.visual,
                     )?;
-                    cached.record.spans = rendered.spans;
+                    cached.record.spans = self.visual.expand(&rendered.spans, &self.interner);
                     cached.record.runs = rendered.runs;
                     cached.record.end_stack = rendered.end_stack;
                     cached.record.scopes = Some(Arc::new(scopes.clone()));
@@ -448,7 +450,7 @@ impl ViewportHighlighter {
                         ops: output.ops.into(),
                         scopes: Some(Arc::new(cursor.scopes.clone())),
                         checkpoint: None,
-                        spans: rendered.spans,
+                        spans: self.visual.expand(&rendered.spans, &self.interner),
                         runs: rendered.runs,
                         end_stack: rendered.end_stack,
                         has_symbols: false,
@@ -577,6 +579,7 @@ impl ViewportHighlighter {
     pub fn set_color_scheme(&mut self, scheme: Arc<ColorScheme>) {
         self.resolver = Highlighter::new(scheme);
         self.interner = ScopeInterner::new(Arc::new(MetadataSet::new()));
+        self.visual = SpanCache::default();
         self.scheme_revision += 1;
         self.checkpoints = BTreeMap::from([(0, self.initial.clone())]);
         self.background = Cursor::new(self.initial.clone(), 0, true);

@@ -206,6 +206,43 @@ pub struct Layout {
     pub viewport_width: usize,
 }
 impl Layout {
+    pub(crate) fn geometry_bytes(&self) -> (usize, usize) {
+        let index =
+            (self.heights.tree.capacity() + self.byte_rows.tree.capacity()) * size_of::<usize>();
+        let mut segments = std::collections::HashSet::new();
+        let wrap_bytes = self.lines.capacity() * size_of::<Line>()
+            + self.wrap.capacity() * size_of::<WrapCache>()
+            + self
+                .lines
+                .iter()
+                .map(|line| {
+                    let shared = if segments.insert(line.segments.as_ptr()) {
+                        size_of_val(line.segments.as_ref()) + 2 * size_of::<usize>()
+                    } else {
+                        0
+                    };
+                    shared + line.hidden.capacity() * size_of::<Range<usize>>()
+                })
+                .sum::<usize>()
+            + self
+                .wrap
+                .iter()
+                .map(|row| {
+                    let dependencies = if let Dependencies::Many(many) = &row.dependencies {
+                        size_of_val(many.as_ref()) + 2 * size_of::<usize>()
+                    } else {
+                        0
+                    };
+                    dependencies
+                        + row.invisible.as_ref().map_or(0, |gaps| {
+                            gaps.capacity() * size_of::<(usize, usize)>()
+                                + size_of::<Vec<(usize, usize)>>()
+                                + 2 * size_of::<usize>()
+                        })
+                })
+                .sum::<usize>();
+        (index, wrap_bytes)
+    }
     pub fn set_wide_advances(&mut self, advances: WideAdvances) {
         if self.advances != advances {
             self.advances = advances;

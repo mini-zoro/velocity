@@ -130,6 +130,10 @@ pub struct ScopeSnapshot {
     pub stacks: ScopeStacks,
 }
 impl ScopeSnapshot {
+    /// Line table bytes, excluding the shared rope, scope runs and interned stacks.
+    pub fn line_table_bytes(&self) -> usize {
+        self.lines.records.capacity() * size_of::<ScopedLine>()
+    }
     /// True when every requested line has exact scopes; O(1) for published snapshots.
     /// Legacy mutable iteration through `lines` requires one scan to refresh its count.
     pub fn complete(&self) -> bool {
@@ -229,6 +233,22 @@ struct ScopeTransition {
     after: ScopeStackId,
 }
 impl ScopeInterner {
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.stacks.0.capacity() * size_of::<Arc<[Scope]>>()
+            + self
+                .stacks
+                .0
+                .iter()
+                .map(|s| size_of_val(s.as_ref()) + 2 * size_of::<usize>())
+                .sum::<usize>()
+            + table_bytes(&self.ids)
+            + self.selected.capacity() * size_of::<Option<SymbolMetadata>>()
+            + self.styles.capacity() * size_of::<Option<u32>>()
+            + self.palette.capacity() * size_of::<vel_color_scheme::Style>()
+            + table_bytes(&self.palette_ids)
+            + table_bytes(&self.transitions)
+            + table_bytes(&self.single)
+    }
     pub(crate) fn new(metadata: Arc<MetadataSet>) -> Self {
         let mut value = Self {
             ids: HashMap::default(),
@@ -410,6 +430,10 @@ impl ScopeInterner {
             })
             .collect()
     }
+}
+
+fn table_bytes<K, V, S>(map: &HashMap<K, V, S>) -> usize {
+    map.capacity() * (size_of::<(K, V)>() + 1)
 }
 /// Per-file symbols, assembled from incrementally maintained line candidates without parsing.
 #[derive(Debug, Clone)]

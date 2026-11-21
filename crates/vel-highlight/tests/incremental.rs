@@ -111,6 +111,140 @@ fn one_character_edit_only_parses_one_line_and_queued_edits_do_not_skip_dirty_re
     }
     assert_eq!(spans(&mut actual), spans(&mut engine(set, text, 4)));
 }
+
+#[test]
+fn sparse_checkpoints_relocate_after_a_newline_and_repair_a_later_branch() {
+    let yaml = r#"
+name: Branch
+scope: source.fixture
+version: 2
+contexts:
+  main:
+    - match: '(?=a)'
+      branch_point: reading
+      branch: [first, second]
+  first:
+    - meta_scope: first.fixture
+    - match: z
+      fail: reading
+    - match: t
+      pop: true
+  second:
+    - meta_scope: second.fixture
+    - match: z
+      pop: true
+"#;
+    let mut builder = SyntaxSetBuilder::new();
+    builder.add(SyntaxDefinition::load_from_str(yaml, true, None).unwrap());
+    let set = Arc::new(builder.build());
+    let scheme = Arc::new(
+        ColorScheme::parse(
+            r##"{"rules":[
+        {"scope":"first","foreground":"#f00"},{"scope":"second","foreground":["#00f","#0f0"]}
+    ]}"##,
+        )
+        .unwrap(),
+    );
+    let make = |text, version| {
+        DocumentHighlighter::new(
+            text,
+            ChangeId(version),
+            set.clone(),
+            &set.syntaxes()[0],
+            scheme.clone(),
+        )
+    };
+    let mut text = Text::from(
+        format!(
+            "{}a\n{}t\n{}",
+            "x\n".repeat(16_378),
+            "xx é\n".repeat(40),
+            "x\n".repeat(256)
+        )
+        .as_str(),
+    );
+    let mut incremental = make(text.clone(), 0);
+    incremental.finish().unwrap();
+
+    let newline = text.line_to_byte(16);
+    text.insert(newline, "\n");
+    incremental
+        .apply_change(
+            text.clone(),
+            ChangeId(1),
+            &ChangeSet::new(vec![Change {
+                old_range: newline..newline,
+                new_len: 1,
+            }]),
+        )
+        .unwrap();
+    incremental.finish().unwrap();
+    assert!(incremental.stats().parsed_lines <= 32);
+    assert_eq!(incremental.stats().convergences, 1);
+
+    let branch_end = 16_420;
+    let at = text.line_to_byte(branch_end);
+    assert_eq!(text.byte_at(at), b't');
+    text.replace(at..at + 1, "z");
+    incremental
+        .apply_change(
+            text.clone(),
+            ChangeId(2),
+            &ChangeSet::new(vec![Change {
+                old_range: at..at + 1,
+                new_len: 1,
+            }]),
+        )
+        .unwrap();
+    incremental.finish().unwrap();
+    assert_eq!(incremental.stats().rewind_from, Some(16_379));
+    let rows = 16_370..16_430;
+    let mut fresh = make(text.clone(), 2);
+    fresh.finish().unwrap();
+    // Recolor from compact operations; hashed token spans must survive expansion.
+    for (actual, expected) in [
+        (
+            incremental
+                .request_lines(ChangeId(2), rows.clone(), Duration::ZERO)
+                .unwrap(),
+            fresh
+                .request_lines(ChangeId(2), rows.clone(), Duration::ZERO)
+                .unwrap(),
+        ),
+        {
+            let other = Arc::new(
+                ColorScheme::parse(
+                    r##"{"rules":[
+                {"scope":"second","foreground":["#f00","#ff0"]}
+            ]}"##,
+                )
+                .unwrap(),
+            );
+            incremental.set_color_scheme(other.clone()).unwrap();
+            fresh.set_color_scheme(other).unwrap();
+            (
+                incremental
+                    .request_lines(ChangeId(2), rows.clone(), Duration::ZERO)
+                    .unwrap(),
+                fresh
+                    .request_lines(ChangeId(2), rows.clone(), Duration::ZERO)
+                    .unwrap(),
+            )
+        },
+    ] {
+        assert!(actual.complete && expected.complete);
+        for (a, b) in actual.highlighted.iter().zip(&expected.highlighted) {
+            assert_eq!(a.spans, b.spans);
+        }
+        for point in text.line_to_byte(rows.start)..text.line_to_byte(rows.end) {
+            use vel_highlight::ScopeProvider;
+            assert_eq!(
+                actual.scopes.scopes_at(point),
+                expected.scopes.scopes_at(point)
+            );
+        }
+    }
+}
 #[test]
 fn multi_change_transaction_and_invalid_versions() {
     let set = set();

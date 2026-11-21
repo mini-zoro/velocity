@@ -1,6 +1,7 @@
 //! Editor-facing snapshots; context stacks are shared and hash-consed by the interpreter.
 use crate::{
-    ParsingError, SyntaxReference, SyntaxSet,
+    ParsingError, SharedScopeOperations, SyntaxReference, SyntaxSet,
+    operations::PackingScratch,
     parser::{InterpreterState, ScopeOperations},
 };
 use std::{
@@ -26,9 +27,6 @@ pub struct LineOps {
     /// Resource and branch-expiry diagnostics.
     pub warnings: Vec<String>,
 }
-/// A shared, immutable sequence of byte-indexed scope operations.
-pub type SharedScopeOperations = Arc<[(usize, crate::ScopeStackOp)]>;
-
 /// Reusable output buffer for consumers that retain operations across lines.
 #[derive(Debug, Default)]
 pub struct SharedLineOps {
@@ -89,8 +87,9 @@ struct LineCache {
     bytes: usize,
     entries: HashMap<u64, CachedLine>,
     order: VecDeque<u64>,
-    operations: HashSet<SharedScopeOperations>,
+    operations: HashMap<u64, SharedScopeOperations>,
     operation_bytes: usize,
+    packing: PackingScratch,
 }
 impl LineCache {
     fn new(capacity: usize) -> Self {
@@ -99,19 +98,28 @@ impl LineCache {
             bytes: 0,
             entries: HashMap::new(),
             order: VecDeque::new(),
-            operations: HashSet::new(),
+            operations: HashMap::new(),
             operation_bytes: 0,
+            packing: PackingScratch::default(),
         }
     }
     fn intern_operations(&mut self, ops: &[(usize, crate::ScopeStackOp)]) -> SharedScopeOperations {
         const BYTES: usize = 4 * 1024 * 1024;
-        if let Some(shared) = self.operations.get(ops) {
-            return shared.clone();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        ops.hash(&mut hash);
+        let key = hash.finish();
+        if let Some(shared) = self.operations.get(&key) {
+            // A collision must not redirect the exact output or its cache key.
+            return if shared.matches(ops) {
+                shared.clone()
+            } else {
+                SharedScopeOperations::with_scratch(ops, &mut self.packing)
+            };
         }
-        let bytes = std::mem::size_of_val(ops);
-        let shared = Arc::from(ops);
+        let shared = SharedScopeOperations::with_scratch(ops, &mut self.packing);
+        let bytes = shared.payload_bytes();
         if self.operations.len() < self.capacity && bytes <= BYTES - self.operation_bytes {
-            self.operations.insert(Arc::clone(&shared));
+            self.operations.insert(key, shared.clone());
             self.operation_bytes += bytes;
         }
         shared
@@ -142,6 +150,42 @@ impl LineCache {
     }
 }
 impl ParseState {
+    /// Diagnostic count of reachable interpreter allocations and line memo storage.
+    /// Checkpoints must belong to the same document. Scope-operation arrays are
+    /// yielded separately so the caller can count them only once.
+    pub fn measure_document<'a>(
+        &'a self,
+        checkpoints: impl Iterator<Item = &'a Self>,
+        mut operations: impl FnMut(&SharedScopeOperations),
+    ) -> (usize, usize) {
+        let mut engines = HashSet::new();
+        let mut stacks = HashSet::new();
+        let mut engine_bytes = 0;
+        let mut record = |engine: &Arc<InterpreterState>| {
+            if engines.insert(Arc::as_ptr(engine)) {
+                engine_bytes += engine.estimated_checkpoint_bytes(&mut stacks);
+            }
+        };
+        record(&self.engine);
+        for checkpoint in checkpoints {
+            record(&checkpoint.engine);
+        }
+        let memo = self.lines.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in memo.entries.values() {
+            record(&entry.before);
+            record(&entry.after);
+            operations(&entry.ops);
+        }
+        for ops in memo.operations.values() {
+            operations(ops);
+        }
+        let memo_bytes = memo.entries.capacity() * (size_of::<(u64, CachedLine)>() + 1)
+            + memo.order.capacity() * size_of::<u64>()
+            + memo.operations.capacity() * (size_of::<(u64, SharedScopeOperations)>() + 1)
+            + memo.bytes;
+        (engine_bytes, memo_bytes)
+    }
+
     /// Binds a new interpreter to a syntax belonging to `set`.
     pub fn new(set: Arc<SyntaxSet>, syntax: &SyntaxReference) -> Self {
         let engine = Arc::new(InterpreterState::new(syntax));
@@ -223,8 +267,7 @@ impl ParseState {
                 {
                     entry.referenced = true;
                     if !SHARE {
-                        out.ops.clear();
-                        out.ops.extend_from_slice(&entry.ops);
+                        entry.ops.write_to(&mut out.ops);
                     }
                     out.corrections.clear();
                     out.warnings.clear();
@@ -232,13 +275,14 @@ impl ParseState {
                     self.engine = entry.after.clone();
                     self.fingerprint = Some(entry.fingerprint);
                     self.next_line += 1;
-                    return Ok(SHARE.then(|| Arc::clone(&entry.ops)));
+                    return Ok(SHARE.then(|| entry.ops.clone()));
                 }
                 Some(key)
             }
         } else {
             None
         };
+        let before_fingerprint = self.fingerprint;
         let before = key.map(|_| self.engine.clone());
         let engine = Arc::make_mut(&mut self.engine);
         if stable {
@@ -265,15 +309,21 @@ impl ParseState {
             && out.rewind.is_none()
             && out.warnings.is_empty()
         {
+            let before = before.expect("memoization enabled");
+            if before_fingerprint == self.fingerprint && self.engine.can_reuse_stable(&before) {
+                // A different source line can end with exactly the same
+                // parser state. Keep both directions of the memo on one Arc.
+                self.engine = before.clone();
+            }
             let mut cache = self.lines.lock().unwrap_or_else(|e| e.into_inner());
             let ops = cache.intern_operations(&out.ops);
-            let shared = SHARE.then(|| Arc::clone(&ops));
+            let shared = SHARE.then(|| ops.clone());
             cache.insert(
                 key,
                 CachedLine {
                     referenced: false,
                     text: line.into(),
-                    before: before.expect("memoization enabled"),
+                    before,
                     after: self.engine.clone(),
                     fingerprint: self.fingerprint.expect("stable memoized fingerprint"),
                     ops,
@@ -288,7 +338,7 @@ impl ParseState {
                     .unwrap_or_else(|e| e.into_inner())
                     .intern_operations(&out.ops)
             } else {
-                Arc::from(out.ops.as_slice())
+                SharedScopeOperations::new(&out.ops)
             }
         }))
     }

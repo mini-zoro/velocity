@@ -46,6 +46,7 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
         let mut memoized =
             ParseState::new(multi.clone(), multi.find_syntax_by_path(syntax).unwrap());
         let mut shared = SharedLineOps::default();
+        let mut shared_wide = Vec::new();
         for (row, line) in text.split_inclusive('\n').enumerate() {
             let expected = reference.parse_line(line).unwrap();
             if let Some(digest) = &mut digest {
@@ -72,7 +73,7 @@ fn official_line_ops_rewinds_and_memoized_transitions_agree() {
             let corrections: Vec<_> = shared.drain_corrections().collect();
             assert_eq!(
                 (
-                    shared.ops.as_ref(),
+                    shared.ops.expanded(&mut shared_wide),
                     shared.rewind(),
                     corrections.as_slice(),
                     shared.warnings()

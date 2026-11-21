@@ -133,6 +133,11 @@ impl Text {
     pub fn estimated_storage_bytes(&self) -> usize {
         tree::storage_bytes(&self.root)
     }
+    /// Heap payload of the leaf LF indexes, already included in the total
+    /// storage estimate. Inline node summaries remain part of rope storage.
+    pub fn line_index_bytes(&self) -> usize {
+        tree::line_index_bytes(&self.root)
+    }
     /// Estimates allocations retained by this snapshot but absent from `current`.
     /// Counts shared nodes (including inline edits' original leaves) only once.
     /// Like [`Self::estimated_storage_bytes`], excludes allocator bookkeeping.
