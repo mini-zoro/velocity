@@ -218,8 +218,34 @@ fn append(h: &mut dyn Host, a: &Value) -> Result<(), String> {
         return Ok(());
     }
     let text = a["characters"].as_str().ok_or("append needs characters")?;
+    let settings = h.settings();
     let (b, id) = h.buffer();
-    ops::append(b, id, text);
+    if settings.translate_tabs_to_spaces
+        && !boolean(a, "disable_tab_translation")
+        && text.contains('\t')
+    {
+        let tab = settings.tab_size.max(1);
+        let advance = |column, c| match c {
+            '\n' | '\r' => 0,
+            '\t' => column + (tab - column % tab),
+            _ => column + 1,
+        };
+        let last = b.text().len_lines() - 1;
+        let mut column = b.text().line(last).chars().fold(0, advance);
+        let mut translated = String::with_capacity(text.len());
+        for c in text.chars() {
+            let next = advance(column, c);
+            if c == '\t' {
+                translated.extend(std::iter::repeat_n(' ', next - column));
+            } else {
+                translated.push(c);
+            }
+            column = next;
+        }
+        ops::append(b, id, &translated);
+    } else {
+        ops::append(b, id, text);
+    }
     Ok(())
 }
 adapter!(split, "split_selection", split_selection);
@@ -277,6 +303,34 @@ mod tests {
             self.intercepts.push(name.into());
             Ok(false)
         }
+    }
+    #[test]
+    fn r35_append_translates_tabs_unless_disabled() {
+        let mut host = Fixture::new("αx");
+        host.settings.tab_size = 4;
+        host.settings.translate_tabs_to_spaces = true;
+        let mut registry = Registry::standard();
+        registry
+            .run("append", &json!({"characters":"\tX\n\t"}), &mut host)
+            .unwrap();
+        assert_eq!(host.buffer.text().to_string(), "αx  X\n    ");
+        registry
+            .run(
+                "append",
+                &json!({
+                    "characters":"\tY", "disable_tab_translation":true
+                }),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.buffer.text().to_string(), "αx  X\n    \tY");
+        registry.run("undo", &json!({}), &mut host).unwrap();
+        assert_eq!(host.buffer.text().to_string(), "αx  X\n    ");
+        host.settings.translate_tabs_to_spaces = false;
+        registry
+            .run("append", &json!({"characters":"\tZ"}), &mut host)
+            .unwrap();
+        assert_eq!(host.buffer.text().to_string(), "αx  X\n    \tZ");
     }
     #[test]
     fn adapters_are_callable_and_chains_keep_registry_undo_macro_and_repeat() {
@@ -421,9 +475,9 @@ mod tests {
             counts,
             std::collections::BTreeMap::from([
                 ("implemented", 61),
-                ("partially", 134),
-                ("missing", 11),
-                ("out of scope", 3)
+                ("partially", 136),
+                ("missing", 10),
+                ("out of scope", 2)
             ])
         );
     }

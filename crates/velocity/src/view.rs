@@ -242,6 +242,7 @@ pub struct View {
     pub(crate) fold_header_rope_lookups: usize,
     selection_cache: Option<SelectionCache>,
     pub find_matches: Vec<Range<usize>>,
+    pub(crate) find_scroll_matches: Vec<usize>,
     pub find_result_matches: Vec<Range<usize>>,
     pub size: Size,
     pub cell: f64,
@@ -966,6 +967,7 @@ impl View {
             fold_header_rope_lookups: 0,
             selection_cache: None,
             find_matches: Vec::new(),
+            find_scroll_matches: Vec::new(),
             find_result_matches: Vec::new(),
             size,
             cell,
@@ -3826,7 +3828,9 @@ impl View {
             .scrolled
             .map_or(f32::INFINITY, |at| at.elapsed().as_secs_f32());
         let hovered = self.scroll_bar_hover || self.scroll_bar_drag;
-        if self.bar_overlay && !hovered && elapsed >= 0.8 {
+        let track_hidden = self.bar_overlay && !hovered && elapsed >= 0.8;
+        let find_markers = !self.find_scroll_matches.is_empty() && self.minimap_width(e) == 0.;
+        if track_hidden && !find_markers {
             self.scroll_bar = Rect::default();
             return;
         }
@@ -3840,6 +3844,13 @@ impl View {
             width: 8. * ui_scale,
             height,
         };
+        if track_hidden {
+            self.scroll_bar = Rect::default();
+            let mut markers = Layer::default();
+            self.paint_scrollbar_find_markers(e, &mut markers, bounds);
+            scene.layers.push(markers);
+            return;
+        }
         self.scroll_bar = bounds;
         let mut theme = e.theme.borrow_mut();
         let path = [
@@ -3891,7 +3902,37 @@ impl View {
             }
         }
         theme.surface(&mut layer, &puck, rect, bounds);
+        if find_markers {
+            self.paint_scrollbar_find_markers(e, &mut layer, bounds);
+        }
         scene.layers.push(layer);
+    }
+    fn paint_scrollbar_find_markers(&self, e: &Editor, layer: &mut Layer, bounds: Rect) {
+        let layout = e.layout.borrow();
+        let rows = layout.total().max(1) as f64;
+        self.paint_find_markers(layer, bounds, |at| {
+            bounds.y + layout.visual_at(&e.text, at).0 as f64 / rows * bounds.height
+        });
+    }
+    fn paint_find_markers(&self, layer: &mut Layer, gutter: Rect, y_at: impl Fn(usize) -> f64) {
+        let color = [0.92, 0.64, 0.20, 1.0];
+        let mut last = f64::NEG_INFINITY;
+        for &offset in &self.find_scroll_matches {
+            let y = y_at(offset).floor();
+            if y >= gutter.y && y < gutter.y + gutter.height && y > last {
+                fill(
+                    layer,
+                    Rect {
+                        y,
+                        height: 1.,
+                        ..gutter
+                    },
+                    gutter,
+                    color,
+                );
+                last = y;
+            }
+        }
     }
     #[allow(clippy::too_many_arguments)]
     fn flush(
@@ -4273,6 +4314,16 @@ impl View {
                 bounds,
                 color(scheme, "minimap_border"),
             );
+        }
+        if !self.find_scroll_matches.is_empty() {
+            let gutter = Rect {
+                x: bounds.x + bounds.width - 3.,
+                width: 3.,
+                ..bounds
+            };
+            self.paint_find_markers(layer, gutter, |at| {
+                map.y(layout.visual_at(&e.text, at).0 as f64)
+            });
         }
     }
 }

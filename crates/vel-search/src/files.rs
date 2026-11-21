@@ -125,6 +125,16 @@ pub struct Request {
     /// Context lines before/after each matching line.
     pub context: usize,
 }
+/// Optional policy for a Find in Files run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Limits {
+    /// Skip inputs larger than this many bytes (zero means unlimited).
+    pub max_file_size: u64,
+    /// Maximum Unicode scalars per preview line (zero uses legacy previews).
+    pub context_characters: usize,
+    /// Suppress traversal and file-read diagnostics without treating them as matches.
+    pub suppress_errors: bool,
+}
 /// One result/context line with a stable jump location and highlight spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
@@ -157,6 +167,41 @@ impl Line {
             + self.highlights.first().map_or(1, |r| {
                 self.text[..r.start.min(self.text.len())].chars().count() + 1
             })
+    }
+
+    fn limit_preview(&mut self, limit: usize) {
+        if limit == 0 || self.text.len() <= limit || self.text.chars().nth(limit).is_none() {
+            return;
+        }
+        let focus = self.highlights.first().map_or(0, |r| r.start);
+        let column = self.text[..focus].chars().count();
+        let start_column = if column < limit / 2 {
+            0
+        } else {
+            column.saturating_sub(limit / 4)
+        };
+        let start = self
+            .text
+            .char_indices()
+            .nth(start_column)
+            .map_or(0, |(i, _)| i);
+        let end = self.text[start..]
+            .char_indices()
+            .nth(limit)
+            .map_or(self.text.len(), |(i, _)| start + i);
+        if start == 0 && end == self.text.len() {
+            return;
+        }
+        self.highlights.retain_mut(|r| {
+            if r.start > end || r.end < start {
+                return false;
+            }
+            *r = r.start.saturating_sub(start)..r.end.min(end) - start;
+            true
+        });
+        self.column_offset += start_column;
+        self.text.truncate(end);
+        self.text.drain(..start);
     }
 }
 /// Device-free Find Results document: file headers, numbered context and match rows.
@@ -331,7 +376,7 @@ fn send_text_lines(
     search: &Search,
     path: &Path,
     text: &Text,
-    context: usize,
+    (context, context_characters): (usize, usize),
 ) -> bool {
     let hits = search.find(text, &[]);
     let path: Arc<Path> = path.into();
@@ -356,18 +401,16 @@ fn send_text_lines(
             .collect();
         let match_count = highlights.len();
         matches.fetch_add(match_count, Ordering::Relaxed);
-        if !send(
-            tx,
-            stop,
-            Event::Line(Line {
-                path: path.clone(),
-                number: row + 1,
-                text: text.slice(start..start + len).to_string(),
-                highlights,
-                column_offset: 0,
-                match_count,
-            }),
-        ) {
+        let mut line = Line {
+            path: path.clone(),
+            number: row + 1,
+            text: text.slice(start..start + len).to_string(),
+            highlights,
+            column_offset: 0,
+            match_count,
+        };
+        line.limit_preview(context_characters);
+        if !send(tx, stop, Event::Line(line)) {
             return false;
         }
     }
@@ -389,6 +432,15 @@ impl Task {
 
     /// Runs a search using the automatic decode policy of the owning window.
     pub fn start_with_decode(request: Request, decode: DecodeOptions) -> Result<Self, String> {
+        Self::start_with_limits(request, decode, Limits::default())
+    }
+
+    /// Runs with the window's decoding and Find in Files preferences.
+    pub fn start_with_limits(
+        request: Request,
+        decode: DecodeOptions,
+        limits: Limits,
+    ) -> Result<Self, String> {
         if request.search.query.is_empty() {
             return Err("Find in Files needs a nonempty query".into());
         }
@@ -421,7 +473,10 @@ impl Task {
                             .iter()
                             .find(|f| open.path.starts_with(&f.path))
                             .map_or(Path::new(""), |f| f.path.as_path());
-                        if !request.scope.allows(&open.path, root) {
+                        if !request.scope.allows(&open.path, root)
+                            || (limits.max_file_size != 0
+                                && open.text.len_bytes() as u64 > limits.max_file_size)
+                        {
                             continue;
                         }
                         seen.lock().expect("seen").insert(open.path.clone());
@@ -433,7 +488,7 @@ impl Task {
                             &request.search,
                             &open.path,
                             &open.text,
-                            request.context,
+                            (request.context, limits.context_characters),
                         ) {
                             return;
                         }
@@ -522,9 +577,18 @@ impl Task {
                                         if !seen.lock().expect("seen").insert(entry.path().into()) {
                                             return WalkState::Continue;
                                         }
-                                        files.fetch_add(1, Ordering::Relaxed);
                                         let result =
                                             vel_crash::catch_recoverable(AssertUnwindSafe(|| {
+                                                if limits.max_file_size != 0
+                                                    && entry
+                                                        .metadata()
+                                                        .map_err(io::Error::other)?
+                                                        .len()
+                                                        > limits.max_file_size
+                                                {
+                                                    return Ok(());
+                                                }
+                                                files.fetch_add(1, Ordering::Relaxed);
                                                 let mut contains = |bytes: &[u8]| {
                                                     required
                                                         .is_none_or(|filter| filter.contains(bytes))
@@ -538,11 +602,12 @@ impl Task {
                                                     }
                                                 });
                                                 reader
-                                                    .open_with_options(
+                                                    .open_with_limit(
                                                         entry.path(),
                                                         decode,
                                                         || stop.load(Ordering::Relaxed),
                                                         filter,
+                                                        limits.max_file_size,
                                                     )
                                                     .and_then(|input| {
                                                         if let Some(input) = input {
@@ -556,7 +621,10 @@ impl Task {
                                                                 entry.path(),
                                                                 query,
                                                                 greps,
-                                                                context,
+                                                                (
+                                                                    context,
+                                                                    limits.context_characters,
+                                                                ),
                                                                 stop,
                                                                 |line| {
                                                                     matches.fetch_add(
@@ -577,7 +645,9 @@ impl Task {
                                             .unwrap_or_else(|_| {
                                                 Err(io::Error::other("search worker failed"))
                                             });
-                                        if let Err(e) = result {
+                                        if let Err(e) = result
+                                            && !limits.suppress_errors
+                                        {
                                             send(
                                                 tx,
                                                 stop,
@@ -588,7 +658,7 @@ impl Task {
                                             );
                                         }
                                     }
-                                    Err(e) => {
+                                    Err(e) if !limits.suppress_errors => {
                                         send(tx, stop, Event::Error(e.to_string()));
                                     }
                                     _ => {}
@@ -598,7 +668,7 @@ impl Task {
                         });
                 }
             }));
-            if result.is_err() {
+            if result.is_err() && !limits.suppress_errors {
                 send(
                     &tx,
                     &cancelled,

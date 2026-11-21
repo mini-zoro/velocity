@@ -315,6 +315,7 @@ impl Greps {
         source: &vel_fileio::search::Windows,
         path: &Path,
         context: usize,
+        preview: usize,
         stop: &AtomicBool,
         emit: impl FnMut(Line) -> bool,
     ) -> io::Result<()> {
@@ -350,6 +351,7 @@ impl Greps {
             emit,
             matcher,
             is_crlf,
+            preview,
         };
         if let Some((raw, crlf)) = grep
             && crlf == is_crlf
@@ -388,6 +390,7 @@ struct GrepSink<'a, F> {
     emit: F,
     matcher: &'a RegexMatcher,
     is_crlf: bool,
+    preview: usize,
 }
 impl<F: FnMut(Line) -> bool> GrepSink<'_, F> {
     fn emit(&mut self, bytes: &[u8], number: Option<u64>, matched: bool) -> io::Result<bool> {
@@ -411,7 +414,7 @@ impl<F: FnMut(Line) -> bool> GrepSink<'_, F> {
                 .map_err(io::Error::other)?;
         }
         let match_count = highlights.len();
-        let (span, column_offset) = clip_highlights(text, &mut highlights);
+        let (span, column_offset) = clip_highlights(text, &mut highlights, self.preview);
         Ok((self.emit)(Line {
             path: self.shared.get_or_insert_with(|| self.path.into()).clone(),
             number: number.unwrap_or(1) as usize,
@@ -432,22 +435,25 @@ impl<F: FnMut(Line) -> bool> Sink for GrepSink<'_, F> {
     }
 }
 
-fn preview_span(text: &str, focus: usize) -> Range<usize> {
-    const LIMIT: usize = 4096;
-    if text.len() <= LIMIT {
+fn preview_span(text: &str, focus: usize, limit: usize) -> Range<usize> {
+    if text.len() <= limit {
         return 0..text.len();
     }
-    let start = if focus < LIMIT / 2 {
+    let start = if focus < limit / 2 {
         0
     } else {
-        focus - LIMIT / 4
+        focus - limit / 4
     };
     let start = text.ceil_char_boundary(start);
-    start..text.floor_char_boundary((start + LIMIT).min(text.len()))
+    start..text.floor_char_boundary(start.saturating_add(limit).min(text.len()))
 }
 
-fn clip_highlights(text: &str, highlights: &mut Vec<Range<usize>>) -> (Range<usize>, usize) {
-    let span = preview_span(text, highlights.first().map_or(0, |r| r.start));
+fn clip_highlights(
+    text: &str,
+    highlights: &mut Vec<Range<usize>>,
+    limit: usize,
+) -> (Range<usize>, usize) {
+    let span = preview_span(text, highlights.first().map_or(0, |r| r.start), limit);
     if span.start != 0 || span.end != text.len() {
         highlights.retain_mut(|r| {
             if r.start > span.end || r.end < span.start {
@@ -730,6 +736,7 @@ struct Lines<'a, B> {
     shared: Option<Arc<Path>>,
     offset: usize,
     number: usize,
+    preview: usize,
 }
 impl<B: BufRead> Lines<'_, B> {
     fn discard_partial_row(&mut self) -> io::Result<()> {
@@ -764,10 +771,10 @@ impl<B: BufRead> Lines<'_, B> {
     // Keep a bounded preview around the first hit, or the start of a context
     // line. Count preceding Unicode scalars so F4 still jumps to the hit.
     fn next(&mut self, focus: usize) -> io::Result<(usize, Range<usize>, Line, bool)> {
-        const PREVIEW: usize = 4096;
+        let budget = self.preview;
         let start = self.offset;
         let bytes = self.file.fill_buf()?;
-        if let Some(n) = memchr(b'\n', &bytes[..bytes.len().min(PREVIEW + 1)]) {
+        if let Some(n) = memchr(b'\n', &bytes[..bytes.len().min(budget.saturating_add(1))]) {
             let text = std::str::from_utf8(&bytes[..n])
                 .expect("validated line")
                 .to_owned();
@@ -776,8 +783,8 @@ impl<B: BufRead> Lines<'_, B> {
             self.number += 1;
             return Ok((start, start..self.offset, self.line(text, 0), true));
         }
-        let from = if focus.saturating_sub(start) >= PREVIEW / 2 {
-            focus.saturating_sub(PREVIEW / 4)
+        let from = if focus.saturating_sub(start) >= budget / 2 {
+            focus.saturating_sub(budget / 4)
         } else {
             start
         };
@@ -794,10 +801,12 @@ impl<B: BufRead> Lines<'_, B> {
             let slice = &bytes[..newline.unwrap_or(bytes.len())];
             let x = from.saturating_sub(self.offset).min(slice.len());
             if from > start {
-                prefix.extend_from_slice(&slice[..slice.len().min(PREVIEW - prefix.len())]);
+                prefix.extend_from_slice(&slice[..slice.len().min(budget - prefix.len())]);
                 column += slice[..x].iter().filter(|&&b| !continuation(b)).count();
             }
-            preview.extend_from_slice(&slice[x..slice.len().min(x + PREVIEW - preview.len())]);
+            preview.extend_from_slice(
+                &slice[x..slice.len().min(x.saturating_add(budget - preview.len()))],
+            );
             let take = slice.len() + usize::from(newline.is_some());
             self.file.consume(take);
             self.offset += take;
@@ -853,15 +862,17 @@ struct Projection<'a> {
     offset: usize,
     number: usize,
     partial_row: bool,
+    preview: usize,
 }
 impl<'a> Projection<'a> {
-    fn new(path: &'a Path, eof_row: bool) -> Self {
+    fn new(path: &'a Path, eof_row: bool, preview: usize) -> Self {
         Self {
             path,
             eof_row,
             offset: 0,
             number: 0,
             partial_row: false,
+            preview,
         }
     }
 }
@@ -880,7 +891,7 @@ pub(super) fn scan(
         .is_none()
         .then(|| Greps::new(query.search))
         .flatten();
-    scan_prepared(input, path, query, greps.as_ref(), context, stop, emit)
+    scan_prepared(input, path, query, greps.as_ref(), (context, 0), stop, emit)
 }
 
 pub(super) fn scan_prepared(
@@ -892,10 +903,15 @@ pub(super) fn scan_prepared(
         multiline,
     }: Query<'_>,
     greps: Option<&Greps>,
-    context: usize,
+    (context, context_characters): (usize, usize),
     stop: &AtomicBool,
-    emit: impl FnMut(Line) -> bool,
+    mut emit: impl FnMut(Line) -> bool,
 ) -> io::Result<()> {
+    let preview = context_characters.saturating_mul(4).max(4096);
+    let emit = |mut line: Line| {
+        line.limit_preview(context_characters);
+        emit(line)
+    };
     match input {
         vel_fileio::search::Text::Slice(s) => {
             if multiline
@@ -908,7 +924,7 @@ pub(super) fn scan_prepared(
                 s.len(),
                 s.as_bytes(),
                 regex.find_iter(s).map(|m| m.range()),
-                Projection::new(path, multiline.is_some()),
+                Projection::new(path, multiline.is_some(), preview),
                 context,
                 stop,
                 emit,
@@ -921,9 +937,9 @@ pub(super) fn scan_prepared(
             }
             if multiline.is_none() && !source.has_long_line() {
                 if let Some(greps) = greps {
-                    greps.grep(&source, path, context, stop, emit)?;
+                    greps.grep(&source, path, context, preview, stop, emit)?;
                 } else {
-                    scan_lines(&source, path, regex, context, stop, emit)?;
+                    scan_lines(&source, path, regex, (context, preview), stop, emit)?;
                 }
                 return source.verify();
             }
@@ -938,7 +954,7 @@ pub(super) fn scan_prepared(
                 offset: source.block_range(block).start,
                 number,
                 partial_row,
-                ..Projection::new(path, multiline.is_some())
+                ..Projection::new(path, multiline.is_some(), preview)
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 project(
@@ -1015,7 +1031,7 @@ fn scan_lines(
     source: &vel_fileio::search::Windows,
     path: &Path,
     regex: &regex::Regex,
-    context: usize,
+    (context, preview): (usize, usize),
     stop: &AtomicBool,
     mut emit: impl FnMut(Line) -> bool,
 ) -> io::Result<()> {
@@ -1068,7 +1084,7 @@ fn scan_lines(
                 if matched || after != 0 || context != 0 {
                     let text = &text[left..right];
                     let match_count = highlights.len();
-                    let (span, column_offset) = clip_highlights(text, &mut highlights);
+                    let (span, column_offset) = clip_highlights(text, &mut highlights, preview);
                     let row = Line {
                         path: shared.get_or_insert_with(|| path.into()).clone(),
                         number,
@@ -1127,6 +1143,7 @@ fn project(
         shared: None,
         offset: projection.offset,
         number: projection.number,
+        preview: projection.preview,
     };
     if projection.partial_row {
         lines.discard_partial_row()?;

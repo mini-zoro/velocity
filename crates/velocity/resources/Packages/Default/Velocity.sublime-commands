@@ -777,6 +777,14 @@
     "command": "next_result"
   },
   {
+    "caption": "Tools: Current Result",
+    "command": "current_result"
+  },
+  {
+    "caption": "Tools: Run Syntax Tests",
+    "command": "run_syntax_tests"
+  },
+  {
     "caption": "Tools: Previous Result",
     "command": "prev_result"
   },

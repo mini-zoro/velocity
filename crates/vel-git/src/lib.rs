@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+mod reftable;
 use gix::{
     bstr::{BString, ByteSlice},
     status::{Item, index_worktree},
@@ -147,6 +148,7 @@ fn git(e: impl ToString) -> Error {
 #[derive(Debug)]
 pub struct Repository {
     repo: gix::Repository,
+    reftable: Option<reftable::Store>,
     root: PathBuf,
     snapshot: Option<StatusSnapshot>,
 }
@@ -155,8 +157,10 @@ impl Repository {
     pub fn discover(folder: impl AsRef<Path>) -> Result<Self, Error> {
         let repo = gix::discover(folder.as_ref()).map_err(git)?;
         let root = repo.workdir().ok_or(Error::Bare)?.canonicalize()?;
+        let reftable = reftable::Store::detect(&repo);
         Ok(Self {
             repo,
+            reftable,
             root,
             snapshot: None,
         })
@@ -180,6 +184,7 @@ impl Repository {
     /// Performs a complete cold/metadata refresh. Never writes an index or repository file.
     pub fn refresh(&mut self) -> Result<&StatusSnapshot, Error> {
         self.repo.reload().map_err(git)?;
+        self.reftable = reftable::Store::detect(&self.repo);
         self.refresh_inner(None)
     }
     /// Refreshes literal changed paths/subtrees and retains all other status entries.
@@ -223,56 +228,32 @@ impl Repository {
                 patterns.push(pattern);
             }
         }
-        let head_tree = self.repo.head_tree_id_or_empty().map_err(git)?.detach();
-        let platform = self
-            .repo
-            .status(gix::progress::Discard)
-            .map_err(git)?
-            .head_tree(head_tree)
-            .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
-            .index_worktree_rewrites(None)
-            .untracked_files(gix::status::UntrackedFiles::Files)
-            .dirwalk_options(|o| {
-                o.emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory))
-            });
-        let iter = platform.into_iter(patterns).map_err(git)?;
-        for item in iter {
-            let item = item.map_err(git)?;
-            let path = gix::path::from_bstr(item.location())
+        let table_head = self
+            .reftable
+            .as_ref()
+            .map(reftable::Store::head)
+            .transpose()?;
+        let head_tree = if let Some((_, id)) = table_head.as_ref() {
+            self.tree_id(*id)?
+        } else {
+            self.repo.head_tree_id_or_empty().map_err(git)?.detach()
+        };
+        if table_head.is_some() {
+            self.reftable_status(head_tree, &patterns, &mut files)?;
+        } else {
+            let platform = self
+                .repo
+                .status(gix::progress::Discard)
                 .map_err(git)?
-                .into_owned();
-            let badge = match &item {
-                Item::TreeIndex(change) => {
-                    use gix::diff::index::ChangeRef;
-                    Some(match change {
-                        ChangeRef::Addition { .. } => Badge::StagedAddition,
-                        ChangeRef::Deletion { .. } => Badge::StagedDeletion,
-                        ChangeRef::Modification { .. } | ChangeRef::Rewrite { .. } => {
-                            Badge::StagedModification
-                        }
-                    })
-                }
-                Item::IndexWorktree(change) => {
-                    use index_worktree::iter::Summary;
-                    if let index_worktree::Item::DirectoryContents { entry, .. } = change
-                        && matches!(entry.status, gix::dir::entry::Status::Ignored(_))
-                    {
-                        Some(Badge::Ignored)
-                    } else {
-                        change.summary().map(|s| match s {
-                            Summary::Removed => Badge::Missing,
-                            Summary::Added | Summary::IntentToAdd => Badge::Untracked,
-                            Summary::Conflict => Badge::Unmerged,
-                            Summary::Modified
-                            | Summary::TypeChange
-                            | Summary::Renamed
-                            | Summary::Copied => Badge::Modified,
-                        })
-                    }
-                }
-            };
-            if let Some(badge) = badge {
-                files.entry(path).or_default().statuses.insert(badge);
+                .head_tree(head_tree)
+                .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+                .index_worktree_rewrites(None)
+                .untracked_files(gix::status::UntrackedFiles::Files)
+                .dirwalk_options(|o| {
+                    o.emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory))
+                });
+            for item in platform.into_iter(patterns).map_err(git)? {
+                record_item(&mut files, &item.map_err(git)?)?;
             }
         }
         let mut folders: BTreeMap<PathBuf, Badge> = BTreeMap::new();
@@ -286,25 +267,30 @@ impl Repository {
                 }
             }
         }
-        let head = self.repo.head().map_err(git)?;
-        let identity = if head.is_detached() {
-            Head::Detached(
-                head.id()
-                    .ok_or_else(|| git("detached HEAD without target"))?
-                    .to_string(),
-            )
+        let (identity, ahead_behind) = if let Some((head, id)) = table_head {
+            let ahead_behind = self.reftable_ahead_behind(&head, id);
+            (head, ahead_behind)
         } else {
-            Head::Branch {
-                name: head
-                    .referent_name()
-                    .expect("branch")
-                    .shorten()
-                    .to_str_lossy()
-                    .into_owned(),
-                unborn: head.is_unborn(),
-            }
+            let head = self.repo.head().map_err(git)?;
+            let head = if head.is_detached() {
+                Head::Detached(
+                    head.id()
+                        .ok_or_else(|| git("detached HEAD without target"))?
+                        .to_string(),
+                )
+            } else {
+                Head::Branch {
+                    name: head
+                        .referent_name()
+                        .expect("branch")
+                        .shorten()
+                        .to_str_lossy()
+                        .into_owned(),
+                    unborn: head.is_unborn(),
+                }
+            };
+            (head, cheap_ahead_behind(&self.repo))
         };
-        let ahead_behind = cheap_ahead_behind(&self.repo);
         let generation = self.snapshot.as_ref().map_or(1, |s| s.generation + 1);
         self.snapshot = Some(StatusSnapshot {
             root: self.root.clone(),
@@ -316,16 +302,157 @@ impl Repository {
         });
         Ok(self.snapshot.as_ref().expect("just assigned"))
     }
+
+    fn tree_id(&self, id: Option<gix::hash::ObjectId>) -> Result<gix::hash::ObjectId, Error> {
+        id.map(|id| {
+            self.repo
+                .find_commit(id)
+                .map_err(git)?
+                .tree_id()
+                .map(|id| id.detach())
+                .map_err(git)
+        })
+        .unwrap_or_else(|| Ok(gix::hash::ObjectId::empty_tree(self.repo.object_hash())))
+    }
+
+    fn reftable_status(
+        &self,
+        tree: gix::hash::ObjectId,
+        patterns: &[BString],
+        files: &mut BTreeMap<PathBuf, FileStatus>,
+    ) -> Result<(), Error> {
+        use gix::{dir::walk::EmissionMode, status::plumbing};
+        use plumbing::index_as_worktree::traits::{FastEq, SubmoduleStatus};
+
+        // gix's high-level status probes HEAD for .gitmodules even with a tree
+        // override. Use its comparisons directly until gix can resolve reftable.
+        #[derive(Clone)]
+        struct SkipNestedStatus;
+        impl SubmoduleStatus for SkipNestedStatus {
+            type Output = gix::submodule::Status;
+            fn status(
+                &mut self,
+                _: &gix::index::Entry,
+                _: &gix::bstr::BStr,
+            ) -> gix::Result<Option<Self::Output>> {
+                Ok(None)
+            }
+        }
+        let index = self.repo.index_or_empty().map_err(git)?;
+        let mut pathspec = self
+            .repo
+            .pathspec(
+                true,
+                patterns,
+                true,
+                &index,
+                gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+            )
+            .map_err(git)?;
+        let mut record_error = None;
+        self.repo
+            .tree_index_status(
+                &tree,
+                &index,
+                Some(&mut pathspec),
+                gix::status::tree_index::TrackRenames::Disabled,
+                |change, _, _| {
+                    if let Err(error) = record_item(files, &Item::TreeIndex(change.into_owned())) {
+                        record_error = Some(error);
+                        return Ok(std::ops::ControlFlow::Break(()));
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )
+            .map_err(git)?;
+        if let Some(error) = record_error {
+            return Err(error);
+        }
+        let mut changes = plumbing::index_as_worktree_with_renames::Recorder {
+            records: Vec::new(),
+        };
+        let options = self
+            .repo
+            .dirwalk_options()
+            .map_err(git)?
+            .emit_untracked(EmissionMode::Matching)
+            .emit_ignored(Some(EmissionMode::CollapseDirectory));
+        self.repo
+            .index_worktree_status(
+                &index,
+                patterns,
+                &mut changes,
+                FastEq,
+                SkipNestedStatus,
+                &mut gix::progress::Discard,
+                &AtomicBool::new(false),
+                index_worktree::Options {
+                    dirwalk_options: Some(options),
+                    ..Default::default()
+                },
+            )
+            .map_err(git)?;
+        for change in changes.records {
+            record_item(files, &Item::IndexWorktree(change.into()))?;
+        }
+        Ok(())
+    }
+
+    fn reftable_ahead_behind(
+        &self,
+        head: &Head,
+        id: Option<gix::hash::ObjectId>,
+    ) -> Option<AheadBehind> {
+        let Head::Branch {
+            name,
+            unborn: false,
+        } = head
+        else {
+            return None;
+        };
+        let config = self.repo.config_snapshot();
+        let merge = config.string(&format!("branch.{name}.merge"))?;
+        let remote = config.string(&format!("branch.{name}.remote"))?;
+        let upstream = if remote.as_slice() == b"." {
+            merge
+        } else {
+            let remote = remote.to_str().ok()?;
+            let name = merge.as_slice().strip_prefix(b"refs/heads/")?;
+            // Only infer the standard mapping when it is configured explicitly.
+            let fetch = config.string(&format!("remote.{remote}.fetch"))?;
+            let expected = format!("refs/heads/*:refs/remotes/{remote}/*");
+            if fetch
+                .as_slice()
+                .strip_prefix(b"+")
+                .unwrap_or(fetch.as_slice())
+                != expected.as_bytes()
+            {
+                return None;
+            }
+            let mut result = BString::from(format!("refs/remotes/{remote}/"));
+            result.extend_from_slice(name);
+            result
+        };
+        let upstream = self.reftable.as_ref()?.resolve(upstream.as_ref()).ok()??;
+        compare_heads(&self.repo, id?, upstream)
+    }
     /// Returns raw bytes at HEAD/index, or None for an absent path/unborn HEAD.
     /// Binary blobs stay binary; callers choose decoding/large-file policies.
     pub fn blob(&self, path: &Path, target: DiffTarget) -> Result<Option<Vec<u8>>, Error> {
         let path = self.relative(path)?;
         let id = match target {
             DiffTarget::Head => {
-                if self.repo.head().map_err(git)?.is_unborn() {
-                    return Ok(None);
-                }
-                let tree = self.repo.head_tree().map_err(git)?;
+                let tree = if let Some(table) = &self.reftable {
+                    let Some(id) = table.head()?.1 else {
+                        return Ok(None);
+                    };
+                    self.repo.find_tree(self.tree_id(Some(id))?).map_err(git)?
+                } else {
+                    if self.repo.head().map_err(git)?.is_unborn() {
+                        return Ok(None);
+                    }
+                    self.repo.head_tree().map_err(git)?
+                };
                 tree.lookup_entry_by_path(&path)
                     .map_err(git)?
                     .map(|e| e.object_id())
@@ -350,6 +477,41 @@ impl Repository {
         Ok(Some(object.data.clone()))
     }
 }
+fn record_item(files: &mut BTreeMap<PathBuf, FileStatus>, item: &Item) -> Result<(), Error> {
+    use gix::diff::index::ChangeRef;
+    use index_worktree::iter::Summary;
+    let badge = match item {
+        Item::TreeIndex(change) => Some(match change {
+            ChangeRef::Addition { .. } => Badge::StagedAddition,
+            ChangeRef::Deletion { .. } => Badge::StagedDeletion,
+            ChangeRef::Modification { .. } | ChangeRef::Rewrite { .. } => Badge::StagedModification,
+        }),
+        Item::IndexWorktree(change) => {
+            if let index_worktree::Item::DirectoryContents { entry, .. } = change
+                && matches!(entry.status, gix::dir::entry::Status::Ignored(_))
+            {
+                Some(Badge::Ignored)
+            } else {
+                change.summary().map(|s| match s {
+                    Summary::Removed => Badge::Missing,
+                    Summary::Added | Summary::IntentToAdd => Badge::Untracked,
+                    Summary::Conflict => Badge::Unmerged,
+                    Summary::Modified
+                    | Summary::TypeChange
+                    | Summary::Renamed
+                    | Summary::Copied => Badge::Modified,
+                })
+            }
+        }
+    };
+    if let Some(badge) = badge {
+        let path = gix::path::from_bstr(item.location())
+            .map_err(git)?
+            .into_owned();
+        files.entry(path).or_default().statuses.insert(badge);
+    }
+    Ok(())
+}
 fn cheap_ahead_behind(repo: &gix::Repository) -> Option<AheadBehind> {
     let head = repo.head_id().ok()?.detach();
     let upstream = repo
@@ -370,6 +532,13 @@ fn cheap_ahead_behind(repo: &gix::Repository) -> Option<AheadBehind> {
                 .ok()
                 .map(|id| id.detach())
         })?;
+    compare_heads(repo, head, upstream)
+}
+fn compare_heads(
+    repo: &gix::Repository,
+    head: gix::hash::ObjectId,
+    upstream: gix::hash::ObjectId,
+) -> Option<AheadBehind> {
     if head == upstream {
         return Some(AheadBehind {
             ahead: 0,

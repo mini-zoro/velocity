@@ -821,6 +821,285 @@ fn r33_cancel_find_in_files_from_menu_and_palette() {
 }
 
 #[test]
+fn r35_find_in_files_input_size_context_and_error_policy() {
+    use vel_config::settings::Layer;
+    let (_dir, first, second) = results_fixture();
+    std::fs::write(&first, "世界世界世界世界 foo世界世界\n").unwrap();
+    std::fs::write(&second, format!("{}foo\n", "z".repeat(160))).unwrap();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    a.workspace
+        .settings
+        .set(Layer::Window, "find_in_files_max_file_size", json!(64));
+    a.workspace
+        .settings
+        .set(Layer::Window, "find_in_files_context_characters", json!(5));
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    let hits: Vec<_> = a
+        .panels
+        .result_view
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Line(l) if l.match_count > 0 => Some(l),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path.as_ref(), first);
+    assert_eq!(hits[0].column(), 10);
+    assert!(hits[0].text.chars().count() <= 5);
+    assert!(hits[0].text.contains("foo"));
+
+    let missing = first.with_file_name("missing.txt");
+    for suppress in [false, true] {
+        a.workspace.settings.set(
+            Layer::Window,
+            "find_in_files_suppress_errors",
+            json!(suppress),
+        );
+        named(
+            &mut a,
+            "show_panel",
+            json!({"panel":"find_in_files", "pattern":"foo", "use_buffer":false}),
+        );
+        a.panels.where_input.set(missing.to_str().unwrap());
+        key(&mut a, "enter");
+        wait_for(&mut a, |a| a.panels.file_complete);
+        assert_eq!(a.panels.message.contains("File search failed"), !suppress);
+    }
+}
+
+#[test]
+fn r35_find_in_files_output_budget_does_not_limit_replacement() {
+    use vel_config::settings::Layer;
+    let (_dir, first, second) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    a.workspace
+        .settings
+        .set(Layer::Window, "find_in_files_max_result_size", json!(1));
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    assert!(a.panels.result_view.rows.is_empty());
+    assert!(
+        results_tab(&a)
+            .editor
+            .text
+            .to_string()
+            .contains("Result size limit reached")
+    );
+    a.panels.replace.set("bar");
+    named(&mut a, "replace_in_files", json!({}));
+    wait_for(&mut a, |a| a.panels.replacement_plan.is_some());
+    a.confirm_file_replacements(|matches, files| {
+        assert_eq!((matches, files), (3, 2));
+        true
+    });
+    for path in [first, second] {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("bar"));
+        assert!(!text.contains("foo"));
+    }
+}
+
+#[test]
+fn r35_current_result_preserves_next_previous_and_opens_beside_tab() {
+    use vel_config::settings::Layer;
+    let (_dir, first, second) = results_fixture();
+    let mut a = app("", "Plain Text", None);
+    add(&mut a, first.parent().unwrap());
+    a.workspace
+        .settings
+        .set(Layer::Window, "find_in_files_side_by_side", json!(true));
+    begin(&mut a, "foo");
+    wait_for(&mut a, |a| a.panels.file_complete);
+    let result = results_tab(&a).sheet;
+    key(&mut a, "f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+    assert_eq!(
+        a.workspace.workbench.groups[a.workspace.workbench.active]
+            .selected
+            .len(),
+        2
+    );
+    assert!(
+        a.workspace.workbench.groups[a.workspace.workbench.active]
+            .selected
+            .contains(&result)
+    );
+    a.workspace.editor_mut().set_caret(0, false);
+    named(&mut a, "current_result", json!({}));
+    assert_eq!(a.workspace.editor().caret, "before\n世界 ".len());
+    key(&mut a, "f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&second)
+    );
+    key(&mut a, "shift+f4");
+    assert_eq!(
+        a.workspace.tabs[a.workspace.active].path.as_ref(),
+        Some(&first)
+    );
+}
+
+#[test]
+fn r35_syntax_tests_menu_palette_output_legacy_and_result_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("syntax_test_r35.rs");
+    let syntax = "Packages/Rust/Rust.sublime-syntax";
+    std::fs::write(
+        &file,
+        format!("// SYNTAX TEST \"{syntax}\"\nfn test() {{}}\n// <- no.such.scope\n"),
+    )
+    .unwrap();
+    let mut a = app("", "Plain Text", None);
+    a.workspace
+        .open(crate::cli::FileLocation {
+            path: file.clone(),
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    let menu = a
+        .application_menu()
+        .into_iter()
+        .find(|row| row.caption == "Tools")
+        .unwrap()
+        .children
+        .into_iter()
+        .find(|row| row.command.as_deref() == Some("run_syntax_tests"))
+        .unwrap();
+    named(
+        &mut a,
+        menu.command.as_deref().unwrap(),
+        serde_json::from_str(&menu.args).unwrap(),
+    );
+    let finish = |a: &mut App| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !a.builds.poll(&mut a.panels) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    };
+    finish(&mut a);
+    assert_eq!(a.panels.panel, Some(crate::panels::Panel::Output));
+    assert!(
+        a.panels.output.contains("0 passed, 1 failed"),
+        "{}",
+        a.panels.output
+    );
+    assert_eq!(a.panels.build_results[0].1.path, file);
+    key(&mut a, "f4");
+    assert_eq!(
+        a.workspace
+            .editor()
+            .text
+            .byte_to_line(a.workspace.editor().caret),
+        2
+    );
+
+    let mut legacy = b"// SYNTAX TEST \"not loaded\"\n// caf".to_vec();
+    legacy.extend_from_slice(b"\xe9\n// <- source.rust\n");
+    std::fs::write(&file, legacy).unwrap();
+    let invocation = a
+        .workspace
+        .palette
+        .iter()
+        .find(|row| row.invocation.command == "run_syntax_tests")
+        .unwrap()
+        .invocation
+        .clone();
+    assert_eq!(invocation.command, "run_syntax_tests");
+    named(
+        &mut a,
+        &invocation.command,
+        json!({"file":file, "syntax":"Rust"}),
+    );
+    finish(&mut a);
+    assert!(
+        a.panels.output.contains("Non-UTF-8 syntax test decoded as"),
+        "{}",
+        a.panels.output
+    );
+    assert!(
+        a.panels.output.contains("1 passed, 0 failed"),
+        "{}",
+        a.panels.output
+    );
+    assert_eq!(a.builds.diagnostics[0].line, 2);
+}
+
+#[test]
+fn r35_io_workers_and_automatic_syntax_size_setting_reach_file_open() {
+    use vel_config::settings::Layer;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().canonicalize().unwrap().join("fixture.rs");
+    let source = "fn fixture() {}\n";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app("", "Plain Text", None);
+    a.workspace
+        .settings
+        .set(Layer::Window, "io_workers", json!(1));
+    a.workspace.settings.set(
+        Layer::Window,
+        "syntax_detection_size_limit",
+        json!(source.len() - 1),
+    );
+    a.workspace
+        .open(crate::cli::FileLocation {
+            path: path.clone(),
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    assert!(a.workspace.tabs[a.workspace.active].loading.is_some());
+    wait_for(&mut a, |a| {
+        a.workspace.tabs[a.workspace.active].loading.is_none()
+    });
+    let syntax = |a: &App| {
+        a.workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .name
+            .clone()
+    };
+    assert_eq!(syntax(&a), "Plain Text");
+    a.workspace.set_file_type("Rust").unwrap();
+    assert_eq!(syntax(&a), "Rust");
+    let second = path.with_file_name("exact.rs");
+    std::fs::write(&second, source).unwrap();
+    a.workspace.settings.set(
+        Layer::Window,
+        "syntax_detection_size_limit",
+        json!(source.len()),
+    );
+    a.workspace
+        .open(crate::cli::FileLocation {
+            path: second,
+            line: 1,
+            column: 1,
+        })
+        .unwrap();
+    wait_for(&mut a, |a| {
+        a.workspace.tabs[a.workspace.active].loading.is_none()
+    });
+    assert_eq!(syntax(&a), "Rust");
+    a.workspace.save(a.workspace.active, None).unwrap();
+}
+
+#[test]
 fn find_results_tab_streams_while_typing_within_frame_budget() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

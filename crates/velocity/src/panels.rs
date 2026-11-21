@@ -357,6 +357,7 @@ struct FindIdentity {
     query: String,
     options: text::Options,
     in_selection: bool,
+    highlight_size_limit: usize,
 }
 #[derive(Debug)]
 struct GotoHighlights {
@@ -371,6 +372,56 @@ struct FilesIdentity {
     options: text::Options,
     where_: String,
     use_gitignore: bool,
+    max_file_size: u64,
+}
+
+#[derive(Debug)]
+struct ResultBudget {
+    remaining: usize,
+    truncated: bool,
+    shown_paths: BTreeMap<Arc<Path>, bool>,
+    hidden_matches: BTreeSet<Arc<Path>>,
+}
+impl ResultBudget {
+    fn new(remaining: usize) -> Option<Self> {
+        (remaining != 0).then(|| Self {
+            remaining,
+            truncated: false,
+            shown_paths: BTreeMap::new(),
+            hidden_matches: BTreeSet::new(),
+        })
+    }
+    fn allows(&mut self, line: &files::Line) -> bool {
+        if !self.truncated {
+            let new_file = !self.shown_paths.contains_key(&line.path);
+            // Charge a possible context gap and the displayed file header as
+            // well as the row. Search/footer chrome is outside the budget.
+            let bytes = line
+                .formatted()
+                .len()
+                .saturating_add(12)
+                .saturating_add(if new_file {
+                    line.path.to_string_lossy().len() + 3
+                } else {
+                    0
+                });
+            if let Some(remaining) = self.remaining.checked_sub(bytes) {
+                self.remaining = remaining;
+                self.shown_paths
+                    .entry(line.path.clone())
+                    .and_modify(|matched| {
+                        *matched |= line.match_count > 0;
+                    })
+                    .or_insert(line.match_count > 0);
+                return true;
+            }
+            self.truncated = true;
+        }
+        if line.match_count > 0 {
+            self.hidden_matches.insert(line.path.clone());
+        }
+        false
+    }
 }
 #[derive(Clone, Debug)]
 pub struct SideRow {
@@ -404,6 +455,7 @@ fn each_goto_word(text: &vel_text::Text, mut visit: impl FnMut(&str, usize)) {
 /// Complete retained widget/controller state. All methods can run without a window server.
 #[derive(Debug)]
 pub struct Panels {
+    pub(crate) find_pasteboard: Option<Box<dyn vel_platform::FindPasteboard>>,
     appearance_selection: Option<appearance_selection::SelectionPanel>,
     macro_files: macro_commands::MacroFiles,
     vintage_prompt: Option<u64>,
@@ -441,6 +493,8 @@ pub struct Panels {
     message_until: Option<Instant>,
     pub search_results_active: bool,
     result_cursor: Option<usize>,
+    result_budget: Option<ResultBudget>,
+    result_error: Option<UiText>,
     files_searched: usize,
     file_matches: usize,
     result_status: UiText,
@@ -542,6 +596,7 @@ pub struct Panels {
     search_worker: text::Worker,
     search_identity: Option<FindIdentity>,
     all_matches_ready: bool,
+    find_deferred: bool,
     pending_navigation: VecDeque<FindNavigation>,
     fuzzy_worker: fuzzy::Worker,
     candidates: Arc<Vec<fuzzy::Candidate>>,
@@ -636,6 +691,9 @@ impl Default for Panels {
             message_until: None,
             search_results_active: false,
             result_cursor: None,
+            result_budget: None,
+            result_error: None,
+            find_pasteboard: None,
             files_searched: 0,
             file_matches: 0,
             result_status: UiText::default(),
@@ -730,6 +788,7 @@ impl Default for Panels {
             search_worker: text::Worker::default(),
             search_identity: None,
             all_matches_ready: false,
+            find_deferred: false,
             pending_navigation: VecDeque::new(),
             fuzzy_worker: fuzzy::Worker::new(),
             candidates: Arc::new(vec![]),
@@ -783,6 +842,11 @@ impl Default for Panels {
     }
 }
 impl Panels {
+    pub(crate) fn reset(&mut self, workspace: &Workspace) {
+        let find_pasteboard = self.find_pasteboard.take();
+        *self = Self::new(workspace, true);
+        self.find_pasteboard = find_pasteboard;
+    }
     pub fn new(workspace: &Workspace, workers: bool) -> Self {
         let mut ui = Self {
             ui_scale: vel_ui::theme::ui_scale(&workspace.editor().settings),
@@ -1684,6 +1748,28 @@ impl Panels {
         self.focus.set(Surface::Panel, 2);
         true
     }
+    pub(crate) fn refresh_find_pasteboard(&mut self, workspace: &mut Workspace) {
+        if self.overlay.is_none()
+            && self.panel_focused
+            && self.focus_input == 0
+            && self.document_find_visible()
+            && let Some(pattern) = self.find_pasteboard_pattern(workspace)
+            && self.query.value() != pattern
+        {
+            self.query.set(&pattern);
+            self.refresh_find(workspace, 0..0);
+        }
+    }
+
+    fn find_pasteboard_pattern(&self, workspace: &Workspace) -> Option<String> {
+        if !workspace.editor().settings.bool("use_find_clipboard", true) {
+            return None;
+        }
+        self.find_pasteboard
+            .as_ref()?
+            .read()
+            .filter(|s| !s.is_empty())
+    }
     pub(crate) fn widget_history_menu(
         &self,
         tr: &vel_i18n::Translator,
@@ -1819,6 +1905,11 @@ impl Panels {
         if !self.in_selection
             && matches!(self.panel, Some(Panel::Find | Panel::Incremental))
             && self.search.is_some()
+            && (self.panel == Some(Panel::Incremental)
+                || self
+                    .search_identity
+                    .as_ref()
+                    .is_none_or(|key| !Self::over_highlight_limit(key, workspace)))
         {
             let origin = self
                 .find_origin
@@ -1858,7 +1949,7 @@ impl Panels {
                 .as_ref()
                 .is_some_and(|e| e.language.borrow().as_ref().is_some_and(|l| l.busy()))
             || self.output_pending()
-            || (self.search.is_some() && !self.all_matches_ready)
+            || (self.search.is_some() && !self.all_matches_ready && !self.find_deferred)
     }
     pub fn ranking_pending(&self) -> bool {
         self.overlay.is_some() && self.quick_pending
@@ -2490,21 +2581,24 @@ impl Panels {
                     // https://www.sublimetext.com/download (show_panel arguments).
                     if let Some(query) = args["pattern"].as_str().or(args["text"].as_str()) {
                         self.query.set(query);
-                    } else if workspace.editor().settings.bool("find_selected_text", true)
-                        && workspace.editor().binary.is_none()
-                        && !workspace.editor().selection().is_empty()
-                    {
-                        let selected = workspace
-                            .editor()
-                            .text
-                            .slice(workspace.editor().selection());
-                        // https://docs.sublimetext.io/reference/settings.html#automatic-behavior
-                        // Public docs establish selection seeding, not empty-caret word seeding.
-                        if !selected.chars().any(|c| matches!(c, '\n' | '\r')) {
+                    } else {
+                        let editor = workspace.editor();
+                        let selected = (editor.binary.is_none()
+                            && editor.settings.bool("find_selected_text", true))
+                        .then(|| editor.text.slice(editor.selection()));
+                        // Selection seeding stays single-line and takes precedence.
+                        if let Some(selected) = selected
+                            && !selected.is_empty()
+                            && !selected.chars().any(|c| matches!(c, '\n' | '\r'))
+                        {
                             self.set_query_from_buffer(
                                 &selected.to_string(),
-                                workspace.editor().settings.bool("regex_auto_escape", true),
+                                editor.settings.bool("regex_auto_escape", true),
                             );
+                        } else if self.document_find_visible()
+                            && let Some(pattern) = self.find_pasteboard_pattern(workspace)
+                        {
+                            self.query.set(&pattern);
                         }
                     }
                     if let Some(replacement) = args["replace_pattern"].as_str() {
@@ -2626,6 +2720,13 @@ impl Panels {
                 if name == "slurp_replace_string" {
                     self.replace.set(&value);
                 } else {
+                    if name == "slurp_find_string"
+                        && !value.is_empty()
+                        && editor.settings.bool("use_find_clipboard", true)
+                        && let Some(board) = &self.find_pasteboard
+                    {
+                        board.write(&value);
+                    }
                     self.set_query_from_buffer(
                         &value,
                         editor.settings.bool("regex_auto_escape", true),
@@ -2810,14 +2911,34 @@ impl Panels {
         {
             return &highlights.ranges;
         }
-        if self
-            .search_identity
-            .as_ref()
-            .is_some_and(|key| key.snapshot == FindSnapshot::current(workspace))
-        {
+        if self.search_identity.as_ref().is_some_and(|key| {
+            key.snapshot == FindSnapshot::current(workspace)
+                && !Self::over_highlight_limit(key, workspace)
+        }) {
             self.visible_highlights()
         } else {
             &[]
+        }
+    }
+    pub(crate) fn scrollbar_find_highlights(&self, workspace: &Workspace) -> &[Range<usize>] {
+        if self.overlay.is_some()
+            || !workspace
+                .editor()
+                .settings
+                .bool("highlight_find_results_in_scrollbar", false)
+        {
+            return &[];
+        }
+        let highlights = self.current_highlights(workspace);
+        let limit = workspace
+            .editor()
+            .settings
+            .usize("find_scroll_highlights_limit", 4096);
+        // A dense result should not leave an apparently complete, partial map.
+        if limit != 0 && highlights.len() > limit {
+            &[]
+        } else {
+            highlights
         }
     }
     fn finish_find_navigation(&mut self, workspace: &mut Workspace) {
@@ -2953,12 +3074,22 @@ impl Panels {
         active
     }
     fn find_identity(&self, workspace: &Workspace) -> FindIdentity {
+        let settings = &workspace.editor().settings;
         FindIdentity {
             snapshot: FindSnapshot::current(workspace),
             query: self.query.value(),
             options: self.options,
             in_selection: self.in_selection,
+            highlight_size_limit: if self.options.regex {
+                settings.usize("find_regex_highlight_matches_max_size", 0)
+            } else {
+                settings.usize("find_highlight_matches_max_size", 0)
+            },
         }
+    }
+    fn over_highlight_limit(key: &FindIdentity, workspace: &Workspace) -> bool {
+        key.highlight_size_limit != 0
+            && workspace.editor().text.len_bytes() > key.highlight_size_limit
     }
     fn ensure_find(&mut self, workspace: &Workspace, _viewport: Range<usize>) -> bool {
         let scope_changed = self.sync_find_scope(workspace);
@@ -2988,6 +3119,7 @@ impl Panels {
                 .map_or(workspace.editor().caret, |(_, at)| at);
         }
         let snapshot = key.snapshot;
+        let limited = Self::over_highlight_limit(&key, workspace);
         let result = (!snapshot.binary).then(|| Search::new(&key.query, key.options));
         self.search_identity = Some(key);
         if self.find_error.take().as_deref() == Some(self.message.as_ref())
@@ -2998,6 +3130,7 @@ impl Panels {
         self.search_worker.cancel();
         self.highlights.clear();
         self.all_matches_ready = false;
+        self.find_deferred = false;
         self.find_status.clear();
         match result {
             Some(Ok(search)) => {
@@ -3007,6 +3140,10 @@ impl Panels {
                     self.all_matches_ready = true;
                 } else if snapshot.loading {
                     self.find_status = UiText::tr("Waiting for file to load…");
+                } else if limited && self.pending_navigation.is_empty() {
+                    // On demand navigation still works; just don't start an
+                    // all-match scan on every field edit.
+                    self.find_deferred = true;
                 } else if editor.text.len_bytes() <= 4096 && !search.options.regex {
                     // Keep tiny literal searches immediate. A viewport may include
                     // an arbitrarily long logical line; never scan it as a preview.
@@ -3102,6 +3239,18 @@ impl Panels {
             self.update_find_status();
         }
         self.pending_navigation.push_back(action);
+        if std::mem::take(&mut self.find_deferred)
+            && !self.all_matches_ready
+            && let Some(search) = &self.search
+        {
+            self.find_status = UiText::tr("Searching…");
+            self.search_worker.search(
+                search.clone(),
+                workspace.editor().text.clone(),
+                workspace.editor().revision,
+                self.scope(),
+            );
+        }
         if !self.all_matches_ready && action.closes() && self.document_find_visible() {
             // Accept is a commit even before the worker returns. Release the
             // input now without discarding the pending command or its scope.
@@ -4600,8 +4749,12 @@ impl Panels {
                 Some(Panel::Replace) => 2,
                 _ => 1,
             };
+            let previous = self.focus_input;
             self.focus_input =
                 (self.focus_input + if key.modifiers & 4 != 0 { count - 1 } else { 1 }) % count;
+            if previous != self.focus_input {
+                self.refresh_find_pasteboard(workspace);
+            }
             return Ok((true, None));
         }
         if self.overlay.is_some()
@@ -4715,7 +4868,7 @@ impl Panels {
         };
         scope.use_gitignore = self.files_use_gitignore;
         self.cancel_files(workspace);
-        self.file_signature = Some(self.files_identity());
+        self.file_signature = Some(self.files_identity(workspace));
         self.replace_rx = None;
         self.replacement_plan = None;
         let mut untitled = BTreeMap::new();
@@ -4745,7 +4898,8 @@ impl Panels {
             })
             .collect();
         let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
-        let task = files::Task::start_with_decode(
+        let settings = &workspace.settings;
+        let task = files::Task::start_with_limits(
             files::Request {
                 search,
                 scope,
@@ -4754,6 +4908,11 @@ impl Panels {
                 context: usize::from(self.files_context),
             },
             decode,
+            files::Limits {
+                max_file_size: settings.usize("find_in_files_max_file_size", 0) as u64,
+                context_characters: settings.usize("find_in_files_context_characters", 0),
+                suppress_errors: settings.bool("find_in_files_suppress_errors", false),
+            },
         );
         let task = match task {
             Ok(task) => task,
@@ -4786,6 +4945,9 @@ impl Panels {
         self.file_task = Some(task);
         self.search_results_active = true;
         self.result_cursor = None;
+        self.result_budget =
+            ResultBudget::new(workspace.settings.usize("find_in_files_max_result_size", 0));
+        self.result_error = None;
         self.files_searched = 0;
         self.file_matches = 0;
         self.result_view = files::Results::ordered(&workspace.folders);
@@ -4891,13 +5053,13 @@ impl Panels {
         if !self.file_complete {
             return Err("Finish Find in Files before preparing replacements".into());
         }
-        if self.file_signature.as_ref() != Some(&self.files_identity()) {
+        if self.file_signature.as_ref() != Some(&self.files_identity(workspace)) {
             return Err(
                 "Find in Files options changed; run the search again before replacing".into(),
             );
         }
         let search = Search::new(&self.query.value(), self.options)?;
-        let paths: BTreeSet<_> = self
+        let mut paths: BTreeSet<_> = self
             .result_view
             .rows
             .iter()
@@ -4906,6 +5068,9 @@ impl Panels {
                 _ => None,
             })
             .collect();
+        if let Some(budget) = &self.result_budget {
+            paths.extend(budget.hidden_matches.iter().cloned());
+        }
         for path in &paths {
             if workspace
                 .tabs
@@ -4918,7 +5083,7 @@ impl Panels {
         let replacement = self.replace.value();
         let decode = vel_fileio::DecodeOptions::from_settings(&workspace.settings.editor());
         let (tx, rx) = mpsc::channel();
-        self.replace_signature = Some((self.files_identity(), replacement.clone()));
+        self.replace_signature = Some((self.files_identity(workspace), replacement.clone()));
         std::thread::spawn(move || {
             let result = paths
                 .into_iter()
@@ -4938,22 +5103,23 @@ impl Panels {
         self.set_message(UiText::tr("Preparing replacement preview…"));
         Ok(())
     }
-    pub(crate) fn file_replace_ready(&self) -> bool {
-        self.file_complete && self.file_signature.as_ref() == Some(&self.files_identity())
+    pub(crate) fn file_replace_ready(&self, workspace: &Workspace) -> bool {
+        self.file_complete && self.file_signature.as_ref() == Some(&self.files_identity(workspace))
     }
-    fn files_identity(&self) -> FilesIdentity {
+    fn files_identity(&self, workspace: &Workspace) -> FilesIdentity {
         FilesIdentity {
             query: self.query.value(),
             options: self.options,
             where_: self.where_input.value(),
             use_gitignore: self.files_use_gitignore,
+            max_file_size: workspace.settings.usize("find_in_files_max_file_size", 0) as u64,
         }
     }
     pub fn jump_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
         if let Some(files::Row::Line(line)) = self.result_view.rows.get(self.result_selected) {
             let target = find_results::target(line, &self.result_untitled);
             self.result_cursor = Some(self.result_selected);
-            self.open_result_target(workspace, target)?;
+            self.open_result_target(workspace, target, self.result_destination)?;
         }
         Ok(())
     }
@@ -4976,7 +5142,7 @@ impl Panels {
             self.result_selected = rank;
             self.result_navigated = true;
         }
-        self.open_result_target(workspace, target)?;
+        self.open_result_target(workspace, target, Some(sheet))?;
         Ok(true)
     }
     pub(crate) fn results_tab_matches(
@@ -4993,6 +5159,7 @@ impl Panels {
         &mut self,
         workspace: &mut Workspace,
         target: find_results::Target,
+        source: Option<u64>,
     ) -> Result<(), String> {
         workspace.observe_navigation();
         let _navigation =
@@ -5002,6 +5169,14 @@ impl Panels {
             line: target.line,
             column: target.column,
         };
+        let beside = source
+            .filter(|_| workspace.settings.bool("find_in_files_side_by_side", false))
+            .and_then(|sheet| {
+                Self::results_sheet_index(workspace, sheet).map(|index| (sheet, index))
+            });
+        if let Some((_, index)) = beside {
+            workspace.select(index);
+        }
         if let Some(sheet) = target.sheet {
             if let Some(index) = workspace.sheet_index(sheet) {
                 workspace.select(index);
@@ -5013,6 +5188,15 @@ impl Panels {
             workspace.preview(location)?;
         } else {
             workspace.open(location)?;
+        }
+        if let Some((source, _)) = beside {
+            let target = workspace.tabs[workspace.active].sheet;
+            if target != source
+                && let Some(group) = workspace.workbench.group_of(source)
+                && workspace.workbench.active == group
+            {
+                workspace.workbench.groups[group].selected.insert(source);
+            }
         }
         self.reveal = true;
         Ok(())
@@ -5304,7 +5488,7 @@ impl Panels {
         if let Some(result) = self.replace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.replace_rx = None;
             if self.replace_signature.as_ref()
-                == Some(&(self.files_identity(), self.replace.value()))
+                == Some(&(self.files_identity(workspace), self.replace.value()))
             {
                 match result {
                     Ok(plan) => self.replacement_plan = Some(plan),
@@ -5516,6 +5700,12 @@ impl Panels {
             match event {
                 files::Event::Line(line) => {
                     self.file_matches += line.match_count;
+                    if let Some(budget) = &mut self.result_budget
+                        && !budget.allows(&line)
+                    {
+                        changed = true;
+                        continue;
+                    }
                     let inserted = self.result_view.push(line);
                     if self.result_destination.is_some()
                         || self.result_navigated
@@ -5538,10 +5728,11 @@ impl Panels {
                         }
                     }
                 }
-                files::Event::Error(error) => self.set_message(UiText::tr_fmt(
-                    "File search failed: {detail}",
-                    [("detail", error)],
-                )),
+                files::Event::Error(error) => {
+                    let error = UiText::tr_fmt("File search failed: {detail}", [("detail", error)]);
+                    self.result_error.get_or_insert_with(|| error.clone());
+                    self.set_message(error);
+                }
                 files::Event::Done { files, .. } => {
                     done = Some(files);
                     self.file_task = None;
@@ -5559,7 +5750,14 @@ impl Panels {
         }
         if let Some(files) = done {
             self.files_searched = files;
-            let matched = self.result_view.matched_files();
+            let matched = self.result_view.matched_files()
+                + self.result_budget.as_ref().map_or(0, |budget| {
+                    budget
+                        .hidden_matches
+                        .iter()
+                        .filter(|path| !budget.shown_paths.get(*path).copied().unwrap_or(false))
+                        .count()
+                });
             self.result_status = match (self.file_matches, matched) {
                 (1, 1) => UiText::tr("1 match in 1 file"),
                 (count, 1) => {
@@ -5570,7 +5768,7 @@ impl Panels {
                     [("count", count.to_string()), ("files", files.to_string())],
                 ),
             };
-            let summary = match (self.file_matches, matched) {
+            let mut summary = match (self.file_matches, matched) {
                 (1, 1) => UiText::tr("1 match across 1 file"),
                 (count, 1) => UiText::tr_fmt(
                     "{count} matches across 1 file",
@@ -5581,6 +5779,25 @@ impl Panels {
                     [("count", count.to_string()), ("files", files.to_string())],
                 ),
             };
+            if self
+                .result_budget
+                .as_ref()
+                .is_some_and(|budget| budget.truncated)
+            {
+                let note = UiText::tr("Result size limit reached; not all matches are shown.");
+                summary = UiText::compose(
+                    "{left}\n{right}",
+                    [("left", summary), ("right", note.clone())],
+                );
+                self.result_status = note;
+            }
+            if let Some(error) = self.result_error.take() {
+                summary = UiText::compose(
+                    "{left}\n{right}",
+                    [("left", summary), ("right", error.clone())],
+                );
+                self.result_status = error;
+            }
             self.finish_results_tab(workspace, summary);
             self.set_message(self.result_status.clone());
             self.file_complete = true;
@@ -7467,6 +7684,7 @@ impl Panels {
             return Ok(true);
         }
         if self.panel.is_some() && contains(self.panel_bounds, point) {
+            let query_had_focus = self.panel_focused && self.focus_input == 0;
             self.panel_focused = true;
             self.focus.show(Surface::Panel, true);
             if down {
@@ -7505,6 +7723,10 @@ impl Panels {
                         }
                     }
                 } else if let Some(panel) = self.panel {
+                    if !query_had_focus && contains(self.query.bounds, point) {
+                        self.focus_input = 0;
+                        self.refresh_find_pasteboard(workspace);
+                    }
                     for (i, input) in [&mut self.query, &mut self.replace, &mut self.where_input]
                         .into_iter()
                         .take(Self::find_fields(panel))
@@ -8729,7 +8951,7 @@ mod intelligence_tests {
             wait(&mut workspace, &mut panels, |_, p| p.file_complete);
             assert_eq!(panels.file_matches, expected);
         }
-        assert!(panels.file_replace_ready());
+        assert!(panels.file_replace_ready(&workspace));
         panels
             .action(
                 &mut workspace,
@@ -8746,7 +8968,7 @@ mod intelligence_tests {
                 0..10,
             )
             .unwrap();
-        assert!(!panels.file_replace_ready());
+        assert!(!panels.file_replace_ready(&workspace));
         workspace
             .open(FileLocation {
                 path: root.join("hidden.txt"),

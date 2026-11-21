@@ -116,6 +116,16 @@ pub(crate) fn prepare_disk_load(
     background: bool,
     comparing: bool,
 ) -> Result<PreparedLoad, String> {
+    prepare_disk_load_on(path, options, background, comparing, None)
+}
+
+fn prepare_disk_load_on(
+    path: &Path,
+    options: fileio::DecodeOptions,
+    background: bool,
+    comparing: bool,
+    workers: Option<(&fileio::IoWorkers, usize)>,
+) -> Result<PreparedLoad, String> {
     let (_, routing) = fileio::decoding_for_path(path, &options)?;
     if routing.attempts.is_empty()
         && let Some(notice) = &routing.binary
@@ -126,11 +136,12 @@ pub(crate) fn prepare_disk_load(
         ));
     }
     if background {
-        return Ok(PreparedLoad::Loading(if comparing {
-            fileio::load_background_for_reload(path.to_owned(), options)?
-        } else {
-            fileio::load_background_with_options(path.to_owned(), options)?
-        }));
+        return Ok(PreparedLoad::Loading(fileio::load_on_workers(
+            path.to_owned(),
+            options,
+            comparing,
+            workers,
+        )?));
     }
     match fileio::load_with_options(path, &options, |_| {}) {
         Ok(loaded) => Ok(PreparedLoad::Text(loaded)),
@@ -510,10 +521,16 @@ impl Tab {
         options: fileio::DecodeOptions,
         background: bool,
         external: bool,
+        workers: Option<(&fileio::IoWorkers, usize)>,
     ) -> Result<(), String> {
         let path = self.path.clone().ok_or("load requires a saved file")?;
-        let prepared =
-            prepare_disk_load(&path, options, background, external && !self.load_failed)?;
+        let prepared = prepare_disk_load_on(
+            &path,
+            options,
+            background,
+            external && !self.load_failed,
+            workers,
+        )?;
         self.install_disk_load(prepared, external);
         self.reload_deferred = false;
         Ok(())
@@ -733,6 +750,7 @@ impl Tab {
 }
 #[derive(Debug)]
 pub struct Workspace {
+    io_workers: fileio::IoWorkers,
     /// A workspace sheet with its own input and drawing, independent of document tabs.
     pub(crate) settings_page: Option<Box<crate::settings_ui::Page>>,
     pending_revert: Option<PendingRevert>,
@@ -2049,6 +2067,7 @@ impl Workspace {
             resource_reports,
             ignored_user_keymaps,
             settings_reports: Default::default(),
+            io_workers: Default::default(),
             restore_in_progress: false,
             restore_source: None,
             restore_deadline: None,
@@ -2606,7 +2625,13 @@ impl Workspace {
             if tab.open_as() == Some(crate::open_requests::OpenAs::Image) {
                 tab.load_hex(String::new(), false)?;
             } else {
-                tab.load_disk(decode, background, false)?;
+                let workers = self.settings.usize("io_workers", 0);
+                tab.load_disk(
+                    decode,
+                    background || workers != 0,
+                    false,
+                    (workers != 0).then_some((&self.io_workers, workers)),
+                )?;
             }
         }
         // Installation suppresses restore-thread filesystem probes. Ordinary
@@ -2681,14 +2706,34 @@ impl Workspace {
             &tab.tracker,
         );
         tab.editor.sync();
-        let saved = fileio::save_report_with_expected(
-            &target,
-            tab.editor.buffer.text(),
-            &tab.format,
-            settings.atomic_save,
-            self.data_dir.as_deref(),
-            expected_disk,
-        )?;
+        let workers = self.settings.usize("io_workers", 0);
+        let saved = if workers == 0 {
+            fileio::save_report_with_expected(
+                &target,
+                tab.editor.buffer.text(),
+                &tab.format,
+                settings.atomic_save,
+                self.data_dir.as_deref(),
+                expected_disk,
+            )?
+        } else {
+            let (target, text, format, data) = (
+                target.clone(),
+                tab.editor.buffer.text().clone(),
+                tab.format.clone(),
+                self.data_dir.clone(),
+            );
+            self.io_workers.write(workers, move || {
+                fileio::save_report_with_expected(
+                    &target,
+                    &text,
+                    &format,
+                    settings.atomic_save,
+                    data.as_deref(),
+                    expected_disk,
+                )
+            })??
+        };
         if let Some(warning) = saved.warning {
             self.resource_reports.push(warning);
         }
@@ -3140,7 +3185,13 @@ impl Workspace {
                         .usize("large_file.load_bytes", 64 * 1024 * 1024)
                         as u64
             });
-            if let Err(error) = tab.load_disk(tab.decode_options(), background, true) {
+            let workers = self.settings.usize("io_workers", 0);
+            if let Err(error) = tab.load_disk(
+                tab.decode_options(),
+                background || workers != 0,
+                true,
+                (workers != 0).then_some((&self.io_workers, workers)),
+            ) {
                 self.resource_reports
                     .push(fileio::regular::error(&path, error));
                 if !tab.dirty() {
@@ -3646,28 +3697,47 @@ impl Workspace {
             .as_ref()
             .map(|l| l.syntax.clone());
         let setting_override = tab.editor.settings.get("syntax").and_then(Value::as_str);
+        let detection_limit = tab.editor.settings.usize("syntax_detection_size_limit", 0) as u64;
+        let autodetect = detection_limit == 0
+            || tab
+                .editor
+                .source_bytes
+                .max(tab.editor.text.len_bytes() as u64)
+                <= detection_limit;
         let chosen = explicit
             .or(setting_override)
             .or(if detect { None } else { previous.as_deref() })
             .or_else(|| {
-                extension_syntax(
-                    &self.assets.syntaxes,
-                    &self.syntax_settings,
-                    tab.path.as_deref(),
-                )
+                autodetect
+                    .then(|| {
+                        extension_syntax(
+                            &self.assets.syntaxes,
+                            &self.syntax_settings,
+                            tab.path.as_deref(),
+                        )
+                    })
+                    .flatten()
             });
-        let reference = vel_highlight::detect_syntax(
-            &self.assets.syntaxes,
-            &crate::language::syntax_path(tab.path.as_deref()),
-            &crate::large::first_line(&tab.editor.text),
-            chosen,
-        )
-        .or_else(|| {
-            explicit
-                .is_none()
-                .then(|| self.assets.syntaxes.find_syntax_plain_text())
-        })
-        .ok_or("Unknown syntax")?;
+        let reference = (autodetect || chosen.is_some())
+            .then(|| {
+                vel_highlight::detect_syntax(
+                    &self.assets.syntaxes,
+                    &crate::language::syntax_path(tab.path.as_deref()),
+                    &if chosen.is_none() {
+                        crate::large::first_line(&tab.editor.text)
+                    } else {
+                        String::new()
+                    },
+                    chosen,
+                )
+            })
+            .flatten()
+            .or_else(|| {
+                explicit
+                    .is_none()
+                    .then(|| self.assets.syntaxes.find_syntax_plain_text())
+            })
+            .ok_or("Unknown syntax")?;
         let syntax = reference.path.clone();
         let name = reference.name.clone();
         if explicit.is_some() {

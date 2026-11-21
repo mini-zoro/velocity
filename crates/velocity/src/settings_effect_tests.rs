@@ -54,6 +54,14 @@ fn alternate(key: &str, default: &Value, root: &Path) -> Value {
         "draw_unicode_white_space" => json!("all"),
         "draw_white_space" => json!(["all"]),
         "fallback_encoding" => json!("Cyrillic (Windows 1251)"),
+        "find_highlight_matches_max_size"
+        | "find_regex_highlight_matches_max_size"
+        | "find_scroll_highlights_limit"
+        | "find_in_files_max_file_size"
+        | "find_in_files_max_result_size"
+        | "syntax_detection_size_limit"
+        | "io_workers" => json!(1),
+        "find_in_files_context_characters" => json!(8),
         "file_exclude_patterns" | "index_exclude_patterns" => json!(["*.rs"]),
         "file_tab_style" => json!("rounded"),
         "folder_exclude_patterns" => json!(["subdir"]),
@@ -266,9 +274,27 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
         app.workspace.select(prev);
         return output;
     }
+    if key == "io_workers" {
+        let path = root.join("worker-probe.txt");
+        fs::write(&path, "a small ordinary file").unwrap();
+        let prev = app.workspace.active;
+        app.workspace
+            .open(crate::cli::FileLocation {
+                path,
+                line: 1,
+                column: 1,
+            })
+            .unwrap();
+        let index = app.workspace.active;
+        let queued = app.workspace.tabs[index].loading.is_some();
+        app.workspace.close(index).unwrap();
+        app.workspace.select(prev);
+        return queued.to_string();
+    }
     let (file, bytes): (&str, &[u8]) = match key {
         "fallback_encoding" => ("decode.txt", b"one\xE0two\n"),
         "detect_indentation" => ("indent.txt", b"a\n  b\n    c\n  d\n    e\n"),
+        "syntax_detection_size_limit" => ("syntax-limit.rs", b"fn fixture() {}\n"),
         "image_file_patterns" => (
             "preview.png",
             include_bytes!("../resources/Packages/Theme - Velocity/palette-edit.png"),
@@ -277,6 +303,15 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
     };
     fixture_document(app, &root.join(file), bytes, |app| {
         let tab = &app.workspace.tabs[app.workspace.active];
+        if key == "syntax_detection_size_limit" {
+            return tab
+                .editor
+                .language
+                .borrow()
+                .as_ref()
+                .map(|lang| lang.name.clone())
+                .unwrap_or_default();
+        }
         format!(
             "{:?}|{}|{}|{:?}|{}|{}",
             tab.format,
@@ -453,6 +488,105 @@ fn find_probe(app: &mut App, key: &str) -> String {
     );
     app.run_named(None, "hide_panel", &json!({}));
     app.workspace.editor_mut().set_caret(0, false);
+    result
+}
+
+fn round35_find_probe(app: &mut App, key: &str) -> String {
+    #[derive(Debug)]
+    struct Pasteboard;
+    impl vel_platform::FindPasteboard for Pasteboard {
+        fn read(&self) -> Option<String> {
+            Some("from Find pasteboard".into())
+        }
+        fn write(&self, _: &str) -> bool {
+            true
+        }
+    }
+    app.panels = crate::panels::Panels::new(&app.workspace, false);
+    app.workspace.editor_mut().set_caret(0, false);
+    if key == "use_find_clipboard" {
+        app.panels.find_pasteboard = Some(Box::new(Pasteboard));
+        app.run_named(None, "show_panel", &json!({"panel":"find"}));
+    } else {
+        if key == "find_scroll_highlights_limit" {
+            app.workspace.editor_mut().settings.set(
+                Layer::View,
+                "highlight_find_results_in_scrollbar",
+                json!(true),
+            );
+        }
+        if key == "find_regex_highlight_matches_max_size" {
+            app.run_named(None, "toggle_find_option", &json!({"option":"regex"}));
+        }
+        app.run_named(
+            None,
+            "show_panel",
+            &json!({"panel":"find", "pattern":"call"}),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.panels.busy() {
+        app.panels.poll(&mut app.workspace, 0..0);
+        assert!(Instant::now() < deadline, "{key} Find did not settle");
+        std::thread::yield_now();
+    }
+    let result = format!(
+        "{}|{}|{}",
+        app.panels.query.value(),
+        app.panels.current_highlights(&app.workspace).len(),
+        app.panels.scrollbar_find_highlights(&app.workspace).len(),
+    );
+    app.run_named(None, "hide_panel", &json!({}));
+    app.panels.find_pasteboard = None;
+    result
+}
+
+fn round35_find_files_probe(app: &mut App, key: &str, root: &Path) -> String {
+    let prev = app.workspace.tabs[app.workspace.active].sheet;
+    let path = root.join("find-in-files-setting-probe.txt");
+    fs::write(&path, "before\n0123456789 needle suffix\nafter\n").unwrap();
+    let where_ = if key == "find_in_files_suppress_errors" {
+        root.join("find-in-files-no-such-path.txt")
+    } else {
+        path.clone()
+    };
+    app.panels = crate::panels::Panels::new(&app.workspace, false);
+    app.run_named(
+        None,
+        "show_panel",
+        &json!({"panel":"find_in_files","pattern":"needle","use_buffer":true}),
+    );
+    app.panels.where_input.set(where_.to_str().unwrap());
+    app.run_named(None, "find_in_files_start", &json!({}));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !app.panels.file_complete {
+        app.panels.poll(&mut app.workspace, 0..0);
+        assert!(
+            Instant::now() < deadline,
+            "{key} Find in Files did not finish"
+        );
+        std::thread::yield_now();
+    }
+    if key == "find_in_files_side_by_side" {
+        app.run_named(None, "next_result", &json!({}));
+    }
+    let result = format!(
+        "{}|{}|{}",
+        app.panels.result_view.formatted(),
+        app.panels.message,
+        app.workspace.workbench.groups[app.workspace.workbench.active]
+            .selected
+            .len()
+    );
+    app.run_named(None, "hide_panel", &json!({}));
+    for i in (0..app.workspace.tabs.len()).rev() {
+        let tab = &app.workspace.tabs[i];
+        if tab.find_results || tab.path.as_ref() == Some(&path) {
+            app.workspace.close(i).unwrap();
+        }
+    }
+    app.workspace
+        .select(app.workspace.sheet_index(prev).unwrap());
     result
 }
 
@@ -1040,6 +1174,8 @@ fn exercise(app: &mut App, key: &str, root: &Path) -> String {
         | "fallback_encoding"
         | "detect_indentation"
         | "image_file_patterns"
+        | "io_workers"
+        | "syntax_detection_size_limit"
         | "large_file.load_bytes" => document_probe(app, key, root),
         "hot_exit" | "remember_open_files" => session_probe(app, key, root),
         "auto_close_tags"
@@ -1060,6 +1196,16 @@ fn exercise(app: &mut App, key: &str, root: &Path) -> String {
         | "regex_auto_escape"
         | "close_find_after_find_all"
         | "close_find_after_replace_all" => find_probe(app, key),
+        "highlight_find_results_in_scrollbar"
+        | "find_scroll_highlights_limit"
+        | "find_highlight_matches_max_size"
+        | "find_regex_highlight_matches_max_size"
+        | "use_find_clipboard" => round35_find_probe(app, key),
+        "find_in_files_max_file_size"
+        | "find_in_files_max_result_size"
+        | "find_in_files_context_characters"
+        | "find_in_files_suppress_errors"
+        | "find_in_files_side_by_side" => round35_find_files_probe(app, key, root),
         "fold_buttons"
         | "inverse_caret_state"
         | "match_brackets"

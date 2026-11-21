@@ -10,6 +10,7 @@ pub use identity::content_identity;
 mod progressive;
 pub mod regular;
 pub mod search;
+mod workers;
 pub use decoding::{
     ContentIdentity, DecodeAttempt, DecodeNotice, DecodingDecision, PrefixFacts, decide_decoding,
     decoding_for_path,
@@ -17,7 +18,7 @@ pub use decoding::{
 use encoding_rs::{CoderResult, Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
 pub use progressive::{
     LoadTask, content_kind, load_background, load_background_for_reload,
-    load_background_with_options, with_cancellation,
+    load_background_with_options, load_on_workers, with_cancellation,
 };
 use std::{
     fs,
@@ -28,6 +29,7 @@ use std::{
 use vel_buffer::{Buffer, Change, ChangeSet, Edit, EditKind, ViewId};
 use vel_config::settings::EditorSettings;
 use vel_text::Text;
+pub use workers::IoWorkers;
 
 /// Detected/selected line-ending convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

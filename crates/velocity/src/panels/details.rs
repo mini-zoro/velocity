@@ -720,6 +720,18 @@ impl Panels {
             .iter()
             .any(|r| matches!(r, files::Row::Line(line) if line.match_count > 0))
     }
+    pub fn current_result(&mut self, workspace: &mut Workspace) -> Result<(), String> {
+        let point = workspace.editor().caret;
+        if self.jump_tab_result(workspace, point)? {
+            return Ok(());
+        }
+        if let Some(index) = self.result_cursor {
+            self.result_selected = index;
+            self.result_scroll.reveal(index);
+            self.jump_result(workspace)?;
+        }
+        Ok(())
+    }
     /// Walks search results through the same jump path used by Enter and the mouse.
     pub fn navigate_result(
         &mut self,

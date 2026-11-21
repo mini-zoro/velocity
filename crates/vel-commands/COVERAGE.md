@@ -21,7 +21,7 @@ Each name counts once, even if it appears in multiple sources. Generic host forw
 is deliberately counted as partial, not implemented. Application hosts may implement
 more than this crate's standalone guarantee.
 
-**Counts: 61 implemented, 134 partially, 11 missing, 3 out of scope; 209 total.**
+**Counts: 61 implemented, 136 partially, 10 missing, 2 out of scope; 209 total.**
 
 Public sources:
 
@@ -47,7 +47,7 @@ and lane A wires browser/clipboard menus in the next round.
 | `add_folder` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `add_jump_record` | missing | changelog | No registration or executable adapter in vel-commands; window/application integration remains. |
 | `add_word` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
-| `append` | implemented | build_systems, changelog | EOF text insertion implemented; force/scroll-to-end are host presentation policy. |
+| `append` | implemented | build_systems, changelog | EOF insertion with optional `disable_tab_translation`; force/scroll-to-end are host presentation policy. |
 | `auto_complete` | partially | changelog | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `build` | partially | key_bindings | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `camel_case` | implemented | spec; 4142 feature announcement (exact adapter schema unverified) | Executable text operation or registry orchestration; headless tests cover its implementation. |
@@ -69,7 +69,7 @@ and lane A wires browser/clipboard menus in the next round.
 | `copy` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `copy_as_html` | missing | spec | vel-export::copy_as_html returns HTML/plain flavours; clipboard host/menu wiring remains absent. |
 | `copy_path` | missing | menus | No registration or executable adapter in vel-commands; window/application integration remains. |
-| `current_result` | missing | changelog | No registration or executable adapter in vel-commands; window/application integration remains. |
+| `current_result` | partially | changelog | Registry dispatches to the host; Velocity reopens the current search or build result without advancing. |
 | `cut` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `decrease_font_size` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `delete_word` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
@@ -174,7 +174,7 @@ and lane A wires browser/clipboard menus in the next round.
 | `revert_modification` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `right_delete` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
 | `run_macro` | implemented | registry inventory | Executable text operation or registry orchestration; headless tests cover its implementation. |
-| `run_syntax_tests` | out of scope | changelog | Package-author tooling; vel-syntax provides the standalone syntax-tests CLI. |
+| `run_syntax_tests` | partially | changelog | Registry dispatches to the host; Velocity runs an active or specified test file and publishes navigable output. |
 | `save` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `save_all` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |
 | `save_project_as` | partially | registry inventory | Registered host action/hook; this crate cannot execute it without an implementing host. |

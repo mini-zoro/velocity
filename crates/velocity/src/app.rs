@@ -290,7 +290,7 @@ impl App {
         self.sessions = std::rc::Rc::new(std::cell::RefCell::new(sessions));
         self.session_id = id;
         self.workspace = workspace;
-        self.panels = crate::panels::Panels::new(&self.workspace, true);
+        self.panels.reset(&self.workspace);
         self.apply_ui_language_notice();
         self.panels.review.native_context = true;
         self.title_theme = None;
@@ -1050,7 +1050,7 @@ impl App {
                 self.sessions
                     .borrow_mut()
                     .retain_departing(self.session_id, retain);
-                self.panels = crate::panels::Panels::new(&self.workspace, true);
+                self.panels.reset(&self.workspace);
                 Ok::<_, String>(())
             })();
             if let Err(error) = result {
@@ -1270,8 +1270,14 @@ impl App {
             "save_all" => return self.workspace.tabs.iter().any(|tab| tab.dirty()),
             // Search replacements are tied to a completed Find in Files request.
             // https://docs.sublimetext.io/reference/commands.html
-            "replace_in_files" => return self.panels.file_replace_ready(),
+            "replace_in_files" => return self.panels.file_replace_ready(&self.workspace),
             "cancel_find_in_files" => return self.panels.file_task.is_some(),
+            "run_syntax_tests"
+                if !args["file"].is_string()
+                    && self.workspace.tabs[self.workspace.active].path.is_none() =>
+            {
+                return false;
+            }
             "toggle_find_option"
                 if matches!(
                     args["option"].as_str(),
@@ -1327,7 +1333,7 @@ impl App {
                 return false;
             }
             "cancel_build" if self.builds.task.is_none() => return false,
-            "next_result" | "prev_result"
+            "next_result" | "prev_result" | "current_result"
                 if if self.panels.search_results_active {
                     !self.panels.has_search_results()
                 } else {
@@ -2104,6 +2110,7 @@ impl App {
                     | "find_prev"
                     | "next_result"
                     | "prev_result"
+                    | "current_result"
             );
         if scroll_from.is_none() && (changed || explicit) {
             self.view.cancel_scroll_animation();
@@ -2768,6 +2775,23 @@ impl App {
             }
             return Ok(());
         }
+        if matches!(name, "next_result" | "prev_result" | "current_result") {
+            return match (self.panels.search_results_active, name) {
+                (true, "current_result") => self.panels.current_result(&mut self.workspace),
+                (true, _) => self
+                    .panels
+                    .navigate_result(&mut self.workspace, name == "next_result"),
+                (false, "current_result") => self.builds.current_result(&mut self.workspace),
+                (false, _) => self
+                    .builds
+                    .navigate(&mut self.workspace, name == "next_result"),
+            };
+        }
+        if name == "run_syntax_tests" {
+            return self
+                .builds
+                .start_syntax_tests(&self.workspace, &mut self.panels, args);
+        }
         // These actions need only the workspace/panels. Both native and headless named
         // dispatch finish them here before advancing to the next macro step.
         if vel_commands::is_find_command(name)
@@ -3014,16 +3038,6 @@ impl App {
                 );
                 return Ok(());
             }
-            "next_result" | "prev_result" => {
-                if self.panels.search_results_active {
-                    self.panels
-                        .navigate_result(&mut self.workspace, name == "next_result")?;
-                } else {
-                    self.builds
-                        .navigate(&mut self.workspace, name == "next_result")?;
-                }
-                return Ok(());
-            }
             "prompt_open_project" | "open_project" | "open_recent_project" => {
                 let path = args["file"]
                     .as_str()
@@ -3055,7 +3069,7 @@ impl App {
                     self.sessions
                         .borrow_mut()
                         .retain_departing(self.session_id, retain);
-                    self.panels = crate::panels::Panels::new(&self.workspace, true);
+                    self.panels.reset(&self.workspace);
                 }
                 return Ok(());
             }
@@ -3086,7 +3100,7 @@ impl App {
                 self.sessions
                     .borrow_mut()
                     .retain_departing(self.session_id, retain);
-                self.panels = crate::panels::Panels::new(&self.workspace, true);
+                self.panels.reset(&self.workspace);
                 return Ok(());
             }
             "edit_project" => {
@@ -3810,6 +3824,7 @@ impl App {
                     && self.panels.input().is_none()
                     && !self.panels.side_focused;
                 view.find_matches.clear();
+                view.find_scroll_matches.clear();
                 view.find_result_matches.clear();
                 if let Some(fonts) = &self.fonts {
                     view.ligatures = fonts.has_ligatures();
@@ -3868,6 +3883,12 @@ impl App {
                             .iter()
                             .take_while(|r| r.start <= viewport.end)
                             .cloned(),
+                    );
+                    view.find_scroll_matches.extend(
+                        self.panels
+                            .scrollbar_find_highlights(&self.workspace)
+                            .iter()
+                            .map(|range| range.start),
                     );
                 }
                 theme_animating |= self.workspace.themes.ui.borrow().animating();
@@ -4679,6 +4700,7 @@ impl AppHandler for App {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        self.panels.find_pasteboard = Some(Box::new(SystemFindPasteboard));
         self.publish_open_route();
         if let Some([x, y, width, height]) = self.window_frame {
             w.restore_frame(Rect {

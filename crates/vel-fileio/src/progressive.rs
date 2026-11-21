@@ -115,6 +115,16 @@ fn start_background(
     options: DecodeOptions,
     comparing: bool,
 ) -> Result<LoadTask, String> {
+    load_on_workers(path, options, comparing, None)
+}
+
+/// Starts a progressive or comparing read on a bounded executor when configured.
+pub fn load_on_workers(
+    path: PathBuf,
+    options: DecodeOptions,
+    comparing: bool,
+    workers: Option<(&crate::IoWorkers, usize)>,
+) -> Result<LoadTask, String> {
     let binary = Arc::new(AtomicBool::new(false));
     let binary_result = binary.clone();
     let unchanged = Arc::new(AtomicBool::new(false));
@@ -129,121 +139,129 @@ fn start_background(
     let cancel = Cancellation::default();
     let cancellation = cancel.clone();
     let (tx, result) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("velocity-file-load".into())
-        .spawn(move || {
-            let publish = |snapshot| {
-                if !comparing && !cancellation.is_cancelled() {
-                    let old = mailbox.lock().expect("prefix mailbox").replace(snapshot);
-                    drop(old);
-                }
-            };
-            let mut loaded = (|| {
-                let mut plan = super::decoding::DecodePlan::new(&path, &options)?;
-                let mut failure = "invalid encoded text".to_owned();
-                while let Some(attempt) = plan.next() {
-                    let file = super::regular::read(&path)?;
-                    let mut raw = super::identity::DigestReader::new(file);
-                    raw.read_exact(&mut vec![0; attempt.skip])
-                        .map_err(|e| e.to_string())?;
-                    counter.store(attempt.skip as u64, Ordering::Relaxed);
-                    let mut emit = |mut snapshot: LoadSnapshot| {
-                        snapshot.progress.read = counter.load(Ordering::Relaxed);
-                        if !attempt.verify_legacy_revision {
-                            publish(snapshot);
-                        }
-                    };
-                    let (result, ending, line_counts) =
-                        if attempt.encoding == encoding_rs::UTF_8 && !attempt.replacement {
-                            // Keep first-snapshot latency and direct UTF-8 construction.
-                            let mut normalized = Normalized::new(
-                                &mut raw,
-                                counter.clone(),
-                                cancellation.clone(),
-                                options.default_line_ending,
-                            );
-                            let result = stream_decoded_utf8(
-                                &mut normalized,
-                                Some(total),
-                                &LoadOptions::default(),
-                                &cancellation,
-                                &mut emit,
-                            );
-                            (result, normalized.ending(), normalized.counts)
-                        } else {
-                            let mut progress = |p: Progress| {
-                                counter.store(p.read + attempt.skip as u64, Ordering::Relaxed);
-                            };
-                            let mut decoder = DecodeReader::new(
-                                CheckedReader {
-                                    input: &mut raw,
-                                    cancel: Some(&cancellation),
-                                },
-                                attempt.encoding,
-                                total,
-                                &mut progress,
-                                options.default_line_ending,
-                            );
-                            decoder.allow_replacement = attempt.replacement;
-                            let result = stream_decoded_utf8(
-                                &mut decoder,
-                                Some(total),
-                                &LoadOptions::default(),
-                                &cancellation,
-                                &mut emit,
-                            );
-                            (result, decoder.ending(), decoder.counts)
-                        };
-                    match result {
-                        Ok(text) => {
-                            let loaded = super::finish_decoding(
-                                &path,
-                                &options,
-                                plan.facts.clone(),
-                                &attempt,
-                                super::DecodedContent {
-                                    text,
-                                    ending,
-                                    line_counts,
-                                    content: raw.digest.identity(),
-                                },
-                            )?;
-                            if plan.accept(&options, &attempt, &loaded)? {
-                                return Ok(loaded);
-                            }
-                        }
-                        Err(LoadError::DecodeRequired) => {}
-                        Err(LoadError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
-                            failure = error.to_string();
-                        }
-                        Err(error) => return Err(error.to_string()),
-                    }
-                    // A failed strict attempt invalidates its read-only prefix.
-                    counter.store(0, Ordering::Relaxed);
-                    publish(LoadSnapshot {
-                        text: vel_text::Text::new(),
-                        progress: vel_largefile::Progress {
-                            read: 0,
-                            total: Some(total),
-                        },
-                        metrics: Default::default(),
-                    });
-                }
-                binary_result.store(plan.binary().is_some(), Ordering::Release);
-                Err(plan
-                    .binary()
-                    .map_or(failure, |notice| notice.message(&path)))
-            })();
-            if let Ok(loaded) = &mut loaded {
-                comparison.store(loaded.unchanged, Ordering::Release);
-                if comparing && loaded.unchanged {
-                    // Retire the duplicate tree on this worker, not on the UI frame.
-                    loaded.text = vel_text::Text::new();
-                }
+    let load = move || {
+        if cancellation.is_cancelled() {
+            return;
+        }
+        let publish = |snapshot| {
+            if !comparing && !cancellation.is_cancelled() {
+                let old = mailbox.lock().expect("prefix mailbox").replace(snapshot);
+                drop(old);
             }
-            let _ = tx.send(loaded.map_err(|error| super::regular::error(&path, error)));
-        })
-        .map_err(|e| e.to_string())?;
+        };
+        let mut loaded = (|| {
+            let mut plan = super::decoding::DecodePlan::new(&path, &options)?;
+            let mut failure = "invalid encoded text".to_owned();
+            while let Some(attempt) = plan.next() {
+                let file = super::regular::read(&path)?;
+                let mut raw = super::identity::DigestReader::new(file);
+                raw.read_exact(&mut vec![0; attempt.skip])
+                    .map_err(|e| e.to_string())?;
+                counter.store(attempt.skip as u64, Ordering::Relaxed);
+                let mut emit = |mut snapshot: LoadSnapshot| {
+                    snapshot.progress.read = counter.load(Ordering::Relaxed);
+                    if !attempt.verify_legacy_revision {
+                        publish(snapshot);
+                    }
+                };
+                let (result, ending, line_counts) =
+                    if attempt.encoding == encoding_rs::UTF_8 && !attempt.replacement {
+                        // Keep first-snapshot latency and direct UTF-8 construction.
+                        let mut normalized = Normalized::new(
+                            &mut raw,
+                            counter.clone(),
+                            cancellation.clone(),
+                            options.default_line_ending,
+                        );
+                        let result = stream_decoded_utf8(
+                            &mut normalized,
+                            Some(total),
+                            &LoadOptions::default(),
+                            &cancellation,
+                            &mut emit,
+                        );
+                        (result, normalized.ending(), normalized.counts)
+                    } else {
+                        let mut progress = |p: Progress| {
+                            counter.store(p.read + attempt.skip as u64, Ordering::Relaxed);
+                        };
+                        let mut decoder = DecodeReader::new(
+                            CheckedReader {
+                                input: &mut raw,
+                                cancel: Some(&cancellation),
+                            },
+                            attempt.encoding,
+                            total,
+                            &mut progress,
+                            options.default_line_ending,
+                        );
+                        decoder.allow_replacement = attempt.replacement;
+                        let result = stream_decoded_utf8(
+                            &mut decoder,
+                            Some(total),
+                            &LoadOptions::default(),
+                            &cancellation,
+                            &mut emit,
+                        );
+                        (result, decoder.ending(), decoder.counts)
+                    };
+                match result {
+                    Ok(text) => {
+                        let loaded = super::finish_decoding(
+                            &path,
+                            &options,
+                            plan.facts.clone(),
+                            &attempt,
+                            super::DecodedContent {
+                                text,
+                                ending,
+                                line_counts,
+                                content: raw.digest.identity(),
+                            },
+                        )?;
+                        if plan.accept(&options, &attempt, &loaded)? {
+                            return Ok(loaded);
+                        }
+                    }
+                    Err(LoadError::DecodeRequired) => {}
+                    Err(LoadError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
+                        failure = error.to_string();
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+                // A failed strict attempt invalidates its read-only prefix.
+                counter.store(0, Ordering::Relaxed);
+                publish(LoadSnapshot {
+                    text: vel_text::Text::new(),
+                    progress: vel_largefile::Progress {
+                        read: 0,
+                        total: Some(total),
+                    },
+                    metrics: Default::default(),
+                });
+            }
+            binary_result.store(plan.binary().is_some(), Ordering::Release);
+            Err(plan
+                .binary()
+                .map_or(failure, |notice| notice.message(&path)))
+        })();
+        if let Ok(loaded) = &mut loaded {
+            comparison.store(loaded.unchanged, Ordering::Release);
+            if comparing && loaded.unchanged {
+                // Retire the duplicate tree on this worker, not on the UI frame.
+                loaded.text = vel_text::Text::new();
+            }
+        }
+        let _ = tx.send(loaded.map_err(|error| super::regular::error(&path, error)));
+    };
+    if let Some((workers, limit)) = workers {
+        workers.submit(limit, "velocity-file-load", load)?;
+    } else {
+        std::thread::Builder::new()
+            .name("velocity-file-load".into())
+            .spawn(load)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(LoadTask {
         read,
         total,

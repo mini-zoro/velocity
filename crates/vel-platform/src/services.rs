@@ -1,6 +1,50 @@
 //! Injectable operating-system services for file commands.
 use std::path::Path;
 
+/// The system-wide Find pasteboard, independent of copy and paste.
+pub trait FindPasteboard: std::fmt::Debug {
+    /// Reads the most recent Find string, if available.
+    fn read(&self) -> Option<String>;
+    /// Publishes a Find string for other apps.
+    fn write(&self, text: &str) -> bool;
+}
+
+/// AppKit's named Find pasteboard; unavailable on other platforms.
+#[derive(Debug)]
+pub struct SystemFindPasteboard;
+
+#[cfg(target_os = "macos")]
+impl FindPasteboard for SystemFindPasteboard {
+    fn read(&self) -> Option<String> {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardNameFind, NSPasteboardTypeString};
+        // SAFETY: these AppKit constants remain valid for the process lifetime.
+        let (name, kind) = unsafe { (NSPasteboardNameFind, NSPasteboardTypeString) };
+        NSPasteboard::pasteboardWithName(name)
+            .stringForType(kind)
+            .map(|s| s.to_string())
+    }
+
+    fn write(&self, text: &str) -> bool {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardNameFind, NSPasteboardTypeString};
+        use objc2_foundation::NSString;
+        // SAFETY: these AppKit constants remain valid for the process lifetime.
+        let (name, kind) = unsafe { (NSPasteboardNameFind, NSPasteboardTypeString) };
+        let board = NSPasteboard::pasteboardWithName(name);
+        board.clearContents();
+        board.setString_forType(&NSString::from_str(text), kind)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl FindPasteboard for SystemFindPasteboard {
+    fn read(&self) -> Option<String> {
+        None
+    }
+    fn write(&self, _: &str) -> bool {
+        false
+    }
+}
+
 /// Opens a local HTML document in the user's default web browser.
 pub trait BrowserOpener {
     /// Requests the open. The caller must keep the file alive after success.

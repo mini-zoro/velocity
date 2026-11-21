@@ -598,6 +598,111 @@ fn cmd_f_does_not_cap_dense_matches_and_recomputes_after_edits() {
 }
 
 #[test]
+fn r35_find_display_limits_preserve_navigation_and_mark_both_gutters() {
+    let source = format!("foo\n{}foo\n", "middle\n".repeat(60));
+    let mut a = find_app(&source);
+    set(&mut a, "highlight_find_results_in_scrollbar", json!(true));
+    set(&mut a, "find_scroll_highlights_limit", json!(2));
+    set(
+        &mut a,
+        "find_highlight_matches_max_size",
+        json!(source.len()),
+    );
+    set(&mut a, "find_regex_highlight_matches_max_size", json!(1));
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel":"find", "pattern":"foo"}),
+    );
+    settle(&mut a);
+    let markers = |a: &mut App| {
+        let scene = a.scene();
+        scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.rects)
+            .filter(|r| r.color == [0.92, 0.64, 0.20, 1.0])
+            .count()
+    };
+    assert!(markers(&mut a) > 0, "minimap marks");
+    assert_eq!(a.view.find_scroll_matches, [0, source.len() - 4]);
+    set(&mut a, "show_minimap", json!(false));
+    assert_eq!(
+        markers(&mut a),
+        2,
+        "offscreen matches still mark the scrollbar"
+    );
+    set(&mut a, "find_scroll_highlights_limit", json!(1));
+    assert_eq!(markers(&mut a), 0);
+    assert_eq!(hits(&a).len(), 2);
+
+    toggle(&mut a, "regex");
+    settle(&mut a);
+    assert!(a.panels.current_highlights(&a.workspace).is_empty());
+    key(&mut a, "enter");
+    settle(&mut a);
+    assert_eq!(a.workspace.editor().selection(), 0..3);
+    assert!(a.panels.current_highlights(&a.workspace).is_empty());
+    toggle(&mut a, "regex");
+    set(
+        &mut a,
+        "find_highlight_matches_max_size",
+        json!(source.len() - 1),
+    );
+    poll_find(&mut a);
+    settle(&mut a);
+    assert!(a.panels.current_highlights(&a.workspace).is_empty());
+    named(&mut a, "find_all", json!({}));
+    settle(&mut a);
+    assert_eq!(selected(&a), [0..3, source.len() - 4..source.len() - 1]);
+}
+
+#[test]
+fn r35_find_pasteboard_has_its_own_channel_and_respects_seeding() {
+    use std::{cell::RefCell, rc::Rc};
+    #[derive(Debug)]
+    struct Mock(Rc<RefCell<String>>);
+    impl vel_platform::FindPasteboard for Mock {
+        fn read(&self) -> Option<String> {
+            Some(self.0.borrow().clone())
+        }
+        fn write(&self, text: &str) -> bool {
+            self.0.replace(text.into());
+            true
+        }
+    }
+    let board = Rc::new(RefCell::new("external\npattern".into()));
+    let mut a = find_app("one\ntwo");
+    a.panels.find_pasteboard = Some(Box::new(Mock(board.clone())));
+    a.workspace.editor_mut().clipboard = "general".into();
+    key(&mut a, "super+f");
+    assert_eq!(a.panels.query.value(), "external\npattern");
+    named(&mut a, "hide_panel", json!({}));
+    select(&mut a, 0..7);
+    key(&mut a, "super+e");
+    assert_eq!(&*board.borrow(), "one\ntwo");
+    assert_eq!(a.workspace.editor().clipboard, "general");
+    set(&mut a, "find_selected_text", json!(true));
+    select(&mut a, 4..7);
+    key(&mut a, "super+f");
+    assert_eq!(a.panels.query.value(), "two", "single-line selection wins");
+    named(
+        &mut a,
+        "show_panel",
+        json!({"panel":"find", "pattern":"explicit"}),
+    );
+    assert_eq!(a.panels.query.value(), "explicit");
+    named(&mut a, "hide_panel", json!({}));
+    set(&mut a, "use_find_clipboard", json!(false));
+    set(&mut a, "find_selected_text", json!(false));
+    board.replace("keep elsewhere".into());
+    key(&mut a, "super+e");
+    key(&mut a, "super+f");
+    assert_eq!(&*board.borrow(), "keep elsewhere");
+    assert_eq!(a.panels.query.value(), "two");
+}
+
+#[test]
 fn cmd_i_shift_enter_and_named_find_prev_respect_wrap() {
     let mut a = find_app("hit\n----\nhit\n----\nhit");
     key(&mut a, "super+i");

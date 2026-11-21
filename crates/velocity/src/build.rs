@@ -1,4 +1,5 @@
 //! UI adapter for asynchronous builds and output-panel result navigation.
+mod syntax_tests;
 use crate::{
     panels::{Panel, Panels},
     ui_text::UiText,
@@ -77,6 +78,7 @@ fn build_settings_supply_result_base_and_merge_environment() {
 #[derive(Debug, Default)]
 pub struct Builds {
     pub task: Option<Task>,
+    syntax_report: Option<std::sync::mpsc::Receiver<syntax_tests::Report>>,
     pub diagnostics: Vec<Diagnostic>,
     pub selected: Option<usize>,
     received_lines: usize,
@@ -145,6 +147,7 @@ impl Builds {
             }
         };
         let task = Task::spawn_after(&exec, self.task.take())?;
+        self.syntax_report = None;
         panels.configure_output(workspace, exec.syntax.as_deref(), exec.word_wrap);
         self.diagnostics.clear();
         self.selected = None;
@@ -207,6 +210,9 @@ impl Builds {
         self.close_input(panels);
     }
     pub fn poll(&mut self, panels: &mut Panels) -> bool {
+        if self.syntax_report.is_some() {
+            return self.poll_syntax_tests(panels);
+        }
         let mut changed = false;
         let mut finish = None;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2);
@@ -393,7 +399,12 @@ impl Builds {
                 (n as isize + if forward { 1 } else { -1 }).rem_euclid(len as isize) as usize
             });
         self.selected = Some(index);
-        let d = &self.diagnostics[index];
+        self.current_result(workspace)
+    }
+    pub fn current_result(&self, workspace: &mut Workspace) -> Result<(), String> {
+        let Some(d) = self.selected.and_then(|index| self.diagnostics.get(index)) else {
+            return Ok(());
+        };
         workspace.open(crate::cli::FileLocation {
             path: d.path.clone(),
             line: d.line,

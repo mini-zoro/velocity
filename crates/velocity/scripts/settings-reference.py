@@ -23,7 +23,8 @@ EFFECTS = {
     "next_window": ("new_window_settings",),
     "next_document": ("default_encoding", "default_line_ending"),
     "next_open": ("fallback_encoding", "detect_indentation", "large_file.load_bytes",
-                  "open_files_in_new_window", "update_system_recent_files", "open_tabs_after_current"),
+                  "open_files_in_new_window", "update_system_recent_files", "open_tabs_after_current",
+                  "io_workers", "syntax_detection_size_limit"),
     "next_save": ("atomic_save", "ensure_newline_at_eof_on_save", "default_dir",
                   "trim_trailing_white_space_on_save", "trim_only_modified_white_space",
                   "save_on_focus_lost"),
@@ -53,6 +54,18 @@ ARCHIVED_REFERENCE = "https://sublime-text-unofficial-documentation.readthedocs.
 CHANGELOG = "https://www.sublimetext.com/download"
 DEV_CHANGELOG = "https://www.sublimetext.com/dev"
 NOTES = {
+    "highlight_find_results_in_scrollbar": "[Dev build 4081](https://www.sublimetext.com/dev#build-4081). Off by default to retain Velocity's previous display.",
+    "find_scroll_highlights_limit": f"[Build 4121]({CHANGELOG}#build-4121). 4096 is Velocity's bound when marks are enabled, not a verified Sublime default.",
+    "find_highlight_matches_max_size": f"[Build 4121]({CHANGELOG}#build-4121). Explicit Find Next/Previous, Find All and Replace still work.",
+    "find_regex_highlight_matches_max_size": f"[Build 4121]({CHANGELOG}#build-4121). Separate from the literal-search size limit.",
+    "use_find_clipboard": f"[Build 4121]({CHANGELOG}#build-4121) describes opting out of the macOS integration. Explicit patterns and single-line selection seeding take precedence over pasteboard text.",
+    "find_in_files_max_file_size": f"[Build 4142]({CHANGELOG}#build-4142). Applies on the next search to disk files and live buffers.",
+    "find_in_files_max_result_size": f"[Build 4126]({CHANGELOG}#build-4126). Applies to the next report, not to replacements or previous reports.",
+    "find_in_files_context_characters": f"[Build 4166]({CHANGELOG}#build-4166). A positive value uses Unicode scalar columns and preserves the source jump column. Zero uses the previous disk previews and live-buffer formatting.",
+    "find_in_files_suppress_errors": f"[Build 4151]({CHANGELOG}#build-4151). Applies to the next search; invalid search expressions still report an error.",
+    "find_in_files_side_by_side": f"[Build 4151]({CHANGELOG}#build-4151). Only applies when opening a match from a Find Results tab, not the output panel.",
+    "io_workers": f"[Build 4213]({CHANGELOG}#build-4213). Applies to regular document opens, reloads and writes submitted by a window. Zero keeps the previous scheduling.",
+    "syntax_detection_size_limit": f"[Build 4113]({CHANGELOG}#build-4113). Oversize files default to Plain Text, unless a syntax is explicitly assigned.",
     "draw_white_space": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
     "highlight_line": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",
     "match_selection": f"[Visual settings]({ARCHIVED_REFERENCE}#visual-settings)",

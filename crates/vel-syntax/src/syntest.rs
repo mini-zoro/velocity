@@ -223,6 +223,17 @@ pub fn evaluate_with_metadata(
     text: &str,
     file: &str,
 ) -> FileResult {
+    evaluate_with_syntax(set, metadata, text, file, None)
+}
+
+/// Evaluates one test file, optionally substituting a resolved syntax for its header path.
+pub fn evaluate_with_syntax(
+    set: &SyntaxSet,
+    metadata: &crate::MetadataSet,
+    text: &str,
+    file: &str,
+    syntax: Option<&str>,
+) -> FileResult {
     let mut result = FileResult {
         scope_counts: Counts::default(),
         symbol_counts: Counts::default(),
@@ -239,7 +250,7 @@ pub fn evaluate_with_metadata(
         result.error = Some("unrecognized syntax test header".into());
         return result;
     };
-    result.syntax = header["path"].into();
+    result.syntax = syntax.unwrap_or(&header["path"]).into();
     let start = header.name("start").unwrap().as_str();
     let end = header.name("end").map(|m| m.as_str());
     let annotations: Vec<_> = lines.iter().map(|l| annotation(l, start, end)).collect();

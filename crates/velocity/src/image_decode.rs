@@ -409,6 +409,14 @@ mod tests {
     }
 
     #[test]
+    fn r35_psd_stays_in_byte_view() {
+        // PSD v1, 1x1 RGB, empty resources/layers, raw merged red pixel.
+        let psd = b"8BPS\0\x01\0\0\0\0\0\0\0\x03\0\0\0\x01\0\0\0\x01\0\x08\0\x03\0\0\0\0\0\0\0\0\0\0\0\0\0\0\xff\0\0";
+        assert!(image::ImageFormat::from_extension("psd").is_none());
+        assert!(decode(psd).is_none());
+    }
+
+    #[test]
     fn r33_fuzz_preview_headers_and_truncated_packets() {
         let mut rng = 0x072b_0349u32;
         let mut next = || {

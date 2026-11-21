@@ -66,7 +66,22 @@ impl Reader {
         cancelled: impl Fn() -> bool,
         filter: Option<Filter<'_>>,
     ) -> io::Result<Option<Text<'_>>> {
+        self.open_with_limit(path, options, cancelled, filter, 0)
+    }
+
+    /// Prepares text only if the opened file fits the byte limit (zero means unlimited).
+    pub fn open_with_limit(
+        &mut self,
+        path: &Path,
+        options: &DecodeOptions,
+        cancelled: impl Fn() -> bool,
+        filter: Option<Filter<'_>>,
+        max_size: u64,
+    ) -> io::Result<Option<Text<'_>>> {
         let (mut file, bytes) = crate::regular::read_search_file(path)?;
+        if max_size != 0 && bytes > max_size {
+            return Ok(None);
+        }
         let len = usize::try_from(bytes).map_err(io::Error::other)?;
         if len > IN_MEMORY {
             return Windows::open(file, len, options, cancelled, filter)

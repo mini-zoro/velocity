@@ -639,7 +639,8 @@
       {"caption":"Jump to Matching Bracket","command":"move_to","args":{"to":"brackets"}},
       {"caption":"Results","children":[
         {"caption":"Next Result","command":"next_result"},
-        {"caption":"Previous Result","command":"prev_result"}
+        {"caption":"Previous Result","command":"prev_result"},
+        {"caption":"Current Result","command":"current_result"}
       ]},
       {
         "caption": "Bookmarks",
@@ -1180,6 +1181,7 @@
         "command": "cancel_build"
       },
       {"caption":"Show Build Results","command":"show_panel","args":{"panel":"output.exec"}},
+      {"caption":"Run Syntax Tests","command":"run_syntax_tests"},
       {"caption":"-"},
       {
         "caption": "Start or Stop Macro Recording",
