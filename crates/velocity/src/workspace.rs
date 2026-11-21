@@ -827,8 +827,8 @@ pub struct Workspace {
     pub(crate) watcher: Option<Watcher>,
     pub(crate) data_dir: Option<PathBuf>,
     pub(crate) project: Option<PathBuf>,
-    config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
-    config_rx: Option<std::sync::mpsc::Receiver<Result<Configuration, String>>>,
+    config_stamp: ConfigStamps,
+    config_rx: Option<std::sync::mpsc::Receiver<ConfigLoad>>,
     last_config_check: Option<Instant>,
     reload_requested: bool,
     settings_writes: Vec<(std::sync::mpsc::Receiver<Result<(), String>>, u64)>,
@@ -964,10 +964,17 @@ struct Configuration {
     distraction_settings: serde_json::Map<String, Value>,
     build_systems: crate::shipped::Builds,
     project_model: vel_session::project::Project,
-    config_stamp: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
     messages: Vec<String>,
     resource_reports: Vec<String>,
     ignored_user_keymaps: IgnoredKeymaps,
+}
+
+type ConfigStamps = Vec<(PathBuf, Option<(u64, SystemTime)>)>;
+
+#[derive(Debug)]
+struct ConfigLoad {
+    result: Result<Configuration, String>,
+    stamps: ConfigStamps,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1073,6 +1080,13 @@ fn snippet_title(name: &str) -> &str {
     let file = name.rsplit('/').next().unwrap_or(name);
     file.strip_suffix(".sublime-snippet").unwrap_or(file)
 }
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_USER_RESOURCE_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl Configuration {
     #[cfg(test)]
     fn load(data_dir: Option<PathBuf>, project: Option<PathBuf>) -> Result<Self, String> {
@@ -1082,6 +1096,7 @@ impl Configuration {
             Some(Default::default()),
             Default::default(),
         )
+        .result
     }
 
     fn load_with_window_overrides(
@@ -1089,7 +1104,30 @@ impl Configuration {
         project: Option<PathBuf>,
         window_overrides: Option<serde_json::Map<String, Value>>,
         preferred_languages: crate::ui_language::PreferredLanguages,
+    ) -> ConfigLoad {
+        let mut stamps = Vec::new();
+        let result = Self::read(
+            data_dir,
+            project,
+            window_overrides,
+            preferred_languages,
+            &mut stamps,
+        );
+        stamps.sort_by(|a, b| a.0.cmp(&b.0));
+        stamps.dedup_by(|a, b| a.0 == b.0);
+        ConfigLoad { result, stamps }
+    }
+
+    fn read(
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        window_overrides: Option<serde_json::Map<String, Value>>,
+        preferred_languages: crate::ui_language::PreferredLanguages,
+        stamps: &mut ConfigStamps,
     ) -> Result<Self, String> {
+        if let Some(path) = &project {
+            stamps.push((path.clone(), stamp(path)));
+        }
         let mut resources = Resources::default();
         crate::theme_ui::bundled(&mut resources);
         for (name, source) in [
@@ -1201,10 +1239,21 @@ impl Configuration {
             );
         }
         if let Some(data) = &data_dir {
+            // Initialize a fresh profile before watching it. Observe inputs
+            // before reading them: sampling at the end can associate old
+            // bytes with the stamp of a concurrent atomic replacement.
+            let _ = std::fs::create_dir_all(data.join("Packages/User"));
             let (mut settings_reports, warnings): (Vec<_>, Vec<_>) = resources
-                .load_with_warnings(data)
+                .load_with_warnings_observing(data, |path| {
+                    stamps.push((path.to_owned(), stamp(path)));
+                })
                 .into_iter()
                 .partition(|w| crate::settings_reports::source(w).is_some());
+            #[cfg(test)]
+            if let Some(after_read) = AFTER_USER_RESOURCE_READ.with(|hook| hook.borrow_mut().take())
+            {
+                after_read();
+            }
             // Retain each settings filename and location for the non-modal report.
             resource_log.extend(settings_reports.iter().cloned());
             resource_reports.append(&mut settings_reports);
@@ -1246,7 +1295,6 @@ impl Configuration {
         let mut settings = Settings::default();
         let mut user = serde_json::Map::new();
         let mut syntax_settings = crate::shipped::SyntaxSettings::default();
-        let mut config_stamp = Vec::new();
         // Derive known key types from our shipped settings, not from an
         // installed package which might itself need validation.
         let schema = Document::parse(include_str!(
@@ -1256,11 +1304,6 @@ impl Configuration {
         let schema = schema.as_object().expect("shipped settings object");
         for resource in resources.matching(".sublime-settings") {
             let file = resource.path.rsplit('/').next().unwrap_or("");
-            // Invalid settings must remain watched: an in-place repair does not
-            // change the containing directory's timestamp.
-            if user_resource(resource, data_dir.as_deref()) {
-                config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
-            }
             if let Some(name) = file.strip_suffix(".sublime-settings")
                 && !name.starts_with("Preferences")
             {
@@ -1382,7 +1425,6 @@ impl Configuration {
                 }
             }
             settings.replace(Layer::Project, project_settings)?;
-            config_stamp.push((path.clone(), stamp(path)));
             folder_values = doc
                 .value
                 .get("folders")
@@ -1468,9 +1510,6 @@ impl Configuration {
             keymaps[first_user..=i].rotate_right(1);
         }
         for resource in keymaps {
-            if resource.origin.exists() {
-                config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
-            }
             let package = resource.path.split('/').nth(1).unwrap_or_default();
             let file = resource.path.rsplit('/').next().unwrap_or_default();
             // https://www.sublimetext.com/docs/key_bindings.html#user-bindings
@@ -1680,13 +1719,6 @@ impl Configuration {
                 },
             });
         }
-        for suffix in [".sublime-snippet", ".sublime-completions"] {
-            for resource in resources.matching(suffix) {
-                if user_resource(resource, data_dir.as_deref()) {
-                    config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
-                }
-            }
-        }
         let catalog = crate::completion::Catalog::load(&resources, &mut resource_messages);
         for (name, snippet) in catalog.snippets.iter() {
             palette.push(PaletteItem {
@@ -1714,9 +1746,6 @@ impl Configuration {
             ".hidden-tmTheme",
         ] {
             for resource in resources.matching(suffix) {
-                if user_resource(resource, data_dir.as_deref()) {
-                    config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
-                }
                 match resource.text() {
                     Ok(source) => scheme_resources.push((resource.path.clone(), source.to_owned())),
                     Err(e) => scheme_warnings.push((resource.path.clone(), e)),
@@ -1784,69 +1813,6 @@ impl Configuration {
             }
         }
         let appearance = appearance::Catalog::load(&resources, &schemes, &scheme_errors);
-        // Track resource files and containing directories, including absent User
-        // locations, so creating a new override is observable on the next poll.
-        for suffix in [
-            ".sublime-syntax",
-            ".tmLanguage",
-            ".tmLanguage.json",
-            ".tmPreferences",
-            ".sublime-menu",
-            ".sublime-mousemap",
-            ".sublime-commands",
-            ".sublime-build",
-            ".sublime-macro",
-            ".sublime-theme",
-            ".sublime-file-icons",
-            ".png",
-        ] {
-            for resource in resources.matching(suffix) {
-                if user_resource(resource, data_dir.as_deref()) {
-                    config_stamp.push((resource.origin.clone(), stamp(&resource.origin)));
-                }
-            }
-        }
-        let parents: Vec<_> = config_stamp
-            .iter()
-            .filter_map(|(p, _)| {
-                if project.as_ref() == Some(p) {
-                    None
-                } else {
-                    p.parent().map(Path::to_owned)
-                }
-            })
-            .collect();
-        for parent in parents {
-            config_stamp.push((parent.clone(), stamp(&parent)));
-        }
-        if let Some(data) = &data_dir {
-            // Observe resource locations directly. Cache/Sessions children must not reload
-            // project settings or discard dynamically added folders. Missing paths are
-            // tracked as None, so their first creation is still detected.
-            for path in [
-                data.join("Packages"),
-                data.join("Packages/User"),
-                data.join("Installed Packages"),
-            ] {
-                let current = stamp(&path);
-                config_stamp.push((path, current));
-            }
-        }
-        if let Some(data) = &data_dir {
-            config_stamp.extend(
-                vel_config::resources::loose_watch_paths(&data.join("Packages"))
-                    .into_iter()
-                    .map(|path| {
-                        let value = stamp(&path);
-                        (path, value)
-                    }),
-            );
-        }
-        config_stamp.retain(|(p, _)| {
-            data_dir.as_ref().is_some_and(|d| p.starts_with(d)) || project.as_ref() == Some(p)
-        });
-        config_stamp.sort_by(|a, b| a.0.cmp(&b.0));
-        config_stamp.dedup_by(|a, b| a.0 == b.0);
         let themes = crate::theme_ui::Themes::prepare(
             &resources,
             &schemes,
@@ -1897,7 +1863,6 @@ impl Configuration {
             distraction_settings,
             build_systems,
             project_model,
-            config_stamp,
             messages: resource_messages,
         })
     }
@@ -1958,6 +1923,15 @@ impl Workspace {
         window_overrides: Option<serde_json::Map<String, Value>>,
         preferred_languages: crate::ui_language::PreferredLanguages,
     ) -> Result<Self, String> {
+        let ConfigLoad {
+            result,
+            stamps: config_stamp,
+        } = Configuration::load_with_window_overrides(
+            data_dir.clone(),
+            project.clone(),
+            window_overrides,
+            preferred_languages,
+        );
         let Configuration {
             appearance,
             themes,
@@ -1978,16 +1952,10 @@ impl Workspace {
             distraction_settings,
             build_systems,
             project_model,
-            config_stamp,
             messages: resource_messages,
             mut resource_reports,
             ignored_user_keymaps,
-        } = Configuration::load_with_window_overrides(
-            data_dir.clone(),
-            project.clone(),
-            window_overrides,
-            preferred_languages,
-        )?;
+        } = result?;
         report_ignored_keymaps(
             &IgnoredKeymaps::new(),
             &ignored_user_keymaps,
@@ -3448,17 +3416,20 @@ impl Workspace {
             }
         }
         let config_result = self.config_rx.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(result) => Some(result),
+            Ok(load) => Some((load.result, Some(load.stamps))),
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(error) => Some(Err(error.to_string())),
+            Err(error) => Some((Err(error.to_string()), None)),
         });
-        if let Some(result) = config_result {
+        if let Some((result, stamps)) = config_result {
             self.config_rx = None;
             let project_changed = self.project.as_ref().is_some_and(|project| {
                 self.config_stamp
                     .iter()
                     .any(|(path, saved)| path == project && stamp(path) != *saved)
             });
+            if let Some(stamps) = stamps {
+                self.config_stamp = stamps;
+            }
             let folders = self
                 .folders
                 .iter()
@@ -3562,7 +3533,6 @@ impl Workspace {
                     self.palette = config.palette;
                     self.macro_paths = config.macro_paths;
                     self.resources = config.resources;
-                    self.config_stamp = config.config_stamp;
                     for tab in &mut self.tabs {
                         for layer in [
                             Layer::Default,
@@ -3581,12 +3551,7 @@ impl Workspace {
                     }
                     changed = true;
                 }
-                Err(e) => {
-                    self.messages.push(e);
-                    for (p, s) in &mut self.config_stamp {
-                        *s = stamp(p);
-                    }
-                }
+                Err(e) => self.messages.push(e),
             }
         }
         for index in 0..self.tabs.len() {
@@ -4183,6 +4148,66 @@ mod tests {
         assert!(workspace.config_rx.is_some() || workspace.resource_revision > 0);
         workspace.wait_resources();
         assert_eq!(workspace.editor().preferences.font_size, 20.);
+    }
+    #[test]
+    fn first_launch_without_user_packages_dir_succeeds_and_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("Velocity");
+        let mut workspace = Workspace::new(Text::new(), Some(data.clone()), None, false).unwrap();
+        assert!(data.join("Packages/User").is_dir());
+        assert!(!workspace.configuration_changed(Instant::now()));
+    }
+    #[test]
+    fn atomic_preferences_write_during_resource_load_is_not_lost() {
+        use std::io::Write as _;
+
+        for already_exists in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let user = dir.path().join("Packages/User");
+            let prefs = user.join("Preferences.sublime-settings");
+            if already_exists {
+                std::fs::create_dir_all(&user).unwrap();
+                std::fs::write(&prefs, r#"{"ui_language":"en"}"#).unwrap();
+            }
+            let mut reader =
+                Workspace::new(Text::new(), Some(dir.path().into()), None, false).unwrap();
+            // Like the preferences writer, stage a hidden sibling. Creating it
+            // can trigger a directory-stamp reload before the rename.
+            let mut staged = tempfile::Builder::new()
+                .prefix(".velocity-session-")
+                .tempfile_in(&user)
+                .unwrap();
+            staged.write_all(br#"{"ui_language":"zh-Hans"}"#).unwrap();
+            let now = Instant::now();
+            reader.request_resource_reload();
+            assert!(reader.configuration_changed(now));
+            reader.reload_requested = false;
+            AFTER_USER_RESOURCE_READ.with(|hook| {
+                hook.replace(Some(Box::new(move || {
+                    staged.persist(&prefs).unwrap();
+                })));
+            });
+            // Force the rename between reading resources and completing this
+            // load, then deliver the result through the real worker mailbox.
+            let result = Configuration::load_with_window_overrides(
+                Some(dir.path().into()),
+                None,
+                Some(Default::default()),
+                Default::default(),
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(result).unwrap();
+            reader.config_rx = Some(rx);
+            reader.poll();
+            assert_ne!(reader.ui_language_setting(), "zh-Hans");
+
+            assert!(
+                reader.configuration_changed(now + Duration::from_millis(500)),
+                "the reader missed an atomic preferences write (already_exists={already_exists})"
+            );
+            reader.wait_resources();
+            assert_eq!(reader.ui_language_setting(), "zh-Hans");
+        }
     }
     #[test]
     fn context_menu_resources_layer_and_hot_reload_with_the_workspace() {

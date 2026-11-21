@@ -77,13 +77,23 @@ impl Resources {
     }
     /// Loads installed archives then loose files. Loose files override archives.
     pub fn load(&mut self, data: &Path) -> Result<(), String> {
-        self.load_inner(data, &mut None)
+        self.load_inner(data, &mut None, |_| {})
     }
     /// Loads independent resources despite broken packages/files and returns their warnings.
     /// Used by background application loading so one bad package cannot hide other packages.
     pub fn load_with_warnings(&mut self, data: &Path) -> Vec<String> {
+        self.load_with_warnings_observing(data, |_| {})
+    }
+    /// Like [Self::load_with_warnings], with a callback before reading each
+    /// archive or loose resource and before scanning each eligible directory.
+    /// The resource roots are observed even when absent.
+    pub fn load_with_warnings_observing(
+        &mut self,
+        data: &Path,
+        observe: impl FnMut(&Path),
+    ) -> Vec<String> {
         let mut warnings = Vec::new();
-        if let Err(error) = self.load_inner(data, &mut Some(&mut warnings)) {
+        if let Err(error) = self.load_inner(data, &mut Some(&mut warnings), observe) {
             warnings.push(format!("{}: {error}", data.display()));
         }
         crate::settings_source::retain_valid(data, &mut self.entries, &mut warnings);
@@ -93,8 +103,15 @@ impl Resources {
         &mut self,
         data: &Path,
         warnings: &mut Option<&mut Vec<String>>,
+        mut observe: impl FnMut(&Path),
     ) -> Result<(), String> {
         let installed = data.join("Installed Packages");
+        let packages = data.join("Packages");
+        observe(&installed);
+        observe(&packages);
+        // Also watch missing or dangling User directories. The target of an
+        // external User symlink may appear without a change to Packages.
+        observe(&packages.join("User"));
         if installed.is_dir() {
             let mut paths = fs::read_dir(&installed)
                 .map_err(|e| e.to_string())?
@@ -106,6 +123,7 @@ impl Resources {
                 .into_iter()
                 .filter(|p| !hidden(p) && p.extension().is_some_and(|e| e == "sublime-package"))
             {
+                observe(&path);
                 let result = self.archive(&path);
                 if let Some(package) = path.file_stem().and_then(std::ffi::OsStr::to_str) {
                     if let Err(error) = &result {
@@ -118,9 +136,8 @@ impl Resources {
                 resource_result(result, &path, warnings)?;
             }
         }
-        let packages = data.join("Packages");
         if packages.is_dir() {
-            self.loose(&packages, Tier::Loose, warnings)?;
+            self.loose(&packages, Tier::Loose, warnings, observe)?;
         }
         Ok(())
     }
@@ -171,8 +188,10 @@ impl Resources {
         root: &Path,
         tier: Tier,
         warnings: &mut Option<&mut Vec<String>>,
+        mut observe: impl FnMut(&Path),
     ) -> Result<(), String> {
         walk_loose(root, loose_limit(), warnings, |path, directory| {
+            observe(path);
             if directory {
                 return Ok(());
             }
@@ -204,7 +223,7 @@ impl Resources {
     }
     /// Adds the supported runtime resources in the bundled language-package tree.
     pub fn load_shipped(&mut self, root: &Path) -> Result<(), String> {
-        self.loose(root, Tier::Shipped, &mut None)
+        self.loose(root, Tier::Shipped, &mut None, |_| {})
     }
     /// Package names, including packages with Python files but no supported resources.
     pub fn package_names(&self) -> BTreeSet<String> {
@@ -331,22 +350,6 @@ fn loose_limit() -> usize {
 #[cfg(test)]
 thread_local! {
     static TEST_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-}
-
-/// Resource files and directories eligible for loose-package change detection.
-/// Uses the loader's traversal, including its bounds and symlink exclusions.
-pub fn loose_watch_paths(root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let _ = walk_loose(
-        root,
-        loose_limit(),
-        &mut Some(&mut Vec::new()),
-        |path, _| {
-            paths.push(path.to_owned());
-            Ok(())
-        },
-    );
-    paths
 }
 
 fn walk_loose(
@@ -601,8 +604,10 @@ fn loose_limit_keeps_linked_user_and_default_after_an_oversized_package() {
     fs::write(user.path().join("ignore.log"), "not a resource").unwrap();
     TEST_LIMIT.set(Some(4));
     let mut resources = Resources::default();
-    let warnings = resources.load_with_warnings(root.path());
-    let watched = loose_watch_paths(&packages);
+    let mut watched = Vec::new();
+    let warnings = resources.load_with_warnings_observing(root.path(), |path| {
+        watched.push(path.to_owned());
+    });
     TEST_LIMIT.set(None);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("package Bulk"), "{warnings:?}");
@@ -641,8 +646,11 @@ fn loose_images_and_ordinary_package_directories_are_loaded_and_watched() {
     fs::write(private.join("must-not-load.gif"), "profile cache").unwrap();
     std::os::unix::fs::symlink(&private, package.join("alias")).unwrap();
     let mut resources = Resources::default();
-    resources.load(root.path()).unwrap();
-    let watched = loose_watch_paths(&packages);
+    let mut watched = Vec::new();
+    let warnings = resources.load_with_warnings_observing(root.path(), |path| {
+        watched.push(path.to_owned());
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
     for ext in ["png", "jpg", "jpeg", "gif"] {
         let key = format!("Packages/Backup/{dirs}/sample.{ext}");
         assert_eq!(resources.get(&key).unwrap().text().unwrap(), ext);

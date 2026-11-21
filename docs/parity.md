@@ -14,13 +14,13 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | --- | ---: | ---: | ---: | ---: |
 | Editing and selection | 55 | 3 | 0 | 0 |
 | Search and navigation | 56 | 7 | 0 | 0 |
-| Files, projects and sessions | 49 | 11 | 2 | 1 |
+| Files, projects and sessions | 50 | 11 | 1 | 1 |
 | Windows, tabs and display | 66 | 14 | 0 | 1 |
 | Language, completion and Vintage | 53 | 12 | 0 | 0 |
 | Customization and resources | 40 | 12 | 1 | 0 |
 | Build, Git and command line | 40 | 13 | 0 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **359** | **72** | **3** | **7** |
+| **Total** | **360** | **72** | **2** | **7** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
@@ -210,7 +210,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | `trim_only_modified_white_space` | [D4107.126][releases], [V4050.18][dev] | done | `vel-fileio` save options; `settings_effect_tests::save_probe` | |
 | `save_on_focus_lost` | [Settings][settings], [D4180][releases] | done | `focus_lost_saving_is_opt_in_and_skips_conflicts_readonly_and_untitled` | |
 | `reload_file_on_change` | [D4107.166][releases], [V4050.52][dev] | done | `reload_decisions_and_failed_load_do_not_overwrite_edits`; [reader](settings.md) | |
-| `reload_file_in_background` | [D4200.15][releases], [V4198.9][dev] | missing | `workspace.rs` watcher/reload path has no separate preference | |
+| `reload_file_in_background` | [D4200.15][releases], [V4198.9][dev] | done | `workspace.rs` watcher/reload; `r33_background_reload_clean_active_inactive_and_dirty`, `r33_background_reload_follows_shared_buffer_across_clones` | Clean inactive buffers reload in the background by default; disabling defers their reload until activation. |
 | `close_deleted_files` | [D4107.78][releases], [V4075.12][dev] | done | `close_deleted_files_closes_clean_watched_tabs`; `workbench.rs` restore | |
 | Data-driven binary (hex) tab | [D4126][releases] | done | `vel-largefile/hex.rs`, `binary.rs` | Read-only byte view. |
 | Binary syntax label | [D4126][releases] | done | `app_status.rs` format/status model | |

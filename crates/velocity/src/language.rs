@@ -375,9 +375,6 @@ impl Assets {
         data: Option<&Path>,
         resources: &vel_config::resources::Resources,
     ) -> Result<Arc<Self>, String> {
-        if let Some(data) = data {
-            let _ = std::fs::create_dir_all(data.join("Packages/User"));
-        }
         let root = packages_root();
         let effective = [".sublime-syntax", ".tmLanguage", ".tmLanguage.json"]
             .into_iter()
@@ -1649,22 +1646,6 @@ pub fn command_pairs(language: Option<&Language>, text: &Text, byte: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vel_syntax::{SyntaxDefinition, SyntaxSetBuilder};
-    #[test]
-    fn first_launch_without_user_packages_dir_succeeds_and_creates_it() {
-        // Regression: a fresh install has no `<data>/Packages`; loading must not fail.
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("Velocity");
-        assert!(!data.exists());
-        let base = Arc::new(fixture());
-        Assets::with_user_packages(
-            &base,
-            Some(&data),
-            &vel_config::resources::Resources::default(),
-        )
-        .expect("first launch must succeed");
-        assert!(data.join("Packages/User").is_dir());
-    }
     #[test]
     fn plain_text_is_virtual_source_is_untouched_and_cache_observes_source_changes() {
         // No staging tree: the corpus is loaded in place, our Plain Text definition is an
@@ -1705,15 +1686,6 @@ mod tests {
             1,
             "only the fixture may exist in the source root"
         );
-    }
-    fn fixture() -> Assets {
-        let mut builder = SyntaxSetBuilder::new();
-        builder.add_with_path(SyntaxDefinition::load_from_str("name: Branch\nscope: source.fixture\nversion: 2\ncontexts:\n  main:\n    - match: '(?=a)'\n      branch_point: reading\n      branch: [first, second]\n  first:\n    - meta_scope: first.fixture\n    - match: z\n      fail: reading\n  second:\n    - meta_scope: second.fixture\n    - match: z\n      pop: true\n", true, None).unwrap(), "Fixture.sublime-syntax");
-        Assets {
-            syntaxes: Arc::new(builder.build()),
-            metadata: Arc::new(MetadataSet::new()),
-            startup_ms: [0.; 4],
-        }
     }
     #[test]
     fn indentation_detection_ignores_blank_lines_and_observes_tab_stops() {
