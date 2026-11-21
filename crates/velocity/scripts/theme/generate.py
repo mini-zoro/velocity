@@ -15,7 +15,8 @@ import sys
 import tempfile
 import zlib
 
-ROOT = Path(__file__).resolve().parent
+# Lives outside the package so the shipped theme carries no Python file.
+ROOT = Path(__file__).resolve().parents[2] / "resources/Packages/Theme - Velocity"
 
 
 def write(path, data):

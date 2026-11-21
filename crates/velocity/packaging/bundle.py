@@ -23,6 +23,9 @@ ICON_CHUNKS = [
 ]
 
 
+# UI languages with a shipped catalog (English is the source language).
+LOCALIZATIONS = ("en", "zh-Hans")
+
 def icon(args):
     # ICNS is a big-endian container of typed PNG chunks. Encode it directly so artwork
     # generation does not depend on iconutil/ImageIO's host-specific conversion behavior.
@@ -95,6 +98,9 @@ def assemble(args):
         path.mkdir(parents=True, exist_ok=True)
     plist = {
         "CFBundleDevelopmentRegion": "en", "CFBundleDisplayName": "Velocity",
+        # AppKit localizes the menu items it adds itself (Services, Window tiling, Minimize All)
+        # only into languages the bundle declares; keep in step with the UI catalogs.
+        "CFBundleLocalizations": list(LOCALIZATIONS),
         "CFBundleExecutable": "velocity", "CFBundleIconFile": "Velocity.icns",
         "CFBundleIdentifier": "dev.velocity.Velocity", "CFBundleName": "Velocity",
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": numeric_version,
@@ -104,6 +110,10 @@ def assemble(args):
         "CFBundleDocumentTypes": document_types(),
     }
     (contents / "Info.plist").write_bytes(plistlib.dumps(plist, sort_keys=True))
+    for language in LOCALIZATIONS:
+        strings = resources / f"{language}.lproj/InfoPlist.strings"
+        strings.parent.mkdir(parents=True, exist_ok=True)
+        strings.write_text('"CFBundleDisplayName" = "Velocity";\n"CFBundleName" = "Velocity";\n', encoding="utf-8")
     shutil.copy2(args.binary, contents / "MacOS/velocity")
     shutil.copy2(repo / "crates/velocity/packaging/velocity", contents / "SharedSupport/bin/velocity")
     for path in [contents / "MacOS/velocity", contents / "SharedSupport/bin/velocity"]:
@@ -147,6 +157,9 @@ def validate(args):
     assert plist["LSMinimumSystemVersion"] == "14.0"
     assert plist["NSRequiresAquaSystemAppearance"] is False
     validate_document_types(plist)
+    assert plist["CFBundleLocalizations"] == list(LOCALIZATIONS)
+    for language in LOCALIZATIONS:
+        assert (resources / f"{language}.lproj/InfoPlist.strings").stat().st_size > 0, language
     required = ["Velocity.icns", "Syntaxes/LICENSE", "Syntaxes/Rust/Rust.sublime-syntax",
                 "Packages/Default/Preferences.sublime-settings",
                 "Packages/Theme - Velocity/Velocity.sublime-theme",

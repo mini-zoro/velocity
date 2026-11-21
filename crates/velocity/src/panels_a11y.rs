@@ -76,6 +76,9 @@ impl Panels {
                     (Role::TextField, label.into())
                 }
                 "quick_panel_row" => {
+                    // Read what the row shows: compact panels (the command palette) hide
+                    // details such as the internal command name.
+                    let compact = p.quick_compact();
                     let label = p
                         .quick
                         .items
@@ -85,7 +88,7 @@ impl Panels {
                             [
                                 i.caption.as_str(),
                                 i.annotation.as_str(),
-                                i.details.as_str(),
+                                if compact { "" } else { i.details.as_str() },
                             ]
                             .into_iter()
                             .filter(|s| !s.is_empty())

@@ -38,6 +38,15 @@ fn object(host: &Rc<Host>, id: Id) -> Retained<AnyObject> {
     // SAFETY: every Objective-C object is an AnyObject; the retained reference transfers unchanged.
     unsafe { Retained::cast_unchecked(element) }
 }
+/// The window content group's name, from the app's localized tree.
+pub(super) fn label(host: &Rc<Host>) -> String {
+    let tree = tree(host);
+    if tree.label.is_empty() {
+        "Velocity workspace".to_owned()
+    } else {
+        tree.label.clone()
+    }
+}
 pub(super) fn children(host: &Rc<Host>, parent: Option<Id>) -> Retained<NSArray<AnyObject>> {
     let tree = tree(host);
     host.ax_elements

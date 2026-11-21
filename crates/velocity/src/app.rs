@@ -503,6 +503,23 @@ impl App {
         }))
     }
 
+    /// An interactive window must become usable even when macOS never reports a real
+    /// scanout: screen sharing and remote-control sessions skip every drawable
+    /// (`presentedTime == 0`), and a window behind others or on another Space may not
+    /// present for a long time. Until startup is done, forwarded files, loads and
+    /// resource polls wait, so stop waiting and continue without the scanout record.
+    fn start_without_scanout(&mut self, w: &WindowHandle, waited: Duration) -> Result<(), String> {
+        self.clock.mark("startup_without_scanout");
+        self.reporter.emit(json!({"kind":"startup_without_scanout","waited_ms":ms(waited),"skipped_drawables":self.first_scanout.skipped_drawables,"first_callback_main_ms":self.first_scanout.first_callback.map(|t|ms(t.saturating_duration_since(self.clock.entered))),"surface_retries":self.retries}))?;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.release_prepared();
+            renderer.persist_pipeline_cache()?;
+        }
+        self.startup_done = true;
+        self.finish_startup_services("scanout_wait_expired_begin")?;
+        w.request_frame_at(Instant::now());
+        Ok(())
+    }
     fn finish_startup_services(&mut self, phase: &'static str) -> Result<(), String> {
         if !std::mem::take(&mut self.startup_services_pending) {
             return Ok(());
@@ -4962,7 +4979,13 @@ impl AppHandler for App {
         Ok(())
     }
     fn accessibility_tree(&self) -> accessibility::Tree {
-        self.accessible_tree()
+        let mut tree = self.accessible_tree();
+        tree.label = self
+            .workspace
+            .translations
+            .tr("Velocity workspace")
+            .into_owned();
+        tree
     }
     fn on_accessibility(
         &mut self,
@@ -5675,6 +5698,9 @@ impl AppHandler for App {
         }
         if !self.startup_done {
             let waiting_since = *self.waiting_since.get_or_insert_with(Instant::now);
+            if stop_waiting_for_scanout(self.options.mode, waiting_since.elapsed()) {
+                return self.start_without_scanout(w, waiting_since.elapsed());
+            }
             // Main already checked the display. The first display-link tick
             // is view-bound; don't query WindowServer again before the acquire.
             if self.options.mode.automatic() && waiting_since.elapsed() >= Duration::from_secs(1) {
@@ -6115,6 +6141,45 @@ fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Transla
             ..Default::default()
         },
     );
+}
+
+/// How long an interactive window waits for its first real scanout before startup
+/// continues without it. Benchmarks and other automatic modes always wait for a real
+/// frame (they check the display status instead).
+const INTERACTIVE_SCANOUT_WAIT: Duration = Duration::from_secs(1);
+fn stop_waiting_for_scanout(mode: Mode, waited: Duration) -> bool {
+    mode == Mode::Interactive && waited >= INTERACTIVE_SCANOUT_WAIT
+}
+
+#[cfg(test)]
+mod scanout_wait_tests {
+    use super::*;
+    #[test]
+    fn interactive_startup_stops_waiting_for_a_real_scanout_but_benchmarks_do_not() {
+        let just_under = INTERACTIVE_SCANOUT_WAIT - Duration::from_millis(1);
+        assert!(!stop_waiting_for_scanout(Mode::Interactive, Duration::ZERO));
+        assert!(!stop_waiting_for_scanout(Mode::Interactive, just_under));
+        assert!(stop_waiting_for_scanout(
+            Mode::Interactive,
+            INTERACTIVE_SCANOUT_WAIT
+        ));
+        assert!(stop_waiting_for_scanout(
+            Mode::Interactive,
+            Duration::from_secs(60)
+        ));
+        for mode in [
+            Mode::Startup,
+            Mode::Open,
+            Mode::Typing,
+            Mode::Scroll,
+            Mode::LargeFiles,
+        ] {
+            assert!(
+                !stop_waiting_for_scanout(mode, Duration::from_secs(60)),
+                "{mode:?}"
+            );
+        }
+    }
 }
 
 fn prune_empty_menus(entries: &mut Vec<MenuEntry>) {

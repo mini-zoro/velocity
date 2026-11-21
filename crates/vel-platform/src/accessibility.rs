@@ -260,6 +260,8 @@ impl Node {
 pub struct Tree {
     /// Parent-before-child ordered elements.
     pub nodes: Vec<Node>,
+    /// Localized name of the window's content group; empty falls back to English.
+    pub label: String,
 }
 
 #[derive(Default)]
@@ -435,7 +437,10 @@ mod tests {
                 calls.set(calls.get() + 1);
                 let mut node = Node::new(2, Some(1), Role::Row, caption, Rect::default());
                 node.announcement = Some(caption.into());
-                Some(Tree { nodes: vec![node] })
+                Some(Tree {
+                    nodes: vec![node],
+                    ..Default::default()
+                })
             })
         };
         let mut tracker = Announcements::default();
@@ -472,7 +477,10 @@ mod tests {
                 nodes.push(n);
             }
         }
-        let tree = Tree { nodes };
+        let tree = Tree {
+            nodes,
+            ..Default::default()
+        };
         let mut focus = Some(6);
         for _ in 0..5 {
             focus = tree.next_focus(focus, false);
@@ -536,6 +544,7 @@ mod tests {
         let status = Node::new(2, None, Role::Status, "Line 2", bounds);
         let tree = Tree {
             nodes: vec![tab, status],
+            ..Default::default()
         };
         assert_eq!(tree.next_focus(None, false), Some(1));
         assert_eq!(tree.next_focus(Some(1), true), Some(1));

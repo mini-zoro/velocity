@@ -696,6 +696,7 @@
     "Discard unsaved changes and reload this file from disk?": "要放弃未保存的更改，并从磁盘重新载入文件吗？",
     "Dismiss": "关闭",
     "Documents": "文稿",
+    "Velocity workspace": "Velocity 工作区",
     "Don't Save": "不保存",
     "Editor, {name}": "编辑器，{name}",
     "Enabled {name}. Preferences backup: {backup}": "已启用 {name}。偏好设置备份：{backup}",

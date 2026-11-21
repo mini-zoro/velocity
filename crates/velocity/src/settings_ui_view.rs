@@ -1324,6 +1324,7 @@ impl Page {
                     self.heading_bounds,
                 ),
             ],
+            ..Default::default()
         };
         if let Some(text) = &self.announcement {
             let mut node = Node::new(AX_ANNOUNCEMENT, None, Role::Status, text, Rect::default());

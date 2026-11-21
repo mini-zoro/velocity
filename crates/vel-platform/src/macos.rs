@@ -1139,7 +1139,7 @@ define_class!(
         }
         #[unsafe(method(isAccessibilityElement))] fn ax_element(&self) -> bool { true }
         #[unsafe(method_id(accessibilityRole))] fn ax_role(&self) -> Retained<NSString> { NSString::from_str("AXGroup") }
-        #[unsafe(method_id(accessibilityLabel))] fn ax_label(&self) -> Retained<NSString> { NSString::from_str("Velocity workspace") }
+        #[unsafe(method_id(accessibilityLabel))] fn ax_label(&self) -> Retained<NSString> { NSString::from_str(&self.ivars().host.upgrade().map_or_else(|| "Velocity workspace".to_owned(), |h| a11y::label(&h))) }
         #[unsafe(method_id(accessibilityChildren))] fn ax_children(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| a11y::children(&h,None)) }
         #[unsafe(method_id(accessibilityChildrenInNavigationOrder))] fn ax_navigation(&self) -> Option<Retained<NSArray<AnyObject>>> { self.ivars().host.upgrade().map(|h| a11y::children(&h,None)) }
         #[unsafe(method_id(accessibilityFocusedUIElement))] fn ax_focused(&self) -> Option<Retained<AnyObject>> { self.ivars().host.upgrade().and_then(|h| a11y::focused(&h)) }
@@ -1637,6 +1637,17 @@ define_class!(
             }
             h.pace();
         }
+        // Focus is applied on the next frame: the application menu is reinstalled for the
+        // key window (menu items target the installing window), selections switch between
+        // active and inactive colors, and the session records the active window. Without a
+        // frame, switching windows through the Window menu, ⌘` or Mission Control left menu
+        // commands such as Close Window acting on the previous window.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn became_key(&self, _n: &NSNotification) {
+            let h = &self.ivars().host;
+            h.dirty.set(true);
+            h.pace();
+        }
         #[unsafe(method(windowDidResignKey:))]
         fn resigned(&self, _n: &NSNotification) {
             if let Some(v) = self.ivars().host.view.get() {
@@ -1645,6 +1656,9 @@ define_class!(
                 }
                 v.text(TextInput::Unmark);
             }
+            let h = &self.ivars().host;
+            h.dirty.set(true);
+            h.pace();
         }
     }
 );

@@ -95,3 +95,29 @@ not instructions to inspect an installed Sublime Text copy.
 | Update dialog theming | Use a local update fixture with current, available and failed responses. Open Check for Updates under a legacy-style theme and check labels, version, changelog link, button states and legibility without installing anything. |
 
 Record results in `crates/velocity/MANUAL_TEST.md` (section "Live checks") or tell the agent.
+
+## Automated live run (2026-11-22, by the agent, user away from keyboard)
+
+Driven from outside the app through the macOS accessibility API and synthesized HID key events
+(`/tmp/live/ax.swift`; not shipped). Packaged build of main `6da6b18` plus the fixes listed below,
+fresh `--data-dir` profiles, system language 简体中文, Pinyin (Simplified) input method.
+
+| Area | Result |
+| --- | --- |
+| VoiceOver tree: editor | Text area exposes the full value, selected text, UTF-16 selection range and insertion line; caret moves and Shift-selection update them; typing replaces the selection. |
+| VoiceOver tree: tabs | Tabs are radio buttons with role description "tab", the file name as label and the selected state; a modified tab reads "b.txt，已编辑"; each tab has a "关闭 b.txt" button. |
+| VoiceOver tree: command palette | Search field "搜索命令", results list "结果", rows with caption and shortcut; arrow keys move the selected row. **Fixed:** rows also read the internal command name (`save`, `toggle_setting`), which the compact palette does not show. |
+| VoiceOver tree: Find | Find field, five option checkboxes with their state, Find / Find Previous / Find All buttons, and the match count status ("2 个匹配项"). |
+| VoiceOver tree: Settings (Graphical) | Rows read name, key, value and modified state; toggles are switches with values; popups read their value; category buttons mark the selected one. |
+| Localization | **Fixed:** the window content group read "Velocity workspace" in Chinese; it now reads "Velocity 工作区". **Fixed:** AppKit's own menu items (Services, Minimize All, Zoom All, Fill, Center, Move & Resize) and system role descriptions stayed English because the bundle declared no localizations; `CFBundleLocalizations` and `en.lproj` / `zh-Hans.lproj` now declare English and Simplified Chinese. |
+| Startup report | **Fixed:** every fresh launch of the packaged app reported "Package Theme - Velocity: 1 Python files not run" because the theme generator script was shipped inside the package. It now lives in `crates/velocity/scripts/theme/`. |
+| Chinese input method | Marked text is underlined at the caret with the candidate window directly below it; Space commits "你好"; ⌘Z removes the committed word in one step; Esc cancels the marked text; three carets each receive the committed text; the Find field and the command palette accept Pinyin. Minor: with several carets the marked text is drawn only at the primary caret (the committed result is correct); in the Find field the marked-text underline is a hairline that is hard to see. |
+| Non-US layout (German) | AppKit relocates menu equivalents for the layout (Toggle Line Comment shows ⌘ß). Neither ⌘ß nor ⌘⇧7 ("/" on German) toggled the comment, and ⌘⇧7 opened the Help search. Pending a black-box comparison with Sublime on the same layout before changing key matching. |
+| Chinese document | Markdown wraps; no extra spacing between Han characters; continuation lines do not start with "。" or "，". |
+| Session windows | Windows open at quit return with their tabs, including an unsaved buffer marked as edited. A normal quit removes the crash-report placeholder (leftover placeholders came only from killed processes). |
+| Window focus and menus | **Fixed:** after switching windows through the Window menu (or ⌘\`, Mission Control), menu commands such as Close Window still went to the previously key window, because the menu is reinstalled only on that window's next frame and a window becoming key requested none. Becoming or resigning key now requests a frame. |
+| Startup without a visible frame | **Fixed:** an interactive window waited indefinitely for a real scanout before polling forwarded files and loads. In a remote-control session every drawable is skipped, so files passed on the command line never opened. Interactive startup now continues after 1 s without a real scanout; benchmarks still wait. A window that macOS keeps behind other windows (activation refused) still starts when it first becomes visible. |
+
+Not run here: light/dark switch (would change the system appearance; covered by the light/dark
+render scenes), GUI benchmarks and the Round 35/36 tables (screen was locked before they ran).
+

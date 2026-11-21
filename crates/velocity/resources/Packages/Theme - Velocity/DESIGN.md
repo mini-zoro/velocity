@@ -46,7 +46,7 @@ so the 1x/2x/3x PNGs are crisp. The script uses only Python's standard library a
 78 compact, supersampled PNGs. File type icons use the matching `.sublime-file-icons` mapping
 rather than overriding the dynamic `icon_file_type` texture in the main theme.
 
-Run `python3 'crates/velocity/resources/Packages/Theme - Velocity/generate.py'` from the repository
+Run `python3 crates/velocity/scripts/theme/generate.py` from the repository
 root to reproduce the JSON and PNG resources, then list any new PNG in `theme_ui.rs` (`BUNDLED`).
 Existing outputs are backed up to `/tmp/velocity-round8-backups` (or the platform temporary
 directory) and replaced atomically. Neither application-only resources nor third-party
