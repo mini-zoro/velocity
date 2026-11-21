@@ -11,8 +11,8 @@ window, renderer, drawable or GPU workload was started in this round.
 **Update 2026-11-21:** with the user's permission, Sublime Text 4215 was later run on this machine
 as a black box only. See
 [Black-box comparison with Sublime Text 4215](#black-box-comparison-with-sublime-text-4215-on-this-machine-2026-11-21).
-At `12879ff`, Velocity reached its first window in 0.61–0.72 s; Sublime took 0.89–0.92 s.
-With `sqlite3.c` open and idle, Velocity's footprint was 224 MB; Sublime's was 173–186 MB.
+At `2427550` (2026-11-22), Velocity reached its first window in 0.37–0.43 s; Sublime took 0.62–0.65 s.
+With `sqlite3.c` open and idle, both used about 179–186 MB in the launch probe (`footprint`: 171–181 MB vs 162–168 MB).
 
 The [PLAN](PLAN.md#13-公开的性能基线) asks for at most 1.2× ST4 on the **same
 machine and file**, and for lower costs on huge files and long lines. Public data
@@ -938,6 +938,36 @@ Findings 1 and 2 are addressed. Velocity now reaches its first window sooner tha
 The `sqlite3.c` footprint is at the 1.2× target (≈ 230 MB). The remaining gap is about 40–50 MB.
 Large files were not re-measured. Round 38 changed only the representations used for
 fully highlighted files below the large-file threshold.
+
+### Native verification after round 39 (`2427550`, 2026-11-22)
+
+Same machine, packaged build of `2427550`, fresh `--data-dir` for every Velocity run,
+Sublime 4215 with `--safe-mode` and its safe-mode data removed before every run. Load
+average 2–5. `footprint` was sampled 25 s after launch; the launch probe is the one above.
+
+| Measurement | Sublime Text 4215 | Velocity `2427550` | Velocity `12879ff` |
+| --- | --- | --- | --- |
+| Launch → first window, empty (probe, 3 pairs) | 0.62–0.65 s | **0.37–0.43 s** | 0.61–0.72 s |
+| Launch → first window, `sqlite3.c` (probe, 2 pairs) | 0.62–0.64 s | **0.35 s** | 0.64–0.69 s |
+| Idle footprint, `sqlite3.c` (probe) | 179.6–186.4 MB | **178.9 MB** (both runs) | 223.6–223.8 MB |
+| Idle footprint, `sqlite3.c` (`footprint`, 2 pairs) | 162 / 168 MB | 171 / 181 MB | 214 MB |
+| Idle footprint, empty window (`footprint`, 2 pairs) | 95 / 120 MB | **86 / 74 MB** | 99 MB |
+| Spawn → idle, `sqlite3.c` | 3.6 s | 4.4 s | 4.7 s |
+
+`footprint` categories for `sqlite3.c`: Velocity MALLOC_SMALL 100–101 MB, MALLOC_LARGE 28 MB,
+IOSurface 21–32 MB, graphics 12 MB; Sublime 81–82, 29, 22–29 and 15 MB. Idle windows now hold
+21 MB of IOSurface in three of four Velocity samples (45 MB before round 39). With the
+probe's idle rule the two editors are level on `sqlite3.c`; `footprint` 25 s after launch
+puts Velocity 3–8% above Sublime, inside the 1.2× target. Velocity reaches its first window
+about 0.25 s sooner. The remaining memory difference is in small allocations.
+
+`scripts/bench-gui.sh` on the same build passed all workloads 5/5: main to first scanout
+476 / 1,318 ms (p50 / p95; the p95 is one cold run), typing on `sqlite3.c` 0.79 / 1.10 ms
+injection to present-return with one caret and 2.87 / 10.36 ms with 1,000 carets (over
+Velocity's own p95 budget), scroll CPU 4.41 / 5.15 ms, GPU pass 1.16 / 1.22 ms at
+2560×1140, first-frame footprint for 5,000 lines 107.5 MB (over Velocity's budget), and
+large files 0.4–16 ms per exercise with 97–376 MB footprint. Raw table:
+`/tmp/live/bench-gui.out` on the review machine.
 
 ## Round 36: interactive startup before AppKit
 

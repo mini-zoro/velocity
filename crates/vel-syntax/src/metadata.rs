@@ -45,6 +45,18 @@ impl Metadata {
             })
     }
     fn merge(&mut self, other: &Self) {
+        // Comment markers form one set per preference file. A more specific file that
+        // declares comment markers replaces the outer set, so JavaScript's `// ` inside an
+        // HTML <script> never pairs with HTML's ` -->` end marker (Sublime 4215 black-box:
+        // the line becomes `// var a = 1;`).
+        if other
+            .shell_variables
+            .keys()
+            .any(|k| k.starts_with("TM_COMMENT_START"))
+        {
+            self.shell_variables
+                .retain(|k, _| !k.starts_with("TM_COMMENT_"));
+        }
         self.shell_variables.extend(other.shell_variables.clone());
         self.settings.extend(other.settings.clone());
     }

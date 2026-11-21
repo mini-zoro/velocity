@@ -183,7 +183,8 @@ fn scope_extent_stays_in_the_carets_multiline_occurrence() {
 fn block_only_comment_probe_table_and_existing_scope_uncomment() {
     for (syntax, source, comment) in [
         ("HTML", "<p>hello</p>", "<!-- <p>hello</p> -->"),
-        ("CSS", "color: red;", "/* color: red; */"),
+        // Verbatim markers, as Sublime 4215 inserts them (black-box, 2026-11-22).
+        ("CSS", "color: red;", "/*color: red;*/"),
     ] {
         let mut e = editor(source, syntax);
         e.set_caret(3, false);
@@ -408,4 +409,24 @@ fn identical_paste_and_indent_collapses_all_requested_selections() {
     assert_eq!(e.buffer.view(e.id).sel().primary_index(), 0);
     e.run("undo", &json!({})).unwrap();
     assert_eq!(e.text.to_string(), "same other same");
+}
+
+/// Sublime Text 4215, observed as a black box (2026-11-22): ⌘/ on each line of an HTML file.
+/// An embedded language uses its own marker set; JavaScript's `// ` never borrows HTML's
+/// ` -->` end, and CSS's `/*` `*/` are inserted verbatim.
+#[test]
+fn embedded_languages_use_their_own_comment_markers() {
+    let source = "<html>\n<script>\nvar a = 1;\n</script>\n<p>text</p>\n<style>\np { color: red; }\n</style>\n</html>\n";
+    let mut e = editor(source, "HTML");
+    ready(&mut e);
+    for needle in ["p { color", "<p>text", "var a"] {
+        let at = e.text.to_string().find(needle).unwrap();
+        e.set_caret(at, false);
+        e.run("toggle_comment", &json!({})).unwrap();
+        ready(&mut e);
+    }
+    assert_eq!(
+        e.text.to_string(),
+        "<html>\n<script>\n// var a = 1;\n</script>\n<!-- <p>text</p> -->\n<style>\n/*p { color: red; }*/\n</style>\n</html>\n"
+    );
 }

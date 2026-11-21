@@ -1911,15 +1911,9 @@ impl Editor {
                     edits.insert((b, b + right), String::new());
                     continue;
                 } else if !preferred.end.is_empty() {
-                    let (start, end) = (&preferred.start, &preferred.end);
-                    let (left, right) = if whole_line {
-                        (
-                            format!("{} ", start.trim_end()),
-                            format!(" {}", end.trim_start()),
-                        )
-                    } else {
-                        (start.clone(), end.clone())
-                    };
+                    // Markers are inserted verbatim, as Sublime 4215 does: CSS's `/*`/`*/`
+                    // make `/*p { color: red; }*/`, HTML's own markers carry their spaces.
+                    let (left, right) = (preferred.start.clone(), preferred.end.clone());
                     // Insert separate delimiters to preserve carets and selection interiors.
                     if a == b {
                         edits.insert((a, b), format!("{left}{right}"));
@@ -2697,12 +2691,17 @@ impl CommentMarker {
         } else {
             right.len()
         };
-        // The block-only whole-line command inserts one space on either side.
+        // A comment padded on both sides (`/* x */`, as older Velocity builds inserted or as
+        // people write) loses both spaces. A space on one side only is content, such as the
+        // indentation inside `/*    int a;*/` that verbatim markers produce.
         if padded && source.len() >= a + b + 2 {
-            a += usize::from(a == left.len() && source.as_bytes().get(a) == Some(&b' '));
-            b += usize::from(
-                b == right.len() && source.as_bytes().get(source.len() - b - 1) == Some(&b' '),
-            );
+            let pad_left = a == left.len() && source.as_bytes().get(a) == Some(&b' ');
+            let pad_right =
+                b == right.len() && source.as_bytes().get(source.len() - b - 1) == Some(&b' ');
+            if pad_left && pad_right {
+                a += 1;
+                b += 1;
+            }
         }
         (a + b <= source.len()).then_some((a, b))
     }

@@ -1104,16 +1104,21 @@ pub fn sort_lines_folded(buffer: &mut Buffer, id: ViewId) -> ChangeId {
 pub fn reverse_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     reorder(buffer, id, Order::Reverse)
 }
-/// Joins touched lines, or a caret's line with its successor, inserting one space.
+/// Joins the lines each selection spans (a caret joins its line with the next), trimming the
+/// whitespace around every seam.
+///
+/// Rules observed in Sublime Text 4215 as a black box (2026-11-22):
+/// - a selection's last line counts even when the selection ends at its first column, so
+///   Select All also joins the final empty line and drops the trailing newline;
+/// - a seam gets one space, except after `(`, `[` or `{`, before `)`, `]` or `}`, and
+///   where either side is blank (blank lines vanish without doubling spaces).
 pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
-    // ST-BEHAVIOR: unverified [L6]: trim horizontal whitespace around joins, insert one ASCII space; the last selected line is not joined onward.
     let text = buffer.text();
     let selection = buffer.view(id).sel();
     let mut joins = BTreeSet::new();
     for r in selection.iter() {
-        let lines = touched_lines(text, &Selection::from(r));
-        let a = *lines.first().expect("line");
-        let b = *lines.last().expect("line");
+        let a = text.byte_to_line(r.begin());
+        let b = text.byte_to_line(r.end());
         if a == b {
             if a + 1 < text.len_lines() {
                 joins.insert(a);
@@ -1124,8 +1129,11 @@ pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
     }
     // https://www.sublimetext.com/download, build 4213: joining maintains the
     // selection. Replace only each seam so endpoints inside the text remain attached.
-    // Build 4166 says "Improved Join Lines behavior" without a precise spacing rule;
-    // retain the existing single-space rule until it can be confirmed publicly.
+    let content = |row: usize| {
+        let line = text.line(row).to_string();
+        let line = line.strip_suffix('\n').unwrap_or(&line).to_owned();
+        line.strip_suffix('\r').unwrap_or(&line).to_owned()
+    };
     let edits = joins
         .iter()
         .copied()
@@ -1139,7 +1147,23 @@ pub fn join_lines(buffer: &mut Buffer, id: ViewId) -> ChangeId {
             };
             let b = text.line_to_byte(row + 1) + right.len()
                 - right.trim_start_matches([' ', '\t']).len();
-            (a..b, " ".into())
+            // The text this seam continues: the nearest non-blank line of the same chain.
+            let previous = (0..=row)
+                .rev()
+                .take_while(|&r| r == row || joins.contains(&r))
+                .map(&content)
+                .find(|line| !line.trim().is_empty());
+            let next = content(row + 1);
+            let next = next.trim_start_matches([' ', '\t']);
+            let space = match previous.as_deref().map(str::trim_end) {
+                None => false,
+                Some(left) => {
+                    !next.is_empty()
+                        && !left.ends_with(['(', '[', '{'])
+                        && !next.starts_with([')', ']', '}'])
+                }
+            };
+            (a..b, if space { " " } else { "" }.into())
         })
         .collect();
     commit_owned(buffer, id, edits)

@@ -12,7 +12,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 <!-- BEGIN PARITY TOTALS -->
 | Area | Done | Partial | Missing | Out of scope |
 | --- | ---: | ---: | ---: | ---: |
-| Editing and selection | 55 | 3 | 0 | 0 |
+| Editing and selection | 56 | 2 | 0 | 0 |
 | Search and navigation | 57 | 6 | 0 | 0 |
 | Files, projects and sessions | 54 | 7 | 1 | 1 |
 | Windows, tabs and display | 72 | 8 | 0 | 1 |
@@ -20,7 +20,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Customization and resources | 42 | 11 | 0 | 0 |
 | Build, Git and command line | 42 | 11 | 0 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **377** | **56** | **1** | **7** |
+| **Total** | **378** | **55** | **1** | **7** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
@@ -79,7 +79,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Duplicate line or selection | [Commands][commands] | done | `duplicate_selected_text_or_caret_lines` | |
 | Delete line, including multiple selected rows | [Commands][commands] | done | `run_command("delete_line")` via `vel-commands`; `line_commands_transform_separate_selected_blocks` | |
 | Swap lines up/down | [D4107][releases], [V4050][dev] | done | `swap_blocks_and_preserve_final_newline_and_column` | |
-| Join lines | [D4166][releases], [D4213][releases] | partial | `join_preserves_interior_selection_and_legacy_unverified_spacing` | Selections stay attached; Velocity inserts a space at each join. 4213 mentions right brackets but does not say which of `)`, `]`, and `}` omit a space or how already padded delimiters behave. |
+| Join lines | [D4166][releases], [D4213][releases] | done | `join_lines_matches_sublime_black_box`, `join_preserves_interior_selection_and_bracket_spacing` | Selections stay attached. Rules confirmed against Sublime 4215 as a black box (2026-11-22): no space after `(`, `[`, `{` or before `)`, `]`, `}`; blank lines vanish; a selection's last line counts even when it ends at the first column, so Select All also drops the final newline. |
 | Sort lines | [Commands][commands], [D4107][releases] | done | `sorting_without_a_selection_sorts_the_whole_buffer`, `sort_reverse_multiple_blocks_unicode_no_final_lf` | |
 | Sort selection | [Commands][commands] | done | `sort_selection`; `selected_strings_move_between_variable_length_slots_without_touching_gaps` | |
 | Permute lines: reverse, unique, shuffle | [Commands][commands] | done | `line_permutations_deduplicate_stably_and_preserve_line_structure`, `shuffle_is_reproducible_and_preserves_the_multiset` | |
@@ -87,7 +87,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Upper/lower/title/swap case | [Commands][commands] | done | `unicode_case_length_changes_and_title_swap` | |
 | Convert identifier case (camel, Pascal, snake, kebab and related forms) | [D4142.6][releases], [V4128.1][dev] | done | `identifier_cases_cover_acronyms_unicode_and_multi_caret_overlap` | |
 | Wrap Paragraph | [D4107][releases], [V4050][dev] | done | `paragraphs_wrap_once_with_display_width_and_retain_blank_separators`, `wrapping_prefix_probe_table_keeps_comments_and_code_separate` | |
-| Line and block comment commands | [D4142][releases], [V4130][dev] | partial | `round21_comment_flags_variants_and_round_trip`; `toggle_comment` | Numbered markers, indent and case flags work. The [comment reference][comments] does not specify marker precedence or how a selection crossing host and embedded language boundaries is split. |
+| Line and block comment commands | [D4142][releases], [V4130][dev] | partial | `round21_comment_flags_variants_and_round_trip`; `embedded_languages_use_their_own_comment_markers` | Numbered markers, indent and case flags work. Black-box Sublime 4215 (2026-11-22): an embedded language's marker set replaces the host's as a unit (`// var a = 1;` in `<script>`, never `// … -->`), and markers are inserted verbatim (`/*p { color: red; }*/`). How a selection crossing host and embedded boundaries is split remains unconfirmed. |
 | Mark, kill/yank and exchange mark | [Commands][commands] | done | `named_mark_kills_yank_and_repeat_use_application_state` | |
 | Bookmarks, navigation, clear, and select all | [Commands][commands], [D4166][releases] | done | `bookmark_regions_and_marks_follow_edits_navigation_and_kills`; `toggle_bookmark`, `select_all_bookmarks` | |
 | Paste and paste-and-indent | [Commands][commands] | done | `clipboard_snippets_newline_tabs_and_typing_groups`; `paste_and_indent` | |
@@ -424,7 +424,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Mouse Bindings Preferences row | [D4166.6][releases], [V4153.3][dev] | done | `edit_settings` Mouse Bindings resource in Main menu | |
 | Mouse Bindings palette entry | [D4180.32][releases], [V4178.1][dev] | done | `Velocity.sublime-commands`, `edit_settings` | |
 | .sublime-menu IDs, submenu merge, availability and checkmarks | [Menus][menus] | done | `vel-config/ui.rs::resolve_menu`, `vel-config/tests/context_menus.rs` | Main/edit/tab/sidebar/mount/Where/widget implemented. |
-| Native shortcut labels match active keymap | [Menus][menus], [Key bindings][keys] | partial | (c) `menu_roles_and_exact_shortcuts_survive_renaming_and_reload`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Menu model resolves the active binding. Live run 2026-11-22 on German: AppKit relocates the ⌘/ equivalent to ⌘ß, and neither ⌘ß nor ⌘⇧7 toggles the comment (⌘⇧7 opens Help search); key matching waits for a black-box comparison with Sublime on the same layout. |
+| Native shortcut labels match active keymap | [Menus][menus], [Key bindings][keys] | partial | (c) `menu_roles_and_exact_shortcuts_survive_renaming_and_reload`; [native check](manual-checks.md#6-round-35-windows-and-resources) | Menu model resolves the active binding. German layout, 2026-11-22: AppKit relocates ⌘/ to ⌘ß. Sublime 4215 (black box) toggles the comment on ⌘ß and ignores ⌘⇧7; Velocity now runs a menu command when AppKit matched its relocated equivalent (`relocated_menu_equivalents_are_told_apart_from_declined_chords`). Native recheck of the fix pending. |
 | Additional native menu resources (build, console, panel and status-specific variants) | [Menus][menus] | partial | (b) `r35_widget_settings_select_named_context_menu_only_for_widget`, `ContextMenuKind::resource_name` | All seven documented menu filenames load, including the widget `context_menu` filename override. The reference does not identify distinct resource names, args or merge precedence for additional build, console and status variants. |
 | Loose and ZIP .sublime-package resources | [Packages][packages] | done | `vel-config/resources.rs`, `vel-packages/tests/packages.rs` | Declarative resources only. |
 | Package priority, User overrides, resource reload | [Packages][packages] | done | `Workspace::poll_resource_reload`, `context_menu_resources_layer_and_hot_reload_with_the_workspace` | |

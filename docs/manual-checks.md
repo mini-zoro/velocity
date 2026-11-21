@@ -118,6 +118,17 @@ fresh `--data-dir` profiles, system language 简体中文, Pinyin (Simplified) i
 | Window focus and menus | **Fixed:** after switching windows through the Window menu (or ⌘\`, Mission Control), menu commands such as Close Window still went to the previously key window, because the menu is reinstalled only on that window's next frame and a window becoming key requested none. Becoming or resigning key now requests a frame. |
 | Startup without a visible frame | **Fixed:** an interactive window waited indefinitely for a real scanout before polling forwarded files and loads. In a remote-control session every drawable is skipped, so files passed on the command line never opened. Interactive startup now continues after 1 s without a real scanout; benchmarks still wait. A window that macOS keeps behind other windows (activation refused) still starts when it first becomes visible. |
 
-Not run here: light/dark switch (would change the system appearance; covered by the light/dark
-render scenes), GUI benchmarks and the Round 35/36 tables (screen was locked before they ran).
+Second run (2026-11-22, 01:45–02:10, user away; every keystroke script aborts if the pointer
+moves or another app becomes frontmost):
+
+| Area | Result |
+| --- | --- |
+| Window focus and menus | Verified natively: after Window › a.rs, File › New File opened in the a.rs window; after Window › b.txt, Window › Close Window closed the b.txt window. |
+| Launch while locked | Verified natively: launched while the display was asleep and the screen locked, the window presented after unlock with both files open. |
+| GUI benchmarks | `scripts/bench-gui.sh` passed every workload 5/5; see "Native verification after round 39" in `performance.md`. Two Velocity budgets were missed (1,000-caret typing p95 10.4 ms, 5,000-line first-frame footprint 107.5 MB). |
+| Black-box comparison with Sublime 4215 | Same keystrokes, saved files compared (`scripts/blackbox-behavior-probe.sh`). Join Lines, embedded-language comments, verbatim block markers and the German-layout menu shortcut now follow Sublime (unit tests reproduce the Sublime outputs). Regex `^` replace already matched; `(?=b)` lookahead is not supported by Velocity's regex engine (Sublime: `a-bc`). With several carets Sublime shows the composing Pinyin at every caret; Velocity only at the primary one. |
+| Evidence for U01 / U04 | Sublime opened with three files shows no sidebar; opened with a folder it shows an empty editor without a tab, and Goto Anything previews a file without adding a tab. Velocity shows the sidebar and an untitled tab, and previews in an italic tab (the user chose "keep" for both before this evidence). |
+
+Still manual: VoiceOver speech itself (the tree was checked, not the voice), light/dark switch
+(covered by render scenes), native recheck of the German-layout fix, and the Round 35/36 tables.
 

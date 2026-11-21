@@ -292,9 +292,10 @@ fn join_lines_multiselection_and_blank_line() {
     let (mut b, v) = setup("a  \n  b\n c\nd", &[(0, 7), (8, 10)]);
     join_lines(&mut b, v);
     assert_eq!(b.text().to_string(), "a b\n c d");
+    // A blank line vanishes without doubling the space (Sublime 4215 black-box).
     let (mut b, v) = setup("a\n \nb", &[(0, 5)]);
     join_lines(&mut b, v);
-    assert_eq!(b.text().to_string(), "a  b");
+    assert_eq!(b.text().to_string(), "a b");
 }
 #[test]
 fn duplicate_selected_text_or_caret_lines() {

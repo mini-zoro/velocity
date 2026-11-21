@@ -52,7 +52,11 @@ fn cdata_and_independent_setting_precedence() {
     assert_eq!(special.boolean("cancelCompletion"), Some(false));
     assert_eq!(special.boolean("indentParens"), Some(true));
     assert_eq!(special.shell_variables["TM_COMMENT_START"], "# ");
-    assert_eq!(special.shell_variables["TM_COMMENT_END_2"], "*/");
+    // Comment markers replace the outer set as a unit (Sublime 4215 black-box: JavaScript in
+    // HTML <script> comments as `// x`, never borrowing HTML's ` -->`); other settings above
+    // still merge one by one.
+    assert!(!special.shell_variables.contains_key("TM_COMMENT_END_2"));
+    assert_eq!(plain.shell_variables["TM_COMMENT_END_2"], "*/");
     let comment = set.metadata_for(&"source.fixture meta.special comment.line".parse().unwrap());
     assert_eq!(comment.boolean("cancelCompletion"), Some(true));
 }

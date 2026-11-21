@@ -131,7 +131,8 @@ fn line_commands_transform_separate_selected_blocks() {
             json!({"operation":"reverse"}),
             "A\nb\n--\nC\nd",
         ),
-        ("join_lines", json!({}), "b A\n--\nd C"),
+        // Join counts a line the selection ends at the start of (Sublime 4215 black-box).
+        ("join_lines", json!({}), "b A --\nd C"),
     ] {
         let mut f = Fixture::new("b\nA\n--\nd\nC", [Region::new(0, 4), Region::new(7, 10)]);
         run(&mut f, name, args);

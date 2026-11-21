@@ -161,14 +161,34 @@ fn wrapping_prefix_probe_table_keeps_comments_and_code_separate() {
 }
 
 #[test]
-fn join_preserves_interior_selection_and_legacy_unverified_spacing() {
+fn join_preserves_interior_selection_and_bracket_spacing() {
     let (mut b, id) = fixture("alpha\n beta", &[Region::new(2, 9)]);
     ops::join_lines(&mut b, id);
     assert_eq!(b.text().to_string(), "alpha beta");
     assert_eq!(b.view(id).sel().primary(), Some(Region::new(2, 8)));
     let (mut b, id) = fixture("foo(\n)", &[Region::caret(3)]);
     ops::join_lines(&mut b, id);
-    assert_eq!(b.text().to_string(), "foo( )"); // See the build-4166 verification note in ops::join_lines.
+    assert_eq!(b.text().to_string(), "foo()");
+}
+
+/// Sublime Text 4215, observed as a black box (2026-11-22): Select All + Join Lines on these
+/// files, and ⌘L ⌘L + Join Lines (a selection ending at the first column of line 3).
+#[test]
+fn join_lines_matches_sublime_black_box() {
+    let source = "call(\n    a,\n    b\n)\nx = [\n    1\n]\n{\n    key\n}\nfoo  (\n  bar  )\nend\n";
+    let (mut b, id) = fixture(source, &[Region::new(0, source.len())]);
+    ops::join_lines(&mut b, id);
+    assert_eq!(
+        b.text().to_string(),
+        "call(a, b) x = [1] {key} foo  (bar  ) end"
+    );
+    let source = "x = (\n\n    1\n)\nfoo(\n    )\n[ 1,\n  2 ]\n";
+    let (mut b, id) = fixture(source, &[Region::new(0, source.len())]);
+    ops::join_lines(&mut b, id);
+    assert_eq!(b.text().to_string(), "x = (1) foo() [ 1, 2 ]");
+    let (mut b, id) = fixture("a\nb\nc\nd\n", &[Region::new(0, 4)]);
+    ops::join_lines(&mut b, id);
+    assert_eq!(b.text().to_string(), "a b c\nd\n");
 }
 
 #[test]

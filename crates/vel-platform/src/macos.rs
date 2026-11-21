@@ -1283,10 +1283,17 @@ define_class!(
                 // If the editor declines a chord (e.g. during composition), don't
                 // execute the display shortcut as a fallback menu action.
                 // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/HandlingKeyEvents/HandlingKeyEvents.html
+                // AppKit relocates equivalents for non-US layouts (⌘/ shows as ⌘ß on German).
+                // The keymap never receives that chord, so the shortcut the menu displays
+                // runs the command, as in Sublime Text 4215 (black-box, German layout).
                 if !h.stopped.get() && !item.keyEquivalent().is_empty()
                     && NSApplication::sharedApplication(h.mtm).currentEvent().is_some_and(|event| {
                         event.r#type() == NSEventType::KeyDown
                             && event.modifierFlags().contains(NSEventModifierFlags::Command)
+                            && !relocated_equivalent(
+                                &item.keyEquivalent().to_string(),
+                                &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
+                            )
                     })
                 {
                     return;
@@ -2141,6 +2148,23 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
             item.setSubmenu(Some(&child));
         }
     }
+}
+
+/// Whether AppKit matched a menu item through its layout-localized equivalent: the key
+/// pressed produced a different character than the one the item was given.
+fn relocated_equivalent(equivalent: &str, pressed: &str) -> bool {
+    !pressed.is_empty() && equivalent.to_lowercase() != pressed.to_lowercase()
+}
+
+#[cfg(test)]
+#[test]
+fn relocated_menu_equivalents_are_told_apart_from_declined_chords() {
+    // German: AppKit shows ⌘/ as ⌘ß; the keymap never sees "ß".
+    assert!(relocated_equivalent("/", "ß"));
+    // Same character (any case): the editor saw and declined this chord.
+    assert!(!relocated_equivalent("/", "/"));
+    assert!(!relocated_equivalent("z", "Z"));
+    assert!(!relocated_equivalent("s", ""));
 }
 
 fn menu_key_equivalent(chord: &str) -> Option<(char, NSEventModifierFlags)> {

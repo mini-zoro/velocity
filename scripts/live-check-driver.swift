@@ -163,6 +163,11 @@ case "type":  // type <pid|hid> text  (unicode string events, bypass layout/IME)
 case "activate":
     guard let pid = pid_t(args[1]), let r = NSRunningApplication(processIdentifier: pid) else { die("no app") }
     print("activate=\(r.activate(options: [.activateAllWindows]))")
+case "mouse":  // current pointer location
+    let l = CGEvent(source: nil)!.location
+    print("\(Int(l.x)),\(Int(l.y))")
+case "frontpid":
+    print(NSWorkspace.shared.frontmostApplication.map { "\($0.processIdentifier)" } ?? "0")
 case "front":
     print(NSWorkspace.shared.frontmostApplication.map { "\($0.processIdentifier) \($0.localizedName ?? "")" } ?? "none")
 case "inputs":  // list enabled + selectable keyboard input sources

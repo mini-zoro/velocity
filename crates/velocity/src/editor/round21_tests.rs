@@ -989,7 +989,8 @@ fn round21_repeated_stale_block_comment_variant_uses_exact_scope() {
     let e = w.editor_mut();
     scopes_ready(e);
     e.run("toggle_comment", &json!({"variant":2})).unwrap();
-    assert_eq!(e.text.to_string(), "/*     int a; */");
+    // Whole-line block markers are inserted verbatim (Sublime 4215 black-box, CSS `/*p { … }*/`).
+    assert_eq!(e.text.to_string(), "/*    int a;*/");
     assert_eq!(e.caret, e.text.len_bytes());
     let mut panels = Panels::new(&w, false);
     key(&mut w, &mut panels, "super+/");
