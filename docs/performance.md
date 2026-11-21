@@ -254,6 +254,159 @@ injection to present-return, and 178 MB physical footprint / 229 MB RSS
 after typing. These are native endpoints; neither the public Sublime idle
 range nor the windowless font probe is like-for-like.
 
+## Native GUI run 2026-11-21
+
+Packaged release `b96f0b7`, real display, M1 Pro, one-minute load average
+4–8. Raw JSONL: `/tmp/velocity-gui-b96.keep/`. The changes below were
+tested without opening a window or packaging an app.
+
+| Workload | Native baseline |
+|---|---|
+| SQLite C, 1,000 carets, 500 samples per run | 3.42–3.50 ms median injection to present-return. In each of three runs, 59 samples exceeded 100 ms, all at the Enter step (indices 35, 43, …, 499); p99 1.95–2.15 s, maximum 2.25–2.37 s. |
+| SQLite C scroll, 3840 × 2000 physical pixels | Event to submit 20.7 / 21.2 ms p50/p95; GPU render pass 0.86 / 1.13 ms. Acquire alone was 18.3–19.6 ms p50 and about 19.9 ms p95. |
+| 50 MB single-line text, 100 native actions | After the first frame: 275 MB footprint / 309 MB RSS. After the benchmark: 2.77 GB footprint / 1.94 GB RSS. |
+| Startup | Two warm runs: display preflight at 84–120 ms, NSApplication ready at 244–263 ms after main (previously about 30 ms and 125 ms, respectively). One outlier reached NSApplication at 2,490 ms. All three skipped the first drawable. First positive scanout was 134–152 ms after first present-return in the warm runs (191 ms in the outlier). |
+
+**Typing.** On the stalled samples, the median event-to-submit time was
+835–840 ms; acquire was 0.05–0.06 ms, encode/submit 0.19–0.21 ms, and
+timer lateness 0.85–1.35 ms. The timer for the following sample could be
+late because the previous Enter had blocked the main thread. The replay
+places carets at bytes for the beginnings of the first 1,000 lines and
+uses the native Unicode/Enter sequence and production keymap, edit,
+reveal and scene code. The old keymap scope fallback binary-searched the
+old byte offset for every caret and replayed the full edit journal at
+each probe. Its cost rose with retained history, even when highlighting
+workers were not on the input thread. The fix projects sorted carets
+back through indexed change ranges once per key resolution; the
+rightmost left-biased preimage still preserves deletion/insertion
+boundary semantics. Enter also reuses the effective indentation patterns
+per scope stack and searches sorted minimap row ranges.
+
+**Scroll.** The native metric called `cpu_event_to_submit` is elapsed
+time and includes the drawable wait. Subtracting acquire and
+encode/submit leaves 0.80–0.93 ms per-run median for all remaining work,
+including native event handling, scene building and renderer preparation.
+The headless replay uses a 1920 × 1000 point viewport at scale 2 and
+warms the exact C styles for the scroll range. View profiling attributes
+about 0.15 ms/frame to preparing and painting text rows, 0.04 ms to
+viewport/style publication, and under 0.01 ms to minimap painting. No
+draw-list approximation was added. The [CAMetalLayer acquire contract](https://developer.apple.com/documentation/quartzcore/cametallayer/nextdrawable())
+allows a blocking wait if the pool is exhausted. The renderer keeps FIFO
+but requests latency 2 (three drawables in wgpu 30 Metal, up from two).
+This adds room for the next frame while a drawable is in use or queued;
+it does not increase display refresh rate and may add an in-flight
+frame. Re-measure acquire, scanout cadence and memory natively.
+
+**Long line.** The headless native-step replay reproduced roughly 50 MB of
+extra footprint per insertion despite only a few cached layouts. A
+temporary allocator trace showed one fresh growable string in
+`ViewportHighlighter::repair_long_line` per version, reaching 64 MiB and
+then being freed. The physical footprint grew with this allocator churn,
+not with live undo or glyph state. Exact background repair now fills one
+reusable, page-rounded UTF-8 scratch buffer across edits, including
+rewind/correction handling. This does not skip exact parsing or change
+the rendering policy.
+
+**Startup.** The preflight is still a display/session query before the
+workspace is constructed; the raw preflight growth alone cannot be
+attributed to the editor. The source audit since round 26 found catalog
+loading in workspace configuration, but Settings (Graphical) metadata
+is lazy, syntax-test inventory is command-driven, temporary index sweeps
+are background work, and font probing runs after NSApplication readiness.
+The bundled grammar cache hit still walked and read the full shipped
+syntax tree to validate the content hash. Build-time generation now
+embeds the same linked syntax set, with no serialized regex machines;
+runtime user grammar overrides retain the existing content-checked
+path. New workspace/document milestones separate editor setup from
+AppKit. Headless startup also reports cumulative and per-phase process
+instruction counts; it cannot measure the display query or AppKit.
+
+Apple documents that a zero [`presentedTime`](https://developer.apple.com/documentation/metal/mtldrawable/presentedtime)
+means a drawable was not presented or its frame was dropped, and that
+Metal presentation is [asynchronous to Core Animation by default](https://developer.apple.com/documentation/quartzcore/cametallayer/presentswithtransaction).
+Ordering and activation requests in the same callback therefore do
+not prove the compositor has accepted the layer. That is consistent
+with the trace, not proof of the particular WindowServer drop reason.
+The app still prepares the first frame offscreen, then orders, activates
+if foreground, and flushes the layer transaction. It acquires on the
+first visible [view display-link tick](https://developer.apple.com/documentation/appkit/nsview/displaylink(target:selector:))
+instead of acquiring in the launch callback. The initial acquire no
+longer repeats display preflight; delayed automatic runs still check it
+on retry. Verify `first_visible_display_tick`, skipped drawables and
+first positive scanout on the native rerun.
+
+### Headless measurements
+
+Use the same fixture HOME and shell as the other benchmarks. No
+window, drawable, encoding or GPU submission is part of these runs.
+
+```sh
+V=target/release/velocity
+F=spikes/data/sublime-comparison
+"$V" --headless-perf-typing "$F/sqlite3.c" --carets 1000
+VELOCITY_REVIEW_PROFILE=1 "$V" --headless-perf-scroll "$F/sqlite3.c" --width 1920 --height 1000
+"$V" --headless-perf-large "$F/line-50000000.txt"
+"$V" --headless-perf-startup --lines 5000
+```
+
+Typing dropped from 2.28 s p99 CPU in the initial control replay to
+14.0–16.3 ms in three candidate runs. These are 500 samples per trial,
+main-thread CPU through scene return, not native present-return. The exact
+4K scene replay measured 0.20 / 0.38 ms p50/p95 before and
+0.20 / 0.24 ms after. The single-line replay ended at 2.60 GB → 139 MB
+footprint and 1.81 GB → 172 MB RSS after 100 actions and settling.
+
+Seven alternating startup pairs on the 5,000-line Rust fixture, with the
+same instrumentation on `b96f0b7` and the candidate. The counters below
+are side medians, in millions of retired process instructions; work done
+by background threads before each sample is included. Median elapsed
+time through first scene was 77.6 → 69.1 ms and bundled syntax loading
+was 19.5 → 3.8 ms. Timing was collected on a shared host, not as a quiet
+launch latency claim.
+
+| Startup phase | Before | After |
+|---|---:|---:|
+| Load input text | 1.45 | 1.45 |
+| Configure workspace | 784.0 | 659.1 |
+| Choose and attach document syntax | 20.6 | 20.8 |
+| Initialize App | 2.74 | 3.27 |
+| First CPU scene | 42.5 | 47.6 |
+| Process total through first CPU scene | 888.1 | 782.9 |
+
+Regression coverage: sorted reverse maps checked against forward
+projection, a 1,000-caret stale-scope Enter CPU budget on 151,639 source
+rows, exact highlighted 4K scene CPU, reusable allocation across 50
+oversized-line edits, and startup ordering with a visible-tick gate.
+Raw headless records are under `/tmp/velocity-c37.pKt9Hy/`.
+
+### Validation
+
+Both release binaries were built with `--locked -j 6` and
+`MACOSX_DEPLOYMENT_TARGET=14.0`. The 242-file official assertion reports
+(126,600 passes, no failures or skips) matched byte-for-byte. The Onig,
+multi-matcher and memoized differential matched on all 193,704 lines,
+with operations, corrections, rewinds and warnings digest
+`1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`.
+Eight software PNGs for `r5_sidebar` and `r6-cjk-zh` at both scales and
+appearances were byte-identical. The sandbox has no Metal adapter.
+
+The no-packaging fallback passed formatting, strict workspace Clippy and
+rustdoc. Release workspace tests: 1,752 passed, 80 ignored, and one
+failure. `shipped_catalogs_pass_draw_list_text_audit` reported the ASCII
+components of the disposable fixture path in zh-Hans Goto Anything.
+
+| Paired instruction workload | Before median | After median | Median paired change |
+|---|---:|---:|---:|
+| `features`, nine serial pairs | 195.332B | 194.702B | −0.20% |
+| `carets1000`, seven pairs | 4.284B | 3.768B | −13.00% |
+| `smoke1`, seven pairs | 307.178M | 307.753M | +0.10% |
+
+The initial seven-pair run overlapped the workspace gate and replay
+probes. `features` exceeded the cap at +1.45% in that run (individual
+pairs ranged from −5.84% to +11.45%). The separately reported nine
+serial pairs ran after this lane's other build and test jobs finished.
+Both runs are retained in `instruction-pairs/` and `features-serial/`.
+
 ## Round 29 attribution
 
 `sample` could not attach to the headless child in the sandbox. An independent

@@ -418,6 +418,9 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             options.mode,
             Mode::HeadlessPerfStartup
                 | Mode::HeadlessPerfFile
+                | Mode::HeadlessPerfTyping
+                | Mode::HeadlessPerfScroll
+                | Mode::HeadlessPerfLarge
                 | Mode::HeadlessPerfHighlight
                 | Mode::HeadlessPerfFind
                 | Mode::HeadlessPerfGoto
@@ -550,6 +553,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                 }
                 Err(e) => return Err(e),
             };
+            clock.mark("workspace_configured");
             workspace.recent_files = restored.recent_files.clone();
             workspace.restore_original = sessions.borrow().original.clone();
             workspace.recent_folders = restored.recent_folders.clone();
@@ -622,6 +626,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             if options.groups > 1 {
                 workbench::configure_groups(&mut workspace, options.groups)?;
             }
+            clock.mark("startup_document_configured");
             window.title = workspace.window_title();
             let mut app = app::App::new(
                 options.clone(),

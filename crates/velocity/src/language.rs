@@ -16,7 +16,7 @@ use vel_highlight::{
     DocumentHighlighter, HighlightBatch, HighlightService, ScopeProvider, ScopeSnapshot,
     StyledLine, SymbolList,
 };
-use vel_scope::{Scope, ScopeStack, Selector};
+use vel_scope::{Scope, ScopeStack};
 use vel_syntax::{MetadataSet, SyntaxSet};
 use vel_text::Text;
 
@@ -975,9 +975,12 @@ impl Language {
         }
         stack
     }
+    /// Scope-selector match at a byte. Production keymap contexts use the batched
+    /// projection in `editing.rs`; tests keep this direct form.
+    #[cfg(test)]
     pub fn selector(&self, text: &Text, selector: &str, byte: usize) -> bool {
         selector
-            .parse::<Selector>()
+            .parse::<vel_scope::Selector>()
             .ok()
             .and_then(|s| s.does_match(self.scopes(text, byte).as_slice()))
             .is_some()

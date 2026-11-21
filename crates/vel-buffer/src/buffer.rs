@@ -370,6 +370,21 @@ impl Buffer {
         }
         Some(point)
     }
+    /// Projects sorted current byte points back through retained edits. For each
+    /// point, picks the largest old byte with a left-biased image at or below it.
+    /// Returns false without changing the input if the version is unavailable or
+    /// the points are out of bounds. Results need not be UTF-8 boundaries.
+    pub fn unmap_left_points_to(&self, points: &mut [usize], to: ChangeId) -> bool {
+        debug_assert!(points.is_sorted());
+        if !self.retains(to) || points.last().is_some_and(|&p| p > self.text.len_bytes()) {
+            return false;
+        }
+        let first = self.log.partition_point(|c| c.id <= to);
+        for change in self.log.range(first..).rev() {
+            change.map.unmap_left_points(points);
+        }
+        true
+    }
     /// Maps a historic named region with exclusion bias at its boundaries.
     pub fn transform_region_from(&self, mut region: Region, from: ChangeId) -> Option<Region> {
         if !self.retains(from) {

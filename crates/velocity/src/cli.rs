@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub const PERF_HELP: &str = "\
   --headless-perf-startup [FILE]  main -> first App::scene, idle memory; no file or --lines = blank
   --headless-perf-file FILE  streamed open, first scene, settled memory, typing and scroll
+  --headless-perf-typing FILE | --headless-perf-scroll FILE | --headless-perf-large FILE
+                         replay native benchmark actions through App::scene, without a window
   --headless-perf-highlight FILE  full bundled syntax parse + color spans (first and warmed pass)
   --headless-perf-find DIR [DIR...]  literal project search through the production worker
   --headless-perf-goto    production ranking over 100k prepared paths
@@ -23,6 +25,9 @@ pub enum Mode {
     HeadlessLargeFiles,
     HeadlessPerfStartup,
     HeadlessPerfFile,
+    HeadlessPerfTyping,
+    HeadlessPerfScroll,
+    HeadlessPerfLarge,
     HeadlessPerfHighlight,
     HeadlessPerfFind,
     HeadlessPerfGoto,
@@ -49,6 +54,9 @@ impl Mode {
             Self::HeadlessLargeFiles => "headless-large-files",
             Self::HeadlessPerfStartup => "headless-perf-startup",
             Self::HeadlessPerfFile => "headless-perf-file",
+            Self::HeadlessPerfTyping => "headless-perf-typing",
+            Self::HeadlessPerfScroll => "headless-perf-scroll",
+            Self::HeadlessPerfLarge => "headless-perf-large",
             Self::HeadlessPerfHighlight => "headless-perf-highlight",
             Self::HeadlessPerfFind => "headless-perf-find",
             Self::HeadlessPerfGoto => "headless-perf-goto",
@@ -178,6 +186,9 @@ impl Options {
                 "--headless-large-files" => Some(Mode::HeadlessLargeFiles),
                 "--headless-perf-startup" => Some(Mode::HeadlessPerfStartup),
                 "--headless-perf-file" => Some(Mode::HeadlessPerfFile),
+                "--headless-perf-typing" => Some(Mode::HeadlessPerfTyping),
+                "--headless-perf-scroll" => Some(Mode::HeadlessPerfScroll),
+                "--headless-perf-large" => Some(Mode::HeadlessPerfLarge),
                 "--headless-perf-highlight" => Some(Mode::HeadlessPerfHighlight),
                 "--headless-perf-find" => Some(Mode::HeadlessPerfFind),
                 "--headless-perf-goto" => Some(Mode::HeadlessPerfGoto),
@@ -335,7 +346,12 @@ impl Options {
         }
         if matches!(
             options.mode,
-            Mode::HeadlessPerfFile | Mode::HeadlessPerfHighlight | Mode::HeadlessPerfFind
+            Mode::HeadlessPerfFile
+                | Mode::HeadlessPerfTyping
+                | Mode::HeadlessPerfScroll
+                | Mode::HeadlessPerfLarge
+                | Mode::HeadlessPerfHighlight
+                | Mode::HeadlessPerfFind
         ) && options.file.is_none()
         {
             return Err(format!("--{} requires a path", options.mode.name()));

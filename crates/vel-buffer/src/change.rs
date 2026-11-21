@@ -49,6 +49,50 @@ pub(crate) struct RegionMoves {
     pub keep_start: bool,
     moves_separator: bool,
 }
+
+#[cfg(test)]
+#[test]
+fn batched_reverse_projection_agrees_with_the_forward_map() {
+    let mut state = 81_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        (state >> 16) as usize
+    };
+    for _ in 0..2000 {
+        let mut len = 40;
+        let mut maps = Vec::new();
+        for _ in 0..4 {
+            let mut at = 0;
+            let mut edits = Vec::new();
+            let mut new_len = len;
+            for _ in 0..12 {
+                let start = (at + next() % 4).min(len);
+                at = (start + next() % 6).min(len);
+                let inserted = next() % 5;
+                new_len = new_len - (at - start) + inserted;
+                edits.push(Change {
+                    old_range: start..at,
+                    new_len: inserted,
+                });
+            }
+            maps.push(ChangeSet::new(edits));
+            len = new_len;
+        }
+        let mut projected: Vec<_> = (0..=len).collect();
+        for map in maps.iter().rev() {
+            map.unmap_left_points(&mut projected);
+        }
+        let forward: Vec<_> = (0..=40)
+            .map(|point| {
+                maps.iter()
+                    .fold(point, |p, map| map.transform_point(p, Bias::Left))
+            })
+            .collect();
+        for (p, old) in projected.into_iter().enumerate() {
+            assert_eq!(old, forward.partition_point(|&image| image <= p) - 1);
+        }
+    }
+}
 impl RegionMoves {
     pub fn lines(name: &'static str, ranges: Vec<(Range<usize>, Range<usize>)>) -> Self {
         let moves_separator = ranges.iter().any(|(from, to)| from.len() != to.len());
@@ -127,6 +171,32 @@ impl ChangeSet {
         } else {
             self.starts[i - 1] + self.changes[i - 1].new_len + point
                 - self.changes[i - 1].old_range.end
+        }
+    }
+    /// Maps sorted post-edit byte points to their rightmost old byte whose
+    /// left-biased image is at or before the point. Unlike an undo ChangeSet,
+    /// this maps into the last byte of replaced text when the image collapses.
+    pub(crate) fn unmap_left_points(&self, points: &mut [usize]) {
+        let Some(&first) = points.first() else { return };
+        let mut i = self.starts.partition_point(|&start| start <= first);
+        for point in points {
+            while self.starts.get(i).is_some_and(|&start| start <= *point) {
+                i += 1;
+            }
+            if i == 0 {
+                continue;
+            }
+            let change = &self.changes[i - 1];
+            let end = self.starts[i - 1] + change.new_len;
+            *point = if *point < end {
+                change
+                    .old_range
+                    .end
+                    .saturating_sub(1)
+                    .max(change.old_range.start)
+            } else {
+                change.old_range.end + (*point - end)
+            };
         }
     }
     /// Maps a named region: begin right, end left; empty regions stick right.

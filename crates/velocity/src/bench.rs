@@ -6,6 +6,15 @@ pub const SCROLL_FRAMES: usize = 600;
 pub const TYPING_INSERTIONS: usize = 500;
 pub const PANEL_ACTIONS: usize = 100;
 pub const WARMUP_FRAMES: usize = 60;
+pub fn typing_text(index: usize) -> &'static str {
+    match index % 8 {
+        0 => "你",
+        1 => "🦀",
+        2 => "é",
+        3 => "\n",
+        _ => "x",
+    }
+}
 #[derive(Debug)]
 pub struct Bench {
     pub mode: Mode,

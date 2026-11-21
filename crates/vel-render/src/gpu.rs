@@ -124,7 +124,9 @@ impl Renderer {
             .contains(&wgpu::PresentMode::Fifo)
             || !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
         {
-            return Err("Metal surface must support Fifo and COPY_DST for synchronous first-frame presentation".into());
+            return Err(
+                "Metal surface must support Fifo and COPY_DST for first-frame presentation".into(),
+            );
         }
         let size = window.content_size();
         let scale = window.scale_factor();
@@ -136,7 +138,9 @@ impl Renderer {
             )
             .ok_or("no surface configuration")?;
         config.present_mode = wgpu::PresentMode::Fifo;
-        config.desired_maximum_frame_latency = 1;
+        // wgpu's Metal backend uses latency + 1 drawables. With only two,
+        // scanout plus one queued present can stall a display-link frame in acquire.
+        config.desired_maximum_frame_latency = 2;
         config.usage |= wgpu::TextureUsages::COPY_DST;
         if capabilities
             .formats
@@ -322,7 +326,7 @@ impl Renderer {
         let instances = make_instances(&device, capacity);
         let queries = has_queries.then(|| Queries::new(&device, &queue));
         let minimap_queries = has_queries.then(|| Queries::new(&device, &queue));
-        let info = json!({"adapter":info.name,"backend":format!("{:?}",info.backend),"driver":info.driver,"present_mode":"fifo","desired_maximum_frame_latency":1,"timestamp_query_enabled":has_queries,"pipeline_cache_supported":has_cache,"pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},"pipeline_cache_loaded_bytes":cache_bytes.as_ref().map_or(0,Vec::len),"device_creation_ms":device_ms,"shader_module_ms":shader_ms,"pipeline_creation_ms":pipeline_ms,"surface_format":format!("{:?}",config.format)});
+        let info = json!({"adapter":info.name,"backend":format!("{:?}",info.backend),"driver":info.driver,"present_mode":"fifo","desired_maximum_frame_latency":config.desired_maximum_frame_latency,"timestamp_query_enabled":has_queries,"pipeline_cache_supported":has_cache,"pipeline_cache_status":if has_cache {"wgpu disk cache enabled"} else {"wgpu 30 Metal does not implement PIPELINE_CACHE; driver cache only"},"pipeline_cache_loaded_bytes":cache_bytes.as_ref().map_or(0,Vec::len),"device_creation_ms":device_ms,"shader_module_ms":shader_ms,"pipeline_creation_ms":pipeline_ms,"surface_format":format!("{:?}",config.format)});
         Ok(Self {
             surface,
             instance,

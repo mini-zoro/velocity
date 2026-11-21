@@ -2050,7 +2050,7 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), St
 }
 
 /// Instructions retired by this process so far (all threads).
-fn instructions() -> u64 {
+pub(super) fn instructions() -> u64 {
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
     // SAFETY: proc_pid_rusage writes one rusage_info_v4 for RUSAGE_INFO_V4 into a buffer of
     // exactly that size; the pointer cast matches its documented `rusage_info_t *` parameter.

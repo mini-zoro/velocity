@@ -99,6 +99,9 @@ pub struct ViewportHighlighter {
     resolver: Highlighter,
     interner: ScopeInterner,
     visual: SpanCache,
+    // Exact repair needs contiguous UTF-8. Reuse it across edits, especially
+    // for multi-megabyte rows that the foreground path never materializes.
+    line_scratch: String,
     options: ViewportOptions,
     checkpoints: BTreeMap<usize, Checkpoint>,
     background: Cursor,
@@ -132,6 +135,7 @@ impl ViewportHighlighter {
             resolver: Highlighter::new(scheme),
             interner: ScopeInterner::new(Arc::new(MetadataSet::new())),
             visual: SpanCache::default(),
+            line_scratch: String::new(),
             options,
             checkpoints: BTreeMap::from([(0, initial.clone())]),
             background: Cursor::new(initial.clone(), 0, true),
@@ -366,11 +370,12 @@ impl ViewportHighlighter {
                 },
             );
         } else {
-            let line = self.text.slice(range).to_string();
+            copy_line(&self.text, range.clone(), &mut self.line_scratch);
+            let line = self.line_scratch.as_str();
             let output = if line.len() > self.options.max_line_bytes {
-                cursor.state.parse_line_uncached(&line)
+                cursor.state.parse_line_uncached(line)
             } else {
-                cursor.state.parse_line(&line)
+                cursor.state.parse_line(line)
             }
             .map_err(|e| Error::Parse(e.to_string()))?;
             self.stats.parsed_lines += 1;
@@ -405,12 +410,13 @@ impl ViewportHighlighter {
                         .history
                         .get_mut(&n)
                         .ok_or_else(|| Error::Parse("missing sparse branch history".into()))?;
-                    let line = self
-                        .text
-                        .slice(complete_line_range(&self.text, n))
-                        .to_string();
+                    copy_line(
+                        &self.text,
+                        complete_line_range(&self.text, n),
+                        &mut self.line_scratch,
+                    );
                     let rendered = style_line(
-                        &line,
+                        &self.line_scratch,
                         &cached.record.ops,
                         &mut scopes,
                         &mut self.resolver,
@@ -424,9 +430,10 @@ impl ViewportHighlighter {
                 }
                 cursor.scopes = scopes;
                 self.checkpoints.retain(|&n, _| n <= from);
+                copy_line(&self.text, range, &mut self.line_scratch);
             }
             let rendered = style_line(
-                &line,
+                &self.line_scratch,
                 &output.ops,
                 &mut cursor.scopes,
                 &mut self.resolver,
@@ -575,5 +582,68 @@ impl ViewportHighlighter {
         self.background = Cursor::new(self.initial.clone(), 0, true);
         self.visible.clear();
         self.foreground = None;
+    }
+}
+
+fn copy_line(text: &Text, range: Range<usize>, scratch: &mut String) {
+    scratch.clear();
+    // Leave page-sized slack for small edits without geometrically doubling
+    // a long line's capacity. Do not copy the old line on growth.
+    if scratch.capacity() < range.len() {
+        let capacity = range.len().next_multiple_of(4096);
+        if scratch.capacity() != 0 {
+            *scratch = String::new();
+        }
+        scratch.reserve_exact(capacity);
+    }
+    for chunk in text.slice(range).chunks() {
+        scratch.push_str(chunk);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn oversized_repair_reuses_one_line_allocation_across_edits() {
+    let set = Arc::new(
+        SyntaxSet::load_roots(
+            &[],
+            &[(
+                "Test/Plain.sublime-syntax",
+                "name: Plain\nscope: text.plain\ncontexts: { main: [] }\n",
+            )],
+        )
+        .unwrap(),
+    );
+    let mut text = Text::from("x".repeat(2_000_000));
+    let mut engine = ViewportHighlighter::new(
+        text.clone(),
+        ChangeId(0),
+        set.clone(),
+        &set.syntaxes()[0],
+        Arc::new(ColorScheme::velocity_dark()),
+        ViewportOptions::default(),
+    );
+    engine.repair_long_line().unwrap();
+    let ptr = engine.line_scratch.as_ptr();
+    let capacity = engine.line_scratch.capacity();
+    assert!(capacity >= text.len_bytes() && capacity <= text.len_bytes() + 4095);
+    for version in 1..=50 {
+        let at = text.len_bytes() / 2;
+        text.insert(at, "y");
+        engine
+            .apply_change(
+                text.clone(),
+                ChangeId(version),
+                &ChangeSet::new(vec![vel_buffer::Change {
+                    old_range: at..at,
+                    new_len: 1,
+                }]),
+            )
+            .unwrap();
+        engine.repair_long_line().unwrap();
+        assert!(engine.progress().complete());
+        assert_eq!(engine.line_scratch.capacity(), capacity);
+        assert_eq!(engine.line_scratch.as_ptr(), ptr);
+        assert_eq!(engine.line_scratch.as_bytes()[at], b'y');
     }
 }

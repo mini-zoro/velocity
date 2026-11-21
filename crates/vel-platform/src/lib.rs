@@ -205,7 +205,7 @@ fn saved_frame_is_clamped_to_current_screens() {
 pub enum FrameReason {
     /// Prepare and submit the complete offscreen first frame before orderFront.
     StartupPrepare,
-    /// Acquire/copy/present immediately after orderFront in the same launch callback.
+    /// Acquire/copy/present on the first visible display-link tick after ordering.
     StartupPresent,
     /// Native input can be submitted immediately, without waiting for vsync.
     Input,

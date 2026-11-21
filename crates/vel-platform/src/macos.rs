@@ -766,6 +766,7 @@ struct Host {
     ime_geometry_dirty: Cell<bool>,
     ready: Cell<bool>,
     starting: Cell<bool>,
+    first_tick: Cell<bool>,
     stopped: Cell<bool>,
     visible: Cell<bool>,
     dirty: Cell<bool>,
@@ -913,13 +914,13 @@ impl Host {
     }
     fn render(self: &Rc<Self>, reason: FrameReason, force: bool) {
         // AppKit may synchronously send resize/updateLayer while ordering a
-        // window front. Only the explicit two launch calls may draw at this stage.
-        if self.starting.get()
-            && !matches!(
-                reason,
-                FrameReason::StartupPrepare | FrameReason::StartupPresent
-            )
-        {
+        // window front. Wait until the visible view actually gets a display tick.
+        if !launch_frame_allowed(
+            self.starting.get(),
+            self.first_tick.get(),
+            reason,
+            self.visible.get(),
+        ) {
             return;
         }
         if self.dispatching.get()
@@ -934,6 +935,13 @@ impl Host {
             self.pace();
             return;
         }
+        let reason = if self.first_tick.get() && reason == FrameReason::DisplayLink {
+            self.first_tick.set(false);
+            self.phase("first_visible_display_tick");
+            FrameReason::StartupPresent
+        } else {
+            reason
+        };
         self.dirty.set(false);
         let previous = self.input.borrow().clone();
         let result = {
@@ -1772,7 +1780,7 @@ impl Delegate {
             .borrow()
             .as_ref()
             .is_none_or(|app| app.activate_on_open());
-        let presented = startup_frame(activate, |step| {
+        let prepared = startup_frame(activate, |step| {
             match step {
                 StartupStep::Prepare => {
                     h.render(FrameReason::StartupPrepare, true);
@@ -1788,23 +1796,25 @@ impl Delegate {
                     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
                     h.phase("activated_before_first_present");
                 }
-                StartupStep::Present => {
-                    h.visible.set(true);
-                    // No display-link tick or run-loop round trip here.
-                    h.render(FrameReason::StartupPresent, true);
-                }
             }
             if matches!(step, StartupStep::OrderFront | StartupStep::OrderBack) {
                 h.phase("ordered_front");
             }
             true
         });
-        if !presented {
+        if !prepared {
             return Ok(());
         }
-        h.starting.set(false);
         CATransaction::flush();
         h.phase("launch_callback_finished");
+        h.visible.set(
+            window
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible),
+        );
+        h.first_tick.set(true);
+        h.starting.set(false);
+        h.handle().request_frame();
         lifecycle::launched();
         Ok(())
     }
@@ -1816,29 +1826,39 @@ enum StartupStep {
     OrderFront,
     OrderBack,
     Activate,
-    Present,
 }
 
 fn startup_frame(activate: bool, mut step: impl FnMut(StartupStep) -> bool) -> bool {
     use StartupStep::*;
-    // Pre-render without a drawable. Acquire one only after AppKit has been
-    // asked to show and activate the window, as in the native floor benchmark.
+    // Pre-render without a drawable; the launch callback only orders the window.
     step(Prepare)
         && if activate {
             step(OrderFront) && step(Activate)
         } else {
             step(OrderBack)
         }
-        && step(Present)
+}
+
+fn launch_frame_allowed(
+    starting: bool,
+    first_tick: bool,
+    reason: FrameReason,
+    visible: bool,
+) -> bool {
+    if starting {
+        reason == FrameReason::StartupPrepare
+    } else {
+        !first_tick || (reason == FrameReason::DisplayLink && visible)
+    }
 }
 
 #[cfg(test)]
 #[test]
-fn startup_prepares_offscreen_and_activates_before_acquire_and_present() {
+fn startup_prepares_offscreen_and_only_presents_on_visible_tick() {
     use StartupStep::*;
     for (activate, expected) in [
-        (true, &[Prepare, OrderFront, Activate, Present][..]),
-        (false, &[Prepare, OrderBack, Present][..]),
+        (true, &[Prepare, OrderFront, Activate][..]),
+        (false, &[Prepare, OrderBack][..]),
     ] {
         let mut observed = Vec::new();
         assert!(startup_frame(activate, |step| {
@@ -1853,6 +1873,34 @@ fn startup_prepares_offscreen_and_activates_before_acquire_and_present() {
         false
     }));
     assert_eq!(observed, [Prepare]);
+    assert!(launch_frame_allowed(
+        true,
+        false,
+        FrameReason::StartupPrepare,
+        false
+    ));
+    assert!(!launch_frame_allowed(
+        true,
+        false,
+        FrameReason::DisplayLink,
+        true
+    ));
+    for reason in [FrameReason::Timer, FrameReason::Input, FrameReason::Resize] {
+        assert!(!launch_frame_allowed(false, true, reason, true));
+    }
+    assert!(!launch_frame_allowed(
+        false,
+        true,
+        FrameReason::DisplayLink,
+        false
+    ));
+    assert!(launch_frame_allowed(
+        false,
+        true,
+        FrameReason::DisplayLink,
+        true
+    ));
+    assert!(launch_frame_allowed(false, false, FrameReason::Input, true));
 }
 
 fn screen_rect(frame: NSRect) -> Rect {
@@ -2201,6 +2249,7 @@ fn create_host(
         ime_geometry_dirty: Cell::new(false),
         ready: Cell::new(false),
         starting: Cell::new(true),
+        first_tick: Cell::new(false),
         stopped: Cell::new(false),
         visible: Cell::new(false),
         dirty: Cell::new(true),

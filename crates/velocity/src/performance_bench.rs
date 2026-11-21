@@ -12,9 +12,19 @@ use std::{
 use vel_platform::TextInput;
 use vel_text::Text;
 
-pub(crate) fn run(options: Options, clock: Clock, reporter: &Reporter) -> Result<(), String> {
+pub(crate) fn run(options: Options, mut clock: Clock, reporter: &Reporter) -> Result<(), String> {
     match options.mode {
         Mode::HeadlessPerfStartup => {
+            let mut last = super::render_scenes::instructions();
+            let mut phase = |clock: &mut Clock, name| -> Result<(), String> {
+                let now = super::render_scenes::instructions();
+                clock.mark(name);
+                reporter.emit(json!({"kind":"perf_startup_phase","phase":name,
+                    "instructions_since_last_phase":now.checked_sub(last),"process_instructions":now}))?;
+                last = now;
+                Ok(())
+            };
+            phase(&mut clock, "startup_probe_entered")?;
             let fixture_name = options
                 .file
                 .as_deref()
@@ -25,23 +35,22 @@ pub(crate) fn run(options: Options, clock: Clock, reporter: &Reporter) -> Result
                 Text::new()
             };
             let entered = clock.entered;
-            let mut app = app(options, clock, reporter, text)?;
-            if !app.workspace.editor().text.is_empty() {
-                let editor = app.workspace.editor();
-                let syntax = vel_highlight::detect_syntax(
-                    &app.workspace.assets.syntaxes,
+            phase(&mut clock, "text_loaded")?;
+            let mut workspace = Workspace::new(text, options.data_dir.clone(), None, false)?;
+            phase(&mut clock, "workspace_configured")?;
+            if !workspace.editor().text.is_empty() {
+                configure_syntax(
+                    &mut workspace,
                     fixture_name.as_deref().unwrap_or("sample.rs"),
-                    &editor.text.line(0).to_string(),
-                    None,
-                )
-                .unwrap_or_else(|| app.workspace.assets.syntaxes.find_syntax_plain_text())
-                .name
-                .clone();
-                app.workspace.set_file_type(&syntax)?;
+                )?;
             }
+            phase(&mut clock, "startup_document_configured")?;
+            let mut app = app_with_workspace(options, clock, reporter, workspace);
+            phase(&mut app.clock, "app_initialized")?;
             let setup = Instant::now();
             black_box(app.scene());
             let ready = Instant::now();
+            phase(&mut app.clock, "first_scene_ready")?;
             let first_scene_ms = ms(ready - entered);
             let text = &app.workspace.editor().text;
             reporter.emit(json!({
@@ -55,6 +64,9 @@ pub(crate) fn run(options: Options, clock: Clock, reporter: &Reporter) -> Result
             reporter.rss("perf_settled", json!({}))?;
         }
         Mode::HeadlessPerfFile => file(options, clock, reporter)?,
+        Mode::HeadlessPerfTyping | Mode::HeadlessPerfScroll | Mode::HeadlessPerfLarge => {
+            replay_native(options, clock, reporter)?
+        }
         Mode::HeadlessPerfHighlight => highlight(&options, reporter)?,
         Mode::HeadlessPerfFind => find(&options, reporter)?,
         Mode::HeadlessPerfGoto => goto(reporter)?,
@@ -64,16 +76,204 @@ pub(crate) fn run(options: Options, clock: Clock, reporter: &Reporter) -> Result
         .emit(json!({"kind":"complete","complete":true,"gui_started":false,"gpu_started":false}))
 }
 
+fn thread_cpu_ms() -> f64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: This is a writable timespec; the clock measures the calling thread.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    assert_eq!(status, 0);
+    time.tv_sec as f64 * 1000. + time.tv_nsec as f64 / 1_000_000.
+}
+
+fn replay_native(mut options: Options, clock: Clock, reporter: &Reporter) -> Result<(), String> {
+    use crate::bench::{PANEL_ACTIONS, SCROLL_FRAMES, TYPING_INSERTIONS, WARMUP_FRAMES};
+    let path = options.file.clone().ok_or("missing input file")?;
+    options.mode = match options.mode {
+        Mode::HeadlessPerfTyping => Mode::Typing,
+        Mode::HeadlessPerfScroll => Mode::Scroll,
+        Mode::HeadlessPerfLarge => Mode::LargeFiles,
+        _ => unreachable!(),
+    };
+    let mode = options.mode;
+    let text = if mode == Mode::LargeFiles {
+        Text::new()
+    } else {
+        crate::load(Some(&path), options.lines)?.0
+    };
+    let mut workspace = Workspace::new(text, options.data_dir.clone(), None, false)?;
+    if mode != Mode::LargeFiles {
+        configure_syntax(&mut workspace, &path.to_string_lossy())?;
+    }
+    let mut app = app_with_workspace(options, clock, reporter, workspace);
+    initialize_fonts(&mut app)?;
+    black_box(app.scene());
+    if mode == Mode::LargeFiles {
+        reporter.rss("replay_empty", json!({}))?;
+        app.workspace.open(FileLocation {
+            path,
+            line: 1,
+            column: 1,
+        })?;
+        while app.workspace.tabs[app.workspace.active].loading.is_some()
+            || app.workspace.tabs[app.workspace.active]
+                .binary_loading
+                .is_some()
+        {
+            app.workspace.poll();
+            black_box(app.scene());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if app.workspace.editor().text.is_empty() && app.workspace.editor().binary.is_none() {
+            return Err(format!(
+                "fixture did not open: {:?}",
+                app.workspace.messages
+            ));
+        }
+        reporter.rss(
+            "replay_loaded",
+            json!({"bytes":app.workspace.editor().text.len_bytes()}),
+        )?;
+        for step in 0..PANEL_ACTIONS {
+            app.workspace.poll();
+            crate::large_bench::native_step(&mut app.workspace, &mut app.view, step)?;
+            black_box(app.scene());
+            // Native presents naturally give workers time between actions.
+            std::thread::sleep(Duration::from_millis(16));
+            if step % 10 == 0 {
+                reporter.rss("replay_step", json!({"step":step}))?;
+            }
+        }
+        settle(&mut app);
+        return reporter.rss("replay_after_actions", json!({}));
+    }
+    wait_for_language(&mut app)?;
+    black_box(app.scene());
+    let editor = app.workspace.editor();
+    reporter.emit(json!({"kind":"replay_ready","carets":editor.regions().len(),
+        "lines":editor.text.len_lines(),"bytes":editor.text.len_bytes(),"logical_size":[app.view.size.width,app.view.size.height],
+        "scale":2,"syntax":editor.language.borrow().as_ref().map(|l| l.name.clone()),"wrap":crate::view::motion_layout_options(editor).width != 0}))?;
+    let mut totals = Vec::new();
+    let mut edits = Vec::new();
+    let mut scenes = Vec::new();
+    if mode == Mode::Typing {
+        for step in 0..TYPING_INSERTIONS {
+            let wall = Instant::now();
+            let start = thread_cpu_ms();
+            let input = crate::bench::typing_text(step);
+            crate::type_through_keymap(app.workspace.editor_mut(), input)?;
+            let edited = thread_cpu_ms();
+            app.changed_state(wall, true);
+            let synced = thread_cpu_ms();
+            black_box(app.scene());
+            let finished = thread_cpu_ms();
+            edits.push(edited - start);
+            scenes.push(finished - synced);
+            totals.push(finished - start);
+            reporter.emit(json!({"kind":"replay_typing_sample","index":step,"newline":input=="\n",
+                "thread_cpu_ms":finished-start,"command_cpu_ms":edited-start,
+                "sync_cpu_ms":synced-edited,"scene_cpu_ms":finished-synced,"wall_ms":ms(wall.elapsed())}))?;
+        }
+    } else {
+        prime_scroll_styles(&mut app, WARMUP_FRAMES + SCROLL_FRAMES)?;
+        for step in 0..(WARMUP_FRAMES + SCROLL_FRAMES) {
+            let start = thread_cpu_ms();
+            app.benchmark_scroll_step();
+            black_box(app.scene());
+            let finished = thread_cpu_ms();
+            if !app.exact_scene {
+                return Err("scroll replay lost its exact highlighted viewport".into());
+            }
+            if step >= WARMUP_FRAMES {
+                totals.push(finished - start);
+            }
+        }
+    }
+    reporter.emit(json!({"kind":"replay_summary","thread_cpu_ms":summarize(&totals),
+        "command_cpu_ms":summarize(&edits),"scene_cpu_ms":summarize(&scenes),
+        "view_profile":app.view.profile,
+        "boundary":"native actions through CPU App::scene; excludes display, fonts rasterization, encoding and submission"}))
+}
+
+fn configure_syntax(workspace: &mut Workspace, name: &str) -> Result<(), String> {
+    let first_line = workspace.editor().text.line(0).to_string();
+    let set = &workspace.assets.syntaxes;
+    let syntax = vel_highlight::detect_syntax(set, name, &first_line, None)
+        .unwrap_or_else(|| set.find_syntax_plain_text())
+        .name
+        .clone();
+    workspace.set_file_type(&syntax)
+}
+
+fn initialize_fonts(app: &mut App) -> Result<(), String> {
+    app.fonts = Some(super::Fonts::load_named(
+        &app.workspace.editor().preferences.font_face,
+    )?);
+    app.workspace.themes.ui.borrow_mut().density = 2.;
+    app.initialize_view_metrics();
+    Ok(())
+}
+
+fn wait_for_language(app: &mut App) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !app
+        .workspace
+        .editor()
+        .language
+        .borrow()
+        .as_ref()
+        .is_some_and(|l| l.ready() && l.highlight_complete())
+    {
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for native replay syntax and analysis".into());
+        }
+        app.workspace.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+fn prime_scroll_styles(app: &mut App, frames: usize) -> Result<(), String> {
+    // Prime all rows the benchmark will visit, not only the first viewport.
+    // Syntax delivery is asynchronous and isn't timed as main-thread scene CPU.
+    let editor = app.workspace.editor();
+    let end =
+        (((frames as f64 * 20. + app.view.size.height) / app.view.line_height).ceil() as usize + 4)
+            .min(editor.text.len_lines());
+    let mut cell = editor.language.borrow_mut();
+    let language = cell.as_mut().expect("scroll replay language");
+    language.request_visible(std::iter::once(0..end).collect());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !(0..end).all(|row| language.styled.get(&row).is_some_and(|l| l.exact)) {
+        if Instant::now() >= deadline {
+            return Err("timed out priming exact scroll styles".into());
+        }
+        language.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
 fn app(options: Options, clock: Clock, reporter: &Reporter, text: Text) -> Result<App, String> {
     let workspace = Workspace::new(text, options.data_dir.clone(), None, false)?;
-    Ok(App::new(
+    Ok(app_with_workspace(options, clock, reporter, workspace))
+}
+
+fn app_with_workspace(
+    options: Options,
+    clock: Clock,
+    reporter: &Reporter,
+    workspace: Workspace,
+) -> App {
+    App::new(
         options,
         clock,
         reporter.clone(),
         workspace,
         Arc::new(AtomicBool::new(false)),
         Rc::new(RefCell::new(Sessions::new(None))),
-    ))
+    )
 }
 
 fn settle(app: &mut App) {
@@ -356,4 +556,103 @@ fn goto(reporter: &Reporter) -> Result<(), String> {
         }))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench::typing_text;
+
+    fn fixture(mode: Mode, lines: usize, carets: usize, source: &str) -> App {
+        let options = Options {
+            mode,
+            width: 1920,
+            height: 1000,
+            carets,
+            ..Options::default()
+        };
+        let now = Instant::now();
+        let clock = Clock::new(now, std::time::SystemTime::now());
+        let mut workspace =
+            Workspace::new(Text::from(source.repeat(lines).as_str()), None, None, false).unwrap();
+        configure_syntax(&mut workspace, "fixture.c").unwrap();
+        let reporter = Reporter::for_options(&Options::default(), now).unwrap();
+        let mut app = app_with_workspace(options, clock, &reporter, workspace);
+        initialize_fonts(&mut app).unwrap();
+        black_box(app.scene());
+        wait_for_language(&mut app).unwrap();
+        app
+    }
+
+    #[test]
+    fn stale_scope_enter_at_1000_carets_has_bounded_cpu() {
+        let mut app = fixture(Mode::Typing, 151_639, 1000, "/* source */ int n;\n");
+        let editor = app.workspace.editor_mut();
+        let snapshot = editor
+            .language
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .scopes
+            .as_ref()
+            .unwrap()
+            .clone();
+        let mut samples = Vec::new();
+        for step in 0..264 {
+            let input = typing_text(step);
+            let start = thread_cpu_ms();
+            crate::type_through_keymap(editor, input).unwrap();
+            if input == "\n" && step > 224 {
+                samples.push(thread_cpu_ms() - start);
+            }
+        }
+        assert!(
+            editor
+                .language
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .scopes
+                .as_ref()
+                .is_none_or(|scopes| Arc::ptr_eq(scopes, &snapshot))
+        );
+        assert!(snapshot.version < editor.buffer.change_id());
+        assert!(editor.published_scopes(editor.caret, false).is_some());
+        assert_eq!(editor.regions().len(), 1000);
+        assert_eq!(samples.len(), 5);
+        // Main-thread CPU, not a scheduler deadline. The old search took
+        // hundreds of ms here even with a warm grammar and no scene work.
+        assert!(summarize(&samples).unwrap().p50 < 40., "{samples:?}");
+    }
+
+    #[test]
+    fn highlighted_4k_scroll_scene_has_bounded_cpu() {
+        let mut app = fixture(
+            Mode::Scroll,
+            3000,
+            1,
+            "static int f(int a, int b) { int v = (a * 25 + b) % 11; if (v < 0) return 0; return v + 1; } /* alpha beta gamma */\n",
+        );
+        prime_scroll_styles(&mut app, 120).unwrap();
+        let mut samples = Vec::new();
+        for step in 0..120 {
+            let start = thread_cpu_ms();
+            app.benchmark_scroll_step();
+            let scene = black_box(app.scene());
+            let spent = thread_cpu_ms() - start;
+            assert!(app.exact_scene);
+            assert!(
+                scene
+                    .layers
+                    .iter()
+                    .map(|layer| layer.text.len())
+                    .sum::<usize>()
+                    > 500
+            );
+            if step >= 20 {
+                samples.push(spent);
+            }
+        }
+        assert!(summarize(&samples).unwrap().p95 < 8., "{samples:?}");
+    }
 }

@@ -5,6 +5,7 @@ use crate::{
 };
 use serde_json::json;
 use std::{
+    borrow::Cow,
     cell::Ref,
     collections::{BTreeMap, HashMap},
     ops::Range,
@@ -124,6 +125,35 @@ const DEDENT_LIMIT: usize = 256;
 const EXACT_SCOPE_BYTES: usize = 256 * 1024;
 const EXACT_SCOPE_LINES: usize = 256;
 type IndentedNewline = (String, Range<usize>, Option<Range<usize>>, Option<usize>);
+
+struct NewlineRules {
+    excluded: Option<IndentRule>,
+    disabled: Option<IndentRule>,
+    increase: Option<IndentRule>,
+    bracket: Option<IndentRule>,
+    decrease: Option<IndentRule>,
+    code: bool,
+}
+impl NewlineRules {
+    fn new(language: &crate::language::Language, scopes: &vel_scope::ScopeStack) -> Self {
+        let metadata = &language.assets.metadata;
+        let selected = metadata.metadata_for(scopes);
+        let pattern = |key| metadata.pattern(&selected, key);
+        let string = scope_named("string");
+        let comment = scope_named("comment");
+        Self {
+            excluded: pattern("unIndentedLinePattern"),
+            disabled: pattern("disableIndentNextLinePattern"),
+            increase: pattern("increaseIndentPattern"),
+            bracket: pattern("bracketIndentNextLinePattern"),
+            decrease: pattern("decreaseIndentPattern").filter(|re| re.compile_error().is_none()),
+            code: !scopes
+                .as_slice()
+                .iter()
+                .any(|&s| string.is_prefix_of(s) || comment.is_prefix_of(s)),
+        }
+    }
+}
 
 fn scope_named(name: &'static str) -> vel_scope::Scope {
     vel_scope::Scope::new(name).expect("built-in scope")
@@ -921,9 +951,10 @@ impl Editor {
         let mut regions = Vec::new();
         let mut owned = Vec::new();
         let mut lines = Vec::new();
+        let mut rules = HashMap::new();
         for (i, r) in selection.iter().enumerate() {
             let (text, relative, blank, rule) =
-                self.newline_with_blank(r, bracket_columns.get(i).copied().flatten());
+                self.newline_with_blank(r, bracket_columns.get(i).copied().flatten(), &mut rules);
             let mut range = r.to_range();
             // Selections are sorted and disjoint, so only the neighbours can share the row.
             if let Some(line) = blank.filter(|_| trim && r.empty()) {
@@ -1100,7 +1131,12 @@ impl Editor {
         (!trace.groups.is_empty()).then_some(trace)
     }
     /// New whitespace and caret, an optional blank line to trim, and possible reduced indent.
-    fn newline_with_blank(&self, r: Region, bracket_column: Option<usize>) -> IndentedNewline {
+    fn newline_with_blank(
+        &self,
+        r: Region,
+        bracket_column: Option<usize>,
+        rules: &mut HashMap<vel_scope::ScopeStack, NewlineRules>,
+    ) -> IndentedNewline {
         let row = self.text.byte_to_line(r.begin());
         if self.text.line_len_bytes(row) >= crate::large::LONG_LINE {
             return ("\n".into(), 1..1, None, None);
@@ -1113,18 +1149,15 @@ impl Editor {
         let blank = (!line.is_empty() && line.bytes().all(|b| matches!(b, b' ' | b'\t')))
             .then(|| start..start + line.len());
         let prefix = &line[..r.begin() - start];
-        let leading: String = prefix
-            .chars()
-            .take_while(|c| matches!(c, ' ' | '\t'))
-            .collect();
-        let mut indent = cells_with_tab(&leading, self.preferences.tab_size);
+        let leading = &prefix[..prefix.len() - prefix.trim_start_matches([' ', '\t']).len()];
+        let mut indent = cells_with_tab(leading, self.preferences.tab_size);
         let after_row = self.text.byte_to_line(r.end());
-        let after = self
-            .text
-            .slice(
-                r.end()..self.text.line_to_byte(after_row) + self.text.line(after_row).len_bytes(),
-            )
-            .to_string();
+        let after = if after_row == row {
+            Cow::Borrowed(&line[r.end() - start..])
+        } else {
+            let end = self.text.line_to_byte(after_row) + self.text.line_len_bytes(after_row);
+            Cow::Owned(self.text.slice(r.end()..end).to_string())
+        };
         let language = self.language.borrow();
         let mut increase = false;
         let mut decrease = false;
@@ -1134,50 +1167,28 @@ impl Editor {
         let smart = self.settings.bool("smart_indent", true);
         if let Some(l) = language.as_ref().filter(|_| smart) {
             let scopes = l.scopes(&self.text, r.begin().saturating_sub(1));
-            let m = l.assets.metadata.metadata_for(&scopes);
-            excluded = l
-                .assets
-                .metadata
-                .matches_pattern(&m, "unIndentedLinePattern", prefix);
-            let disable =
-                l.assets
-                    .metadata
-                    .matches_pattern(&m, "disableIndentNextLinePattern", prefix);
-            if !excluded && !disable {
-                increase = l
-                    .assets
-                    .metadata
-                    .matches_pattern(&m, "increaseIndentPattern", prefix)
-                    || l.assets.metadata.matches_pattern(
-                        &m,
-                        "bracketIndentNextLinePattern",
-                        prefix,
-                    );
+            let rule = rules
+                .entry(scopes)
+                .or_insert_with_key(|s| NewlineRules::new(l, s));
+            let matches = |pattern: &Option<IndentRule>, text| {
+                pattern.as_ref().is_some_and(|p| p.is_match(text))
+            };
+            excluded = matches(&rule.excluded, prefix);
+            if !excluded && !matches(&rule.disabled, prefix) {
+                increase = matches(&rule.increase, prefix) || matches(&rule.bracket, prefix);
                 // An unmatched opening delimiter supplements metadata for code syntaxes.
-                let code = !l.selector(&self.text, "string, comment", r.begin().saturating_sub(1));
-                if code && prefix.trim_end().ends_with(['{', '[', '(']) {
+                if rule.code && prefix.trim_end().ends_with(['{', '[', '(']) {
                     increase = true;
                 }
-                let decrease_pattern = l.assets.metadata.pattern(&m, "decreaseIndentPattern");
-                // Match here as well as on typing: Enter warms the pattern and records it.
-                let decrease_pattern = decrease_pattern.filter(|re| re.compile_error().is_none());
-                decrease = decrease_pattern
-                    .as_ref()
-                    .is_some_and(|re| re.is_match(&after))
-                    || (code && after.trim_start().starts_with(['}', ']', ')']));
-                if row > 0 {
+                decrease = matches(&rule.decrease, &after)
+                    || (rule.code && after.trim_start().starts_with(['}', ']', ')']));
+                if row > 0 && rule.bracket.is_some() {
                     let previous = self.text.line(row - 1).to_string();
-                    temporary_previous = l.assets.metadata.matches_pattern(
-                        &m,
-                        "bracketIndentNextLinePattern",
-                        previous.trim_end(),
-                    ) && !l.assets.metadata.matches_pattern(
-                        &m,
-                        "increaseIndentPattern",
-                        previous.trim_end(),
-                    );
+                    let previous = previous.trim_end();
+                    temporary_previous =
+                        matches(&rule.bracket, previous) && !matches(&rule.increase, previous);
                 }
-                can_dedent = decrease_pattern.is_some();
+                can_dedent = rule.decrease.is_some();
             }
         }
         if excluded {

@@ -4460,6 +4460,16 @@ impl App {
         w.invalidate_character_coordinates();
         w.request_frame();
     }
+    fn benchmark_scroll_step(&mut self) {
+        let editor = self.workspace.editor();
+        let max = (editor.text.len_lines() as f64 * self.view.line_height - self.view.size.height
+            + 8.)
+            .max(0.);
+        if self.view.scroll_y + 20. >= max {
+            self.view.scroll_y = 0.;
+        }
+        self.view.scroll(editor, 0., 20.);
+    }
     fn changed_state(&mut self, received: Instant, reveal: bool) {
         self.next_utf8_save();
         let reveal = self.panels.should_reveal(reveal);
@@ -4572,7 +4582,7 @@ impl App {
             previous = m.main_ms;
         }
         let renderer = self.renderer.as_ref().ok_or("renderer missing")?;
-        self.reporter.emit(json!({"kind":"startup","milestones":self.clock.milestones,"before_main_ms":self.clock.before_main_ms,"process_birth_error":self.clock.birth_error,"process_birth_method":"proc_pidinfo(PROC_PIDTBSDINFO) anchored at main wall snapshot; monotonic deltas thereafter","actual_physical_size":renderer.physical_size(),"logical_size":[w.content_size().width,w.content_size().height],"scale_factor":w.scale_factor(),"maximum_frames_per_second":w.maximum_frames_per_second(),"present_mode":"fifo","scanout_main_ms":ms(p.scanout.saturating_duration_since(self.clock.entered)),"scanout_process_ms":self.clock.before_main_ms.map(|n|n+ms(p.scanout.saturating_duration_since(self.clock.entered))),"presented_time_seconds":p.presented_time,"presented_callback_main_ms":ms(p.callback.saturating_duration_since(self.clock.entered)),"scanout_to_callback_ms":ms(p.callback.saturating_duration_since(p.scanout)),"drawable":p.drawable,"startup_path":"offscreen text frame submitted, window ordered, app activated if foreground, then acquire/copy/present in the same launch callback","surface_retries":self.retries,"skipped_drawables":self.first_scanout.skipped_drawables,"first_callback_main_ms":self.first_scanout.first_callback.map(|t|ms(t.saturating_duration_since(self.clock.entered))),"first_real_scanout":p.presented_time,"boundary":"MTLDrawable.addPresentedHandler + presentedTime; queue.present return reported separately"}))?;
+        self.reporter.emit(json!({"kind":"startup","milestones":self.clock.milestones,"before_main_ms":self.clock.before_main_ms,"process_birth_error":self.clock.birth_error,"process_birth_method":"proc_pidinfo(PROC_PIDTBSDINFO) anchored at main wall snapshot; monotonic deltas thereafter","actual_physical_size":renderer.physical_size(),"logical_size":[w.content_size().width,w.content_size().height],"scale_factor":w.scale_factor(),"maximum_frames_per_second":w.maximum_frames_per_second(),"present_mode":"fifo","scanout_main_ms":ms(p.scanout.saturating_duration_since(self.clock.entered)),"scanout_process_ms":self.clock.before_main_ms.map(|n|n+ms(p.scanout.saturating_duration_since(self.clock.entered))),"presented_time_seconds":p.presented_time,"presented_callback_main_ms":ms(p.callback.saturating_duration_since(self.clock.entered)),"scanout_to_callback_ms":ms(p.callback.saturating_duration_since(p.scanout)),"drawable":p.drawable,"startup_path":"prepare offscreen, order and activate if foreground, commit the layer tree, then acquire/copy/present on the first visible display-link tick","surface_retries":self.retries,"skipped_drawables":self.first_scanout.skipped_drawables,"first_callback_main_ms":self.first_scanout.first_callback.map(|t|ms(t.saturating_duration_since(self.clock.entered))),"first_real_scanout":p.presented_time,"boundary":"MTLDrawable.addPresentedHandler + presentedTime; queue.present return reported separately"}))?;
         self.reporter.emit(json!({"kind":"environment","renderer":renderer.info,"fonts":self.fonts.as_ref().map(Fonts::metadata),"atlas":renderer.atlas_info(),"log_input":self.options.log_input,"platform":"native AppKit objc2; macOS 14+","wgpu":"30.0.2"}))?;
         renderer.wait_idle()?;
         self.reporter.rss("after_first_frame",json!({"lines":self.workspace.editor().text.len_lines(),"bytes":self.workspace.editor().text.len_bytes(),"atlas":renderer.atlas_info()}))?;
@@ -5597,17 +5607,13 @@ impl AppHandler for App {
         }
         if !self.startup_done {
             let waiting_since = *self.waiting_since.get_or_insert_with(Instant::now);
-            let status = w.display_status();
-            // AppKit can report occluded briefly immediately after orderFront.
-            if status.display_asleep
-                || status.screen_locked
-                || waiting_since.elapsed() >= Duration::from_millis(1000)
-            {
-                status.check()?;
+            // Main already checked the display. The first display-link tick
+            // is view-bound; don't query WindowServer again before the acquire.
+            if self.options.mode.automatic() && waiting_since.elapsed() >= Duration::from_secs(1) {
+                w.display_status().check()?;
             }
-            // orderFront may constrain an oversized window or change its backing
-            // scale. Rebuild immediately in this same callback if that invalidated
-            // the prepared texture; never copy stale-sized pixels or await redraw.
+            // Ordering can constrain an oversized window or change its scale.
+            // Rebuild on this tick if a resize invalidated the offscreen texture.
             if !self
                 .renderer
                 .as_ref()
@@ -5735,13 +5741,7 @@ impl AppHandler for App {
                     return Ok(());
                 }
                 if self.bench_received.is_none() {
-                    let text = match b.completed % 8 {
-                        0 => "你",
-                        1 => "🦀",
-                        2 => "é",
-                        3 => "\n",
-                        _ => "x",
-                    };
+                    let text = crate::bench::typing_text(b.completed);
                     self.bench_received = Some(Instant::now());
                     crate::type_through_keymap(self.workspace.editor_mut(), text)?;
                     self.changed(w, self.bench_received.unwrap(), true);
@@ -5753,15 +5753,7 @@ impl AppHandler for App {
                     self.view.scroll_y = b.positions[b.completed] as f64 * self.view.line_height;
                     self.view.clamp_scroll(self.workspace.editor());
                 } else {
-                    let max = (self.workspace.editor().text.len_lines() as f64
-                        * self.view.line_height
-                        - self.view.size.height
-                        + 8.)
-                        .max(0.);
-                    if self.view.scroll_y + 20. >= max {
-                        self.view.scroll_y = 0.;
-                    }
-                    self.view.scroll(self.workspace.editor(), 0., 20.);
+                    self.benchmark_scroll_step();
                 }
             }
             if let Some(b) = self.bench.as_ref()
