@@ -60,7 +60,7 @@ impl TextInputState {
         Some((self.text.slice(bytes).to_string(), actual))
     }
 }
-/// Native text input. Explicit replacement ranges always win over current selection.
+/// Native text input. Explicit replacements address the current visible document.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextInput {
     /// Commit text, even when no composition preceded it (picker/dead keys).
@@ -81,6 +81,8 @@ pub enum TextInput {
     },
     /// Commit the current marked characters without inserting them again.
     Unmark,
+    /// Drop the current preedit without editing the document.
+    Discard,
 }
 /// Platform-neutral key state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

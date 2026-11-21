@@ -400,6 +400,7 @@ impl Input {
                 let _ = self.run("insert", &serde_json::json!({"characters":text}));
             }
             TextInput::Unmark => self.commit_composition(),
+            TextInput::Discard => self.cancel_composition(),
         }
     }
     fn commit_composition(&mut self) {

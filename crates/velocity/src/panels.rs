@@ -17,7 +17,7 @@ use vel_config::{
     keymap::{Invocation, Key},
 };
 use vel_platform::{Command, Point, Rect, Size, TextInput};
-use vel_render::scene::{Layer, Scene};
+use vel_render::scene::{Layer, Scene, Underline};
 use vel_search::{
     files, fuzzy,
     goto::{Query, Target},
@@ -6265,7 +6265,13 @@ impl Panels {
             height: (size.height - status - bottom).max(32. * self.ui_scale),
         }
     }
-    fn paint_input(layer: &mut Layer, input: &Input, focused: bool, ink: [f32; 4]) {
+    fn paint_input(
+        layer: &mut Layer,
+        input: &Input,
+        focused: bool,
+        style: &vel_ui::theme::Style,
+        density: f64,
+    ) {
         let rect = input.bounds;
         // Inputs shrunk by a very short panel scale their vertical offsets with the box, so
         // the glyphs (cap height to descender) stay inside it instead of sinking out.
@@ -6281,6 +6287,23 @@ impl Panels {
             },
         );
         let state = input.state();
+        let underline = |layer: &mut Layer, a: f64, b: f64, y: f64| {
+            if a < b {
+                layer.underlines.push(Underline {
+                    rect: Rect {
+                        x: a,
+                        y: (y * density).round() / density,
+                        width: b - a,
+                        height: 1.,
+                    },
+                    clip: rect,
+                    color: style.foreground,
+                    thickness: 1.,
+                    squiggle: false,
+                    stippled: false,
+                });
+            }
+        };
         if input.multiline() {
             let selected = state.selected.bytes(&state.text);
             let marked = state.marked.map(|m| m.bytes(&state.text));
@@ -6313,21 +6336,7 @@ impl Panels {
                     [0.9, 0.92, 0.95, 1.],
                 );
                 if let Some(marked) = &marked {
-                    let a = x(marked.start);
-                    let b = x(marked.end);
-                    if a < b {
-                        fill(
-                            layer,
-                            Rect {
-                                x: a,
-                                y: y + 24. * s,
-                                width: b - a,
-                                height: 1.,
-                            },
-                            rect,
-                            [0.55, 0.8, 1., 1.],
-                        );
-                    }
+                    underline(layer, x(marked.start), x(marked.end), y + 24. * s);
                 }
             }
             if focused {
@@ -6350,7 +6359,7 @@ impl Panels {
                         height: thumb,
                     },
                     rect,
-                    [ink[0], ink[1], ink[2], if focused { 0.9 } else { 0.6 }],
+                    style.matched,
                 );
             }
             return;
@@ -6393,17 +6402,7 @@ impl Panels {
             let range = marked.bytes(&state.text);
             let a = input.x_for_byte(&value, range.start);
             let b = input.x_for_byte(&value, range.end);
-            fill(
-                layer,
-                Rect {
-                    x: a,
-                    y: rect.y + (24. * input.scale * k),
-                    width: b - a,
-                    height: 1.,
-                },
-                rect,
-                [0.55, 0.8, 1., 1.],
-            );
+            underline(layer, a, b, rect.y + (24. * input.scale * k));
         }
     }
     fn widget(&mut self, id: u64, class: &'static str, rect: Rect, attributes: &[&'static str]) {
@@ -8142,6 +8141,60 @@ mod tests {
         Workspace::new(vel_text::Text::from("cat CAT\ncat"), None, None, false).unwrap()
     }
     #[test]
+    fn marked_field_underline_matches_text_ink_and_backing_scale() {
+        let mut workspace = workspace();
+        let mut inks = Vec::new();
+        for dark in [false, true] {
+            workspace.set_appearance(dark).unwrap();
+            let mut theme = workspace.themes.ui.borrow_mut();
+            let style = theme.style(
+                StyleId::SettingsInput.at(1),
+                &vel_theme::ElementPath(&[
+                    vel_theme::Element::new("window", &[]),
+                    vel_theme::Element::new("panel_control find_panel", &[]),
+                    vel_theme::Element::new("text_input", &["focused"]),
+                ]),
+                &workspace.editor().settings,
+            );
+            inks.push(style.foreground);
+            for density in [1., 2.] {
+                theme.density = density;
+                for multiline in [false, true] {
+                    let mut input = Input::new("");
+                    input.set_multiline(multiline);
+                    input.scale = 1.125;
+                    input.set_row_pitch(18. * input.scale);
+                    input.bounds = Rect {
+                        x: 10.,
+                        y: 9.25,
+                        width: 240.,
+                        height: if multiline { 66. } else { 32. },
+                    };
+                    let preedit = if multiline { "ni\nhao" } else { "ni hao" };
+                    input.text_input(TextInput::Marked {
+                        text: preedit.into(),
+                        selected: vel_platform::Utf16Range::new(preedit.len(), 0),
+                        replacement: None,
+                    });
+                    let mut layer = Layer::default();
+                    paint_themed_input(&theme, &style, &mut layer, &mut input, true);
+                    assert_eq!(layer.underlines.len(), if multiline { 2 } else { 1 });
+                    for (stroke, run) in layer.underlines.iter().zip(&layer.text) {
+                        assert_eq!(stroke.color, style.foreground);
+                        assert_eq!(stroke.color, run.color);
+                        assert_eq!(stroke.rect.height * f64::from(density), f64::from(density));
+                        assert_eq!(stroke.thickness * density, density);
+                        assert_eq!((stroke.rect.y * f64::from(density)).fract(), 0.);
+                        assert_eq!(stroke.clip, input.bounds);
+                        assert!((stroke.rect.x - f64::from(run.x)).abs() < 0.02);
+                        assert!(stroke.rect.width > 0.);
+                    }
+                }
+            }
+        }
+        assert_ne!(inks[0], inks[1]);
+    }
+    #[test]
     fn panel_input_focus_find_replace_and_cancel_restore_preview() {
         let mut workspace = workspace();
         workspace.editor_mut().settings.set(
@@ -9863,7 +9916,7 @@ pub(crate) fn paint_themed_input(
     input.configure_theme(style, theme.metrics.clone());
     let first = layer.rects.len();
     let text = layer.text.len();
-    Panels::paint_input(layer, input, focused, style.matched);
+    Panels::paint_input(layer, input, focused, style, f64::from(theme.density));
     layer.rects.remove(first);
     theme.surface(layer, style, input.bounds, input.bounds);
     for run in &mut layer.text[text..] {

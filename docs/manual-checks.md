@@ -24,13 +24,22 @@ Turn on VoiceOver (⌘F5). In Velocity:
 - [ ] Switch UI language to 简体中文 (Preferences › Language): the same places are read in Chinese.
 Note anything silent, mislabeled or read in the wrong language.
 
-## 3. Chinese input method (≈ 3 min)
+## 3. Chinese input method (≈ 4 min)
 Use the macOS Pinyin (Simplified) input method.
-- [ ] Typing pinyin in the editor shows marked (underlined) text at the caret; the candidate window
-      appears right under the caret, also after scrolling, in a wrapped line, and with 2 groups (split view).
-- [ ] Selecting a candidate inserts it; Esc cancels marked text; undo removes the committed text in one step.
-- [ ] The same in the Find field, the command palette and a Settings text field.
-- [ ] Multiple carets (⌘D twice) + pinyin: the text is inserted at every caret.
+- [ ] Place three carets at the start of three lines and type `nihao`. All three show underlined
+      `ni hao`, but only the primary caret has a candidate window. Repeat with the primary in the
+      middle of the document, after scrolling, on a wrapped line, and in a split view.
+- [ ] Space commits `你好` at all three carets and one ⌘Z removes only that commit. Repeat with
+      non-empty selections: the preedit visually replaces each selection, as does the commit.
+- [ ] Esc and switching to another window discard all the marks and restore the original selections.
+      Clicking during preedit discards it and puts the caret where clicked. The document does not
+      become modified or retain any preedit in autosave or a restored session.
+- [ ] Type Pinyin in Find, Replace (including a multiline field), the command palette and a Settings
+      text field. In both light and dark appearances the underline uses the field's text colour and
+      is clearly visible at 1× and Retina scale. Confirm a candidate still commits in each field.
+
+Round 40 matches the Sublime 4215 multi-caret preview in headless tests. The live Pinyin candidate
+window, native discard callbacks and field contrast still need the native recheck above.
 
 ## 4. Non-US keyboard layout (≈ 2 min)
 Add a non-US layout (e.g. German or French) in System Settings › Keyboard and switch to it.

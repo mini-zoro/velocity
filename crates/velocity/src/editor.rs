@@ -30,10 +30,39 @@ pub type ReindentResult = (
 );
 #[derive(Debug)]
 struct Composition {
-    original: Range<usize>,
+    base: (vel_buffer::BufferId, vel_buffer::ChangeId),
     contents: String,
     selection: Selection,
-    explicit: bool,
+    // A request outside the primary preedit is a single document replacement.
+    replacement: Option<Range<usize>>,
+    marks: Vec<Range<usize>>,
+}
+impl Composition {
+    fn original_range(&self, index: usize) -> Range<usize> {
+        self.replacement.clone().unwrap_or_else(|| {
+            self.selection
+                .get(index)
+                .expect("composition target")
+                .to_range()
+        })
+    }
+
+    fn to_document(&self, range: Range<usize>) -> Range<usize> {
+        let point = |byte, right: bool| {
+            let i = self.marks.partition_point(|mark| mark.start <= byte);
+            let Some(i) = i.checked_sub(1) else {
+                return byte;
+            };
+            let mark = &self.marks[i];
+            let original = self.original_range(i);
+            if byte == mark.start || (byte < mark.end && !right) {
+                original.start
+            } else {
+                original.end + byte.saturating_sub(mark.end)
+            }
+        };
+        point(range.start, false)..point(range.end, true)
+    }
 }
 #[derive(Debug, Default)]
 struct SelectorPoints {
@@ -108,7 +137,7 @@ pub struct Editor {
     pub anchor: usize,
     pub caret: usize,
     pub marked: Option<Range<usize>>,
-    composition: Option<Composition>,
+    composition: Option<Box<Composition>>,
     pub settings: Settings,
     pub(crate) detected_tab_size: Option<crate::language::DetectedTabSize>,
     pub preferences: EditorSettings,
@@ -458,16 +487,26 @@ impl Editor {
                 .borrow_mut()
                 .committed(&self.buffer, &self.settings);
         }
-        self.text = self.buffer.text().clone();
-        let primary = self
-            .buffer
-            .view(self.id)
-            .sel()
-            .primary()
-            .expect("selection");
-        self.anchor = primary.a;
-        self.caret = primary.b;
-        self.revision = self.buffer.change_id().0;
+        if self
+            .composition
+            .as_ref()
+            .is_none_or(|c| c.base != (self.buffer.id(), self.buffer.change_id()))
+        {
+            if self.composition.take().is_some() {
+                self.marked = None;
+                self.layout.borrow_mut().invalidate();
+            }
+            self.text = self.buffer.text().clone();
+            let primary = self
+                .buffer
+                .view(self.id)
+                .sel()
+                .primary()
+                .expect("selection");
+            self.anchor = primary.a;
+            self.caret = primary.b;
+            self.revision = self.buffer.change_id().0;
+        }
         if self.fields.as_ref().is_some_and(|s| {
             if self.shared_shadow {
                 return false;
@@ -569,25 +608,39 @@ impl Editor {
     }
     pub fn regions(&self) -> Vec<Region> {
         if let Some(composition) = &self.composition {
-            let changes = ChangeSet::new(vec![Change {
-                old_range: composition.original.clone(),
-                new_len: composition.contents.len(),
-            }]);
-            self.buffer
-                .view(self.id)
-                .sel()
-                .iter()
-                .map(|r| {
-                    if r == composition.selection.primary().expect("primary") {
-                        Region::new(self.anchor, self.caret)
-                    } else {
-                        changes.transform_region(r)
-                    }
-                })
-                .collect()
+            if let Some(replacement) = &composition.replacement {
+                let changes = ChangeSet::new(vec![Change {
+                    old_range: replacement.clone(),
+                    new_len: composition.contents.len(),
+                }]);
+                composition
+                    .selection
+                    .iter()
+                    .enumerate()
+                    .map(|(i, region)| {
+                        if i == composition.selection.primary_index() {
+                            Region::new(self.anchor, self.caret)
+                        } else {
+                            changes.transform_region(region)
+                        }
+                    })
+                    .collect()
+            } else {
+                let start = self.marked.as_ref().expect("primary mark").start;
+                let a = self.anchor - start;
+                let b = self.caret - start;
+                composition
+                    .marks
+                    .iter()
+                    .map(|mark| Region::new(mark.start + a, mark.start + b))
+                    .collect()
+            }
         } else {
             self.buffer.view(self.id).sel().iter().collect()
         }
+    }
+    pub(crate) fn marked_ranges(&self) -> &[Range<usize>] {
+        self.composition.as_ref().map_or(&[], |c| &c.marks)
     }
     pub fn set_selection(&mut self, selection: Selection) {
         self.observe_navigation("selection");
@@ -999,33 +1052,18 @@ impl Editor {
         match input {
             TextInput::Insert { text, replacement } => {
                 if let Some(composition) = self.composition.take() {
-                    let range = replacement.map(|r| r.bytes(&self.text));
-                    let mapped = range.map(|r| self.map_preview_range(r, &composition));
-                    self.marked = None;
-                    self.sync();
-                    if let Some(range) = mapped {
-                        self.buffer
-                            .set_selection(self.id, Selection::from_regions([Region::from(range)]));
-                    } else if composition.explicit {
-                        self.buffer.set_selection(
-                            self.id,
-                            Selection::from_regions([Region::from(composition.original)]),
-                        );
-                    } else {
-                        self.buffer.set_selection(self.id, composition.selection);
-                    }
-                } else if let Some(replacement) = replacement {
+                    let replacement = self.composition_replacement(&composition, replacement);
+                    self.select_composition_targets(composition.selection, replacement);
+                    self.insert_input(text);
+                    self.buffer.break_undo_group();
+                    return;
+                }
+                if let Some(replacement) = replacement {
                     let range = replacement.bytes(self.buffer.text());
                     self.buffer
                         .set_selection(self.id, Selection::from_regions([Region::from(range)]));
                 }
-                if self.vintage.is_some() {
-                    if let Some(command) = self.vintage_text(&text) {
-                        let _ = self.run(&command.command, &command.args);
-                    }
-                } else {
-                    let _ = self.run("insert", &json!({"characters":text}));
-                }
+                self.insert_input(text);
             }
             TextInput::Marked {
                 text,
@@ -1041,104 +1079,144 @@ impl Editor {
                     }
                     return;
                 }
-                let original = if let Some(composition) = &self.composition {
-                    replacement
-                        .map(|r| self.map_preview_range(r.bytes(&self.text), composition))
-                        .unwrap_or_else(|| composition.original.clone())
-                } else {
-                    replacement
-                        .map(|r| r.bytes(&self.text))
-                        .unwrap_or_else(|| self.selection())
-                };
-                let selection = self
-                    .composition
-                    .as_ref()
-                    .map(|c| c.selection.clone())
-                    .unwrap_or_else(|| self.buffer.view(self.id).sel().clone());
-                let explicit =
-                    replacement.is_some() || self.composition.as_ref().is_some_and(|c| c.explicit);
-                let compatible = self
-                    .composition
-                    .as_ref()
-                    .is_none_or(|c| c.original == original);
-                let old_preview = self.text.clone();
-                let old_range = self
-                    .composition
-                    .as_ref()
-                    .filter(|c| c.original == original)
-                    .map_or_else(
-                        || original.clone(),
-                        |c| original.start..original.start + c.contents.len(),
-                    );
-                self.layout
-                    .borrow_mut()
-                    .prepare_change((self.buffer.id(), vel_buffer::ChangeId(self.revision)));
-                self.text = self.buffer.text().clone();
-                self.text.replace(original.clone(), &text);
-                if !compatible {
-                    self.layout.borrow_mut().invalidate();
-                }
-                self.layout.borrow_mut().change(
-                    &old_preview,
-                    &self.text,
-                    (self.buffer.id(), vel_buffer::ChangeId(self.revision + 1)),
-                    &ChangeSet::new(vec![Change {
-                        old_range,
-                        new_len: text.len(),
-                    }]),
-                );
-                let relative = selected.bytes(&Text::from(text.as_str()));
-                self.anchor = original.start + relative.start;
-                self.caret = original.start + relative.end;
-                self.marked = Some(original.start..original.start + text.len());
-                self.composition = Some(Composition {
-                    original,
-                    contents: text,
-                    selection,
-                    explicit,
-                });
-                self.revision += 1;
+                self.update_composition(text, selected, replacement);
             }
             TextInput::Unmark => self.unmark(),
+            TextInput::Discard => self.cancel_composition(),
         }
     }
-    fn map_preview_range(&self, range: Range<usize>, composition: &Composition) -> Range<usize> {
-        let start = composition.original.start;
-        let end = start + composition.contents.len();
-        let delta = composition.original.len() as isize - composition.contents.len() as isize;
-        let begin = if range.start < start {
-            range.start
-        } else if range.start < end {
-            start
+    fn insert_input(&mut self, text: String) {
+        if self.vintage.is_some() {
+            if let Some(command) = self.vintage_text(&text) {
+                let _ = self.run(&command.command, &command.args);
+            }
         } else {
-            range.start.wrapping_add_signed(delta)
-        };
-        let finish = if range.end <= start {
-            range.end
-        } else if range.end <= end {
-            composition.original.end
+            let _ = self.run("insert", &json!({"characters":text}));
+        }
+    }
+    fn composition_replacement(
+        &self,
+        composition: &Composition,
+        replacement: Option<Utf16Range>,
+    ) -> Option<Range<usize>> {
+        if let Some(range) = replacement.map(|r| r.bytes(&self.text)) {
+            let primary = self.marked.as_ref().expect("primary mark");
+            if range.start < primary.start || range.end > primary.end {
+                return Some(composition.to_document(range));
+            }
+        }
+        // AppKit can address the active composition by its selected or marked
+        // range. Both refer to the primary copy of the same preedit.
+        composition.replacement.clone()
+    }
+    fn update_composition(
+        &mut self,
+        text: String,
+        selected: Utf16Range,
+        native_replacement: Option<Utf16Range>,
+    ) {
+        let previous = self.composition.as_deref();
+        let replacement = if let Some(previous) = previous {
+            self.composition_replacement(previous, native_replacement)
         } else {
-            range.end.wrapping_add_signed(delta)
+            native_replacement
+                .map(|r| r.bytes(&self.text))
+                .filter(|r| *r != self.selection())
         };
-        begin..finish
+        let selection = previous.map_or_else(
+            || self.buffer.view(self.id).sel().clone(),
+            |c| c.selection.clone(),
+        );
+        let mut composition = Box::new(Composition {
+            base: (self.buffer.id(), self.buffer.change_id()),
+            contents: text,
+            selection,
+            replacement,
+            marks: Vec::new(),
+        });
+        let primary = if composition.replacement.is_some() {
+            0
+        } else {
+            composition.selection.primary_index()
+        };
+        let len = composition.contents.len();
+        let mut edits = Vec::new();
+        let mut old_end = 0;
+        let mut new_end = 0;
+        let count = if composition.replacement.is_some() {
+            1
+        } else {
+            composition.selection.len()
+        };
+        for i in 0..count {
+            let range = composition.original_range(i);
+            let start = new_end + (range.start - old_end);
+            old_end = range.end;
+            new_end = start + len;
+            composition.marks.push(start..new_end);
+            edits.push(vel_text::Edit {
+                range,
+                text: &composition.contents,
+            });
+        }
+        let mut preview = self.buffer.text().clone();
+        preview.apply_edits(&edits);
+        let mut layout = self.layout.borrow_mut();
+        if previous.is_some_and(|c| c.replacement != composition.replacement) {
+            layout.invalidate();
+        } else {
+            let changes = ChangeSet::new(
+                edits
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, edit)| Change {
+                        old_range: previous.map_or(edit.range, |c| c.marks[i].clone()),
+                        new_len: len,
+                    })
+                    .collect(),
+            );
+            layout.prepare_change((self.buffer.id(), vel_buffer::ChangeId(self.revision)));
+            layout.change(
+                &self.text,
+                &preview,
+                (self.buffer.id(), vel_buffer::ChangeId(self.revision + 1)),
+                &changes,
+            );
+        }
+        self.text = preview;
+        let mark = composition.marks[primary].clone();
+        let relative = selected.bytes(&Text::from(composition.contents.as_str()));
+        self.anchor = mark.start + relative.start;
+        self.caret = mark.start + relative.end;
+        self.marked = Some(mark);
+        self.composition = Some(composition);
+        self.revision += 1;
+    }
+    fn select_composition_targets(
+        &mut self,
+        selection: Selection,
+        replacement: Option<Range<usize>>,
+    ) {
+        self.marked = None;
+        self.layout.borrow_mut().invalidate();
+        self.sync();
+        let selection = replacement.map_or(selection, |range| {
+            Selection::from_regions([Region::from(range)])
+        });
+        self.buffer.set_selection(self.id, selection);
+        self.buffer.break_undo_group();
     }
     pub fn unmark(&mut self) {
         if let Some(composition) = self.composition.take() {
-            self.marked = None;
-            self.sync();
-            if composition.explicit {
-                self.buffer.set_selection(
-                    self.id,
-                    Selection::from_regions([Region::from(composition.original)]),
-                );
-            } else {
-                self.buffer.set_selection(self.id, composition.selection);
-            }
+            self.select_composition_targets(composition.selection, composition.replacement);
             let _ = self.run("insert", &json!({"characters":composition.contents}));
+            self.buffer.break_undo_group();
         }
     }
     pub fn cancel_composition(&mut self) {
-        self.composition = None;
+        if self.composition.take().is_some() {
+            self.layout.borrow_mut().invalidate();
+        }
         self.marked = None;
         self.sync();
     }
@@ -1717,6 +1795,127 @@ mod tests {
         assert_eq!(e.text.to_string(), "🦀");
     }
     #[test]
+    fn multi_caret_preedit_has_one_primary_native_range_and_one_commit() {
+        let mut e = Editor::new(Text::from("a\nb\nc"));
+        let original =
+            Selection::from_regions([Region::caret(0), Region::caret(4), Region::caret(2)]);
+        e.set_selection(original.clone());
+        let version = e.buffer.change_id();
+        let selected = e.selected_utf16();
+        mark(&mut e, "ni hao", Utf16Range::new(3, 3), Some(selected));
+        assert_eq!(e.text.to_string(), "ni haoa\nni haob\nni haoc");
+        assert_eq!(e.marked_ranges(), &[0..6, 8..14, 16..22]);
+        assert_eq!(e.marked_utf16(), Some(Utf16Range::new(8, 6)));
+        assert_eq!(e.selected_utf16(), Utf16Range::new(11, 3));
+        assert_eq!(
+            e.regions(),
+            [Region::new(3, 6), Region::new(11, 14), Region::new(19, 22)]
+        );
+        assert!(!e.key(&Key::parse("super+d").unwrap()).unwrap());
+
+        let selected = e.selected_utf16();
+        mark(&mut e, "😀ok", Utf16Range::new(2, 0), Some(selected));
+        // An ordinary settings/workspace sync must not replace the live preview with the buffer.
+        e.sync();
+        assert_eq!(e.text.to_string(), "😀oka\n😀okb\n😀okc");
+        assert_eq!(e.selected_utf16(), Utf16Range::new(8, 0));
+        assert_eq!(e.marked_utf16(), Some(Utf16Range::new(6, 4)));
+        assert_eq!(
+            e.regions(),
+            [Region::caret(4), Region::caret(12), Region::caret(20)]
+        );
+        assert_eq!(e.buffer.text().to_string(), "a\nb\nc");
+        assert_eq!(e.buffer.change_id(), version);
+        assert!(!e.buffer.is_dirty());
+
+        let marked = e.marked_utf16();
+        insert(&mut e, "你好", marked);
+        assert_eq!(e.buffer.text().to_string(), "你好a\n你好b\n你好c");
+        assert!(e.marked_ranges().is_empty());
+        assert_eq!(
+            e.regions(),
+            [Region::caret(6), Region::caret(14), Region::caret(22)]
+        );
+        assert_eq!(e.caret, 14);
+        e.command(Command::Undo);
+        assert_eq!(e.text.to_string(), "a\nb\nc");
+        assert_eq!(e.buffer.view(e.id).sel(), &original);
+        assert!(!e.buffer.is_dirty());
+        e.command(Command::Redo);
+        assert_eq!(e.text.to_string(), "你好a\n你好b\n你好c");
+    }
+    #[test]
+    fn multi_caret_preedit_replaces_selections_and_discard_restores_them() {
+        let original = "left\nmiddle\nright";
+        let mut e = Editor::new(Text::from(original));
+        let selection =
+            Selection::from_regions([Region::new(4, 0), Region::caret(8), Region::new(12, 17)]);
+        e.set_selection(selection.clone());
+        let version = e.buffer.change_id();
+        for discard in [false, true] {
+            mark(&mut e, "nu", Utf16Range::new(2, 0), None);
+            assert_eq!(e.text.to_string(), "nu\nmidnudle\nnu");
+            assert_eq!(e.marked_ranges(), &[0..2, 6..8, 12..14]);
+            assert_eq!(
+                e.regions(),
+                [Region::caret(2), Region::caret(8), Region::caret(14)]
+            );
+            if discard {
+                e.text_input(TextInput::Discard);
+                // AppKit may follow discardMarkedText with unmarkText.
+                e.text_input(TextInput::Unmark);
+            } else {
+                e.command(Command::Cancel);
+            }
+            assert!(e.marked_ranges().is_empty());
+            assert_eq!(e.text.to_string(), original);
+            assert_eq!(e.buffer.view(e.id).sel(), &selection);
+            assert_eq!(e.buffer.change_id(), version);
+            assert!(!e.buffer.is_dirty());
+        }
+        mark(&mut e, "ni", Utf16Range::new(2, 0), None);
+        insert(&mut e, "你", None);
+        assert_eq!(e.text.to_string(), "你\nmid你dle\n你");
+        e.command(Command::Undo);
+        assert_eq!(e.text.to_string(), original);
+        assert_eq!(e.buffer.view(e.id).sel(), &selection);
+    }
+    #[test]
+    fn explicit_reconversion_maps_back_past_secondary_marks() {
+        let mut e = Editor::new(Text::from("one\ntwo\n🦀tail"));
+        e.set_selection(Selection::from_regions([
+            Region::new(0, 3),
+            Region::caret(4),
+        ]));
+        mark(&mut e, "𠮷", Utf16Range::new(2, 0), None);
+        assert_eq!(e.text.to_string(), "𠮷\n𠮷two\n🦀tail");
+        mark(
+            &mut e,
+            "rec",
+            Utf16Range::new(3, 0),
+            Some(Utf16Range::new(9, 2)),
+        );
+        assert_eq!(e.text.to_string(), "one\ntwo\nrectail");
+        assert_eq!(e.marked_utf16(), Some(Utf16Range::new(8, 3)));
+        let selected = e.selected_utf16();
+        insert(&mut e, "文", Some(selected));
+        assert_eq!(e.text.to_string(), "one\ntwo\n文tail");
+        assert_eq!(e.regions(), [Region::caret(11)]);
+    }
+    #[test]
+    fn composition_commit_is_separate_from_adjacent_typing() {
+        let mut e = Editor::new(Text::default());
+        insert(&mut e, "a", None);
+        mark(&mut e, "ni", Utf16Range::new(2, 0), None);
+        e.text_input(TextInput::Unmark);
+        insert(&mut e, "b", None);
+        assert_eq!(e.text.to_string(), "anib");
+        for text in ["ani", "a", ""] {
+            e.command(Command::Undo);
+            assert_eq!(e.text.to_string(), text);
+        }
+    }
+    #[test]
     fn extended_grapheme_deletion_and_column_movement() {
         let mut e = Editor::new(Text::from("a👩‍💻é\n你\nabc"));
         e.command(Command::End(false));
@@ -2034,29 +2233,6 @@ mod keymap_tests {
             crate::editing::reindent_block("\t\tx\n\t\t\ty\n", "  ", false),
             "  x\n  \ty\n"
         );
-    }
-    #[test]
-    fn composition_preview_does_not_change_buffer_and_commit_targets_every_caret() {
-        let mut editor = Editor::new(Text::from("a\nb"));
-        editor.set_selection(Selection::from_regions([
-            Region::caret(1),
-            Region::caret(3),
-        ]));
-        editor.text_input(TextInput::Marked {
-            text: "ni".into(),
-            selected: Utf16Range::new(2, 0),
-            replacement: None,
-        });
-        assert_eq!(editor.buffer.text().to_string(), "a\nb");
-        assert_eq!(editor.text.to_string(), "a\nbni");
-        assert!(!editor.key(&Key::parse("super+d").unwrap()).unwrap());
-        editor.text_input(TextInput::Insert {
-            text: "你".into(),
-            replacement: None,
-        });
-        assert_eq!(editor.text.to_string(), "a你\nb你");
-        editor.command(Command::Undo);
-        assert_eq!(editor.text.to_string(), "a\nb");
     }
 }
 

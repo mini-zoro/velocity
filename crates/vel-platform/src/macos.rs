@@ -1483,15 +1483,22 @@ impl EditorView {
             h.flush();
         }
     }
+    fn discard_marked_text(&self, host: &Rc<Host>) {
+        // Clear our preview before AppKit can call unmarkText (which commits).
+        if host.input.borrow().marked.is_some() {
+            host.dispatch(Event::Text(TextInput::Discard));
+        }
+        if let Some(context) = self.inputContext() {
+            context.discardMarkedText();
+        }
+    }
     fn mouse(&self, e: &NSEvent, kind: MouseKind) {
         if let Some(h) = self.ivars().host.upgrade() {
             if kind == MouseKind::Down {
                 if let Some(w) = self.window() {
                     w.makeFirstResponder(Some(self));
                 }
-                if let Some(c) = self.inputContext() {
-                    c.discardMarkedText();
-                }
+                self.discard_marked_text(&h);
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             let event = MouseEvent {
@@ -1742,13 +1749,10 @@ define_class!(
         }
         #[unsafe(method(windowDidResignKey:))]
         fn resigned(&self, _n: &NSNotification) {
-            if let Some(v) = self.ivars().host.view.get() {
-                if let Some(c) = v.inputContext() {
-                    c.discardMarkedText();
-                }
-                v.text(TextInput::Unmark);
-            }
             let h = &self.ivars().host;
+            if let Some(v) = h.view.get() {
+                v.discard_marked_text(h);
+            }
             h.dirty.set(true);
             h.pace();
         }

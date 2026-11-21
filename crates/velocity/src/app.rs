@@ -818,8 +818,8 @@ impl App {
         }
         self.ensure_startup_services();
         for tab in &mut self.workspace.tabs {
-            if tab.lazy.is_none() {
-                tab.editor.unmark();
+            if tab.lazy.is_none() && tab.editor.marked.is_some() {
+                tab.editor.cancel_composition();
             }
         }
         if self.hot_exit().retain(true) {
@@ -2641,7 +2641,10 @@ impl App {
         needs_decision: impl FnOnce(&Self, usize) -> bool,
     ) -> Result<bool, String> {
         self.workspace.prepare_sheet(index)?;
-        self.workspace.tabs[index].editor.unmark();
+        let editor = &mut self.workspace.tabs[index].editor;
+        if editor.marked.is_some() {
+            editor.cancel_composition();
+        }
         if !needs_decision(self, index) {
             return Ok(true);
         }

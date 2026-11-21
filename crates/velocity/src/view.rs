@@ -465,6 +465,8 @@ impl View {
         let mut column = window.column;
         let mut run = String::new();
         let mut run_x = left + column as f64 * self.cell - self.scroll_x;
+        let marked = e.marked_ranges();
+        let mut mark_index = marked.partition_point(|r| r.end <= start + window.bytes.start);
         for (byte, grapheme) in window.text.grapheme_indices(true) {
             let width = if grapheme == "\t" {
                 e.preferences.tab_size - column % e.preferences.tab_size.max(1)
@@ -504,10 +506,10 @@ impl View {
                 }
                 occurrence_index += 1;
             }
-            if e.marked
-                .as_ref()
-                .is_some_and(|r| r.start <= at && at < r.end)
-            {
+            while marked.get(mark_index).is_some_and(|r| r.end <= at) {
+                mark_index += 1;
+            }
+            if marked.get(mark_index).is_some_and(|r| r.start <= at) {
                 fill(
                     layer,
                     Rect {
@@ -2586,6 +2588,7 @@ impl View {
             global("gutter"),
         );
         let regions = e.regions();
+        let marked = e.marked_ranges();
         // Most keystrokes leave only carets. Avoid a binary search and range
         // classification for every painted grapheme when no text is selected.
         let has_selection = regions.iter().any(|region| !region.empty());
@@ -3636,10 +3639,11 @@ impl View {
                     &mut layer, &mut run, run_x, baseline, fg, font, decoration, clip, e, advances,
                 );
             }
-            if let Some(marked) = &e.marked {
-                let a = marked.start.max(range_start);
-                let b = marked.end.min(range_end);
-                if a < b {
+            if !marked.is_empty() && range_start < range_end {
+                let first = marked.partition_point(|r| r.end <= range_start);
+                for mark in marked[first..].iter().take_while(|r| r.start < range_end) {
+                    let a = mark.start.max(range_start);
+                    let b = mark.end.min(range_end);
                     let a = px(column_at(a));
                     let b = px(column_at(b));
                     let x = left + a - self.scroll_x;

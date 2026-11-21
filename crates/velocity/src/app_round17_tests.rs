@@ -83,6 +83,128 @@ fn fixture_profile(mousemap: &str) -> tempfile::TempDir {
 }
 
 #[test]
+fn multi_caret_composition_scene_native_queries_and_mouse_discard() {
+    let original = "first\nsecond\nthird";
+    let mut a = app(original, None);
+    let target = point(&a, 1, 3);
+    a.workspace
+        .editor_mut()
+        .set_selection(Selection::from_regions([
+            Region::caret(0),
+            Region::new(13, 18),
+            Region::caret(6),
+        ]));
+    a.handle_text_input(
+        None,
+        TextInput::Marked {
+            text: "ni hao".into(),
+            selected: Utf16Range::new(6, 0),
+            replacement: None,
+        },
+    );
+    let preview = "ni haofirst\nni haosecond\nni hao";
+    let state = a.text_input_state();
+    assert_eq!(state.text.to_string(), preview);
+    assert_eq!(state.selected, Utf16Range::new(18, 0));
+    let marked = state.marked.unwrap();
+    assert_eq!(marked, Utf16Range::new(12, 6));
+    assert_eq!(state.substring(marked), Some(("ni hao".into(), marked)));
+    assert_eq!(
+        a.text_input_rect(state.selected),
+        (state.caret, state.selected)
+    );
+    let (rect, actual) = a.text_input_rect(marked);
+    assert_eq!(actual, marked);
+    assert_eq!(rect.y, state.caret.y);
+    assert!((rect.x + rect.width - state.caret.x).abs() < 0.02);
+    assert_eq!(
+        a.character_index_for_point(Point {
+            x: rect.x,
+            y: rect.y + rect.height / 2.
+        }),
+        Some(marked.location)
+    );
+
+    let tree = a.accessible_tree();
+    let ax = tree
+        .nodes
+        .iter()
+        .filter_map(|node| node.text.as_ref())
+        .find(|text| text.selected == state.selected)
+        .unwrap();
+    assert_eq!(ax.text, state.text);
+
+    let scene = a.view.scene(a.workspace.editor());
+    let strokes = &scene.layers[0].underlines;
+    let editor = a.workspace.editor();
+    assert_eq!(strokes.len(), 3);
+    for (stroke, mark) in strokes.iter().zip(editor.marked_ranges()) {
+        let start = a.view.rect_at(editor, mark.start);
+        let end = a.view.rect_at(editor, mark.end);
+        assert!((stroke.rect.x - start.x).abs() < 0.02);
+        assert!((stroke.rect.width - (end.x - start.x)).abs() < 0.02);
+        assert_eq!(stroke.rect.y, start.y + a.view.line_height - 2.);
+    }
+
+    let (_, docs) = a.capture_session_window().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert!(!docs[0].dirty);
+    let (buffer, _) = docs[0]
+        .history
+        .as_ref()
+        .unwrap()
+        .restore(true, false)
+        .unwrap();
+    assert_eq!(buffer.text().to_string(), original);
+
+    mouse(&mut a, target, MouseKind::Down, 1, 0);
+    mouse(&mut a, target, MouseKind::Up, 1, 0);
+    assert_eq!(a.workspace.editor().text.to_string(), original);
+    assert_eq!(a.workspace.editor().regions(), [Region::caret(9)]);
+    assert!(a.text_input_state().marked.is_none());
+    assert!(!a.workspace.editor().buffer.is_dirty());
+    assert!(
+        a.view.scene(a.workspace.editor()).layers[0]
+            .underlines
+            .is_empty()
+    );
+}
+
+#[test]
+fn quit_discards_composition_before_hot_exit() {
+    let original = "first\nsecond";
+    let mut a = app(original, None);
+    a.workspace
+        .editor_mut()
+        .set_selection(Selection::from_regions([
+            Region::caret(0),
+            Region::caret(6),
+        ]));
+    a.handle_text_input(
+        None,
+        TextInput::Marked {
+            text: "ni hao".into(),
+            selected: Utf16Range::new(6, 0),
+            replacement: None,
+        },
+    );
+    a.workspace.settings.set(
+        vel_config::settings::Layer::User,
+        "hot_exit",
+        json!("always"),
+    );
+    assert!(a.hot_exit().retain(true));
+    assert!(a.prepare_quit(None));
+    assert_eq!(a.workspace.editor().text.to_string(), original);
+    assert_eq!(
+        a.workspace.editor().regions(),
+        [Region::caret(0), Region::caret(6)]
+    );
+    assert!(!a.workspace.editor().buffer.is_dirty());
+    assert!(a.text_input_state().marked.is_none());
+}
+
+#[test]
 fn real_resource_loader_isolates_bad_syntaxes_schemes_and_archives() {
     let profile = fixture_profile("[]");
     let user = profile.path().join("Packages/User");

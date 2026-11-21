@@ -20,6 +20,12 @@ impl App {
         if event.kind == MouseKind::Down {
             self.ensure_startup_services();
             self.end_mouse_gesture();
+            if self.workspace.editor().marked.is_some() {
+                // Headless events do not pass through AppKit's discard. Hit-test
+                // the restored document, not offsets in the provisional text.
+                self.workspace.editor_mut().cancel_composition();
+                self.view.apply_style(self.workspace.editor());
+            }
         }
         self.route_mouse_event(w, event, keep_focus);
         if up {
