@@ -365,9 +365,7 @@ impl ViewportHighlighter {
                         scopes: Some(Arc::new(cursor.scopes.clone())),
                         checkpoint: None,
                         spans: default_spans(range.len(), self.resolver.scheme().default_style()),
-                        runs: Arc::from([]),
-                        end_stack: ScopeStackId(0),
-                        has_symbols: false,
+                        runs: ScopeRuns::new(&[], ScopeStackId(0), false),
                     },
                 },
             );
@@ -427,7 +425,6 @@ impl ViewportHighlighter {
                     )?;
                     cached.record.spans = self.visual.expand(&rendered.spans, &self.interner);
                     cached.record.runs = rendered.runs;
-                    cached.record.end_stack = rendered.end_stack;
                     cached.record.scopes = Some(Arc::new(scopes.clone()));
                 }
                 cursor.scopes = scopes;
@@ -452,8 +449,6 @@ impl ViewportHighlighter {
                         checkpoint: None,
                         spans: self.visual.expand(&rendered.spans, &self.interner),
                         runs: rendered.runs,
-                        end_stack: rendered.end_stack,
-                        has_symbols: false,
                     },
                 },
             );
@@ -509,12 +504,7 @@ impl ViewportHighlighter {
                 .clone()
                 .map(|line| {
                     let c = self.visible.get(&line).filter(|c| c.exact);
-                    ScopedLine {
-                        line,
-                        exact: c.is_some(),
-                        runs: c.map_or_else(|| Arc::from([]), |c| c.record.runs.clone()),
-                        end_stack: c.map_or(ScopeStackId(0), |c| c.record.end_stack),
-                    }
+                    ScopedLine::new(c.map(|c| c.record.runs.clone()))
                 })
                 .collect(),
         };

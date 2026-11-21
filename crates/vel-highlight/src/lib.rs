@@ -21,7 +21,7 @@ mod memory;
 mod scopes;
 mod viewport;
 pub use memory::HighlightMemory;
-use scopes::ScopeInterner;
+use scopes::{ScopeInterner, ScopeRuns};
 pub use scopes::{
     ScopeLines, ScopeProvider, ScopeRun, ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine,
     SymbolList,
@@ -109,9 +109,7 @@ struct LineRecord<S = Arc<VisualShape>, O = SharedScopeOperations> {
     scopes: Option<Arc<ScopeStack>>,
     checkpoint: Option<Arc<ParseState>>,
     spans: S,
-    runs: Arc<[ScopeRun]>,
-    end_stack: ScopeStackId,
-    has_symbols: bool,
+    runs: ScopeRuns,
 }
 /// Instrumented component wall times; available only with the `profile` feature.
 /// Regex time is part of `parse`; use an instrumented matcher backend to split it.
@@ -269,12 +267,7 @@ impl DocumentHighlighter {
             lines: (start..end)
                 .map(|line| {
                     let record = self.records[line].as_ref().filter(|_| line < self.frontier);
-                    ScopedLine {
-                        line,
-                        runs: record.map_or_else(|| Arc::from([]), |r| r.runs.clone()),
-                        end_stack: record.map_or(ScopeStackId(0), |r| r.end_stack),
-                        exact: record.is_some(),
-                    }
+                    ScopedLine::new(record.map(|r| r.runs.clone()))
                 })
                 .collect(),
         }
@@ -311,8 +304,8 @@ impl DocumentHighlighter {
                     .filter_map(|(row, record)| {
                         record
                             .as_ref()
-                            .filter(|r| r.has_symbols)
-                            .map(|r| (row, r.runs.as_ref()))
+                            .filter(|r| r.runs.has_symbols())
+                            .map(|r| (row, &r.runs))
                     }),
             )?,
         })
@@ -391,8 +384,6 @@ impl DocumentHighlighter {
             let record = self.records[row].as_mut().unwrap();
             record.spans = rendered.spans;
             record.runs = rendered.runs;
-            record.end_stack = rendered.end_stack;
-            record.has_symbols = self.scope_interner.has_symbols(&record.runs);
             record.scopes = scopes
                 .stack
                 .has_pending_clears()
@@ -609,8 +600,6 @@ impl DocumentHighlighter {
                 let record = self.records[n].as_mut().unwrap();
                 record.spans = rendered.spans;
                 record.runs = rendered.runs;
-                record.end_stack = rendered.end_stack;
-                record.has_symbols = self.scope_interner.has_symbols(&record.runs);
                 record.scopes = scopes
                     .stack
                     .has_pending_clears()
@@ -670,9 +659,7 @@ impl DocumentHighlighter {
             scopes,
             checkpoint: save_checkpoint.then(|| Arc::new(self.state.clone())),
             spans: rendered.spans,
-            has_symbols: self.scope_interner.has_symbols(&rendered.runs),
             runs: rendered.runs,
-            end_stack: rendered.end_stack,
         });
         self.frontier += 1;
         if converged && self.reusable_to > self.frontier {
@@ -755,8 +742,7 @@ fn default_spans(len: usize, style: Style) -> Arc<[StyleSpan]> {
 #[derive(Debug, Clone)]
 struct RenderedLine {
     spans: Arc<VisualShape>,
-    runs: Arc<[ScopeRun]>,
-    end_stack: ScopeStackId,
+    runs: ScopeRuns,
     text_dependent: bool,
 }
 
@@ -767,15 +753,18 @@ struct ScopeCursor {
 }
 impl ScopeCursor {
     fn from_record(record: &LineRecord, stacks: &ScopeStacks) -> Self {
+        let active = record.runs.end_stack();
         Self {
-            active: record.end_stack,
-            stack: record.scopes.as_deref().cloned().unwrap_or_else(|| {
-                ScopeStack::from_vec(stacks.get(record.end_stack).unwrap().to_vec())
-            }),
+            active,
+            stack: record
+                .scopes
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| ScopeStack::from_vec(stacks.get(active).unwrap().to_vec())),
         }
     }
     fn matches(&self, record: &LineRecord) -> bool {
-        self.active == record.end_stack
+        self.active == record.runs.end_stack()
             && record.scopes.as_deref().map_or_else(
                 || !self.stack.has_pending_clears(),
                 |old| *old == self.stack,
@@ -831,7 +820,7 @@ impl RenderCache {
             {
                 self.hits += 1;
             }
-            let end = cached.output.end_stack;
+            let end = cached.output.runs.end_stack();
             if cursor.active != end {
                 cursor.stack.scopes.clear();
                 cursor
@@ -855,10 +844,10 @@ impl RenderCache {
             interner,
             &mut self.visual,
         )?;
-        cursor.active = output.end_stack;
+        cursor.active = output.runs.end_stack();
         let bytes = ops.payload_bytes()
             + std::mem::size_of_val(output.spans.as_ref())
-            + std::mem::size_of_val(output.runs.as_ref());
+            + std::mem::size_of_val(output.runs.storage().as_ref());
         if !output.text_dependent
             && self.entries.len() < 8192
             && self.bytes.saturating_add(bytes) <= 4 * 1024 * 1024
@@ -886,6 +875,7 @@ type VisualShape = [(u32, u32)];
 #[derive(Debug, Default)]
 struct SpanCache {
     scratch: Vec<(u32, u32)>,
+    scope_scratch: Vec<(u32, ScopeStackId)>,
     shapes: HashSet<Arc<VisualShape>, fnv::FnvBuildHasher>,
     expanded: HashMap<usize, ExpandedShape, fnv::FnvBuildHasher>,
     expanded_bytes: usize,
@@ -996,7 +986,7 @@ fn style_line_at(
             "line exceeds compact scope range (4 GiB)".into(),
         ));
     }
-    let mut runs: Vec<ScopeRun> = Vec::with_capacity(ops.len() / 2 + 1);
+    visual.scope_scratch.clear();
     visual.scratch.clear();
     let mut at = 0;
     let mut text_dependent = false;
@@ -1008,17 +998,12 @@ fn style_line_at(
         if range.is_empty() {
             return;
         }
-        if let Some(last) = runs.last_mut()
-            && last.stack == id
-            && last.end as usize == range.start
+        if let Some(last) = visual.scope_scratch.last_mut()
+            && last.1 == id
         {
-            last.end = range.end as u32;
+            last.0 = range.end as u32;
         } else {
-            runs.push(ScopeRun {
-                start: range.start as u32,
-                end: range.end as u32,
-                stack: id,
-            });
+            visual.scope_scratch.push((range.end as u32, id));
         }
         let style_id = interner.style_id(id, resolver);
         let style = interner.style(style_id);
@@ -1057,10 +1042,13 @@ fn style_line_at(
         at = byte;
     }
     emit(at..line.len(), active, resolver, interner, visual);
+    let has_symbols = visual
+        .scope_scratch
+        .iter()
+        .any(|&(_, stack)| interner.has_symbol(stack));
     Ok(RenderedLine {
         spans: visual.finish(text_dependent),
-        runs: runs.into(),
-        end_stack: active,
+        runs: ScopeRuns::new(&visual.scope_scratch, active, has_symbols),
         text_dependent,
     })
 }
@@ -1178,14 +1166,7 @@ impl HighlightService {
                 text: self.text.clone(),
                 range: start..end,
                 stacks: ScopeStacks::default(),
-                lines: (start..end)
-                    .map(|line| ScopedLine {
-                        line,
-                        runs: Arc::from([]),
-                        end_stack: ScopeStackId(0),
-                        exact: false,
-                    })
-                    .collect(),
+                lines: (start..end).map(|_| ScopedLine::default()).collect(),
             },
             complete: start == end,
         })
@@ -1410,10 +1391,9 @@ mod render_tests {
         assert!(Arc::ptr_eq(&a.spans, &b.spans));
         assert!(!Arc::ptr_eq(&b.spans, &c.spans));
         assert_ne!(a.runs, b.runs);
-        assert_ne!(a.end_stack, b.end_stack);
         assert_ne!(
-            interner.stacks.get(a.end_stack),
-            interner.stacks.get(b.end_stack)
+            interner.stacks.get(a.runs.end_stack()),
+            interner.stacks.get(b.runs.end_stack())
         );
     }
 
@@ -1441,9 +1421,7 @@ mod render_tests {
             scopes: None,
             checkpoint: None,
             spans: Arc::from([]),
-            runs: Arc::from([]),
-            end_stack: bare.active,
-            has_symbols: false,
+            runs: ScopeRuns::new(&[], bare.active, false),
         };
         assert!(bare.matches(&record));
         assert!(!saved.matches(&record));
@@ -1496,7 +1474,7 @@ mod render_tests {
             assert_eq!(cursor.stack, expected_cursor.stack);
             assert_eq!(actual.spans, expected.spans);
             assert_eq!(actual.runs, expected.runs);
-            assert_eq!(actual.end_stack, expected.end_stack);
+            assert_eq!(actual.runs.end_stack(), expected.runs.end_stack());
         }
         assert!(cache.entries.is_empty());
         let ops = SharedScopeOperations::new(&[(1, ScopeStackOp::Noop)]);
@@ -1548,9 +1526,9 @@ mod render_tests {
                 .render("ab", &ops, &mut cursor, &mut resolver, &mut interner)
                 .unwrap();
             if let Some(first) = &first {
-                assert!(Arc::ptr_eq(first, &rendered.runs));
+                assert!(Arc::ptr_eq(first, rendered.runs.storage()));
             } else {
-                first = Some(rendered.runs);
+                first = Some(rendered.runs.storage().clone());
             }
             cursor.stack.apply(&ScopeStackOp::Restore).unwrap();
             cursor.stack.apply(&ScopeStackOp::Restore).unwrap();

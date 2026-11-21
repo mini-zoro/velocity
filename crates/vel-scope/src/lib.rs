@@ -155,6 +155,55 @@ pub enum ScopeStackOp {
 }
 /// Short name used by the line parser API.
 pub type ScopeOp = ScopeStackOp;
+
+/// Eight-byte form of a byte-indexed operation. Keeping the encoding with
+/// `Scope` avoids exposing a constructor for arbitrary interned IDs.
+#[derive(Clone, Copy, Debug)]
+pub struct CompactScopeOp {
+    offset_and_kind: u32,
+    operand: u32,
+}
+
+impl CompactScopeOp {
+    /// Returns None if the position or pop/clear count needs full width.
+    #[inline]
+    pub fn pack(at: usize, op: ScopeStackOp) -> Option<Self> {
+        if at > (u32::MAX >> 3) as usize {
+            return None;
+        }
+        let (kind, operand) = match op {
+            ScopeStackOp::Push(Scope(id)) => (0, id),
+            ScopeStackOp::Pop(n) => (1, u32::try_from(n).ok()?),
+            ScopeStackOp::Clear(ClearAmount::TopN(n)) => (2, u32::try_from(n).ok()?),
+            ScopeStackOp::Clear(ClearAmount::All) => (3, 0),
+            ScopeStackOp::Restore => (4, 0),
+            ScopeStackOp::Noop => (5, 0),
+        };
+        Some(Self {
+            offset_and_kind: (at as u32) << 3 | kind,
+            operand,
+        })
+    }
+    /// Byte position within the line.
+    #[inline]
+    pub fn byte(self) -> usize {
+        (self.offset_and_kind >> 3) as usize
+    }
+    /// Decodes the exact operation and byte position.
+    #[inline]
+    pub fn unpack(self) -> (usize, ScopeStackOp) {
+        let op = match self.offset_and_kind & 7 {
+            0 => ScopeStackOp::Push(Scope(self.operand)),
+            1 => ScopeStackOp::Pop(self.operand as usize),
+            2 => ScopeStackOp::Clear(ClearAmount::TopN(self.operand as usize)),
+            3 => ScopeStackOp::Clear(ClearAmount::All),
+            4 => ScopeStackOp::Restore,
+            _ => ScopeStackOp::Noop,
+        };
+        (self.byte(), op)
+    }
+}
+
 /// An invalid restore operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("scope restore without a corresponding clear")]

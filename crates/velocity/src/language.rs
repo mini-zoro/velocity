@@ -503,6 +503,9 @@ pub struct Pair {
     pub close: Range<usize>,
     pub kind: char,
 }
+mod pair_index;
+use pair_index::PairIndex;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fold {
     pub range: Range<usize>,
@@ -526,8 +529,7 @@ pub struct Analysis {
     pub scheme: Arc<ColorScheme>,
     pub version: ChangeId,
     pub symbols: Vec<(String, usize)>,
-    pub pairs: Vec<Pair>,
-    pair_tree: Vec<usize>,
+    pub pairs: PairIndex,
     pub folds: Vec<Fold>,
     pub minimap: Arc<[MiniLine]>,
     pub index_symbols: Arc<SymbolList>,
@@ -549,8 +551,7 @@ impl Analysis {
                 .iter()
                 .map(|s| s.name.capacity() + s.index_name.capacity())
                 .sum::<usize>();
-        let geometry = self.pairs.capacity() * size_of::<Pair>()
-            + self.pair_tree.capacity() * size_of::<usize>()
+        let geometry = self.pairs.storage_bytes()
             + self.folds.capacity() * size_of::<Fold>()
             + self.guides.storage_bytes();
         let minimap = size_of_val(self.minimap.as_ref())
@@ -572,25 +573,25 @@ impl Analysis {
         byte: usize,
         content: bool,
         enabled: impl Fn(char) -> bool,
-    ) -> Option<&Pair> {
-        if self.pair_tree.is_empty() {
+    ) -> Option<Pair> {
+        if self.pairs.leaf_count() == 0 {
             return None;
         }
-        let limit = self.pairs.partition_point(|p| p.open.start <= byte);
-        fn visit<'a>(
-            analysis: &'a Analysis,
+        let limit = self.pairs.starts_at_or_before(byte);
+        fn visit(
+            pairs: &PairIndex,
             node: usize,
             range: Range<usize>,
             limit: usize,
             byte: usize,
             content: bool,
             enabled: &impl Fn(char) -> bool,
-        ) -> Option<&'a Pair> {
-            if range.start >= limit || analysis.pair_tree[node] < byte {
+        ) -> Option<Pair> {
+            if range.start >= limit || pairs.max_end(node) < byte {
                 return None;
             }
             if range.len() == 1 {
-                let pair = analysis.pairs.get(range.start)?;
+                let pair = pairs.get(range.start)?;
                 return (enabled(pair.kind)
                     && (pair.open.contains(&byte)
                         || pair.close.contains(&byte)
@@ -601,7 +602,7 @@ impl Analysis {
             }
             let middle = (range.start + range.end) / 2;
             visit(
-                analysis,
+                pairs,
                 node * 2 + 1,
                 middle..range.end,
                 limit,
@@ -611,7 +612,7 @@ impl Analysis {
             )
             .or_else(|| {
                 visit(
-                    analysis,
+                    pairs,
                     node * 2,
                     range.start..middle,
                     limit,
@@ -622,9 +623,9 @@ impl Analysis {
             })
         }
         visit(
-            self,
+            &self.pairs,
             1,
-            0..self.pair_tree.len() / 2,
+            0..self.pairs.leaf_count(),
             limit,
             byte,
             content,
@@ -710,6 +711,7 @@ pub struct Language {
     pub minimap: Arc<[MiniLine]>,
     pub scopes: Option<Arc<ScopeSnapshot>>,
     viewport_scopes: BTreeMap<usize, Arc<ScopeSnapshot>>,
+    relief_pending: bool,
     text: Text,
     scheme_revision: u64,
     requested: Option<(ChangeId, u64, Vec<Range<usize>>)>,
@@ -791,6 +793,7 @@ impl Language {
             minimap: Arc::from([]),
             scopes: None,
             viewport_scopes: BTreeMap::new(),
+            relief_pending: text.len_bytes() >= vel_platform::memory_pressure::LARGE_WORK_BYTES,
             text,
             scheme_revision: 0,
             requested: None,
@@ -810,6 +813,13 @@ impl Language {
         }
     }
     pub fn change(&mut self, text: Text, version: ChangeId, changes: ChangeSet, tab: usize) {
+        if !self.relief_pending && vel_platform::memory_pressure::enabled() {
+            let mut bytes = 0usize;
+            self.relief_pending = changes.changes().iter().any(|change| {
+                bytes = bytes.saturating_add(change.old_range.len().max(change.new_len));
+                bytes >= vel_platform::memory_pressure::LARGE_WORK_BYTES
+            });
+        }
         self.guides.change(&self.text, &text, &changes);
         let viewport = self.requested.as_ref().map(|(_, _, r)| r.clone());
         if !self.minimap.is_empty() {
@@ -901,7 +911,12 @@ impl Language {
                 .get(&line.line)
                 .is_some_and(|old| old.spans == line.spans && old.exact == line.exact)
         });
-        if batch.scopes.lines.iter().any(|line| line.exact) {
+        if batch
+            .scopes
+            .lines
+            .iter()
+            .any(vel_highlight::ScopedLine::exact)
+        {
             self.viewport_scopes
                 .insert(batch.lines.start, Arc::new(batch.scopes));
             if self.viewport_scopes.len() > 32 {
@@ -1004,6 +1019,10 @@ impl Language {
                 Ok(old) => retire(old),
                 Err(e) => self.errors.push(e),
             }
+        }
+        if self.relief_pending && vel_platform::memory_pressure::enabled() && !self.busy() {
+            self.relief_pending = false;
+            vel_platform::memory_pressure::request();
         }
         changed
     }
@@ -1177,7 +1196,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
     let mut block_folds = Vec::new();
     let mut previous_stack = None;
     let mut stack: Vec<(char, usize)> = Vec::new();
-    let mut pairs = Vec::new();
+    let mut pairs = PairIndex::new(text.len_bytes());
     let mut angles = Vec::new();
     let mut minimap = Vec::new();
     let mut resolver = Highlighter::new(job.scheme.clone());
@@ -1185,8 +1204,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
     // temporary ScopeStacks. Facts are local to this immutable snapshot and palette.
     let mut facts: Vec<Option<ScopeFacts>> = Vec::new();
     let step = text.len_lines().div_ceil(1024).max(1);
-    for record in &job.scopes.lines {
-        let row = record.line;
+    for (row, record) in job.scopes.range.clone().zip(&job.scopes.lines) {
         if row % 32 == 0 && latest.load(Ordering::Acquire) != job.scopes.version.0 {
             return Ok(None);
         }
@@ -1194,7 +1212,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         let line = text.line(row).to_string();
         let mut tokens = Vec::new();
         let mut col = 0;
-        for run in record.runs.iter() {
+        for run in record.runs() {
             let range = run.start as usize..(run.end as usize).min(line.len());
             if range.is_empty() {
                 continue;
@@ -1373,7 +1391,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
             });
         }
     }
-    for pair in &pairs {
+    for pair in pairs.iter() {
         if pair.kind == '<' {
             continue;
         }
@@ -1458,15 +1476,7 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         fold.level = ends.len() + 1;
         ends.push(fold.range.end);
     }
-    pairs.sort_by_key(|p| p.open.start);
-    let mut pair_tree = vec![0; pairs.len().max(1).next_power_of_two() * 2];
-    let base = pair_tree.len() / 2;
-    for (i, pair) in pairs.iter().enumerate() {
-        pair_tree[base + i] = pair.close.end;
-    }
-    for i in (1..base).rev() {
-        pair_tree[i] = pair_tree[i * 2].max(pair_tree[i * 2 + 1]);
-    }
+    pairs.finish();
     if latest.load(Ordering::Acquire) != job.scopes.version.0 {
         return Ok(None);
     }
@@ -1475,7 +1485,6 @@ fn analyze(job: &Job, latest: &AtomicU64) -> Result<Option<Analysis>, String> {
         version: job.scopes.version,
         symbols,
         pairs,
-        pair_tree,
         folds,
         guides: Arc::new(vel_render::guides::GuideIndex::new(guide_rows)),
         minimap: minimap.into(),
@@ -1597,9 +1606,7 @@ pub fn command_scope_regions(language: &Language, byte: usize, prefix: &str) -> 
         return vec![];
     };
     let row = snapshot.text.byte_to_line(byte);
-    let Ok(line_index) = snapshot.lines.binary_search_by_key(&row, |line| line.line) else {
-        return vec![];
-    };
+    let line_index = row - snapshot.range.start;
     let mut result = Vec::new();
     for scope in scopes
         .iter()
@@ -1619,30 +1626,29 @@ pub fn command_scope_regions(language: &Language, byte: usize, prefix: &str) -> 
         let mut range = byte..byte;
         // Start at the caret's run and stop at the first different scope in each
         // direction. Unrelated runs before/after this occurrence are never visited.
-        'left: for line in snapshot.lines[..=line_index].iter().rev() {
-            if !line.exact {
+        'left: for (row, line) in (snapshot.range.start..row + 1)
+            .zip(&snapshot.lines[..=line_index])
+            .rev()
+        {
+            if !line.exact() {
                 break;
             }
-            let start = snapshot.text.line_to_byte(line.line);
+            let start = snapshot.text.line_to_byte(row);
             let local = range.start - start;
-            let limit = line
-                .runs
-                .partition_point(|run| (run.start as usize) < local);
-            for run in line.runs[..limit].iter().rev() {
+            for run in line.runs_before(local).rev() {
                 if start + (run.end as usize) < range.start || !contains(run.stack) {
                     break 'left;
                 }
                 range.start = start + run.start as usize;
             }
         }
-        'right: for line in &snapshot.lines[line_index..] {
-            if !line.exact {
+        'right: for (row, line) in (row..).zip(&snapshot.lines[line_index..]) {
+            if !line.exact() {
                 break;
             }
-            let start = snapshot.text.line_to_byte(line.line);
+            let start = snapshot.text.line_to_byte(row);
             let local = range.end.saturating_sub(start);
-            let first = line.runs.partition_point(|run| run.end as usize <= local);
-            for run in &line.runs[first..] {
+            for run in line.runs_after(local) {
                 if start + (run.start as usize) > range.end || !contains(run.stack) {
                     break 'right;
                 }
@@ -1667,12 +1673,12 @@ fn command_enclosing_pairs(analysis: &Analysis, byte: usize) -> Vec<Pair> {
         byte: usize,
         pairs: &mut Vec<Pair>,
     ) {
-        if range.start >= limit || analysis.pair_tree[node] < byte {
+        if range.start >= limit || analysis.pairs.max_end(node) < byte {
             return;
         }
         if range.len() == 1 {
             if let Some(pair) = analysis.pairs.get(range.start) {
-                pairs.push(pair.clone());
+                pairs.push(pair);
             }
             return;
         }
@@ -1688,12 +1694,12 @@ fn command_enclosing_pairs(analysis: &Analysis, byte: usize) -> Vec<Pair> {
         );
     }
     let mut pairs = Vec::new();
-    if !analysis.pair_tree.is_empty() {
+    if analysis.pairs.leaf_count() != 0 {
         visit(
             analysis,
             1,
-            0..analysis.pair_tree.len() / 2,
-            analysis.pairs.partition_point(|p| p.open.start <= byte),
+            0..analysis.pairs.leaf_count(),
+            analysis.pairs.starts_at_or_before(byte),
             byte,
             &mut pairs,
         );

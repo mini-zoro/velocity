@@ -50,12 +50,22 @@ impl GuideIndex {
             return Self::default();
         }
         let base = columns.len().max(1).next_power_of_two();
-        let mut minimum = vec![u32::MAX; base * 2];
-        minimum[base..base + columns.len()].copy_from_slice(&columns);
+        let mut minimum = vec![u32::MAX; base];
         for i in (1..base).rev() {
-            minimum[i] = minimum[i * 2].min(minimum[i * 2 + 1]);
+            minimum[i] = Self::node_minimum(&minimum, &columns, i * 2).min(Self::node_minimum(
+                &minimum,
+                &columns,
+                i * 2 + 1,
+            ));
         }
         Self { columns, minimum }
+    }
+    fn node_minimum(tree: &[u32], columns: &[u32], node: usize) -> u32 {
+        if node < tree.len() {
+            tree[node]
+        } else {
+            columns.get(node - tree.len()).copied().unwrap_or(u32::MAX)
+        }
     }
     /// Resolved indentation in display cells; absent rows have no guides.
     pub fn columns(&self, row: usize) -> usize {
@@ -69,10 +79,10 @@ impl GuideIndex {
             return None;
         }
         let column = (columns - 1) / tab.max(1) * tab.max(1);
-        let before = self.boundary(1, 0..self.minimum.len() / 2, 0..row, column as u32, true);
+        let before = self.boundary(1, 0..self.minimum.len(), 0..row, column as u32, true);
         let after = self.boundary(
             1,
-            0..self.minimum.len() / 2,
+            0..self.minimum.len(),
             row + 1..self.columns.len(),
             column as u32,
             false,
@@ -90,7 +100,10 @@ impl GuideIndex {
         column: u32,
         reverse: bool,
     ) -> Option<usize> {
-        if rows.end <= query.start || rows.start >= query.end || self.minimum[node] > column {
+        if rows.end <= query.start
+            || rows.start >= query.end
+            || Self::node_minimum(&self.minimum, &self.columns, node) > column
+        {
             return None;
         }
         if rows.len() == 1 {
@@ -130,6 +143,7 @@ mod tests {
             Some(0),
             Some(8),
         ]);
+        assert_eq!(g.storage_bytes(), 16 * size_of::<u32>());
         assert_eq!(g.columns(3), 8);
         assert_eq!(
             g.active(2, 4),

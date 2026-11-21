@@ -1,5 +1,4 @@
 use proptest::prelude::*;
-use std::sync::Arc;
 use vel_buffer::ChangeId;
 use vel_highlight::{ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine};
 use vel_text::Text;
@@ -31,20 +30,22 @@ proptest! {
             let snapshot = ScopeSnapshot {
                 version: ChangeId(17), text: text.clone(), range: range.clone(),
                 stacks: ScopeStacks::default(),
-                lines: range.map(|line| ScopedLine {
-                    line, runs: Arc::from([]), end_stack: ScopeStackId(0), exact: flags[line],
+                lines: range.map(|line| if flags[line] {
+                    ScopedLine::empty(ScopeStackId(0))
+                } else {
+                    ScopedLine::default()
                 }).collect(),
             };
-            prop_assert_eq!(snapshot.complete(), snapshot.lines.iter().all(|line| line.exact));
+            prop_assert_eq!(snapshot.complete(), snapshot.lines.iter().all(ScopedLine::exact));
             let saved = snapshot.clone();
             prop_assert_eq!(snapshot.complete(), saved.complete());
             let mut mutated = saved;
             for line in &mut mutated.lines {
-                line.exact = !line.exact;
+                *line = if line.exact() { ScopedLine::default() } else { ScopedLine::empty(ScopeStackId(0)) };
             }
             // Legacy mutable consumers must not leave a stale cached count.
             let cloned_before_query = mutated.clone();
-            prop_assert_eq!(mutated.complete(), mutated.lines.iter().all(|line| line.exact));
+            prop_assert_eq!(mutated.complete(), mutated.lines.iter().all(ScopedLine::exact));
             prop_assert_eq!(mutated.complete(), cloned_before_query.complete());
         }
     }

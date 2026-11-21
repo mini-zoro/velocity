@@ -2081,8 +2081,7 @@ impl Editor {
                                 .lines
                                 .get(row - snapshot.range.start)
                                 .is_none_or(|line| {
-                                    line.runs
-                                        .iter()
+                                    line.runs()
                                         .take_while(|run| (run.start as usize) < prefix.len())
                                         .any(|run| {
                                             snapshot.stacks.get(run.stack).is_none_or(

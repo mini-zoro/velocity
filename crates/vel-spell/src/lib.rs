@@ -340,12 +340,12 @@ fn selected_ranges(
     lines: Range<usize>,
 ) -> Vec<Range<usize>> {
     let mut result = Vec::new();
-    for line in &scopes.lines {
-        if !line.exact || !lines.contains(&line.line) || line.line >= scopes.text.len_lines() {
+    for (row, line) in scopes.range.clone().zip(&scopes.lines) {
+        if !line.exact() || !lines.contains(&row) || row >= scopes.text.len_lines() {
             continue;
         }
-        let offset = scopes.text.line_to_byte(line.line);
-        for run in line.runs.iter() {
+        let offset = scopes.text.line_to_byte(row);
+        for run in line.runs() {
             if scopes
                 .stacks
                 .get(run.stack)

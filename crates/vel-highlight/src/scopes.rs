@@ -13,7 +13,7 @@ use vel_text::Text;
 /// Document-local interned active scope stack. IDs remain valid for the document's lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ScopeStackId(pub u32);
-/// One line-local half-open UTF-8 range, exactly 12 bytes on all supported targets.
+/// One decoded, line-local half-open UTF-8 range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct ScopeRun {
@@ -39,17 +39,166 @@ impl ScopeStacks {
         self.0.get(id.0 as usize).map(AsRef::as_ref)
     }
 }
-/// Scope output for one line; unavailable lines have no runs and `exact == false`.
-#[derive(Debug, Clone)]
+/// Adjacent runs cover the line, so only ends are stored. A narrow word
+/// holds a 16-bit byte end and a 16-bit scope ID. The wide header preserves
+/// the full 32-bit domains when either field doesn't fit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopeRuns(Arc<[u32]>);
+impl ScopeRuns {
+    const WIDE: u32 = 1 << 31;
+    const SYMBOLS: u32 = 1 << 30;
+
+    pub(crate) fn new(
+        runs: &[(u32, ScopeStackId)],
+        end_stack: ScopeStackId,
+        has_symbols: bool,
+    ) -> Self {
+        let flags = if has_symbols { Self::SYMBOLS } else { 0 };
+        if end_stack.0 < Self::SYMBOLS
+            && runs
+                .last()
+                .is_none_or(|&(end, _)| end <= u32::from(u16::MAX))
+            && runs
+                .iter()
+                .all(|&(_, stack)| stack.0 <= u32::from(u16::MAX))
+        {
+            Self(Arc::from_iter(std::iter::once(flags | end_stack.0).chain(
+                runs.iter().map(|&(end, stack)| (end << 16) | stack.0),
+            )))
+        } else {
+            Self(Arc::from_iter(
+                [flags | Self::WIDE, end_stack.0]
+                    .into_iter()
+                    .chain(runs.iter().flat_map(|&(end, stack)| [end, stack.0])),
+            ))
+        }
+    }
+
+    pub(crate) fn end_stack(&self) -> ScopeStackId {
+        ScopeStackId(if self.wide() {
+            self.0[1]
+        } else {
+            self.0[0] & (Self::SYMBOLS - 1)
+        })
+    }
+
+    pub(crate) fn has_symbols(&self) -> bool {
+        self.0[0] & Self::SYMBOLS != 0
+    }
+
+    fn wide(&self) -> bool {
+        self.0[0] & Self::WIDE != 0
+    }
+
+    pub(crate) fn storage(&self) -> &Arc<[u32]> {
+        &self.0
+    }
+
+    pub(crate) fn iter(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + '_ {
+        self.view().iter()
+    }
+
+    fn view(&self) -> RunView<'_> {
+        if self.wide() {
+            RunView::Wide(self.0[2..].as_chunks::<2>().0)
+        } else {
+            RunView::Narrow(&self.0[1..])
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RunView<'a> {
+    Narrow(&'a [u32]),
+    Wide(&'a [[u32; 2]]),
+}
+impl<'a> RunView<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Narrow(runs) => runs.len(),
+            Self::Wide(runs) => runs.len(),
+        }
+    }
+    fn end(self, i: usize) -> u32 {
+        match self {
+            Self::Narrow(runs) => runs[i] >> 16,
+            Self::Wide(runs) => runs[i][0],
+        }
+    }
+    fn run(self, i: usize) -> ScopeRun {
+        let (end, stack) = match self {
+            Self::Narrow(runs) => (runs[i] >> 16, runs[i] & 0xffff),
+            Self::Wide(runs) => (runs[i][0], runs[i][1]),
+        };
+        ScopeRun {
+            start: i.checked_sub(1).map_or(0, |prev| self.end(prev)),
+            end,
+            stack: ScopeStackId(stack),
+        }
+    }
+    fn iter(self) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + 'a {
+        self.span(0..self.len())
+    }
+    fn span(
+        self,
+        range: Range<usize>,
+    ) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + 'a {
+        range.map(move |i| self.run(i))
+    }
+    fn end_partition(self, pred: impl Fn(u32) -> bool) -> usize {
+        match self {
+            Self::Narrow(runs) => runs.partition_point(|word| pred(word >> 16)),
+            Self::Wide(runs) => runs.partition_point(|pair| pred(pair[0])),
+        }
+    }
+}
+
+/// Scope output for one row. The snapshot range determines its row number.
+#[derive(Debug, Clone, Default)]
 pub struct ScopedLine {
-    /// Zero-based document line.
-    pub line: usize,
-    /// Shared compact scope runs (including LF).
-    pub runs: Arc<[ScopeRun]>,
-    /// Stack at the end of the line, after all end-of-line operations.
-    pub end_stack: ScopeStackId,
+    runs: Option<ScopeRuns>,
+}
+impl ScopedLine {
+    pub(crate) fn new(runs: Option<ScopeRuns>) -> Self {
+        Self { runs }
+    }
+    /// An exact empty line, including the stack after all end-of-line operations.
+    pub fn empty(end_stack: ScopeStackId) -> Self {
+        Self::new(Some(ScopeRuns::new(&[], end_stack, false)))
+    }
     /// Whether parsing has validated this line at the snapshot version.
-    pub exact: bool,
+    pub fn exact(&self) -> bool {
+        self.runs.is_some()
+    }
+    fn run_view(&self) -> RunView<'_> {
+        self.runs
+            .as_ref()
+            .map_or(RunView::Narrow(&[]), ScopeRuns::view)
+    }
+    /// Shared scope runs (including LF), decoded without a new allocation.
+    pub fn runs(&self) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + '_ {
+        self.run_view().iter()
+    }
+    /// Runs starting before the requested local offset.
+    pub fn runs_before(
+        &self,
+        byte: usize,
+    ) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + '_ {
+        let view = self.run_view();
+        let stop = (view.end_partition(|end| (end as usize) < byte) + usize::from(byte != 0))
+            .min(view.len());
+        view.span(0..stop)
+    }
+    /// Runs ending after the requested local offset.
+    pub fn runs_after(
+        &self,
+        byte: usize,
+    ) -> impl DoubleEndedIterator<Item = ScopeRun> + ExactSizeIterator + '_ {
+        let view = self.run_view();
+        view.span(view.end_partition(|end| end as usize <= byte)..view.len())
+    }
 }
 /// Line records with an incrementally accumulated completeness count.
 ///
@@ -70,7 +219,7 @@ impl FromIterator<ScopedLine> for ScopeLines {
         let records = iter
             .into_iter()
             .inspect(|line| {
-                inexact += usize::from(!line.exact);
+                inexact += usize::from(!line.exact());
             })
             .collect();
         Self {
@@ -140,13 +289,17 @@ impl ScopeSnapshot {
         *self
             .lines
             .inexact
-            .get_or_init(|| self.lines.iter().filter(|line| !line.exact).count())
+            .get_or_init(|| self.lines.iter().filter(|line| !line.exact()).count())
             == 0
     }
     /// Returns scopes without parsing, with UTF-8 and line bounds checked.
     pub fn scope_at(&self, line: usize, byte: usize) -> Option<ScopeStackId> {
-        let record = self.lines.get(line.checked_sub(self.range.start)?)?;
-        if !record.exact || line >= self.text.len_lines() {
+        let runs = self
+            .lines
+            .get(line.checked_sub(self.range.start)?)?
+            .runs
+            .as_ref()?;
+        if line >= self.text.len_lines() {
             return None;
         }
         let len = crate::complete_line_range(&self.text, line).len();
@@ -155,14 +308,11 @@ impl ScopeSnapshot {
             return None;
         }
         if byte == len {
-            return Some(record.end_stack);
+            return Some(runs.end_stack());
         }
-        let index = record.runs.partition_point(|run| run.end as usize <= byte);
-        record
-            .runs
-            .get(index)
-            .filter(|run| run.start as usize <= byte)
-            .map(|run| run.stack)
+        let view = runs.view();
+        let index = view.end_partition(|end| end as usize <= byte);
+        (index < view.len()).then(|| view.run(index).stack)
     }
     /// Maximal equal-stack region within this snapshot's available interval.
     /// Returns None if the region touches an unavailable line; request a larger interval to
@@ -170,12 +320,12 @@ impl ScopeSnapshot {
     pub fn extract_scope(&self, point: usize) -> Option<Range<usize>> {
         self.scopes_at(point)?;
         let mut current: Option<(ScopeStackId, Range<usize>)> = None;
-        for line in &self.lines {
-            if !line.exact {
+        for (row, line) in self.range.clone().zip(&self.lines) {
+            if !line.exact() {
                 continue;
             }
-            let offset = self.text.line_to_byte(line.line);
-            for run in line.runs.iter() {
+            let offset = self.text.line_to_byte(row);
+            for run in line.runs() {
                 let range = offset + run.start as usize..offset + run.end as usize;
                 if let Some((id, region)) = &mut current {
                     if *id == run.stack && region.end == range.start {
@@ -379,22 +529,21 @@ impl ScopeInterner {
     pub(crate) fn style(&self, id: u32) -> vel_color_scheme::Style {
         self.palette[id as usize]
     }
-    pub(crate) fn has_symbols(&self, runs: &[ScopeRun]) -> bool {
-        runs.iter()
-            .any(|run| self.selected[run.stack.0 as usize].is_some())
+    pub(crate) fn has_symbol(&self, stack: ScopeStackId) -> bool {
+        self.selected[stack.0 as usize].is_some()
     }
     pub(crate) fn symbols<'a>(
         &self,
         text: &Text,
-        lines: impl Iterator<Item = (usize, &'a [ScopeRun])>,
+        lines: impl Iterator<Item = (usize, &'a ScopeRuns)>,
     ) -> Result<Vec<Symbol>, crate::Error> {
         let mut groups: Vec<(Range<usize>, &SymbolMetadata)> = Vec::new();
         for (row, runs) in lines {
-            if runs.is_empty() {
+            if runs.view().len() == 0 {
                 continue;
             }
             let offset = text.line_to_byte(row);
-            for run in runs {
+            for run in runs.iter() {
                 let Some(m) = self.selected[run.stack.0 as usize].as_ref() else {
                     continue;
                 };
@@ -434,6 +583,50 @@ impl ScopeInterner {
 
 fn table_bytes<K, V, S>(map: &HashMap<K, V, S>) -> usize {
     map.capacity() * (size_of::<(K, V)>() + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_runs_preserve_boundaries_order_and_full_width_stack_ids() {
+        for (last_end, id, end_stack, words) in [
+            (u16::MAX.into(), ScopeStackId(17), ScopeStackId(3), 3),
+            (70_000, ScopeStackId(17), ScopeStackId(3), 6),
+            (20, ScopeStackId(u32::MAX), ScopeStackId(3), 6),
+            (20, ScopeStackId(17), ScopeStackId(u32::MAX), 6),
+        ] {
+            let first = ScopeRun {
+                start: 0,
+                end: 5,
+                stack: ScopeStackId(1),
+            };
+            let second = ScopeRun {
+                start: 5,
+                end: last_end,
+                stack: id,
+            };
+            let runs = ScopeRuns::new(
+                &[(first.end, first.stack), (second.end, second.stack)],
+                end_stack,
+                true,
+            );
+            assert_eq!(runs.storage().len(), words);
+            assert!(runs.has_symbols());
+            assert_eq!(runs.end_stack(), end_stack);
+            let line = ScopedLine::new(Some(runs));
+            assert!(line.exact());
+            assert!(line.runs().eq([first, second]));
+            assert!(line.runs_before(0).next().is_none());
+            assert!(line.runs_before(5).rev().eq([first]));
+            assert!(line.runs_before(6).rev().eq([second, first]));
+            assert!(line.runs_after(4).eq([first, second]));
+            assert!(line.runs_after(5).eq([second]));
+            assert!(line.runs_after(last_end as usize).next().is_none());
+        }
+        assert_eq!(size_of::<ScopedLine>(), 2 * size_of::<usize>());
+    }
 }
 /// Per-file symbols, assembled from incrementally maintained line candidates without parsing.
 #[derive(Debug, Clone)]

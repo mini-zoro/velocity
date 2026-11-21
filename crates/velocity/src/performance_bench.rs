@@ -356,6 +356,10 @@ fn memory(options: Options, clock: Clock, reporter: &Reporter) -> Result<(), Str
     details["text_bytes"] = json!(editor.text.len_bytes());
     details["lines"] = json!(editor.text.len_lines());
     reporter.rss("memory_highlighted", details)?;
+    let released = vel_platform::memory_pressure::measure_relief().map_err(|e| e.to_string())?;
+    let mut details = malloc_statistics();
+    details["malloc_pressure_relief_bytes"] = json!(released);
+    reporter.rss("memory_highlighted_after_relief", details)?;
     let cell = editor.language.borrow();
     let language = cell.as_ref().ok_or("missing highlight worker")?;
     let highlight = loop {

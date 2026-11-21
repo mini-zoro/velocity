@@ -42,6 +42,8 @@ fn full_highlight_retained_byte_budget_for_seven_mb_of_c() {
     assert!(batch.complete && batch.scopes.complete());
     assert!(batch.highlighted.iter().any(|line| line.spans.len() >= 5));
     let retained = engine.memory_usage();
+    let published = engine.scope_snapshot(0..end);
+    assert!(published.complete());
     let total = retained.records
         + retained.parser_states
         + retained.parser_memo
@@ -49,10 +51,11 @@ fn full_highlight_retained_byte_budget_for_seven_mb_of_c() {
         + retained.interned_scopes
         + retained.scope_runs
         + retained.style_spans
-        + retained.render_cache;
+        + retained.render_cache
+        + published.line_table_bytes();
     eprintln!(
         "{} source bytes: {total} retained bytes",
         engine.text().len_bytes()
     );
-    assert!(total <= 35_000_000, "{total} bytes: {retained:?}");
+    assert!(total <= 27_000_000, "{total} bytes: {retained:?}");
 }

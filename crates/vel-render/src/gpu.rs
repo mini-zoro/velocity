@@ -46,6 +46,8 @@ pub struct FrameTimes {
     pub presented: Instant,
     /// Drawable acquisition time in milliseconds.
     pub acquire_ms: f64,
+    /// Native pool limit for this acquisition (two when resuming from idle).
+    pub drawable_limit: usize,
     /// Encode + submit time, excluding acquisition.
     pub encode_submit_ms: f64,
     /// Present-call duration.
@@ -149,6 +151,7 @@ impl Renderer {
             config.format = wgpu::TextureFormat::Bgra8Unorm;
         }
         surface.configure(&device.device, &config);
+        window.drawable_surface_configured();
         phase("surface_configured");
         Self::assemble(
             instance,
@@ -369,6 +372,9 @@ impl Renderer {
         self.config.height = height;
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
+            if let Some(window) = &self.window {
+                window.drawable_surface_configured();
+            }
         }
         self.queue.write_buffer(
             &self.screen,
@@ -1040,7 +1046,12 @@ impl Renderer {
     }
     /// Releases the startup texture after a positive presentedTime observation.
     pub fn release_prepared(&mut self) {
-        self.offscreen = None;
+        if let Some(texture) = self.offscreen.take() {
+            texture.destroy();
+        }
+        // Reap completed submission references without waiting for the
+        // device or for another frame.
+        let _ = self.device.poll(wgpu::PollType::Poll);
     }
     /// Presents the prebuilt first frame, retaining it for skipped-drawable retries.
     pub fn present_prepared(&mut self) -> Result<Option<FrameTimes>, String> {
@@ -1061,10 +1072,11 @@ impl Renderer {
         if query.is_some_and(|i| i >= MAX_MEASURED_FRAMES) {
             return Err("GPU query index exceeds benchmark capacity".into());
         }
-        let start = Instant::now();
         let (Some(surface), Some(window)) = (&self.surface, &self.window) else {
             return Err("an offscreen renderer cannot present".into());
         };
+        let start = Instant::now();
+        let drawable_limit = window.begin_drawable_frame(start);
         let texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1073,6 +1085,7 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, &self.config);
+                window.drawable_surface_configured();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -1084,6 +1097,7 @@ impl Renderer {
                 }
                 .map_err(|e| e.to_string())?;
                 surface.configure(&self.device, &self.config);
+                window.drawable_surface_configured();
                 self.surface = Some(surface);
                 return Ok(None);
             }
@@ -1150,6 +1164,7 @@ impl Renderer {
             submitted,
             presented,
             acquire_ms: ms(acquired - start),
+            drawable_limit,
             encode_submit_ms: ms(submitted - acquired),
             present_call_ms: ms(presented - present_start),
         }))

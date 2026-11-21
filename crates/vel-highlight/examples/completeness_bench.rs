@@ -1,5 +1,5 @@
 //! Paired completeness-query microbenchmark using the actual 10 MB line count.
-use std::{hint::black_box, path::Path, sync::Arc, time::Instant};
+use std::{hint::black_box, path::Path, time::Instant};
 use vel_buffer::ChangeId;
 use vel_highlight::{ScopeSnapshot, ScopeStackId, ScopeStacks, ScopedLine};
 use vel_text::Text;
@@ -9,7 +9,7 @@ fn measure(snapshot: &ScopeSnapshot, before: bool) -> f64 {
     for _ in 0..iterations {
         let snapshot = black_box(snapshot);
         let complete = if before {
-            snapshot.lines.iter().all(|line| line.exact)
+            snapshot.lines.iter().all(ScopedLine::exact)
         } else {
             snapshot.complete()
         };
@@ -30,12 +30,7 @@ fn main() {
         version: ChangeId(1),
         range: 0..text.len_lines(),
         lines: (0..text.len_lines())
-            .map(|line| ScopedLine {
-                line,
-                runs: Arc::from([]),
-                end_stack: ScopeStackId(0),
-                exact: true,
-            })
+            .map(|_| ScopedLine::empty(ScopeStackId(0)))
             .collect(),
         text,
         stacks: ScopeStacks::default(),

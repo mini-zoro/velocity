@@ -141,6 +141,7 @@ struct Sample {
     event_to_submit_ms: f64,
     event_to_present_return_ms: f64,
     acquire_ms: f64,
+    drawable_limit: usize,
     encode_submit_ms: f64,
     present_call_ms: f64,
     timer_lateness_ms: Option<f64>,
@@ -4854,6 +4855,7 @@ impl App {
                     event_to_submit_ms: ms(times.submitted.saturating_duration_since(at)),
                     event_to_present_return_ms: ms(times.presented.saturating_duration_since(at)),
                     acquire_ms: times.acquire_ms,
+                    drawable_limit: times.drawable_limit,
                     encode_submit_ms: times.encode_submit_ms,
                     present_call_ms: times.present_call_ms,
                     timer_lateness_ms: b
@@ -4877,7 +4879,7 @@ impl App {
         } else if let Some(at) = self.input_at.take()
             && self.options.log_input
         {
-            self.reporter.emit(json!({"kind":"input_latency","receipt_to_submit_ms":ms(times.submitted.saturating_duration_since(at)),"receipt_to_present_return_ms":ms(times.presented.saturating_duration_since(at))}))?;
+            self.reporter.emit(json!({"kind":"input_latency","receipt_to_submit_ms":ms(times.submitted.saturating_duration_since(at)),"receipt_to_present_return_ms":ms(times.presented.saturating_duration_since(at)),"acquire_ms":times.acquire_ms,"drawable_limit":times.drawable_limit}))?;
         }
         Ok(())
     }
@@ -4904,6 +4906,9 @@ impl AppHandler for App {
         self.clock.mark(phase);
     }
     fn on_start(&mut self, w: &WindowHandle) -> Result<(), String> {
+        if self.options.mode == Mode::Interactive {
+            vel_platform::memory_pressure::enable();
+        }
         #[cfg(target_os = "macos")]
         if self.options.mode == Mode::Interactive
             && !self.options.safe_mode

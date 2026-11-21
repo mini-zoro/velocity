@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use vel_scope::{ClearAmount, Scope, ScopeStackOp};
+use vel_scope::{CompactScopeOp, ScopeStackOp};
 
 /// Shared byte-indexed parser operations. The compact representation is exact;
 /// unusually large offsets and counts retain the full-width representation.
@@ -8,52 +8,12 @@ pub struct SharedScopeOperations(Storage);
 
 #[derive(Clone, Debug)]
 enum Storage {
-    Compact(Arc<[(u32, CompactOp)]>),
+    Compact(Arc<[CompactScopeOp]>),
     Wide(Arc<[(usize, ScopeStackOp)]>),
 }
 
-#[derive(Clone, Copy, Debug)]
-enum CompactOp {
-    Push(Scope),
-    Pop(u32),
-    ClearTop(u32),
-    ClearAll,
-    Restore,
-    Noop,
-}
-
 #[derive(Debug, Default)]
-pub(crate) struct PackingScratch(Vec<(u32, CompactOp)>);
-
-impl CompactOp {
-    fn narrow(at: usize, op: ScopeStackOp) -> Option<(u32, Self)> {
-        Some((
-            u32::try_from(at).ok()?,
-            match op {
-                ScopeStackOp::Push(scope) => Self::Push(scope),
-                ScopeStackOp::Pop(n) => Self::Pop(u32::try_from(n).ok()?),
-                ScopeStackOp::Clear(ClearAmount::TopN(n)) => Self::ClearTop(u32::try_from(n).ok()?),
-                ScopeStackOp::Clear(ClearAmount::All) => Self::ClearAll,
-                ScopeStackOp::Restore => Self::Restore,
-                ScopeStackOp::Noop => Self::Noop,
-            },
-        ))
-    }
-
-    fn wide((at, op): (u32, Self)) -> (usize, ScopeStackOp) {
-        (
-            at as usize,
-            match op {
-                Self::Push(scope) => ScopeStackOp::Push(scope),
-                Self::Pop(n) => ScopeStackOp::Pop(n as usize),
-                Self::ClearTop(n) => ScopeStackOp::Clear(ClearAmount::TopN(n as usize)),
-                Self::ClearAll => ScopeStackOp::Clear(ClearAmount::All),
-                Self::Restore => ScopeStackOp::Restore,
-                Self::Noop => ScopeStackOp::Noop,
-            },
-        )
-    }
-}
+pub(crate) struct PackingScratch(Vec<CompactScopeOp>);
 
 impl Default for SharedScopeOperations {
     fn default() -> Self {
@@ -75,7 +35,7 @@ impl SharedScopeOperations {
         let scratch = &mut scratch.0;
         scratch.clear();
         for &(at, op) in ops {
-            let Some(packed) = CompactOp::narrow(at, op) else {
+            let Some(packed) = CompactScopeOp::pack(at, op) else {
                 return Self(Storage::Wide(Arc::from(ops)));
             };
             scratch.push(packed);
@@ -91,7 +51,7 @@ impl SharedScopeOperations {
                     && ops
                         .iter()
                         .copied()
-                        .map(CompactOp::wide)
+                        .map(CompactScopeOp::unpack)
                         .eq(operations.iter().copied())
             }
         }
@@ -101,7 +61,9 @@ impl SharedScopeOperations {
         scratch.clear();
         match &self.0 {
             Storage::Wide(ops) => scratch.extend_from_slice(ops),
-            Storage::Compact(ops) => scratch.extend(ops.iter().copied().map(CompactOp::wide)),
+            Storage::Compact(ops) => {
+                scratch.extend(ops.iter().copied().map(CompactScopeOp::unpack))
+            }
         }
     }
 
@@ -137,9 +99,7 @@ impl SharedScopeOperations {
     /// Whether all positions belong to scalar boundaries in this line.
     pub fn matches_boundaries(&self, line: &str) -> bool {
         match &self.0 {
-            Storage::Compact(ops) => ops
-                .iter()
-                .all(|(at, _)| line.is_char_boundary(*at as usize)),
+            Storage::Compact(ops) => ops.iter().all(|op| line.is_char_boundary(op.byte())),
             Storage::Wide(ops) => ops.iter().all(|(at, _)| line.is_char_boundary(*at)),
         }
     }
@@ -148,6 +108,7 @@ impl SharedScopeOperations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vel_scope::{ClearAmount, Scope};
 
     #[test]
     fn stored_operations_round_trip_all_variants_and_large_values() {
@@ -163,12 +124,16 @@ mod tests {
         let packed = SharedScopeOperations::new(&original);
         assert!(packed.matches(&original));
         assert_eq!(packed.expanded(&mut scratch), original);
-        assert_eq!(packed.payload_bytes(), 12 * original.len());
+        assert_eq!(packed.payload_bytes(), 8 * original.len());
         let original = [(2, ScopeStackOp::Pop(usize::MAX))];
         let wide = SharedScopeOperations::new(&original);
         assert_eq!(wide.expanded(&mut scratch), original);
         if usize::BITS > 32 {
             assert!(matches!(wide.0, Storage::Wide(_)));
         }
+        let original = [((u32::MAX >> 3) as usize + 1, ScopeStackOp::Noop)];
+        let wide = SharedScopeOperations::new(&original);
+        assert_eq!(wide.expanded(&mut scratch), original);
+        assert!(matches!(wide.0, Storage::Wide(_)));
     }
 }

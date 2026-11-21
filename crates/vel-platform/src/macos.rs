@@ -1,4 +1,5 @@
 //! AppKit ownership and Objective-C interop are confined to this module.
+use crate::drawable_pool::DrawablePool;
 use crate::*;
 #[path = "macos_a11y.rs"]
 mod a11y;
@@ -238,6 +239,9 @@ impl WindowHandle {
         *self.0.context.borrow_mut() = ContextRequest::default();
         self.0.pace();
         if let Some(timer) = self.0.timer.take() {
+            timer.invalidate();
+        }
+        if let Some(timer) = self.0.drawable_timer.take() {
             timer.invalidate();
         }
         if self.0.simple_fullscreen.take().is_some() {
@@ -660,6 +664,27 @@ impl WindowHandle {
             Retained::as_ptr(l).cast_mut().cast()
         })
     }
+    /// Updates the native drawable pool before acquisition. Idle service polls
+    /// that do not draw must not call this. Returns the active drawable limit.
+    pub fn begin_drawable_frame(&self, now: Instant) -> usize {
+        crate::memory_pressure::note_activity();
+        let mut pool = self.0.drawable_pool.get();
+        let old = pool.limit();
+        pool.frame(now);
+        self.0.drawable_pool.set(pool);
+        if pool.limit() != old {
+            self.0.set_drawable_limit(pool.limit());
+        }
+        self.0.arm_drawable_timer(pool, now);
+        pool.limit()
+    }
+    /// Reapplies the idle cap after wgpu configure, which always sets three.
+    pub fn drawable_surface_configured(&self) {
+        let limit = self.0.drawable_pool.get().limit();
+        if limit != 3 {
+            self.0.set_drawable_limit(limit);
+        }
+    }
     /// Takes completed drawable observations; Metal callbacks only write this queue.
     pub fn take_presentations(&self) -> Vec<Presentation> {
         self.0
@@ -780,6 +805,8 @@ struct Host {
     layer: OnceCell<Retained<ObservedLayer>>,
     link: OnceCell<Retained<CADisplayLink>>,
     timer: Cell<Option<Retained<NSTimer>>>,
+    drawable_pool: Cell<DrawablePool>,
+    drawable_timer: Cell<Option<Retained<NSTimer>>>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
     menu_commands: RefCell<Vec<(String, String)>>,
@@ -800,6 +827,56 @@ impl Host {
     fn handle(self: &Rc<Self>) -> WindowHandle {
         WindowHandle(Rc::clone(self))
     }
+    fn set_drawable_limit(&self, limit: usize) {
+        if let Some(layer) = self.layer.get() {
+            layer.setMaximumDrawableCount(limit);
+        }
+    }
+    fn arm_drawable_timer(&self, pool: DrawablePool, now: Instant) {
+        let (Some(due), Some(view)) = (pool.deadline(), self.view.get()) else {
+            return;
+        };
+        let current = self.drawable_timer.take();
+        if current.is_some() {
+            // A burst moves the deadline in Rust; reuse the pending native
+            // timer, which will recheck the deadline and rearm if necessary.
+            self.drawable_timer.set(current);
+            return;
+        }
+        // SAFETY: settleDrawablePool: takes the timer on the view's main thread.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                due.saturating_duration_since(now).as_secs_f64().max(0.0001),
+                view,
+                sel!(settleDrawablePool:),
+                None,
+                false,
+            )
+        };
+        // SAFETY: timer and common-mode constant belong to the main run loop.
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+        self.drawable_timer.set(Some(timer));
+    }
+    fn settle_drawable_pool(&self) {
+        self.drawable_timer.take();
+        if self.stopped.get() {
+            return;
+        }
+        let now = Instant::now();
+        let mut pool = self.drawable_pool.get();
+        let old = pool.limit();
+        if self.drawing.get() {
+            // A nested AppKit run loop must not trim during a draw.
+            pool.frame(now);
+        } else {
+            pool.timer(now);
+        }
+        self.drawable_pool.set(pool);
+        if pool.limit() != old {
+            self.set_drawable_limit(pool.limit());
+        }
+        self.arm_drawable_timer(pool, now);
+    }
     fn phase(&self, phase: &'static str) {
         if let Some(app) = self.app.borrow_mut().as_mut() {
             app.on_platform_phase(phase);
@@ -810,6 +887,9 @@ impl Host {
         self.handle().quit();
     }
     fn dispatch(self: &Rc<Self>, event: Event) {
+        if matches!(event, Event::Key(_) | Event::Text(_) | Event::Scroll(_)) {
+            crate::memory_pressure::note_activity();
+        }
         self.pending.borrow_mut().push_back(event);
         self.drain();
     }
@@ -888,6 +968,7 @@ impl Host {
         {
             return false;
         }
+        crate::memory_pressure::note_activity();
         self.dispatching.set(true);
         let previous = self.input.borrow().clone();
         let handled = if let Some(app) = self.app.borrow_mut().as_mut() {
@@ -1168,6 +1249,10 @@ define_class!(
         }
         #[unsafe(method(tick:))] fn tick(&self, _link: &CADisplayLink) { if let Some(h) = self.ivars().host.upgrade() { h.render(FrameReason::DisplayLink, false); } }
         #[unsafe(method(wake:))] fn wake(&self, _timer: &NSTimer) { if let Some(h) = self.ivars().host.upgrade() { h.timer.take(); h.render(FrameReason::Timer, true); } }
+        #[unsafe(method(settleDrawablePool:))]
+        fn settle_drawable_pool(&self, _timer: &NSTimer) {
+            if let Some(h) = self.ivars().host.upgrade() { h.settle_drawable_pool(); }
+        }
         #[unsafe(method(showDeferredContextMenu:))]
         fn show_deferred_context_menu(&self, _sender: Option<&AnyObject>) {
             if let Some(h) = self.ivars().host.upgrade() { h.show_context_menu(); }
@@ -2276,6 +2361,8 @@ fn create_host(
         layer: OnceCell::new(),
         link: OnceCell::new(),
         timer: Cell::new(None),
+        drawable_pool: Cell::new(DrawablePool::default()),
+        drawable_timer: Cell::new(None),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
         menu_commands: RefCell::new(Vec::new()),

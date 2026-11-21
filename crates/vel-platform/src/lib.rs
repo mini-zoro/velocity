@@ -6,6 +6,8 @@
 
 pub mod accessibility;
 mod display;
+#[cfg(any(target_os = "macos", test))]
+mod drawable_pool;
 pub mod fonts;
 pub mod fullscreen;
 #[cfg(target_os = "macos")]
@@ -21,6 +23,7 @@ pub use services::{
 };
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod memory_pressure;
 pub mod metrics;
 #[cfg(target_os = "macos")]
 pub use macos::WindowHandle;

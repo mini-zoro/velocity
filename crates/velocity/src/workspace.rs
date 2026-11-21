@@ -3173,7 +3173,11 @@ impl Workspace {
         for group in &mut self.workbench.groups {
             group.remove(sheet);
         }
+        let large = tab.editor.text.len_bytes() >= vel_platform::memory_pressure::LARGE_WORK_BYTES;
         self.tabs.remove(index);
+        if large {
+            vel_platform::memory_pressure::request();
+        }
         if self.tabs.is_empty() {
             self.tabs
                 .push(Tab::new(Text::new(), &self.settings, &self.keymap)?);

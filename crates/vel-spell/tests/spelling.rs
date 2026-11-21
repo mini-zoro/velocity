@@ -126,7 +126,7 @@ fn scope_filters_and_incremental_cache_track_exact_lines() {
     assert_eq!(document.checked_lines(), 2);
     let mut unavailable = updated.clone();
     for line in &mut unavailable.lines {
-        line.exact = false;
+        *line = Default::default();
     }
     assert!(
         checker

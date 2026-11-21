@@ -1167,3 +1167,130 @@ draw-list audit again flagged ASCII components of the disposable path
 (`shipped_catalogs_pass_draw_list_text_audit`). None was modified or rerun.
 
 Raw records, gate output and binaries are in `/tmp/velocity-c38.ZLtoAo/`.
+
+## Round 39: native footprint for a highlighted normal-size file
+
+The native starting point is the reviewer's fresh-profile `footprint` sample:
+Velocity `12879ff` used 214 MB with SQLite (about 224 MB in the earlier launch
+probe) and 99 MB with an empty window. Sublime 4215 used 169 MB with SQLite
+and 123 MB empty. The goals for Velocity are at most 185 MB with SQLite and
+no growth from 99 MB empty. These have not been measured natively for this
+round.
+
+### Drawable pool and allocator
+
+- The layer starts with three drawables, as in round 37's 4K FIFO path. A
+  one-shot timer reduces the cap to two after 350 ms without a drawable
+  request. It does not wake the display link, render a frame, or reconfigure
+  the surface. App polling that does not draw cannot postpone the timer.
+  The first frame after idle uses the two-slot pool without changing the cap
+  or waiting for a timer. A second frame within 120 ms restores three before
+  acquire; isolated updates stay at two. Resizing and surface recovery
+  preserve the policy's current cap. State transitions have clock-driven unit
+  tests without AppKit, Metal, or wall-clock timing budgets.
+- The render pass targets the drawable directly. The only window-sized
+  offscreen texture on the native path is the startup frame. After scanout
+  the renderer destroys it explicitly and polls completed GPU references
+  without waiting. The Metal backend already wraps acquire and present in
+  autorelease pools; Velocity's presentation callback keeps times and a
+  sequence number, not the drawable. The glyph atlas is independently sized.
+  Apple's [drawable pool documentation](https://developer.apple.com/documentation/quartzcore/cametallayer/maximumdrawablecount)
+  describes the two and three slots, but does not promise when the underlying
+  IOSurfaces disappear after a resize of the pool. The implementation leaves
+  the displayed content in place and does not detach the layer.
+- Completed highlighting and analysis for a file of at least 1 MiB,
+  a composite edit or undo changing at least 1 MiB, and closing a file of at
+  least 1 MiB queue an allocator pass. The interactive process uses one lazy
+  background worker, with 750 ms to let retirement and index publication
+  settle and at least five seconds between calls. Input and rendered frames
+  extend the delay while a request is pending. No allocator scan runs on the
+  input or rendering thread. The [Darwin pressure relief API](https://github.com/apple-oss-distributions/libmalloc/blob/main/include/malloc/malloc.h)
+  is best effort. It returned zero bytes in all five settled SQLite runs in
+  this environment; none of the measured savings are attributed to it.
+
+### Headless measurement
+
+Five alternating fresh-process pairs against `6da6b18`: the same pinned
+grammars, release flags, `--locked -j 6`, `MACOSX_DEPLOYMENT_TARGET=14.0`,
+and disposable profiles. The round 38 `sqlite3.c` fixture was copied outside
+a Git worktree. The same `--headless-perf-file FILE --memory-only` command now
+records `memory_highlighted_after_relief` after a single worker pass, before
+allocating the detailed counting scratch. No window or GPU was started.
+
+Median physical footprint fell from **147.4 MB to 124.5 MB** (−22.9 MB,
+−15.6%). All candidate samples were 123.1–124.6 MB; force-running the allocator
+pass changed the paired median by zero bytes. Empty with fonts was 28.0 MB
+before and 28.1 MB after, with overlapping ranges. These are decimal MB,
+not results of the `footprint` command.
+
+Subsystem rows below are counted allocation payloads from the first pair,
+not assignments of physical pages or additions to the malloc totals.
+
+| Subsystem | Before bytes | After bytes | Change |
+| --- | ---: | ---: | --- |
+| Scope runs and published line table | 15,421,808 | 7,006,488 | Packed byte ends and stack IDs with a full-width fallback, one shared slice per exact row, implicit row numbers |
+| Exact scope operations | 13,874,384 | 9,524,848 | Eight-byte tagged operations; full offsets and counts on overflow |
+| Highlight line records | 12,131,120 | 10,918,008 | End stack and symbol flag live in the scope-run header |
+| Pairs, folds, and guides | 11,092,316 | 4,276,572 | Eight-byte bracket pairs, full tag spans, and no duplicated leaf arrays in the pair and guide trees |
+| Word index | 5,489,823 | 5,489,823 | Unchanged; parser memo also stayed about 6.4 MB |
+| Malloc live (median) | 128,129,728 | 106,212,640 | −21.9 MB |
+| Malloc reserved (median) | 173,883,392 | 156,532,736 | Reservation, not dirty pages |
+
+The generated 7.5 MB C regression now includes the published scope table:
+25,087,584 retained bytes against a 27,000,000-byte limit. Other tests exercise wide scope IDs and
+positions, operation round trips, exact incremental scopes, compact and wide
+pair indexes, and guide boundaries.
+
+### Verification
+
+The no-packaging gate passed formatting, strict workspace Clippy, release
+workspace tests (1,774 passed, 80 ignored), rustdoc with warnings denied,
+and the release build. No timing or watcher failure reproduced in this run.
+The official assertion JSON was byte-identical with prefilter verification:
+242 files, 126,600 passes, no failures or skips. The Onig, multi-matcher and
+memoized differential matched on 193,704 lines, with digest
+`1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`.
+Eight software PNGs for `r5_sidebar` and `r6-cjk-zh` matched byte-for-byte.
+The 32 Settings screenshots differed only on the temporary profile path line,
+as in a second run of the control. Metal reported no adapter.
+
+Instructions were read from `proc_pid_rusage(RUSAGE_INFO_V4)` after each
+child exited but before it was reaped; sandboxed `time -l` could not read
+`kern.clockrate`. The original 10,000,000-byte Rust fixture was supplied as
+the positional argument to `--headless-view-features`. The typing and scroll
+replays used the first 5,000 lines of `sqlite3.c`. These whole-process counts
+include setup and background publication. Counts below are side medians;
+percentage changes are medians of alternating paired ratios.
+
+| Workload | Pairs | Before instructions | After instructions | Paired change |
+| --- | ---: | ---: | ---: | ---: |
+| `features` | 5 | 192,334,997,633 | 195,083,812,343 | +0.27% |
+| `carets1000` | 5 | 3,692,376,538 | 3,754,809,940 | +0.80% |
+| `smoke1` | 5 | 305,797,814 | 305,380,197 | −0.03% |
+| Headless typing replay | 5 | 3,195,843,025 | 3,078,099,832 | −2.99% |
+| Headless scroll replay | 15 | 3,283,361,478 | 3,209,260,578 | −0.16% |
+
+The first five scroll pairs gave +1.74%; a separate nine-pair identical-binary
+control gave +0.10%. The longer repeat does not show a scroll instruction
+increase. Raw reports, binaries, and the counter wrapper are in
+`/tmp/velocity-c39.vvSybS/`.
+
+### Native checks still needed
+
+One 2400×1600 BGRA8 drawable is 15.36 MB before alignment. If Core Animation
+releases a spare after the pool shrinks, expect about 30 MB of IOSurface
+memory rather than 45 MB in both default-size idle windows. Applying that
+estimate and the observed headless reduction to the reviewer's 214–224 MB
+range suggests roughly 176–186 MB, not a native measurement. Compare fresh
+empty and SQLite windows with `footprint <pid>` after the document and
+retirement work settle. Check total dirty memory and IOSurface bytes; region
+count alone is not a drawable count.
+
+In native `--log-input` runs, compare the first key after an idle pause
+against the following burst using `input_latency.acquire_ms`,
+`drawable_limit`, and receipt-to-submit time. Check that the window neither
+blanks during the pause nor misses the first scanout after it. In the native
+`--bench-scroll` and `--bench-typing` samples, verify three drawables during
+the sustained workload, particularly 4K FIFO, and no acquire-time or retry
+regression. The headless replay exercises the CPU scene path but cannot
+measure a drawable acquisition or a scanout.

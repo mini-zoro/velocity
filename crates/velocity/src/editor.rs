@@ -2105,11 +2105,7 @@ mod round15_details {
         snapshot.text = e.buffer.text().clone();
         snapshot.range = 0..snapshot.text.len_lines();
         snapshot.lines = (0..snapshot.text.len_lines())
-            .map(|line| {
-                let mut record = published.lines[0].clone();
-                record.line = line;
-                record
-            })
+            .map(|_| published.lines[0].clone())
             .collect();
         let root = language.as_ref().unwrap().root;
         let at = e.buffer.text().len_bytes();

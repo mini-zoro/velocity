@@ -64,13 +64,13 @@ impl DocumentHighlighter {
         );
         for record in self.records.iter().flatten() {
             operations.operations(&record.ops);
-            scope_runs.slice(&record.runs);
+            scope_runs.slice(record.runs.storage());
             visual_shapes.slice(&record.spans);
         }
         let cache = &self.render_cache;
         for entry in cache.entries.values() {
             operations.operations(&entry.ops);
-            scope_runs.slice(&entry.output.runs);
+            scope_runs.slice(entry.output.runs.storage());
             visual_shapes.slice(&entry.output.spans);
         }
         let render_cache = cache.entries.capacity() * (size_of::<(RenderKey, CachedRender)>() + 1)
