@@ -75,6 +75,19 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Check that the tag names the packaged version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          ls dist
+          for platform in universal windows-x64; do
+            if ! ls dist | grep -q -- "^Velocity-${version}-${platform}"; then
+              echo "::error::tag $TAG does not match the packaged version (no Velocity-${version}-${platform}* asset); bump the workspace version first"
+              exit 1
+            fi
+          done
       - name: Combine checksums
         run: |
           set -euo pipefail
