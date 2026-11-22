@@ -295,7 +295,7 @@ fn round24_view_checks_and_project_requirements() {
         ("toggle_setting", spelling, false),
         ("toggle_minimap", json!({}), true),
         ("toggle_tabs", json!({}), true),
-        ("toggle_side_bar", json!({}), true),
+        ("toggle_side_bar", json!({}), false),
         ("toggle_status_bar", json!({}), true),
     ] {
         assert_eq!(

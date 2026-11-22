@@ -67,7 +67,7 @@ fn first_cmd_w_honors_close_windows_when_empty() {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, json!({"close_windows_when_empty":closes}).to_string()).unwrap();
             let mut app = first_action_app(dir.path(), None, initialize_first);
-            assert!(!app.workspace.is_empty());
+            assert!(app.workspace.is_empty());
             assert!(app.dispatch_key_binding(
                 None,
                 &Key::parse("super+w").unwrap(),
@@ -130,7 +130,8 @@ fn first_menu_command_and_palette_query_resolve_normally() {
             0,
         )
         .unwrap();
-        assert_eq!(app.workspace.tabs.len(), 2);
+        assert_eq!(app.workspace.tabs.len(), 1);
+        assert!(!app.workspace.is_empty());
         assert_ready(&app);
 
         let dir = tempfile::tempdir().unwrap();

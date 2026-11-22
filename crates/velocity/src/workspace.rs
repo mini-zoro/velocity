@@ -1995,7 +1995,13 @@ impl Workspace {
         project: Option<PathBuf>,
         watch: bool,
     ) -> Result<Self, String> {
-        Self::new_with_window_overrides(text, data_dir, project, watch, Some(Default::default()))
+        Self::new_with_window_overrides(
+            Some(text),
+            data_dir,
+            project,
+            watch,
+            Some(Default::default()),
+        )
     }
 
     pub(crate) fn new_for_startup(
@@ -2006,7 +2012,7 @@ impl Workspace {
         phases: &mut crate::report::StartupPhases,
     ) -> Result<Self, String> {
         Self::new_with_configuration(
-            text,
+            (!text.is_empty()).then_some(text),
             data_dir,
             project,
             (
@@ -2024,11 +2030,19 @@ impl Workspace {
     }
 
     pub(crate) fn new_window(data_dir: Option<PathBuf>, watch: bool) -> Result<Self, String> {
-        Self::new_with_window_overrides(Text::new(), data_dir, None, watch, None)
+        Self::new_with_window_overrides(None, data_dir, None, watch, None)
+    }
+
+    pub(crate) fn new_empty(
+        data_dir: Option<PathBuf>,
+        project: Option<PathBuf>,
+        watch: bool,
+    ) -> Result<Self, String> {
+        Self::new_with_window_overrides(None, data_dir, project, watch, Some(Default::default()))
     }
 
     pub(crate) fn new_with_window_overrides(
-        text: Text,
+        text: Option<Text>,
         data_dir: Option<PathBuf>,
         project: Option<PathBuf>,
         watch: bool,
@@ -2053,7 +2067,7 @@ impl Workspace {
         preferred: &'static [&'static str],
     ) -> Result<Self, String> {
         Self::new_configured(
-            text,
+            Some(text),
             data_dir,
             None,
             watch,
@@ -2064,7 +2078,7 @@ impl Workspace {
     }
 
     fn new_configured(
-        text: Text,
+        text: Option<Text>,
         data_dir: Option<PathBuf>,
         project: Option<PathBuf>,
         watch: bool,
@@ -2084,7 +2098,7 @@ impl Workspace {
     }
 
     fn new_with_configuration(
-        text: Text,
+        text: Option<Text>,
         data_dir: Option<PathBuf>,
         project: Option<PathBuf>,
         (watch, kind): (bool, ConfigKind),
@@ -2135,7 +2149,8 @@ impl Workspace {
             &ignored_user_keymaps,
             &mut resource_reports,
         );
-        let tab = Tab::new(text, &settings, &keymap)?;
+        let empty = text.is_none();
+        let tab = Tab::new(text.unwrap_or_default(), &settings, &keymap)?;
         let mut localizer = vel_i18n::Translator::default();
         localizer.replace(translations);
         let mut messages = resource_messages;
@@ -2188,7 +2203,7 @@ impl Workspace {
             transient_folders: Default::default(),
             tabs: vec![tab],
             active: 0,
-            empty: false,
+            empty,
             closed_files: Vec::new(),
             open_as_choices: Default::default(),
             closed_text: BTreeMap::new(),
@@ -2243,7 +2258,9 @@ impl Workspace {
             settings_reload_deferred: false,
             resource_revision: 0,
         };
-        workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
+        if !empty {
+            workspace.workbench.groups[0].add(workspace.tabs[0].sheet, false);
+        }
         workspace.configure_language(0, None, true)?;
         workspace.observe_navigation();
         workspace.sync_ui_language();
@@ -2602,6 +2619,7 @@ impl Workspace {
         Ok(index)
     }
     pub(crate) fn new_text_tab(&mut self, text: Text) -> Result<(), String> {
+        self.materialize_input();
         if self.empty {
             self.tabs.clear();
             self.empty = false;
@@ -4200,7 +4218,7 @@ mod tests {
         .unwrap();
         let preferred = crate::ui_language::PreferredLanguages(&["zh-Hans-CN", "en"]);
         let mut startup = Workspace::new_with_configuration(
-            Text::new(),
+            None,
             Some(dir.path().into()),
             None,
             (true, ConfigKind::FirstFrame),

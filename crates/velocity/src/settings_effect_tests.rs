@@ -97,6 +97,7 @@ fn alternate(key: &str, default: &Value, root: &Path) -> Value {
         "scroll_context_lines" => json!(0),
         "scroll_speed" => json!(2.0),
         "show_line_column" => json!("disabled"),
+        "show_side_bar" => json!(false),
         "spelling_selector" => json!("string"),
         "sub_word_separators" => json!("-"),
         "sublime_merge_path" => json!(root.join("alternate/smerge")),

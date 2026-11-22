@@ -527,7 +527,7 @@ impl WindowRoute {
         self.untouched = startup
             && self.project.is_none()
             && self.folders.is_empty()
-            && workspace.tabs.len() == 1
+            && workspace.is_empty()
             && self.files.is_empty()
             && workspace.editor().text.is_empty()
             && !workspace.tabs[0].dirty()

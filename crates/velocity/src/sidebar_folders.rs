@@ -131,15 +131,28 @@ impl Panels {
         }
         match applied.edit {
             Edit::Add(path) => {
+                // Adding a root in distraction-free mode has always revealed it.
+                // Respect an explicit mode choice; ordinary windows use the folder default.
+                let reveal_in_distraction = workspace.distraction_free
+                    && workspace.folders.is_empty()
+                    && !workspace
+                        .window_layers
+                        .distraction
+                        .contains_key("show_side_bar")
+                    && !workspace.distraction_settings.contains_key("show_side_bar");
                 workspace.transient_folders.remove(&path);
                 crate::workbench::remember(&mut workspace.recent_folders, path.clone());
                 self.install_folder(workspace, path)?;
+                if reveal_in_distraction {
+                    workspace.set_window_toggle("show_side_bar", true)?;
+                }
             }
             Edit::Reveal(path) => {
                 if !workspace.folders.iter().any(|f| f.path == path) {
                     workspace.transient_folders.insert(path.clone());
                 }
                 self.install_folder(workspace, path)?;
+                workspace.set_window_toggle("show_side_bar", true)?;
             }
             Edit::Remove(path) => {
                 workspace.transient_folders.remove(&path);
@@ -152,6 +165,8 @@ impl Panels {
                 self.restart_index(workspace);
             }
         }
+        self.side_visible = workspace.window_visible("show_side_bar");
+        self.side_focused &= self.side_visible;
         Ok(())
     }
 }

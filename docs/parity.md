@@ -276,6 +276,7 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Copy Path in sidebar context menu | [D4166.8][releases], [V4158.5][dev] | done | `copy_file_path`, `context_menu.rs` | |
 | `preview_on_click` (left-only / disabled / enabled) | [D4107.169][releases], [V4075.10][dev] | done | `round18_sidebar_preview_setting_replacement_promotion_and_session_recent_files` | |
 | `sidebar_on_right` | [D4200.1][releases], [V4198.1][dev] | done | `Panels::layout`; `r34_sidebar_cross_group_and_right_geometry` | Mirrors the sidebar and editor bounds without changing the default left placement. |
+| Fresh window sidebar and untitled editor | [U01, Sublime Text 4215](behavior.md#decisions-on-the-open-questions-user-2026-11-21) | done | `r41_fresh_input_is_not_a_document_until_edited`; `r41_open_files_and_folders_reuse_the_startup_input` | Sidebar defaults to visible when the window has folders. An untouched initial editor has no tab. |
 | `tree_animation_enabled` | [Themes][themes] | done | `panels.rs` geometry and Reduce Motion; [reader](settings.md) | |
 | Full screen | [Distraction Free][distraction], [Commands][commands] | done | `toggle_full_screen`, `vel-platform/fullscreen.rs` | |
 | `use_simple_full_screen` | [Distraction Free][distraction], [Settings][settings] | done | `toggle_full_screen_with_mode`; next native transition per [settings](settings.md) | |

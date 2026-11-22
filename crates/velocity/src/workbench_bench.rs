@@ -79,7 +79,7 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
         windows: vec![Window {
             sheets,
             workbench,
-            sidebar_visible: true,
+            sidebar_visible: Some(true),
             ..Window::default()
         }],
         ..Session::default()

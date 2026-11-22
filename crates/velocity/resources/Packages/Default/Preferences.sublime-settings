@@ -64,7 +64,7 @@
     "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store",
     "*.class", "*.psd", "*.db", "*.sublime-workspace", ".velocity-save-*"
   ],
-  "show_side_bar": true,
+  "show_side_bar": "auto",
   "color_scheme": "auto",
   "dark_color_scheme": "Velocity Dark.sublime-color-scheme",
   "light_color_scheme": "Velocity Light.sublime-color-scheme",

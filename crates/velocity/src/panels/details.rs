@@ -2288,6 +2288,7 @@ mod tests {
     #[test]
     fn overlay_and_sidebar_geometry_stay_aligned_across_scales() {
         let (w, mut p) = setup("text");
+        p.side_visible = true;
         p.overlay = Some(Overlay::Locations);
         for scale in [0.75, 1., 1.5, 2.] {
             p.ui_scale = scale;

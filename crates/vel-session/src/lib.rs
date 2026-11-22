@@ -170,8 +170,9 @@ pub struct Window {
     pub workbench: Workbench,
     /// Open sheets.
     pub sheets: Vec<Sheet>,
-    /// Sidebar visibility.
-    pub sidebar_visible: bool,
+    /// Legacy sidebar visibility; new snapshots use the explicit UI override maps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sidebar_visible: Option<bool>,
     /// Open Files section visibility; older sessions retain the preexisting visible default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sidebar_open_files: Option<bool>,
@@ -205,9 +206,11 @@ pub struct Window {
     pub normal_ui: std::collections::BTreeMap<String, bool>,
     /// Per-window chrome visibility within distraction-free mode.
     pub distraction_ui: std::collections::BTreeMap<String, bool>,
-    /// Sidebar visibility remembered outside distraction-free mode.
+    /// Legacy sidebar visibility remembered outside distraction-free mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub normal_sidebar: Option<bool>,
-    /// Sidebar visibility remembered within distraction-free mode.
+    /// Legacy sidebar visibility remembered within distraction-free mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub distraction_sidebar: Option<bool>,
     /// Whether full screen was already active when distraction-free mode was entered.
     pub fullscreen_before_distraction: bool,

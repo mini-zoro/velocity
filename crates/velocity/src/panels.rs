@@ -885,7 +885,7 @@ impl Panels {
         let mut ui = Self {
             ui_scale: vel_ui::theme::ui_scale(&workspace.editor().settings),
             chrome: workspace.window_visible("show_status_bar"),
-            side_visible: workspace.editor().settings.bool("show_side_bar", true),
+            side_visible: workspace.window_visible("show_side_bar"),
             startup_index_pending: workspace.startup_services_pending(),
             ..Self::default()
         };
@@ -1204,17 +1204,7 @@ impl Panels {
         self.history_cursor = [None, None];
     }
     pub fn capture_session(&mut self, window: &mut vel_session::Window) {
-        window.sidebar_visible = self.side_visible;
         window.sidebar_open_files = Some(self.open_files_visible);
-        if window.distraction_free {
-            window
-                .distraction_ui
-                .insert("show_side_bar".into(), self.side_visible);
-        } else {
-            window
-                .normal_ui
-                .insert("show_side_bar".into(), self.side_visible);
-        }
         window.sidebar_expanded = self.expanded.iter().cloned().collect();
         window.sidebar_expanded.sort_unstable();
         window.sidebar_scroll = self.side_scroll.offset;
@@ -1225,7 +1215,6 @@ impl Panels {
         window.find_in_files_context = Some(self.files_context);
     }
     pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
-        self.side_visible = window.sidebar_visible;
         self.open_files_visible = window.sidebar_open_files.unwrap_or(true);
         self.expanded = window.sidebar_expanded.iter().cloned().collect();
         self.watched_expanded = false;
@@ -1288,8 +1277,6 @@ impl Panels {
             self.restart_index(workspace);
             self.load_directory(workspace, &path);
         }
-        self.side_visible = true;
-        workspace.set_window_toggle("show_side_bar", true)?;
         Ok(())
     }
     fn load_directory(&mut self, workspace: &Workspace, path: &Path) {
@@ -1363,7 +1350,8 @@ impl Panels {
     }
     /// Rows above the first side bar file row: the Open Files block and the Folders heading.
     pub(crate) fn folder_row_base(&self, workspace: &Workspace) -> usize {
-        self.visible_open_files(workspace) + 1 + usize::from(self.open_files_visible)
+        let files = self.visible_open_files(workspace);
+        files + 1 + usize::from(files != 0)
     }
     fn select_side(&mut self, index: usize) {
         self.side_selected = index;
@@ -6794,7 +6782,7 @@ impl Panels {
                 ),
             ]
             .into_iter()
-            .skip(usize::from(!self.open_files_visible))
+            .skip(usize::from(self.visible_open_files(workspace) == 0))
             {
                 // A localized heading keeps the capitalization chosen by its translator.
                 let mut heading = heading.clone();

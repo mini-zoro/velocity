@@ -227,8 +227,6 @@ pub struct App {
     text_drag_origin: Option<(Point, usize)>,
     mouse_preferences: vel_platform::mouse::MousePreferences,
     builds: crate::build::Builds,
-    normal_sidebar: bool,
-    distraction_sidebar: Option<bool>,
     fullscreen_before_distraction: bool,
     window_frame: Option<[f64; 4]>,
     #[cfg(test)]
@@ -285,7 +283,7 @@ impl App {
             .as_ref()
             .and_then(|window| window.project.clone())
             .filter(|path| path.is_file());
-        let mut workspace = Workspace::new(vel_text::Text::new(), directory, project, true)?;
+        let mut workspace = Workspace::new_empty(directory, project, true)?;
         workspace.restore_original = sessions.original.clone();
         if let Some(window) = &first {
             workspace.restore_window(window, &restored.documents)?;
@@ -451,8 +449,6 @@ impl App {
             text_drag_origin: None,
             mouse_preferences: vel_platform::mouse::MousePreferences::read(),
             builds: crate::build::Builds::default(),
-            normal_sidebar: true,
-            distraction_sidebar: None,
             fullscreen_before_distraction: false,
             window_frame: None,
             #[cfg(test)]
@@ -482,8 +478,6 @@ impl App {
     }
     pub fn restore_ui(&mut self, window: &vel_session::Window) {
         self.panels.restore_session(&self.workspace, window);
-        self.normal_sidebar = window.normal_sidebar.unwrap_or(true);
-        self.distraction_sidebar = window.distraction_sidebar;
         self.fullscreen_before_distraction = window.fullscreen_before_distraction;
         self.window_frame = window.frame;
     }
@@ -733,8 +727,6 @@ impl App {
         self.workspace.tabs[active].scroll_line_height = self.view.line_height;
         let (mut window, documents) = self.workspace.snapshot()?;
         self.panels.capture_session(&mut window);
-        window.normal_sidebar = Some(self.normal_sidebar);
-        window.distraction_sidebar = self.distraction_sidebar;
         window.fullscreen_before_distraction = self.fullscreen_before_distraction;
         window.frame = self.window_frame;
         Ok((window, documents))
@@ -888,7 +880,7 @@ impl App {
         let mut workspace = if use_new_window_settings {
             Workspace::new_window(data, true)?
         } else {
-            Workspace::new(vel_text::Text::new(), data, project, true)?
+            Workspace::new_empty(data, project, true)?
         };
         workspace.recent_files = self.workspace.recent_files.clone();
         workspace.recent_folders = self.workspace.recent_folders.clone();
@@ -1031,12 +1023,8 @@ impl App {
         Ok(Some((route, incoming)))
     }
     fn app_for_new_window(&self, incoming: crate::instance::Incoming) -> Result<Self, String> {
-        let workspace = Workspace::new(
-            vel_text::Text::new(),
-            self.workspace.data_path().map(Path::to_owned),
-            None,
-            true,
-        )?;
+        let workspace =
+            Workspace::new_empty(self.workspace.data_path().map(Path::to_owned), None, true)?;
         let mut options = self.options.clone();
         options.background = incoming.request.background;
         options.files.clear();
@@ -1326,6 +1314,9 @@ impl App {
                 .len()
                 > 1;
         }
+        if self.workspace.is_empty() && matches!(name, "close" | "close_file") {
+            return self.should_close_empty_window();
+        }
         if let Some(state) = self.context_state(name, args) {
             return state.enabled;
         }
@@ -1370,8 +1361,7 @@ impl App {
             {
                 return false;
             }
-            "close" | "close_file" | "prompt_save_as" | "save_as" | "save" | "save_and_close"
-            | "save_encoding"
+            "prompt_save_as" | "save_as" | "save" | "save_and_close" | "save_encoding"
                 if self.workspace.is_empty() =>
             {
                 return false;
@@ -2717,9 +2707,10 @@ impl App {
         result
     }
     fn macro_view_active(&mut self) -> bool {
-        if self.macro_origin.is_some_and(|sheet| {
-            self.workspace.is_empty() || self.workspace.tabs[self.workspace.active].sheet != sheet
-        }) {
+        if self
+            .macro_origin
+            .is_some_and(|sheet| self.workspace.tabs[self.workspace.active].sheet != sheet)
+        {
             self.panels.set_message(UiText::tr(
                 "Macro playback stopped: the starting view is no longer active",
             ));
@@ -3141,10 +3132,9 @@ impl App {
         if self.workspace.workbench_action(name, args)? {
             if name == "toggle_distraction_free" {
                 self.panels.chrome = self.workspace.window_visible("show_status_bar");
+                self.panels.side_visible = self.workspace.window_visible("show_side_bar");
                 if self.workspace.distraction_free {
-                    self.normal_sidebar = self.panels.side_visible;
                     self.fullscreen_before_distraction = self.workspace.fullscreen;
-                    self.panels.side_visible = self.workspace.window_visible("show_side_bar");
                     if !self.workspace.fullscreen {
                         self.workspace.fullscreen = true;
                         w.toggle_full_screen_with_mode(
@@ -3155,8 +3145,6 @@ impl App {
                         );
                     }
                 } else {
-                    self.distraction_sidebar = Some(self.panels.side_visible);
-                    self.panels.side_visible = self.workspace.window_visible("show_side_bar");
                     if !self.fullscreen_before_distraction && self.workspace.fullscreen {
                         self.workspace.fullscreen = false;
                         w.toggle_full_screen_with_mode(
@@ -3965,8 +3953,16 @@ impl App {
             };
             self.group_bounds.push(group_bounds);
             let visible = group.visible();
-            let count = visible.len().max(1);
-            for (position, sheet) in visible.iter().enumerate() {
+            // An empty window has an editor in the active group but no tab to select.
+            let input = [focused];
+            let editor_sheets =
+                if self.workspace.is_empty() && group_index == self.workspace.workbench.active {
+                    input.as_slice()
+                } else {
+                    visible.as_slice()
+                };
+            let count = editor_sheets.len().max(1);
+            for (position, sheet) in editor_sheets.iter().enumerate() {
                 let Some(index) = self.workspace.sheet_index(*sheet) else {
                     continue;
                 };
@@ -6445,6 +6441,9 @@ mod round17_tests;
 #[cfg(test)]
 #[path = "app_round18_tests.rs"]
 mod round18_tests;
+#[cfg(test)]
+#[path = "app_round41_lane_b_tests.rs"]
+mod round41_lane_b_tests;
 
 #[cfg(test)]
 mod round15_tests {
@@ -6468,6 +6467,7 @@ mod round15_tests {
         let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
         workspace.close(0).unwrap();
         let mut app = app(workspace, None);
+        app.run_named(None, "toggle_side_bar", &json!({}));
         for expected in [0, 1, 0] {
             match expected {
                 1 => app

@@ -1099,14 +1099,20 @@ fn distraction_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
 }
 
 fn empty_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
-    let mut workspace = Workspace::new(
-        vel_text::Text::new(),
-        Some(fixture.data.clone()),
-        None,
-        false,
-    )?;
+    let mut workspace = Workspace::new_window(Some(fixture.data.clone()), false)?;
     workspace.set_appearance(dark)?;
     new_app(workspace)
+}
+
+fn empty_folder_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = empty_scene(fixture, dark)?;
+    let folder = fixture
+        .file
+        .parent()
+        .ok_or("missing scene fixture folder")?
+        .to_owned();
+    app.panels.add_folder(&mut app.workspace, folder)?;
+    Ok(app)
 }
 
 fn narrow_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
@@ -1731,6 +1737,11 @@ const SCENARIOS: &[Scenario] = &[
         name: "empty_window",
         size: (1200., 800.),
         build: empty_scene,
+    },
+    Scenario {
+        name: "empty_folder_window",
+        size: (1200., 800.),
+        build: empty_folder_scene,
     },
     Scenario {
         name: "narrow_640x480",
@@ -2367,8 +2378,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                     None => match Renderer::offscreen(width, height) {
                         Ok(r) => Some(renderer.insert(r)),
                         Err(error)
-                            if matches!(scenario.name, "r6-cjk-zh" | "r5_sidebar")
-                                || scenario.name.starts_with("settings_ui") =>
+                            if matches!(
+                                scenario.name,
+                                "r6-cjk-zh" | "r5_sidebar" | "empty_window" | "empty_folder_window"
+                            ) || scenario.name.starts_with("settings_ui") =>
                         {
                             eprintln!("velocity: {error}; using flat software text snapshot");
                             None
@@ -2430,7 +2443,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 
 fn finish_layout(app: &mut App, name: &str) {
     settle(app);
-    if matches!(name, "status_bar" | "status_narrow" | "status_switcher") {
+    if matches!(
+        name,
+        "status_bar" | "status_narrow" | "status_switcher" | "empty_window" | "empty_folder_window"
+    ) {
         // Review the status fields rather than the fixture's package diagnostics.
         app.panels.message.clear();
     }
@@ -2440,6 +2456,59 @@ fn finish_layout(app: &mut App, name: &str) {
     if name == "hover_definition" {
         hover_definition(app);
         settle(app);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn r41_empty_window_scenes_in_both_appearances_and_languages() {
+    for (language, folders, open_files) in [
+        ("en", "FOLDERS", "OPEN FILES"),
+        ("zh-Hans", "文件夹", "打开的文件"),
+    ] {
+        let fixture = Fixture::create(Some(language), &[]).unwrap();
+        for (build, has_folders) in [
+            (
+                empty_scene as fn(&Fixture, bool) -> Result<App, String>,
+                false,
+            ),
+            (empty_folder_scene, true),
+        ] {
+            for dark in [true, false] {
+                let mut app = build(&fixture, dark).unwrap();
+                assert_eq!(app.workspace.dark, dark);
+                assert_eq!(
+                    app.workspace.translations.matched_language().as_str(),
+                    language
+                );
+                assert_eq!(app.panels.side_visible, has_folders);
+                app.view.reset_caret();
+                let scene = app.scene();
+                assert!(app.tab_hits.is_empty());
+                assert!(app.content.width > 0. && (app.content.x > 0.) == has_folders);
+                let texts: Vec<_> = scene
+                    .layers
+                    .iter()
+                    .flat_map(|layer| &layer.text)
+                    .map(|run| run.text.as_str())
+                    .collect();
+                assert!(texts.contains(&"1"), "{language} dark={dark}: {texts:?}");
+                assert!(
+                    !scene.layers[1].rects.is_empty(),
+                    "{language} dark={dark}: the empty editor must paint a caret"
+                );
+                assert_eq!(
+                    texts.iter().any(|text| text.eq_ignore_ascii_case(folders)),
+                    has_folders,
+                    "{language} dark={dark}: {texts:?}"
+                );
+                assert!(
+                    !texts
+                        .iter()
+                        .any(|text| text.eq_ignore_ascii_case(open_files))
+                );
+            }
+        }
     }
 }
 

@@ -282,7 +282,7 @@ fn new_window_settings_are_a_validated_snapshot_not_a_global_edit() {
 #[test]
 fn settings_user_tab_save_updates_existing_window_and_preserves_explicit_toggles() {
     let data = tempfile::tempdir().unwrap();
-    let path = user_file(data.path(), &json!({"font_size":13}));
+    let path = user_file(data.path(), &json!({"font_size":13, "show_side_bar":true}));
     let mut app = app(Some(data.path()));
     assert!(app.panels.side_visible && app.panels.chrome);
     assert!(

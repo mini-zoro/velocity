@@ -393,7 +393,7 @@ fn r32_open_dialog_and_recent_menu_focus_without_repositioning() {
     assert_eq!(a.workspace.tabs.len(), 1);
     assert!(a.workspace.tabs[0].path.is_none());
     assert!(a.workspace.editor().text.is_empty());
-    assert!(a.panels.side_visible);
+    assert!(!a.panels.side_visible);
     assert!(a.panels.overlay.is_none() && a.panels.panel.is_none());
 
     let invalid = files.path().join("socket");

@@ -282,6 +282,7 @@ pub fn validate_layer(
             | "open_files_in_new_window"
             | "hot_exit"
             | "remember_layout"
+            | "show_side_bar"
             | "auto_complete_preserve_order"
             | "preview_on_click"
             | "trim_trailing_white_space_on_save" => &["a boolean", "a string"],

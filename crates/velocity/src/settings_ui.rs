@@ -1810,6 +1810,7 @@ mod model {
                     json!(["enabled", "compact", "disabled"]),
                 ),
                 ("preview_on_click", json!([true, false, "only_left"])),
+                ("show_side_bar", json!(["auto", true, false])),
                 (
                     "auto_find_in_selection",
                     json!([false, true, "find_only", "replace_only"]),

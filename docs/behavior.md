@@ -60,7 +60,7 @@ Audit totals: **39 same**, **6 differs on purpose**, **13 differs — bug** (4 f
 
 | Step | Sublime (source) | Velocity (test or code) | Verdict |
 | --- | --- | --- | --- |
-| Fresh window, untitled buffer, sidebar and welcome | [Build 4126][r4126] documents a startup window preference and reusing an empty startup window; [navigation guide][nav] documents the sidebar, not its clean-profile visibility, the initial sheet, or welcome UI. | `r32_open_dialog_and_recent_menu_focus_without_repositioning`: one empty untitled tab, sidebar visible, no welcome overlay or panel in the fresh App model. | **uncertain** (U01) |
+| Fresh window, untitled buffer, sidebar and welcome | Sublime Text 4215, fresh safe-mode profile on macOS (2026-11-22): opening one or three files gave one or three tabs and no sidebar. Opening only a folder showed FOLDERS and an editable empty editor (line 1, caret) without a tab, titled `untitled — <folder>`. [Build 4126][r4126] documents reusing the empty startup window. | `r41_fresh_input_is_not_a_document_until_edited`, `r41_open_files_and_folders_reuse_the_startup_input`: no welcome screen; folder-aware sidebar and an editable tabless buffer until the first edit. | **same** (U01, round 41 lane B) |
 | UI language | No per-language startup UI is specified in [Sublime's settings guide][settings]. | Ships `ui_language: "auto"` since round 31: the first supported macOS preferred language, else English (`Workspace::sync_ui_language`, preferred-order tests). | **differs on purpose** (D2 and the localized UI addition; done in round 31) |
 
 ### 2. Opening
@@ -304,7 +304,7 @@ now the confirmed design.
 
 | # | Decision | Change |
 | --- | --- | --- |
-| U01 | Keep: one empty untitled tab, sidebar visible, no welcome page | none |
+| U01 | Changed to Sublime: hide the sidebar by default in windows without folders, show it in windows with folders, and keep the initial editable buffer tabless until edited. No welcome page. | 2026-11-22, round 41 lane B. Sublime Text 4215 in a fresh safe-mode profile: `subl a.rs zh.md b.txt` showed three tabs and no sidebar; one file showed one tab and no sidebar; a folder alone showed FOLDERS, line 1 and a caret, no tab, and `untitled — <folder>`. |
 | U02 | Keep: a drop anywhere on the window opens in the window (no per-pane drop zones) | none |
 | U03 | **A**: a bare path from the CLI keeps an already-open file's position; explicit `:line[:col]` still jumps | Done (round 33 lane C) |
 | U04 | Keep: Goto Anything previews in an italic transient tab | none |
@@ -331,7 +331,7 @@ discussion, not new defaults.
 
 | Question | What Sublime is known to do / Velocity now | Options and recommendation |
 | --- | --- | --- |
-| **U01. What should a fresh window show?** | [Build 4126][r4126] documents empty-window reuse, not the clean-profile starter UI. Velocity shows one empty tab, sidebar visible, and no welcome. | A. Keep that state. B. Hide the sidebar until a folder is added. C. Start with no sheet until typing/new file. **Recommend A** pending evidence; no welcome step. |
+| **U01. What should a fresh window show?** | The clean-profile Sublime Text 4215 observations are recorded in the U01 decision above. [Build 4126][r4126] documents empty-window reuse. | **Decided 2026-11-22.** The empty editor is immediately editable but is not an open document yet. New File opens a tab immediately. Explicit sidebar toggles override the folder-based default and survive session restore. |
 | **U02. Should a window drop target a particular pane or just open in the current window?** | [Build 4126][r4126] documents alias resolution on macOS drops; details of drop zones aren't established. Velocity routes accepted paths through its native open dispatcher; Dock opens still follow D4. | A. Keep window-wide routing and verify actual Finder alias delivery separately. B. Add pane-specific drops. **Recommend A**; avoid inventing a pane rule. |
 | **U03. Should bare CLI reopen preserve the existing location?** | [CLI][cli] documents optional positions; [Build 4143][r4143] describes macOS reopen without identifying the CLI route. | **Decided A.** Bare paths preserve the caret and viewport; explicit coordinates, including `:1:1`, still jump. |
 | **U04. Should Goto's preview occupy a tab?** | [Navigation guide][nav] describes a tab-less Goto preview versus an italic sidebar tab; the current stable [release history][releases] confirms cleanup rather than tab-strip appearance. Velocity displays an italic transient tab for both. | A. Hide Goto's temporary tab until acceptance, keep sidebar preview tabs. B. Retain one visible transient model. **Recommend A** if current ST4's visual behavior is confirmed; otherwise keep B. |

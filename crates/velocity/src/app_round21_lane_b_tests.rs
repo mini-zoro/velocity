@@ -56,10 +56,7 @@ fn two_apps_route_to_existing_folder_project_and_file_without_replacing_dirty_ta
         .run("insert", &json!({"characters":"unsaved "}))
         .unwrap();
     first.publish_open_route();
-    let second = fixture(
-        Workspace::new(Text::new(), None, None, false).unwrap(),
-        sessions,
-    );
+    let second = fixture(Workspace::new_empty(None, None, false).unwrap(), sessions);
     second.publish_open_route();
     for path in [&root, &project, &file] {
         let mut request = crate::open_requests::native_request(std::slice::from_ref(path)).unwrap();

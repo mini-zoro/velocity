@@ -148,7 +148,7 @@
   "goto_anything_exclude_gitignore": {"group": "find", "control": "bool", "name": "Goto Anything: Exclude Git-Ignored Files", "description": "Omit Git-ignored files from Goto Anything."},
 
   // File lists and indexing.
-  "show_side_bar": {"group": "sidebar", "control": "bool", "aliases": ["sidebar","侧栏"], "name": "Show Sidebar", "description": "Show the sidebar with open files and folders."},
+  "show_side_bar": {"group": "sidebar", "control": "enum", "choices": ["auto",true,false], "aliases": ["sidebar","侧栏"], "name": "Show Sidebar", "description": "Auto shows the sidebar only while the window has folders. Set true or false in User settings to override this default. A window's own sidebar toggle takes precedence and survives session restore."},
   "file_exclude_patterns": {"group": "sidebar", "control": "array", "name": "File Exclude Patterns", "description": "Omit matching files from the sidebar’s file tree."},
   "folder_exclude_patterns": {"group": "sidebar", "control": "array", "name": "Folder Exclude Patterns", "description": "Omit matching folders from the sidebar’s file tree."},
   "tree_animation_enabled": {"group": "sidebar", "control": "bool", "name": "Sidebar Tree Animations", "description": "Animate changes in the sidebar’s file tree."},

@@ -155,7 +155,7 @@ impl vel_platform::AppHandler for NativeForwarder {
                         .data_dir
                         .clone()
                         .or_else(workspace::Workspace::default_data_dir);
-                    let workspace = workspace::Workspace::new(Text::new(), data, None, true)?;
+                    let workspace = workspace::Workspace::new_empty(data, None, true)?;
                     let mut options = self.options.clone();
                     options.forward_native_opens = false;
                     let mut app = app::App::new(

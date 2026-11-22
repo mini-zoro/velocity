@@ -342,8 +342,23 @@ impl Workspace {
             return self.ui.settings_window.to_string();
         }
         let settings = &tab.editor.settings;
+        let project = self
+            .project
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map(|name| name.to_string_lossy())
+            .or_else(|| {
+                self.folders
+                    .first()
+                    .filter(|_| self.is_empty())
+                    .map(|folder| std::borrow::Cow::Borrowed(folder.name.as_str()))
+            });
         let name = if self.is_empty() {
-            "Velocity".into()
+            if project.is_some() {
+                self.translations.tr("untitled").into_owned()
+            } else {
+                "Velocity".into()
+            }
         } else if settings.bool("show_rel_path", false) {
             tab.path
                 .as_deref()
@@ -386,24 +401,17 @@ impl Workspace {
             },
             if tab.dirty() { " •" } else { "" }
         );
-        self.project
-            .as_deref()
-            .and_then(Path::file_stem)
-            .map_or_else(
-                || title.clone(),
-                |project| {
-                    if self.settings.bool("show_project_first", false) {
-                        return format!("{} — {title}", project.to_string_lossy());
-                    }
-                    vel_i18n::format_named(
-                        &self.ui.project_title,
-                        &[
-                            ("title", std::borrow::Cow::Borrowed(title.as_str())),
-                            ("project", project.to_string_lossy()),
-                        ],
-                    )
-                },
+        if let Some(project) = project {
+            if self.settings.bool("show_project_first", false) {
+                return format!("{project} — {title}");
+            }
+            vel_i18n::format_named(
+                &self.ui.project_title,
+                &[("title", title.as_str()), ("project", project.as_ref())],
             )
+        } else {
+            title
+        }
     }
     /// Zoom is a user Preference shared by every tab, rather than a view override.
     pub fn zoom_font(&mut self, command: &str) -> Result<(), String> {
@@ -509,7 +517,8 @@ impl Workspace {
         self.refresh_window_layers()
     }
     pub fn window_visible(&self, key: &str) -> bool {
-        self.settings.bool(key, true)
+        self.settings
+            .bool(key, key != "show_side_bar" || !self.folders.is_empty())
     }
     pub fn sheet_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.sheet == id)
@@ -1569,22 +1578,25 @@ impl Workspace {
         crate::session_restore::step("window_settings");
         self.window_layers.normal = window.normal_ui.clone();
         self.window_layers.distraction = window.distraction_ui.clone();
-        self.window_layers
-            .normal
-            .entry("show_side_bar".into())
-            .or_insert(window.normal_sidebar.unwrap_or(window.sidebar_visible));
-        self.window_layers
-            .distraction
-            .entry("show_side_bar".into())
-            .or_insert(
-                window
-                    .distraction_sidebar
-                    .unwrap_or(if window.distraction_free {
-                        window.sidebar_visible
-                    } else {
-                        false
-                    }),
-            );
+        let (normal, distraction) = if window.distraction_free {
+            (None, window.sidebar_visible)
+        } else {
+            (window.sidebar_visible, None)
+        };
+        for (overrides, legacy) in [
+            (
+                &mut self.window_layers.normal,
+                window.normal_sidebar.or(normal),
+            ),
+            (
+                &mut self.window_layers.distraction,
+                window.distraction_sidebar.or(distraction),
+            ),
+        ] {
+            if let Some(visible) = legacy {
+                overrides.entry("show_side_bar".into()).or_insert(visible);
+            }
+        }
         self.distraction_free = window.distraction_free;
         self.refresh_window_layers()?;
         let docs: BTreeMap<_, _> = documents.iter().map(|d| (d.id, d)).collect();
@@ -1821,7 +1833,7 @@ impl Workspace {
     ) -> Result<(), String> {
         let path = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
         let mut config = Self::new_with_window_overrides(
-            Text::new(),
+            None,
             self.data_dir.clone(),
             Some(path.clone()),
             self.watcher.is_some(),
@@ -1877,7 +1889,7 @@ impl Workspace {
     }
     pub fn close_project(&mut self) -> Result<(), String> {
         let mut empty = Self::new_with_window_overrides(
-            Text::new(),
+            None,
             self.data_dir.clone(),
             None,
             self.watcher.is_some(),
