@@ -14,6 +14,10 @@ use std::{
 use vel_buffer::{Bias, Change, ChangeSet, Edit, EditKind, Region, Selection, VerticalLayout};
 use vel_config::Value;
 
+#[cfg(test)]
+#[path = "editing_round42_tests.rs"]
+mod round42_tests;
+
 #[derive(Debug, Default)]
 pub(crate) struct ExactScopeCache {
     identity: Option<(vel_buffer::BufferId, vel_buffer::ChangeId, String, usize)>,
@@ -126,6 +130,11 @@ const EXACT_SCOPE_BYTES: usize = 256 * 1024;
 const EXACT_SCOPE_LINES: usize = 256;
 type IndentedNewline = (String, Range<usize>, Option<Range<usize>>, Option<usize>);
 
+#[cfg(test)]
+thread_local! {
+    static NEWLINE_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct NewlineRules {
     excluded: Option<IndentRule>,
     disabled: Option<IndentRule>,
@@ -134,6 +143,55 @@ struct NewlineRules {
     decrease: Option<IndentRule>,
     code: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NewlinePrefix {
+    Excluded,
+    Disabled,
+    Increase,
+    Carry,
+}
+
+struct NewlineRuleCache {
+    rules: NewlineRules,
+    prefixes: HashMap<Box<str>, NewlinePrefix>,
+    previous: HashMap<Box<str>, bool>,
+    suffixes: HashMap<Box<str>, bool>,
+}
+
+impl NewlineRuleCache {
+    fn new(language: &crate::language::Language, scopes: &vel_scope::ScopeStack) -> Self {
+        Self {
+            rules: NewlineRules::new(language, scopes),
+            prefixes: HashMap::new(),
+            previous: HashMap::new(),
+            suffixes: HashMap::new(),
+        }
+    }
+}
+
+/// Regex decisions depend on the effective scope rules and their exact input,
+/// not on the caret or on the rest of its line. Bound scratch space for large
+/// heterogeneous batches; hits do not allocate.
+fn newline_memo<const REUSE: bool, T: Copy>(
+    cache: &mut HashMap<Box<str>, T>,
+    input: &str,
+    evaluate: impl FnOnce(&str) -> T,
+) -> T {
+    const LIMIT: usize = 256;
+    if !REUSE || input.len() > LIMIT {
+        return evaluate(input);
+    }
+    if let Some(&result) = cache.get(input) {
+        return result;
+    }
+    let result = evaluate(input);
+    if cache.len() < LIMIT {
+        cache.insert(input.into(), result);
+    }
+    result
+}
+
 impl NewlineRules {
     fn new(language: &crate::language::Language, scopes: &vel_scope::ScopeStack) -> Self {
         let metadata = &language.assets.metadata;
@@ -152,6 +210,34 @@ impl NewlineRules {
                 .iter()
                 .any(|&s| string.is_prefix_of(s) || comment.is_prefix_of(s)),
         }
+    }
+    fn matches(&self, pattern: &Option<IndentRule>, text: &str) -> bool {
+        pattern.as_ref().is_some_and(|p| {
+            #[cfg(test)]
+            NEWLINE_EVALUATIONS.set(NEWLINE_EVALUATIONS.get() + 1);
+            p.is_match(text)
+        })
+    }
+    fn prefix(&self, text: &str) -> NewlinePrefix {
+        if self.matches(&self.excluded, text) {
+            NewlinePrefix::Excluded
+        } else if self.matches(&self.disabled, text) {
+            NewlinePrefix::Disabled
+        } else if self.matches(&self.increase, text)
+            || self.matches(&self.bracket, text)
+            || (self.code && text.trim_end().ends_with(['{', '[', '(']))
+        {
+            NewlinePrefix::Increase
+        } else {
+            NewlinePrefix::Carry
+        }
+    }
+    fn previous(&self, text: &str) -> bool {
+        self.matches(&self.bracket, text) && !self.matches(&self.increase, text)
+    }
+    fn decrease(&self, text: &str) -> bool {
+        self.matches(&self.decrease, text)
+            || (self.code && text.trim_start().starts_with(['}', ']', ')']))
     }
 }
 
@@ -641,7 +727,11 @@ impl Editor {
                     Vec::new()
                 };
                 if auto_newline {
-                    self.insert_indented_newline(&bracket_columns);
+                    if self.buffer.view(self.id).sel().len() > 1 {
+                        self.insert_indented_newline::<true>(&bracket_columns);
+                    } else {
+                        self.insert_indented_newline::<false>(&bracket_columns);
+                    }
                     return Ok(true);
                 }
                 self.insert_typed(TypedInsert::Uniform(s));
@@ -943,7 +1033,7 @@ impl Editor {
     /// Breaks the line at every selection like `insert "\n"`, but a caret alone on a line that
     /// holds only indentation (typically left by the previous auto-indent) leaves that line
     /// empty instead of keeping trailing white space (`trim_automatic_white_space`).
-    fn insert_indented_newline(&mut self, bracket_columns: &[Option<usize>]) {
+    fn insert_indented_newline<const REUSE: bool>(&mut self, bracket_columns: &[Option<usize>]) {
         let selection = self.buffer.view(self.id).sel().clone();
         let track = self.fields.is_none() && self.language.borrow().is_some();
         let trim = self.settings.bool("trim_automatic_white_space", true);
@@ -953,8 +1043,11 @@ impl Editor {
         let mut lines = Vec::new();
         let mut rules = HashMap::new();
         for (i, r) in selection.iter().enumerate() {
-            let (text, relative, blank, rule) =
-                self.newline_with_blank(r, bracket_columns.get(i).copied().flatten(), &mut rules);
+            let (text, relative, blank, rule) = self.newline_with_blank::<REUSE>(
+                r,
+                bracket_columns.get(i).copied().flatten(),
+                &mut rules,
+            );
             let mut range = r.to_range();
             // Selections are sorted and disjoint, so only the neighbours can share the row.
             if let Some(line) = blank.filter(|_| trim && r.empty()) {
@@ -1131,77 +1224,84 @@ impl Editor {
         (!trace.groups.is_empty()).then_some(trace)
     }
     /// New whitespace and caret, an optional blank line to trim, and possible reduced indent.
-    fn newline_with_blank(
+    fn newline_with_blank<const REUSE: bool>(
         &self,
         r: Region,
         bracket_column: Option<usize>,
-        rules: &mut HashMap<vel_scope::ScopeStack, NewlineRules>,
+        rules: &mut HashMap<vel_scope::ScopeStack, NewlineRuleCache>,
     ) -> IndentedNewline {
-        let row = self.text.byte_to_line(r.begin());
-        if self.text.line_len_bytes(row) >= crate::large::LONG_LINE {
-            return ("\n".into(), 1..1, None, None);
-        }
         if !self.settings.bool("auto_indent", true) {
             return ("\n".into(), 1..1, None, None);
         }
+        let row = self.text.byte_to_line(r.begin());
         let start = self.text.line_to_byte(row);
-        let line = self.text.line(row).to_string();
+        let end = if row + 1 == self.text.len_lines() {
+            self.text.len_bytes()
+        } else {
+            self.text.line_to_byte(row + 1) - 1
+        };
+        if end - start >= crate::large::LONG_LINE {
+            return ("\n".into(), 1..1, None, None);
+        }
+        let (chunk, base) = self.text.chunk_at_byte(start);
+        let line = chunk.get(start - base..end - base).map_or_else(
+            || Cow::Owned(self.text.slice(start..end).to_string()),
+            Cow::Borrowed,
+        );
         let blank = (!line.is_empty() && line.bytes().all(|b| matches!(b, b' ' | b'\t')))
             .then(|| start..start + line.len());
         let prefix = &line[..r.begin() - start];
         let leading = &prefix[..prefix.len() - prefix.trim_start_matches([' ', '\t']).len()];
         let mut indent = cells_with_tab(leading, self.preferences.tab_size);
-        let after_row = self.text.byte_to_line(r.end());
-        let after = if after_row == row {
-            Cow::Borrowed(&line[r.end() - start..])
-        } else {
-            let end = self.text.line_to_byte(after_row) + self.text.line_len_bytes(after_row);
-            Cow::Owned(self.text.slice(r.end()..end).to_string())
-        };
         let language = self.language.borrow();
         let mut increase = false;
         let mut decrease = false;
-        let mut temporary_previous = false;
-        let mut excluded = false;
+        let mut effect = NewlinePrefix::Disabled;
         let mut can_dedent = false;
         let smart = self.settings.bool("smart_indent", true);
         if let Some(l) = language.as_ref().filter(|_| smart) {
             let scopes = l.scopes(&self.text, r.begin().saturating_sub(1));
             let rule = rules
                 .entry(scopes)
-                .or_insert_with_key(|s| NewlineRules::new(l, s));
-            let matches = |pattern: &Option<IndentRule>, text| {
-                pattern.as_ref().is_some_and(|p| p.is_match(text))
-            };
-            excluded = matches(&rule.excluded, prefix);
-            if !excluded && !matches(&rule.disabled, prefix) {
-                increase = matches(&rule.increase, prefix) || matches(&rule.bracket, prefix);
-                // An unmatched opening delimiter supplements metadata for code syntaxes.
-                if rule.code && prefix.trim_end().ends_with(['{', '[', '(']) {
+                .or_insert_with_key(|s| NewlineRuleCache::new(l, s));
+            effect = newline_memo::<REUSE, _>(&mut rule.prefixes, prefix, |s| rule.rules.prefix(s));
+            can_dedent = matches!(effect, NewlinePrefix::Carry | NewlinePrefix::Increase)
+                && rule.rules.decrease.is_some();
+            if bracket_column.is_none() {
+                if effect == NewlinePrefix::Increase {
                     increase = true;
-                }
-                decrease = matches(&rule.decrease, &after)
-                    || (rule.code && after.trim_start().starts_with(['}', ']', ')']));
-                if row > 0 && rule.bracket.is_some() {
+                    indent += self.preferences.tab_size;
+                    let after;
+                    let suffix = if r.end() <= end {
+                        &line[r.end() - start..]
+                    } else {
+                        let row = self.text.byte_to_line(r.end());
+                        let end = self.text.line_to_byte(row) + self.text.line_len_bytes(row);
+                        after = self.text.slice(r.end()..end).to_string();
+                        &after
+                    };
+                    decrease = newline_memo::<REUSE, _>(&mut rule.suffixes, suffix, |s| {
+                        rule.rules.decrease(s)
+                    });
+                } else if effect == NewlinePrefix::Carry
+                    && indent != 0
+                    && row > 0
+                    && rule.rules.bracket.is_some()
+                {
                     let previous = self.text.line(row - 1).to_string();
-                    let previous = previous.trim_end();
-                    temporary_previous =
-                        matches(&rule.bracket, previous) && !matches(&rule.increase, previous);
+                    if newline_memo::<REUSE, _>(&mut rule.previous, previous.trim_end(), |s| {
+                        rule.rules.previous(s)
+                    }) {
+                        indent = indent.saturating_sub(self.preferences.tab_size);
+                    }
                 }
-                can_dedent = rule.decrease.is_some();
             }
         }
-        if excluded {
-            indent = 0;
-        } else if increase {
-            indent += self.preferences.tab_size;
-        } else if temporary_previous {
-            indent = indent.saturating_sub(self.preferences.tab_size);
-        }
         // https://www.sublimetext.com/docs/indentation.html#automatic-indentation-settings
-        if !excluded && let Some(column) = bracket_column {
+        if effect == NewlinePrefix::Excluded {
+            indent = 0;
+        } else if let Some(column) = bracket_column {
             indent = column;
-            increase = false;
         }
         let whitespace = |n: usize| indentation(n, &self.preferences);
         let mut text = format!("\n{}", whitespace(indent));

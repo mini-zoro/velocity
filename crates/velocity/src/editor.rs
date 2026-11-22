@@ -69,6 +69,13 @@ struct SelectorPoints {
     version: Option<(vel_buffer::BufferId, vel_buffer::ChangeId)>,
     values: std::collections::HashMap<usize, Option<vel_scope::ScopeStack>>,
 }
+#[derive(Debug)]
+struct SelectorBatch {
+    document: (vel_buffer::BufferId, vel_buffer::ChangeId),
+    snapshot: std::sync::Weak<vel_highlight::ScopeSnapshot>,
+    points: Vec<usize>,
+    scopes: Vec<Option<vel_scope::ScopeStack>>,
+}
 #[derive(Clone, Debug)]
 pub struct SharedLayoutEdit {
     pub buffer: vel_buffer::BufferId,
@@ -118,6 +125,7 @@ pub struct Editor {
         )>,
     >,
     selector_points: RefCell<SelectorPoints>,
+    selector_batch: RefCell<Option<SelectorBatch>>,
     pub(crate) exact_scope_cache: RefCell<crate::editing::ExactScopeCache>,
     pub(crate) automatic_indents: Option<crate::editing::AutomaticIndents>,
     pub(crate) pending_closing_tag: Option<crate::editing::PendingClosingTag>,
@@ -276,6 +284,7 @@ impl Editor {
             status_column: Box::default(),
             selector_snapshots: RefCell::new(Vec::new()),
             selector_points: RefCell::default(),
+            selector_batch: RefCell::default(),
             exact_scope_cache: RefCell::default(),
             automatic_indents: None,
             pending_closing_tag: None,
@@ -867,11 +876,9 @@ impl Editor {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                if let Some(snapshot) = language.scope_snapshot_at(r.b) {
+                if let Some((snapshot, scopes)) = language.scoped_point(r.b) {
                     self.retain_selector_snapshot(language.root, snapshot.clone());
-                    snapshot
-                        .scopes_at(r.b)
-                        .map(|s| vel_scope::ScopeStack::from_vec(s.to_vec()))
+                    Some(vel_scope::ScopeStack::from_vec(scopes.to_vec()))
                 } else {
                     missing.push((i, r.b));
                     None
@@ -880,6 +887,9 @@ impl Editor {
             .collect();
         let cache = self.selector_snapshots.borrow();
         let mut projected = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut previous = self.selector_batch.borrow_mut();
+        let document = (self.buffer.id(), self.buffer.change_id());
         for snapshot in language
             .scopes
             .iter()
@@ -896,19 +906,64 @@ impl Editor {
             if first >= end {
                 continue;
             }
+            let carets = &missing[first..end];
+            let remember =
+                first == 0 && end == missing.len() && (32..=4096).contains(&carets.len());
+            let input = || carets.iter().map(|&(_, byte)| byte);
+            // Ordinary typing leaves the caret at the end of the insertion.
+            // Reuse the intersection with the last query against this same
+            // snapshot, even when refreshed viewport scopes change which
+            // carets need the stale-scope fallback.
+            unresolved.clear();
+            if remember
+                && let Some(batch) = previous.as_mut()
+                && batch.document.0 == document.0
+                && std::ptr::eq(batch.snapshot.as_ptr(), snapshot.as_ref())
+            {
+                projected.clear();
+                projected.extend(input());
+                if self
+                    .buffer
+                    .unmap_left_points_to(&mut projected, batch.document.1)
+                {
+                    let mut old = 0;
+                    for (&(i, byte), &point) in carets.iter().zip(&projected) {
+                        while batch.points.get(old).is_some_and(|&p| p < point) {
+                            old += 1;
+                        }
+                        if batch.points.get(old) == Some(&point) {
+                            results[i].clone_from(&batch.scopes[old]);
+                        } else {
+                            unresolved.push((i, byte));
+                        }
+                    }
+                } else {
+                    unresolved.extend_from_slice(carets);
+                }
+            } else {
+                unresolved.extend_from_slice(carets);
+            }
             projected.clear();
-            projected.extend(missing[first..end].iter().map(|&(_, byte)| byte));
+            projected.extend(unresolved.iter().map(|&(_, byte)| byte));
             if !self
                 .buffer
                 .unmap_left_points_to(&mut projected, snapshot.version)
             {
                 continue;
             }
-            for (&(i, _), &byte) in missing[first..end].iter().zip(&projected) {
+            for (&(i, _), &byte) in unresolved.iter().zip(&projected) {
                 let at = snapshot.text.floor_char_boundary(byte.min(limit));
                 results[i] = snapshot
                     .scopes_at(at)
                     .map(|s| vel_scope::ScopeStack::from_vec(s.to_vec()));
+            }
+            if remember {
+                *previous = Some(SelectorBatch {
+                    document,
+                    snapshot: Arc::downgrade(snapshot),
+                    points: input().collect(),
+                    scopes: carets.iter().map(|&(i, _)| results[i].clone()).collect(),
+                });
             }
             missing.retain(|&(i, _)| results[i].is_none());
         }
@@ -924,15 +979,9 @@ impl Editor {
         let language = self.language.borrow();
         let language = language.as_ref()?;
         self.check_selector_snapshot_identity(language.root);
-        if let Some(snapshot) = language.scope_snapshot_at(byte) {
+        if let Some((snapshot, scopes)) = language.scoped_point(byte) {
             self.retain_selector_snapshot(language.root, snapshot.clone());
-            return snapshot.scopes_at(byte).map(|scopes| {
-                let mut stack = vel_scope::ScopeStack::new();
-                for scope in scopes {
-                    stack.push(*scope);
-                }
-                stack
-            });
+            return Some(vel_scope::ScopeStack::from_vec(scopes.to_vec()));
         }
         let mut points = self.selector_points.borrow_mut();
         let version = (self.buffer.id(), self.buffer.change_id());
@@ -1506,10 +1555,40 @@ impl Host for Editor {
 struct EditorContext<'a>(
     &'a Editor,
     std::cell::OnceCell<Vec<Option<vel_scope::ScopeStack>>>,
+    std::cell::OnceCell<SelectorScopeGroups>,
 );
+struct SelectorScopeGroups {
+    representatives: Vec<usize>,
+    by_caret: Vec<Option<usize>>,
+}
+impl SelectorScopeGroups {
+    fn new(scopes: &[Option<vel_scope::ScopeStack>]) -> Self {
+        let mut unique = std::collections::HashMap::new();
+        let mut representatives = Vec::new();
+        let by_caret = scopes
+            .iter()
+            .enumerate()
+            .map(|(i, stack)| {
+                let stack = stack.as_ref()?.as_slice();
+                Some(*unique.entry(stack).or_insert_with(|| {
+                    representatives.push(i);
+                    representatives.len() - 1
+                }))
+            })
+            .collect();
+        Self {
+            representatives,
+            by_caret,
+        }
+    }
+}
 impl<'a> EditorContext<'a> {
     fn new(editor: &'a Editor) -> Self {
-        Self(editor, std::cell::OnceCell::new())
+        Self(
+            editor,
+            std::cell::OnceCell::new(),
+            std::cell::OnceCell::new(),
+        )
     }
     fn batch_scopes(&self) -> Option<&[Option<vel_scope::ScopeStack>]> {
         (self.0.buffer.view(self.0.id).sel().len() >= 32).then(|| {
@@ -1595,16 +1674,23 @@ impl ContextProvider for EditorContext<'_> {
             .then(|| selector.parse::<vel_scope::Selector>().ok())
             .flatten();
         if !plain && let Some(scopes) = self.batch_scopes() {
-            return scopes
+            let groups = self.2.get_or_init(|| SelectorScopeGroups::new(scopes));
+            let matches: Vec<_> = groups
+                .representatives
                 .iter()
-                .map(|stack| {
-                    stack
+                .map(|&i| {
+                    scopes[i]
                         .as_ref()
                         .zip(parsed.as_ref())
                         .is_some_and(|(stack, selector)| {
                             selector.does_match(stack.as_slice()).is_some()
                         })
                 })
+                .collect();
+            return groups
+                .by_caret
+                .iter()
+                .map(|id| id.is_some_and(|i| matches[i]))
                 .collect();
         }
         self.0
@@ -2530,6 +2616,29 @@ mod round15_details {
         e.run("undo", &json!({})).unwrap();
         e.set_caret(inside + shift, false);
         assert_eq!(EditorContext::new(&e).selector_matches("string"), [true]);
+    }
+    #[test]
+    fn cached_selector_batches_agree_with_scalar_history_after_carets_move() {
+        let row = "let s = \"word\"; // comment";
+        let mut e = highlighted(&format!("{row}\n").repeat(150));
+        let check = |e: &Editor| {
+            let scalar: Vec<_> = e.regions().iter().map(|r| e.selector_scopes(r.b)).collect();
+            assert_eq!(e.batch_selector_scopes(), scalar);
+        };
+        let positions = |e: &Editor, changed: bool| {
+            Selection::from_regions((0..150).map(|row| {
+                let col = if changed && row % 3 == 0 { 20 } else { 10 };
+                Region::caret(e.text.line_to_byte(row) + col)
+            }))
+        };
+        e.set_selection(positions(&e, false));
+        e.run("insert", &json!({"characters":"x"})).unwrap();
+        check(&e);
+        assert!(e.selector_batch.borrow().is_some());
+        e.run("insert", &json!({"characters":"é"})).unwrap();
+        check(&e);
+        e.set_selection(positions(&e, true));
+        check(&e);
     }
     #[test]
     fn selectors_still_defer_when_no_scopes_have_ever_been_published() {

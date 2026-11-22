@@ -2674,7 +2674,12 @@ impl View {
         let caret_row = e.text.byte_to_line(e.caret);
         let folded = e.folded();
         let layout = e.layout.borrow();
-        let caret_visuals: BTreeSet<_> = regions
+        let visible_carets = if e.marked.is_none() {
+            visible_caret_candidates(&layout, &e.text, &regions, first..last)
+        } else {
+            &regions
+        };
+        let caret_visuals: BTreeSet<_> = visible_carets
             .iter()
             .map(|r| layout.visual_at(&e.text, r.b).0)
             .collect();
@@ -3733,7 +3738,7 @@ impl View {
         }
         // Carets are ordered: those on one row share its display columns.
         let mut caret_row = None;
-        for r in regions {
+        for r in visible_carets {
             let visual = e.layout.borrow().visual_at(&e.text, r.b).0;
             if !(first..last).contains(&visual) {
                 continue;
@@ -5224,6 +5229,75 @@ mod tests {
 
 // Public settings reference confirms match_selection defaults to true:
 // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#visual-settings
+fn visible_caret_candidates<'a>(
+    layout: &crate::layout::Layout,
+    text: &vel_text::Text,
+    regions: &'a [vel_buffer::Region],
+    visual: Range<usize>,
+) -> &'a [vel_buffer::Region] {
+    if regions.len() <= 32 || layout.has_folds() {
+        return regions;
+    }
+    if visual.is_empty() {
+        return &[];
+    }
+    // Without folds a caret cannot project outside its physical row. Include
+    // both boundary rows for partial wraps and keep the final visual check.
+    let first = text.line_to_byte(layout.locate(visual.start).0);
+    let next = layout.locate(visual.end - 1).0 + 1;
+    let start = regions.partition_point(|r| r.end() < first);
+    let end = if next < text.len_lines() {
+        let end = text.line_to_byte(next);
+        regions.partition_point(|r| r.begin() < end)
+    } else {
+        regions.len()
+    };
+    &regions[start..end]
+}
+
+#[cfg(test)]
+#[test]
+fn visible_caret_candidates_keep_each_visible_endpoint_in_wrapped_rows() {
+    use vel_buffer::{Region, Selection};
+    let line = "é two words three words four words\n";
+    let source = line.repeat(1000);
+    let mut editor = Editor::new(vel_text::Text::from(source.as_str()));
+    editor.set_view_setting("show_minimap", vel_config::json!(false));
+    editor.set_view_setting("word_wrap", vel_config::json!(true));
+    editor.set_selection(Selection::from_regions((0..1000).map(|i| {
+        let start = i * line.len();
+        if i % 2 == 0 {
+            Region::new(start + 20, start + 7)
+        } else {
+            Region::caret(start + 10)
+        }
+    })));
+    let mut view = View::new(
+        Size {
+            width: 180.,
+            height: 200.,
+        },
+        8.,
+        12.,
+    );
+    let _ = view.scene(&editor);
+    let layout = editor.layout.borrow();
+    assert!(layout.total() > editor.text.len_lines());
+    let regions = editor.regions();
+    for first in [0, 1, 59, 1000, layout.total() - 1] {
+        let rows = first..(first + 20).min(layout.total());
+        let candidates = visible_caret_candidates(&layout, &editor.text, &regions, rows.clone());
+        assert!(candidates.len() <= 21);
+        let visible = |r: &&Region| rows.contains(&layout.visual_at(&editor.text, r.b).0);
+        assert!(
+            candidates
+                .iter()
+                .filter(visible)
+                .eq(regions.iter().filter(visible))
+        );
+    }
+}
+
 fn selected_word(e: &Editor, regions: &[vel_buffer::Region]) -> Option<String> {
     if !e.settings.bool("match_selection", true) || e.marked.is_some() {
         return None;

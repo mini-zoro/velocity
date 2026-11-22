@@ -294,20 +294,25 @@ impl ScopeSnapshot {
     }
     /// Returns scopes without parsing, with UTF-8 and line bounds checked.
     pub fn scope_at(&self, line: usize, byte: usize) -> Option<ScopeStackId> {
-        let runs = self
-            .lines
-            .get(line.checked_sub(self.range.start)?)?
-            .runs
-            .as_ref()?;
-        if line >= self.text.len_lines() {
-            return None;
-        }
+        let runs = self.runs_at(line)?;
         let len = crate::complete_line_range(&self.text, line).len();
         let point = self.text.line_to_byte(line).checked_add(byte)?;
         if byte > len || !self.text.is_char_boundary(point) {
             return None;
         }
-        if byte == len {
+        Self::stack_at(runs, byte, byte == len)
+    }
+    fn runs_at(&self, line: usize) -> Option<&ScopeRuns> {
+        if line >= self.text.len_lines() {
+            return None;
+        }
+        self.lines
+            .get(line.checked_sub(self.range.start)?)?
+            .runs
+            .as_ref()
+    }
+    fn stack_at(runs: &ScopeRuns, byte: usize, at_end: bool) -> Option<ScopeStackId> {
+        if at_end {
             return Some(runs.end_stack());
         }
         let view = runs.view();
@@ -359,8 +364,14 @@ impl ScopeProvider for ScopeSnapshot {
         if point > self.text.len_bytes() || !self.text.is_char_boundary(point) {
             return None;
         }
-        let row = self.text.byte_to_line(point);
-        let id = self.scope_at(row, point - self.text.line_to_byte(row))?;
+        // A valid absolute point already proves the local UTF-8 and line
+        // bounds. Only EOF can be at the end of the complete row (including LF).
+        let at = self.text.byte_to_point(point);
+        let id = Self::stack_at(
+            self.runs_at(at.row)?,
+            at.column,
+            point == self.text.len_bytes(),
+        )?;
         self.stacks.get(id)
     }
 }
@@ -588,6 +599,50 @@ fn table_bytes<K, V, S>(map: &HashMap<K, V, S>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_scope_lookup_agrees_with_row_lookup_at_utf8_and_line_boundaries() {
+        for source in ["", "é\n🦀\n", "é\n\n🦀"] {
+            let text = Text::from(source);
+            let stacks = ScopeStacks(Arc::new(vec![
+                Arc::from([Scope::new("text.plain").unwrap()]),
+                Arc::from([Scope::new("meta.end").unwrap()]),
+            ]));
+            for start in 0..text.len_lines() {
+                let range = start..text.len_lines();
+                let snapshot = ScopeSnapshot {
+                    version: ChangeId(0),
+                    text: text.clone(),
+                    lines: range
+                        .clone()
+                        .map(|row| {
+                            let len = crate::complete_line_range(&text, row).len() as u32;
+                            let runs = [(len, ScopeStackId(0))];
+                            ScopedLine::new(Some(ScopeRuns::new(
+                                if len == 0 { &[] } else { &runs },
+                                ScopeStackId(1),
+                                false,
+                            )))
+                        })
+                        .collect(),
+                    range,
+                    stacks: stacks.clone(),
+                };
+                for byte in 0..=text.len_bytes() {
+                    let expected = text
+                        .is_char_boundary(byte)
+                        .then(|| {
+                            let row = text.byte_to_line(byte);
+                            snapshot
+                                .scope_at(row, byte - text.line_to_byte(row))
+                                .and_then(|stack| snapshot.stacks.get(stack))
+                        })
+                        .flatten();
+                    assert_eq!(snapshot.scopes_at(byte), expected, "{source:?} at {byte}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn packed_runs_preserve_boundaries_order_and_full_width_stack_ids() {

@@ -690,6 +690,11 @@ impl AnalysisTask {
 
 #[path = "guide_state.rs"]
 mod guide_state;
+#[derive(Debug)]
+struct ViewportScopes {
+    snapshot: Arc<ScopeSnapshot>,
+    bytes: Range<usize>,
+}
 /// One instance per Buffer; split views borrow its results through RefCell.
 #[derive(Debug)]
 pub struct Language {
@@ -710,7 +715,7 @@ pub struct Language {
     pub errors: Vec<String>,
     pub minimap: Arc<[MiniLine]>,
     pub scopes: Option<Arc<ScopeSnapshot>>,
-    viewport_scopes: BTreeMap<usize, Arc<ScopeSnapshot>>,
+    viewport_scopes: BTreeMap<usize, ViewportScopes>,
     relief_pending: bool,
     text: Text,
     scheme_revision: u64,
@@ -839,8 +844,18 @@ impl Language {
                         && text.byte_to_line(at) == text.byte_to_line(at + c.new_len)
                 });
             let samples = Arc::make_mut(&mut self.minimap);
+            // Samples and old row ranges are both ordered. Visit each changed
+            // range at most once instead of scanning all edits for each sample.
+            let mut pending = changed_rows.as_slice();
             for sample in samples {
-                let touched = changed_rows.iter().any(|rows| rows.contains(&sample.row));
+                while let Some(rows) = pending.first()
+                    && *rows.end() < sample.row
+                {
+                    pending = &pending[1..];
+                }
+                let touched = pending
+                    .first()
+                    .is_some_and(|rows| rows.contains(&sample.row));
                 if !same_lines {
                     let start = self
                         .text
@@ -917,11 +932,24 @@ impl Language {
             .iter()
             .any(vel_highlight::ScopedLine::exact)
         {
-            self.viewport_scopes
-                .insert(batch.lines.start, Arc::new(batch.scopes));
+            let text = &batch.scopes.text;
+            let start = text.line_to_byte(batch.scopes.range.start);
+            let end = if batch.scopes.range.end == text.len_lines() {
+                text.len_bytes() + 1 // Include the final line's EOF point.
+            } else {
+                text.line_to_byte(batch.scopes.range.end)
+            };
+            self.viewport_scopes.insert(
+                batch.lines.start,
+                ViewportScopes {
+                    snapshot: Arc::new(batch.scopes),
+                    bytes: start..end,
+                },
+            );
             if self.viewport_scopes.len() > 32 {
                 self.viewport_scopes.retain(|_, s| {
-                    s.range.start < batch.lines.end && s.range.end > batch.lines.start
+                    s.snapshot.range.start < batch.lines.end
+                        && s.snapshot.range.end > batch.lines.start
                 });
             }
         }
@@ -1043,19 +1071,27 @@ impl Language {
         })
     }
     pub fn scopes_ready_at(&self, _text: &Text, byte: usize) -> bool {
-        self.scope_snapshot_at(byte).is_some()
+        self.scoped_point(byte).is_some()
     }
     pub fn scope_snapshot_at(&self, byte: usize) -> Option<Arc<ScopeSnapshot>> {
-        self.scopes
-            .as_ref()
-            .filter(|s| s.version == self.version && s.scopes_at(byte).is_some())
-            .or_else(|| {
-                self.viewport_scopes
-                    .values()
-                    .rev()
-                    .find(|s| s.version == self.version && s.scopes_at(byte).is_some())
+        self.scoped_point(byte)
+            .map(|(snapshot, _)| snapshot.clone())
+    }
+    pub(crate) fn scoped_point(&self, byte: usize) -> Option<(&Arc<ScopeSnapshot>, &[Scope])> {
+        if let Some(snapshot) = self.scopes.as_ref().filter(|s| s.version == self.version)
+            && let Some(scopes) = snapshot.scopes_at(byte)
+        {
+            return Some((snapshot, scopes));
+        }
+        self.viewport_scopes
+            .values()
+            .rev()
+            .filter(|s| s.snapshot.version == self.version && s.bytes.contains(&byte))
+            .find_map(|s| {
+                s.snapshot
+                    .scopes_at(byte)
+                    .map(|scopes| (&s.snapshot, scopes))
             })
-            .cloned()
     }
     pub fn busy(&self) -> bool {
         if self.policy.highlighting == vel_largefile::HighlightMode::Viewport {
@@ -1078,15 +1114,10 @@ impl Language {
         self.service.complete.load(Ordering::Acquire)
     }
     pub fn scopes(&self, _text: &Text, byte: usize) -> ScopeStack {
-        let mut stack = ScopeStack::new();
-        if let Some(snapshot) = self.scope_snapshot_at(byte) {
-            for scope in snapshot.scopes_at(byte).unwrap_or(&[]) {
-                stack.push(*scope);
-            }
-        } else {
-            stack.push(self.root);
-        }
-        stack
+        ScopeStack::from_vec(
+            self.scoped_point(byte)
+                .map_or_else(|| vec![self.root], |(_, scopes)| scopes.to_vec()),
+        )
     }
     /// Scope-selector match at a byte. Production keymap contexts use the batched
     /// projection in `editing.rs`; tests keep this direct form.

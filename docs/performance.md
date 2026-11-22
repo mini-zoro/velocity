@@ -1364,3 +1364,166 @@ grammars, fixture input, `--locked -j 6`, `MACOSX_DEPLOYMENT_TARGET=14.0`, and
 disposable profiles. Median paired retired instructions: `features` -0.05%,
 `carets1000` +0.66%, `smoke1` +0.10%, all within +1%. Raw runs and gate logs:
 `/tmp/velocity-b40.xcEf3r/`.
+
+## Round 42: Enter with 1,000 carets
+
+The reviewer saw 2.88 / 10.37 ms p50 / p95 from event to present-return on
+the native build immediately before `5ad9474`. Every sample above 6 ms
+was Enter (steps 3, 11, 19, ...). Acquire, encode/submit and present-return
+together took about 0.22 ms. The work below targets the CPU path before
+submission, not the renderer or the timing of presentation.
+
+The headless comparison starts from `5ad9474`, uses the full 151,639-line
+`sqlite3.c`, and warms C syntax before running all 500 keys through the
+real keymap, edit, reveal and CPU scene. Enter occurs 63 times. HOME, SHELL,
+and the log directory were isolated for both release builds; the same
+`--locked --offline -j 6` build was used on both sides.
+
+### What changed
+
+- Enter already committed one batch of rope edits and one undo transaction.
+  It reused merged metadata by scope but still ran the regex rules for each
+  caret. Within a scope, the new command-local cache matches exact prefix,
+  suffix, and previous-line inputs independently. Closing-pattern checks
+  run only when the command can split an indented pair. The single-caret
+  path skips memoization, and very long or varied inputs fall back to the
+  same evaluator. Destination scope validation and automatic dedent on the
+  next key are unchanged.
+- The Enter binding consults selectors from bundled language keymaps even
+  on C files. Stale-scope lookups now reuse the last results for points
+  that reverse-project to the same bytes in the same retained snapshot.
+  Current scopes still take precedence, misses still use the journal, and
+  selectors are evaluated once per distinct stack in a batch. Viewport
+  snapshots reject off-screen bytes before querying the rope.
+- Provisional minimap updates sweep ordered changed rows instead of
+  comparing every sample to every change. Caret painting and caret-line
+  highlights project only candidate endpoints for the visible rows when
+  there are many carets and no folds or active composition. The final
+  visual-row check and drawing code are unchanged, including for wrapped
+  rows.
+- Exact syntax repair, folds, analysis, and the document word index
+  already ran on workers. Their invalidation and publication rules stay
+  the same. This round does not remove parsing, change visible styling
+  policy, or move work out of the undo journal.
+
+### Phase audit
+
+Temporary probes bracketed the command, buffer, language, and scene
+work. CPU times are on the calling thread. Instruction deltas use
+`proc_pid_rusage(RUSAGE_INFO_V4)` and include any worker work overlapping
+the phase; they are not thread-specific or additive. The main replay
+does not create a native window. It therefore cannot measure accessibility
+notifications, encoding, drawable wait, or present-return. Wrapping is
+off for this fixture.
+
+The baseline spent about 4.54 ms in line reads, scope and indentation
+rules, and building the 1,000 edit/selection pairs. Within that phase,
+merging metadata for the distinct scope took about 0.01 ms (0.036 M
+process instructions). Sampling 32 of the 1,000 carets per Enter measured
+0.063 ms / 0.306 M instructions in scope lookup and 0.130 ms / 1.167 M in
+the regex decision block, including probes. The sampled numbers should
+not be extrapolated to a thousand calls: probe overhead and concurrent
+worker instructions are not subtracted. The counted regression uses
+actual regex calls through the Enter command instead.
+
+The minimap phase was about 1.23 ms when an overview was present; not
+all 63 Enter steps had one. The guide row map cost about 0.32 ms per
+Enter, the batched rope and line index about 0.10 ms, and the undo journal
+about 0.01 ms. Worker dispatch was about 0.01 ms: the incremental syntax
+repair and reconstruction of folds, guides and words are not included
+in that dispatch time. No synchronous word-index scan or accessibility
+notification runs in the headless action.
+
+| Probed phase, per Enter | Before: CPU ms / M instructions | Tuned probe build: CPU ms / M instructions |
+| --- | ---: | ---: |
+| Auto-indent, line reads, and edit/selection preparation | 4.544 / 155.09 | 1.318 / 33.12 |
+| Scope lookup, 32 sampled carets | 0.063 / 0.306 | 0.052 / 0.304 |
+| Metadata merge, distinct scope | 0.011 / 0.036 | 0.011 / 0.037 |
+| Regex decision block, 32 sampled carets | 0.130 / 1.167 | 0.053 / 0.311 |
+| Edit application and publication, excluding preparation | 0.482 / 6.72 | 0.480 / 8.41 |
+| Batched rope and line index | 0.103 / 0.911 | 0.094 / 0.929 |
+| Selection validation and publication | 0.004 / 0.041 | 0.004 / 0.041 |
+| Undo journal | 0.011 / 0.109 | 0.010 / 0.109 |
+| Guide row map | 0.316 / 2.235 | 0.318 / 2.349 |
+| Minimap rebase when an overview is present | 1.233 / 30.03 | 0.334 / 7.04 |
+| Highlight and analysis dispatch | 0.010 / 0.033 | 0.008 / 0.019 |
+| Layout invalidation | 0.002 / 0.009 | 0.002 / 0.009 |
+| Destination dedent validation | 0.003 / 0.014 | 0.003 / 0.014 |
+| View synchronization and reveal | 0.020 / 0.094 | 0.018 / 0.095 |
+| Visible CPU scene | 2.242 / 61.74 | 0.537 / 11.98 |
+
+The phase probes above compare the baseline with an instrumented iteration
+before the final viewport byte bounds and selector stack grouping. The
+unattributed baseline command time (largely key resolution) was about
+1.92 ms per Enter, computed by subtracting the measured edit phases for
+each step. The tuned probe measured 0.80 ms / 19.28 M instructions
+directly in key resolution. Counters for the complete, uninstrumented
+builds are below.
+
+### Paired results
+
+Seven alternating process pairs. Timing entries are the medians of the
+seven per-run percentiles of main-thread CPU. The instruction totals
+include startup and workers. The sandbox denied `time -l` a
+`kern.clockrate` read, so instructions were read from
+`proc_pid_rusage(RUSAGE_INFO_V4)` after child exit and before reaping.
+
+| Workload or phase | Before p50 / p95 (ms) | After p50 / p95 (ms) | p95 change |
+| --- | ---: | ---: | ---: |
+| SQLite, 1,000 carets, all keys | 2.271 / 9.569 | 0.518 / 2.836 | -70% |
+| SQLite, 1,000 carets, Enter only | 8.830 / 12.530 | 2.632 / 3.656 | -71% |
+| Enter command, including key resolution | 6.939 / 8.865 | 2.166 / 3.154 | -64% |
+| Enter synchronization and reveal | 0.019 / 0.030 | 0.013 / 0.026 | -13% |
+| Enter visible scene | 2.267 / 3.569 | 0.442 / 0.695 | -81% |
+| SQLite, 1,000 carets, other keys | 2.074 / 3.399 | 0.493 / 0.825 | -76% |
+| SQLite, one caret, all keys | 0.211 / 0.422 | 0.210 / 0.410 | -3% |
+
+| Instruction workload | Before median | After median | Median paired change |
+| --- | ---: | ---: | ---: |
+| `features` (`--headless-view-features`) | 196,976,461,723 | 196,841,273,843 | -0.069% |
+| `carets1000` (`--headless-smoke --carets 1000`) | 3,744,220,662 | 3,265,643,852 | -12.651% |
+| `smoke1` (`--headless-smoke`) | 311,308,047 | 311,398,611 | +0.180% |
+| Full SQLite typing, 1,000 carets | 59,231,855,967 | 23,948,316,879 | -59.491% |
+| Full SQLite typing, one caret | 12,396,181,069 | 12,421,486,653 | +0.397% |
+
+The full SQLite replay does not wait for every intermediate version to
+settle. Its process instruction totals include differing amounts of
+overlapped and cancelled worker work, so the 59% drop is a replay result,
+not a measure of settled parser throughput.
+
+### Verification
+
+The no-packaging gate passed formatting, strict workspace Clippy, release
+build, and rustdoc with warnings denied. Release workspace tests reported
+1,813 passed, 80 ignored and one failure: the settings effect sweep did
+not observe a change for `large_file.load_bytes`. The same test passed in
+isolation on both `5ad9474` and the candidate with the fixture environment.
+The production and test code for that setting was not changed.
+
+The official syntax assertions and parser differential passed with digests
+`6c861d72d9008d749f6a4ab5cc47ee2649e3907a8f554cd30eae6474aba7a83a`
+and `1a53ce33b5bd89ff5b0faa616255e4f5712046273118ec01ff9e6941fec913af`.
+The new tests compare 1,000-caret C, Python, and Markdown Enter with
+uncached rule evaluation, including exact text, selection, undo/redo and
+settled scopes. The counted-work test checks the real Enter command:
+at most 16 regex evaluations where uncached evaluation makes at least
+1,000. Other tests cover stale scope reuse, UTF-8 scope boundaries, and
+the visible caret candidates for wrapped rows.
+
+Metal reported no adapter. Of 28 software snapshots, 24 matched
+byte-for-byte; four Goto preview snapshots differed only in their
+generated fixture paths, as in a second baseline run. The editor,
+minimap, split, invisibles, and selection scenes also ran through
+`--bench-scene` without a device. Raw profiles, paired logs, and gate
+output are in `/tmp/velocity-r42.0FBK46/`.
+
+### Native verification
+
+Rerun `scripts/bench-gui.sh target/release/velocity` on the review Mac
+with the same screen and SQLite fixture. Check `typing-sqlite-1000`
+against 2 ms p50 and 4 ms p95 event-to-present-return, split Enter from the
+other keys by sample index, and inspect event-to-submit before attributing
+any remaining tail to acquire or presentation. Also compare
+`typing-sqlite-1`, check settled C highlighting and the caret/minimap
+geometry, and verify one Undo restores the text and 1,000 selections.
+The headless times above are not native present-return results.
