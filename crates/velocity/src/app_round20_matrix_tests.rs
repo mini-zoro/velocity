@@ -549,13 +549,18 @@ fn set_mtime(p: &Path, t: SystemTime) {
 fn external(a: &mut App, path: &Path, bytes: Option<&[u8]>, obs: &mut Obs) -> bool {
     let m = mtime(path) + Duration::from_secs(2);
     if let Some(b) = bytes {
-        // Write and stamp in one step (temp file + rename). Writing in place and then
-        // setting the time let a slow machine reload twice, and the second decision
-        // depends on the first (CI picked windows-1252 instead of UTF-8 for ASCII bytes).
-        let staged = path.with_extension("external-write");
-        std::fs::write(&staged, b).unwrap();
-        set_mtime(&staged, m);
-        std::fs::rename(&staged, path).unwrap();
+        // Write and stamp through one handle, in place: separate write and touch calls let
+        // a slow machine reload twice, and the second encoding decision depends on the
+        // first (CI picked windows-1252 instead of UTF-8 for ASCII bytes). A rename would
+        // replace the file instead of changing it, which is a different scenario.
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        file.write_all(b).unwrap();
+        file.set_modified(m).unwrap();
     } else {
         set_mtime(path, m);
     }
