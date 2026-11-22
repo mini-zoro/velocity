@@ -293,3 +293,59 @@ fn r41_sidebar_transient_tab_and_goto_click_acceptance() {
     );
     assert!(app.workspace.tabs[app.workspace.sheet_index(sidebar).unwrap()].transient);
 }
+
+/// U01 and U04 together, as Sublime 4215 shows them: a folder window starts tabless, Goto
+/// previews without a tab, Escape returns to the tabless input, and Return opens the file
+/// as the only tab (the untouched input is reused, not kept as an "untitled" tab).
+#[test]
+fn r41_goto_preview_in_a_tabless_folder_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(root.join(TARGET), "preview body sentinel\n".repeat(40)).unwrap();
+    let now = Instant::now();
+    let options = Options::default();
+    let workspace =
+        Workspace::new_for_startup(Text::new(), None, None, false, &mut Default::default())
+            .unwrap();
+    let mut app = App::new(
+        options.clone(),
+        Clock::new(now, std::time::SystemTime::now()),
+        Reporter::for_options(&options, now).unwrap(),
+        workspace,
+        Arc::new(AtomicBool::new(false)),
+        Rc::new(RefCell::new(crate::session::Sessions::new(None))),
+    );
+    app.panels
+        .add_folder(&mut app.workspace, root.to_owned())
+        .unwrap();
+    app.scene();
+    assert!(app.workspace.is_empty() && app.tab_hits.is_empty());
+
+    goto(&mut app, "target", TARGET);
+    let preview = app.workspace.tabs[app.workspace.active].sheet;
+    let scene = app.scene();
+    assert!(app.tab_hits.is_empty(), "the preview must not add a tab");
+    assert!(app.sheet_bounds.contains_key(&preview));
+    assert!(
+        scene
+            .layers
+            .iter()
+            .flat_map(|layer| &layer.text)
+            .any(|run| run.text.contains("preview body sentinel"))
+    );
+    key(&mut app, "escape");
+    app.scene();
+    assert!(app.workspace.is_empty() && app.tab_hits.is_empty());
+    assert!(app.workspace.editor().text.is_empty());
+
+    goto(&mut app, "target", TARGET);
+    key(&mut app, "enter");
+    app.scene();
+    assert!(!app.workspace.is_empty());
+    let sheets = &app.workspace.workbench.groups[0].sheets;
+    assert_eq!(sheets.len(), 1, "only the opened file has a tab");
+    let tab = &app.workspace.tabs[app.workspace.active];
+    assert_eq!(tab.sheet, sheets[0]);
+    assert_eq!(tab.path.as_deref(), Some(root.join(TARGET).as_path()));
+    assert_eq!(app.tab_hits.len(), 1);
+}
