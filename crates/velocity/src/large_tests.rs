@@ -380,6 +380,8 @@ fn binary_tab_reads_4gb_tail_copies_and_survives_external_truncation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("binary.bin");
     let mut f = std::fs::File::create(&path).unwrap();
+    #[cfg(windows)]
+    crate::binary::make_sparse(&f);
     f.set_len(4_000_000_003).unwrap();
     f.seek(SeekFrom::End(-3)).unwrap();
     f.write_all(b"END").unwrap();
@@ -393,6 +395,17 @@ fn binary_tab_reads_4gb_tail_copies_and_survives_external_truncation() {
     .unwrap();
     until(&mut w, |w| w.editor().binary.is_some());
     assert!(w.editor().read_only && w.tabs[w.active].label().contains("[hex]"));
+    assert_eq!(
+        w.editor()
+            .binary
+            .as_ref()
+            .unwrap()
+            .view
+            .row(125_000_000)
+            .unwrap()
+            .bytes,
+        &[0; 16]
+    );
     w.editor_mut()
         .run("goto_hex_offset", &json!({"text":"0xee6b2800"}))
         .unwrap();
