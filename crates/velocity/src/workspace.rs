@@ -1021,6 +1021,20 @@ fn load_palette(
     for resource in resources.matching(".sublime-commands") {
         match resource.text().and_then(ui::parse::<PaletteItem>) {
             Ok(mut items) => {
+                #[cfg(windows)]
+                if resource.path == "Packages/Default/Velocity.sublime-commands" {
+                    items.retain(|item| {
+                        !matches!(
+                            item.invocation.command.as_str(),
+                            "enable_finder_new_file" | "disable_finder_new_file"
+                        )
+                    });
+                    for item in &mut items {
+                        if item.invocation.command == "edit_settings" {
+                            use_windows_keymap_paths(&mut item.invocation.args);
+                        }
+                    }
+                }
                 if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
                     items.retain(|item| {
                         let name = &item.invocation.command;
@@ -1091,10 +1105,34 @@ fn report_ignored_keymaps(old: &IgnoredKeymaps, new: &IgnoredKeymaps, reports: &
     reports.extend(
         new.iter()
             .filter(|(name, file)| old.get(*name) != Some(*file))
-            .map(|(name, _)| {
-                format!("Ignored {name}; use Packages/User/Default (OSX).sublime-keymap")
-            }),
+            .map(|(name, _)| format!("Ignored {name}; use Packages/User/{PLATFORM_KEYMAP}")),
     );
+}
+
+const PLATFORM_KEYMAP: &str = if cfg!(windows) {
+    "Default (Windows).sublime-keymap"
+} else {
+    "Default (OSX).sublime-keymap"
+};
+
+#[cfg(windows)]
+fn use_windows_keymap_paths(args: &mut Value) {
+    if args["base_file"] == "${packages}/Default/Velocity.sublime-keymap"
+        && args["user_file"] == "${packages}/User/Default (OSX).sublime-keymap"
+    {
+        args["base_file"] = format!("${{packages}}/Default/{PLATFORM_KEYMAP}").into();
+        args["user_file"] = format!("${{packages}}/User/{PLATFORM_KEYMAP}").into();
+    }
+}
+
+#[cfg(windows)]
+fn adapt_windows_menu(items: &mut [MenuItem]) {
+    for item in items {
+        if item.command.as_deref() == Some("edit_settings") {
+            use_windows_keymap_paths(&mut item.args);
+        }
+        adapt_windows_menu(&mut item.children);
+    }
 }
 // Diagnostics retain their resource paths; display names never establish provenance.
 fn user_resource(resource: &vel_config::resources::Resource, data: Option<&Path>) -> bool {
@@ -1269,9 +1307,15 @@ impl Configuration {
                     "../resources/Packages/Default/Preferences (Windows).sublime-settings"
                 ),
             ),
+            #[cfg(not(windows))]
             (
                 "Velocity.sublime-keymap",
                 include_str!("../resources/Packages/Default/Velocity.sublime-keymap"),
+            ),
+            #[cfg(windows)]
+            (
+                PLATFORM_KEYMAP,
+                include_str!("../resources/Packages/Default/Default (Windows).sublime-keymap"),
             ),
             (
                 "Velocity Vintage.sublime-keymap",
@@ -1617,7 +1661,10 @@ impl Configuration {
             });
         }
         phases.mark("settings_ready");
+        #[cfg(not(windows))]
         let mut keymap = Keymap::default();
+        #[cfg(windows)]
+        let mut keymap = Keymap::windows();
         let registry = Editor::command_registry();
         let known = |name: &str| name == "noop" || registry.kind(name).is_some();
         let mut unsupported: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
@@ -1626,10 +1673,13 @@ impl Configuration {
         let mut mousemap = Vec::new();
         let mut scrollbar_mousemap = Vec::new();
         const LEGACY: &str = "Packages/User/Velocity.sublime-keymap";
-        let mut keymaps = resources.matching(".sublime-keymap");
+        let keymaps = resources.matching(".sublime-keymap");
+        #[cfg(not(windows))]
+        let mut keymaps = keymaps;
         let mut ignored_user_keymaps = IgnoredKeymaps::new();
         // Public User naming: https://www.sublimetext.com/docs/key_bindings.html#user-bindings
-        // Load the old Velocity-generated file before either supported User override.
+        // Only macOS generated a legacy Velocity-named User file.
+        #[cfg(not(windows))]
         if let Some(i) = keymaps.iter().position(|r| r.path == LEGACY) {
             let first_user = keymaps
                 .iter()
@@ -1641,20 +1691,17 @@ impl Configuration {
             let package = resource.path.split('/').nth(1).unwrap_or_default();
             let file = resource.path.rsplit('/').next().unwrap_or_default();
             // https://www.sublimetext.com/docs/key_bindings.html#user-bindings
-            let is_default = matches!(
-                file,
-                "Default.sublime-keymap" | "Default (OSX).sublime-keymap"
-            );
+            let is_default = file == "Default.sublime-keymap" || file == PLATFORM_KEYMAP;
             let ours = package == "Default"
-                && matches!(
-                    file,
-                    "Velocity.sublime-keymap" | "Velocity Vintage.sublime-keymap"
-                );
-            if !(is_default || ours || resource.path == LEGACY) {
+                && (file == "Velocity Vintage.sublime-keymap"
+                    || (!cfg!(windows) && file == "Velocity.sublime-keymap"));
+            if !(is_default || ours || (!cfg!(windows) && resource.path == LEGACY)) {
                 if package == "User"
                     && !matches!(
                         file,
-                        "Default (Linux).sublime-keymap" | "Default (Windows).sublime-keymap"
+                        "Default (Linux).sublime-keymap"
+                            | "Default (OSX).sublime-keymap"
+                            | "Default (Windows).sublime-keymap"
                     )
                 {
                     ignored_user_keymaps.insert(
@@ -1727,6 +1774,10 @@ impl Configuration {
             };
             match resource.text().and_then(ui::parse) {
                 Ok(mut items) => {
+                    #[cfg(windows)]
+                    if resource.path == "Packages/Default/Main.sublime-menu" {
+                        adapt_windows_menu(&mut items);
+                    }
                     let package = resource.path.split('/').nth(1).unwrap_or_default();
                     unsupported.entry(package).or_default().1 += count_unknown_menu(&items, &known);
                     if resource.shipped() && !resource.path.starts_with("Packages/Default/") {
@@ -4369,6 +4420,74 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_keymap_defaults_and_user_override() {
+        use vel_config::keymap::{Key, Resolution, SettingsContext};
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        let mut defaults = Workspace::new_empty(Some(profile.clone()), None, false).unwrap();
+        fn expects(w: &mut Workspace, key: &str, command: &str, args: Value) {
+            assert_eq!(
+                w.keymap.resolve(
+                    &Key::parse_windows(key).unwrap(),
+                    &SettingsContext(&w.settings)
+                ),
+                Resolution::Command(vel_config::keymap::Invocation {
+                    command: command.into(),
+                    args
+                }),
+                "{key}"
+            );
+        }
+        for (key, command) in [
+            ("f3", "find_next"),
+            ("f11", "toggle_full_screen"),
+            ("ctrl+g", "goto_line"),
+            ("ctrl+q", "exit"),
+            ("ctrl+tab", "next_view_in_stack"),
+            ("ctrl+f6", "next_window"),
+            ("ctrl+shift+f6", "prev_window"),
+        ] {
+            expects(&mut defaults, key, command, serde_json::json!({}));
+        }
+        expects(
+            &mut defaults,
+            "ctrl+p",
+            "show_overlay",
+            serde_json::json!({"overlay":"goto"}),
+        );
+        expects(
+            &mut defaults,
+            "ctrl+shift+p",
+            "show_overlay",
+            serde_json::json!({"overlay":"command_palette"}),
+        );
+        let prefs = defaults
+            .menus
+            .iter()
+            .find(|m| m.id == "preferences")
+            .unwrap();
+        assert!(prefs.children.iter().any(
+            |row| row.args["user_file"] == "${packages}/User/Default (Windows).sublime-keymap"
+        ));
+        let user = profile.join("Packages/User");
+        std::fs::create_dir_all(&user).unwrap();
+        for (name, command) in [
+            ("Default.sublime-keymap", "paste"),
+            ("Default (OSX).sublime-keymap", "copy"),
+            ("Default (Windows).sublime-keymap", "save_all"),
+        ] {
+            std::fs::write(
+                user.join(name),
+                format!(r#"[{{"keys":["ctrl+p"],"command":"{command}"}}]"#),
+            )
+            .unwrap();
+        }
+        let mut overridden = Workspace::new_empty(Some(profile), None, false).unwrap();
+        expects(&mut overridden, "ctrl+p", "save_all", serde_json::json!({}));
+    }
     use vel_config::{
         json,
         keymap::{Key, Resolution},

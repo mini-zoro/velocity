@@ -10335,7 +10335,7 @@ fn escape_html(text: &str) -> String {
 
 #[path = "panels_a11y.rs"]
 mod accessibility;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(windows, not(test))))]
 pub(crate) use accessibility::ax_id;
 
 #[cfg(test)]

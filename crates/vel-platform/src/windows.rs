@@ -123,6 +123,36 @@ impl WindowHandle {
         }
     }
 
+    /// Activates another editor window in creation order. Auxiliary windows
+    /// such as Indexing Status don't have a menu bar and are not in the cycle.
+    pub fn cycle_editor_window(&self, forward: bool) {
+        let Some(runtime) = self.0.runtime.upgrade() else {
+            return;
+        };
+        let target = {
+            let windows = runtime.windows.borrow();
+            let editors: Vec<_> = windows
+                .iter()
+                .filter(|host| {
+                    host.ready.get() && !host.closing.get() && host.menu.borrow().is_some()
+                })
+                .collect();
+            editors
+                .iter()
+                .position(|host| host.id == self.0.id)
+                .and_then(|at| {
+                    let count = editors.len();
+                    (count > 1).then(|| {
+                        let offset = if forward { 1 } else { count - 1 };
+                        WindowHandle(Rc::clone(editors[(at + offset) % count]))
+                    })
+                })
+        };
+        if let Some(target) = target {
+            target.focus();
+        }
+    }
+
     /// Stops the event loop without confirmation.
     pub fn quit(&self) {
         if let Some(runtime) = self.0.runtime.upgrade() {
@@ -828,13 +858,18 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         if instance.is_null() {
             return Err(win_error("GetModuleHandleW"));
         }
+        let icon = LoadIconW(instance, 101usize as *const u16);
         let class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_DBLCLKS,
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-            hIcon: LoadIconW(null_mut(), IDI_APPLICATION),
+            hIcon: if icon.is_null() {
+                LoadIconW(null_mut(), IDI_APPLICATION)
+            } else {
+                icon
+            },
             lpszClassName: CLASS,
             ..Default::default()
         };

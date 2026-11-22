@@ -11,6 +11,7 @@ pub fn canonical_profile(path: &Path) -> PathBuf {
         })
 }
 
+#[cfg(unix)]
 pub fn socket_path(data: Option<&Path>, uid: u32) -> PathBuf {
     // FNV-1a, fixed width and independent of Rust's randomized hashers.
     let mut hash = 0xcbf29ce484222325_u64;

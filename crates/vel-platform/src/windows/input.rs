@@ -92,17 +92,6 @@ impl Host {
             self.request(FrameReason::Input);
             return true;
         }
-        if flags.command() && !flags.option() && !flags.shift() {
-            let action = match vk {
-                0x4d => Some(super::menu::Action::Minimize), // Ctrl+M
-                0x51 => Some(super::menu::Action::Quit),     // Ctrl+Q
-                _ => None,
-            };
-            if let Some(action) = action {
-                self.enqueue(Event::Named(action));
-                return true;
-            }
-        }
         if let Some(command) = model::responder(vk, flags) {
             self.enqueue(Event::Command(command));
             self.request(FrameReason::Input);

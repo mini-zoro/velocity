@@ -5,13 +5,6 @@ use windows_sys::Win32::System::{
     Threading::ExitProcess,
 };
 
-pub struct Startup;
-impl Startup {
-    pub fn take() -> Self {
-        Self
-    }
-}
-
 unsafe extern "system" fn interrupt_wait(event: u32) -> i32 {
     if event == CTRL_C_EVENT {
         // SAFETY: this runs only in the waiting CLI client, not in the primary.

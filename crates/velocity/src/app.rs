@@ -1667,7 +1667,10 @@ impl App {
         {
             syntax.children.extend(self.syntax_menu());
         }
+        #[cfg(target_os = "macos")]
         install_application_rows(&mut entries, tr);
+        #[cfg(windows)]
+        crate::windows_menu::arrange(&mut entries, tr, &self.workspace.keymap);
         prune_empty_menus(&mut entries);
         entries
     }
@@ -2832,9 +2835,14 @@ impl App {
             return Ok(());
         }
         if name == "choose_font" {
-            #[cfg(target_os = "macos")]
             if let Some(w) = window {
+                #[cfg(target_os = "macos")]
                 self.font_choices(w.font_families());
+                #[cfg(windows)]
+                {
+                    let _ = w;
+                    self.font_choices(vel_platform::fonts::font_families());
+                }
             }
             return Ok(());
         }
@@ -3408,6 +3416,8 @@ impl App {
         match name {
             "new_file" => self.workspace.new_file()?,
             "exit" => w.request_app_quit(),
+            #[cfg(windows)]
+            "next_window" | "prev_window" => w.cycle_editor_window(name == "next_window"),
             "open_recent_folder" => {
                 self.open_native_window_request(
                     w,
@@ -3468,7 +3478,6 @@ impl App {
         }
         Ok(())
     }
-    #[cfg(any(target_os = "macos", test))]
     fn font_choices(&mut self, mut families: Vec<String>) {
         let current = self.workspace.editor().preferences.font_face.as_str();
         families.sort_unstable();
@@ -5069,7 +5078,6 @@ impl AppHandler for App {
         if self.options.mode == Mode::Interactive {
             vel_platform::memory_pressure::enable();
         }
-        #[cfg(target_os = "macos")]
         if self.options.mode == Mode::Interactive
             && !self.options.safe_mode
             && let Ok(executable) = std::env::current_exe()
@@ -6268,9 +6276,10 @@ fn native_menu(
     items
         .iter()
         .filter(|item| {
-            item.platform.as_deref() != Some("!OSX")
-                && item.platform.as_deref() != Some("Windows")
-                && item.platform.as_deref() != Some("Linux")
+            #[cfg(windows)]
+            return !matches!(item.platform.as_deref(), Some("OSX" | "!Windows" | "Linux"));
+            #[cfg(target_os = "macos")]
+            return !matches!(item.platform.as_deref(), Some("!OSX" | "Windows" | "Linux"));
         })
         .map(|item| {
             let caption = if let Some(caption) = app.menu_caption(&item.id) {
@@ -6290,16 +6299,17 @@ fn native_menu(
                 }
             });
             // AppKit cannot dispatch a sequence as a key equivalent.
-            let shortcut_hint = if item.id == "side_bar_visibility" && shortcut.is_none() {
-                item.command.as_ref().and_then(|command| {
-                    keymap.menu_sequence_hint(&vel_config::keymap::Invocation {
-                        command: command.clone(),
-                        args: item.args.clone(),
+            let shortcut_hint =
+                if (cfg!(windows) || item.id == "side_bar_visibility") && shortcut.is_none() {
+                    item.command.as_ref().and_then(|command| {
+                        keymap.menu_sequence_hint(&vel_config::keymap::Invocation {
+                            command: command.clone(),
+                            args: item.args.clone(),
+                        })
                     })
-                })
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
             let children = if item.id == "macros" {
                 macros
                     .iter()
@@ -6323,6 +6333,7 @@ fn native_menu(
             };
             MenuEntry {
                 caption,
+                mnemonic: item.mnemonic.as_deref().and_then(|key| key.chars().next()),
                 id: item.id.clone(),
                 command: item.command.clone(),
                 args: item.args.to_string(),
@@ -6357,6 +6368,7 @@ fn localized_menu_caption<'a>(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn install_application_rows(entries: &mut Vec<MenuEntry>, tr: &vel_i18n::Translator) {
     // https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#App-menu
     // Advertise the JSON settings shortcut once, in the application menu.

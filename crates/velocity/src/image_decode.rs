@@ -250,7 +250,7 @@ pub(crate) fn helper(path: &Path, mut output: impl std::io::Write) -> Option<()>
     output.write_all(image.as_raw()).ok()
 }
 
-#[cfg(any(test, not(unix)))]
+#[cfg(any(test, not(any(unix, windows))))]
 pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
     use std::sync::atomic::Ordering;
     let at = std::time::Instant::now();
@@ -259,7 +259,7 @@ pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
         .then_some(pixels)
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(all(any(unix, windows), not(test)))]
 pub(crate) fn preview(path: &Path, cancelled: &AtomicBool) -> Option<Pixels> {
     let exe = std::env::current_exe().ok()?;
     let mut command = std::process::Command::new(exe);

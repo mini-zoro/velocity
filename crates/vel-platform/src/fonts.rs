@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{font_named, font_style};
+pub use windows::{font_families, font_named, font_style};
 
 /// Font bytes retained independently of replaceable user font files.
 #[derive(Debug)]

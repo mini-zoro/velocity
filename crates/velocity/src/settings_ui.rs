@@ -1,13 +1,13 @@
 //! The graphical User-preferences sheet. Nothing here is initialized by editor windows
 //! until the sheet is opened.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[path = "settings_ui_file.rs"]
 mod file;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[path = "settings_ui_view.rs"]
 mod view;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod model {
     use super::file::{FileSession, Issue, Mutation, Snapshot};
     use crate::{workbench, workspace::Workspace};
@@ -1863,10 +1863,12 @@ mod model {
     }
 }
 
+#[cfg(any(target_os = "macos", all(windows, not(test))))]
+pub(crate) use model::Navigation;
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) use model::Page;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) use model::source_text;
-#[cfg(target_os = "macos")]
-pub(crate) use model::{Navigation, Page};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug)]
 pub(crate) struct Page;

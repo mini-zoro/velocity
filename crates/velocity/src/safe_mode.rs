@@ -1,4 +1,5 @@
 //! Isolate startup diagnostics and retain sessions implicated in a restore crash.
+pub use crate::cli::safe_profile as profile;
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -33,15 +34,6 @@ fn nanos(time: SystemTime) -> u128 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-pub fn profile(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .unwrap_or("Velocity".as_ref())
-        .to_os_string();
-    name.push(" (Safe Mode)");
-    path.with_file_name(name)
 }
 
 pub fn fresh_run(profile: &Path) -> io::Result<PathBuf> {

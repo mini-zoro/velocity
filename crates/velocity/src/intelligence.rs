@@ -1113,7 +1113,7 @@ pub fn status_text_localized(
     output
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug)]
 pub struct StatusWindow {
     source: Arc<Mutex<StatusSource>>,
@@ -1122,7 +1122,7 @@ pub struct StatusWindow {
     fonts: Option<vel_render::font::Fonts>,
     scroll: f64,
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl StatusWindow {
     pub fn new(source: Arc<Mutex<StatusSource>>, owner: vel_platform::WindowHandle) -> Self {
         Self {
@@ -1138,16 +1138,31 @@ impl StatusWindow {
         w.request_frame();
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl vel_platform::AppHandler for StatusWindow {
     fn on_start(&mut self, w: &vel_platform::WindowHandle) -> Result<(), String> {
-        self.fonts = Some(vel_render::font::Fonts::load_named("Menlo")?);
-        self.renderer = Some(vel_render::Renderer::new(
-            w.clone(),
-            false,
-            &std::env::temp_dir().join("velocity-index-status-renderer"),
-            |_| {},
-        )?);
+        self.fonts = Some(vel_render::font::Fonts::load()?);
+        let cache = std::env::temp_dir().join("velocity-index-status-renderer");
+        #[cfg(target_os = "macos")]
+        let renderer = vel_render::Renderer::new(w.clone(), false, &cache, |_| {})?;
+        #[cfg(windows)]
+        let renderer = {
+            let hwnd = w.hwnd().ok_or("native HWND missing for index status")?;
+            let size = w.content_size();
+            let scale = w.scale_factor();
+            // SAFETY: the handler and its renderer are dropped before this HWND.
+            unsafe {
+                vel_render::Renderer::from_hwnd(
+                    hwnd.as_ptr(),
+                    (size.width * scale).round() as u32,
+                    (size.height * scale).round() as u32,
+                    false,
+                    &cache,
+                    |_| {},
+                )?
+            }
+        };
+        self.renderer = Some(renderer);
         Ok(())
     }
     fn on_scroll(&mut self, w: &vel_platform::WindowHandle, event: vel_platform::ScrollEvent) {
@@ -1184,6 +1199,10 @@ impl vel_platform::AppHandler for StatusWindow {
         }
     }
     fn on_frame(&mut self, ctx: &mut vel_platform::FrameContext<'_>) -> Result<(), String> {
+        #[cfg(windows)]
+        if let Some(fonts) = &mut self.fonts {
+            fonts.poll_fallbacks();
+        }
         let size = ctx.window.content_size();
         let clip = vel_platform::Rect {
             x: 0.,

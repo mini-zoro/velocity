@@ -15,6 +15,14 @@ const MODIFIERS: [(u8, &str, char, &str); 4] = [
     (4, "shift", '⇧', "Shift"),
     (8, "super", '⌘', "Cmd"),
 ];
+// Win32 Ctrl is delivered as Velocity's logical Command bit. The OS
+// reserves the Windows key; its resource bit is never set by Win32 input.
+const WINDOWS_MODIFIERS: [(u8, &str, char, &str); 4] = [
+    (8, "ctrl", ' ', "Ctrl"),
+    (2, "alt", ' ', "Alt"),
+    (4, "shift", ' ', "Shift"),
+    (1, "super", ' ', "Win"),
+];
 
 /// A normalized chord, including modifier-only taps and named/keypad keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -27,6 +35,13 @@ pub struct Key {
 impl Key {
     /// Parses public Sublime key syntax without hardware-specific keycodes.
     pub fn parse(input: &str) -> Result<Self, String> {
+        Self::parse_syntax(input, false)
+    }
+    /// Parses Windows resource syntax into the editor's logical modifier bits.
+    pub fn parse_windows(input: &str) -> Result<Self, String> {
+        Self::parse_syntax(input, true)
+    }
+    fn parse_syntax(input: &str, windows: bool) -> Result<Self, String> {
         let input = input.to_lowercase();
         let mut modifiers = 0;
         let (prefix, name) = if input == "+" {
@@ -41,12 +56,24 @@ impl Key {
         }
         for modifier in prefix.split('+').filter(|s| !s.is_empty()) {
             modifiers |= match modifier {
-                "ctrl" | "control" => 1,
+                "ctrl" | "control" => {
+                    if windows {
+                        8
+                    } else {
+                        1
+                    }
+                }
                 "alt" | "option" => 2,
                 "shift" => 4,
-                "super" | "command" | "cmd" => 8,
+                "super" | "command" | "cmd" => {
+                    if windows {
+                        1
+                    } else {
+                        8
+                    }
+                }
                 "primary" => {
-                    if cfg!(target_os = "macos") {
+                    if windows || cfg!(target_os = "macos") {
                         8
                     } else {
                         1
@@ -55,6 +82,11 @@ impl Key {
                 _ => return Err(format!("unknown modifier {modifier}")),
             };
         }
+        let name = match (windows, name) {
+            (true, "ctrl" | "control" | "primary") => "super",
+            (true, "super" | "command" | "cmd") => "win",
+            _ => name,
+        };
         Ok(Self::from_parts(name, modifiers))
     }
     /// Normalizes native shifted punctuation to its base key plus Shift. Literal
@@ -307,7 +339,11 @@ struct RawBinding {
     #[serde(default)]
     context: Vec<Context>,
 }
-fn parse_binding(mut raw: RawBinding, origin: Option<Arc<str>>) -> Result<Binding, String> {
+fn parse_binding(
+    mut raw: RawBinding,
+    origin: Option<Arc<str>>,
+    windows: bool,
+) -> Result<Binding, String> {
     if raw.keys.is_empty() {
         return Err("key sequence may not be empty".into());
     }
@@ -318,7 +354,7 @@ fn parse_binding(mut raw: RawBinding, origin: Option<Arc<str>>) -> Result<Bindin
         keys: raw
             .keys
             .iter()
-            .map(|k| Key::parse(k))
+            .map(|k| Key::parse_syntax(k, windows))
             .collect::<Result<_, _>>()?,
         invocation: raw.invocation,
         context: raw.context,
@@ -350,8 +386,16 @@ pub struct Keymap {
     nodes: Arc<Vec<Node>>,
     pending: usize,
     app_context: HashMap<String, Value>,
+    windows: bool,
 }
 impl Keymap {
+    /// Loads Windows key syntax and displays Windows key names.
+    pub fn windows() -> Self {
+        Self {
+            windows: true,
+            ..Self::default()
+        }
+    }
     /// Supplies an app-owned context without changing any preference revision.
     pub fn set_app_context(&mut self, key: &str, value: Value) {
         if self.app_context.get(key) != Some(&value) {
@@ -361,15 +405,22 @@ impl Keymap {
     /// Most recent unconditional binding hint for an invocation (including arguments).
     /// Uses native key glyphs on macOS and spelled-out modifiers elsewhere.
     pub fn hint(&self, invocation: &Invocation) -> Option<String> {
-        let mac = cfg!(target_os = "macos");
+        let mac = cfg!(target_os = "macos") && !self.windows;
         self.hint_binding(invocation)
-            .map(|b| format_hint(&b.keys, mac, if mac { " " } else { ", " }))
+            .map(|b| format_hint(&b.keys, mac, self.windows, if mac { " " } else { ", " }))
     }
     /// Display-only shortcut for a sequence AppKit cannot register as a key equivalent.
     pub fn menu_sequence_hint(&self, invocation: &Invocation) -> Option<String> {
         self.hint_binding(invocation)
             .filter(|b| b.keys.len() > 1)
-            .map(|b| format_hint(&b.keys, cfg!(target_os = "macos"), ", "))
+            .map(|b| {
+                format_hint(
+                    &b.keys,
+                    cfg!(target_os = "macos") && !self.windows,
+                    self.windows,
+                    ", ",
+                )
+            })
     }
     fn hint_binding(&self, invocation: &Invocation) -> Option<&Binding> {
         self.bindings
@@ -385,10 +436,11 @@ impl Keymap {
             })
             .map(|(_, b)| b)
     }
-    /// Display an effective single Command chord. Unlike the palette, a native
+    /// Display an effective single menu chord. Unlike the palette, a native
     /// menu cannot describe a sequence. Resource and argument precedence follows
     /// <https://www.sublimetext.com/docs/key_bindings.html>.
     pub fn menu_shortcut(&self, command: &str, args: &Value) -> Option<String> {
+        let format = |key| menu_chord(key, self.windows);
         let matches = |binding: &Binding| {
             binding.invocation.command == command && binding.invocation.args == *args
         };
@@ -407,7 +459,16 @@ impl Keymap {
                 let [key] = binding.keys.as_slice() else {
                     continue;
                 };
-                if key.modifiers & 8 == 0
+                let eligible = if self.windows {
+                    key.modifiers & 1 == 0
+                        && (key.modifiers & (8 | 2) != 0
+                            || key.name.strip_prefix('f').is_some_and(|n| {
+                                n.parse::<u8>().is_ok_and(|n| (1..=24).contains(&n))
+                            }))
+                } else {
+                    key.modifiers & 8 != 0
+                };
+                if !eligible
                     || self.bindings[index + 1..].iter().any(|later| {
                         later.context.is_empty() && later.keys == binding.keys && !matches(later)
                     })
@@ -415,13 +476,13 @@ impl Keymap {
                     continue;
                 }
                 if binding.context.is_empty() {
-                    return Some(menu_chord(key));
+                    return Some(format(key));
                 }
                 conditional = Some(key);
             }
             end = start;
         }
-        conditional.filter(|_| count == 1).map(menu_chord)
+        conditional.filter(|_| count == 1).map(format)
     }
     /// Appends one resource; subsequent resources have higher precedence.
     pub fn append(&mut self, source: &str) -> Result<(), String> {
@@ -429,7 +490,7 @@ impl Keymap {
         let raw: Vec<RawBinding> = serde_json::from_value(doc.value).map_err(|e| e.to_string())?;
         let parsed = raw
             .into_iter()
-            .map(|raw| parse_binding(raw, None))
+            .map(|raw| parse_binding(raw, None, self.windows))
             .collect::<Result<Vec<_>, _>>()?;
         self.add(parsed);
         Ok(())
@@ -451,7 +512,7 @@ impl Keymap {
         for (n, value) in list.iter().enumerate() {
             let binding = serde_json::from_value(value.clone())
                 .map_err(|e| e.to_string())
-                .and_then(|raw: RawBinding| parse_binding(raw, Some(origin.clone())));
+                .and_then(|raw: RawBinding| parse_binding(raw, Some(origin.clone()), self.windows));
             match binding {
                 Ok(binding) if allowed(&binding.invocation) => entries.push(binding),
                 Ok(_) => skipped += 1,
@@ -573,9 +634,13 @@ impl Keymap {
     }
 }
 
-fn menu_chord(key: &Key) -> String {
+fn menu_chord(key: &Key, windows: bool) -> String {
     let mut chord = String::new();
-    for (bit, name, _, _) in MODIFIERS {
+    for (bit, name, _, _) in if windows {
+        WINDOWS_MODIFIERS
+    } else {
+        MODIFIERS
+    } {
         if key.modifiers & bit != 0 {
             chord.push_str(name);
             chord.push('+');
@@ -585,13 +650,17 @@ fn menu_chord(key: &Key) -> String {
     chord
 }
 
-fn format_hint(keys: &[Key], mac: bool, separator: &str) -> String {
+fn format_hint(keys: &[Key], mac: bool, windows: bool, separator: &str) -> String {
     let mut hint = String::new();
     for (i, key) in keys.iter().enumerate() {
         if i != 0 {
             hint.push_str(separator);
         }
-        for (bit, _, symbol, name) in MODIFIERS {
+        for (bit, _, symbol, name) in if windows {
+            WINDOWS_MODIFIERS
+        } else {
+            MODIFIERS
+        } {
             if key.modifiers & bit != 0 {
                 if mac {
                     hint.push(symbol);
@@ -629,6 +698,52 @@ fn format_hint(keys: &[Key], mac: bool, separator: &str) -> String {
 
 #[cfg(test)]
 #[test]
+fn windows_resources_map_physical_ctrl_to_the_logical_command_bit() {
+    let mut keys = Keymap::windows();
+    keys.append(
+        r#"[
+        {"keys":["ctrl+shift+p"],"command":"palette"},
+        {"keys":["primary+p"],"command":"goto"},
+        {"keys":["f3"],"command":"find_next"},
+        {"keys":["super+p"],"command":"windows_key"},
+        {"keys":["ctrl+k","ctrl+,"],"command":"preferences"}
+    ]"#,
+    )
+    .unwrap();
+    let ctx = Settings::default();
+    let ctx = SettingsContext(&ctx);
+    assert_eq!(
+        Key::parse_windows("control+p").unwrap(),
+        Key::from_parts("p", 8)
+    );
+    assert_eq!(
+        Key::parse_windows("super+p").unwrap(),
+        Key::from_parts("p", 1)
+    );
+    assert_ne!(Key::parse_windows("super"), Key::parse_windows("ctrl"));
+    assert!(
+        matches!(keys.resolve(&Key::from_parts("p", 8), &ctx), Resolution::Command(i) if i.command == "goto")
+    );
+    assert!(
+        matches!(keys.resolve(&Key::from_parts("p", 12), &ctx), Resolution::Command(i) if i.command == "palette")
+    );
+    assert_eq!(
+        keys.menu_shortcut("find_next", &empty_args()).as_deref(),
+        Some("f3")
+    );
+    assert_eq!(keys.menu_shortcut("windows_key", &empty_args()), None);
+    let prefs = Invocation {
+        command: "preferences".into(),
+        args: empty_args(),
+    };
+    assert_eq!(
+        keys.menu_sequence_hint(&prefs).as_deref(),
+        Some("Ctrl+K, Ctrl+,")
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn mac_hints_share_the_menu_modifier_order() {
     for (binding, menu, hint) in [
         ("super+shift+s", "shift+super+s", "⇧⌘S"),
@@ -645,15 +760,15 @@ fn mac_hints_share_the_menu_modifier_order() {
         ("f5", "f5", "F5"),
     ] {
         let key = Key::parse(binding).unwrap();
-        assert_eq!(menu_chord(&key), menu);
-        assert_eq!(format_hint(&[key], true, " "), hint);
+        assert_eq!(menu_chord(&key, false), menu);
+        assert_eq!(format_hint(&[key], true, false, " "), hint);
     }
     let keys = [
         Key::parse("super+k").unwrap(),
         Key::parse("super+b").unwrap(),
     ];
-    assert_eq!(format_hint(&keys, true, " "), "⌘K ⌘B");
-    assert_eq!(format_hint(&keys, true, ", "), "⌘K, ⌘B");
+    assert_eq!(format_hint(&keys, true, false, " "), "⌘K ⌘B");
+    assert_eq!(format_hint(&keys, true, false, ", "), "⌘K, ⌘B");
 }
 
 #[cfg(test)]

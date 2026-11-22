@@ -279,7 +279,8 @@ impl Resources {
                     1 + r.tier as u8
                 },
                 package,
-                r.path.contains("(OSX)"),
+                r.path
+                    .contains(if cfg!(windows) { "(Windows)" } else { "(OSX)" }),
                 &r.path,
             )
         });

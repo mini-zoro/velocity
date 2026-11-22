@@ -23,6 +23,10 @@ fn main() -> io::Result<()> {
     // The runtime binary-searches these slash-separated resource IDs.
     files.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    #[cfg(windows)]
+    if env::var("TARGET").is_ok_and(|target| target == "x86_64-pc-windows-msvc") {
+        windows_resources(&out)?;
+    }
     dispatch::generate(&out)?;
     i18n::generate(&out)?;
     let index = fs::File::create(out.join("startup-syntaxes.bin"))?;
@@ -89,6 +93,58 @@ fn main() -> io::Result<()> {
     }
     writeln!(out, "];")?;
     out.flush()
+}
+
+// Native MSVC builds have the SDK resource compiler; cargo check from another
+// host does not link binaries and must not require an SDK.
+#[cfg(windows)]
+fn windows_resources(out: &Path) -> io::Result<()> {
+    use std::process::Command;
+    let version = env!("CARGO_PKG_VERSION");
+    let numeric = format!(
+        "{},{},{},0",
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH")
+    );
+    let packaging = Path::new("packaging").canonicalize()?;
+    let icon = packaging.join("velocity.ico");
+    let source = packaging.join("velocity.rc");
+    println!("cargo:rerun-if-changed=packaging/velocity.ico");
+    println!("cargo:rerun-if-changed=packaging/velocity.rc");
+    let template = fs::read_to_string(source)?;
+    for (bin, subsystem) in [
+        ("velocity", "Velocity editor"),
+        ("vel", "Velocity console client"),
+    ] {
+        let rc = out.join(format!("{bin}.rc"));
+        let res = out.join(format!("{bin}.res"));
+        let script = template
+            .replace("@VERSION@", version)
+            .replace("@VERSION_COMMAS@", &numeric)
+            .replace("@EXE@", bin)
+            .replace("@DESCRIPTION@", subsystem);
+        // Use the working directory and /I for paths with spaces or non-ASCII.
+        fs::write(&rc, script)?;
+        let mut compiler = find_msvc_tools::find("x86_64-pc-windows-msvc", "rc.exe")
+            .unwrap_or_else(|| Command::new("rc.exe"));
+        let status = compiler
+            .current_dir(packaging.as_path())
+            .arg("/nologo")
+            .arg("/I")
+            .arg(icon.parent().expect("icon directory"))
+            .arg("/fo")
+            .arg(&res)
+            .arg(&rc)
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "rc.exe failed to compile {bin}: {status}"
+            )));
+        }
+        println!("cargo:rustc-link-arg-bin={bin}={}", res.display());
+    }
+    Ok(())
 }
 
 fn inventory(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {

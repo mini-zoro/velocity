@@ -70,7 +70,7 @@ fn read_faces(path: &Path) -> Vec<Entry> {
                 match name.id() {
                     StringId::Full => names.push(name.to_string().to_lowercase()),
                     StringId::Family | StringId::TypographicFamily => {
-                        families.push(name.to_string().to_lowercase())
+                        families.push(name.to_string())
                     }
                     _ => {}
                 }
@@ -112,7 +112,13 @@ fn family_face(name: &str) -> Option<&'static Entry> {
     let name = name.to_lowercase();
     database()
         .iter()
-        .filter(|entry| entry.names.contains(&name) || entry.families.contains(&name))
+        .filter(|entry| {
+            entry.names.contains(&name)
+                || entry
+                    .families
+                    .iter()
+                    .any(|family| family.to_lowercase() == name)
+        })
         .min_by_key(|entry| (!entry.names.contains(&name), entry.score(false, false)))
 }
 
@@ -127,6 +133,17 @@ pub fn font_named(name: &str) -> Option<FontDescriptor> {
     family_face(name)
         .or_else(|| family_face(alias))
         .map(|entry| entry.face.clone())
+}
+
+/// Family names for the font chooser, using the same catalog as rendering.
+pub fn font_families() -> Vec<String> {
+    database()
+        .iter()
+        .flat_map(|entry| &entry.families)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Discover the closest available weight and slope within the selected face's family.

@@ -1,6 +1,15 @@
 //! Adapted from Velocity’s MIT OR Apache-2.0 P0 prototype.
 //! Small, dependency-free command-line parser; modes never require human interaction.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+pub fn safe_profile(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or("Velocity".as_ref())
+        .to_os_string();
+    name.push(" (Safe Mode)");
+    path.with_file_name(name)
+}
 
 pub const PERF_HELP: &str = "\
   --headless-perf-startup [FILE]  main -> first App::scene, idle memory; no file or --lines = blank

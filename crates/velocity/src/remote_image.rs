@@ -1,6 +1,6 @@
 //! Untrusted minihtml raster images use the anonymous HTTPS client and a killable codec child.
 use std::io::Read;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::path::Path;
 
 pub(crate) const REMOTE_HELPER: &str = "--internal-decode-remote-image";
@@ -51,7 +51,7 @@ pub(crate) fn helper(input: impl Read, output: impl std::io::Write) -> Option<()
     output.write_all(image.as_raw()).ok()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn load(
     url: &str,
     client: &vel_packages::https::HttpsClient,

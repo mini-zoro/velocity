@@ -15,7 +15,6 @@ pub(super) enum Action {
     Zoom,
     BringAll,
     Quit,
-    About(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,9 +74,19 @@ fn key_hint(hint: &str) -> String {
         .join(", ")
 }
 
-fn label(caption: &str) -> String {
+fn label(caption: &str, mnemonic: Option<char>) -> String {
     // Literal ampersands in translated captions, file names and command labels.
-    caption.replace('&', "&&").replace(['\t', '\n', '\r'], " ")
+    let caption = caption.replace('&', "&&").replace(['\t', '\n', '\r'], " ");
+    let Some(key) = mnemonic.filter(char::is_ascii_alphanumeric) else {
+        return caption;
+    };
+    if let Some(at) = caption.find(|c: char| c.eq_ignore_ascii_case(&key)) {
+        let mut caption = caption;
+        caption.insert(at, '&');
+        caption
+    } else {
+        format!("{caption} (&{})", key.to_ascii_uppercase())
+    }
 }
 
 fn model(app: &dyn AppHandler, entries: &[MenuEntry]) -> Vec<Item> {
@@ -101,7 +110,6 @@ fn model(app: &dyn AppHandler, entries: &[MenuEntry]) -> Vec<Item> {
             Some("native_zoom") => Some(Action::Zoom),
             Some("native_bring_all_to_front") => Some(Action::BringAll),
             Some("native_quit") => Some(Action::Quit),
-            Some("native_about") => Some(Action::About(caption.into())),
             Some("native_services" | "native_hide" | "native_hide_others" | "native_show_all") => {
                 continue;
             }
@@ -125,7 +133,7 @@ fn model(app: &dyn AppHandler, entries: &[MenuEntry]) -> Vec<Item> {
             ),
             _ => (true, false),
         };
-        let mut label = label(caption);
+        let mut label = label(caption, entry.mnemonic);
         if let Some(shortcut) = &entry.shortcut {
             label.push('\t');
             label.push_str(&accelerator(shortcut));
@@ -271,18 +279,22 @@ impl MenuBar {
             popups: Vec::new(),
             actions: Actions::default(),
         };
-        let mut mnemonics = Vec::new();
+        let mut mnemonics: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| entry.mnemonic.map(|letter| letter.to_ascii_lowercase()))
+            .collect();
         for entry in entries {
             if entry.children.is_empty() {
                 continue;
             }
-            let mut title = label(&entry.caption);
-            if let Some((index, letter)) = title.char_indices().find(|(_, ch)| {
-                ch.is_ascii_alphabetic() && !mnemonics.contains(&ch.to_ascii_lowercase())
-            }) {
-                title.insert(index, '&');
+            let mnemonic = entry.mnemonic.or_else(|| {
+                let letter = entry.caption.chars().find(|ch| {
+                    ch.is_ascii_alphabetic() && !mnemonics.contains(&ch.to_ascii_lowercase())
+                })?;
                 mnemonics.push(letter.to_ascii_lowercase());
-            }
+                Some(letter)
+            });
+            let title = label(&entry.caption, mnemonic);
             if let Some(native) =
                 OwnedMenu::new(true).and_then(|popup| menu.root.add_popup(&title, popup))
             {
@@ -397,18 +409,6 @@ impl Host {
             Action::Minimize => window.minimize(),
             Action::Zoom => window.zoom(),
             Action::Quit => window.request_app_quit(),
-            Action::About(title) => {
-                let title = wide(&title);
-                // SAFETY: The dialog copies the terminated title and uses our live parent.
-                unsafe {
-                    MessageBoxW(
-                        self.hwnd.get(),
-                        windows_sys::w!("Velocity"),
-                        title.as_ptr(),
-                        MB_OK | MB_ICONINFORMATION,
-                    )
-                };
-            }
             Action::BringAll => {
                 if let Some(runtime) = self.runtime.upgrade() {
                     let windows = runtime.windows.borrow().clone();
@@ -538,5 +538,8 @@ mod tests {
         );
         assert_eq!(items[1].action, Some(Action::Zoom));
         assert_eq!(accelerator("control+super+pageup"), "Ctrl+PgUp");
+        assert_eq!(label("Find", Some('I')), "F&ind");
+        assert_eq!(label("查找", Some('I')), "查找 (&I)");
+        assert_eq!(label("Copy & Keep", Some('K')), "Copy && &Keep");
     }
 }

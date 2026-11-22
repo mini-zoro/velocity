@@ -3450,6 +3450,7 @@ name = "velocity"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "find-msvc-tools",
  "image",
  "libc",
  "png",

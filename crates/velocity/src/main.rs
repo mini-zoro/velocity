@@ -1,5 +1,6 @@
 //! Native editor and headless tools. Tests do not launch the native editor.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 mod annotation_commands;
 mod annotations;
 // The legacy in-App test modules have AppKit/macOS-specific fixtures. Windows
@@ -14,7 +15,7 @@ mod bundled_syntax;
 mod cjk_bench;
 mod cli;
 mod cli_stdin;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod codec_process;
 mod completion;
 mod context_menu;
@@ -27,12 +28,16 @@ mod git_ui;
 #[cfg(unix)]
 mod gui_launch;
 #[cfg(windows)]
-#[path = "cli_console.rs"]
+#[path = "windows_launch.rs"]
 mod gui_launch;
 mod html_ui;
 mod image_decode;
 mod instance;
 mod instance_path;
+#[cfg(windows)]
+#[path = "instance/pipe.rs"]
+mod instance_pipe;
+mod instance_protocol;
 mod intelligence;
 mod intelligence_bench;
 mod language;
@@ -77,6 +82,8 @@ mod view;
 mod vintage;
 #[cfg(test)]
 mod vintage_tests;
+#[cfg(any(windows, test))]
+mod windows_menu;
 mod workbench;
 mod workbench_bench;
 #[cfg(test)]
@@ -226,8 +233,6 @@ impl vel_platform::AppHandler for NativeForwarder {
     }
 }
 fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(), String> {
-    #[cfg(windows)]
-    let _ = gui;
     // Developer tool: offscreen PNGs of real UI states; never creates a window.
     #[cfg(target_os = "macos")]
     {
@@ -239,7 +244,10 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             return cjk_bench::run();
         }
     }
-    let Some(mut options) = Options::parse(std::env::args().skip(1))? else {
+    let args = std::env::args().skip(1);
+    #[cfg(windows)]
+    let args = args.skip(usize::from(gui.serve));
+    let Some(mut options) = Options::parse(args)? else {
         print!("{}", cli::HELP);
         return Ok(());
     };
@@ -285,7 +293,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     #[cfg(unix)]
     let gui_process = inherited.is_some();
     #[cfg(windows)]
-    let gui_process = false;
+    let gui_process = true;
     #[cfg(unix)]
     let launch_services = !gui_process && options.launched_by_launch_services(parent_pid());
     #[cfg(windows)]
@@ -319,6 +327,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             request.add = true;
             request.wait = false;
         }
+        #[cfg(unix)]
         if request.wait && !gui_process && !launch_services {
             gui_launch::install_client_interrupt().map_err(|e| e.to_string())?;
             // Build 4126 restored terminal focus on wait completion.
@@ -340,7 +349,14 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             instance::Instance::enter(data_dir.as_deref(), &request)?
         };
         #[cfg(windows)]
-        let entry = instance::Instance::enter(data_dir.as_deref(), &request)?;
+        let entry = if gui.serve {
+            let Some(claim) = instance::Instance::claim_startup(data_dir.as_deref())? else {
+                return Ok(());
+            };
+            instance::Entry::Claimed(claim)
+        } else {
+            instance::Instance::enter(data_dir.as_deref(), &request)?
+        };
         match entry {
             instance::Entry::Forwarded if launch_services => {
                 // Retain the native event recipient until its actual paths are relayed.

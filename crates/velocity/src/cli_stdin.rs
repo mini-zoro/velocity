@@ -1,5 +1,5 @@
 //! Classification and bounded reading of the client's standard input.
-use crate::{cli::Options, instance::Stdin};
+use crate::{cli::Options, instance_protocol::Stdin};
 use std::{io::Read, path::Path};
 
 #[cfg(all(test, windows))]

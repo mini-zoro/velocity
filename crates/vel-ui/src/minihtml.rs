@@ -21,7 +21,7 @@ pub use crate::images::remote::enable as enable_remote_images;
 pub struct Metrics {
     images: crate::images::Images,
     cache: RefCell<HashMap<u64, (String, TextStyle, TextMetrics)>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     native: RefCell<Option<vel_render::font::Fonts>>,
 }
 impl std::fmt::Debug for Metrics {
@@ -41,19 +41,39 @@ impl Metrics {
     }
     /// Polls completed image decodes and reports whether layouts should be invalidated.
     pub fn poll_images(&self) -> bool {
-        self.images.poll() | remote::poll()
+        let changed = self.images.poll() | remote::poll();
+        #[cfg(windows)]
+        if self
+            .native
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(vel_render::font::Fonts::poll_fallbacks)
+        {
+            self.cache.borrow_mut().clear();
+            return true;
+        }
+        changed
     }
     /// Whether the host should schedule a bounded worker poll.
     pub fn images_pending(&self) -> bool {
+        #[cfg(windows)]
+        if self
+            .native
+            .borrow()
+            .as_ref()
+            .is_some_and(vel_render::font::Fonts::fallback_pending)
+        {
+            return true;
+        }
         self.images.pending() || remote::pending()
     }
     /// Whether native text shaping has been explicitly initialized.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn native_enabled(&self) -> bool {
         self.native.borrow().is_some()
     }
     /// Enables the existing native font/fallback stack. Never called by headless modes/tests.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn enable_native(&self) -> Result<(), String> {
         let mut fonts = vel_render::font::Fonts::load()?;
         fonts.shape_ui("M世界 👋", "system-ui", 12., FontStyle::default());
@@ -86,7 +106,7 @@ impl FontMetrics for Metrics {
         {
             return *metrics;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let native = self.native.borrow_mut().as_mut().map(|fonts| {
             let run = fonts.shape_ui(
                 text,
@@ -108,9 +128,9 @@ impl FontMetrics for Metrics {
             ascent: style.font_size * 0.8,
             descent: style.font_size * 0.2,
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let metrics = native.unwrap_or_else(estimate);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let metrics = estimate();
         let mut cache = self.cache.borrow_mut();
         if cache.len() >= 4096 {

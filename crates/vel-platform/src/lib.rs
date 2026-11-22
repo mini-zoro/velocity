@@ -392,6 +392,8 @@ pub trait AppHandler: 'static {
 pub struct MenuEntry {
     /// Visible caption, or "-" for a separator.
     pub caption: String,
+    /// Win32 access key, separate from literal ampersands in the caption.
+    pub mnemonic: Option<char>,
     /// Stable resource role, independent of the translated caption.
     pub id: String,
     /// Command registry name, absent on submenu parents.
