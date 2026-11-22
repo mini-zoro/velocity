@@ -1,12 +1,9 @@
-name: Release artifacts (no publishing)
+name: Release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +12,8 @@ jobs:
   macos:
     name: macOS universal app and DMG
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -24,16 +23,58 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: Build and validate local ad-hoc artifacts
+      - name: Build and validate (ad hoc signed)
         run: scripts/package-macos.sh target/release-artifacts
-      - name: Retain workflow artifacts only
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Velocity-macos-universal
+          name: velocity-macos
           path: |
             target/release-artifacts/*.app.zip
             target/release-artifacts/*.dmg
             target/release-artifacts/SHA256SUMS
-            target/release-artifacts/packaging-report.json
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: GitHub Release
+    # Only a pushed version tag publishes; a manual run just builds the artifacts above.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          sha256sum -- *.zip *.dmg *.exe *.msi 2>/dev/null | sort -k2 > SHA256SUMS || true
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'NOTES'
+          ## Install
+
+          **macOS (Apple silicon and Intel):** open the DMG and drag Velocity to Applications.
+          This build is not notarized (no Apple Developer ID), so macOS reports it as damaged
+          or from an unidentified developer. After copying it, run once in Terminal:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/Velocity.app
+          ```
+
+          **Finder "New Text File":** enable it in Velocity's command palette
+          ("Finder: Enable New Text File in Context Menu") or in System Settings › General ›
+          Login Items & Extensions.
+
+          Verify downloads with `shasum -a 256 -c SHA256SUMS`.
+          NOTES
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Velocity $TAG" \
+            --notes-file notes.md --generate-notes

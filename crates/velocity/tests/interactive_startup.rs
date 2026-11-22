@@ -90,9 +90,16 @@ fn first_frame_setup_is_bounded_with_an_empty_syntax_cache() {
         assert_eq!(phases.last().unwrap()["phase"], "interactive_setup_ready");
         assert!(phases.iter().any(|r| r["phase"] == "menus_mousemap_ready"));
         assert!(!tmp.join("velocity-syntax-cache").exists());
-        if !cfg!(debug_assertions) {
-            let instructions = |record: &Value| record["instructions"].as_u64().unwrap();
-            let used = instructions(phases.last().unwrap()) - instructions(phases[0]);
+        // Virtual machines (CI runners) expose no instruction counter; the phase order and
+        // the other checks still run there.
+        let instructions = |record: &Value| record["instructions"].as_u64();
+        if !cfg!(debug_assertions)
+            && let (Some(first), Some(last)) = (
+                instructions(phases[0]),
+                instructions(phases.last().unwrap()),
+            )
+        {
+            let used = last - first;
             assert!((1..BUDGET).contains(&used), "restore={restore}: {used}");
         }
         let ready = records

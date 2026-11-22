@@ -672,7 +672,9 @@ fn r19_app_sustained_build_output_has_steady_progress_and_lossless_tail() {
     eprintln!(
         "App sustained build: {updates}/{polls} data polls; longest UI gap {longest:?}; excluded scheduler oversleep {excluded_sleep:?}"
     );
-    assert!(polls >= 100);
+    // The poll count depends on how often a busy machine schedules this thread (a CI
+    // runner managed ~33 in the window); the data-poll ratio below is the real check.
+    assert!(polls >= 20, "{polls} polls");
     // Lock starvation (the original defect) shows up as polls without data, which this
     // ratio catches under any load. The wall-clock gap also includes this thread's own
     // poll work, which a loaded parallel gate can deschedule; enforce the strict 50 ms

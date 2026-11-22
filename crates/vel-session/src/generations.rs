@@ -639,7 +639,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(writes.len() >= 3, "{writes:?}");
-        assert!(writes[0] <= Duration::from_millis(800), "{writes:?}");
+        // Bounded by max_wait (600 ms) plus scheduling; a loaded CI runner took 830 ms.
+        assert!(writes[0] <= Duration::from_secs(3), "{writes:?}");
         writer.flush().unwrap();
         assert_eq!(
             load(&path).session.recent_files,
