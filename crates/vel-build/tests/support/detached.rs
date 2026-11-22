@@ -31,6 +31,13 @@ mark("done");
 "#,
         )
         .unwrap();
+        // A file, not inline shell: build commands expand `$name` like Sublime, so the
+        // command line itself must not contain `$`.
+        fs::write(
+            root.path().join("wait-ready.sh"),
+            "i=0\nwhile [ ! -e \"$1/ready\" ] && [ \"$i\" -lt 500 ]; do sleep 0.01; i=$((i+1)); done\n",
+        )
+        .unwrap();
         Self(root)
     }
 
@@ -38,10 +45,14 @@ mark("done");
         self.0.path()
     }
 
+    /// Starts the detached holder, waits until it has left the caller's process group
+    /// (it marks `ready` after `setsid`), then runs `after`. Without the wait, a slow
+    /// machine (CI) could reach `after` and finish before Perl detached, so the caller's
+    /// process-group cleanup killed the holder and the pipe closed early.
     pub fn script(&self, continuous: bool, after: &str) -> String {
         let dir = self.root().to_str().unwrap().replace('\'', "'\\''");
         format!(
-            "/usr/bin/perl '{dir}/detach.pl' '{dir}' {} &\n{after}\n",
+            "/usr/bin/perl '{dir}/detach.pl' '{dir}' {} &\n/bin/sh '{dir}/wait-ready.sh' '{dir}'\n{after}\n",
             u8::from(continuous),
         )
     }
