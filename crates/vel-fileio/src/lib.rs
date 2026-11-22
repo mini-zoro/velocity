@@ -931,7 +931,7 @@ fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 #[cfg(windows)]
 fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    windows::move_file(from, to, false)
+    windows::rename_no_replace(from, to)
 }
 #[cfg(not(any(unix, windows)))]
 fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {

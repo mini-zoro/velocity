@@ -1,12 +1,47 @@
 #![cfg(windows)]
-use std::{fs, io::Write, os::windows::fs::OpenOptionsExt};
+use std::{
+    fs,
+    io::Write,
+    os::windows::fs::{MetadataExt, OpenOptionsExt},
+};
 use vel_fileio::{
     Format, LineEnding,
     atomic::{Durability, Stage},
     rename_no_replace, save,
 };
 use vel_text::Text;
-use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_TEMPORARY, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
+
+#[test]
+fn atomic_save_publishes_new_and_existing_verbatim_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().canonicalize().unwrap().join("revision.txt");
+    let mut expected = None;
+    for revision in ["first\n", "second revision\n", "third revision\n"] {
+        let saved = vel_fileio::save_report_with_expected(
+            &path,
+            &Text::from(revision),
+            &Format::default(),
+            true,
+            None,
+            expected,
+        )
+        .unwrap();
+        expected = Some(saved.content);
+        assert_eq!(vel_fileio::content_identity(&path).unwrap(), expected);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            revision.replace('\n', "\r\n")
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().file_attributes() & FILE_ATTRIBUTE_TEMPORARY,
+            0
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
 
 #[test]
 fn atomic_save_keeps_original_on_encoding_readonly_and_sharing_failures() {

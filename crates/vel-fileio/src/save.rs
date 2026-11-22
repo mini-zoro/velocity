@@ -342,7 +342,7 @@ fn replace_target(
     metadata.map_err(error)?;
     #[cfg(windows)]
     super::windows::copy_dacl(source.as_ref().expect("metadata source"), stage.path())
-        .map_err(error)?;
+        .map_err(|e| regular::error(target, format!("copying file permissions: {e}")))?;
     // POSIX has no compare-and-replace rename; an external writer can still race commit.
     check_target(target, &expected)?;
     if rename {
@@ -352,6 +352,13 @@ fn replace_target(
             && crate::content_identity(target)? != Some(disk)
         {
             return Err(changed(target));
+        }
+        #[cfg(windows)]
+        {
+            // MoveFileExW cannot replace an open destination, even when our
+            // own handles share DELETE. Finish the checks before releasing them.
+            drop(source);
+            drop(writable);
         }
         check_target(target, &expected)?;
         match stage.replace_existing(target) {
@@ -363,6 +370,9 @@ fn replace_target(
             }
             #[cfg(unix)]
             Err(e) if adaptively_in_place(&e) => check_target(target, &expected)?,
+            #[cfg(windows)]
+            Err(e) => return Err(regular::error(target, format!("publishing save: {e}"))),
+            #[cfg(not(windows))]
             Err(e) => return Err(error(e)),
         }
     }

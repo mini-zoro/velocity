@@ -8,7 +8,7 @@ use std::{
     ptr::null_mut,
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_SUCCESS, LocalFree},
+    Foundation::{ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree},
     Security::{
         ACL,
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT, SetNamedSecurityInfoW},
@@ -17,8 +17,9 @@ use windows_sys::Win32::{
         UNPROTECTED_DACL_SECURITY_INFORMATION,
     },
     Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, GetVolumeInformationByHandleW, MOVEFILE_REPLACE_EXISTING,
-        MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+        FILE_ATTRIBUTE_NORMAL, FindClose, FindFirstFileW, GetVolumeInformationByHandleW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+        WIN32_FIND_DATAW,
     },
     System::SystemServices::FILE_PERSISTENT_ACLS,
     UI::Shell::{
@@ -71,7 +72,7 @@ fn wide_path(path: &Path, verbatim: bool) -> io::Result<Vec<u16>> {
     Ok(path.encode_wide().chain([0]).collect())
 }
 
-pub(super) fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
     let from = wide_path(from, true)?;
     let to = wide_path(to, true)?;
     let flags = MOVEFILE_WRITE_THROUGH
@@ -86,6 +87,43 @@ pub(super) fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()>
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn entry_name(path: &Path) -> io::Result<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    let path = wide_path(path, true)?;
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: path is NUL-terminated, data is writable, and the valid search
+    // handle is only used to close the search.
+    unsafe {
+        let handle = FindFirstFileW(path.as_ptr(), &mut data);
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        FindClose(handle);
+    }
+    let len = data.cFileName.iter().position(|&u| u == 0).unwrap();
+    Ok(OsString::from_wide(&data.cFileName[..len]))
+}
+
+pub(super) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    let from = std::path::absolute(from)?;
+    let to = std::path::absolute(to)?;
+    if std::fs::symlink_metadata(&to).is_ok() {
+        // NTFS can report success for two names linked to the same file. The
+        // only allowed existing destination is the very same directory entry.
+        let same_entry = vel_config::paths::equal(&from, &to)
+            && from.parent().zip(to.parent()).is_some_and(|(a, b)| {
+                std::fs::canonicalize(a)
+                    .is_ok_and(|a| std::fs::canonicalize(b).is_ok_and(|b| a == b))
+            })
+            && entry_name(&from)? == entry_name(&to)?;
+        if !same_entry {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+    }
+    // Retain the kernel's no-replace check even when the name was missing above.
+    move_file(&from, &to, false)
 }
 
 pub(super) fn publish(stage: &Path, target: &Path, replace: bool) -> io::Result<()> {
