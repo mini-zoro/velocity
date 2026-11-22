@@ -865,6 +865,7 @@ mod tests {
         std::fs::write(&target, "").unwrap();
         a.open_received_paths(std::slice::from_ref(&target))
             .unwrap();
+        a.run_named(None, "toggle_show_open_files", &json!({}));
         if !a.panels.side_visible {
             a.run_named(None, "toggle_side_bar", &json!({}));
         }

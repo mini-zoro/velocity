@@ -811,7 +811,7 @@ struct Host {
     error: RefCell<Option<String>>,
     /// Command, JSON args and the key equivalent Velocity installed (AppKit may rewrite the
     /// item's own equivalent for the active keyboard layout).
-    menu_commands: RefCell<Vec<(String, String, String)>>,
+    menu_commands: RefCell<Vec<MenuBarAction>>,
     title: RefCell<WindowTitle>,
     context: RefCell<ContextRequest<Retained<NSEvent>>>,
     context_scheduled: Cell<bool>,
@@ -1291,20 +1291,20 @@ define_class!(
                 // shortcut the menu displays runs the command, as in Sublime Text 4215
                 // (black-box, German layout).
                 let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
-                if let Some((_, _, installed)) = &command
-                    && !h.stopped.get() && !installed.is_empty()
+                if let Some(command) = &command
+                    && !h.stopped.get() && !command.installed_equivalent.is_empty()
                     && NSApplication::sharedApplication(h.mtm).currentEvent().is_some_and(|event| {
                         event.r#type() == NSEventType::KeyDown
                             && event.modifierFlags().contains(NSEventModifierFlags::Command)
                             && !relocated_equivalent(
-                                installed,
+                                &command.installed_equivalent,
                                 &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
                             )
                     })
                 {
                     return;
                 }
-                if let Some((name,args,_)) = command {
+                if let Some(MenuBarAction { name, args, .. }) = command {
                     if h.stopped.get() && lifecycle::is_template(h.id) {
                         if windowless_command(&name) && let Ok(mut slot) = h.app.try_borrow_mut()
                             && let Some(app) = slot.as_mut() {
@@ -1321,11 +1321,11 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             self.ivars().host.upgrade().is_some_and(|h| {
                 let commands=h.menu_commands.borrow();
-                commands.get(item.tag().max(0) as usize).is_some_and(|(name,args,_)| {
+                commands.get(item.tag().max(0) as usize).is_some_and(|command| {
                     if h.stopped.get() && lifecycle::is_template(h.id) {
-                        windowless_command(name)
+                        windowless_command(&command.name)
                     } else {
-                        h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(name,args)))
+                        h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(&command.name,&command.args)))
                     }
                 })
             })
@@ -2095,6 +2095,15 @@ fn build_menu(mtm: MainThreadMarker) {
     }
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
 }
+#[derive(Clone)]
+struct MenuBarAction {
+    id: String,
+    name: String,
+    args: String,
+    installed_equivalent: String,
+    shortcut_hint: Option<String>,
+}
+
 fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
     if let Some(view) = host.view.get() {
         menu.setDelegate(Some(ProtocolObject::from_ref(&**view)));
@@ -2119,7 +2128,10 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
         // SAFETY: These selectors all take one optional sender.
         let item = unsafe {
             menu.addItemWithTitle_action_keyEquivalent(
-                &NSString::from_str(&entry.caption),
+                &NSString::from_str(&menus::item_title(
+                    &entry.caption,
+                    entry.shortcut_hint.as_deref(),
+                )),
                 native.or_else(|| {
                     (!services && entry.command.is_some()).then(|| sel!(velocityCommand:))
                 }),
@@ -2149,7 +2161,13 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
                 .and_then(menu_key_equivalent)
                 .map(|(key, _)| key.to_string())
                 .unwrap_or_default();
-            commands.push((command.clone(), entry.args.clone(), installed));
+            commands.push(MenuBarAction {
+                id: entry.id.clone(),
+                name: command.clone(),
+                args: entry.args.clone(),
+                installed_equivalent: installed,
+                shortcut_hint: entry.shortcut_hint.clone(),
+            });
             if let Some(view) = host.view.get() {
                 // SAFETY: host retains the view until every menu is torn down.
                 unsafe {

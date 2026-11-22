@@ -295,7 +295,6 @@ fn round24_view_checks_and_project_requirements() {
         ("toggle_setting", spelling, false),
         ("toggle_minimap", json!({}), true),
         ("toggle_tabs", json!({}), true),
-        ("toggle_side_bar", json!({}), false),
         ("toggle_status_bar", json!({}), true),
     ] {
         assert_eq!(
@@ -328,6 +327,60 @@ fn round24_view_checks_and_project_requirements() {
         "recent_projects",
     ] {
         assert!(app.command_enabled(command, "{}"), "{command}");
+    }
+}
+
+#[test]
+fn r43_side_bar_menu_caption_tracks_visibility_in_both_languages() {
+    let dir = tempfile::tempdir().unwrap();
+    for (language, show, hide) in [
+        ("en", "Show Side Bar", "Hide Side Bar"),
+        ("zh-Hans", "显示侧边栏", "隐藏侧边栏"),
+    ] {
+        let mut app = fixture(None);
+        app.run_named(None, "set_ui_language", &json!({"language": language}));
+        let menu = app.application_menu();
+        let row = rows(&menu)
+            .find(|row| row.id == "side_bar_visibility")
+            .unwrap();
+        let command = row.command.as_deref().unwrap();
+        assert_eq!(command, "toggle_side_bar");
+        let hint = if cfg!(target_os = "macos") {
+            "⌘K, ⌘B"
+        } else {
+            "Cmd+K, Cmd+B"
+        };
+        assert!(!app.panels.side_visible);
+        assert_eq!(row.caption, show);
+        assert_eq!(row.shortcut_hint.as_deref(), Some(hint));
+        assert_eq!(row.shortcut, None); // A sequence must not register its first chord with AppKit.
+        assert!(!app.command_checked(command, &row.args));
+
+        app.panels
+            .add_folder(&mut app.workspace, dir.path().into())
+            .unwrap();
+        let menu = app.application_menu();
+        let visible = rows(&menu)
+            .find(|row| row.id == "side_bar_visibility")
+            .unwrap();
+        assert_eq!(visible.caption, hide);
+        assert_eq!(visible.shortcut_hint.as_deref(), Some(hint));
+        assert!(!app.command_checked(command, &row.args));
+        app.run_named(None, command, &json!({}));
+        assert_eq!(app.menu_caption(&row.id), Some(show));
+        app.run_named(None, command, &json!({}));
+        assert_eq!(app.menu_caption(&row.id), Some(hide));
+        app.workspace
+            .keymap
+            .append(r#"[{"keys":["super+alt+b"],"command":"toggle_side_bar"}]"#)
+            .unwrap();
+        let menu = app.application_menu();
+        let row = rows(&menu)
+            .find(|row| row.id == "side_bar_visibility")
+            .unwrap();
+        assert_eq!(row.caption, hide);
+        assert_eq!(row.shortcut.as_deref(), Some("alt+super+b"));
+        assert_eq!(row.shortcut_hint, None);
     }
 }
 

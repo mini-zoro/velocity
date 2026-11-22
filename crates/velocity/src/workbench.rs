@@ -342,13 +342,15 @@ impl Workspace {
         // https://www.sublimetext.com/download
         let tab = if self.tabs[self.active].goto_preview {
             // AppKit uses this title for the Window menu as well.
-            let Some(index) = self.workbench.groups[self.workbench.active]
+            match self.workbench.groups[self.workbench.active]
                 .focused
                 .and_then(|sheet| self.sheet_index(sheet))
-            else {
-                return "Velocity".into();
-            };
-            &self.tabs[index]
+            {
+                Some(index) => &self.tabs[index],
+                // A tabless Goto preview leaves the original input in slot zero.
+                None if self.is_empty() => &self.tabs[0],
+                None => return "Velocity".into(),
+            }
         } else {
             &self.tabs[self.active]
         };
@@ -368,11 +370,7 @@ impl Workspace {
                     .map(|folder| std::borrow::Cow::Borrowed(folder.name.as_str()))
             });
         let name = if self.is_empty() {
-            if project.is_some() {
-                self.translations.tr("untitled").into_owned()
-            } else {
-                "Velocity".into()
-            }
+            self.translations.tr("untitled").into_owned()
         } else if settings.bool("show_rel_path", false) {
             tab.path
                 .as_deref()

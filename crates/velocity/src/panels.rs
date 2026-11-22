@@ -775,7 +775,7 @@ impl Default for Panels {
             side_visible: true,
             sidebar_on_right: false,
             side_focused: false,
-            open_files_visible: true,
+            open_files_visible: false,
             side_selected: 0,
             side_selection: None,
             sidebar_reveal: None,
@@ -1243,7 +1243,7 @@ impl Panels {
         window.find_in_files_context = Some(self.files_context);
     }
     pub fn restore_session(&mut self, workspace: &Workspace, window: &vel_session::Window) {
-        self.open_files_visible = window.sidebar_open_files.unwrap_or(true);
+        self.open_files_visible = window.sidebar_open_files.unwrap_or_default();
         self.expanded = window.sidebar_expanded.iter().cloned().collect();
         self.watched_expanded = false;
         self.side_scroll.offset = window.sidebar_scroll;
@@ -4014,6 +4014,28 @@ impl Panels {
             .get(index)
             .or_else(|| self.extra_paths.get(index.saturating_sub(self.paths.len())))
     }
+    fn goto_path_detail(path: &Path, folders: &[Folder], home: Option<&Path>) -> String {
+        if let Some((folder, relative)) = folders
+            .iter()
+            .filter_map(|f| {
+                path.strip_prefix(&f.path)
+                    .ok()
+                    .map(|relative| (f, relative))
+            })
+            .max_by_key(|(f, _)| f.path.as_os_str().len())
+        {
+            // Sublime's public changelog documents the folder prefix for multiple roots.
+            return if folders.len() > 1 {
+                format!("{}/{}", folder.name, relative.display())
+            } else {
+                relative.display().to_string()
+            };
+        }
+        if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
+            return Path::new("~").join(relative).display().to_string();
+        }
+        path.display().to_string()
+    }
     fn goto_filters_gitignore(workspace: &Workspace) -> bool {
         // A transient preview may change the active view's syntax and settings.
         !workspace.folders.is_empty()
@@ -4022,6 +4044,10 @@ impl Panels {
                 .bool("goto_anything_exclude_gitignore", false)
     }
     fn publish_quick(&mut self, workspace: &Workspace, hits: Vec<fuzzy::Hit>) {
+        let goto_files = self.overlay == Some(Overlay::Goto) && self.local_positions.is_empty();
+        let home = goto_files
+            .then(|| std::env::var_os("HOME").filter(|home| !home.is_empty()))
+            .flatten();
         let palette = matches!(
             self.overlay,
             Some(Overlay::Palette | Overlay::Syntax | Overlay::Choices)
@@ -4119,6 +4145,16 @@ impl Panels {
                             .unwrap_or_default()
                     } else if palette {
                         palette_items[index].invocation.command.clone()
+                    } else if goto_files {
+                        self.quick_path(hit.index)
+                            .map(|path| {
+                                Self::goto_path_detail(
+                                    path,
+                                    &workspace.folders,
+                                    home.as_deref().map(Path::new),
+                                )
+                            })
+                            .unwrap_or_default()
                     } else {
                         self.quick_path(hit.index)
                             .map(|p| p.display().to_string())
@@ -6696,7 +6732,15 @@ impl Panels {
                     ..self.side_bounds
                 };
                 let mut attrs = Vec::new();
-                if self.side_focused && self.side_open.is_none() && self.side_selected == i {
+                let selected = if self.side_focused {
+                    self.side_open.is_none() && self.side_selected == i
+                } else {
+                    // Match the editor view (including a tabless Goto preview) without
+                    // selecting, expanding or scrolling the sidebar to it.
+                    !row.directory
+                        && workspace.tabs[workspace.active].path.as_deref() == Some(&row.path)
+                };
+                if selected {
                     attrs.push("selected");
                 }
                 if expanded {
@@ -9264,6 +9308,7 @@ mod tests {
         for width in (120..=500).step_by(10) {
             let mut panels = Panels::new(&workspace, false);
             panels.side_visible = true;
+            panels.open_files_visible = true;
             panels.layout(Size {
                 width: f64::from(width),
                 height: 400.,
@@ -9374,6 +9419,82 @@ mod intelligence_tests {
             .unwrap();
         wait(&mut workspace, &mut panels, |_, p| p.file_complete);
         assert_eq!(panels.file_matches, 1);
+    }
+
+    #[test]
+    fn r43_goto_publishes_relative_details_and_keeps_outside_paths() {
+        let folder = |name: &str| Folder {
+            path: Path::new("/project-fixtures").join(name),
+            name: name.into(),
+            rules: Rules::new(&[], &[], &[]).unwrap(),
+            follow_links: true,
+        };
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let mut panels = Panels::new(&workspace, false);
+        workspace.folders.push(folder("first"));
+        panels.overlay = Some(Overlay::Goto);
+        let outside = "/project-fixtures/outside.md";
+        panels.paths = Arc::new(vec![
+            workspace.folders[0].path.join("zh.md"),
+            workspace.folders[0].path.join("sub/dir/child.md"),
+        ]);
+        panels.candidates = Arc::new(
+            panels
+                .paths
+                .iter()
+                .map(|path| fuzzy::Candidate::new(path.to_string_lossy()))
+                .collect(),
+        );
+        panels.extra_paths = vec![outside.into()];
+        panels.extra_candidates = Arc::new(vec![fuzzy::Candidate::new(outside)]);
+
+        let hit = |index| fuzzy::Hit {
+            index,
+            score: 0,
+            positions: Vec::new(),
+        };
+        let mut hits = (0..3).map(hit).collect::<Vec<_>>();
+        panels.publish_quick(&workspace, hits.clone());
+        let details = |panels: &Panels| {
+            panels
+                .quick
+                .items
+                .iter()
+                .map(|item| item.details.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(details(&panels), ["zh.md", "sub/dir/child.md", outside]);
+
+        workspace.folders.push(folder("second"));
+        panels
+            .extra_paths
+            .push(workspace.folders[1].path.join("zh.md"));
+        Arc::make_mut(&mut panels.extra_candidates).push(fuzzy::Candidate::new("zh.md"));
+        hits.push(hit(3));
+        panels.publish_quick(&workspace, hits);
+        assert_eq!(
+            details(&panels),
+            [
+                "first/zh.md",
+                "first/sub/dir/child.md",
+                outside,
+                "second/zh.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn r43_goto_detail_abbreviates_home_on_component_boundaries() {
+        let home = Some(Path::new("/Users/fixture"));
+        assert_eq!(
+            Panels::goto_path_detail(Path::new("/Users/fixture/notes/zh.md"), &[], home),
+            "~/notes/zh.md"
+        );
+        let shared = "/Users/fixture-share/notes/zh.md";
+        assert_eq!(
+            Panels::goto_path_detail(Path::new(shared), &[], home),
+            shared
+        );
     }
 
     #[test]

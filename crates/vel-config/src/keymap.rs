@@ -361,6 +361,17 @@ impl Keymap {
     /// Most recent unconditional binding hint for an invocation (including arguments).
     /// Uses native key glyphs on macOS and spelled-out modifiers elsewhere.
     pub fn hint(&self, invocation: &Invocation) -> Option<String> {
+        let mac = cfg!(target_os = "macos");
+        self.hint_binding(invocation)
+            .map(|b| format_hint(&b.keys, mac, if mac { " " } else { ", " }))
+    }
+    /// Display-only shortcut for a sequence AppKit cannot register as a key equivalent.
+    pub fn menu_sequence_hint(&self, invocation: &Invocation) -> Option<String> {
+        self.hint_binding(invocation)
+            .filter(|b| b.keys.len() > 1)
+            .map(|b| format_hint(&b.keys, cfg!(target_os = "macos"), ", "))
+    }
+    fn hint_binding(&self, invocation: &Invocation) -> Option<&Binding> {
         self.bindings
             .iter()
             .enumerate()
@@ -372,7 +383,7 @@ impl Keymap {
                         .iter()
                         .any(|later| later.context.is_empty() && later.keys == b.keys)
             })
-            .map(|(_, b)| format_hint(&b.keys, cfg!(target_os = "macos")))
+            .map(|(_, b)| b)
     }
     /// Display an effective single Command chord. Unlike the palette, a native
     /// menu cannot describe a sequence. Resource and argument precedence follows
@@ -574,11 +585,11 @@ fn menu_chord(key: &Key) -> String {
     chord
 }
 
-fn format_hint(keys: &[Key], mac: bool) -> String {
+fn format_hint(keys: &[Key], mac: bool, separator: &str) -> String {
     let mut hint = String::new();
     for (i, key) in keys.iter().enumerate() {
         if i != 0 {
-            hint.push_str(if mac { " " } else { ", " });
+            hint.push_str(separator);
         }
         for (bit, _, symbol, name) in MODIFIERS {
             if key.modifiers & bit != 0 {
@@ -635,13 +646,14 @@ fn mac_hints_share_the_menu_modifier_order() {
     ] {
         let key = Key::parse(binding).unwrap();
         assert_eq!(menu_chord(&key), menu);
-        assert_eq!(format_hint(&[key], true), hint);
+        assert_eq!(format_hint(&[key], true, " "), hint);
     }
     let keys = [
         Key::parse("super+k").unwrap(),
         Key::parse("super+b").unwrap(),
     ];
-    assert_eq!(format_hint(&keys, true), "⌘K ⌘B");
+    assert_eq!(format_hint(&keys, true, " "), "⌘K ⌘B");
+    assert_eq!(format_hint(&keys, true, ", "), "⌘K, ⌘B");
 }
 
 #[cfg(test)]

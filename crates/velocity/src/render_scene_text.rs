@@ -42,7 +42,11 @@ fn shortcut_word(word: &str, text: &str) -> bool {
 fn fixture_label(scene: &str, text: &str, word: &str, root: &Path) -> bool {
     match scene {
         // Goto Anything's details are styled a path component at a time.
-        "goto_anything" | "r5_goto_anything" | "overlay_small" | "r41-goto-preview" => {
+        "goto_anything"
+        | "r5_goto_anything"
+        | "overlay_small"
+        | "r41-goto-preview"
+        | "r43-empty-folder-goto" => {
             if root
                 .components()
                 .any(|part| words(&part.as_os_str().to_string_lossy()).any(|w| w == word))
@@ -289,6 +293,7 @@ pub(super) fn runs<'a>(name: &str, app: &App, root: &Path, scene: &'a Scene) -> 
             "invisible.rs",
             "md",
             "an_unusually_long_module_name_for_truncation_checks.rs",
+            "render/an_unusually_long_module_name_for_truncation_checks.rs",
             "src/main.rs",
             "src/lib.rs",
             "src/config.rs",

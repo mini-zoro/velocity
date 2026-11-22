@@ -27,13 +27,7 @@ fn click(w: &mut Workspace, p: &mut Panels, path: &Path, double: bool) {
         width: 1000.,
         height: 800.,
     });
-    let i = p.side_rows.iter().position(|r| r.path == path).unwrap();
-    let position = Point {
-        x: 60.,
-        y: 30. * p.ui_scale
-            + (open_file_count(w) + 2 + i) as f64 * 24. * p.ui_scale
-            + 12. * p.ui_scale,
-    };
+    let position = p.test_sidebar_point(w, path);
     for down in [true, false] {
         p.mouse(w, position, down, double, false, 0..1).unwrap();
     }

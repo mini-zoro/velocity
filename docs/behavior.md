@@ -324,6 +324,26 @@ now the confirmed design.
 | U18 | **B**: recoverable, reversible command failures are reported in the status bar; dialogs only for confirmations and possible data loss | done (round 32 lane B) |
 | U19 | Keep `atomic_save` off by default | none |
 
+### Round 43: U01 and U04 details
+
+Source: 2026-11-22 side-by-side comparison on macOS, with fresh profiles and Sublime
+Text 4215 in safe mode. The comparison used screenshots and the accessibility/menu tree.
+
+| Journey | Sublime observation | Velocity regression coverage |
+| --- | --- | --- |
+| U01: Open an untouched window, with or without a folder | The empty window is titled `untitled`, or `untitled — <folder>` when a folder is open. | `r43_empty_titles_survive_goto_in_both_languages`: localizes `untitled` (`未命名` in zh-Hans) with and without the folder suffix. |
+| U01: View › Side Bar | Show Open Files starts unchecked; the sidebar shows FOLDERS. The visibility action reads Hide Side Bar or Show Side Bar, with no check mark. | `r43_open_files_defaults_off_and_restores_each_explicit_choice`, `r43_side_bar_menu_caption_tracks_visibility_in_both_languages`: per-window choice persists; the localized action retains the shortcut display. |
+| U01/U04: Open `zh.md`, then move through Goto results | FOLDERS highlights the active file, including the preview during Goto. The tabless preview from the empty folder window keeps the title `untitled — <folder>`. | `r43_folder_highlight_follows_view_without_reveal_or_focus_change`, `r43_empty_titles_survive_goto_in_both_languages`: highlight only rendered file rows, without touching the sidebar's selection, expansion or scroll. Explicit Reveal in Side Bar is unchanged. |
+| U04: Read the Goto result detail | The second line shows `zh.md` at the root and `sub/dir/file` for nested files. The [public 20110203 changelog][goto-multi-root] documents a folder-name prefix for multiple roots; this was not part of the 4215 observation. | `r43_goto_publishes_relative_details_and_keeps_outside_paths`, `r43_goto_detail_abbreviates_home_on_component_boundaries`: one root uses a relative path, multiple roots add the containing folder name, and outside files retain their absolute path with `~` for HOME. |
+
+Render coverage: `r43-empty-folder-goto` adds the tabless preview, visible folder-row
+highlight, and relative result detail. `sidebar_folders_only` uses the new window
+default; `sidebar`, `sidebar_focused`, and `sidebar_narrow` explicitly enable Open
+Files. The `r41-goto-preview`, `r41-goto-committed`, and `r41-sidebar-preview` scenes
+still cover the three distinct tab states.
+
+[goto-multi-root]: https://www.sublimetext.com/2
+
 ## To discuss
 
 No behavior changes are made on the basis of these questions. Recommendations are for
@@ -334,7 +354,7 @@ discussion, not new defaults.
 | **U01. What should a fresh window show?** | The clean-profile Sublime Text 4215 observations are recorded in the U01 decision above. [Build 4126][r4126] documents empty-window reuse. | **Decided 2026-11-22.** The empty editor is immediately editable but is not an open document yet. New File opens a tab immediately. Explicit sidebar toggles override the folder-based default and survive session restore. |
 | **U02. Should a window drop target a particular pane or just open in the current window?** | [Build 4126][r4126] documents alias resolution on macOS drops; details of drop zones aren't established. Velocity routes accepted paths through its native open dispatcher; Dock opens still follow D4. | A. Keep window-wide routing and verify actual Finder alias delivery separately. B. Add pane-specific drops. **Recommend A**; avoid inventing a pane rule. |
 | **U03. Should bare CLI reopen preserve the existing location?** | [CLI][cli] documents optional positions; [Build 4143][r4143] describes macOS reopen without identifying the CLI route. | **Decided A.** Bare paths preserve the caret and viewport; explicit coordinates, including `:1:1`, still jump. |
-| **U04. Should Goto's preview occupy a tab?** | No for an unopened file. Sublime Text 4215 on macOS confirmed the [navigation guide][nav] distinction on 2026-11-22: ⌘P → `zh` previews `zh.md` without adding a tab. Return opens it; Escape restores the origin. | **Resolved: A.** Keep sidebar preview tabs and show new Goto previews without tabs. The observation did not establish Sublime's exact highlight state, so Velocity keeps the original tab highlighted while drawing the hidden preview. |
+| **U04. Should Goto's preview occupy a tab?** | No for an unopened file. Sublime Text 4215 on macOS confirmed the [navigation guide][nav] distinction on 2026-11-22: ⌘P → `zh` previews `zh.md` without adding a tab. Return opens it; Escape restores the origin. | **Resolved: A.** Keep sidebar preview tabs and show new Goto previews without tabs. Velocity still highlights the original tab while drawing the preview; the round 43 observation established the highlight in FOLDERS, not a different tab selection rule. |
 | **U05. Where should an ordinary new tab go?** | [Tab multi-select][tabs] specifies some modifier-based placements, not the ordinary default. Velocity appends at the right of the current group. | A. Append. B. Insert immediately to the right of the current tab. **Recommend A** until the default is confirmed. |
 | **U06. Should ⌘W close an empty anonymous window by default?** | [Settings reference][settings-ref] documents the option, and [Build 4121][r4121] documents the named-project exception. | User chose B: close the window, not the app. Preserve the project exceptions and D5. |
 | **U07. What should one ⌘Z revert after a word, a space, or an auto-pair?** | [Commands][commands] document undo/soft undo but not typing boundaries. Velocity groups ordinary typing and makes the automatic pair one edit transaction. | A. Keep the grouping and atomic pair. B. Group continuous typing across more boundaries but retain atomic pairs. **Recommend A**; don't invent ST4's grouping without evidence. |

@@ -298,6 +298,10 @@ pub trait AppHandler: 'static {
     fn command_checked(&self, _name: &str, _args: &str) -> bool {
         false
     }
+    /// A window-dependent caption for a menu item with a stable resource role.
+    fn menu_caption(&self, _id: &str) -> Option<&str> {
+        None
+    }
     /// Apply insert/marked/unmark updates, including native replacement ranges.
     fn on_text_input(&mut self, _window: &WindowHandle, _event: TextInput) {}
     /// Execute a standard responder command (also used by the Edit menu).
@@ -381,6 +385,8 @@ pub struct MenuEntry {
     pub args: String,
     /// Single Command chord (Sublime key syntax), or no native equivalent.
     pub shortcut: Option<String>,
+    /// Display-only key sequence when there is no native equivalent.
+    pub shortcut_hint: Option<String>,
     /// Submenu contents.
     pub children: Vec<MenuEntry>,
 }

@@ -102,6 +102,16 @@ pub(super) fn popup(host: &Rc<Host>, entries: &[MenuEntry], event: &NSEvent) {
     lifecycle::schedule();
 }
 
+pub(super) fn item_title<'a>(
+    caption: &'a str,
+    shortcut_hint: Option<&str>,
+) -> std::borrow::Cow<'a, str> {
+    shortcut_hint.map_or_else(
+        || caption.into(),
+        |hint| format!("{caption}  {hint}").into(),
+    )
+}
+
 pub(super) fn update_menu_bar(host: &Rc<Host>, menu: &NSMenu) {
     let states = {
         let Ok(slot) = host.app.try_borrow() else {
@@ -118,17 +128,24 @@ pub(super) fn update_menu_bar(host: &Rc<Host>, menu: &NSMenu) {
                     return None;
                 }
                 let index = usize::try_from(item.tag()).ok()?;
-                let (name, args, _) = commands.get(index)?;
+                let command = commands.get(index)?;
+                let (name, args) = (&command.name, &command.args);
                 Some((
                     item,
                     app.command_enabled(name, args),
                     app.command_visible(name, args),
                     app.command_checked(name, args),
+                    app.menu_caption(&command.id).map(|caption| {
+                        item_title(caption, command.shortcut_hint.as_deref()).into_owned()
+                    }),
                 ))
             })
             .collect::<Vec<_>>()
     };
-    for (item, enabled, visible, checked) in states {
+    for (item, enabled, visible, checked, caption) in states {
+        if let Some(caption) = caption {
+            item.setTitle(&NSString::from_str(&caption));
+        }
         item.setEnabled(enabled);
         item.setHidden(!visible);
         item.setState(if checked {

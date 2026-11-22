@@ -1337,6 +1337,7 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
 #[test]
 fn round18_review_sidebar_open_files_preserves_parked_scroll() {
     let mut a = app(&"line\n".repeat(6000), None);
+    named(&mut a, "toggle_show_open_files", json!({}));
     named(&mut a, "new_file", json!({}));
     named(
         &mut a,

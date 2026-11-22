@@ -42,6 +42,9 @@ mod round36_lane_c_tests;
 #[cfg(test)]
 #[path = "app_round41_tests.rs"]
 mod round41_tests;
+#[cfg(test)]
+#[path = "app_round43_tests.rs"]
+mod round43_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
@@ -1614,7 +1617,7 @@ impl App {
             .macro_file_items(&self.workspace)
             .unwrap_or_default();
         let tr = &self.workspace.translations;
-        let mut entries = native_menu(&self.workspace.menus, &macros, &self.workspace.keymap, tr);
+        let mut entries = native_menu(self, &self.workspace.menus, &macros);
         if let Some(syntax) = entries
             .iter_mut()
             .find(|item| item.id == "view")
@@ -5311,7 +5314,6 @@ impl AppHandler for App {
             "toggle_find_option" => args["option"]
                 .as_str()
                 .is_some_and(|option| self.panels.find_option_checked(option)),
-            "toggle_side_bar" => self.panels.side_visible,
             "toggle_show_open_files" => self.panels.open_files_visible,
             "toggle_minimap" => self.workspace.window_visible("show_minimap"),
             "toggle_tabs" => self.workspace.window_visible("show_tabs"),
@@ -5334,6 +5336,17 @@ impl AppHandler for App {
             }
             _ => false,
         }
+    }
+    fn menu_caption(&self, id: &str) -> Option<&str> {
+        (id == "side_bar_visibility").then(|| {
+            self.workspace
+                .translations
+                .caption(if self.panels.side_visible {
+                    "Hide Side Bar"
+                } else {
+                    "Show Side Bar"
+                })
+        })
     }
     fn on_text_input(&mut self, w: &WindowHandle, event: TextInput) {
         self.cancel_context(w);
@@ -6045,11 +6058,12 @@ fn context_child_args(parent: &Value, child: &Value) -> Value {
     Value::Object(args)
 }
 fn native_menu(
+    app: &App,
     items: &[vel_config::ui::MenuItem],
     macros: &[vel_config::ui::PaletteItem],
-    keymap: &vel_config::keymap::Keymap,
-    tr: &vel_i18n::Translator,
 ) -> Vec<MenuEntry> {
+    let keymap = &app.workspace.keymap;
+    let tr = &app.workspace.translations;
     items
         .iter()
         .filter(|item| {
@@ -6057,25 +6071,35 @@ fn native_menu(
                 && item.platform.as_deref() != Some("Windows")
                 && item.platform.as_deref() != Some("Linux")
         })
-        .map(|item| MenuEntry {
-            caption: if item.command.as_deref() == Some("set_ui_language")
+        .map(|item| {
+            let caption = if let Some(caption) = app.menu_caption(&item.id) {
+                caption.to_owned()
+            } else if item.command.as_deref() == Some("set_ui_language")
                 && !matches!(item.args["language"].as_str(), Some("en" | "auto"))
             {
                 item.caption.clone()
             } else {
                 localized_menu_caption(tr, &item.caption, item.command.as_deref()).to_owned()
-            },
-            id: item.id.clone(),
-            command: item.command.clone(),
-            args: item.args.to_string(),
-            shortcut: item.command.as_ref().and_then(|command| {
+            };
+            let shortcut = item.command.as_ref().and_then(|command| {
                 if command.starts_with("native_") {
                     item.shortcut.clone()
                 } else {
                     keymap.menu_shortcut(command, &item.args)
                 }
-            }),
-            children: if item.id == "macros" {
+            });
+            // AppKit cannot dispatch a sequence as a key equivalent.
+            let shortcut_hint = if item.id == "side_bar_visibility" && shortcut.is_none() {
+                item.command.as_ref().and_then(|command| {
+                    keymap.menu_sequence_hint(&vel_config::keymap::Invocation {
+                        command: command.clone(),
+                        args: item.args.clone(),
+                    })
+                })
+            } else {
+                None
+            };
+            let children = if item.id == "macros" {
                 macros
                     .iter()
                     .map(|row| MenuEntry {
@@ -6094,8 +6118,17 @@ fn native_menu(
                     })
                     .collect()
             } else {
-                native_menu(&item.children, macros, keymap, tr)
-            },
+                native_menu(app, &item.children, macros)
+            };
+            MenuEntry {
+                caption,
+                id: item.id.clone(),
+                command: item.command.clone(),
+                args: item.args.to_string(),
+                shortcut,
+                shortcut_hint,
+                children,
+            }
         })
         .collect()
 }
@@ -6511,6 +6544,7 @@ mod round15_tests {
         workspace.close(0).unwrap();
         let mut app = app(workspace, None);
         app.run_named(None, "toggle_side_bar", &json!({}));
+        app.run_named(None, "toggle_show_open_files", &json!({}));
         for expected in [0, 1, 0] {
             match expected {
                 1 => app

@@ -5070,7 +5070,7 @@ mod round15_tests {
         w.close(0).unwrap();
         assert!(w.is_empty());
         assert!(w.workbench.groups[0].sheets.is_empty());
-        assert_eq!(w.window_title(), "Velocity");
+        assert_eq!(w.window_title(), "untitled");
         let (window, docs) = w.snapshot().unwrap();
         assert!(window.sheets.is_empty());
         assert!(docs.is_empty());

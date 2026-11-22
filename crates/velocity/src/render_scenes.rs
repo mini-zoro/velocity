@@ -587,6 +587,12 @@ fn groups_scene(fixture: &Fixture, dark: bool, preset: &str) -> Result<App, Stri
 }
 
 fn sidebar_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = sidebar_folders_only_scene(fixture, dark)?;
+    named(&mut app, "toggle_show_open_files", json!({}));
+    Ok(app)
+}
+
+fn sidebar_folders_only_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     for name in ["src/main.rs", "README.md"] {
         open(&mut app, &fixture.path(name))?;
@@ -920,12 +926,6 @@ fn phantom_selections_scene(fixture: &Fixture, dark: bool) -> Result<App, String
     Ok(app)
 }
 
-fn sidebar_folders_only_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
-    let mut app = sidebar_scene(fixture, dark)?;
-    named(&mut app, "toggle_show_open_files", json!({}));
-    Ok(app)
-}
-
 fn hover_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = project_app(fixture, dark)?;
     open(&mut app, &fixture.file)?;
@@ -1141,6 +1141,24 @@ fn empty_folder_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
         .ok_or("missing scene fixture folder")?
         .to_owned();
     app.panels.add_folder(&mut app.workspace, folder)?;
+    Ok(app)
+}
+
+fn empty_folder_goto_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = empty_folder_scene(fixture, dark)?;
+    named(
+        &mut app,
+        "show_overlay",
+        json!({"overlay": "goto", "text": "main.rs"}),
+    );
+    settle(&mut app);
+    let tab = &app.workspace.tabs[app.workspace.active];
+    if !app.workspace.is_empty()
+        || !tab.goto_preview
+        || tab.path.as_deref() != Some(fixture.file.as_path())
+    {
+        return Err("Goto did not preview main.rs from the empty folder window".into());
+    }
     Ok(app)
 }
 
@@ -1788,6 +1806,11 @@ const SCENARIOS: &[Scenario] = &[
         build: empty_folder_scene,
     },
     Scenario {
+        name: "r43-empty-folder-goto",
+        size: (1200., 800.),
+        build: empty_folder_goto_scene,
+    },
+    Scenario {
         name: "narrow_640x480",
         size: (640., 480.),
         build: narrow_scene,
@@ -2420,7 +2443,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                         Err(error)
                             if matches!(
                                 scenario.name,
-                                "r6-cjk-zh" | "r5_sidebar" | "empty_window" | "empty_folder_window"
+                                "r6-cjk-zh"
+                                    | "r5_sidebar"
+                                    | "empty_window"
+                                    | "empty_folder_window"
+                                    | "r43-empty-folder-goto"
                             ) || scenario.name.starts_with("r41-")
                                 || scenario.name.starts_with("settings_ui") =>
                         {

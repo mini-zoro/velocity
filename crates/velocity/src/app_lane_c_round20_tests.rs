@@ -134,7 +134,6 @@ fn r20_recursive_sidebar_keys_and_window_visibility_round_trip() {
     std::os::unix::fs::symlink(other.path(), root.join("one/external")).unwrap();
     let mut a = app("editing", None, sessions());
     a.panels.add_folder(&mut a.workspace, root.clone()).unwrap();
-    a.run_named(None, "toggle_show_open_files", &json!({}));
     a.panels.side_focused = true;
     a.panels.side_selected = 0;
     key(&mut a, "alt+right");
@@ -1347,7 +1346,6 @@ fn r20_selection_and_shift_anchor_survive_external_inserts() {
     );
     let mut a = app_with_profile("", None, sessions(), Some(profile.path().into()));
     a.run_named(None, "add_folder", &json!({"dir":root}));
-    a.run_named(None, "toggle_show_open_files", &json!({}));
     until(&mut a, |a| rows(a).contains(&root.join("n.txt")));
     fn click(a: &mut App, path: &Path, extend: bool) {
         a.scene();

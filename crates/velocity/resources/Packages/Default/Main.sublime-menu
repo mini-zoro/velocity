@@ -714,7 +714,7 @@
       {
         "caption": "Side Bar",
         "children": [
-          {"caption": "Show Side Bar", "command": "toggle_side_bar"},
+          {"caption": "Show Side Bar", "id": "side_bar_visibility", "command": "toggle_side_bar"},
           {"caption": "Show Open Files", "command": "toggle_show_open_files"}
         ]
       },
