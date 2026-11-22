@@ -1,9 +1,10 @@
-//! Native AppKit editor demo with automatic measurements; never launches in tests.
-// W1 builds the shared editor code before the Windows event loop is wired in.
+//! Native editor and headless tools. Tests do not launch the native editor.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod annotation_commands;
 mod annotations;
-#[cfg(target_os = "macos")]
+// The legacy in-App test modules have AppKit/macOS-specific fixtures. Windows
+// exercises the production binary via its separate headless integration tests.
+#[cfg(any(target_os = "macos", all(windows, not(test))))]
 mod app;
 mod bench;
 mod binary;
@@ -550,7 +551,11 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             return headless(&reporter, text, options.carets);
         }
         let done = Arc::new(AtomicBool::new(false));
-        #[cfg(target_os = "macos")]
+        #[cfg(windows)]
+        if options.mode != Mode::Interactive {
+            return Err("native presentation measurements require macOS".into());
+        }
+        #[cfg(any(target_os = "macos", all(windows, not(test))))]
         {
             let mut phases =
                 report::StartupPhases::new(entered, interactive_setup && reporter.is_enabled());
@@ -723,7 +728,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                 done.store(true, Ordering::Release);
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", all(windows, not(test)))))]
         {
             let _ = (&clock, &text, &workspace_data);
             Platform::run_with_options(WindowOptions::default(), Unsupported)?;
@@ -847,9 +852,9 @@ fn type_through_keymap(editor: &mut editor::Editor, text: &str) -> Result<(), St
     }
     Ok(())
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", all(windows, not(test)))))]
 struct Unsupported;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", all(windows, not(test)))))]
 impl vel_platform::AppHandler for Unsupported {
     fn on_frame(&mut self, _: &mut vel_platform::FrameContext<'_>) -> Result<(), String> {
         unreachable!()

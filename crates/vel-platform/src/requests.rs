@@ -1,5 +1,8 @@
 //! Headless routing and snapshots shared by the native bridge and its tests.
-use crate::{AppHandler, MenuEntry};
+#[cfg(any(target_os = "macos", test))]
+use crate::AppHandler;
+use crate::MenuEntry;
+#[cfg(any(target_os = "macos", test))]
 use std::{collections::VecDeque, path::PathBuf};
 
 /// A live host; stopped hosts are excluded before routing.
@@ -19,11 +22,13 @@ pub(crate) fn open_target(hosts: &[OpenHost]) -> Option<u64> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) enum ReopenPlan {
     Focus(u64),
     WaitForStartup,
     CreateWindow,
 }
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn reopen_plan(hosts: &[OpenHost]) -> ReopenPlan {
     if let Some(id) = open_target(hosts) {
         ReopenPlan::Focus(id)
@@ -35,13 +40,16 @@ pub(crate) fn reopen_plan(hosts: &[OpenHost]) -> ReopenPlan {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) enum NativeOpenRequest {
     Paths(Vec<PathBuf>),
     FinderNewTextFile(PathBuf),
 }
 
 #[derive(Debug, Default)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct OpenRequests(VecDeque<NativeOpenRequest>);
+#[cfg(any(target_os = "macos", test))]
 impl OpenRequests {
     pub fn push(&mut self, paths: Vec<PathBuf>) {
         if !paths.is_empty() {
@@ -93,6 +101,7 @@ pub(crate) struct MenuCommand {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct MenuSnapshot {
     pub caption: String,
     pub command: Option<MenuCommand>,
@@ -102,6 +111,7 @@ pub(crate) struct MenuSnapshot {
 }
 
 /// Resolve every flag while the app is borrowed, then release it before tracking.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn menu_snapshot(app: &dyn AppHandler, entries: &[MenuEntry]) -> Vec<MenuSnapshot> {
     let mut result = Vec::new();
     for entry in entries {
@@ -201,7 +211,9 @@ impl<E: Clone> ContextRequest<E> {
 
 /// Cache both the owner and menu contents, preserving round-13 installation dedupe.
 #[derive(Debug, Default)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) struct MenuInstallation(Option<(u64, Vec<MenuEntry>)>);
+#[cfg(any(target_os = "macos", test))]
 impl MenuInstallation {
     pub fn update(&mut self, owner: u64, entries: &[MenuEntry]) -> bool {
         if self

@@ -1,4 +1,4 @@
-//! Native macOS windows and input, with device-free coordinates and IME queries.
+//! Native macOS and Windows windows and input, with device-free coordinates and IME queries.
 //!
 //! All editor coordinates exposed to AppKit are UTF-16 code units. View geometry
 //! uses logical points, top-left origin; only the native bridge converts to screen
@@ -14,7 +14,7 @@ pub mod fullscreen;
 pub mod image_io;
 mod input;
 pub mod mouse;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod requests;
 mod services;
 pub use display::{DisplayStatus, display_status};
@@ -25,17 +25,17 @@ pub use services::{
 mod macos;
 pub mod memory_pressure;
 pub mod metrics;
-#[cfg(windows)]
-mod path_case;
 #[cfg(target_os = "macos")]
 pub use macos::WindowHandle;
-#[cfg(windows)]
-pub use path_case::windows_path_component_eq;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod stub;
 pub use input::*;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub use stub::WindowHandle;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::WindowHandle;
 
 use std::time::Instant;
 
@@ -296,10 +296,10 @@ pub trait AppHandler: 'static {
     /// Called directly with the template borrowed once; ordinary events are not
     /// dispatched to its closed view. A registered factory is a fallback.
     fn on_reopen(&mut self, _window: &WindowHandle) {}
-    /// Poll background work such as IPC while all windows are closed.
-    /// Runs on the main thread every 100 ms on the retained template handler,
-    /// without calling `on_frame` or acquiring a drawable. A new window may be
-    /// created through the supplied handle. Stops when a live window exists.
+    /// Poll background work such as IPC without acquiring a drawable.
+    /// Runs on the main thread every 100 ms on the retained template while
+    /// all windows are closed. Windows also uses it for minimized windows.
+    /// A new window may be created through the supplied handle.
     fn on_idle(&mut self, _window: &WindowHandle) {}
     /// Validate a native menu action in the current view.
     fn command_enabled(&self, _name: &str, _args: &str) -> bool {
@@ -442,7 +442,11 @@ impl Platform {
         {
             macos::run(options, Box::new(app))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            windows::run(options, Box::new(app))
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = (options, app);
             Err("Velocity's native platform requires macOS 14 or later".into())

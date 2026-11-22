@@ -7,6 +7,7 @@ mod accessibility_adapter;
 mod clipboard;
 #[path = "app_context.rs"]
 mod context_adapter;
+#[cfg(target_os = "macos")]
 #[path = "app_finder.rs"]
 mod finder;
 #[cfg(test)]
@@ -14,10 +15,12 @@ mod finder;
 mod lane_c_round20_tests;
 #[path = "app_mouse.rs"]
 mod mouse_adapter;
+#[cfg(target_os = "macos")]
 #[path = "performance_bench.rs"]
 pub(crate) mod performance_bench;
 #[path = "app_print.rs"]
 mod printing;
+#[cfg(target_os = "macos")]
 #[path = "render_scenes.rs"]
 pub(crate) mod render_scenes;
 #[cfg(test)]
@@ -1680,7 +1683,8 @@ impl App {
         // that just resigned key, must not take the menu back — that sent menu commands
         // such as Close Window or Close File to a window other than the one in front.
         let focused = window.is_focused();
-        if menu_install_wanted(focused, rebuild, focus_changed, self.menu_owner) {
+        let install = menu_install_wanted(focused, rebuild, focus_changed, self.menu_owner);
+        if install || (cfg!(windows) && (rebuild || focus_changed)) {
             window.set_menu(&self.menu_cache.as_ref().expect("installed menu").1);
         }
         self.menu_owner = focused;
@@ -2814,6 +2818,7 @@ impl App {
         args: &Value,
     ) -> Result<(), String> {
         if matches!(name, "enable_finder_new_file" | "disable_finder_new_file") {
+            #[cfg(target_os = "macos")]
             if window.is_some() {
                 self.set_finder_new_text_file_enabled(name == "enable_finder_new_file");
             }
@@ -3265,6 +3270,9 @@ impl App {
                     vel_minihtml::LinkTarget::parse(url),
                     Ok(vel_minihtml::LinkTarget::Browser(_))
                 ) {
+                    #[cfg(windows)]
+                    w.open_url(url)?;
+                    #[cfg(target_os = "macos")]
                     std::process::Command::new("/usr/bin/open")
                         .arg(url)
                         .spawn()
@@ -5111,12 +5119,34 @@ impl AppHandler for App {
             .data_path()
             .map(|p| p.join("Cache/Renderer"))
             .unwrap_or_else(|| std::env::temp_dir().join("velocity-renderer-cache"));
-        self.renderer = Some(Renderer::new(
+        #[cfg(target_os = "macos")]
+        let renderer = Renderer::new(
             w.clone(),
             self.options.mode == Mode::Scroll,
             &cache_dir,
             |phase| self.clock.mark(phase),
-        )?);
+        )?;
+        #[cfg(windows)]
+        let renderer = {
+            let hwnd = w
+                .hwnd()
+                .ok_or("native HWND missing during renderer startup")?;
+            let size = w.content_size();
+            let scale = w.scale_factor();
+            // SAFETY: The native host owns this handler and releases its
+            // renderer on this thread before destroying the HWND.
+            unsafe {
+                Renderer::from_hwnd(
+                    hwnd.as_ptr(),
+                    (size.width * scale).round() as u32,
+                    (size.height * scale).round() as u32,
+                    false,
+                    &cache_dir,
+                    |phase| self.clock.mark(phase),
+                )?
+            }
+        };
+        self.renderer = Some(renderer);
         for record in std::mem::take(&mut self.workspace.telemetry) {
             self.reporter.emit(record)?;
         }
@@ -5312,6 +5342,7 @@ impl AppHandler for App {
             self.named_error(Some(w), &error);
         }
     }
+    #[cfg(target_os = "macos")]
     fn on_finder_new_text_file(&mut self, window: &WindowHandle, directory: &Path) {
         self.finder_new_text_file(window, directory);
     }
@@ -5324,6 +5355,18 @@ impl AppHandler for App {
     }
     fn on_idle(&mut self, w: &WindowHandle) {
         if self.options.mode != Mode::Interactive {
+            return;
+        }
+        #[cfg(windows)]
+        if !w.is_closed() {
+            // A minimized HWND cannot present, but must still service the pipe
+            // and any outstanding CLI wait replies.
+            self.ensure_startup_services();
+            if let Err(error) = self.poll_workbench(w) {
+                self.named_error(Some(w), &error);
+            }
+            self.builds.poll(&mut self.panels);
+            w.set_taskbar_build_active(self.builds.task.is_some());
             return;
         }
         let requests = self
@@ -5685,6 +5728,8 @@ impl AppHandler for App {
             self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
             changed |= self.workspace.themes.ui.borrow().metrics.poll_images();
             changed |= self.builds.poll(&mut self.panels);
+            #[cfg(windows)]
+            w.set_taskbar_build_active(self.builds.task.is_some());
             if self.print_jobs.active() {
                 changed |= self.poll_print(w, Instant::now());
             }
@@ -5923,6 +5968,13 @@ impl AppHandler for App {
                 .present_prepared()?
             {
                 self.record(w, times, ctx.received)?;
+                #[cfg(windows)]
+                {
+                    // The renderer can report present return, not scanout.
+                    // Start IPC, load services and editing without waiting for
+                    // a Metal-only presented callback.
+                    self.start_without_scanout(w, waiting_since.elapsed())?;
+                }
                 w.request_frame_at(Instant::now() + Duration::from_millis(16));
             } else {
                 self.retries += 1;
@@ -6165,6 +6217,10 @@ impl AppHandler for App {
         }
         if let Some(input) = self.panels.input() {
             return Some(input.utf16_at_point(point));
+        }
+        #[cfg(windows)]
+        if !vel_ui::contains(self.content, point) {
+            return None;
         }
         Some(
             self.workspace

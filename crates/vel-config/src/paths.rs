@@ -38,7 +38,7 @@ pub fn components_equal(a: std::path::Component<'_>, b: std::path::Component<'_>
         return true;
     }
     std::mem::discriminant(&a) == std::mem::discriminant(&b)
-        && vel_platform::windows_path_component_eq(a.as_os_str(), b.as_os_str())
+        && vel_pathcase::windows_path_component_eq(a.as_os_str(), b.as_os_str())
 }
 
 /// Remove the Win32 verbatim prefix for display and lexical comparisons only.
