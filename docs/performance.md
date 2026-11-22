@@ -969,6 +969,14 @@ Velocity's own p95 budget), scroll CPU 4.41 / 5.15 ms, GPU pass 1.16 / 1.22 ms a
 large files 0.4–16 ms per exercise with 97–376 MB footprint. Raw table:
 `/tmp/live/bench-gui.out` on the review machine.
 
+The two missed budgets are Velocity's own, not Sublime comparisons. The 1,000-caret p95 comes
+entirely from the Enter step (one sample in eight: 7–11.5 ms inside event-to-submit; every
+other key stays near 2.9 ms); round 42 targets it. The 80 MB first-frame footprint budget
+predates the native black-box measurement: Sublime 4215 itself uses 95–120 MB for an empty
+window and 162–186 MB with `sqlite3.c` on this machine, so the 107.5 MB first frame (three
+window-sized drawables right after launch, before the idle pool trims to two) is not a gap
+with Sublime. The budget is kept as a Velocity target, not as a parity requirement.
+
 ## Round 36: interactive startup before AppKit
 
 The measured interval starts at `interactive_setup_begin`, just after text
