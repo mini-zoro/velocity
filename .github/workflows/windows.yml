@@ -2,7 +2,7 @@ name: Windows
 
 on:
   push:
-    branches: [windows-port]
+    branches: [main, windows-port, lane-c]
   workflow_dispatch:
 
 env:
@@ -12,12 +12,18 @@ jobs:
   build:
     name: build / test (Windows x64)
     runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: true
       - name: Install pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"').Matches.Groups[1].Value
+          rustup toolchain install $channel --profile minimal --component clippy --component rustfmt --target $env:CARGO_BUILD_TARGET
       - uses: Swatinem/rust-cache@v2
       - name: Build (all crates, keep going to list every error)
         run: cargo build --workspace --locked --release --keep-going
@@ -27,3 +33,14 @@ jobs:
       - name: Test
         if: success() || failure()
         run: cargo test --workspace --locked --release --no-fail-fast
+      - name: Package and validate
+        run: ./scripts/package-windows.ps1 -OutputDirectory target/windows-artifacts -SkipBuild
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velocity-windows
+          path: |
+            target/windows-artifacts/Velocity-*-windows-x64.zip
+            target/windows-artifacts/Velocity-*-windows-x64-setup.exe
+            target/windows-artifacts/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

@@ -1,4 +1,4 @@
-# Windows backend (W2)
+# Windows backend (W2/W3)
 
 The production Windows editor uses the same App as macOS. Tests do not create
 windows. The native backend assumes Windows 10/11-era desktop APIs; the build
@@ -20,24 +20,25 @@ target is x86_64-pc-windows-msvc. W1 defines the profile, pipe and DX12 surface.
   but poll CLI work. A successful DX12 present return starts the remaining app
   services; it is not recorded as scanout. Native measurement modes that
   require Metal presentation observations remain macOS-only.
-- The original Windows console subsystem is unchanged for W1 CLI and redirected
-  streams. Selecting a packaged GUI/CLI entry point is not part of W2.
+- The editor uses the GUI subsystem and loads its class icon from the
+  executable. The console client, `vel.exe`, does not create a window. It sends
+  requests to the profile pipe and owns any wait/edited-stdin output.
 
-## Input and menus (W3 handoff)
+## Input and menus
 
 - Physical left/right Ctrl becomes logical left/right **command** (the "super"
   bit) in KeyEvent and in mouse modifiers. Shift and Alt become shift and
   option. The Windows key remains reserved for the OS. No event sets the
   separate Mac Control bit as well as the Command bit; Ctrl-click is therefore
-  not a secondary click. Windows resource chords for Ctrl must resolve to the
-  logical super bit until W3 adds a platform-specific keymap translation.
+  not a secondary click. W3 translates `ctrl`/`primary` to the logical
+  Command bit when reading Windows keymaps, without changing native events.
   Ctrl+Alt synthesized by AltGr is used for text, not a shortcut. Keyboard
   layout and dead keys are left to Windows, with named non-printing keys
   translated to the existing keycode vocabulary.
 - The app keymap is offered each eligible key before Win32 text translation.
-  Standard editing/navigation commands are the fallback. OS system chords
-  such as Alt+F4 remain native. Ctrl+Q and Ctrl+M are native menu fallbacks
-  when the app keymap does not handle them.
+  Standard editing/navigation commands are the fallback. Alt+F4, Alt+Space,
+  Alt menu access and F10 remain native; Ctrl+Q is the app's remappable Exit
+  command and Ctrl+M is available for bracket navigation.
 - IMM32 supplies inline preedit, result and cancellation; the candidate window
   is anchored to the app's caret in the focused window. This is the IMM32
   compatibility path, not a TSF implementation. Pinyin and switching IMEs
@@ -48,9 +49,11 @@ target is x86_64-pc-windows-msvc. W1 defines the profile, pipe and DX12 surface.
   I-beam, arrow and standard non-client resize cursors.
 - HMENU entries retain their original command name and JSON arguments, validate
   visibility, enabled and checked state on open, and show shortcuts after a
-  tab. Mac-only Services/Hide entries are omitted. Window commands use native
-  minimize and maximize; Help links use the default browser. Context popups
-  track after button release, not while the app callback is borrowed.
+  tab. Top-level entries use explicit access keys; translated Chinese labels
+  append an ASCII mnemonic, and literal ampersands are escaped. There is no
+  application menu or separate Window menu; About is in Help, Exit is in File,
+  and View > Window contains the native window actions. Context popups track
+  after button release, not while the app callback is borrowed.
 
 ## Shell and limits
 
@@ -75,12 +78,13 @@ target is x86_64-pc-windows-msvc. W1 defines the profile, pipe and DX12 surface.
   accessibility tree (including editor text, selection and focus) is not yet
   exposed to UI Automation.
 
-Headless Windows CI can check the pure DPI, frame scheduling, key, IME, mouse,
-menu, clipboard and open-message models. It should compile/link the Windows
-production binary as well as run tests. A desktop check is still needed for
-DX12 startup and resize across two DPIs, click/drag/precision scrolling,
-Pinyin commit/cancel, fallback alerts, Shell dialogs, and IPC while minimized
-or after closing the last window.
+Headless Windows CI is configured to link both executables and test the pure
+DPI, frame scheduling, key, IME, mouse, menu, clipboard and open-message
+models and the console client protocol. A desktop check is still needed for
+DX12 startup and resize across two DPIs, menu mnemonics in English and Chinese,
+click/drag/precision scrolling, Pinyin commit/cancel, fallback alerts, Shell
+dialogs, installer registration, and IPC from the console on cold launch,
+while minimized or after closing the last window.
 
 References: [IME composition](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-composition),
 [keyboard translation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-tounicodeex),

@@ -1,10 +1,93 @@
-# Windows x64 portability (W1)
+# Windows x64 port
 
 The supported build target for this pass is `x86_64-pc-windows-msvc` on the
-`windows-2022` GitHub runner. Build, Clippy and tests require neither a window nor a
-GPU. The native window backend and the installer/release job are separate work.
+`windows-2022` GitHub runner. Build, Clippy, package validation and tests do not
+require an interactive desktop or GPU. W1 supplied the portability foundation;
+W2 supplied the Win32 host; W3 integrates the editor and packages it.
 
-## Platform behavior
+## W3: editor and distribution
+
+- **Editor:** The graphical Settings sheet, resource menus and accessibility
+  model are shared with macOS. Indexing Status has its own DX12 window. The font
+  chooser and minihtml measurements use the Windows Swash font catalog. Local
+  image previews and HTTPS minihtml images keep the bounded decoder subprocess.
+- **Input:** The Windows defaults and user override are both named
+  `Default (Windows).sublime-keymap` in their respective Default and User
+  packages. The User platform file follows the neutral `Default.sublime-keymap`.
+  Physical Ctrl remains the app's logical Command bit. In Windows resources,
+  `ctrl` and `primary` translate to that bit, `alt` stays Alt, and `super` denotes
+  the OS-reserved Windows key rather than a Ctrl alias. Ctrl+P opens Goto
+  Anything; Ctrl+Shift+P opens the palette; F3 / Shift+F3 find next / previous;
+  F11 toggles fullscreen. Ctrl+Tab cycles tabs by recency, Ctrl+Page Up/Down
+  cycles visually, and Ctrl+F6 / Ctrl+Shift+F6 cycle editor windows. Ctrl+K,
+  Ctrl+, opens Settings; Ctrl+Q exits the application. Alt+F4 closes the
+  active window through Win32.
+- **Menus:** File, Edit, Selection, Find, View, Goto, Tools, Project,
+  Preferences and Help. Alt or F10 enters the menu bar. The stable access
+  keys are F, E, S, I, V, G, T, P, N and H respectively, including in
+  Simplified Chinese. Exit is in File, window actions are under View >
+  Window, and About is in Help. Preferences contains Settings, Key Bindings,
+  Color Scheme and Theme. Shortcut labels follow the effective Windows keymap.
+- **Executables:** `velocity.exe` is the GUI subsystem executable for Explorer
+  and shortcuts. In cmd or PowerShell, use adjacent `vel.exe` for files,
+  projects, line/column, `--wait`, stdin and redirected output. On a cold start
+  the helper starts the GUI and waits for its local pipe, without sending stdin
+  or wait state on a command line. The same pipe handles warm requests and
+  close replies. Closing sheets completes `--wait`; stdin implies wait and
+  returns edited bytes on stdout. Ctrl+C interrupts the waiting helper.
+- **Distribution:** On Windows, run `./scripts/package-windows.ps1`. It builds
+  the pinned x64 MSVC release and stages
+  `Velocity-<version>-windows-x64.zip` and
+  `Velocity-<version>-windows-x64-setup.exe`. Use `-PortableOnly` for a ZIP
+  without Inno Setup. Both executables have the Velocity icon and Cargo version
+  resource. The ZIP includes both binaries, bundled resources, the public
+  language corpus (not Sublime's Default UI package), licenses and unsigned
+  installation guidance. The per-user installer adds a Start menu shortcut,
+  alternate Explorer Open with registration for common text formats, and an
+  unchecked option to add `vel.exe` to the user's PATH. It does not change the
+  user's default handlers. [Inno Setup is installed on the runner image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md).
+
+## Not on Windows
+
+- Finder Sync, the Finder New Text File command, LaunchServices and Dock
+  behavior, the Services menu, application Hide/Hide Others, and the system
+  Find pasteboard are macOS-specific. The in-app macOS CLI installer is replaced
+  by the setup program's PATH task. Windows does not restore terminal focus
+  after a wait reply.
+- W2 does not expose the editor's virtual accessibility tree to UI Automation.
+  There is no custom Jump List, TSF integration or precision touchpad
+  gesture/momentum model; the Windows host uses automatic recent documents,
+  IMM32 and legacy pointer messages.
+- WebP previews still use macOS ImageIO. On Windows the file opens without a
+  raster preview. PNG, JPEG, GIF and TGA file previews use the portable decoder.
+- Native timing and scene-generation modes that depend on Metal/AppKit,
+  scanout, Darwin footprint or retired-instruction counters remain macOS-only.
+  Windows crash capture is panic-only. Windows release artifacts are unsigned;
+  there is no Authenticode signing or equivalent of Apple notarization.
+
+## Verification boundary
+
+The local `/tmp/wincheck/check.sh` checks the Windows target and its test
+targets from macOS. Its fake C compiler is suitable only for type checking
+and Clippy. It cannot link, run or package Windows executables.
+
+`windows.yml` builds the workspace with native MSVC, runs Clippy and release
+tests, validates the packaged ZIP and compiles the installer, then uploads
+`velocity-windows`. Windows tests check device-free components, the
+production executable's headless mode and console forwarding through a real
+named pipe to a headless peer. Legacy App unit fixtures remain macOS-only;
+they contain macOS-specific key, clipboard, filesystem and lifecycle
+assumptions. The tag workflow builds and packages both platforms before
+publishing, and hashes every release asset in the combined `SHA256SUMS`.
+
+No Windows desktop or installed copy was tested locally. CI does not exercise
+DX12 window creation or presentation, IME/candidate placement, multi-monitor
+DPI, keyboard menu tracking, real Shell dialogs/Explorer integration,
+SmartScreen, install/uninstall behavior, or helper cold start into a live GUI.
+See [the backend handoff](../crates/vel-platform/WINDOWS.md) for the desktop
+smoke checklist.
+
+## W1: platform behavior
 
 - **Profile:** `%APPDATA%\Velocity`. `VELOCITY_DATA_DIR` and an explicit `--data-dir`
   still override it. Logs go to `%LOCALAPPDATA%\Velocity\Logs` (or
@@ -69,13 +152,11 @@ GPU. The native window backend and the installer/release job are separate work.
   and glyph coverage. Swash shapes and rasterizes the selected faces.
   The Windows wgpu backend is DX12 only; Metal remains enabled only on macOS.
 
-## Handoff and limits
+## W1: implementation notes
 
-- Lane C owns input, IME, menus, the clipboard, dialogs, accessibility and the
-  native window/event loop. Pass a live HWND and a physical pixel size to
-  `vel_render::Renderer::from_hwnd`; destroy the renderer before the window.
-  While a font fallback is pending, the event loop should request another frame.
-  The native Trash adapter can call `vel_fileio::trash`, which asks the Shell
+- W2 supplies input, IME, menus, clipboard, dialogs and the native event loop.
+  A renderer borrows a live HWND and is destroyed before its window. The
+  native Trash adapter calls `vel_fileio::trash`, which asks the Shell
   to recycle and does not suppress a separate confirmation for permanent deletion
   when recycling is unavailable. Legacy Shell path-length restrictions apply.
 - Crash reporting is **panic-only** on Windows. It writes the same local
@@ -84,12 +165,6 @@ GPU. The native window backend and the installer/release job are separate work.
   The Windows build reports process CPU and working set; macOS physical
   footprint and retired-instruction measurements do not have Windows equivalents
   in this pass.
-- Native Windows presentation and Shell behavior are not tested in W1. First CI
-  checks should cover named-pipe ownership and close replies, Job Object
-  assignment under the runner's own jobs, NTFS sharing and rename behavior,
-  Windows font availability, and DX12 dependency linking. No package is built or
-  published until the native integration round.
-
 API notes: [named pipe access](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
 [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
 [the Recycle Bin operation](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shfileoperationw).
