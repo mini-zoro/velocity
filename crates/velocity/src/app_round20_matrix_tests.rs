@@ -549,9 +549,16 @@ fn set_mtime(p: &Path, t: SystemTime) {
 fn external(a: &mut App, path: &Path, bytes: Option<&[u8]>, obs: &mut Obs) -> bool {
     let m = mtime(path) + Duration::from_secs(2);
     if let Some(b) = bytes {
-        std::fs::write(path, b).unwrap();
+        // Write and stamp in one step (temp file + rename). Writing in place and then
+        // setting the time let a slow machine reload twice, and the second decision
+        // depends on the first (CI picked windows-1252 instead of UTF-8 for ASCII bytes).
+        let staged = path.with_extension("external-write");
+        std::fs::write(&staged, b).unwrap();
+        set_mtime(&staged, m);
+        std::fs::rename(&staged, path).unwrap();
+    } else {
+        set_mtime(path, m);
     }
-    set_mtime(path, m);
     pump(a, obs, |a| {
         let t = &a.workspace.tabs[a.workspace.active];
         idle(a) && t.disk_stamp.is_some_and(|(_, time)| time == m)
