@@ -762,6 +762,8 @@
     "Name for the new file": "新文件名称",
     "Name for the new folder": "新文件夹名称",
     "New name for this entry": "输入新名称",
+    "Rename": "重命名",
+    "Rename…": "重命名…",
     "No folders open": "未打开文件夹",
     "No indexed locations": "索引中没有相应的位置",
     "No later match ({summary})": "没有下一个匹配项（{summary}）",

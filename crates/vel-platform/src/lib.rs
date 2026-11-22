@@ -267,6 +267,13 @@ pub trait AppHandler: 'static {
     fn on_key(&mut self, _window: &WindowHandle, _event: KeyEvent) -> bool {
         false
     }
+    /// A transient field owns Command shortcuts and accepts marked text on blur.
+    /// Other AppKit input and editing selectors still go through NSTextInputClient.
+    fn inline_text_input(&self) -> bool {
+        false
+    }
+    /// Allow transient input to finish even when a resigned window will not draw.
+    fn on_inline_text_focus_lost(&mut self, _window: &WindowHandle) {}
     /// Execute a command selected from a resource-defined native menu.
     fn on_named_command(&mut self, _window: &WindowHandle, _name: &str, _args: &str) {}
     /// Open files or add folders delivered by Finder, the Dock, or a window drop.

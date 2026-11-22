@@ -199,3 +199,15 @@ Packaged into velocity-stable, registered, enabled with `pluginkit -e use -i dev
 Not yet checked: Desktop background, read-only folder message, English system/UI language,
 mixed selections.
 
+### Inline tab rename (round 46, native review pending)
+
+Use a disposable local folder with `新建文本文档.txt`, `.zshrc`, and an already occupied name. Run with English and Simplified Chinese UI, light and dark.
+
+| Check | Native steps and expected result |
+| --- | --- |
+| Tab meanings | Double-click the preview tab: it becomes permanent and does not edit. After that click sequence ends, double-click the permanent tab: the field replaces its label, the stem is selected, and the close button and dirty dot are gone. A dotfile selects the whole name. Double-click empty tab space: a new file opens. Untitled/settings/Find Results/image tabs do not edit. |
+| Context menu and editing | Secondary-click a file tab and choose Rename… / 重命名…. Try a long name, Shift+Arrow, ⌘A, ⌘C, ⌘V, and ⌘Z. Text scrolls within the tab; ⌘W must not close it and dragging in the field should select text, not move the tab. Escape cancels and returns to the editor. |
+| Pinyin and VoiceOver | With Simplified Chinese Pinyin enabled, type `ni hao` over the selected stem. Check that the thin underline is legible and the candidate window is below the tab, including on Retina. Choose 你好 with Space, then press Return to rename to `你好.txt`. VoiceOver should focus the Rename / 重命名 text field with its current value. |
+| Blur and propagation | Start with dirty text and an open clone plus another window showing the file. Rename via Return, click another tab, and switch to another app or Velocity window during separate attempts. Check that the path follows in every window and in Open Recent, dirty text is still unsaved, and editor Undo still works. Check the restored path after a normal quit with Hot Exit. |
+| Errors and case changes | Submit the occupied name, a path with a slash, and a new name in a folder you can read but cannot modify. Check the status text and VoiceOver announcement, no dialog, full filename selection, and that the existing file is untouched. Try `case.txt` → `CASE.txt` and check the directory's actual spelling in Finder. |
+

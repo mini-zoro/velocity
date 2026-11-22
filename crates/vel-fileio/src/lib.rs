@@ -902,22 +902,9 @@ fn write_encoded(
 /// letter case of the name on a case-insensitive volume (`foo.txt` → `Foo.txt`, where `to`
 /// resolves to `from` itself) is allowed.
 pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
-    let from_meta = fs::symlink_metadata(from)?;
-    if let Ok(to_meta) = fs::symlink_metadata(to) {
-        if same_entry(&from_meta, &to_meta) && case_only_change(from, to) {
-            return fs::rename(from, to);
-        }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{} already exists", to.display()),
-        ));
-    }
+    // The filesystem distinguishes a case change of the same entry from a
+    // separate name (including a hard link). Never fall back to replacing rename.
     exclusive_rename(from, to)
-}
-/// Both names lead to one directory entry: same parent, names differing only in case.
-fn case_only_change(from: &Path, to: &Path) -> bool {
-    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
-    from.parent() == to.parent() && name(from) == name(to) && from != to
 }
 #[cfg(unix)]
 fn same_entry(a: &fs::Metadata, b: &fs::Metadata) -> bool {

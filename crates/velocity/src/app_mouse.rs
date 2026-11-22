@@ -19,6 +19,7 @@ impl App {
         let up = event.kind == MouseKind::Up;
         if event.kind == MouseKind::Down {
             self.ensure_startup_services();
+            self.receive_file_renames();
             self.end_mouse_gesture();
             if self.workspace.editor().marked.is_some() {
                 // Headless events do not pass through AppKit's discard. Hit-test
@@ -26,6 +27,9 @@ impl App {
                 self.workspace.editor_mut().cancel_composition();
                 self.view.apply_style(self.workspace.editor());
             }
+        }
+        if self.tab_rename.is_some() && self.tab_rename_mouse(w, &event) {
+            return;
         }
         self.route_mouse_event(w, event, keep_focus);
         if up {
@@ -343,15 +347,14 @@ impl App {
         if event.kind == MouseKind::Down
             && event.button == 0
             && event.click_count >= 2
-            && let Some((at, sheet)) = self.tab_click
+            && let Some((at, sheet)) = self.tab_click.take()
             && (at.x - event.position.x).abs() <= 4.
             && (at.y - event.position.y).abs() <= 4.
             && let Some(index) = self.workspace.sheet_index(sheet)
         {
             // The first click revealed this tab, which may have moved the strip: the double
             // click belongs to the tab it started on, not to whatever slid under the pointer.
-            self.workspace.make_permanent(index);
-            self.named_changed(w, false);
+            self.double_click_tab(w, index, event.click_count);
             return;
         }
         if event.kind == MouseKind::Down {
@@ -388,8 +391,8 @@ impl App {
                     }
                     self.panels.dragging_tab = Some(index);
                     self.tab_click = Some((event.position, sheet));
-                    if event.click_count >= 2 {
-                        self.workspace.make_permanent(index);
+                    if event.button == 0 && event.click_count >= 2 {
+                        self.double_click_tab(w, index, event.click_count);
                     }
                 }
                 self.named_changed(w, false);
@@ -716,12 +719,20 @@ impl App {
                     if let Some(tab) = self
                         .workspace
                         .sheet_index(group.sheets[(at + offset) % group.sheets.len()])
+                        && self.finish_tab_rename(w)
                     {
                         self.workspace.select(tab);
                         self.sync_active_view();
                         self.named_changed(w, true);
                     }
                 }
+                return;
+            }
+            // Do not scroll the editing tab out of sight. Its text scrolls on
+            // caret movement; using another tab or a tab button commits first.
+            if self.tab_rename.as_ref().is_some_and(|rename| {
+                self.workspace.workbench.group_of(rename.sheet) == Some(group)
+            }) {
                 return;
             }
             let max = self

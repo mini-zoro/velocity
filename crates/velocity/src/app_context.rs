@@ -57,6 +57,14 @@ impl App {
         if let Some(state) = menus::sidebar_command_state(name, args, &self.context_roots()) {
             return Some(state);
         }
+        if name == tab_rename::RENAME_TAB {
+            let enabled = self.command_enabled_args(name, args);
+            return Some(vel_config::ui::CommandState {
+                enabled,
+                visible: enabled,
+                ..Default::default()
+            });
+        }
         if Self::is_tab_close(name) {
             return Some(vel_config::ui::CommandState {
                 enabled: !self.tab_close_sheets(name, args).is_empty(),
@@ -316,7 +324,11 @@ impl App {
                 .filter_map(Value::as_str)
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
-            menus::prepare_file_operation(&mut self.workspace, &paths)?;
+            if name == "side_bar_rename" {
+                menus::prepare_rename(&self.workspace, &paths)?;
+            } else {
+                menus::prepare_file_operation(&mut self.workspace, &paths)?;
+            }
         }
         let roots = self.context_roots();
         let Some(effect) = menus::sidebar_command(name, args, &roots, &mut FileOperations(w))?
@@ -368,9 +380,7 @@ impl App {
                 }
             }
             SidebarEffect::Renamed { from, to } => {
-                let result = menus::apply_rename(&mut self.workspace, &from, &to);
-                self.panels.refresh_sidebar(&mut self.workspace);
-                result?;
+                self.apply_file_rename(&from, &to)?;
             }
             SidebarEffect::Deleted { paths, failures } => {
                 crate::open_requests::apply_trashed(&mut self.workspace, &mut self.panels, &paths)?;
@@ -411,6 +421,36 @@ impl App {
             SidebarEffect::Done => {}
         }
         Ok(true)
+    }
+
+    pub(super) fn apply_file_rename(&mut self, from: &Path, to: &Path) -> Result<(), String> {
+        if from == to {
+            return Ok(());
+        }
+        let result = menus::apply_rename(&mut self.workspace, from, to);
+        self.sessions
+            .borrow_mut()
+            .file_renamed(self.session_id, from, to);
+        self.panels.refresh_sidebar(&mut self.workspace);
+        self.sync_recents();
+        result
+    }
+
+    pub(super) fn receive_file_renames(&mut self) -> bool {
+        let renames = self
+            .sessions
+            .borrow_mut()
+            .take_file_renames(self.session_id);
+        for (from, to) in &renames {
+            if let Err(error) = menus::apply_rename(&mut self.workspace, from, to) {
+                self.named_error(None, &error);
+            }
+        }
+        if !renames.is_empty() {
+            self.panels.refresh_sidebar(&mut self.workspace);
+            self.session_due.get_or_insert_with(Instant::now);
+        }
+        !renames.is_empty()
     }
 }
 

@@ -170,6 +170,7 @@ fn fixture_label(scene: &str, text: &str, word: &str, root: &Path) -> bool {
         "r5_palette_mixed" if text == "rust" => return true,
         "command_palette" if text == "toggle" => return true,
         "r5_palette" if text == "save" => return true,
+        "r46-tab-rename-ime" if text == "ni hao.txt" => return true,
         "find" | "find_options_on" | "find_regex_error" | "r25_find_ui2" | "r5_find"
             if matches!(text, "task" | "(task") =>
         {

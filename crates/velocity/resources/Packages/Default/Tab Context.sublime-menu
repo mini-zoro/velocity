@@ -46,6 +46,10 @@
     "command": "copy_file_path"
   },
   {
+    "caption": "Rename…",
+    "command": "rename_tab"
+  },
+  {
     "caption": "Reveal in Side Bar",
     "command": "reveal_in_side_bar"
   },

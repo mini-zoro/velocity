@@ -65,6 +65,26 @@ impl App {
                             false,
                         ));
                         tree.nodes.push(node);
+                        if let Some(rename) = self.tab_rename.as_ref().filter(|r| r.sheet == *sheet)
+                        {
+                            let mut field = Node::new(
+                                tab_rename::RENAME_FIELD,
+                                Some(1000 + sheet * 2),
+                                Role::TextField,
+                                tr.tr("Rename"),
+                                rename.bounds,
+                            );
+                            field.focused = true;
+                            field.editable = true;
+                            if include_text {
+                                let state = rename.input.state();
+                                field.text = Some(TextArea::new(
+                                    &state,
+                                    Utf16Range::new(0, state.text.len_utf16()),
+                                ));
+                            }
+                            tree.nodes.push(field);
+                        }
                     }
                 }
                 for (sheet, frame) in &self.tab_close_hits {
@@ -98,7 +118,9 @@ impl App {
                 self.content,
             );
             node.region = Some(Region::Editor);
-            node.focused = self.panels.input().is_none() && !self.panels.side_focused;
+            node.focused = self.tab_rename.is_none()
+                && self.panels.input().is_none()
+                && !self.panels.side_focused;
             if include_text && e.binary.is_none() {
                 let state = TextInputState {
                     text: e.text.clone(),
@@ -273,6 +295,35 @@ impl App {
         tree
     }
     pub(super) fn accessibility_action(&mut self, w: &WindowHandle, id: Id, request: Request) {
+        if id == tab_rename::RENAME_FIELD {
+            if let Some(rename) = &mut self.tab_rename {
+                match request {
+                    Request::Focus | Request::Press => w.focus(),
+                    Request::Select(range) => {
+                        rename.input.text_input(TextInput::Unmark);
+                        let input = &mut rename.input;
+                        let bytes = range.bytes(input.buffer.text());
+                        input.buffer.set_selection(
+                            input.view,
+                            vel_buffer::Selection::from_regions([vel_buffer::Region::from(bytes)]),
+                        );
+                        input.reveal();
+                    }
+                    Request::SetValue(text) => {
+                        let len = rename.input.state().text.len_utf16();
+                        rename.input.text_input(TextInput::Insert {
+                            text,
+                            replacement: Some(Utf16Range::new(0, len)),
+                        });
+                    }
+                }
+                self.redraw_tab_rename(Some(w));
+            }
+            return;
+        }
+        if !self.finish_tab_rename(Some(w)) {
+            return;
+        }
         let Some(node) = self.accessible_tree().node(id).cloned() else {
             return;
         };
@@ -392,6 +443,12 @@ impl App {
         w.request_frame();
     }
     pub(super) fn accessible_range_rect(&self, id: Id, range: Utf16Range) -> Rect {
+        if id == tab_rename::RENAME_FIELD {
+            return self
+                .tab_rename
+                .as_ref()
+                .map_or(Rect::default(), |r| r.range_rect(range).0);
+        }
         let document = range;
         if self.settings_page_has_focus() {
             return self

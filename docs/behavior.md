@@ -23,6 +23,7 @@ public sources, the decision is the user's and is recorded here.
 | Addition | Behavior |
 | --- | --- |
 | Finder: New Text File (round 45) | Opt-in Finder Sync action for the desktop, folder backgrounds and selections. The Finder menu follows the system language; the empty, uniquely named `.txt` file follows Velocity's UI language. Velocity opens it as a tab in the current window (D4), or opens a new window if needed. File creation errors appear in the status bar (U18). |
+| Inline tab rename (round 46) | Double-click a permanent local text-file tab or choose Rename… / 重命名… from its context menu. The stem is selected in the tab; Return, clicking away, or leaving the key window accepts, and Escape cancels. The same exclusive rename as the side bar updates clones, other windows, lazy tabs, recents and the session without saving or discarding edits. Failures stay in the field and appear in the status bar (U18). Preview double-click still only promotes; double-clicking the empty strip still opens a new file. Untitled, settings, Find Results, read-only, binary/image and non-local sheets are not eligible. |
 
 The public [Search and Replace guide](https://docs.sublimetext.io/guide/usage/search-and-replace.html#results-format)
 documents the separate view, context and match navigation. The [theme reference](https://www.sublimetext.com/docs/themes.html#icons)

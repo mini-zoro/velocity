@@ -113,6 +113,7 @@ pub struct Sessions {
     next: u64,
     live: BTreeSet<u64>,
     transfers: BTreeMap<u64, Vec<(usize, crate::workspace::Tab)>>,
+    file_renames: BTreeMap<u64, Vec<(PathBuf, PathBuf)>>,
     pub(crate) open_windows: BTreeMap<u64, crate::open_requests::WindowRoute>,
     pub(crate) open_as_choices: crate::open_requests::OpenAsChoices,
     pub(crate) open_inbox: BTreeMap<u64, Vec<crate::instance::Incoming>>,
@@ -168,6 +169,7 @@ impl Sessions {
             next: 1,
             live: BTreeSet::new(),
             transfers: BTreeMap::new(),
+            file_renames: BTreeMap::new(),
             open_windows: BTreeMap::new(),
             open_as_choices: Default::default(),
             open_inbox: BTreeMap::new(),
@@ -218,6 +220,65 @@ impl Sessions {
     }
     pub fn take_tabs(&mut self, id: u64) -> Vec<(usize, crate::workspace::Tab)> {
         self.transfers.remove(&id).unwrap_or_default()
+    }
+
+    /// Keep recovery snapshots and routing current even before other windows draw.
+    /// Live windows retarget their actual buffers before publishing another snapshot.
+    pub(crate) fn file_renamed(&mut self, source: u64, from: &Path, to: &Path) {
+        use crate::context_menu::{canonical_entry, retarget_path};
+        let canonical = (canonical_entry(from), canonical_entry(to));
+        let retarget = |path: &mut PathBuf| {
+            if let Some(new) = retarget_path(path, from, to)
+                .or_else(|| retarget_path(path, &canonical.0, &canonical.1))
+            {
+                *path = new;
+            }
+        };
+        let documents = |documents: &mut [Document]| {
+            for doc in documents {
+                doc.path.iter_mut().for_each(&retarget);
+            }
+        };
+        let window = |window: &mut Window| {
+            window.project.iter_mut().for_each(&retarget);
+            window.folders.iter_mut().for_each(&retarget);
+            window.goto_recent_files.iter_mut().for_each(&retarget);
+        };
+        for (snapshot, docs) in self.windows.values_mut().chain(self.departing.iter_mut()) {
+            documents(docs);
+            window(snapshot);
+        }
+        documents(&mut self.restored.documents);
+        self.restored.windows.iter_mut().for_each(window);
+        for route in self.open_windows.values_mut() {
+            route.project.iter_mut().for_each(&retarget);
+            route.project_spelling.iter_mut().for_each(&retarget);
+            route.folders.iter_mut().for_each(&retarget);
+            route.folder_spellings.iter_mut().for_each(&retarget);
+            route.files.iter_mut().for_each(&retarget);
+        }
+        self.recent.iter_mut().flatten().for_each(&retarget);
+        self.recent_heads
+            .values_mut()
+            .flat_map(|heads| heads.iter_mut().flatten())
+            .for_each(&retarget);
+        self.recent_opened.iter_mut().for_each(&retarget);
+        self.closed_window_files.iter_mut().for_each(&retarget);
+        for &id in &self.live {
+            if id != source {
+                self.file_renames
+                    .entry(id)
+                    .or_default()
+                    .push((from.to_owned(), to.to_owned()));
+                if let Some(handle) = self.handles.get(&id) {
+                    handle.request_frame();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn take_file_renames(&mut self, id: u64) -> Vec<(PathBuf, PathBuf)> {
+        self.file_renames.remove(&id).unwrap_or_default()
     }
     /// Reserves recovered windows before any live window can replace their snapshot.
     ///
@@ -541,6 +602,7 @@ impl Sessions {
         files: impl IntoIterator<Item = PathBuf>,
     ) -> Result<(), String> {
         self.live.remove(&id);
+        self.file_renames.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
         self.handles.remove(&id);

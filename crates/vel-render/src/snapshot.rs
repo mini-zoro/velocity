@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use swash::scale::image::Content;
 use vel_platform::Rect;
 
-/// Composites editor text, carets, guides, and selection fills for visual QA
+/// Composites editor text, carets, guides, selection fills and straight underlines for visual QA
 /// on hosts where no Metal adapter is available.
 pub fn text_rgba(
     scene: &Scene,
@@ -174,6 +174,19 @@ pub fn text_rgba(
                         }
                         over(&mut image[index(x, y)], c);
                     }
+                }
+            }
+        }
+        for underline in layer
+            .underlines
+            .iter()
+            .filter(|u| !u.squiggle && !u.stippled)
+        {
+            let (x, y) = clip(underline.rect);
+            let (sx, sy) = clip(underline.clip);
+            for row in y.start.max(sy.start)..y.end.min(sy.end) {
+                for col in x.start.max(sx.start)..x.end.min(sx.end) {
+                    over(&mut image[index(col, row)], underline.color);
                 }
             }
         }

@@ -58,6 +58,8 @@ mod startup_tests;
 pub(crate) mod status_adapter;
 #[path = "app_tabs.rs"]
 mod tab_adapter;
+#[path = "app_tab_rename.rs"]
+mod tab_rename;
 #[path = "app_terminal.rs"]
 mod terminal;
 #[cfg(test)]
@@ -110,6 +112,7 @@ const WINDOW_COMMANDS: &[&str] = &[
     "build_send_input",
     "build_close_input",
     "unselect_current",
+    tab_rename::RENAME_TAB,
     "open_terminal",
     "enable_finder_new_file",
     "disable_finder_new_file",
@@ -222,6 +225,7 @@ pub struct App {
     /// Where the last click selected a tab: revealing that tab may slide the strip under the
     /// pointer, and the second click of a double click still means the same tab.
     tab_click: Option<(Point, u64)>,
+    tab_rename: Option<Box<tab_rename::TabRename>>,
     /// The last image status message ("W × H" or the decode failure note): it describes the
     /// document it was shown for and goes away with it.
     image_status: Option<String>,
@@ -453,6 +457,7 @@ impl App {
             visible_view_scratch: Vec::new(),
             tab_close_hits: Vec::new(),
             tab_click: None,
+            tab_rename: None,
             image_status: None,
             hovered_close: None,
             hovered_tab_button: None,
@@ -716,6 +721,7 @@ impl App {
         self.checkpoint_reason(quitting, false)
     }
     fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
+        self.receive_file_renames();
         self.sync_recents();
         // Cache stdin clients' current contents before a project switch can replace
         // this window's documents. Completion still waits until their sheets close.
@@ -1144,6 +1150,16 @@ impl App {
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         self.ensure_startup_services();
+        self.receive_file_renames();
+        if !self.finish_tab_rename(None) {
+            // Keep the field on errors, but complete the external client's protocol.
+            crate::instance::Waiter::acknowledge(
+                incoming,
+                &mut self.workspace,
+                Default::default(),
+            )?;
+            return Ok(());
+        }
         let request = &incoming.request;
         if self.panels.navigation_overlay_open()
             && (!request.files.is_empty() || request.project.is_some() || request.stdin.is_some())
@@ -1333,6 +1349,9 @@ impl App {
             .is_some_and(|version| version != self.workspace.tabs[target].editor.revision)
         {
             return false;
+        }
+        if name == tab_rename::RENAME_TAB {
+            return self.tab_rename_path(target).is_some();
         }
         if name == "open_terminal" {
             return args["dir"].is_string()
@@ -1557,6 +1576,9 @@ impl App {
         viewport: std::ops::Range<usize>,
     ) -> bool {
         self.ensure_startup_services();
+        if self.tab_rename.is_some() {
+            return self.tab_rename_key(window, key);
+        }
         if self.settings_page_has_focus()
             && !matches!((key.name.as_str(), key.modifiers), (",", 8) | ("p", 12))
         {
@@ -1875,6 +1897,7 @@ impl App {
         );
         let started = self.ensure_startup_services();
         let transferred = self.receive_tabs();
+        let renamed = self.receive_file_renames();
         let resources = self.workspace.resource_revision;
         let old_chrome = self.window_chrome_preferences();
         let changed = self.workspace.poll();
@@ -1897,7 +1920,7 @@ impl App {
             self.panels.refresh_locale(&self.workspace);
         }
         self.apply_ui_language_notice();
-        changed || transferred || started
+        changed || transferred || renamed || started
     }
     fn apply_ui_language_notice(&mut self) {
         if let Some(note) = self.workspace.ui_language_notice.take() {
@@ -2027,12 +2050,43 @@ impl App {
         depth: usize,
     ) -> Result<(), String> {
         self.ensure_startup_services();
+        self.receive_file_renames();
         // https://docs.sublimetext.io/reference/commands.html
         let name = match name {
             "prompt_add_folder" => "add_folder",
             "prompt_select_project" => "prompt_open_project",
             other => other,
         };
+        if self.tab_rename.is_some() {
+            let edit = match name {
+                "select_all" => Some(Command::SelectAll),
+                "copy" => Some(Command::Copy),
+                "cut" => Some(Command::Cut),
+                "paste" => Some(Command::Paste),
+                "undo" | "soft_undo" => Some(Command::Undo),
+                "redo" | "soft_redo" => Some(Command::Redo),
+                _ => None,
+            };
+            if let Some(edit) = edit {
+                self.tab_rename_command(window, edit);
+                return Ok(());
+            }
+            if self.workspace.editor().registry.kind(name) == Some(vel_commands::Kind::TextCommand)
+                || !self.finish_tab_rename(window)
+            {
+                return Ok(());
+            }
+        }
+        if name == tab_rename::RENAME_TAB {
+            let index = match args["_context_sheet"].as_u64() {
+                Some(sheet) => self.workspace.sheet_index(sheet),
+                None => Some(self.workspace.active),
+            };
+            if let Some(index) = index {
+                self.start_tab_rename(window, index);
+            }
+            return Ok(());
+        }
         if self.settings_page_has_focus() && self.settings_named(window, name) {
             return Ok(());
         }
@@ -4087,6 +4141,7 @@ impl App {
                 view.tab_height = if !show_tabs { 0. } else { tab_height };
                 view.focused = *sheet == focused
                     && self.window_focused
+                    && self.tab_rename.is_none()
                     && self.panels.input().is_none()
                     && !self.panels.side_focused;
                 view.find_matches.clear();
@@ -4365,22 +4420,6 @@ impl App {
                             close_rect.x > middle
                         };
                     let close_left = has_close && close_left;
-                    // A 16-DIP file icon, a label that ends before the close button, and a
-                    // 20-DIP close target; all vertically centred in the tab.
-                    if let Some(icon) = icon.filter(|_| !narrow) {
-                        theme.icon(
-                            &mut chrome,
-                            icon,
-                            Rect {
-                                x: rect.x + if close_left { 30. } else { 10. } * s,
-                                y: rect.y + ((rect.height - 16. * s) / 2.).round(),
-                                width: 16. * s,
-                                height: 16. * s,
-                            },
-                            hit,
-                            label.foreground,
-                        );
-                    }
                     let caption = if let Some((read, total)) = tab.progress() {
                         format!(
                             "{} · {}%",
@@ -4415,52 +4454,88 @@ impl App {
                             10.
                         } * s;
                     let baseline = rect.y + f64::from(label.size) + 8. * self.panels.ui_scale;
-                    let label_clip = Rect {
-                        width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
-                        ..rect
-                    };
-                    let label_end = if bullet {
-                        // Right-aligned before the label's end; in a tab too narrow for that,
-                        // centred in the visible part, and only when it fits there at all.
-                        let width = theme.advance(&label, "•");
-                        let x = if label_end - width >= hit.x + 1. {
-                            label_end - width
-                        } else {
-                            hit.x + (hit.width - width) / 2.
-                        };
-                        if width <= hit.width {
-                            theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
-                        }
-                        x - 3. * s
+                    let renaming = self
+                        .tab_rename
+                        .as_mut()
+                        .filter(|rename| rename.sheet == *sheet);
+                    if let Some(rename) = renaming {
+                        rename.paint(
+                            &mut chrome,
+                            &theme,
+                            &label,
+                            (
+                                hit,
+                                Point {
+                                    x: label_x,
+                                    y: baseline,
+                                },
+                            ),
+                            self.workspace.dark,
+                            s,
+                        );
                     } else {
-                        label_end
-                    };
-                    // "Preferences.sublime-settings (Default)" keeps its "(Default)".
-                    let shown = theme.fit_label(&label, &caption, label_end - label_x);
-                    if !shown.is_empty() {
-                        theme.text(&mut chrome, &label, &shown, label_x, baseline, label_clip);
-                    }
-                    let close_path = [
-                        path[0],
-                        path[1],
-                        path[2],
-                        vel_theme::Element::new(
-                            "tab_close_button",
-                            if self.hovered_close == Some(*sheet) {
-                                &["hover"]
+                        let label_clip = Rect {
+                            width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
+                            ..rect
+                        };
+                        let label_end = if bullet {
+                            // Right-aligned before the label's end; in a tab too narrow for that,
+                            // centred in the visible part, and only when it fits there at all.
+                            let width = theme.advance(&label, "•");
+                            let x = if label_end - width >= hit.x + 1. {
+                                label_end - width
                             } else {
-                                &[]
+                                hit.x + (hit.width - width) / 2.
+                            };
+                            if width <= hit.width {
+                                theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
+                            }
+                            x - 3. * s
+                        } else {
+                            label_end
+                        };
+                        // "Preferences.sublime-settings (Default)" keeps its "(Default)".
+                        let shown = theme.fit_label(&label, &caption, label_end - label_x);
+                        if !shown.is_empty() {
+                            theme.text(&mut chrome, &label, &shown, label_x, baseline, label_clip);
+                        }
+                        let close_path = [
+                            path[0],
+                            path[1],
+                            path[2],
+                            vel_theme::Element::new(
+                                "tab_close_button",
+                                if self.hovered_close == Some(*sheet) {
+                                    &["hover"]
+                                } else {
+                                    &[]
+                                },
+                            ),
+                        ];
+                        let close = theme.style(
+                            crate::panels::StyleId::TabClose.at(*sheet),
+                            &vel_theme::ElementPath(&close_path),
+                            settings,
+                        );
+                        if has_close {
+                            self.tab_close_hits.push((*sheet, close_rect));
+                            theme.icon_surface(&mut chrome, &close, close_rect, hit);
+                        }
+                    }
+                    // The file icon stays in its label inset, above an editing field's fill.
+                    if let Some(icon) = icon.filter(|_| !narrow) {
+                        theme.icon(
+                            &mut chrome,
+                            icon,
+                            Rect {
+                                x: rect.x + if close_left { 30. } else { 10. } * s,
+                                y: rect.y + ((rect.height - 16. * s) / 2.).round(),
+                                width: 16. * s,
+                                height: 16. * s,
                             },
-                        ),
-                    ];
-                    let close = theme.style(
-                        crate::panels::StyleId::TabClose.at(*sheet),
-                        &vel_theme::ElementPath(&close_path),
-                        settings,
-                    );
-                    if has_close {
-                        self.tab_close_hits.push((*sheet, close_rect));
-                        theme.icon_surface(&mut chrome, &close, close_rect, hit);
+                            hit,
+                            label.foreground,
+                        );
                     }
                     drop(theme);
                     let id = 100 + *sheet;
@@ -4653,6 +4728,11 @@ impl App {
             return;
         }
         self.ensure_startup_services();
+        if let Some(rename) = &mut self.tab_rename {
+            rename.input.text_input(event);
+            self.redraw_tab_rename(window);
+            return;
+        }
         if self.settings_page_has_focus() {
             let page = self.workspace.settings_page.as_mut().unwrap();
             page.text_input(&self.workspace.translations, event, Instant::now());
@@ -5110,6 +5190,9 @@ impl AppHandler for App {
         let Some(key) = crate::editor::binding_key(&event) else {
             return false;
         };
+        if self.tab_rename.is_some() {
+            return self.tab_rename_key(Some(w), &key);
+        }
         let input = if self.settings_page_has_focus() {
             self.workspace
                 .settings_page
@@ -5143,6 +5226,12 @@ impl AppHandler for App {
     }
     fn accepts_first_mouse(&self) -> bool {
         self.workspace.settings.bool("click_through", false)
+    }
+    fn inline_text_input(&self) -> bool {
+        self.tab_rename.is_some()
+    }
+    fn on_inline_text_focus_lost(&mut self, w: &WindowHandle) {
+        self.finish_tab_rename(Some(w));
     }
     fn on_named_command(&mut self, w: &WindowHandle, name: &str, args: &str) {
         if !self.options.mode.automatic() {
@@ -5391,6 +5480,10 @@ impl AppHandler for App {
             return;
         }
         self.ensure_startup_services();
+        if self.tab_rename.is_some() {
+            self.tab_rename_command(Some(w), command);
+            return;
+        }
         if self.settings_page_has_focus() {
             self.settings_command(Some(w), command, Instant::now());
             return;
@@ -5976,6 +6069,9 @@ impl AppHandler for App {
         Ok(())
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
+        if !self.finish_tab_rename(Some(w)) {
+            return false;
+        }
         self.finish_settings_input();
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
@@ -5995,6 +6091,9 @@ impl AppHandler for App {
         }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        if !self.finish_tab_rename(Some(w)) {
+            return false;
+        }
         self.finish_settings_input();
         self.receive_tabs();
         self.workspace.fullscreen = w.is_full_screen();
@@ -6004,6 +6103,9 @@ impl AppHandler for App {
         self.prepare_window_close(Some(w))
     }
     fn text_input_state(&self) -> TextInputState {
+        if let Some(rename) = &self.tab_rename {
+            return rename.input.state();
+        }
         if self.settings_page_has_focus() {
             return self
                 .workspace
@@ -6028,6 +6130,9 @@ impl AppHandler for App {
         }
     }
     fn text_input_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
+        if let Some(rename) = &self.tab_rename {
+            return rename.range_rect(range);
+        }
         if self.settings_page_has_focus() {
             return self
                 .workspace
@@ -6045,6 +6150,9 @@ impl AppHandler for App {
         (rect, range)
     }
     fn character_index_for_point(&self, point: Point) -> Option<usize> {
+        if let Some(rename) = &self.tab_rename {
+            return Some(rename.input.utf16_at_point(point));
+        }
         if self.settings_page_has_focus() {
             return self
                 .workspace

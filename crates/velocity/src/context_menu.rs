@@ -278,6 +278,25 @@ pub(crate) fn one_path(args: &Value) -> Result<PathBuf, String> {
 fn entry(path: &Path) -> Result<fs::Metadata, String> {
     fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) fn local_volume(path: &Path) -> bool {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut info = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: path is NUL-terminated and statfs initializes info on success.
+    unsafe {
+        libc::statfs(path.as_ptr(), info.as_mut_ptr()) == 0
+            && info.assume_init().f_flags & libc::MNT_LOCAL as u32 != 0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn local_volume(_: &Path) -> bool {
+    true
+}
 fn directory_for(path: &Path) -> Result<PathBuf, String> {
     entry(path)?;
     if path.is_dir() {
@@ -302,6 +321,23 @@ fn validate_name(name: &str) -> Result<(), String> {
         return Err("Enter one file or folder name, without a path".into());
     }
     Ok(())
+}
+
+/// Rename the entry itself, never its target or an existing destination.
+pub(crate) fn rename_entry(from: &Path, name: &str) -> Result<PathBuf, String> {
+    validate_name(name)?;
+    entry(from)?;
+    let to = from.with_file_name(name);
+    if from != to {
+        vel_fileio::rename_no_replace(from, &to).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("{} already exists", to.display())
+            } else {
+                format!("{}: {error}", from.display())
+            }
+        })?;
+    }
+    Ok(to)
 }
 fn relative_path(path: &Path, roots: &[PathBuf]) -> Result<String, String> {
     let relative = roots
@@ -406,19 +442,7 @@ pub fn sidebar_command(
                 )));
             };
             let text = text.as_str().ok_or("text must be a name")?;
-            validate_name(text)?;
-            let to = from.with_file_name(text);
-            if from != to {
-                // One exclusive rename: an existing destination is never replaced, and a
-                // case-only change on a case-insensitive volume is allowed.
-                vel_fileio::rename_no_replace(&from, &to).map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::AlreadyExists {
-                        format!("{} already exists", to.display())
-                    } else {
-                        format!("{}: {e}", from.display())
-                    }
-                })?;
-            }
+            let to = rename_entry(&from, text)?;
             SidebarEffect::Renamed { from, to }
         }
         "side_bar_delete" => {
@@ -613,10 +637,10 @@ pub fn path_was_deleted(path: &Path, deleted: &[PathBuf]) -> bool {
         .any(|root| path.starts_with(root) || path.starts_with(canonical_entry(root)))
 }
 
-/// Materializes affected lazy tabs before a submitted rename or confirmed trash.
+/// Materializes affected lazy tabs before confirmed trash.
 ///
-/// Call before filesystem mutation. A background load must finish before retrying;
-/// this prevents a rename/delete from racing a loader's first open of the old path.
+/// A background load must finish before retrying; this prevents the trash
+/// operation from racing a loader's first open of the old path.
 pub fn prepare_file_operation(
     workspace: &mut crate::workspace::Workspace,
     paths: &[PathBuf],
@@ -640,13 +664,9 @@ pub fn prepare_file_operation(
             failures.push(error);
             continue;
         }
-        let tab = &workspace.tabs[index];
-        if tab.loading.is_some() || tab.binary_loading.is_some() {
-            failures.push(workspace.translations.tr_fmt(
-                "Wait for {name} to finish loading before changing its file",
-                &[("name", tab.ui_label(&workspace.ui))],
-            ));
-        }
+    }
+    if let Err(error) = prepare_rename(workspace, paths) {
+        failures.push(error);
     }
     workspace.prepare_sheet(workspace.active)?;
     if failures.is_empty() {
@@ -656,11 +676,33 @@ pub fn prepare_file_operation(
     }
 }
 
+/// Lazy documents can follow a move without opening the old path. An already
+/// running loader, in contrast, may not have opened its file descriptor yet.
+pub(crate) fn prepare_rename(
+    workspace: &crate::workspace::Workspace,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    for tab in &workspace.tabs {
+        if (tab.loading.is_some() || tab.binary_loading.is_some())
+            && tab
+                .path
+                .as_deref()
+                .is_some_and(|path| path_was_deleted(path, paths))
+        {
+            return Err(workspace.translations.tr_fmt(
+                "Wait for {name} to finish loading before changing its file",
+                &[("name", tab.ui_label(&workspace.ui))],
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Retargets all matching sheets after a successful filesystem rename.
 ///
 /// Text, undo history, view state and shared document identities survive. Every
 /// path is updated before watcher/language errors are returned, since the rename
-/// has already happened on disk. Call `prepare_file_operation` before renaming.
+/// has already happened on disk. Call `prepare_rename` before renaming.
 pub fn apply_rename(
     workspace: &mut crate::workspace::Workspace,
     from: &Path,
@@ -746,6 +788,7 @@ pub fn apply_rename(
         &mut workspace.recent_files,
         &mut workspace.recent_folders,
         &mut workspace.recent_projects,
+        &mut workspace.goto_recent_files,
     ] {
         for path in list {
             if let Some(renamed) = retarget_path(path, from, to) {
@@ -770,6 +813,10 @@ pub fn apply_rename(
         workspace.request_resource_reload();
     }
     for index in affected {
+        if workspace.tabs[index].lazy.is_some() {
+            // Restoring the placeholder will open and detect syntax at the new path.
+            continue;
+        }
         let path = workspace.tabs[index]
             .path
             .as_deref()

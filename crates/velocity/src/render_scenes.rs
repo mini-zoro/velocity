@@ -1259,6 +1259,22 @@ fn r26_tabs(fixture: &Fixture, dark: bool, rounded: bool, left: bool) -> Result<
     Ok(app)
 }
 
+fn r46_tab_rename(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    let name = if app.workspace.translations.language().is_english() {
+        "Untitled Text.txt"
+    } else {
+        "新建文本文档.txt"
+    };
+    let file = fixture.scratch(name);
+    std::fs::write(&file, "Draft\n").map_err(|err| err.to_string())?;
+    open(&mut app, &file)?;
+    named(&mut app, "insert", json!({"characters": "Draft notes\n"}));
+    settle(&mut app);
+    app.panels.message.clear();
+    Ok(app)
+}
+
 fn r25_status_selection(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_editor(fixture, dark)?;
     let editor = app.workspace.editor_mut();
@@ -1909,11 +1925,54 @@ const SCENARIOS: &[Scenario] = &[
         size: (800., 200.),
         build: |f, d| r26_tabs(f, d, true, true),
     },
+    Scenario {
+        name: "r46-tab-rename",
+        size: (800., 240.),
+        build: r46_tab_rename,
+    },
+    Scenario {
+        name: "r46-tab-rename-ime",
+        size: (800., 240.),
+        build: r46_tab_rename,
+    },
 ];
 
 /// Pointer-driven states are applied after layout because hit testing needs real geometry.
 fn after_layout(name: &str, app: &mut App) {
     match name {
+        "r46-tab-rename" | "r46-tab-rename-ime" => {
+            let sheet = app.workspace.tabs[app.workspace.active].sheet;
+            if let Some((_, rect)) = app.tab_hits.iter().find(|(id, _)| *id == sheet).copied() {
+                for click_count in [1, 2] {
+                    for kind in [MouseKind::Down, MouseKind::Up] {
+                        app.handle_mouse_event(
+                            None,
+                            MouseEvent {
+                                button: 0,
+                                kind,
+                                position: Point {
+                                    x: rect.x + rect.width / 2.,
+                                    y: rect.y + rect.height / 2.,
+                                },
+                                click_count,
+                                modifiers: Modifiers::default(),
+                                timestamp: 0.,
+                            },
+                        );
+                    }
+                }
+                if name == "r46-tab-rename-ime" {
+                    app.handle_text_input(
+                        None,
+                        TextInput::Marked {
+                            text: "ni hao".into(),
+                            selected: Utf16Range::new(6, 0),
+                            replacement: None,
+                        },
+                    );
+                }
+            }
+        }
         "editor" => editor_hover_gutter(app),
         "minimap_scrollbar" => editor_hover_scrollbar(app),
         "minimap_hover" => {
@@ -2448,6 +2507,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                                     | "empty_window"
                                     | "empty_folder_window"
                                     | "r43-empty-folder-goto"
+                                    | "r46-tab-rename"
+                                    | "r46-tab-rename-ime"
                             ) || scenario.name.starts_with("r41-")
                                 || scenario.name.starts_with("settings_ui") =>
                         {

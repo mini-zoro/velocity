@@ -772,6 +772,7 @@ enum Event {
     Scroll(ScrollEvent),
     Resize,
     Appearance(Appearance),
+    InlineTextFocusLost,
     CloseRequested,
     Accessibility(accessibility::Id, accessibility::Request),
     AccessibilityPreferences,
@@ -943,6 +944,7 @@ impl Host {
                 Event::Scroll(e) => app.on_scroll(&w, e),
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
+                Event::InlineTextFocusLost => app.on_inline_text_focus_lost(&w),
                 Event::CloseRequested => {
                     if app.on_window_close_requested(&w) {
                         w.close();
@@ -968,9 +970,10 @@ impl Host {
     }
     fn offer_key(self: &Rc<Self>, key: KeyEvent) -> bool {
         if self.stopped.get()
-            || self.input.borrow().marked.is_some()
             || self.dispatching.get()
             || self.drawing.get()
+            || (self.input.borrow().marked.is_some()
+                && !(key.modifiers.command() && self.inline_text_input()))
         {
             return false;
         }
@@ -989,6 +992,11 @@ impl Host {
         a11y::notify(self, &previous, &current);
         self.drain();
         handled
+    }
+    fn inline_text_input(&self) -> bool {
+        self.app
+            .try_borrow()
+            .is_ok_and(|app| app.as_ref().is_some_and(|app| app.inline_text_input()))
     }
     fn flush_ime_coordinates(&self) {
         if self.dispatching.get() || self.drawing.get() || !self.ime_geometry_dirty.replace(false) {
@@ -1492,10 +1500,15 @@ impl EditorView {
             h.flush();
         }
     }
-    fn discard_marked_text(&self, host: &Rc<Host>) {
-        // Clear our preview before AppKit can call unmarkText (which commits).
+    fn finish_marked_text(&self, host: &Rc<Host>, commit: bool) {
+        // Clear our preview before AppKit can call unmarkText. Inline fields
+        // accept the shown text on blur; document and panel preedit still cancels.
         if host.input.borrow().marked.is_some() {
-            host.dispatch(Event::Text(TextInput::Discard));
+            host.dispatch(Event::Text(if commit {
+                TextInput::Unmark
+            } else {
+                TextInput::Discard
+            }));
         }
         if let Some(context) = self.inputContext() {
             context.discardMarkedText();
@@ -1507,7 +1520,7 @@ impl EditorView {
                 if let Some(w) = self.window() {
                     w.makeFirstResponder(Some(self));
                 }
-                self.discard_marked_text(&h);
+                self.finish_marked_text(&h, h.inline_text_input());
             }
             let p = self.convertPoint_fromView(e.locationInWindow(), None);
             let event = MouseEvent {
@@ -1774,8 +1787,12 @@ define_class!(
         #[unsafe(method(windowDidResignKey:))]
         fn resigned(&self, _n: &NSNotification) {
             let h = &self.ivars().host;
+            let inline = h.inline_text_input();
             if let Some(v) = h.view.get() {
-                v.discard_marked_text(h);
+                v.finish_marked_text(h, inline);
+            }
+            if inline {
+                h.dispatch(Event::InlineTextFocusLost);
             }
             h.dirty.set(true);
             h.pace();

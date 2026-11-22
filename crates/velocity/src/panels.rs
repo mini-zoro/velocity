@@ -6369,22 +6369,8 @@ impl Panels {
             },
         );
         let state = input.state();
-        let underline = |layer: &mut Layer, a: f64, b: f64, y: f64| {
-            if a < b {
-                layer.underlines.push(Underline {
-                    rect: Rect {
-                        x: a,
-                        y: (y * density).round() / density,
-                        width: b - a,
-                        height: 1.,
-                    },
-                    clip: rect,
-                    color: style.foreground,
-                    thickness: 1.,
-                    squiggle: false,
-                    stippled: false,
-                });
-            }
+        let underline = |layer: &mut Layer, a, b, y| {
+            paint_marked_underline(layer, rect, [a, b], y, density, style.foreground);
         };
         if input.multiline() {
             let selected = state.selected.bytes(&state.text);
@@ -10110,6 +10096,31 @@ impl Panels {
         }
         self.rebuild_side(workspace);
         true
+    }
+}
+
+pub(crate) fn paint_marked_underline(
+    layer: &mut Layer,
+    clip: Rect,
+    [left, right]: [f64; 2],
+    y: f64,
+    density: f64,
+    color: [f32; 4],
+) {
+    if left < right {
+        layer.underlines.push(Underline {
+            rect: Rect {
+                x: left,
+                y: (y * density).round() / density,
+                width: right - left,
+                height: 1.,
+            },
+            clip,
+            color,
+            thickness: 1.,
+            squiggle: false,
+            stippled: false,
+        });
     }
 }
 

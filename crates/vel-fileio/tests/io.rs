@@ -345,6 +345,14 @@ fn rename_no_replace_refuses_existing_targets_but_allows_case_only_changes() {
     assert_eq!(std::fs::read_to_string(&c).unwrap(), "a");
     // Works on case-insensitive (default APFS) and case-sensitive volumes alike.
     let upper = dir.path().join("C.txt");
+    if !upper.exists() {
+        std::fs::hard_link(&c, &upper).unwrap();
+        assert_eq!(
+            rename_no_replace(&c, &upper).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        std::fs::remove_file(&upper).unwrap();
+    }
     rename_no_replace(&c, &upper).unwrap();
     let names: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
