@@ -1,0 +1,25 @@
+name: Windows
+
+on:
+  push:
+    branches: [windows-port]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build / test (Windows x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (all crates, keep going to list every error)
+        run: cargo build --workspace --locked --release --keep-going
+      - name: Test
+        run: cargo test --workspace --locked --release --no-fail-fast
