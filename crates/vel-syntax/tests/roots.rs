@@ -34,6 +34,33 @@ fn definition(name: &str, scope: &str) -> String {
 }
 
 #[test]
+fn crlf_loose_grammar_keeps_names_and_token_scopes() {
+    let tmp = Scratch::new("crlf-grammar");
+    let file = "Package/Nested/Fixture.sublime-syntax";
+    write(
+        &tmp.0,
+        file,
+        "%YAML 1.2\r\n---\r\nname: Fixture\r\nscope: source.fixture\r\ncontexts:\r\n  main:\r\n    - match: >-\r\n        keyword\r\n      scope: keyword.fixture\r\n",
+    );
+    let set = Arc::new(SyntaxSet::load_directories(&[&tmp.0]).unwrap());
+    assert!(set.warnings().is_empty(), "{:?}", set.warnings());
+    let syntax = set
+        .find_syntax_by_path(&format!("Packages/{file}"))
+        .unwrap();
+    let actual = set
+        .find_syntax_by_path(tmp.0.join(file).to_str().unwrap())
+        .unwrap();
+    assert!(std::ptr::eq(syntax, actual));
+    assert_eq!(syntax.name, "Fixture");
+    let ops = ParseState::new(set.clone(), syntax)
+        .parse_line("keyword\n")
+        .unwrap()
+        .ops;
+    assert!(ops.contains(&(0, ScopeStackOp::Push("keyword.fixture".parse().unwrap()))));
+    assert!(ops.contains(&(7, ScopeStackOp::Pop(1))));
+}
+
+#[test]
 fn parallel_source_reads_preserve_override_order_and_content_invalidation() {
     let tmp = Scratch::new("parallel-content");
     let first = tmp.dir("first");

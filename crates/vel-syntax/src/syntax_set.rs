@@ -282,6 +282,15 @@ impl SyntaxSet {
     /// loaded syntax definition files
     // however, if a syntax name is provided without a folder, make sure we don't accidentally match the end of a different syntax definition's name - by checking a / comes before it or it is the full path
     pub fn find_syntax_by_path<'a>(&'a self, path: &str) -> Option<&'a SyntaxReference> {
+        #[cfg(windows)]
+        let normalized;
+        #[cfg(windows)]
+        let path = if path.contains('\\') {
+            normalized = path.replace('\\', "/");
+            normalized.as_str()
+        } else {
+            path
+        };
         if let Some(&index) = self.physical_paths.get(path) {
             return self.syntaxes.get(index);
         }

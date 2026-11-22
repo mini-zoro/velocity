@@ -579,6 +579,12 @@ pub fn run(set: &SyntaxSet, root: &Path, filter: Option<&str>) -> SuiteResult {
     paths.sort();
     for path in paths {
         let file = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+        #[cfg(windows)]
+        let file = if file.contains('\\') {
+            file.replace('\\', "/").into()
+        } else {
+            file
+        };
         let result = match std::fs::read_to_string(&path) {
             Ok(text) => match &metadata {
                 Ok(metadata) => {

@@ -3,6 +3,16 @@ use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
 
+/// Spells a native path with `/` separators for virtual resource names.
+pub fn slash_separated(path: &Path) -> std::borrow::Cow<'_, str> {
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    if path.contains('\\') {
+        return path.replace('\\', "/").into();
+    }
+    path
+}
+
 /// Compare normalized paths, without following symlinks.
 #[inline]
 pub fn equal(a: &Path, b: &Path) -> bool {

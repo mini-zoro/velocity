@@ -1,0 +1,3 @@
+# Fixtures and shipped resources are byte-sensitive. Keep the committed bytes
+# on checkout, regardless of core.autocrlf. User files are handled separately.
+* -text

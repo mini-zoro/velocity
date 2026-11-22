@@ -38,7 +38,7 @@ fn main() -> io::Result<()> {
     writeln!(out, "static SHIPPED: &[File] = &[")?;
     for path in paths {
         let relative = path.strip_prefix(root).expect("inventory relative path");
-        let name = format!("Packages/{}", relative.display());
+        let name = format!("Packages/{}", vel_config::paths::slash_separated(relative));
         if name.ends_with(".py") {
             writeln!(
                 out,

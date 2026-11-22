@@ -160,7 +160,10 @@ impl Resources {
             if file.is_dir() {
                 continue;
             }
-            let key = format!("Packages/{package}/{}", relative.to_string_lossy());
+            let key = format!(
+                "Packages/{package}/{}",
+                crate::paths::slash_separated(&relative)
+            );
             if key.ends_with(".py") {
                 staged.plugins.insert(key, Tier::Installed);
                 continue;
@@ -196,7 +199,7 @@ impl Resources {
                 return Ok(());
             }
             let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
-            let key = format!("Packages/{}", relative.to_string_lossy());
+            let key = format!("Packages/{}", crate::paths::slash_separated(relative));
             if key.ends_with(".py") {
                 self.plugins.insert(key, tier);
             } else if tier != Tier::Shipped || shipped_resource(path) {

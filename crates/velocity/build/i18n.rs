@@ -25,7 +25,7 @@ pub(super) fn generate(out: &Path) -> io::Result<()> {
                 let relative = path.strip_prefix(packages).expect("package path");
                 catalogs.push(format!(
                     "({:?}, include_bytes!({:?}) as &[u8]),\n",
-                    format!("Packages/{}", relative.display()),
+                    format!("Packages/{}", vel_config::paths::slash_separated(relative)),
                     path.canonicalize()?
                 ));
             }

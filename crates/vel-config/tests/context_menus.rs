@@ -86,12 +86,12 @@ fn loose_menu_overrides_its_archive_then_user_extends_it() {
     zip.finish().unwrap();
     fs::write(
         dir.path().join("Packages/Alpha/Context.sublime-menu"),
-        r#"[{"id":"entry","caption":"Loose","command":"loose"}]"#,
+        "[\r\n  // Loose overrides the archive\r\n  {\"id\":\"entry\",\"caption\":\"Loose\",\"command\":\"loose\"},\r\n]\r\n",
     )
     .unwrap();
     fs::write(
         dir.path().join("Packages/User/Context.sublime-menu"),
-        r#"[{"id":"entry","caption":"User caption"}]"#,
+        "[\r\n  {\"id\":\"entry\",\"caption\":\"User caption\"},\r\n]\r\n",
     )
     .unwrap();
     let mut resources = Resources::default();
