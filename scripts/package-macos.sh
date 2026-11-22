@@ -16,6 +16,14 @@ VELOCITY_OUTPUT=$(CDPATH= cd -- "$VELOCITY_OUTPUT" && pwd -P)
 VELOCITY_STAGE=$(mktemp -d "$VELOCITY_OUTPUT/.package.XXXXXX")
 VELOCITY_LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 VELOCITY_FINDER_APPEX=Contents/PlugIns/VelocityFinderNewFile.appex
+VELOCITY_FINDER_ID=dev.velocity.Velocity.FinderNewFile
+# Remember whether the user had enabled the Finder extension: a repackaged extension has a
+# new ad hoc signature, and Finder keeps running the old one until it is toggled.
+if /usr/bin/pluginkit -m -i "$VELOCITY_FINDER_ID" 2>/dev/null | grep -q '^+'; then
+    VELOCITY_FINDER_WAS_ENABLED=1
+else
+    VELOCITY_FINDER_WAS_ENABLED=0
+fi
 unregister() {
     # Staging and backup copies share the bundle identifier; keep them out of
     # LaunchServices so Finder's Open With never picks one of them.
@@ -196,5 +204,10 @@ fi
 # Registration does not enable the extension; that is an explicit user choice.
 if ! /usr/bin/pluginkit -a "$VELOCITY_OUTPUT/Velocity.app/$VELOCITY_FINDER_APPEX"; then
     printf '%s\n' 'Warning: could not register the Finder extension.' >&2
+fi
+# Re-apply an existing user choice only (never enable it on our own).
+if [ "$VELOCITY_FINDER_WAS_ENABLED" = 1 ]; then
+    /usr/bin/pluginkit -e ignore -i "$VELOCITY_FINDER_ID" >/dev/null 2>&1 || true
+    /usr/bin/pluginkit -e use -i "$VELOCITY_FINDER_ID" >/dev/null 2>&1 || true
 fi
 cat "$VELOCITY_OUTPUT/packaging-report.json"
