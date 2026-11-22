@@ -572,7 +572,10 @@ fn round19_sustained_output_keeps_ui_polling_progress_with_regex() {
     eprintln!(
         "steady output: {updates}/{polls} data polls; UI gap {longest:?}; excluded sleep {excluded_sleep:?}; {errors} diagnostics"
     );
-    assert!(polls >= 100);
+    // Enough polls to show steady progress. The count depends on how often a busy
+    // machine schedules this thread (CI: 33 polls in 3 s with 2.5 s of oversleep), so
+    // the cadence itself is judged by the data-poll ratio and the UI gap below.
+    assert!(polls >= 20, "{polls} polls");
     assert!(updates * 100 >= polls * 90);
     assert!(longest < Duration::from_millis(50));
     assert!(tail.ends_with("TAIL_MARKER\n"));

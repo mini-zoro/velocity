@@ -22,7 +22,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked --release
+      # Report every failing test in one run instead of stopping at the first crate.
+      - run: cargo test --workspace --locked --release --no-fail-fast
         env:
           # Native IPC fixtures have short wall-clock deadlines; avoid test-worker contention.
           {} # Default parallelism; readiness is signalled by the IPC fixture.
