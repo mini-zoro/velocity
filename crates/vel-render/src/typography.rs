@@ -71,7 +71,7 @@ impl WideAdvances {
     }
 
     /// Geometry key for shaped text caches; the legacy grid key remains zero.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn identity(self) -> u64 {
         use std::hash::{Hash, Hasher};
         self.0.map_or(0, |samples| {

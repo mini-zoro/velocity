@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+#[cfg(unix)]
 pub mod cli;
 pub mod https;
 mod index;

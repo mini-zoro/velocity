@@ -24,32 +24,11 @@ pub fn equal(a: &Path, b: &Path) -> bool {
 /// Compare components with Win32's ordinal case folding, not the current locale.
 #[cfg(windows)]
 pub fn components_equal(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
     if a == b {
         return true;
     }
-    if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
-        return false;
-    }
-    let wide = |c: std::path::Component<'_>| {
-        c.as_os_str()
-            .encode_wide()
-            .map(|u| {
-                if u == u16::from(b'/') {
-                    u16::from(b'\\')
-                } else {
-                    u
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let (a, b) = (wide(a), wide(b));
-    let (Ok(an), Ok(bn)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
-        return false;
-    };
-    // SAFETY: both buffers are live and the lengths count their UTF-16 code units.
-    unsafe { CompareStringOrdinal(a.as_ptr(), an, b.as_ptr(), bn, 1) == CSTR_EQUAL }
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
+        && vel_platform::windows_path_component_eq(a.as_os_str(), b.as_os_str())
 }
 
 /// Remove the Win32 verbatim prefix for display and lexical comparisons only.
@@ -149,6 +128,10 @@ mod tests {
         );
         assert!(equal(Path::new(r"\\?\C:\Work\A"), Path::new("c:/work/a")));
         assert!(!equal(Path::new(r"C:\Work\A"), Path::new(r"D:\Work\A")));
+        assert!(equal(
+            Path::new("C:/Work/\u{00c4}.txt"),
+            Path::new("c:/work/\u{00e4}.TXT"),
+        ));
         assert!(equal(
             Path::new(r"\\?\UNC\Server\Share\A"),
             Path::new(r"\\server\share\a")

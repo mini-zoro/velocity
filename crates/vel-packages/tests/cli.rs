@@ -1,5 +1,4 @@
 #![cfg(unix)]
-#![cfg(unix)]
 
 use std::{
     fs,

@@ -264,8 +264,10 @@ pub struct Tree {
     pub label: String,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 pub(crate) struct TreeCache(std::cell::RefCell<Option<std::rc::Rc<Tree>>>);
+#[cfg(any(target_os = "macos", test))]
 impl TreeCache {
     pub(crate) fn invalidate(&self) {
         self.0.take();

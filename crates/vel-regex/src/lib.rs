@@ -866,6 +866,8 @@ struct Prefilter {
     literals: Option<LiteralPrefilter>,
     identifier: Option<identifier_guard::IdentifierGuard>,
 }
+// The x86_64 memchr finder is wider; keeping it inline avoids an allocation per literal prefilter.
+#[cfg_attr(target_arch = "x86_64", allow(clippy::large_enum_variant))]
 #[derive(Debug)]
 enum LiteralPrefilter {
     One(memchr::memmem::Finder<'static>),

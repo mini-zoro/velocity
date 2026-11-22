@@ -15,11 +15,9 @@ use vel_config::{
     settings::Settings,
     ui::{MenuItem, PaletteItem},
 };
-use vel_packages::{
-    PackageManager, ResourceKind, Support,
-    cli::{CliInstallOutcome, CliInstallPlan, install_cli, install_directories},
-    https::HttpsClient,
-};
+#[cfg(unix)]
+use vel_packages::cli::{CliInstallOutcome, CliInstallPlan, install_cli, install_directories};
+use vel_packages::{PackageManager, ResourceKind, Support, https::HttpsClient};
 use vel_platform::WindowHandle;
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -58,6 +56,7 @@ pub fn bundle_resources() -> Option<PathBuf> {
     let resources = contents.join("Resources");
     (contents.file_name()? == "Contents" && resources.is_dir()).then_some(resources)
 }
+#[cfg(unix)]
 fn bundle_for_exe(exe: &Path) -> Result<PathBuf, String> {
     let contents = exe
         .parent()
@@ -88,6 +87,7 @@ pub fn extend_commands(
     settings: &Settings,
 ) {
     for (caption, command) in [
+        #[cfg(unix)]
         ("Install Command Line Tool…", "install_cli"),
         ("Open Crash Reports", "open_crash_reports"),
         ("Package: Install from File…", "package_install_file"),
@@ -174,6 +174,7 @@ enum Reply {
     Choices(Vec<PaletteItem>),
     Changed(UiText),
     Message(UiText),
+    #[cfg(unix)]
     CliPlans(Vec<CliInstallPlan>),
 }
 #[derive(Debug, Default)]
@@ -226,6 +227,7 @@ impl Actions {
                     )))
                 })?;
             }
+            #[cfg(unix)]
             "install_cli" => {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
                 let home = std::env::var_os("HOME").ok_or("home directory unavailable")?;
@@ -412,6 +414,7 @@ impl Actions {
                 panels.set_message(message);
             }
             Ok(Reply::Message(message)) => panels.set_message(message),
+            #[cfg(unix)]
             Ok(Reply::CliPlans(plans)) => {
                 let Some(first) = plans.first() else {
                     return true;
@@ -492,7 +495,9 @@ impl Actions {
         true
     }
 }
+#[cfg(unix)]
 fn directory_writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
     let mut candidate = path;
     while !candidate.exists() {
         let Some(parent) = candidate.parent() else {
@@ -500,19 +505,11 @@ fn directory_writable(path: &Path) -> bool {
         };
         candidate = parent;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(path) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // SAFETY: path is a live NUL-terminated pathname; access only queries permissions.
-        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    let Ok(path) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: path is a live NUL-terminated pathname; access only queries permissions.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
 }
 fn open_folder(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -1093,6 +1090,7 @@ mod tests {
         let ignored = PackageManager::new(temp.path()).ignored_packages().unwrap();
         assert!(ignored.contains("Vintage") && ignored.contains("Fixture"));
     }
+    #[cfg(unix)]
     #[test]
     fn bundle_plan_never_guesses_a_launcher_for_a_cargo_binary() {
         assert!(bundle_for_exe(Path::new("/tmp/target/release/velocity")).is_err());

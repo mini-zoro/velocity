@@ -212,11 +212,12 @@ fn explicit_index_command_and_ignored_bundled_grammar_filter_are_consistent() {
             .iter()
             .any(|p| p.invocation.command == "package_check_upgrades")
     );
-    assert!(
+    assert_eq!(
         fresh
             .palette
             .iter()
-            .any(|p| p.invocation.command == "install_cli")
+            .any(|p| p.invocation.command == "install_cli"),
+        cfg!(unix),
     );
     assert!(
         fresh

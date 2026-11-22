@@ -220,8 +220,8 @@ impl Pattern {
         // A directory-only rule cannot match the file component, but can match
         // any of the containing directories. No ancestor strings are constructed.
         if self.directory && !path.directory {
-            bytes = match bytes.iter().rposition(|&b| b == b'/') {
-                Some(0) if bytes.starts_with(b"/") => &bytes[..1],
+            bytes = match bytes.iter().copied().rposition(is_path_separator) {
+                Some(0) => &bytes[..1],
                 Some(at) => &bytes[..at],
                 None => return false,
             };
@@ -239,20 +239,19 @@ impl Pattern {
             // following boundary, including a directory with descendants.
             let mut tail = bytes;
             loop {
-                if tail.strip_prefix(body).is_some_and(at_component_end) {
+                if strip_path_prefix(tail, body).is_some_and(at_component_end) {
                     return true;
                 }
-                let Some(slash) = tail.iter().position(|&b| b == b'/') else {
+                let Some(slash) = tail.iter().copied().position(is_path_separator) else {
                     return false;
                 };
                 tail = &tail[slash + 1..];
             }
         }
-        let Some(rest) = bytes.strip_prefix(self.body.as_bytes()) else {
+        let Some(rest) = strip_path_prefix(bytes, self.body.as_bytes()) else {
             return false;
         };
-        rest.is_empty()
-            || rest.starts_with(b"/")
+        at_component_end(rest)
             || self.scope == Scope::Absolute && self.body == "/"
             || self.scope == Scope::Project && self.body.is_empty()
     }
@@ -311,8 +310,35 @@ impl Pattern {
     }
 }
 
+// Patterns always use '/', even when the walker returns Windows path spellings.
+#[inline]
+fn is_path_separator(byte: u8) -> bool {
+    byte == b'/' || cfg!(windows) && byte == b'\\'
+}
+
+#[inline]
+fn path_byte_eq(path: u8, pattern: u8) -> bool {
+    path == pattern || cfg!(windows) && pattern == b'/' && path == b'\\'
+}
+
+#[inline]
+fn strip_path_prefix<'a>(path: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(prefix)
+    }
+    #[cfg(windows)]
+    {
+        let (head, rest) = path.split_at_checked(prefix.len())?;
+        head.iter()
+            .zip(prefix)
+            .all(|(&actual, &pattern)| path_byte_eq(actual, pattern))
+            .then_some(rest)
+    }
+}
+
 fn at_component_end(rest: &[u8]) -> bool {
-    rest.is_empty() || rest[0] == b'/'
+    rest.is_empty() || is_path_separator(rest[0])
 }
 
 fn path_glob(body: &[u8], path: &[u8], suffix: bool) -> bool {
@@ -333,7 +359,11 @@ fn path_glob(body: &[u8], path: &[u8], suffix: bool) -> bool {
                     continue;
                 }
             }
-            Some(byte) if path.get(n) == Some(byte) => {
+            Some(&byte)
+                if path
+                    .get(n)
+                    .is_some_and(|&actual| path_byte_eq(actual, byte)) =>
+            {
                 p += 1;
                 n += 1;
                 continue;
@@ -349,7 +379,9 @@ fn path_glob(body: &[u8], path: &[u8], suffix: bool) -> bool {
             p = pattern;
             n = consumed + 1;
             retry = Some((p, n));
-        } else if suffix && let Some(slash) = path[start..].iter().position(|&b| b == b'/') {
+        } else if suffix
+            && let Some(slash) = path[start..].iter().copied().position(is_path_separator)
+        {
             start += slash + 1;
             n = start;
             p = 0;
@@ -361,7 +393,7 @@ fn path_glob(body: &[u8], path: &[u8], suffix: bool) -> bool {
 
 fn scalar_width(bytes: &[u8]) -> Option<usize> {
     let width = match *bytes.first()? {
-        b'/' => return None,
+        byte if is_path_separator(byte) => return None,
         0..=0x7f => return Some(1),
         0xc2..=0xdf => 2,
         0xe0..=0xef => 3,
@@ -1151,6 +1183,27 @@ impl Drop for Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn slash_patterns_match_native_windows_paths_at_component_boundaries() {
+        let root = Path::new(r"C:\work\repo");
+        for (pattern, path, expected) in [
+            ("//src/generated/", r"src\generated\out.rs", true),
+            ("//src/generated/", r"src\generated-more\out.rs", false),
+            ("src/generated", r"nested\src\generated\out.rs", true),
+            ("//src/*/out.rs", r"src\generated/out.rs", true),
+            ("//src/?/out.rs", r"src\g\out.rs", true),
+            ("//src/?/out.rs", r"src\\out.rs", false),
+            ("//src/generated", r"nested\src\generated\out.rs", false),
+        ] {
+            assert_eq!(
+                Patterns::new(&[pattern.into()]).matches(root, &root.join(path), false),
+                expected,
+                "{pattern:?}, {path:?}",
+            );
+        }
+    }
+
     #[test]
     fn file_pattern_reference_table() {
         // https://www.sublimetext.com/docs/file_patterns.html (current, 4066+ examples).

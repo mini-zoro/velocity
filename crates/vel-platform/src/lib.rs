@@ -25,8 +25,12 @@ pub use services::{
 mod macos;
 pub mod memory_pressure;
 pub mod metrics;
+#[cfg(windows)]
+mod path_case;
 #[cfg(target_os = "macos")]
 pub use macos::WindowHandle;
+#[cfg(windows)]
+pub use path_case::windows_path_component_eq;
 #[cfg(not(target_os = "macos"))]
 mod stub;
 pub use input::*;

@@ -39,8 +39,13 @@ impl Job {
         }
         // SAFETY: CreateJobObjectW returned a fresh owned handle.
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         // SAFETY: the input points to a fully initialized limits struct of the declared type.
         if unsafe {
             SetInformationJobObject(
@@ -294,16 +299,14 @@ impl Drop for Attributes {
     }
 }
 
-pub(super) fn spawn(exec: &Exec, env: &BTreeMap<String, String>, job: &Job) -> io::Result<Child> {
-    let (exe, line) = command_line(exec, env)?;
-    let exe = wide(exe.as_os_str())?;
-    let mut line = wide(&line)?;
-    let cwd = wide(exec.working_dir.as_os_str())?;
+fn environment_block(env: &BTreeMap<String, String>) -> io::Result<Vec<u16>> {
     // Key spelling is canonicalized by expand_environment. UTF-16 block is sorted
     // by name and double-NUL terminated, including when there are no entries.
     let mut block = Vec::new();
     for (key, value) in env {
-        if key.is_empty() || key.contains('=') {
+        // Win32 puts per-drive working directories in keys such as "=C:".
+        let name = key.strip_prefix('=').unwrap_or(key);
+        if name.is_empty() || name.contains('=') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid environment variable name",
@@ -315,6 +318,15 @@ pub(super) fn spawn(exec: &Exec, env: &BTreeMap<String, String>, job: &Job) -> i
         block.push(0);
     }
     block.push(0);
+    Ok(block)
+}
+
+pub(super) fn spawn(exec: &Exec, env: &BTreeMap<String, String>, job: &Job) -> io::Result<Child> {
+    let (exe, line) = command_line(exec, env)?;
+    let exe = wide(exe.as_os_str())?;
+    let mut line = wide(&line)?;
+    let cwd = wide(exec.working_dir.as_os_str())?;
+    let block = environment_block(env)?;
     let (stdin, input) = pipe(true)?;
     let stdin = exec.interactive.then_some(stdin);
     let (stdout, output) = pipe(false)?;
@@ -329,15 +341,17 @@ pub(super) fn spawn(exec: &Exec, env: &BTreeMap<String, String>, job: &Job) -> i
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
     // Unlike assigning after spawn, this covers descendants launched by the first instruction.
     attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
-    let mut info = STARTUPINFOEXW::default();
-    info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-    info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    [
-        info.StartupInfo.hStdInput,
-        info.StartupInfo.hStdOutput,
-        info.StartupInfo.hStdError,
-    ] = handles;
-    info.lpAttributeList = attributes.ptr();
+    let info = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: handles[0],
+            hStdOutput: handles[1],
+            hStdError: handles[2],
+            ..Default::default()
+        },
+        lpAttributeList: attributes.ptr(),
+    };
     let mut process = PROCESS_INFORMATION::default();
     // SAFETY: strings, environment, handles and both attribute arrays live across
     // the call. No handle other than the three child stdio ends is inherited.
@@ -401,6 +415,20 @@ mod tests {
     const ROLE: &str = "VELOCITY_WIN_TEST_JOB_ROLE";
     const PID_FILE: &str = "VELOCITY_WIN_TEST_JOB_PID";
     const FIXTURE: &str = "process::windows::tests::job_fixture";
+
+    #[test]
+    fn environment_block_passes_drive_directories_to_the_child() {
+        let env = BTreeMap::from([
+            ("PATH".into(), r"C:\bin;D:\bin".into()),
+            ("=D:".into(), r"D:\work".into()),
+        ]);
+        assert_eq!(
+            String::from_utf16(&environment_block(&env).unwrap()).unwrap(),
+            "=D:=D:\\work\0PATH=C:\\bin;D:\\bin\0\0",
+        );
+        assert_eq!(environment_block(&BTreeMap::new()).unwrap(), [0, 0]);
+        assert!(environment_block(&BTreeMap::from([("A=B".into(), "x".into())])).is_err());
+    }
 
     #[test]
     fn job_fixture() {

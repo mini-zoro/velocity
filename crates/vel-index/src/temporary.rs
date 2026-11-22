@@ -1,6 +1,8 @@
 //! Ownership of expendable index caches, including detached coordinators at process exit.
+#[cfg(unix)]
+use std::fs;
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };

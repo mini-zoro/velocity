@@ -5280,7 +5280,10 @@ mod round15_tests {
         let new = new_dir.join("renamed.sublime-project");
         w.save_project_as(new.clone()).unwrap();
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(&new).unwrap()).unwrap();
-        assert_eq!(saved["folders"][0]["path"], "../old/src");
+        assert_eq!(
+            Path::new(saved["folders"][0]["path"].as_str().unwrap()),
+            Path::new("../old/src"),
+        );
         assert_eq!(saved["folders"][0]["custom_folder"]["keep"], 7);
         assert_eq!(saved["custom_project"], 42);
         for key in [

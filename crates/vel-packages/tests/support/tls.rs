@@ -41,6 +41,8 @@ impl Server {
         let ready = root.path().join("ready");
         let python = if cfg!(target_os = "macos") {
             "/usr/bin/python3"
+        } else if cfg!(windows) {
+            "python"
         } else {
             "python3"
         };

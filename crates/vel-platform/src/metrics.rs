@@ -75,9 +75,11 @@ pub fn rss_bytes() -> Result<u64, String> {
             ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
             Threading::GetCurrentProcess,
         };
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
         let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        counters.cb = size;
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: size,
+            ..Default::default()
+        };
         // SAFETY: the pseudo-handle and the initialized output buffer are valid for this call.
         if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } == 0 {
             return Err(std::io::Error::last_os_error().to_string());

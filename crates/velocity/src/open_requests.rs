@@ -951,8 +951,11 @@ mod round15_tests {
     fn primary_takeover_keeps_inflight_and_all_later_native_batches_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let request = Request::new(&Options::default(), None).unwrap();
-        let Start::Primary(instance) = Instance::start_fixture(dir.path(), &request).unwrap()
-        else {
+        #[cfg(unix)]
+        let start = Instance::start_fixture(dir.path(), &request);
+        #[cfg(windows)]
+        let start = Instance::start(Some(dir.path()), &request);
+        let Start::Primary(instance) = start.unwrap() else {
             panic!("primary")
         };
         let now = Instant::now();

@@ -1,12 +1,16 @@
 //! Only fixed buffers and POSIX async-signal-safe calls are used in `handle`.
 #[cfg(unix)]
 use std::{
-    fs,
+    fs, io,
     os::fd::IntoRawFd,
-    sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering},
+    path::Path,
+    sync::{
+        Mutex,
+        atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering},
+    },
 };
-use std::{io, path::Path, sync::Mutex};
 
+#[cfg(unix)]
 static ACTIVE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 #[cfg(unix)]
 static FD: AtomicI32 = AtomicI32::new(-1);

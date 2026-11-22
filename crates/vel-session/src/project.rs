@@ -196,6 +196,10 @@ mod tests {
     use super::*;
     #[test]
     fn save_as_rebases_a_relative_project_filename_and_retains_folder_extensions() {
+        // On Windows the CI checkout and the system temp directory can be on different drives.
+        #[cfg(windows)]
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(not(windows))]
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
         std::fs::create_dir(dir.path().join("new")).unwrap();
