@@ -138,6 +138,15 @@ moves or another app becomes frontmost):
 | Black-box comparison with Sublime 4215 | Same keystrokes, saved files compared (`scripts/blackbox-behavior-probe.sh`). Join Lines, embedded-language comments, verbatim block markers and the German-layout menu shortcut now follow Sublime (unit tests reproduce the Sublime outputs). Regex `^` replace already matched; `(?=b)` lookahead is not supported by Velocity's regex engine (Sublime: `a-bc`). With several carets Sublime shows the composing Pinyin at every caret; Velocity only at the primary one. |
 | Evidence for U01 / U04 | Sublime opened with three files shows no sidebar; opened with a folder it shows an empty editor without a tab, and Goto Anything previews a file without adding a tab. Velocity shows the sidebar and an untitled tab, and previews in an italic tab (the user chose "keep" for both before this evidence). |
 
+Third run (2026-11-22, 12:35–12:55, at the user's request "跑复核"):
+
+| Area | Result |
+| --- | --- |
+| Multi-caret Pinyin (round 40) | Verified natively: three carets each show underlined `ni hao` while composing; Space commits `你好` at all three; one ⌘Z removes it; Esc discards. |
+| Find-field underline (round 40) | Verified natively: the marked-text underline under `ni hao` in the Find field is clearly visible in the light theme. |
+| German layout ⌘ß (0fe1911) | **Failed natively, then fixed:** AppKit rewrites the menu item's own key equivalent to the relocated one (`ß`), so comparing it with the pressed key treated the chord as declined. The check now compares against the equivalent Velocity installed (`/`). Verified natively with `f4d5f88`: ⌘ß toggles `# x = 1` on and off on German; ⌘/ still toggles on US. |
+| U01 / U04 side by side with Sublime 4215 | Matches: files only (tabs, no sidebar), folder only (FOLDERS, no tab, `… — folder` title), Goto preview without a tab, Escape back to the tabless window, Return opens one tab. Differences sent to round 43: empty-window title (`Velocity` vs `untitled`), no folder-tree highlight of the active/previewed file, "Show Open Files" on by default (Sublime: off), static "Show Side Bar ✓" caption (Sublime: dynamic "Hide Side Bar"), absolute instead of folder-relative Goto detail paths. |
+
 Still manual: VoiceOver speech itself (the tree was checked, not the voice), light/dark switch
 (covered by render scenes), native recheck of the German-layout fix, and the Round 35/36 tables.
 
