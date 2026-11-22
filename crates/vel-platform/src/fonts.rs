@@ -1,5 +1,9 @@
 //! CoreText fallback selection behind a device-free interface.
 use std::{collections::HashMap, path::PathBuf};
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{font_named, font_style};
 
 /// Font bytes retained independently of replaceable user font files.
 #[derive(Debug)]
@@ -177,7 +181,14 @@ impl FontFallback for SystemFontFallback {
     fn resolve_cluster(&mut self, _: &str, cluster: &str) -> Option<FontDescriptor> {
         // CTFontCreateForString receives the whole presentation sequence. Starting
         // with the emoji face prevents text cmap coverage swallowing VS16/keycaps.
-        system_face("AppleColorEmoji", cluster)
+        system_face(
+            if cfg!(windows) {
+                "Segoe UI Emoji"
+            } else {
+                "AppleColorEmoji"
+            },
+            cluster,
+        )
     }
     fn resolve_text_cluster(&mut self, primary: &str, cluster: &str) -> Option<FontDescriptor> {
         // Let CoreText evaluate VS15 with the primary's text cascade, including its
@@ -242,7 +253,9 @@ fn system_face(primary: &str, text: &str) -> Option<FontDescriptor> {
             native: Some(CascadeFont(font)),
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return windows::fallback(primary, text);
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (primary, text);
         None

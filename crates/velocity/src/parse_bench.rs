@@ -63,18 +63,23 @@ pub fn wait(workspace: &mut Workspace) -> Result<(), String> {
     }
 }
 pub fn cpu_ms() -> Result<f64, String> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: getrusage writes one rusage into the valid out pointer on success.
-    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+    #[cfg(windows)]
+    return vel_platform::metrics::process_cpu_ms();
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        // SAFETY: getrusage writes one rusage into the valid out pointer on success.
+        let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        // SAFETY: the successful getrusage initialized all fields.
+        let usage = unsafe { usage.assume_init() };
+        Ok(
+            (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64 * 1000.
+                + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64 / 1000.,
+        )
     }
-    // SAFETY: the successful getrusage initialized all fields.
-    let usage = unsafe { usage.assume_init() };
-    Ok(
-        (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64 * 1000.
-            + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64 / 1000.,
-    )
 }
 pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
     Assets::bundled()?;

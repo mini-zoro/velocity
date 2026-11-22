@@ -1069,6 +1069,7 @@ impl ThemeUi {
             style.size.to_bits().hash(&mut h);
             (style.font.bold, style.font.italic).hash(&mut h);
             (std::rc::Rc::as_ptr(&self.metrics) as usize).hash(&mut h);
+            #[cfg(target_os = "macos")]
             self.metrics.native_enabled().hash(&mut h);
             h.finish()
         };

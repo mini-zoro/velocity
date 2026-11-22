@@ -4,6 +4,11 @@ pub mod atomic;
 mod decoding;
 mod identity;
 mod save;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows;
+#[cfg(windows)]
+pub use windows::trash;
 #[cfg(unix)]
 mod save_journal;
 pub use identity::content_identity;
@@ -45,11 +50,15 @@ pub enum LineEnding {
     Cr,
 }
 impl LineEnding {
+    /// Operating system convention for new files without ending evidence.
+    pub const fn system() -> Self {
+        if cfg!(windows) { Self::CrLf } else { Self::Lf }
+    }
     /// Parses Sublime's public setting/command spelling.
     pub fn parse(name: &str) -> Result<Self, String> {
         match name.to_lowercase().as_str() {
-            // The macOS system convention is LF.
-            "unix" | "lf" | "system" => Ok(Self::Lf),
+            "system" => Ok(Self::system()),
+            "unix" | "lf" => Ok(Self::Lf),
             "windows" | "crlf" => Ok(Self::CrLf),
             "mac" | "cr" => Ok(Self::Cr),
             _ => Err(format!("unknown line ending {name}")),
@@ -101,7 +110,7 @@ impl Default for Format {
             encoding: "UTF-8".into(),
             display_name: None,
             bom: false,
-            line_ending: LineEnding::Lf,
+            line_ending: LineEnding::system(),
         }
     }
 }
@@ -165,7 +174,7 @@ impl Default for DecodeOptions {
             legacy_text_fingerprint: None,
             legacy_format: None,
             fallback_encoding: "Western (Windows 1252)".into(),
-            default_line_ending: LineEnding::Lf,
+            default_line_ending: LineEnding::system(),
         }
     }
 }
@@ -175,7 +184,7 @@ impl DecodeOptions {
         Self {
             fallback_encoding: settings.fallback_encoding.clone(),
             default_line_ending: LineEnding::parse(&settings.default_line_ending)
-                .unwrap_or_default(),
+                .unwrap_or_else(|_| LineEnding::system()),
             ..Self::default()
         }
     }
@@ -911,7 +920,7 @@ fn same_entry(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     a.dev() == b.dev() && a.ino() == b.ino()
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn same_entry(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
     false
 }
@@ -920,7 +929,11 @@ fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(std::io::Error::from)
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    windows::move_file(from, to, false)
+}
+#[cfg(not(any(unix, windows)))]
 fn exclusive_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     if fs::symlink_metadata(to).is_ok() {
         return Err(std::io::Error::new(

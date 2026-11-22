@@ -301,6 +301,10 @@ impl Pixels {
     }
 }
 
+pub(crate) fn image_fallback_note(tr: &vel_i18n::Translator) -> std::borrow::Cow<'static, str> {
+    tr.tr("Not shown as an image: unsupported or damaged")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

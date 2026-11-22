@@ -1,4 +1,13 @@
 //! CoreText discovery and bitmap fallback, adapted from the MIT/Apache P0 prototype.
+#[cfg(windows)]
+pub type NativeFont = vel_platform::fonts::FontDescriptor;
+
+#[cfg(windows)]
+pub fn font_location(name: &str) -> Result<(std::path::PathBuf, String, NativeFont), String> {
+    let face = vel_platform::fonts::font_named(name)
+        .ok_or_else(|| format!("Windows font family {name} is unavailable"))?;
+    Ok((face.path.clone(), face.postscript_name.clone(), face))
+}
 #[cfg(target_os = "macos")]
 pub fn font_location(name: &str) -> Result<(std::path::PathBuf, String, NativeFont), String> {
     use objc2_core_foundation::{CFString, CFURL};
@@ -135,13 +144,15 @@ pub fn font_variation(_: &NativeFont) -> Vec<(u32, f32)> {
     Vec::new()
 }
 
-/// Font variants require CoreText on the native platform.
-#[cfg(not(target_os = "macos"))]
+/// Resolves file-backed weights and styles from the Windows system font set.
+#[cfg(windows)]
 pub fn font_variant(
-    _: &NativeFont,
-    _: crate::scene::FontStyle,
+    original: &NativeFont,
+    style: crate::scene::FontStyle,
 ) -> Result<(std::path::PathBuf, String, NativeFont), String> {
-    Err("CoreText unavailable".into())
+    let face = vel_platform::fonts::font_style(original, style.bold, style.italic)
+        .ok_or("font family has no requested weight/slant")?;
+    Ok((face.path.clone(), face.postscript_name.clone(), face))
 }
 
 /// Rasterize an OS font glyph when swash cannot read that font's outline/bitmap format.
@@ -259,6 +270,7 @@ pub fn raster_glyph(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn unpremultiply(data: &mut [u8]) {
     for pixel in data.as_chunks_mut::<4>().0 {
         let a = pixel[3] as u32;

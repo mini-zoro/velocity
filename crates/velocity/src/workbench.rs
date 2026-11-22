@@ -77,7 +77,7 @@ pub(crate) fn restore_settings_tab(
 }
 
 pub fn remember(list: &mut Vec<PathBuf>, path: PathBuf) {
-    list.retain(|p| *p != path);
+    list.retain(|p| !vel_config::paths::equal(p, &path));
     list.insert(0, path);
     list.truncate(100);
 }

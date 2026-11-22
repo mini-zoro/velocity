@@ -895,7 +895,7 @@ impl View {
             let mut label =
                 theme.style(e.ui_id(0xE304), &vel_theme::ElementPath(&path), &e.settings);
             label.foreground = colors.muted;
-            let text = crate::app::image_fallback_note(&e.translations);
+            let text = crate::image_decode::image_fallback_note(&e.translations);
             let width = theme.advance(&label, &text) + 20. * s;
             let height = (22. * s).round();
             let rect = Rect {

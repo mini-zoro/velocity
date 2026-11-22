@@ -2,11 +2,19 @@
 use crate::{cli::Options, instance::Stdin};
 use std::{io::Read, path::Path};
 
+#[cfg(all(test, windows))]
+use windows_sys::Win32::Storage::FileSystem::FILE_TYPE_CHAR as DEVICE;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK as REGULAR, FILE_TYPE_PIPE as PIPE};
+#[cfg(unix)]
+const PIPE: u32 = libc::S_IFIFO as u32;
+#[cfg(unix)]
+const REGULAR: u32 = libc::S_IFREG as u32;
+#[cfg(all(test, unix))]
+const DEVICE: u32 = libc::S_IFCHR as u32;
+
 fn wants_input(explicit: bool, has_files: bool, launch_services: bool, file_type: u32) -> bool {
-    explicit
-        || (!has_files
-            && !launch_services
-            && [u32::from(libc::S_IFIFO), u32::from(libc::S_IFREG)].contains(&file_type))
+    explicit || (!has_files && !launch_services && [PIPE, REGULAR].contains(&file_type))
 }
 
 pub fn read(
@@ -18,6 +26,7 @@ pub fn read(
     if gui_child && !explicit {
         return Ok(None);
     }
+    #[cfg(unix)]
     // SAFETY: fstat initializes the provided stat when it returns success.
     let kind = unsafe {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -26,6 +35,15 @@ pub fn read(
         } else {
             0
         }
+    };
+    #[cfg(windows)]
+    let kind = {
+        use windows_sys::Win32::{
+            Storage::FileSystem::GetFileType,
+            System::Console::{GetStdHandle, STD_INPUT_HANDLE},
+        };
+        // SAFETY: query the process standard input without closing the borrowed handle.
+        unsafe { GetFileType(GetStdHandle(STD_INPUT_HANDLE)) }
     };
     if !wants_input(explicit, !options.files.is_empty(), launch_services, kind) {
         return Ok(None);
@@ -49,16 +67,13 @@ mod tests {
     use super::*;
     #[test]
     fn implicit_stdin_requires_no_files_and_a_redirected_stream() {
-        let pipe = u32::from(libc::S_IFIFO);
-        let regular = u32::from(libc::S_IFREG);
-        let device = u32::from(libc::S_IFCHR);
         for (explicit, files, native, kind, expected) in [
-            (true, true, false, device, true),
-            (false, false, false, pipe, true),
-            (false, false, false, regular, true),
-            (false, false, false, device, false),
-            (false, false, true, pipe, false),
-            (false, true, false, pipe, false),
+            (true, true, false, DEVICE, true),
+            (false, false, false, PIPE, true),
+            (false, false, false, REGULAR, true),
+            (false, false, false, DEVICE, false),
+            (false, false, true, PIPE, false),
+            (false, true, false, PIPE, false),
         ] {
             assert_eq!(wants_input(explicit, files, native, kind), expected);
         }

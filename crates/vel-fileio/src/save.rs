@@ -135,7 +135,7 @@ pub fn save_report_with_expected(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 fn replace(
     path: &Path,
     prefer_rename: bool,
@@ -211,11 +211,17 @@ fn replace_target(
     let existing = regular::metadata(target, true)?;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let _ = (prefer_rename, profile);
+    #[cfg(not(any(unix, windows)))]
     let _ = (prefer_rename, profile, expected_disk);
     #[cfg(not(target_os = "macos"))]
     let _ = (exact_len, encoded.map(|image| (image.bytes, image.content)));
     let Some(mut expected) = existing else {
+        #[cfg(windows)]
+        if expected_disk.is_some() {
+            return Err(changed(target));
+        }
         #[cfg(unix)]
         let mode = Some(fs::Permissions::from_mode(0o666));
         #[cfg(not(unix))]
@@ -242,6 +248,10 @@ fn replace_target(
         {
             return Err(regular::error(target, "file is locked or append-only"));
         }
+    }
+    #[cfg(windows)]
+    if expected.permissions().readonly() {
+        return Err(regular::error(target, "file is read-only"));
     }
     let writable = regular::writable(target)?;
     let opened = writable.metadata().map_err(error)?;
@@ -330,10 +340,19 @@ fn replace_target(
     }
     #[cfg(not(unix))]
     metadata.map_err(error)?;
+    #[cfg(windows)]
+    super::windows::copy_dacl(source.as_ref().expect("metadata source"), stage.path())
+        .map_err(error)?;
     // POSIX has no compare-and-replace rename; an external writer can still race commit.
     check_target(target, &expected)?;
     if rename {
         stage.sync(Durability::Full).map_err(error)?;
+        #[cfg(windows)]
+        if let Some(disk) = expected_disk
+            && crate::content_identity(target)? != Some(disk)
+        {
+            return Err(changed(target));
+        }
         check_target(target, &expected)?;
         match stage.replace_existing(target) {
             Ok(published) => {

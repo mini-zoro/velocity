@@ -16,13 +16,10 @@ impl Variables {
             if let Some(path) = path {
                 result
                     .0
-                    .insert(prefix.into(), path.to_string_lossy().into_owned());
+                    .insert(prefix.into(), vel_config::paths::display(path));
                 result.0.insert(
                     format!("{prefix}_path"),
-                    path.parent()
-                        .unwrap_or(Path::new(""))
-                        .to_string_lossy()
-                        .into_owned(),
+                    vel_config::paths::display(path.parent().unwrap_or(Path::new(""))),
                 );
                 result.0.insert(
                     format!("{prefix}_name"),
@@ -51,7 +48,7 @@ impl Variables {
             if let Some(path) = path {
                 result
                     .0
-                    .insert(key.into(), path.to_string_lossy().into_owned());
+                    .insert(key.into(), vel_config::paths::display(path));
             }
         }
         result.0.insert(
@@ -123,7 +120,7 @@ impl Variables {
                 if i == start {
                     out.push('$');
                 } else {
-                    out.push_str(self.0.get(&source[start..i]).map_or("", String::as_str));
+                    out.push_str(self.value(&source[start..i]));
                 }
             }
         }
@@ -132,7 +129,7 @@ impl Variables {
     fn expression(&self, expression: &str, depth: usize) -> Result<String, String> {
         let end = expression.find([':', '/']).unwrap_or(expression.len());
         let name = &expression[..end];
-        let value = self.0.get(name).map_or("", String::as_str);
+        let value = self.value(name);
         let tail = &expression[end..];
         if let Some(default) = tail.strip_prefix(':') {
             return if value.is_empty() {
@@ -160,5 +157,15 @@ impl Variables {
             return Ok(expansion.edits[0].text.clone());
         }
         Ok(value.into())
+    }
+    fn value(&self, name: &str) -> &str {
+        if let Some(value) = self.0.get(name) {
+            return value;
+        }
+        #[cfg(windows)]
+        if let Some(value) = self.0.get(&name.to_uppercase()) {
+            return value;
+        }
+        ""
     }
 }

@@ -132,7 +132,12 @@ impl Stage {
                     Err(e)
                 }
             })?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            super::windows::publish(self.path(), path, false)?;
+            self.retain();
+        }
+        #[cfg(not(any(unix, windows)))]
         self.0.persist_noclobber(path).map_err(|e| e.error)?;
         Ok(published(path))
     }
@@ -170,6 +175,9 @@ impl Stage {
     pub(crate) fn replace_existing(&mut self, path: &Path) -> io::Result<Published> {
         fault(Point::Publish)?;
         fault(Point::Replace)?;
+        #[cfg(windows)]
+        super::windows::publish(self.path(), path, true)?;
+        #[cfg(not(windows))]
         fs::rename(self.path(), path)?;
         self.retain();
         Ok(published(path))

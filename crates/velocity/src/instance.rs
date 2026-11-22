@@ -4,6 +4,7 @@ use crate::{
     workspace::Workspace,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd},
     unix::{
@@ -12,27 +13,42 @@ use std::os::{
         process::CommandExt,
     },
 };
+#[cfg(unix)]
 use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
     hash::{Hash, Hasher},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::SystemTime,
+};
+use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    time::{Duration, Instant, SystemTime},
+    sync::{OnceLock, mpsc},
+    time::{Duration, Instant},
 };
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+use win::Pipe as ReplyStream;
+#[cfg(windows)]
+pub use win::{Claim, Instance, Start};
+#[cfg(unix)]
+type ReplyStream = UnixStream;
 
 #[cfg(target_os = "macos")]
 mod legacy_process;
 
 const MAX_REQUEST: u64 = 64 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
 const PRIMARY_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(unix)]
 const SOCKET_CHECK: Duration = Duration::from_millis(500);
+#[cfg(unix)]
 pub const INHERITED_LOCK: &str = "VELOCITY_INSTANCE_LOCK_FD";
 const ENQUEUED: u8 = 1;
 const BUSY: u8 = 4;
@@ -80,7 +96,9 @@ impl From<&str> for Stdin {
 }
 impl Request {
     pub fn new(options: &Options, stdin: Option<Stdin>) -> Result<Self, String> {
+        #[cfg(unix)]
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        #[cfg(unix)]
         let absolute = |p: &Path| {
             if p.is_absolute() {
                 p.to_owned()
@@ -88,6 +106,37 @@ impl Request {
                 cwd.join(p)
             }
         };
+        #[cfg(windows)]
+        return Ok(Self {
+            native_open: false,
+            files: options
+                .files
+                .iter()
+                .filter(|f| f.path != Path::new("-"))
+                .map(|f| {
+                    Ok(FileLocation {
+                        path: std::path::absolute(&f.path).map_err(|e| e.to_string())?,
+                        line: f.line,
+                        column: f.column,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+            project: options
+                .project
+                .as_ref()
+                .map(std::path::absolute)
+                .transpose()
+                .map_err(|e| e.to_string())?,
+            new_window: options.new_window || options.launch_or_new_window,
+            add: options.add_to_window,
+            wait: options.wait || stdin.is_some(),
+            stdin,
+            background: options.background,
+            stay: options.stay,
+            command: options.command.clone(),
+            return_pid: None,
+        });
+        #[cfg(unix)]
         Ok(Self {
             native_open: false,
             files: options
@@ -112,11 +161,10 @@ impl Request {
         })
     }
 }
-#[cfg(unix)]
 #[derive(Debug)]
 pub struct Incoming {
     pub request: Request,
-    reply: Option<mpsc::Receiver<UnixStream>>,
+    reply: Option<mpsc::Receiver<ReplyStream>>,
 }
 impl Incoming {
     pub fn local(request: Request) -> Self {
@@ -125,7 +173,7 @@ impl Incoming {
             reply: None,
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn fixture(request: Request, mut stream: UnixStream) -> Self {
         let (tx, rx) = mpsc::sync_channel(1);
         stream.write_all(&[1]).unwrap();
@@ -134,17 +182,15 @@ impl Incoming {
         Self { request, reply }
     }
 }
-#[cfg(unix)]
 #[derive(Debug)]
 pub struct Waiter {
     ids: std::collections::BTreeSet<u64>,
-    reply: Option<mpsc::Receiver<UnixStream>>,
+    reply: Option<mpsc::Receiver<ReplyStream>>,
     stdin_sheet: Option<u64>,
     stdin_output: bool,
     stdin_text: vel_text::Text,
     stdin_format: vel_fileio::Format,
 }
-#[cfg(unix)]
 impl Waiter {
     pub fn acknowledge(
         incoming: Incoming,
@@ -272,6 +318,7 @@ pub enum Forward {
     Submitted(Result<(), String>),
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct Claim {
     path: PathBuf,
@@ -279,11 +326,137 @@ pub struct Claim {
     lock: File,
     starting: Option<Starting>,
 }
+fn submit(
+    mut stream: ReplyStream,
+    request: &Request,
+    timeout: Duration,
+    reopen: impl Fn() -> Option<ReplyStream>,
+    accepted: impl FnOnce(),
+    upgrade: Option<&str>,
+) -> Result<(), String> {
+    let mut acknowledged = false;
+    let submit = (|| {
+        let bytes = serde_json::to_vec(request).map_err(io::Error::other)?;
+        if bytes.len() as u64 > MAX_REQUEST {
+            return Err(io::Error::other(
+                "request exceeds the local protocol size limit",
+            ));
+        }
+        let until = Instant::now() + timeout;
+        let busy = || io::Error::other("the editor is busy; request was not accepted");
+        // Once the primary has explicitly answered BUSY, a later timeout or
+        // failed reconnect still means "busy", not an opaque I/O error.
+        let mut was_busy = false;
+        loop {
+            let attempt = (|| {
+                let remaining = until
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1));
+                stream.set_read_timeout(Some(remaining))?;
+                stream.set_write_timeout(Some(remaining))?;
+                stream.write_all(&(bytes.len() as u64).to_le_bytes())?;
+                stream.write_all(&bytes)?;
+                let mut ack = [0];
+                stream.read_exact(&mut ack)?;
+                Ok::<u8, io::Error>(ack[0])
+            })();
+            let ack = match attempt {
+                Ok(ack) => ack,
+                Err(_) if was_busy => return Err(busy()),
+                Err(error) => return Err(error),
+            };
+            match ack {
+                ENQUEUED => break,
+                BUSY => {
+                    was_busy = true;
+                    let remaining = until.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(busy());
+                    }
+                    std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                    if Instant::now() >= until {
+                        return Err(busy());
+                    }
+                    stream = reopen().ok_or_else(busy)?;
+                }
+                _ => return Err(io::Error::other("invalid enqueue acknowledgement")),
+            }
+        }
+        acknowledged = true;
+        accepted();
+        if request.wait {
+            let closed = || io::Error::other("connection to the editor closed");
+            // Darwin can reject SO_RCVTIMEO after the peer exits. Its close
+            // acknowledgement may still be buffered, so read before failing.
+            if let Err(error) = stream.set_read_timeout(None)
+                && !invalid_timeout(&error)
+                && error.kind() != io::ErrorKind::NotConnected
+            {
+                return Err(error);
+            }
+            let read_error = |error: io::Error| match error.kind() {
+                io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::NotConnected => closed(),
+                _ => error,
+            };
+            let mut ack = [0];
+            stream.read_exact(&mut ack).map_err(read_error)?;
+            if ack == [3] {
+                let mut message = String::new();
+                stream.take(4096).read_to_string(&mut message)?;
+                return Err(io::Error::other(message));
+            }
+            if ack != [2] {
+                return Err(io::Error::other("invalid close acknowledgement"));
+            }
+            if request.stdin.is_some() {
+                let mut size = [0; 8];
+                stream.read_exact(&mut size).map_err(read_error)?;
+                let expected = u64::from_le_bytes(size);
+                let mut stdout = io::stdout().lock();
+                let copied = io::copy(&mut stream.take(expected), &mut stdout)?;
+                if copied != expected {
+                    return Err(io::Error::other("truncated edited stdin response"));
+                }
+                stdout.flush()?;
+            }
+            #[cfg(target_os = "macos")]
+            if !request.background
+                && !request.stay
+                && let Some(pid) = request.return_pid
+            {
+                vel_platform::Platform::activate_pid(pid);
+            }
+        }
+        Ok(())
+    })();
+    submit.map_err(|error| match (acknowledged, upgrade) {
+        (true, _) => error.to_string(),
+        (false, Some(upgrade)) => {
+            format!("could not forward to the previous editor: {error}; {upgrade}")
+        }
+        (false, None) => format!("request sent to the editor: {error}"),
+    })
+}
+
+fn invalid_timeout(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::EINVAL)
+    }
+    #[cfg(windows)]
+    {
+        error.kind() == io::ErrorKind::InvalidInput
+    }
+}
+
 pub enum Entry {
     Forwarded,
     Claimed(Claim),
 }
 
+#[cfg(unix)]
 fn private_endpoint(path: PathBuf, uid: u32) -> io::Result<PathBuf> {
     if path.as_os_str().len() > 103 {
         return Err(io::Error::other(
@@ -325,11 +498,12 @@ fn user_temp() -> io::Result<PathBuf> {
         Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn user_temp() -> io::Result<PathBuf> {
     Ok(std::env::temp_dir())
 }
 
+#[cfg(unix)]
 fn choose_endpoint(
     path: PathBuf,
     uid: u32,
@@ -352,6 +526,7 @@ fn choose_endpoint(
 
 // 2026-11-19: retain this exact pre-flock lookup for at least two releases.
 // 5497418 hashed Option<PathBuf> without canonicalizing away symlinks or `..`.
+#[cfg(unix)]
 fn legacy_path(data: Option<&Path>, uid: u32, tmp: &Path) -> PathBuf {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     let data = data.map(|p| {
@@ -365,12 +540,14 @@ fn legacy_path(data: Option<&Path>, uid: u32, tmp: &Path) -> PathBuf {
     tmp.join(format!("velocity-{uid}-{:016x}.sock", hash.finish()))
 }
 
+#[cfg(unix)]
 struct Endpoints {
     socket: PathBuf,
     lock: PathBuf,
     legacy: Vec<PathBuf>,
 }
 
+#[cfg(unix)]
 impl Endpoints {
     fn new(data: Option<&Path>, isolated: Option<&Path>) -> io::Result<Self> {
         use crate::instance_path::{canonical_profile, socket_path};
@@ -452,7 +629,7 @@ impl Endpoints {
                     format!("the previous editor only accepts UTF-8 from stdin; {UPGRADE}")
                 })?));
             }
-            return Instance::submit(
+            return submit(
                 stream,
                 &request,
                 TIMEOUT,
@@ -466,6 +643,7 @@ impl Endpoints {
     }
 }
 
+#[cfg(unix)]
 fn socket_identity(path: &Path, uid: u32) -> io::Result<(u64, u64)> {
     let meta = path.symlink_metadata()?;
     if meta.file_type().is_socket() && meta.uid() == uid {
@@ -477,6 +655,7 @@ fn socket_identity(path: &Path, uid: u32) -> io::Result<(u64, u64)> {
     }
 }
 
+#[cfg(unix)]
 fn legacy_connection(path: &Path, uid: u32) -> Result<Option<UnixStream>, String> {
     // An absent endpoint needs no retry: enter checks again after taking the lock.
     let Ok(identity) = socket_identity(path, uid) else {
@@ -519,12 +698,14 @@ fn legacy_connection(path: &Path, uid: u32) -> Result<Option<UnixStream>, String
     }
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct Starting {
     path: PathBuf,
     identity: (u64, u64),
 }
 
+#[cfg(unix)]
 impl Starting {
     fn path(socket: &Path) -> PathBuf {
         socket.with_extension("starting")
@@ -579,6 +760,7 @@ impl Starting {
     }
 }
 
+#[cfg(unix)]
 impl Claim {
     pub fn path(&self) -> &Path {
         &self.path
@@ -732,12 +914,14 @@ impl Claim {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Claim {
     fn drop(&mut self) {
         self.clear_starting();
     }
 }
 
+#[cfg(unix)]
 struct BoundSocket {
     listener: UnixListener,
     path: PathBuf,
@@ -745,6 +929,7 @@ struct BoundSocket {
     identity: Option<(u64, u64)>,
 }
 
+#[cfg(unix)]
 impl BoundSocket {
     fn bind(path: &Path) -> io::Result<Self> {
         // SAFETY: side-effect-free identity query.
@@ -763,6 +948,7 @@ impl BoundSocket {
     }
 }
 
+#[cfg(unix)]
 impl Drop for BoundSocket {
     fn drop(&mut self) {
         if self.identity.is_some() && socket_identity(&self.path, self.uid).ok() == self.identity {
@@ -771,6 +957,7 @@ impl Drop for BoundSocket {
     }
 }
 
+#[cfg(unix)]
 fn serve(
     mut socket: BoundSocket,
     wake: UnixStream,
@@ -863,6 +1050,7 @@ fn serve(
     }
 }
 
+#[cfg(unix)]
 fn read_request(
     stream: &mut UnixStream,
     mut buf: &mut [u8],
@@ -890,6 +1078,7 @@ fn read_request(
 }
 
 /// Main-thread receiver; the listener owns no native handles.
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct Instance {
     rx: mpsc::Receiver<Incoming>,
@@ -899,11 +1088,13 @@ pub struct Instance {
     // A failed listener must not unlock a still-live GUI.
     _lock: File,
 }
+#[cfg(unix)]
 pub enum Start {
     Forwarded,
     Primary(Instance),
 }
 
+#[cfg(unix)]
 impl Instance {
     pub fn forward(path: &Path, request: &Request) -> Result<Forward, String> {
         Self::forward_with_ack(path, request, TIMEOUT, || {})
@@ -930,7 +1121,7 @@ impl Instance {
         let Some(stream) = open()? else {
             return Ok(Forward::NotRunning);
         };
-        Ok(Forward::Submitted(Self::submit(
+        Ok(Forward::Submitted(submit(
             stream,
             request,
             timeout,
@@ -938,120 +1129,6 @@ impl Instance {
             accepted,
             None,
         )))
-    }
-
-    fn submit(
-        mut stream: UnixStream,
-        request: &Request,
-        timeout: Duration,
-        reopen: impl Fn() -> Option<UnixStream>,
-        accepted: impl FnOnce(),
-        upgrade: Option<&str>,
-    ) -> Result<(), String> {
-        let mut acknowledged = false;
-        let submit = (|| {
-            let bytes = serde_json::to_vec(request).map_err(io::Error::other)?;
-            if bytes.len() as u64 > MAX_REQUEST {
-                return Err(io::Error::other(
-                    "request exceeds the local protocol size limit",
-                ));
-            }
-            let until = Instant::now() + timeout;
-            let busy = || io::Error::other("the editor is busy; request was not accepted");
-            // Once the primary has explicitly answered BUSY, a later timeout or
-            // failed reconnect still means "busy", not an opaque I/O error.
-            let mut was_busy = false;
-            loop {
-                let attempt = (|| {
-                    let remaining = until
-                        .saturating_duration_since(Instant::now())
-                        .max(Duration::from_millis(1));
-                    stream.set_read_timeout(Some(remaining))?;
-                    stream.set_write_timeout(Some(remaining))?;
-                    stream.write_all(&(bytes.len() as u64).to_le_bytes())?;
-                    stream.write_all(&bytes)?;
-                    let mut ack = [0];
-                    stream.read_exact(&mut ack)?;
-                    Ok::<u8, io::Error>(ack[0])
-                })();
-                let ack = match attempt {
-                    Ok(ack) => ack,
-                    Err(_) if was_busy => return Err(busy()),
-                    Err(error) => return Err(error),
-                };
-                match ack {
-                    ENQUEUED => break,
-                    BUSY => {
-                        was_busy = true;
-                        let remaining = until.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            return Err(busy());
-                        }
-                        std::thread::sleep(remaining.min(Duration::from_millis(50)));
-                        if Instant::now() >= until {
-                            return Err(busy());
-                        }
-                        stream = reopen().ok_or_else(busy)?;
-                    }
-                    _ => return Err(io::Error::other("invalid enqueue acknowledgement")),
-                }
-            }
-            acknowledged = true;
-            accepted();
-            if request.wait {
-                let closed = || io::Error::other("connection to the editor closed");
-                // Darwin can reject SO_RCVTIMEO after the peer exits. Its close
-                // acknowledgement may still be buffered, so read before failing.
-                if let Err(error) = stream.set_read_timeout(None)
-                    && error.raw_os_error() != Some(libc::EINVAL)
-                    && error.kind() != io::ErrorKind::NotConnected
-                {
-                    return Err(error);
-                }
-                let read_error = |error: io::Error| match error.kind() {
-                    io::ErrorKind::UnexpectedEof
-                    | io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::NotConnected => closed(),
-                    _ => error,
-                };
-                let mut ack = [0];
-                stream.read_exact(&mut ack).map_err(read_error)?;
-                if ack == [3] {
-                    let mut message = String::new();
-                    stream.take(4096).read_to_string(&mut message)?;
-                    return Err(io::Error::other(message));
-                }
-                if ack != [2] {
-                    return Err(io::Error::other("invalid close acknowledgement"));
-                }
-                if request.stdin.is_some() {
-                    let mut size = [0; 8];
-                    stream.read_exact(&mut size).map_err(read_error)?;
-                    let expected = u64::from_le_bytes(size);
-                    let mut stdout = io::stdout().lock();
-                    let copied = io::copy(&mut stream.take(expected), &mut stdout)?;
-                    if copied != expected {
-                        return Err(io::Error::other("truncated edited stdin response"));
-                    }
-                    stdout.flush()?;
-                }
-                #[cfg(target_os = "macos")]
-                if !request.background
-                    && !request.stay
-                    && let Some(pid) = request.return_pid
-                {
-                    vel_platform::Platform::activate_pid(pid);
-                }
-            }
-            Ok(())
-        })();
-        submit.map_err(|error| match (acknowledged, upgrade) {
-            (true, _) => error.to_string(),
-            (false, Some(upgrade)) => {
-                format!("could not forward to the previous editor: {error}; {upgrade}")
-            }
-            (false, None) => format!("request sent to the editor: {error}"),
-        })
     }
 
     pub fn enter(data: Option<&Path>, request: &Request) -> Result<Entry, String> {
@@ -1125,13 +1202,14 @@ impl Instance {
         self.rx.try_iter().collect()
     }
 }
+#[cfg(unix)]
 impl Drop for Instance {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn fixture_endpoints(root: &Path) -> Endpoints {
     let mut endpoints =
         Endpoints::new(Some(&root.join("profile")), Some(&root.join("ipc"))).unwrap();
@@ -1139,7 +1217,7 @@ fn fixture_endpoints(root: &Path) -> Endpoints {
     endpoints
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #[test]
     fn stable_endpoint_ignores_shell_tmpdir_and_canonicalizes_a_fresh_profile() {

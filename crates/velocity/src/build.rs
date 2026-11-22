@@ -652,13 +652,18 @@ mod output_mirror_tests {
     use std::time::Duration;
     /// CPU time of the calling thread: frame cost without scheduler noise on a busy machine.
     fn thread_cpu() -> Duration {
-        let mut t = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: clock_gettime writes one timespec for a valid clock id.
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
-        Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+        #[cfg(windows)]
+        return vel_platform::metrics::thread_cpu().unwrap();
+        #[cfg(unix)]
+        {
+            let mut t = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: clock_gettime writes one timespec for a valid clock id.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+            Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+        }
     }
     /// Streams `total` bytes of build output through retention trimming and the output view,
     /// one producer chunk per frame, then drains; `restart` starts a new build half way.

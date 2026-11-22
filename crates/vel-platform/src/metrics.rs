@@ -1,7 +1,7 @@
 //! Headless kernel process clocks, resident size and physical footprint.
 //! Adapted from Velocity’s MIT OR Apache-2.0 macOS P0 prototype.
 use std::time::SystemTime;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Read the kernel's process birth time, including loader work before Rust main.
@@ -32,7 +32,16 @@ pub fn process_birth() -> Result<SystemTime, String> {
             + Duration::from_secs(info.pbi_start_tvsec)
             + Duration::from_micros(info.pbi_start_tvusec))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        const EPOCH_DIFFERENCE: u64 = 116_444_736_000_000_000; // 1601 to 1970, in 100 ns ticks.
+        let (birth, _) = win_process_times()?;
+        let ticks = birth
+            .checked_sub(EPOCH_DIFFERENCE)
+            .ok_or("invalid process birth time")?;
+        Ok(UNIX_EPOCH + Duration::from_nanos(ticks * 100))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Err("process birth measurement requires macOS".into())
     }
@@ -60,10 +69,80 @@ pub fn rss_bytes() -> Result<u64, String> {
         // SAFETY: KERN_SUCCESS and the checked count confirm the structure is initialized.
         Ok(unsafe { info.assume_init() }.resident_size)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::{
+            ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+            Threading::GetCurrentProcess,
+        };
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        counters.cb = size;
+        // SAFETY: the pseudo-handle and the initialized output buffer are valid for this call.
+        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(counters.WorkingSetSize as u64)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Err("RSS measurement requires macOS task_info".into())
     }
+}
+
+#[cfg(windows)]
+fn win_process_times() -> Result<(u64, u64), String> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
+    // SAFETY: all four outputs point to distinct live FILETIME structs.
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Ok((ticks(created), ticks(kernel) + ticks(user)))
+}
+
+/// Total user and kernel CPU time for the Windows process.
+#[cfg(windows)]
+pub fn process_cpu_ms() -> Result<f64, String> {
+    Ok(win_process_times()?.1 as f64 / 10_000.)
+}
+
+/// Total user and kernel CPU time for the calling Windows thread.
+#[cfg(windows)]
+pub fn thread_cpu() -> Result<Duration, String> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentThread, GetThreadTimes},
+    };
+    let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
+    // SAFETY: all four outputs point to distinct live FILETIME structs.
+    if unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    Ok(Duration::from_nanos((ticks(kernel) + ticks(user)) * 100))
 }
 
 // Stable TASK_VM_INFO revision 1 prefix from the macOS SDK's mach/task_info.h.
@@ -123,7 +202,7 @@ pub fn phys_footprint_bytes() -> Result<u64, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("physical footprint measurement requires macOS task_info".into())
+        Err("macOS physical footprint accounting is unavailable on this platform".into())
     }
 }
 
@@ -143,15 +222,17 @@ fn checked_footprint(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", windows))]
     use super::*;
     #[test]
     fn kernel_readings_are_plausible_without_gpu() {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let birth = process_birth().unwrap();
             let age = SystemTime::now().duration_since(birth).unwrap();
             assert!(age < Duration::from_secs(3600));
             assert!(rss_bytes().unwrap() > 0);
+            #[cfg(target_os = "macos")]
             assert!(phys_footprint_bytes().unwrap() > 0);
         }
     }

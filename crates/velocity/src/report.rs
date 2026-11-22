@@ -175,12 +175,16 @@ impl Reporter {
         self.sink.is_some()
     }
     pub fn new(mode: Mode, path: Option<&Path>, entered: Instant) -> Result<Self, String> {
+        #[cfg(windows)]
+        let profile = std::env::var_os("LOCALAPPDATA");
+        #[cfg(not(windows))]
+        let profile = std::env::var_os("HOME");
         Self::in_directories(
             mode,
             path,
             entered,
             std::env::var_os("VELOCITY_LOG_DIR").as_deref(),
-            std::env::var_os("HOME").as_deref(),
+            profile.as_deref(),
         )
     }
     fn in_directories(
@@ -269,14 +273,22 @@ fn default_output_path(
     log_dir: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let default = || vel_config::paths::windows_log_dir(home);
+    #[cfg(not(windows))]
+    let default = || {
+        home.filter(|p| !p.is_empty())
+            .map(|p| Path::new(p).join("Library/Logs/Velocity"))
+    };
     let directory = log_dir
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|p| !p.is_empty())
-                .map(|p| Path::new(p).join("Library/Logs/Velocity"))
-        })
-        .ok_or("telemetry needs VELOCITY_LOG_DIR, HOME, or an explicit --output path")?;
+        .or_else(default)
+        .ok_or(if cfg!(windows) {
+            "telemetry needs VELOCITY_LOG_DIR, LOCALAPPDATA, or an explicit --output path"
+        } else {
+            "telemetry needs VELOCITY_LOG_DIR, HOME, or an explicit --output path"
+        })?;
     Ok(directory.join(format!("interactive-{run_id}-{pid}.jsonl")))
 }
 fn memory_record(
@@ -288,7 +300,7 @@ fn memory_record(
     json!({
         "kind":"memory", "phase":phase, "details":details,
         "rss_bytes":rss.as_ref().ok(), "rss_error":rss.err(),
-        "method":"task_info(MACH_TASK_BASIC_INFO).resident_size",
+        "method":if cfg!(windows) { "GetProcessMemoryInfo.WorkingSetSize" } else { "task_info(MACH_TASK_BASIC_INFO).resident_size" },
         "phys_footprint_bytes":footprint.as_ref().ok(), "phys_footprint_error":footprint.err(),
         "phys_footprint_method":"task_info(TASK_VM_INFO, REV1).phys_footprint"
     })
@@ -349,6 +361,7 @@ mod tests {
         assert!(clock.reporter.is_none());
     }
     #[test]
+    #[cfg(not(windows))]
     fn measurement_paths_use_runtime_log_directory_and_exact_name() {
         let resolve = |log_dir: Option<&str>, home: Option<&str>| {
             default_output_path("123456", 42, log_dir.map(OsStr::new), home.map(OsStr::new))

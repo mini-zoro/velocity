@@ -119,7 +119,7 @@ struct Completed {
 /// low-priority threads. All writes are serialized, stale tasks and unsaved versions are rejected.
 #[derive(Debug)]
 pub struct ProjectIndex {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     idle_counters: Arc<IdleCounters>,
     root: PathBuf,
     source_root: PathBuf,
@@ -236,16 +236,16 @@ impl ProjectIndex {
         let directory = if let Some(temp) = &temp {
             temp.path().to_owned()
         } else {
-            let dir = options.cache_dir.as_ref().map_or_else(
-                || cache_dir().join("Velocity/index"),
-                |base| base.join("velocity/index"),
-            );
+            let dir = options
+                .cache_dir
+                .as_ref()
+                .map_or_else(index_cache_dir, |base| base.join("velocity/index"));
             fs::create_dir_all(&dir)?;
             dir.canonicalize()?
         };
         let cache = directory.join(format!("{}.v6", hash.finalize().to_hex()));
         let worker = Coordinator {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             idle_counters: Arc::new(IdleCounters::default()),
             root: root.clone(),
             syntaxes,
@@ -261,7 +261,7 @@ impl ProjectIndex {
             cache,
             local_volume,
         };
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let idle_counters = worker.idle_counters.clone();
         thread::Builder::new()
             .name("velocity-index".into())
@@ -270,7 +270,7 @@ impl ProjectIndex {
                 worker.run();
             })?;
         Ok(Self {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             idle_counters,
             root,
             source_root,
@@ -376,19 +376,26 @@ impl Drop for ProjectIndex {
         self.cancel();
     }
 }
-fn cache_dir() -> PathBuf {
+#[cfg(windows)]
+fn index_cache_dir() -> PathBuf {
+    vel_config::paths::windows_cache_dir(std::env::var_os("LOCALAPPDATA").as_deref())
+        .unwrap_or_else(|| std::env::temp_dir().join("Velocity/Cache"))
+        .join("index")
+}
+#[cfg(not(windows))]
+fn index_cache_dir() -> PathBuf {
     if !cfg!(target_os = "macos")
         && let Some(path) = std::env::var_os("XDG_CACHE_HOME")
     {
-        return path.into();
+        return PathBuf::from(path).join("Velocity/index");
     }
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     if cfg!(target_os = "macos") {
-        base.join("Library/Caches")
+        base.join("Library/Caches/Velocity/index")
     } else {
-        base.join(".cache")
+        base.join(".cache/Velocity/index")
     }
 }
 #[derive(Clone, Debug)]
@@ -815,7 +822,7 @@ impl SharedPool {
     }
 }
 struct Coordinator {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     idle_counters: Arc<IdleCounters>,
     root: PathBuf,
     syntaxes: Arc<SyntaxSet>,
@@ -918,7 +925,7 @@ impl Coordinator {
         let mut aliases = Aliases::default();
         let mut flushes = Vec::new();
         while !self.cancelled.load(Ordering::Acquire) {
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             self.idle_counters.turns.fetch_add(1, Ordering::Relaxed);
             let (overflow, events) = std::mem::take(&mut *notices.lock().unwrap());
             scan |= overflow;
@@ -1490,7 +1497,7 @@ impl Coordinator {
                 if let Err(e) = journal.compact(&self.cancelled) {
                     self.log(format!("compact: {e}"));
                 }
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 self.idle_counters.stats.store(
                     crate::store::STAT_READS.with(std::cell::Cell::get),
                     Ordering::Relaxed,
@@ -1535,7 +1542,7 @@ impl Coordinator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Debug, Default)]
 struct IdleCounters {
     turns: std::sync::atomic::AtomicU64,
@@ -1597,7 +1604,7 @@ fn analyze_task(
     Ok((stamp, Some(analysis)))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod idle_tests {
     use super::*;
 

@@ -318,7 +318,7 @@ impl Default for EditorSettings {
             // Build 4142 made this configurable; retain Velocity's underscore delimiter.
             // https://www.sublimetext.com/download
             sub_word_separators: "_".into(),
-            font_face: "Menlo".into(),
+            font_face: if cfg!(windows) { "Consolas" } else { "Menlo" }.into(),
             font_size: 13.,
             line_numbers: true,
             gutter: true,

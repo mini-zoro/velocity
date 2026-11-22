@@ -929,6 +929,9 @@ pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
     if std::fs::metadata(path).is_ok_and(|m| m.is_file() || m.is_dir()) {
         return std::fs::canonicalize(path).map_err(|e| e.to_string());
     }
+    #[cfg(windows)]
+    let absolute = std::path::absolute(path).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
     let absolute = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -1229,6 +1232,10 @@ impl Configuration {
         }
         let mut resources = Resources::default();
         crate::theme_ui::bundled(&mut resources);
+        #[cfg(windows)]
+        let platform_preferences = "Preferences (Windows).sublime-settings";
+        #[cfg(not(windows))]
+        let platform_preferences = "Preferences (OSX).sublime-settings";
         for (name, source) in [
             (
                 "Distraction Free.sublime-settings",
@@ -1242,9 +1249,17 @@ impl Configuration {
                 "Preferences.sublime-settings",
                 include_str!("../resources/Packages/Default/Preferences.sublime-settings"),
             ),
+            #[cfg(not(windows))]
             (
-                "Preferences (OSX).sublime-settings",
+                platform_preferences,
                 include_str!("../resources/Packages/Default/Preferences (OSX).sublime-settings"),
+            ),
+            #[cfg(windows)]
+            (
+                platform_preferences,
+                include_str!(
+                    "../resources/Packages/Default/Preferences (Windows).sublime-settings"
+                ),
             ),
             (
                 "Velocity.sublime-keymap",
@@ -1374,9 +1389,7 @@ impl Configuration {
             if (resource.path.starts_with("Packages/Default/")
                 || resource.path.starts_with("Packages/User/"))
                 && (resource.path.ends_with("/Preferences.sublime-settings")
-                    || resource
-                        .path
-                        .ends_with("/Preferences (OSX).sublime-settings"))
+                    || resource.path.rsplit('/').next() == Some(platform_preferences))
                 && let Ok(doc) = resource.text().and_then(Document::parse)
                 && let Some(values) = doc.value.get("ignored_packages").and_then(Value::as_array)
             {
@@ -1449,13 +1462,11 @@ impl Configuration {
                 "Packages/Default/Preferences.sublime-settings" => {
                     settings.replace(Layer::Default, doc.value)?
                 }
-                "Packages/Default/Preferences (OSX).sublime-settings" => {
+                path if path.strip_prefix("Packages/Default/") == Some(platform_preferences) => {
                     settings.replace(Layer::Platform, doc.value)?
                 }
                 _ => {
-                    if file == "Preferences.sublime-settings"
-                        || file == "Preferences (OSX).sublime-settings"
-                    {
+                    if file == "Preferences.sublime-settings" || file == platform_preferences {
                         user.extend(doc.value.as_object().ok_or("settings object")?.clone());
                     }
                 }
@@ -2830,7 +2841,8 @@ impl Workspace {
     }
     pub(crate) fn remember_goto_file(&mut self) {
         if let Some(path) = self.tabs[self.active].path.clone() {
-            self.goto_recent_files.retain(|other| other != &path);
+            self.goto_recent_files
+                .retain(|other| !vel_config::paths::equal(other, &path));
             self.goto_recent_files.insert(0, path);
             self.goto_recent_files.truncate(100);
         }
@@ -2895,7 +2907,10 @@ impl Workspace {
     fn open_tab_for_path(&self, path: &Path) -> Option<usize> {
         self.tabs.iter().position(|tab| {
             !tab.goto_preview
-                && (tab.path.as_deref() == Some(path)
+                && (tab
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| vel_config::paths::equal(p, path))
                     || (tab.load_failed
                         && tab
                             .path
@@ -3989,7 +4004,11 @@ impl Workspace {
                     // User resource changes must preserve folders added at runtime. An
                     // actual project-file edit still replaces its configured folder list.
                     for mut folder in folders {
-                        if self.folders.iter().any(|f| f.path == folder.path) {
+                        if self
+                            .folders
+                            .iter()
+                            .any(|f| vel_config::paths::equal(&f.path, &folder.path))
+                        {
                             continue;
                         }
                         let patterns = |key| {
@@ -4317,6 +4336,12 @@ impl Workspace {
         }
     }
     pub fn default_data_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        return vel_config::paths::windows_data_dir(
+            std::env::var_os("VELOCITY_DATA_DIR").as_deref(),
+            std::env::var_os("APPDATA").as_deref(),
+        );
+        #[cfg(not(windows))]
         std::env::var_os("VELOCITY_DATA_DIR")
             .map(PathBuf::from)
             .or_else(|| {

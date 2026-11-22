@@ -189,6 +189,7 @@ fn edited_file() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn peak_rss() -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage writes the correctly aligned rusage on a successful call.
@@ -201,6 +202,10 @@ fn peak_rss() -> u64 {
     } else {
         bytes * 1024
     }
+}
+#[cfg(not(unix))]
+fn peak_rss() -> Option<u64> {
+    None
 }
 #[cfg(target_os = "macos")]
 fn resident_rss() -> Option<u64> {

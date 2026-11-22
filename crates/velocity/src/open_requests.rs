@@ -295,8 +295,8 @@ pub(crate) fn restored_window(session: &vel_session::Session, options: &Options)
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     let normalized = crate::workspace::absolute;
     match (normalized(a), normalized(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
+        (Ok(a), Ok(b)) => vel_config::paths::equal(&a, &b),
+        _ => vel_config::paths::equal(a, b),
     }
 }
 
@@ -755,7 +755,11 @@ mod tests {
     #[test]
     fn before_window_queue_opens_files_folders_and_literal_colon_names_once_ready() {
         let directory = tempfile::tempdir().unwrap();
-        let file = directory.path().join("你好:2:3");
+        let file = directory.path().join(if cfg!(windows) {
+            "你好.txt"
+        } else {
+            "你好:2:3"
+        });
         let folder = directory.path().join("folder");
         fs::write(&file, "first\nsecond\n").unwrap();
         fs::create_dir(&folder).unwrap();

@@ -26,6 +26,11 @@ objc2-core-text = "=0.3.2"
 objc2-core-graphics = "=0.3.2"
 objc2-core-foundation = "=0.3.2"
 
+[target.'cfg(windows)'.dependencies]
+pollster = "=1.0.1"
+raw-window-handle = "=0.6.2"
+wgpu = { version = "=30.0.2", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"] }
+
 [dev-dependencies]
 proptest = "1"
 naga = { version = "=30.0.2", features = ["wgsl-in"] }

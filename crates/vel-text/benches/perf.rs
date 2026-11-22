@@ -13,6 +13,7 @@ use vel_text::{Edit, Text};
 const QUERIES: usize = 1_000_000;
 const EDITS: usize = 10_000;
 
+#[cfg(unix)]
 fn usage() -> libc::rusage {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage initializes the supplied, correctly aligned rusage on success.
@@ -23,6 +24,7 @@ fn usage() -> libc::rusage {
     unsafe { usage.assume_init() }
 }
 
+#[cfg(unix)]
 fn peak_rss(usage: &libc::rusage) -> u64 {
     let bytes = usage.ru_maxrss as u64;
     if cfg!(target_os = "macos") {
@@ -50,11 +52,12 @@ fn resident_rss() -> Option<u64> {
     // SAFETY: a successful v2 call initialized the complete struct above.
     Some(unsafe { info.assume_init() }.ri_resident_size)
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn resident_rss() -> Option<u64> {
     None
 }
 
+#[cfg(unix)]
 fn loadavg() -> String {
     match Command::new("sysctl").args(["-n", "vm.loadavg"]).output() {
         Ok(output) if output.status.success() => {
@@ -87,7 +90,7 @@ fn retired_instructions() -> Option<u64> {
     Some(unsafe { info.assume_init() }.ri_instructions)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn retired_instructions() -> Option<u64> {
     None
 }
@@ -100,24 +103,28 @@ fn measure<T: 'static>(
     count: usize,
     f: impl FnOnce() -> T,
 ) -> T {
-    let load = loadavg();
-    let before_instructions = retired_instructions();
-    let before = usage();
+    #[cfg(unix)]
+    let (load, before_instructions, before) = (loadavg(), retired_instructions(), usage());
     let start = Instant::now();
     let result = black_box(f());
     let ns = start.elapsed().as_nanos();
+    #[cfg(unix)]
     let after = usage();
+    #[cfg(unix)]
     let instructions = retired_instructions()
         .zip(before_instructions)
         .map(|(after, before)| (after - before).to_string())
         .unwrap_or_else(|| "null".to_owned());
+    #[cfg(unix)]
     let resident = resident_rss()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "null".to_owned());
+    #[cfg(unix)]
     let cpu_ns = |u: &libc::rusage| {
         (u.ru_utime.tv_sec + u.ru_stime.tv_sec) as i128 * 1_000_000_000
             + (u.ru_utime.tv_usec + u.ru_stime.tv_usec) as i128 * 1000
     };
+    #[cfg(unix)]
     let cpu_ns = cpu_ns(&after) - cpu_ns(&before);
     // Count reachable allocations after timing and RSS capture. This supplements
     // resident memory on hosts where compression can hide part of the corpus.
@@ -126,11 +133,16 @@ fn measure<T: 'static>(
         .map(|text| text.estimated_storage_bytes().to_string())
         .unwrap_or_else(|| "null".to_owned());
     let run = env::var("VEL_TEXT_BENCH_RUN").unwrap_or_else(|_| "0".to_owned());
+    #[cfg(unix)]
     println!(
         "{{\"implementation\":{implementation:?},\"corpus\":{corpus:?},\"operation\":{operation:?},\"run\":{run},\"total_ns\":{ns},\"cpu_ns\":{cpu_ns},\"retired_instructions\":{instructions},\"minor_faults\":{},\"major_faults\":{},\"count\":{count},\"content_bytes\":{bytes},\"peak_rss_bytes\":{},\"resident_rss_bytes\":{resident},\"estimated_storage_bytes\":{storage},\"loadavg\":{load:?}}}",
         after.ru_minflt - before.ru_minflt,
         after.ru_majflt - before.ru_majflt,
         peak_rss(&after)
+    );
+    #[cfg(not(unix))]
+    println!(
+        "{{\"implementation\":{implementation:?},\"corpus\":{corpus:?},\"operation\":{operation:?},\"run\":{run},\"total_ns\":{ns},\"cpu_ns\":null,\"retired_instructions\":null,\"minor_faults\":null,\"major_faults\":null,\"count\":{count},\"content_bytes\":{bytes},\"peak_rss_bytes\":null,\"resident_rss_bytes\":null,\"estimated_storage_bytes\":{storage},\"loadavg\":\"unavailable\"}}"
     );
     result
 }

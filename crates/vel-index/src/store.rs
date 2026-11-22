@@ -43,7 +43,7 @@ struct Record {
 pub(crate) struct Journal {
     file: File,
     path: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     lock: Option<File>,
     end: u64,
     live: u64,
@@ -62,11 +62,11 @@ impl Journal {
                 "index cancelled",
             ));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = journal_lock(path)?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let writable = lock.is_some();
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let writable = true;
         let mut file = OpenOptions::new()
             .create(writable)
@@ -75,9 +75,10 @@ impl Journal {
             .truncate(false)
             .open(path)
             .or_else(|error| {
-                if cfg!(unix) && !writable && error.kind() == io::ErrorKind::NotFound {
+                if cfg!(any(unix, windows)) && !writable && error.kind() == io::ErrorKind::NotFound
+                {
                     // A peer holds the lock but has not opened the journal yet.
-                    File::open("/dev/null")
+                    File::open(if cfg!(windows) { "NUL" } else { "/dev/null" })
                 } else {
                     Err(error)
                 }
@@ -148,7 +149,7 @@ impl Journal {
             Self {
                 file,
                 path: path.to_owned(),
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 lock,
                 end: valid,
                 live,
@@ -164,7 +165,7 @@ impl Journal {
         stamp: Option<Stamp>,
         analysis: Option<FileAnalysis>,
     ) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.lock.is_none() {
             return Ok(());
         }
@@ -202,7 +203,7 @@ impl Journal {
         written
     }
     pub(crate) fn compact(&mut self, cancelled: &AtomicBool) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.lock.is_none() {
             return Ok(());
         }
@@ -255,7 +256,7 @@ impl Journal {
         }
     }
     pub(crate) fn flush(&mut self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.lock.is_none() {
             return Ok(());
         }
@@ -294,6 +295,28 @@ fn journal_lock(path: &Path) -> io::Result<Option<File>> {
         Ok(None)
     } else {
         Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn journal_lock(path: &Path) -> io::Result<Option<File>> {
+    use std::fs::TryLockError;
+    // Keep the lock separate from the journal so replacing the journal cannot release it.
+    let directory = path.parent().expect("journal directory").join(".locks");
+    if let Err(error) = fs::create_dir(&directory)
+        && error.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(error);
+    }
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join(path.file_name().expect("journal filename")))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error),
     }
 }
 

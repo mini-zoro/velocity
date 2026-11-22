@@ -129,7 +129,7 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
         let row = editor.text.byte_to_line(editor.caret);
         (
             row + 1,
-            crate::app::status_adapter::selection_column(editor, row),
+            crate::status_position::selection_column(editor, row),
             regions
                 .iter()
                 .filter(|r| !r.empty())
@@ -147,7 +147,7 @@ pub(crate) fn status_position(workspace: &Workspace) -> String {
         .bool("show_line_endings", true)
         .then_some(tab.format.line_ending.display_name());
     let sum = (selected > 0)
-        .then(|| crate::app::status_adapter::selection_sum(editor))
+        .then(|| crate::status_position::selection_sum(editor))
         .flatten();
     if workspace.translations.language().is_english() && sum.is_none() {
         return vel_ui::status::position_mode(
@@ -4031,10 +4031,13 @@ impl Panels {
                 relative.display().to_string()
             };
         }
-        if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
+        if let Some(relative) = home
+            .filter(|_| cfg!(unix))
+            .and_then(|home| path.strip_prefix(home).ok())
+        {
             return Path::new("~").join(relative).display().to_string();
         }
-        path.display().to_string()
+        vel_config::paths::display(path)
     }
     fn goto_filters_gitignore(workspace: &Workspace) -> bool {
         // A transient preview may change the active view's syntax and settings.
@@ -9470,6 +9473,7 @@ mod intelligence_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn r43_goto_detail_abbreviates_home_on_component_boundaries() {
         let home = Some(Path::new("/Users/fixture"));
         assert_eq!(

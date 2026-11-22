@@ -10,6 +10,7 @@ use std::{
 };
 use vel_buffer::{Buffer, Edit, EditKind, Region, Selection, ops};
 use vel_text::Text;
+#[cfg(unix)]
 fn usage() -> libc::rusage {
     let mut u = std::mem::MaybeUninit::uninit();
     // SAFETY: the correctly aligned rusage is initialized on successful getrusage.
@@ -18,6 +19,7 @@ fn usage() -> libc::rusage {
     // SAFETY: success above initialized the entire structure.
     unsafe { u.assume_init() }
 }
+#[cfg(unix)]
 fn loadavg() -> String {
     match Command::new("sysctl").args(["-n", "vm.loadavg"]).output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().into(),
@@ -25,6 +27,7 @@ fn loadavg() -> String {
         Err(e) => format!("unavailable: {e}"),
     }
 }
+#[cfg(unix)]
 fn measure<T>(op: &str, count: usize, f: impl FnOnce() -> T) -> T {
     let load = loadavg();
     let before = usage();
@@ -43,6 +46,17 @@ fn measure<T>(op: &str, count: usize, f: impl FnOnce() -> T) -> T {
         cpu(after) - cpu(before),
         after.ru_minflt - before.ru_minflt,
         after.ru_majflt - before.ru_majflt
+    );
+    value
+}
+#[cfg(not(unix))]
+fn measure<T>(op: &str, count: usize, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let value = black_box(f());
+    let ns = start.elapsed().as_nanos();
+    let run = env::var("VEL_BUFFER_BENCH_RUN").unwrap_or_else(|_| "0".into());
+    println!(
+        "{{\"operation\":{op:?},\"run\":{run},\"count\":{count},\"total_ns\":{ns},\"cpu_ns\":null,\"minor_faults\":null,\"major_faults\":null,\"peak_rss_bytes\":null,\"loadavg\":\"unavailable\"}}"
     );
     value
 }

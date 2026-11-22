@@ -131,12 +131,27 @@ pub struct CrashStartup {
     pub pending: Vec<vel_crash::Report>,
 }
 impl CrashStartup {
-    pub fn install(home: &Path) -> Result<Self, String> {
-        let reporter = vel_crash::CrashReporter::new(vel_crash::Config::for_home(
-            home,
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    pub fn for_home(home: &Path) -> Result<Self, String> {
+        Self::install_config(vel_crash::Config::for_home(home, env!("CARGO_PKG_VERSION")))
+    }
+
+    pub fn install() -> Result<Self, String> {
+        #[cfg(not(windows))]
+        {
+            let home = std::env::var_os("HOME").ok_or("home directory unavailable")?;
+            Self::for_home(Path::new(&home))
+        }
+        #[cfg(windows)]
+        Self::install_config(vel_crash::Config {
+            directory: windows_logs().ok_or("LOCALAPPDATA and VELOCITY_LOG_DIR unavailable")?,
+            version: env!("CARGO_PKG_VERSION").into(),
+            log_capacity: 100,
+        })
+    }
+
+    fn install_config(config: vel_crash::Config) -> Result<Self, String> {
+        let reporter = vel_crash::CrashReporter::new(config).map_err(|e| e.to_string())?;
         let pending = reporter.pending_reports().map_err(|e| e.to_string())?;
         reporter.install_panic_hook();
         #[cfg(unix)]
@@ -146,6 +161,13 @@ impl CrashStartup {
         reporter.record(vel_crash::Level::Info, "application startup");
         Ok(Self { reporter, pending })
     }
+}
+#[cfg(windows)]
+fn windows_logs() -> Option<std::path::PathBuf> {
+    std::env::var_os("VELOCITY_LOG_DIR")
+        .filter(|p| !p.is_empty())
+        .map(Into::into)
+        .or_else(|| vel_config::paths::windows_log_dir(std::env::var_os("LOCALAPPDATA").as_deref()))
 }
 #[derive(Debug)]
 enum Reply {
@@ -189,6 +211,9 @@ impl Actions {
                     .as_ref()
                     .map(|c| c.reporter.directory().to_owned())
                     .or_else(|| {
+                        #[cfg(windows)]
+                        return windows_logs();
+                        #[cfg(not(windows))]
                         std::env::var_os("HOME")
                             .map(|h| PathBuf::from(h).join("Library/Logs/Velocity"))
                     })
@@ -490,7 +515,11 @@ fn directory_writable(path: &Path) -> bool {
     }
 }
 fn open_folder(path: &Path) -> Result<(), String> {
-    std::process::Command::new("/usr/bin/open")
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(not(windows))]
+    let program = "/usr/bin/open";
+    std::process::Command::new(program)
         .arg(path)
         .spawn()
         .map(|_| ())

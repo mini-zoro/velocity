@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 pub mod json;
 pub mod keymap;
+pub mod paths;
 pub mod resources;
 pub mod settings;
 mod settings_source;

@@ -108,6 +108,13 @@ pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
         }
     }
     fn lexical(target: &Path, base: &Path) -> PathBuf {
+        #[cfg(windows)]
+        let (display_target, display_base) = (
+            vel_config::paths::display_path(target),
+            vel_config::paths::display_path(base),
+        );
+        #[cfg(windows)]
+        let (target, base) = (display_target.as_ref(), display_base.as_ref());
         let normalize = |p: &Path| {
             let mut out = PathBuf::new();
             for part in p.components() {
@@ -128,7 +135,12 @@ pub fn relative_path(target: &Path, base: &Path) -> PathBuf {
         let common = target_parts
             .iter()
             .zip(&base_parts)
-            .take_while(|(a, b)| a == b)
+            .take_while(|(a, b)| {
+                #[cfg(windows)]
+                return vel_config::paths::components_equal(**a, **b);
+                #[cfg(not(windows))]
+                return a == b;
+            })
             .count();
         if common == 0 && target.is_absolute() {
             return target;
@@ -210,6 +222,36 @@ mod tests {
             dir.path().join("src").canonicalize().unwrap()
         );
         assert_eq!(saved.folders[0].extra["custom"]["kept"], true);
+    }
+}
+
+#[cfg(all(windows, test))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn relative_paths_respect_drive_and_unc_share_boundaries() {
+        assert_eq!(
+            relative_path(Path::new(r"D:\Work\src"), Path::new(r"c:\Work")),
+            Path::new(r"D:\Work\src")
+        );
+        assert_eq!(
+            relative_path(Path::new(r"C:\WORK\src"), Path::new(r"c:\work\old")),
+            Path::new(r"..\src")
+        );
+        assert_eq!(
+            relative_path(
+                Path::new(r"\\SERVER\Shared\src"),
+                Path::new(r"\\server\shared")
+            ),
+            Path::new("src")
+        );
+        assert_eq!(
+            relative_path(
+                Path::new(r"\\server\Shared\src"),
+                Path::new(r"\\server\Elsewhere")
+            ),
+            Path::new(r"\\server\Shared\src")
+        );
     }
 }
 

@@ -2,28 +2,32 @@
 use crate::{Exec, Variables};
 use std::{
     collections::BTreeMap,
+    sync::{OnceLock, atomic::AtomicBool},
+};
+#[cfg(unix)]
+use std::{
     io::Read,
     process::{Command, Stdio},
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Mutex, atomic::Ordering},
     time::{Duration, Instant},
 };
 type Environment = BTreeMap<String, String>;
 #[cfg(all(test, unix))]
 #[path = "../tests/support/detached.rs"]
 mod detached_fixture;
+#[cfg(unix)]
 #[derive(Debug)]
 struct Capture {
     rx: std::sync::mpsc::Receiver<Result<Environment, String>>,
     stop: std::sync::Arc<AtomicBool>,
 }
+#[cfg(unix)]
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
     }
 }
+#[cfg(unix)]
 #[derive(Debug, Default)]
 struct Cache {
     key: Environment,
@@ -33,12 +37,17 @@ struct Cache {
     capture: Option<Capture>,
     retried: bool,
 }
+#[cfg(unix)]
 static LOGIN: OnceLock<Mutex<Cache>> = OnceLock::new();
+#[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(2);
+#[cfg(unix)]
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const BACKOFF: Duration = Duration::from_secs(300);
 // Login/startup and logout files: https://zsh.sourceforge.io/Doc/Release/Files.html
 // Both sentinels below delimit the environment before any logout/EXIT output.
+#[cfg(unix)]
 fn profile_stamp(
     inherited: &Environment,
 ) -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
@@ -76,6 +85,7 @@ fn profile_stamp(
         })
         .collect()
 }
+#[cfg(unix)]
 impl Cache {
     fn refresh(&mut self) {
         let result = self
@@ -120,16 +130,16 @@ impl Cache {
 }
 /// Starts login-environment capture before a build, without waiting on the UI thread.
 pub(crate) fn warm_login_environment() {
-    if !cfg!(unix) {
-        return;
+    #[cfg(unix)]
+    {
+        let inherited = inherited_environment();
+        let key = cache_key(&inherited);
+        LOGIN
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prepare(key, &inherited);
     }
-    let inherited = inherited_environment();
-    let key = cache_key(&inherited);
-    LOGIN
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .prepare(key, &inherited);
 }
 // Injection is explicit runtime state. Cargo feature unification must never choose
 // a fixture for a production binary, including `build --all-targets`.
@@ -153,9 +163,19 @@ fn inherited_environment() -> Environment {
     crate::test_login::install();
     PROVIDER
         .get()
-        .map_or_else(|| std::env::vars().collect(), |provider| provider())
+        .map_or_else(system_environment, |provider| provider())
+}
+
+pub(crate) fn system_environment() -> Environment {
+    #[cfg(not(windows))]
+    return std::env::vars().collect();
+    #[cfg(windows)]
+    std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
 }
 // Build-specific env/path overrides are applied after capture, never part of its identity.
+#[cfg(unix)]
 fn cache_key(inherited: &Environment) -> Environment {
     ["SHELL", "HOME", "ZDOTDIR"]
         .into_iter()
@@ -166,6 +186,7 @@ fn cache_key(inherited: &Environment) -> Environment {
         })
         .collect()
 }
+#[cfg(unix)]
 pub(crate) fn launch_environment(exec: &Exec, stop: &AtomicBool) -> (Environment, Option<String>) {
     launch_environment_with(
         exec,
@@ -174,6 +195,16 @@ pub(crate) fn launch_environment(exec: &Exec, stop: &AtomicBool) -> (Environment
         LOGIN.get_or_init(Default::default),
     )
 }
+#[cfg(not(unix))]
+pub(crate) fn launch_environment(exec: &Exec, _stop: &AtomicBool) -> (Environment, Option<String>) {
+    let inherited = inherited_environment();
+    match expand_environment(&inherited, &exec.env_source, &exec.variables) {
+        Ok(env) => (env, None),
+        Err(error) => (inherited, Some(format!("Build environment: {error}"))),
+    }
+}
+
+#[cfg(unix)]
 fn launch_environment_with(
     exec: &Exec,
     stop: &AtomicBool,
@@ -237,17 +268,28 @@ pub(crate) fn expand_environment(
     overrides: &Environment,
     variables: &Variables,
 ) -> Result<Environment, String> {
-    let mut context = Variables(base.clone());
-    context.0.extend(variables.0.clone());
+    #[cfg(windows)]
+    let canonical_key = |key: &str| key.to_uppercase();
+    #[cfg(not(windows))]
+    let canonical_key = |key: &str| key.to_owned();
+    #[cfg(windows)]
+    let mut result: Environment = base
+        .iter()
+        .map(|(k, v)| (canonical_key(k), v.clone()))
+        .collect();
+    #[cfg(not(windows))]
     let mut result = base.clone();
+    let mut context = Variables(result.clone());
+    context.0.extend(variables.0.clone());
     for (key, value) in overrides {
-        result.insert(key.clone(), context.expand(value)?);
+        result.insert(canonical_key(key), context.expand(value)?);
     }
     Ok(result)
 }
 // Public build docs require the user's PATH for both cmd and shell_cmd:
 // https://www.sublimetext.com/docs/build_systems.html#exec-target-options
 // Capture login startup once, then run individual commands without repeating it.
+#[cfg(unix)]
 fn login_environment(inherited: &Environment, stop: &AtomicBool) -> Result<Environment, String> {
     capture_shell_in(
         inherited
@@ -259,7 +301,7 @@ fn login_environment(inherited: &Environment, stop: &AtomicBool) -> Result<Envir
         inherited,
     )
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn capture_shell(shell: &str, stop: &AtomicBool, timeout: Duration) -> Result<Environment, String> {
     // No process-global environment or cache is shared between these fixtures.
     let inherited = [
@@ -277,6 +319,7 @@ fn capture_shell(shell: &str, stop: &AtomicBool, timeout: Duration) -> Result<En
     .into();
     capture_shell_in(shell, stop, timeout, &inherited)
 }
+#[cfg(unix)]
 fn capture_shell_in(
     shell: &str,
     stop: &AtomicBool,
@@ -327,6 +370,7 @@ fn capture_shell_in(
     last
 }
 
+#[cfg(unix)]
 fn collect_login(
     command: &mut Command,
     stop: &AtomicBool,
@@ -421,7 +465,7 @@ fn collect_login(
     }
     Ok(env)
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn await_login(cache: &Mutex<Cache>, env: &Environment) {

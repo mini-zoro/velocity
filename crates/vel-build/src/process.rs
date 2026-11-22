@@ -1,17 +1,24 @@
-//! Bounded UTF-8 streaming and Unix process-group cancellation.
+//! Bounded UTF-8 streaming and process-tree cancellation.
 use crate::Exec;
+#[cfg(not(windows))]
+use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU32;
 #[cfg(unix)]
 use std::{io::Write, os::fd::AsRawFd, process::ChildStdin};
+#[cfg(windows)]
+use std::{io::Write, os::windows::io::AsRawHandle};
 use std::{
     io::{self, Read},
-    process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+mod windows;
 
 /// Maximum UTF-8 bytes in a submitted input line, excluding the newline.
 pub const MAX_INPUT_LINE: usize = 4096;
@@ -85,7 +92,10 @@ pub struct Task {
     pub events: crate::output::Events,
     cancel: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
+    #[cfg(unix)]
     pid: Arc<AtomicU32>,
+    #[cfg(windows)]
+    job: Arc<windows::Job>,
     input: Option<mpsc::SyncSender<String>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -99,8 +109,14 @@ impl Task {
         let exec = exec.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
         let pid = Arc::new(AtomicU32::new(0));
+        #[cfg(unix)]
         let child_pid = pid.clone();
+        #[cfg(windows)]
+        let job = Arc::new(windows::Job::new().map_err(|e| e.to_string())?);
+        #[cfg(windows)]
+        let child_job = job.clone();
         let stop = cancel.clone();
         let (tx, events) =
             crate::output::channel(exec.parser.clone(), finished.clone(), cancel.clone());
@@ -120,7 +136,16 @@ impl Task {
                 // receiver also releases backpressure; detached pipes must not delay restart.
                 drop(previous);
                 let at = Instant::now();
-                let result = run(&exec, &tx, &stop, &child_pid, incoming);
+                let result = run(
+                    &exec,
+                    &tx,
+                    &stop,
+                    #[cfg(unix)]
+                    &child_pid,
+                    #[cfg(windows)]
+                    &child_job,
+                    incoming,
+                );
                 let (code, signal) = match result {
                     Ok(status) => status,
                     Err(e) => {
@@ -141,7 +166,10 @@ impl Task {
             events,
             cancel,
             finished,
+            #[cfg(unix)]
             pid,
+            #[cfg(windows)]
+            job,
             input,
             worker: Some(worker),
         })
@@ -155,9 +183,10 @@ impl Task {
             return Err(InputError::Closed);
         }
         let input = self.input.as_ref().ok_or(InputError::Closed)?;
-        let mut bytes = String::with_capacity(line.len() + 1);
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        let mut bytes = String::with_capacity(line.len() + ending.len());
         bytes.push_str(line);
-        bytes.push('\n');
+        bytes.push_str(ending);
         input.try_send(bytes).map_err(|e| match e {
             mpsc::TrySendError::Full(_) => InputError::Full,
             mpsc::TrySendError::Disconnected(_) => InputError::Closed,
@@ -170,6 +199,8 @@ impl Task {
     /// Requests process-tree termination without blocking the UI.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
+        #[cfg(windows)]
+        self.job.kill();
         #[cfg(unix)]
         {
             let pid = self.pid.load(Ordering::Acquire);
@@ -194,7 +225,8 @@ fn run(
     exec: &Exec,
     tx: &crate::output::Sender,
     stop: &Arc<AtomicBool>,
-    published_pid: &AtomicU32,
+    #[cfg(unix)] published_pid: &AtomicU32,
+    #[cfg(windows)] job: &windows::Job,
     incoming: Option<mpsc::Receiver<String>>,
 ) -> Result<(Option<i32>, Option<i32>), String> {
     let (env, warning) = crate::environment::launch_environment(exec, stop);
@@ -204,49 +236,56 @@ fn run(
     if stop.load(Ordering::Acquire) {
         return Ok((None, None));
     }
-    let shell = exec.shell_cmd.clone().or_else(|| {
-        exec.shell.then(|| {
-            exec.cmd
-                .iter()
-                .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-    });
-    let mut command = if let Some(source) = shell {
-        #[cfg(unix)]
-        let mut command = Command::new("/bin/bash");
-        #[cfg(not(unix))]
-        let mut command = Command::new("cmd.exe");
-        #[cfg(unix)]
-        command.arg("-c");
-        #[cfg(not(unix))]
-        command.arg("/C");
-        command.arg(source);
-        command
-    } else {
-        let mut command = Command::new(exec.cmd.first().ok_or("empty build command")?);
-        command.args(&exec.cmd[1..]);
-        command
-    };
-    command
-        .env_clear()
-        .current_dir(&exec.working_dir)
-        .envs(env)
-        .stdin(if exec.interactive {
-            Stdio::piped()
+    #[cfg(windows)]
+    let mut child = windows::spawn(exec, &env, job).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    let mut child = {
+        let shell = exec.shell_cmd.clone().or_else(|| {
+            exec.shell.then(|| {
+                exec.cmd
+                    .iter()
+                    .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+        });
+        let mut command = if let Some(source) = shell {
+            #[cfg(unix)]
+            let mut command = Command::new("/bin/bash");
+            #[cfg(not(unix))]
+            let mut command = Command::new("cmd.exe");
+            #[cfg(unix)]
+            command.arg("-c");
+            #[cfg(not(unix))]
+            command.arg("/C");
+            command.arg(source);
+            command
         } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+            let mut command = Command::new(exec.cmd.first().ok_or("empty build command")?);
+            command.args(&exec.cmd[1..]);
+            command
+        };
+        command
+            .env_clear()
+            .current_dir(&exec.working_dir)
+            .envs(env)
+            .stdin(if exec.interactive {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        command.spawn().map_err(|e| e.to_string())?
+    };
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
+    #[cfg(unix)]
     published_pid.store(pid, Ordering::Release);
     #[cfg(unix)]
     let mut input =
@@ -263,7 +302,39 @@ fn run(
                     None
                 }
             });
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let input = incoming
+        .zip(child.stdin.take())
+        .map(|(incoming, mut pipe)| {
+            let tx = tx.clone();
+            let stop = stop.clone();
+            let exited = Arc::new(AtomicBool::new(false));
+            let done = exited.clone();
+            let worker = std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) && !done.load(Ordering::Acquire) {
+                    match incoming.recv_timeout(Duration::from_millis(25)) {
+                        Ok(line) => {
+                            let _ = send(
+                                &tx,
+                                Event::Output {
+                                    stream: Stream::Input,
+                                    text: line.clone(),
+                                },
+                                &stop,
+                            );
+                            if pipe.write_all(line.as_bytes()).is_err() {
+                                let _ = send(&tx, Event::InputClosed, &stop);
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+            (worker, exited)
+        });
+    #[cfg(not(any(unix, windows)))]
     drop(incoming);
     let exited = Arc::new(std::sync::OnceLock::new());
     let readers = [
@@ -286,7 +357,11 @@ fn run(
         if stop.load(Ordering::Acquire) {
             #[cfg(unix)]
             drop(input.take());
+            #[cfg(unix)]
             kill_tree(pid);
+            #[cfg(windows)]
+            job.kill();
+            #[cfg(not(windows))]
             let _ = child.kill();
             break child.wait();
         }
@@ -309,7 +384,10 @@ fn run(
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => {
+                #[cfg(unix)]
                 kill_tree(pid);
+                #[cfg(windows)]
+                job.kill();
                 let _ = child.wait();
                 break Err(error);
             }
@@ -317,7 +395,17 @@ fn run(
     };
     #[cfg(unix)]
     drop(input);
+    #[cfg(windows)]
+    {
+        job.kill();
+        if let Some((worker, done)) = input {
+            done.store(true, Ordering::Release);
+            let _ = worker.join();
+        }
+    }
+    #[cfg(unix)]
     kill_tree(pid);
+    #[cfg(unix)]
     published_pid.store(0, Ordering::Release);
     // Read for at most 500 ms after exit, even when a detached writer never stops.
     // The transport retains a bounded tail without waiting for UI delivery, so
@@ -543,20 +631,12 @@ mod input_tests {
         starter.join().unwrap();
     }
 }
+#[cfg(unix)]
 pub(crate) fn kill_tree(pid: u32) {
-    #[cfg(unix)]
-    {
-        // SAFETY: the child created its own process group with PGID=PID. A negative
-        // PID targets that group only; SIGKILL cannot run application signal handlers.
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
+    // SAFETY: the child created its own process group with PGID=PID. A negative
+    // PID targets that group only; SIGKILL cannot run application signal handlers.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 fn send(tx: &crate::output::Sender, event: Event, cancel: &AtomicBool) -> bool {
@@ -566,9 +646,13 @@ fn send(tx: &crate::output::Sender, event: Event, cancel: &AtomicBool) -> bool {
 trait Pipe: Read + Send + std::os::fd::AsRawFd + 'static {}
 #[cfg(unix)]
 impl<T: Read + Send + std::os::fd::AsRawFd + 'static> Pipe for T {}
-#[cfg(not(unix))]
+#[cfg(windows)]
+trait Pipe: Read + Send + AsRawHandle + 'static {}
+#[cfg(windows)]
+impl<T: Read + Send + AsRawHandle + 'static> Pipe for T {}
+#[cfg(not(any(unix, windows)))]
 trait Pipe: Read + Send + 'static {}
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl<T: Read + Send + 'static> Pipe for T {}
 fn reader(
     mut pipe: impl Pipe,
@@ -632,7 +716,22 @@ fn reader(
                     break;
                 }
             }
-            let n = match pipe.read(&mut chunk) {
+            #[cfg(windows)]
+            let read = match windows::available(pipe.as_raw_handle()) {
+                Ok(Some(0)) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Ok(Some(n)) => {
+                    let count = n.min(chunk.len());
+                    pipe.read(&mut chunk[..count])
+                }
+                Ok(None) => Ok(0),
+                Err(e) => Err(e),
+            };
+            #[cfg(not(windows))]
+            let read = pipe.read(&mut chunk);
+            let n = match read {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,

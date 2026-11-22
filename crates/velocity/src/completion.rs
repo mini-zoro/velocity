@@ -710,31 +710,36 @@ fn matched_ranges(trigger: &str, prefix: &str) -> Vec<Range<usize>> {
 fn system_fullname() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
-        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
-        let mut result = std::ptr::null_mut();
-        let mut storage = vec![0u8; 16 * 1024];
-        // SAFETY: getpwuid_r writes into entry/storage, whose allocations remain alive
-        // until the NUL-terminated GECOS field has been copied to an owned String.
-        unsafe {
-            if libc::getpwuid_r(
-                libc::getuid(),
-                entry.as_mut_ptr(),
-                storage.as_mut_ptr().cast(),
-                storage.len(),
-                &mut result,
-            ) == 0
-                && !result.is_null()
-                && !(*result).pw_gecos.is_null()
-            {
-                return std::ffi::CStr::from_ptr((*result).pw_gecos)
-                    .to_string_lossy()
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .to_owned();
+        #[cfg(windows)]
+        return std::env::var("USERNAME").unwrap_or_default();
+        #[cfg(unix)]
+        {
+            let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+            let mut result = std::ptr::null_mut();
+            let mut storage = vec![0u8; 16 * 1024];
+            // SAFETY: getpwuid_r writes into entry/storage, whose allocations remain alive
+            // until the NUL-terminated GECOS field has been copied to an owned String.
+            unsafe {
+                if libc::getpwuid_r(
+                    libc::getuid(),
+                    entry.as_mut_ptr(),
+                    storage.as_mut_ptr().cast(),
+                    storage.len(),
+                    &mut result,
+                ) == 0
+                    && !result.is_null()
+                    && !(*result).pw_gecos.is_null()
+                {
+                    return std::ffi::CStr::from_ptr((*result).pw_gecos)
+                        .to_string_lossy()
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .to_owned();
+                }
             }
+            std::env::var("USER").unwrap_or_default()
         }
-        std::env::var("USER").unwrap_or_default()
     })
 }
 /// Rows of the popup as last painted, in view coordinates relative to its top.

@@ -1,4 +1,6 @@
 //! Exercise the real executable against a headless local peer; no GUI launch.
+#![cfg(unix)]
+
 #[path = "../src/instance_path.rs"]
 mod instance_path;
 

@@ -1,9 +1,10 @@
 //! Isolate startup diagnostics and retain sessions implicated in a restore crash.
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -47,10 +48,7 @@ pub fn fresh_run(profile: &Path) -> io::Result<PathBuf> {
     // https://www.sublimetext.com/docs/safe_mode.html
     // An empty run directory provides the clean settings/packages without
     // deleting any prior work. A safe-mode run does not have a session writer.
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(profile)?;
+    private_directory(profile, true)?;
     if let Ok(entries) = fs::read_dir(profile) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -72,8 +70,16 @@ pub fn fresh_run(profile: &Path) -> io::Result<PathBuf> {
         nanos(SystemTime::now()),
         std::process::id()
     ));
-    DirBuilder::new().mode(0o700).create(&path)?;
+    private_directory(&path, false)?;
     Ok(path)
+}
+
+fn private_directory(path: &Path, recursive: bool) -> io::Result<()> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(recursive);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)
 }
 
 fn prune_empty_run(path: &Path, depth: usize) {
@@ -96,17 +102,24 @@ fn prune_empty_run(path: &Path, depth: usize) {
 }
 
 fn read_marker(path: &Path) -> Option<Marker> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
     serde_json::from_reader(file.take(1024)).ok()
 }
 
+#[cfg(unix)]
 fn dead(pid: u32) -> bool {
     let Ok(pid) = i32::try_from(pid) else {
         return false;
@@ -115,6 +128,28 @@ fn dead(pid: u32) -> bool {
     pid > 1
         && unsafe { libc::kill(pid, 0) } == -1
         && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(windows)]
+fn dead(pid: u32) -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
+        Storage::FileSystem::SYNCHRONIZE,
+        System::Threading::{OpenProcess, WaitForSingleObject},
+    };
+    if pid <= 4 {
+        return false;
+    }
+    // SAFETY: request only permission to test for termination of this process ID.
+    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    // SAFETY: OpenProcess returned an owned handle which remains live across the wait.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // SAFETY: the wait only polls the owned process handle.
+    unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) == WAIT_OBJECT_0 }
 }
 
 fn crash_during(marker: Marker, reports: &[vel_crash::Report]) -> bool {
@@ -206,11 +241,11 @@ fn protection_warning(error: io::Error) -> Startup {
 
 fn write_marker(marker_path: &Path, marker: Marker) -> io::Result<()> {
     let tmp = marker_path.with_extension(format!("tmp-{}-{}", marker.pid, marker.started));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&tmp)?;
     let result = (|| {
         file.write_all(&serde_json::to_vec(&marker).map_err(io::Error::other)?)?;
         file.sync_data()?;
@@ -278,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_only_sessions_and_enospc_leave_recovery_available() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
@@ -314,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn safe_mode_prunes_empty_dead_runs_without_touching_sessions_or_symlinks() {
         let temp = tempfile::tempdir().unwrap();
         let profile = profile(&temp.path().join("profile"));

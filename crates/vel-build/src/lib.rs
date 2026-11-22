@@ -166,8 +166,8 @@ impl BuildSystem {
             return Err("build needs cmd or shell_cmd".into());
         }
         let interactive = self.options.get("interactive").and_then(Value::as_bool) == Some(true);
-        if interactive && !cfg!(unix) {
-            return Err("Interactive builds need nonblocking Unix pipes".into());
+        if interactive && !cfg!(any(unix, windows)) {
+            return Err("Interactive builds are unavailable on this platform".into());
         }
         let working_dir = string("working_dir")
             .map(|s| variables.expand(s))
@@ -189,7 +189,11 @@ impl BuildSystem {
         if let Some(values) = self.options.get("env") {
             for (key, value) in values.as_object().ok_or("env must be an object")? {
                 env.insert(
-                    key.clone(),
+                    if cfg!(windows) {
+                        key.to_uppercase()
+                    } else {
+                        key.clone()
+                    },
                     value
                         .as_str()
                         .ok_or("env values must be strings")?
@@ -201,7 +205,7 @@ impl BuildSystem {
             env.insert("PATH".into(), path.to_owned());
         }
         let env_source = env.clone();
-        let base = std::env::vars().collect();
+        let base = environment::system_environment();
         let expanded = environment::expand_environment(&base, &env_source, variables)?;
         for (key, value) in &mut env {
             *value = expanded[key].clone();

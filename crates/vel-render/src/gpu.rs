@@ -1,4 +1,4 @@
-//! Metal-only wgpu implementation. The retained WindowHandle outlives the surface.
+//! Shared wgpu renderer with native Metal and DX12 surfaces.
 use crate::{
     atlas::*,
     cache::*,
@@ -14,8 +14,35 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use vel_platform::{Rect, WindowHandle};
+use vel_platform::Rect;
+#[cfg(target_os = "macos")]
+use vel_platform::WindowHandle;
 use wgpu::util::DeviceExt;
+
+#[cfg(target_os = "macos")]
+type NativeWindow = WindowHandle;
+#[cfg(windows)]
+type NativeWindow = std::num::NonZeroIsize;
+#[cfg(target_os = "macos")]
+const BACKEND: wgpu::Backends = wgpu::Backends::METAL;
+#[cfg(windows)]
+const BACKEND: wgpu::Backends = wgpu::Backends::DX12;
+
+#[cfg(windows)]
+unsafe fn win32_surface(
+    instance: &wgpu::Instance,
+    hwnd: NativeWindow,
+) -> Result<wgpu::Surface<'static>, String> {
+    use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+    // SAFETY: the caller keeps hwnd valid on this thread through surface destruction.
+    unsafe {
+        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: None,
+            raw_window_handle: RawWindowHandle::Win32(Win32WindowHandle::new(hwnd)),
+        })
+    }
+    .map_err(|error| error.to_string())
+}
 
 const ATLAS_SIDE: u32 = 1024;
 const MAX_PAGES: usize = 8;
@@ -53,7 +80,7 @@ pub struct FrameTimes {
     /// Present-call duration.
     pub present_call_ms: f64,
 }
-/// Metal renderer, reusable scene buffers, lazy array atlas and layout cache.
+/// Native renderer, reusable scene buffers, lazy array atlas and layout cache.
 #[derive(Debug)]
 pub struct Renderer {
     /// None for an offscreen renderer, which never presents.
@@ -62,7 +89,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    window: Option<WindowHandle>,
+    window: Option<NativeWindow>,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     bind: wgpu::BindGroup,
@@ -91,6 +118,7 @@ pub struct Renderer {
 impl Renderer {
     /// Creates a Fifo surface directly from our CAMetalLayer. `phase` records
     /// initialization milestones without coupling this crate to a JSONL sink.
+    #[cfg(target_os = "macos")]
     pub fn new(
         window: WindowHandle,
         timestamps: bool,
@@ -164,11 +192,70 @@ impl Renderer {
             phase,
         )
     }
+    /// Creates a DX12 renderer from an existing native window and physical pixel size.
+    ///
+    /// # Safety
+    /// The HWND must identify a live window on this thread. Keep the window alive,
+    /// and use and drop this renderer on the window thread before destroying it.
+    #[cfg(windows)]
+    pub unsafe fn from_hwnd(
+        hwnd: *mut std::ffi::c_void,
+        width: u32,
+        height: u32,
+        timestamps: bool,
+        cache_dir: &Path,
+        mut phase: impl FnMut(&'static str),
+    ) -> Result<Self, String> {
+        let window = NativeWindow::new(hwnd as isize).ok_or("null window handle")?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: BACKEND,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        phase("wgpu_instance");
+        // SAFETY: from_hwnd requires the caller to keep the window live.
+        let surface = unsafe { win32_surface(&instance, window) }?;
+        phase("surface_created");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .map_err(|e| e.to_string())?;
+        phase("adapter");
+        let device = DeviceParts::request(&adapter, timestamps)?;
+        phase("device_queue");
+        let capabilities = surface.get_capabilities(&adapter);
+        let mut config = surface
+            .get_default_config(&adapter, width.max(1), height.max(1))
+            .ok_or("no DX12 surface configuration")?;
+        if !capabilities.usages.contains(wgpu::TextureUsages::COPY_DST)
+            || !capabilities
+                .formats
+                .contains(&wgpu::TextureFormat::Bgra8Unorm)
+        {
+            return Err("DX12 surface must support BGRA8 and COPY_DST".into());
+        }
+        config.present_mode = wgpu::PresentMode::Fifo;
+        config.usage |= wgpu::TextureUsages::COPY_DST;
+        config.format = wgpu::TextureFormat::Bgra8Unorm;
+        surface.configure(&device.device, &config);
+        phase("surface_configured");
+        Self::assemble(
+            instance,
+            Some(surface),
+            Some(window),
+            &adapter,
+            device,
+            config,
+            Some(cache_dir),
+            phase,
+        )
+    }
     /// Creates a windowless renderer for developer tools. It never creates a surface,
     /// window or application object; frames are read back with [`Renderer::render_rgba`].
     pub fn offscreen(width: u32, height: u32) -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends: BACKEND,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -178,7 +265,7 @@ impl Renderer {
         }))
         .map_err(|e| e.to_string())?;
         let device = DeviceParts::request(&adapter, false)?;
-        // Same format as the presented CAMetalLayer surface, so pixels match a window.
+        // Same format as the presented surface, so pixels match a window.
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: wgpu::TextureFormat::Bgra8Unorm,
@@ -196,7 +283,7 @@ impl Renderer {
     fn assemble(
         instance: wgpu::Instance,
         surface: Option<wgpu::Surface<'static>>,
-        window: Option<WindowHandle>,
+        window: Option<NativeWindow>,
         adapter: &wgpu::Adapter,
         parts: DeviceParts,
         config: wgpu::SurfaceConfiguration,
@@ -214,7 +301,12 @@ impl Renderer {
         let cache_path = cache_dir.filter(|_| has_cache).map(|cache_dir| {
             cache_dir.join(format!(
                 "{}.bin",
-                wgpu::util::pipeline_cache_key(&info).unwrap_or_else(|| "metal".into())
+                wgpu::util::pipeline_cache_key(&info).unwrap_or_else(|| if cfg!(windows) {
+                    "dx12"
+                } else {
+                    "metal"
+                }
+                .into())
             ))
         });
         let cache_bytes = cache_path.as_ref().and_then(|p| {
@@ -372,6 +464,7 @@ impl Renderer {
         self.config.height = height;
         if let Some(surface) = &self.surface {
             surface.configure(&self.device, &self.config);
+            #[cfg(target_os = "macos")]
             if let Some(window) = &self.window {
                 window.drawable_surface_configured();
             }
@@ -923,6 +1016,7 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.data));
         }
+        #[cfg(target_os = "macos")]
         if fonts.fallback_pending()
             && let Some(window) = &self.window
         {
@@ -1076,7 +1170,10 @@ impl Renderer {
             return Err("an offscreen renderer cannot present".into());
         };
         let start = Instant::now();
+        #[cfg(target_os = "macos")]
         let drawable_limit = window.begin_drawable_frame(start);
+        #[cfg(windows)]
+        let drawable_limit = self.config.desired_maximum_frame_latency as usize;
         let texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -1085,18 +1182,29 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, &self.config);
+                #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // SAFETY: the retained window still owns this CAMetalLayer on this thread.
+                #[cfg(target_os = "macos")]
                 let surface = unsafe {
                     self.instance.create_surface_unsafe(
                         wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(window.metal_layer_ptr()),
                     )
                 }
                 .map_err(|e| e.to_string())?;
+                #[cfg(windows)]
+                let surface = {
+                    let hwnd = *window;
+                    // DXGI only permits one flip-model swap chain per HWND.
+                    drop(self.surface.take());
+                    // SAFETY: the caller of from_hwnd keeps hwnd live.
+                    unsafe { win32_surface(&self.instance, hwnd) }?
+                };
                 surface.configure(&self.device, &self.config);
+                #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
                 self.surface = Some(surface);
                 return Ok(None);
@@ -1106,7 +1214,10 @@ impl Renderer {
             }
         };
         let acquired = Instant::now();
+        #[cfg(target_os = "macos")]
         let drawable = window.last_acquired_drawable();
+        #[cfg(windows)]
+        let drawable = None;
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if first {
             let offscreen = self

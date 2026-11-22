@@ -1,28 +1,27 @@
-//! Instanced editor primitives, paged glyph caches and a Metal wgpu renderer.
-//! Geometry and cache logic are usable without a GPU. Native rendering and
-//! system fonts are gated to macOS; no renderer is instantiated by tests.
+//! Instanced editor primitives, paged glyph caches and a Metal/DX12 wgpu renderer.
+//! Geometry, font shaping and cache logic work without a GPU.
 pub mod atlas;
 pub mod cache;
 pub mod fold;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod font;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod gpu;
 pub mod guides;
 pub mod invisibles;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod native;
 pub mod nine_slice;
 pub mod scene;
 pub mod selection;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod snapshot;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod timing;
 pub mod typography;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use gpu::{FrameTimes, Renderer};
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub mod font {
     /// Portable glyph layout record for headless cache tests.
     #[derive(Clone, Copy, Debug)]

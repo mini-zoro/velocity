@@ -11,6 +11,7 @@ use std::{
 use unicode_width::UnicodeWidthChar;
 use vel_largefile::{LoadOptions, LongLineIndex, load_utf8};
 use vel_text::Text;
+#[cfg(unix)]
 fn rss() -> u64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     assert_eq!(
@@ -21,6 +22,10 @@ fn rss() -> u64 {
     // SAFETY: the successful call initialized the structure.
     unsafe { usage.assume_init() }.ru_maxrss as u64
         * if cfg!(target_os = "macos") { 1 } else { 1024 }
+}
+#[cfg(not(unix))]
+fn rss() -> Option<u64> {
+    None
 }
 fn record(operation: &str, side: &str, samples: &[u128], extra: serde_json::Value) {
     println!(

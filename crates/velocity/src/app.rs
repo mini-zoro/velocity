@@ -284,9 +284,6 @@ pub struct App {
 #[cfg(test)]
 pub(crate) const IMAGE_FALLBACK_NOTE: &str = "Not shown as an image: unsupported or damaged";
 
-pub(crate) fn image_fallback_note(tr: &vel_i18n::Translator) -> std::borrow::Cow<'static, str> {
-    tr.tr("Not shown as an image: unsupported or damaged")
-}
 impl App {
     /// Restores retained documents before a temporary native receiver can write the profile.
     pub(crate) fn take_over_native_primary(
@@ -3716,7 +3713,9 @@ impl App {
             let [width, height] = image.logical_size;
             Some(format!("{width} × {height}"))
         } else if self.view.image_preview.failed && (synced || switched) {
-            Some(image_fallback_note(&self.workspace.translations).into_owned())
+            Some(
+                crate::image_decode::image_fallback_note(&self.workspace.translations).into_owned(),
+            )
         } else {
             None
         };

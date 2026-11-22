@@ -222,10 +222,13 @@ fn toggle(layer: &mut Layer, ink: &Ink, r: Rect, clip: Rect, on: bool, enabled: 
 }
 
 fn abbreviated(path: &Path, home: Option<&Path>) -> String {
-    if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
+    if let Some(relative) = home
+        .filter(|_| cfg!(unix))
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
         return Path::new("~").join(relative).to_string_lossy().into_owned();
     }
-    path.to_string_lossy().into_owned()
+    vel_config::paths::display(path)
 }
 
 fn middle_fit(path: &str, fits: impl Fn(&str) -> bool) -> String {

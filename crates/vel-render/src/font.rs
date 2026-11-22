@@ -23,6 +23,7 @@ use vel_platform::fonts::{FontFallback, SystemFontFallback, cluster_characters};
 #[path = "emoji_presentation.rs"]
 mod emoji;
 #[path = "font_snapshot.rs"]
+#[cfg(target_os = "macos")]
 mod snapshot;
 
 #[derive(Debug)]
@@ -47,7 +48,13 @@ impl Face {
         files: &mut HashMap<PathBuf, std::sync::Arc<vel_platform::fonts::FontData>>,
         outlines: bool,
     ) -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
         let snapshot = snapshot::mobile_asset_face(path, name, native.as_deref(), outlines)?;
+        #[cfg(windows)]
+        let snapshot = {
+            let _ = outlines;
+            None
+        };
         let face_snapshot = snapshot.is_some();
         let bytes = match snapshot {
             Some(bytes) => std::sync::Arc::new(vel_platform::fonts::FontData::Owned(bytes)),
@@ -55,46 +62,49 @@ impl Face {
         };
         let collection = FontDataRef::new(&bytes)
             .ok_or_else(|| format!("{} is not a supported font", path.display()))?;
+        let named = || {
+            collection.fonts().find(|f| {
+                f.localized_strings()
+                    .any(|s| s.id() == StringId::PostScript && s.to_string() == name)
+            })
+        };
+        #[cfg(windows)]
+        let font = named();
+        #[cfg(target_os = "macos")]
         let font = if face_snapshot {
             // Already identified the exact face on the opened file descriptor.
             collection.fonts().next()
         } else {
-            collection
-                .fonts()
-                .find(|f| {
-                    f.localized_strings()
-                        .any(|s| s.id() == StringId::PostScript && s.to_string() == name)
-                })
-                .or_else(|| {
-                    // Private cascade names need not appear in the file's name table.
-                    // Match immutable SFNT tables to identify the exact collection member;
-                    // selecting the first member can silently use a different language face.
-                    let native = native.as_ref()?;
-                    let mut tables = Vec::new();
-                    for tag in [
-                        swash::tag_from_bytes(b"name"),
-                        swash::tag_from_bytes(b"cmap"),
-                        swash::tag_from_bytes(b"head"),
-                    ] {
-                        // SAFETY: immutable table copied from a retained CTFont.
-                        let table = unsafe {
-                            native.table(tag, objc2_core_text::CTFontTableOptions::empty())
-                        }?;
-                        tables.push((tag, table.to_vec()));
-                    }
-                    let mut matches = collection.fonts().filter(|f| {
-                        tables
-                            .iter()
-                            .all(|(tag, bytes)| f.table(*tag) == Some(bytes.as_slice()))
-                    });
-                    let face = matches.next()?;
-                    if matches.next().is_some() {
-                        return None;
-                    }
-                    Some(face)
-                })
-        }
-        .ok_or_else(|| format!("{}: exact face {name} unavailable", path.display()))?;
+            named().or_else(|| {
+                // Private cascade names need not appear in the file's name table.
+                // Match immutable SFNT tables to identify the exact collection member;
+                // selecting the first member can silently use a different language face.
+                let native = native.as_ref()?;
+                let mut tables = Vec::new();
+                for tag in [
+                    swash::tag_from_bytes(b"name"),
+                    swash::tag_from_bytes(b"cmap"),
+                    swash::tag_from_bytes(b"head"),
+                ] {
+                    // SAFETY: immutable table copied from a retained CTFont.
+                    let table =
+                        unsafe { native.table(tag, objc2_core_text::CTFontTableOptions::empty()) }?;
+                    tables.push((tag, table.to_vec()));
+                }
+                let mut matches = collection.fonts().filter(|f| {
+                    tables
+                        .iter()
+                        .all(|(tag, bytes)| f.table(*tag) == Some(bytes.as_slice()))
+                });
+                let face = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                Some(face)
+            })
+        };
+        let font =
+            font.ok_or_else(|| format!("{}: exact face {name} unavailable", path.display()))?;
         let actual = font
             .localized_strings()
             .find(|s| s.id() == StringId::PostScript)
@@ -183,6 +193,7 @@ pub struct Fonts {
     /// Missing-face/glyph diagnostics.
     pub warnings: Vec<String>,
     coretext_rasters: usize,
+    #[cfg(target_os = "macos")]
     coretext_faces: std::collections::HashSet<u16>,
     scaler: ScaleContext,
     shaper: ShapeContext,
@@ -206,15 +217,22 @@ pub struct Fonts {
 impl Fonts {
     /// Loads only the primary monospace face; system fallbacks are lazy.
     pub fn load() -> Result<Self, String> {
-        Self::load_named("Menlo")
+        Self::load_named(if cfg!(windows) { "Consolas" } else { "Menlo" })
     }
     /// Loads a requested primary face through CoreText, retaining lazy fallbacks.
     pub fn load_named(requested: &str) -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
         let primary = Path::new("/System/Library/Fonts/Menlo.ttc");
         let mut files = HashMap::new();
+        #[cfg(target_os = "macos")]
         let face = if requested == "Menlo" && primary.exists() {
             Face::load(primary, "Menlo-Regular", None, &mut files, true)?
         } else {
+            let (path, name, font) = native::font_location(requested)?;
+            Face::load(&path, &name, Some(font), &mut files, true)?
+        };
+        #[cfg(windows)]
+        let face = {
             let (path, name, font) = native::font_location(requested)?;
             Face::load(&path, &name, Some(font), &mut files, true)?
         };
@@ -262,6 +280,7 @@ impl Fonts {
             },
             warnings: Vec::new(),
             coretext_rasters: 0,
+            #[cfg(target_os = "macos")]
             coretext_faces: std::collections::HashSet::new(),
             scaler: ScaleContext::new(),
             shaper: ShapeContext::new(),
@@ -303,7 +322,10 @@ impl Fonts {
                     match self.load_face(
                         &d.path,
                         &d.postscript_name,
+                        #[cfg(target_os = "macos")]
                         d.native.map(vel_platform::fonts::CascadeFont::into_native),
+                        #[cfg(windows)]
+                        Some(d.clone()),
                     ) {
                         Ok(face)
                             if match &key {
@@ -408,7 +430,12 @@ impl Fonts {
     }
     /// Font identities, raster fallback counts and diagnostics.
     pub fn metadata(&self) -> Value {
-        json!({"rasterizer":"swash with CoreText fallback when a glyph has no swash image","coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
+        let rasterizer = if cfg!(windows) {
+            "swash"
+        } else {
+            "swash with CoreText fallback when a glyph has no swash image"
+        };
+        json!({"rasterizer":rasterizer,"coretext_fallback_raster_count":self.coretext_rasters,"point_size":13,"cell_points":self.cell,"ascent_points":self.ascent,"fallbacks_loaded_lazily":true,"mapped_files":self.files.values().filter(|d|matches!(&***d,vel_platform::fonts::FontData::Mapped(_))).count(),"font_files":self.files.len(),"face_snapshots":self.faces.iter().filter(|f|f.face_snapshot).count(),"fallback_pending":self.fallback_pending(),"line_height_points":self.metrics.line(13.,1.,0.,0.).0,"faces":self.faces.iter().map(|f|json!({"path":f.path,"postscript_name":f.name,"font_file_bytes":f.bytes.len(),"memory_mapped":matches!(&*f.bytes,vel_platform::fonts::FontData::Mapped(_)),"face_snapshot":f.face_snapshot})).collect::<Vec<_>>(),"warnings":self.warnings})
     }
     /// Unique face backing bytes: owned heap capacity and mapped file length.
     /// The latter is not a count of resident pages.
@@ -482,7 +509,10 @@ impl Fonts {
                 Face::load(
                     &d.path,
                     &d.postscript_name,
+                    #[cfg(target_os = "macos")]
                     d.native.map(vel_platform::fonts::CascadeFont::into_native),
+                    #[cfg(windows)]
+                    Some(d.clone()),
                     &mut self.files,
                     false,
                 )
@@ -803,41 +833,46 @@ impl Fonts {
             }
             return Some(image);
         }
-        let native_font = match &self.faces[face as usize].native {
-            Some(f) => f.clone(),
-            None => match native::font_location(&self.faces[face as usize].name) {
-                Ok((_, _, f)) => {
-                    self.faces[face as usize].native = Some(f.clone());
-                    f
+        #[cfg(windows)]
+        return None;
+        #[cfg(target_os = "macos")]
+        {
+            let native_font = match &self.faces[face as usize].native {
+                Some(f) => f.clone(),
+                None => match native::font_location(&self.faces[face as usize].name) {
+                    Ok((_, _, f)) => {
+                        self.faces[face as usize].native = Some(f.clone());
+                        f
+                    }
+                    Err(e) => {
+                        self.warnings.push(e);
+                        return None;
+                    }
+                },
+            };
+            match native::raster_glyph(&native_font, id, px, bucket) {
+                Ok(mut image) => {
+                    if no_antialias && image.content == Content::Mask {
+                        image
+                            .data
+                            .iter_mut()
+                            .for_each(|a| *a = if *a >= 128 { 255 } else { 0 });
+                    }
+                    self.coretext_rasters += 1;
+                    if self.coretext_faces.insert(face) {
+                        self.warnings.push(format!(
+                            "swash image unavailable for {}; using CoreText raster fallback",
+                            self.faces[face as usize].name
+                        ));
+                    }
+                    Some(image)
                 }
                 Err(e) => {
-                    self.warnings.push(e);
-                    return None;
+                    if self.warnings.len() < 32 {
+                        self.warnings.push(e);
+                    }
+                    None
                 }
-            },
-        };
-        match native::raster_glyph(&native_font, id, px, bucket) {
-            Ok(mut image) => {
-                if no_antialias && image.content == Content::Mask {
-                    image
-                        .data
-                        .iter_mut()
-                        .for_each(|a| *a = if *a >= 128 { 255 } else { 0 });
-                }
-                self.coretext_rasters += 1;
-                if self.coretext_faces.insert(face) {
-                    self.warnings.push(format!(
-                        "swash image unavailable for {}; using CoreText raster fallback",
-                        self.faces[face as usize].name
-                    ));
-                }
-                Some(image)
-            }
-            Err(e) => {
-                if self.warnings.len() < 32 {
-                    self.warnings.push(e);
-                }
-                None
             }
         }
     }
@@ -871,7 +906,7 @@ impl std::fmt::Debug for Fonts {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     #[test]
     fn bold_italic_use_distinct_real_faces_without_changing_grid_advance() {
@@ -1060,7 +1095,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod round17_tests {
     use super::*;
     fn fixture() -> Fonts {
@@ -1175,7 +1210,7 @@ mod round17_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod fallback_mock_tests {
     use super::*;
     #[test]
@@ -1255,7 +1290,7 @@ pub(crate) fn emoji_presentation(cluster: &str) -> bool {
                 .is_some_and(|c| matches!(c, '#' | '*' | '0'..='9')))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod review_regressions {
     use super::*;
     #[test]

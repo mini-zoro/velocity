@@ -1,9 +1,11 @@
+#[cfg(unix)]
 mod support;
-use std::{
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
-use vel_build::{BuildSystem, Event, ResultParser, Task, Variables};
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+use vel_build::{BuildSystem, ResultParser, Variables};
+#[cfg(unix)]
+use vel_build::{Event, Task};
 #[cfg(unix)]
 #[path = "support/detached.rs"]
 mod detached_fixture;
@@ -77,6 +79,7 @@ fn relative_file_regex_and_line_only_results_use_latest_header() {
     assert_eq!((d.line, d.column), (3, 2));
 }
 #[test]
+#[cfg(unix)]
 fn streams_both_pipes_and_preserves_split_utf8() {
     let build=BuildSystem::parse("fixture",r#"{"shell_cmd":"printf 'hello\\n'; printf 'error\\n' >&2; printf '\\344'; printf '\\275\\240\\n'"}"#).unwrap();
     let exec = build.resolve(&Variables::default()).unwrap();
@@ -110,6 +113,7 @@ fn streams_both_pipes_and_preserves_split_utf8() {
     assert!(output.contains("你"));
 }
 #[test]
+#[cfg(unix)]
 fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
     let build =
         BuildSystem::parse("fixture", r#"{"shell_cmd":"sleep 30 & echo ready; wait"}"#).unwrap();
@@ -154,6 +158,7 @@ fn cancel_reaps_process_tree_and_unblocks_inherited_pipes() {
 }
 
 #[test]
+#[cfg(unix)]
 fn dropping_a_build_with_full_output_queue_reaps_its_tree_without_a_consumer() {
     let exec = BuildSystem::parse("output", r#"{"cmd":["/usr/bin/yes","output"]}"#)
         .unwrap()
@@ -459,6 +464,7 @@ fn round18_detached_output_pipe_finishes_cancels_and_restarts_without_waiting() 
 }
 
 #[test]
+#[cfg(unix)]
 fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
     let exec = BuildSystem::from_value("fixture", serde_json::json!({"cmd":["/usr/bin/env"]}))
         .unwrap()
@@ -492,6 +498,7 @@ fn round18_third_task_defaults_cannot_capture_real_login_profiles() {
 }
 
 #[test]
+#[cfg(unix)]
 fn round19_sustained_output_keeps_ui_polling_progress_with_regex() {
     support::install();
     // Full-speed 4 KiB diagnostic lines for three seconds; the same reader,

@@ -211,6 +211,7 @@ fn project_save_as_keeps_rules_and_unknown_keys_and_loads_inline_builds() {
     assert!(w.project_path().is_none());
 }
 #[test]
+#[cfg(unix)]
 fn streamed_build_output_result_navigation_and_output_double_click() {
     use std::time::{Duration, Instant};
     let dir = tempfile::tempdir().unwrap();

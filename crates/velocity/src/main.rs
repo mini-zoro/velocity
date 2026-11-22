@@ -1,4 +1,6 @@
 //! Native AppKit editor demo with automatic measurements; never launches in tests.
+// W1 builds the shared editor code before the Windows event loop is wired in.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod annotation_commands;
 mod annotations;
 #[cfg(target_os = "macos")]
@@ -21,6 +23,10 @@ mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
 mod git_ui;
+#[cfg(unix)]
+mod gui_launch;
+#[cfg(windows)]
+#[path = "cli_console.rs"]
 mod gui_launch;
 mod html_ui;
 mod image_decode;
@@ -54,6 +60,7 @@ mod settings_ui;
 mod shared_document;
 mod shipped;
 mod stats;
+mod status_position;
 #[cfg(test)]
 #[path = "../../vel-build/tests/support/mod.rs"]
 mod test_login;
@@ -86,7 +93,9 @@ use std::{
     },
     time::{Instant, SystemTime},
 };
-use vel_platform::{Platform, Size, WindowOptions};
+#[cfg(target_os = "macos")]
+use vel_platform::Size;
+use vel_platform::{Platform, WindowOptions};
 use vel_text::Text;
 
 fn main() {
@@ -195,7 +204,7 @@ impl vel_platform::AppHandler for NativeForwarder {
                         eprintln!("velocity: {error}");
                     }
                     if let Some(home) = std::env::var_os("HOME") {
-                        match release::CrashStartup::install(Path::new(&home)) {
+                        match release::CrashStartup::for_home(Path::new(&home)) {
                             Ok(crash) => app.set_crash(Some(crash)),
                             Err(error) => {
                                 eprintln!("velocity: crash reporting unavailable: {error}")
@@ -217,6 +226,8 @@ impl vel_platform::AppHandler for NativeForwarder {
     }
 }
 fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(), String> {
+    #[cfg(windows)]
+    let _ = gui;
     // Developer tool: offscreen PNGs of real UI states; never creates a window.
     #[cfg(target_os = "macos")]
     {
@@ -257,10 +268,12 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         .map(std::path::absolute)
         .transpose()
         .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
     let safe_profile = normal_data_dir
         .as_deref()
         .filter(|_| options.safe_mode)
         .map(safe_mode::profile);
+    #[cfg(unix)]
     let inherited = if options.mode == Mode::Interactive {
         instance::Claim::inherited(
             safe_profile.as_deref().or(normal_data_dir.as_deref()),
@@ -269,8 +282,14 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     } else {
         None
     };
+    #[cfg(unix)]
     let gui_process = inherited.is_some();
+    #[cfg(windows)]
+    let gui_process = false;
+    #[cfg(unix)]
     let launch_services = !gui_process && options.launched_by_launch_services(parent_pid());
+    #[cfg(windows)]
+    let launch_services = false;
     // https://www.sublimetext.com/docs/safe_mode.html
     #[cfg(target_os = "macos")]
     if launch_services && Platform::option_held_at_launch() {
@@ -309,6 +328,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                 request.return_pid = Platform::frontmost_pid();
             }
         }
+        #[cfg(unix)]
         let entry = if let Some(claim) = inherited {
             if let Some(log) = gui.log
                 && let Err(e) = gui_launch::capture_stderr(log)
@@ -319,6 +339,8 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         } else {
             instance::Instance::enter(data_dir.as_deref(), &request)?
         };
+        #[cfg(windows)]
+        let entry = instance::Instance::enter(data_dir.as_deref(), &request)?;
         match entry {
             instance::Entry::Forwarded if launch_services => {
                 // Retain the native event recipient until its actual paths are relayed.
@@ -330,6 +352,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             instance::Entry::Claimed(claim) => {
                 // Finder/Dock launches must retain the process receiving Apple events.
                 // See Options::launched_by_launch_services for the path-free heuristics.
+                #[cfg(unix)]
                 if !gui_process && !launch_services {
                     request.new_window = options.new_window;
                     let path = claim.path().to_owned();
@@ -387,10 +410,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
     };
     let flush_replies = instance.is_some() || options.forward_native_opens;
     let crash = if options.mode == Mode::Interactive && !options.forward_native_opens {
-        match std::env::var_os("HOME")
-            .ok_or_else(|| "home directory unavailable".to_owned())
-            .and_then(|home| release::CrashStartup::install(Path::new(&home)))
-        {
+        match release::CrashStartup::install() {
             Ok(crash) => Some(crash),
             Err(error) => {
                 eprintln!("velocity: local crash reporting unavailable: {error}");
@@ -706,7 +726,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (&clock, &text);
+            let _ = (&clock, &text, &workspace_data);
             Platform::run_with_options(WindowOptions::default(), Unsupported)?;
         }
         if !done.load(Ordering::Acquire) {

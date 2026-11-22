@@ -345,7 +345,9 @@ fn prune(directory: &Path, retain: usize) -> io::Result<()> {
     Ok(())
 }
 fn os_description() -> String {
-    let mut description = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let description = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+    #[cfg(target_os = "macos")]
+    let mut description = description;
     #[cfg(target_os = "macos")]
     if let Ok(output) = std::process::Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")

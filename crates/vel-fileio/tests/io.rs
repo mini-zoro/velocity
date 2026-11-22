@@ -290,7 +290,7 @@ fn new_files_get_the_umask_and_atomic_saves_keep_the_file_identity() {
 
 #[test]
 fn trim_all_and_the_system_line_ending() {
-    assert_eq!(LineEnding::parse("system").unwrap(), LineEnding::Lf);
+    assert_eq!(LineEnding::parse("system").unwrap(), LineEnding::system());
     let mut buffer = Buffer::new("tabs\t \nideographic\u{3000}\nnbsp\u{a0}\n");
     let id = buffer.new_view();
     let tracker = ChangeTracker::new(&buffer);

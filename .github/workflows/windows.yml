@@ -21,5 +21,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build (all crates, keep going to list every error)
         run: cargo build --workspace --locked --release --keep-going
+      - name: Clippy (all targets)
+        if: success() || failure()
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
+        if: success() || failure()
         run: cargo test --workspace --locked --release --no-fail-fast
