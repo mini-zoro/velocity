@@ -13,7 +13,7 @@ workspace = true
 vel-config = { path = "../vel-config" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSLocale", "NSString"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSLocale", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Globalization"] }
