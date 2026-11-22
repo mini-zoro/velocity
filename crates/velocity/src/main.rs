@@ -121,6 +121,7 @@ fn main() {
 #[cfg(target_os = "macos")]
 struct NativeForwarder {
     relay: open_requests::Forwarder,
+    data_dir: Option<std::path::PathBuf>,
     options: Options,
     reporter: Reporter,
 }
@@ -136,6 +137,29 @@ impl vel_platform::AppHandler for NativeForwarder {
         paths: &[std::path::PathBuf],
     ) {
         self.relay.enqueue(paths.to_vec(), Instant::now());
+    }
+    fn on_finder_new_text_file(&mut self, window: &vel_platform::WindowHandle, directory: &Path) {
+        // The profile's primary may be a different copy. A Finder Sync request
+        // is bound to this executable and must not cross the profile socket.
+        let result = (|| {
+            let workspace = workspace::Workspace::new_empty(self.data_dir.clone(), None, true)?;
+            let mut options = self.options.clone();
+            options.forward_native_opens = false;
+            let mut app = app::App::new(
+                options,
+                Clock::new(Instant::now(), SystemTime::now()),
+                self.reporter.clone(),
+                workspace,
+                Arc::new(AtomicBool::new(false)),
+                std::rc::Rc::new(std::cell::RefCell::new(session::Sessions::new(None))),
+            );
+            app.handle_finder_new_text_file(None, directory);
+            window.new_window(WindowOptions::default(), app)?;
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = result {
+            eprintln!("velocity: could not open a window for Finder New Text File: {error}");
+        }
     }
     fn on_reopen(&mut self, _window: &vel_platform::WindowHandle) {
         self.relay.enqueue(vec![], Instant::now());
@@ -417,6 +441,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
             // before orderFront and let the closed-window timer pump the relay.
             return Platform::run(NativeForwarder {
                 relay: open_requests::Forwarder::new(data_dir.clone(), Instant::now()),
+                data_dir: data_dir.clone(),
                 options: options.clone(),
                 reporter: reporter.clone(),
             });

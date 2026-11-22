@@ -1388,6 +1388,14 @@
     "Sum: {sum}": "合计：{sum}",
     "Open Terminal": "打开终端",
     "File: Open Terminal": "文件：打开终端",
+    "Finder: Enable New Text File in Context Menu": "Finder：启用右键新建文本文件",
+    "Finder: Disable New Text File in Context Menu": "Finder：停用右键新建文本文件",
+    "Finder: New Text File enabled": "Finder：已启用右键新建文本文件",
+    "Finder: New Text File disabled": "Finder：已停用右键新建文本文件",
+    "This copy of Velocity has no Finder extension": "此 Velocity 副本未安装 Finder 扩展",
+    "Could not change the Finder extension: {detail}": "无法更改 Finder 扩展：{detail}",
+    "New Text Document": "新建文本文档",
+    "Could not create a text file in {path}: {detail}": "无法在 {path} 中新建文本文件：{detail}",
     "Selection: Tab Selection: Deselect Focused Tab": "选择：标签页选择：取消选择当前标签页",
   }
 }

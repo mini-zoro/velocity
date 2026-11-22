@@ -1,6 +1,8 @@
 //! Process-wide open routing and the retained, closed-window template.
 use super::*;
-use crate::requests::{OpenHost, OpenRequests, ReopenPlan, open_target, reopen_plan};
+use crate::requests::{
+    NativeOpenRequest, OpenHost, OpenRequests, ReopenPlan, open_target, reopen_plan,
+};
 
 type WindowFactory = Box<dyn FnMut() -> Result<(WindowOptions, Box<dyn AppHandler>), String>>;
 
@@ -115,6 +117,15 @@ pub(super) fn receive(paths: Vec<PathBuf>) {
     });
     schedule();
 }
+pub(super) fn receive_finder_new_text_file(directory: PathBuf) {
+    APPLICATION.with(|app| {
+        app.requests
+            .borrow_mut()
+            .push_finder_new_text_file(directory);
+        app.awaiting_new_request.set(false);
+    });
+    schedule();
+}
 pub(super) fn reopen() {
     APPLICATION.with(|app| {
         app.reopen.set(true);
@@ -161,7 +172,13 @@ pub(super) fn drain() {
             {
                 let mut slot = template.app.borrow_mut();
                 if let Some(app) = slot.as_mut() {
-                    app.on_reopen(&template.handle());
+                    let directory = APPLICATION
+                        .with(|state| state.requests.borrow_mut().pop_finder_for_closed_window());
+                    if let Some(directory) = directory {
+                        app.on_finder_new_text_file(&template.handle(), &directory);
+                    } else {
+                        app.on_reopen(&template.handle());
+                    }
                 }
             }
             template.dispatching.set(false);
@@ -203,14 +220,19 @@ pub(super) fn drain() {
             let current = live_hosts();
             let current_destinations = self::destinations(&current);
             let request =
-                APPLICATION.with(|app| app.requests.borrow_mut().pop_all(&current_destinations));
-            let Some((id, paths)) = request else {
+                APPLICATION.with(|app| app.requests.borrow_mut().pop(&current_destinations));
+            let Some((id, request)) = request else {
                 break;
             };
             let Some(host) = current.iter().find(|host| host.id == id) else {
                 break;
             };
-            host.dispatch(Event::OpenPaths(paths));
+            host.dispatch(match request {
+                NativeOpenRequest::Paths(paths) => Event::OpenPaths(paths),
+                NativeOpenRequest::FinderNewTextFile(directory) => {
+                    Event::FinderNewTextFile(directory)
+                }
+            });
             if !host.stopped.get() {
                 host.handle().focus();
                 host.flush();

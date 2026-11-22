@@ -105,6 +105,39 @@ not instructions to inspect an installed Sublime Text copy.
 
 Record results in `crates/velocity/MANUAL_TEST.md` (section "Live checks") or tell the agent.
 
+## Finder New Text File (round 45)
+
+Run outside the sandbox. Package to a disposable output directory with
+`scripts/package-macos.sh /absolute/path/to/artifacts`, then use that `Velocity.app`.
+Packaging registers the app and extension without changing the Finder extension preference.
+Use a test user or record and restore the existing preference.
+
+1. With the extension off, confirm Finder does not show the item. Run **Finder: Enable New
+   Text File in Context Menu** in Velocity and check its status bar. The alternative on
+   macOS 15 and later is System Settings > General > Login Items & Extensions > Finder
+   (under Extensions); on macOS 14, use Privacy & Security > Extensions > Finder Extensions.
+2. Right-click a folder window's empty area, then one folder, one file, a mixed selection,
+   and the Desktop background. Confirm one Velocity item and the correct destination each
+   time: the container, the selected folder, or the first selected item's parent. Include a
+   folder with spaces, non-ASCII characters, and `&` or `+` in its name.
+3. Invoke the action repeatedly, with a pre-existing numbered file and a gap. Confirm each
+   file is empty, the first available name is used, and nothing existing is overwritten.
+   With two Velocity windows, the selected window gets a tab and comes to the front.
+4. Repeat with all windows closed and with Velocity fully quit. The containing app should
+   create a window and open the file once. Repeat in a read-only test folder; expect a
+   status bar error, not a dialog or a tab. With all windows closed, the new window should
+   show the same error.
+5. Try Simplified Chinese and English as macOS system languages. The menu should read
+   **新建文本文件** or **New Text File**. Set Velocity's UI language to the opposite language
+   and confirm the name still follows Velocity: `新建文本文档.txt` or
+   `New Text Document.txt`, then ` (2)`, ` (3)`, etc.
+6. With a second copy running, invoke the registered copy's extension and confirm only
+   its own app opens the tab. Try opening `velocity://new-text-file?dir=%2Ftmp%2Ftest-folder`
+   directly from Terminal or a browser, using an existing disposable folder. No file
+   should be created. Confirm Finder Open With and Dock file drops still open regular files.
+7. Run **Finder: Disable New Text File in Context Menu**. Check its status and confirm the
+   item disappears. Restore the original Finder preference.
+
 ## Automated live run (2026-11-22, by the agent, user away from keyboard)
 
 Driven from outside the app through the macOS accessibility API and synthesized HID key events

@@ -41,8 +41,12 @@ Bundle layout:
 
 ```text
 Velocity.app/Contents/
-  Info.plist                           dev.velocity.Velocity; Cargo version; macOS 14.0
+  Info.plist                           dev.velocity.Velocity; macOS 14.0; velocity URL scheme
   MacOS/velocity                       release Mach-O (arm64 or universal)
+  PlugIns/VelocityFinderNewFile.appex/Contents/
+    Info.plist                         dev.velocity.Velocity.FinderNewFile; com.apple.FinderSync
+    MacOS/VelocityFinderNewFile         Swift extension; matches app architectures and target
+    Resources/{en,zh-Hans}.lproj/Localizable.strings
   SharedSupport/bin/velocity           symlink-aware launcher, preserves cwd/stdin/args
   Resources/
     Velocity.icns                      original artwork; 10 standard/Retina representations
@@ -79,6 +83,30 @@ and space-containing paths, symlink invocation, relative paths, `--`, stdin, `-n
 `-w` staying blocked until a close acknowledgement. The peer mirrors `src/instance.rs` framing
 and socket naming; this is not a native GUI end-to-end test. Existing workspace tests also
 exercise the actual instance server and close-driven waiters.
+
+### Finder New Text File (round 45)
+
+`bundle.py` builds the Finder Sync extension with the macOS Command Line Tools' `swiftc`;
+Xcode is not needed for the local build. The package script signs the extension first, with
+only `com.apple.security.app-sandbox`, then signs the enclosing app without `--deep`. Developer
+ID signing uses the hardened runtime and timestamps for both. The layout validator checks the
+extension's plist, localizations, architecture slices, deployment target and signed
+entitlements. Deep signature verification still checks the nested signature.
+
+After publishing to the output directory, the script registers the app with `lsregister -f`
+and the embedded extension with `pluginkit -a`. It does not change the extension preference.
+From the installed copy of Velocity, run **Finder: Enable New Text File in Context Menu**
+or **Finder: Disable New Text File in Context Menu**. Alternatively, on macOS 15 and later,
+use [System Settings > General > Login Items & Extensions > Finder](https://support.apple.com/en-us/guide/mac-help/mtusr003/mac)
+(under Extensions) and toggle Velocity. On macOS 14, look for Finder Extensions in
+System Settings > Privacy & Security > Extensions.
+
+Finder chooses the action's language; Velocity chooses the file's name using its own UI
+language. The extension never writes the file. It opens the request in its containing app
+with running-app substitution disabled. Velocity accepts only a single absolute `dir`
+argument from the Apple-event audit token of that bundle's exact extension executable.
+Unauthenticated links, including direct opens from a browser or Terminal, do not create files.
+See [native checks](../../../docs/manual-checks.md#finder-new-text-file-round-45).
 
 DMGs use a read-only HFS+ filesystem built by DiscRecording (`hdiutil makehybrid -hfs`), then
 UDZO compression. The root contains only the app and `Applications -> /Applications`.

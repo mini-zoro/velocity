@@ -3,6 +3,8 @@ use crate::drawable_pool::DrawablePool;
 use crate::*;
 #[path = "macos_a11y.rs"]
 mod a11y;
+#[path = "macos_finder.rs"]
+pub(super) mod finder;
 #[path = "macos_requests.rs"]
 mod lifecycle;
 #[path = "macos_menu.rs"]
@@ -17,7 +19,7 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
-use objc2_foundation::NSNotificationCenter;
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSNotificationCenter};
 
 pub(super) fn option_held_at_launch() -> bool {
     // SAFETY: NSEvent's class method modifierFlags returns the documented bitset.
@@ -766,6 +768,7 @@ enum Event {
     NamedCommand(String, String),
     Mouse(MouseEvent, Option<Retained<NSEvent>>),
     OpenPaths(Vec<PathBuf>),
+    FinderNewTextFile(PathBuf),
     Scroll(ScrollEvent),
     Resize,
     Appearance(Appearance),
@@ -936,6 +939,7 @@ impl Host {
                     }
                 }
                 Event::OpenPaths(paths) => app.on_open_paths(&w, &paths),
+                Event::FinderNewTextFile(directory) => app.on_finder_new_text_file(&w, &directory),
                 Event::Scroll(e) => app.on_scroll(&w, e),
                 Event::Resize => app.on_resize(&w, self.size.get(), self.scale.get()),
                 Event::Appearance(e) => app.on_appearance(&w, e),
@@ -1635,7 +1639,18 @@ define_class!(
         }
         #[unsafe(method(application:openURLs:))]
         fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
-            lifecycle::receive(urls.iter().filter_map(|url| path_from_url(&url)).collect());
+            let mut paths = Vec::new();
+            for url in urls.iter() {
+                if let Some(path) = path_from_url(&url) {
+                    paths.push(path);
+                } else {
+                    let event = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent();
+                    finder::receive(&url, event.as_deref());
+                }
+            }
+            if !paths.is_empty() {
+                lifecycle::receive(paths);
+            }
         }
         #[unsafe(method(application:openFiles:))]
         fn open_files(&self, app: &NSApplication, filenames: &NSArray<NSString>) {
@@ -1686,6 +1701,10 @@ define_class!(
         }
     }
     impl Delegate {
+        #[unsafe(method(velocityOpenURL:withReplyEvent:))]
+        fn open_url_event(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
+            finder::open_event(event);
+        }
         #[unsafe(method(velocitySessionEnding:))]
         fn session_ending(&self, _notification: &NSNotification) {
             let hosts = WINDOWS.with(|windows| {
@@ -2282,6 +2301,15 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    let apple_events = NSAppleEventManager::sharedAppleEventManager();
+    // AppKit may defer openURLs: on cold launch. Capture sender provenance from
+    // the raw kAEGetURL before it goes away, without intercepting kAEOpenDocuments.
+    // SAFETY: the handler is retained until run returns and implements the two-descriptor selector.
+    unsafe {
+        let _: () = msg_send![&*apple_events, setEventHandler: &*delegate,
+            andSelector: sel!(velocityOpenURL:withReplyEvent:),
+            forEventClass: finder::INTERNET_EVENT, andEventID: finder::INTERNET_EVENT];
+    }
     // Apple's workspace notification is sent on this center, not the default.
     // https://developer.apple.com/documentation/appkit/nsworkspace/willpoweroffnotification
     // SAFETY: the delegate is retained while the app runs and implements the selector.
@@ -2296,6 +2324,11 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
             );
     }
     nsapp.run();
+    // SAFETY: both arguments are UInt32 event codes, matching the registration.
+    unsafe {
+        let _: () = msg_send![&*apple_events, removeEventHandlerForEventClass: finder::INTERNET_EVENT,
+            andEventID: finder::INTERNET_EVENT];
+    }
     teardown(&nsapp)
 }
 

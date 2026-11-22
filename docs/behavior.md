@@ -20,6 +20,10 @@ public sources, the decision is the user's and is recorded here.
 - Graphical Settings page (`specs/vel-settings-ui.md`); JSON editing stays the primary Sublime path (D1).
 - Simplified Chinese UI and the i18n framework (`docs/i18n.md`); English text and behaviour are unchanged.
 
+| Addition | Behavior |
+| --- | --- |
+| Finder: New Text File (round 45) | Opt-in Finder Sync action for the desktop, folder backgrounds and selections. The Finder menu follows the system language; the empty, uniquely named `.txt` file follows Velocity's UI language. Velocity opens it as a tab in the current window (D4), or opens a new window if needed. File creation errors appear in the status bar (U18). |
+
 The public [Search and Replace guide](https://docs.sublimetext.io/guide/usage/search-and-replace.html#results-format)
 documents the separate view, context and match navigation. The [theme reference](https://www.sublimetext.com/docs/themes.html#icons)
 distinguishes a buffer from an output panel. The [changelog](https://www.sublimetext.com/download)

@@ -79,6 +79,7 @@ pub(super) fn command(item: &PaletteItem) -> ItemIcon {
         }
         "set_ui_language" | "set_indentation" | "set_encoding" | "show_dictionary"
         | "set_dictionary" => return Settings,
+        "enable_finder_new_file" | "disable_finder_new_file" => return Settings,
         "next_modification" | "prev_modification" | "next_misspelling" | "prev_misspelling" => {
             return Goto;
         }

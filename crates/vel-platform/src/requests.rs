@@ -34,31 +34,54 @@ pub(crate) fn reopen_plan(hosts: &[OpenHost]) -> ReopenPlan {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeOpenRequest {
+    Paths(Vec<PathBuf>),
+    FinderNewTextFile(PathBuf),
+}
+
 #[derive(Debug, Default)]
-pub(crate) struct OpenRequests(VecDeque<Vec<PathBuf>>);
+pub(crate) struct OpenRequests(VecDeque<NativeOpenRequest>);
 impl OpenRequests {
     pub fn push(&mut self, paths: Vec<PathBuf>) {
         if !paths.is_empty() {
-            self.0.push_back(paths);
+            self.0.push_back(NativeOpenRequest::Paths(paths));
         }
+    }
+    pub fn push_finder_new_text_file(&mut self, directory: PathBuf) {
+        self.0
+            .push_back(NativeOpenRequest::FinderNewTextFile(directory));
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    pub fn pop(&mut self, hosts: &[OpenHost]) -> Option<(u64, Vec<PathBuf>)> {
-        let id = open_target(hosts)?;
-        self.0.pop_front().map(|paths| (id, paths))
-    }
-    /// Drain all currently queued batches in arrival order before invoking the
-    /// destination. A LaunchServices proxy may forward once and quit immediately
-    /// after acknowledgement, so no already-queued batch may remain behind it.
-    /// Without a ready destination, every batch stays queued.
-    pub fn pop_all(&mut self, hosts: &[OpenHost]) -> Option<(u64, Vec<PathBuf>)> {
-        let (id, mut paths) = self.pop(hosts)?;
-        for batch in self.0.drain(..) {
-            paths.extend(batch);
+    pub fn pop_finder_for_closed_window(&mut self) -> Option<PathBuf> {
+        // A secondary native launch may relay path opens to a different copy of
+        // the app. Give a bundle-local request first chance to open a window here.
+        let index = self
+            .0
+            .iter()
+            .position(|request| matches!(request, NativeOpenRequest::FinderNewTextFile(_)))?;
+        match self.0.remove(index)? {
+            NativeOpenRequest::FinderNewTextFile(directory) => Some(directory),
+            NativeOpenRequest::Paths(_) => unreachable!(),
         }
-        Some((id, paths))
+    }
+    /// Coalesce adjacent open-path batches in arrival order before invoking the
+    /// destination. A LaunchServices proxy may forward once and quit immediately
+    /// after acknowledgement. Finder creation is a separate, ordered action.
+    /// Without a ready destination, every batch stays queued.
+    pub fn pop(&mut self, hosts: &[OpenHost]) -> Option<(u64, NativeOpenRequest)> {
+        let id = open_target(hosts)?;
+        let mut request = self.0.pop_front()?;
+        if let NativeOpenRequest::Paths(paths) = &mut request {
+            while let Some(NativeOpenRequest::Paths(_)) = self.0.front() {
+                if let Some(NativeOpenRequest::Paths(batch)) = self.0.pop_front() {
+                    paths.extend(batch);
+                }
+            }
+        }
+        Some((id, request))
     }
 }
 
@@ -229,7 +252,10 @@ mod tests {
         hosts[0].ready = true;
         assert_eq!(
             requests.pop(&hosts),
-            Some((1, vec!["/file.txt".into(), "/folder".into()]))
+            Some((
+                1,
+                NativeOpenRequest::Paths(vec!["/file.txt".into(), "/folder".into()])
+            ))
         );
         hosts.push(OpenHost {
             id: 2,
@@ -237,7 +263,10 @@ mod tests {
             key: true,
         });
         requests.push(vec!["/other.txt".into()]);
-        assert_eq!(requests.pop(&hosts), Some((2, vec!["/other.txt".into()])));
+        assert_eq!(
+            requests.pop(&hosts),
+            Some((2, NativeOpenRequest::Paths(vec!["/other.txt".into()])))
+        );
         // No key window: retain a live destination (for example, a minimized window).
         hosts[1].key = false;
         assert_eq!(open_target(&hosts), Some(2));
@@ -254,9 +283,19 @@ mod tests {
             ready: true,
             key: true,
         }];
-        assert_eq!(requests.pop(&fresh), Some((3, vec!["/again".into()])));
+        assert_eq!(
+            requests.pop(&fresh),
+            Some((
+                3,
+                NativeOpenRequest::Paths(vec!["/again".into(), "/again".into()])
+            ))
+        );
         // A later explicit open of the same path must still focus its tab.
-        assert_eq!(requests.pop(&fresh), Some((3, vec!["/again".into()])));
+        requests.push(vec!["/again".into()]);
+        assert_eq!(
+            requests.pop(&fresh),
+            Some((3, NativeOpenRequest::Paths(vec!["/again".into()])))
+        );
         requests.push(vec![]);
         assert!(requests.is_empty());
     }
@@ -282,13 +321,13 @@ mod tests {
         requests.push(vec!["/first.txt".into(), "/folder".into()]);
         requests.push(vec!["/second.txt".into(), "/first.txt".into()]);
         requests.push(vec!["/binary".into(), "/huge.txt".into()]);
-        assert!(requests.pop_all(&[]).is_none());
+        assert!(requests.pop(&[]).is_none());
         let mut hosts = [OpenHost {
             id: 1,
             ready: false,
             key: true,
         }];
-        assert!(requests.pop_all(&hosts).is_none());
+        assert!(requests.pop(&hosts).is_none());
         hosts[0].ready = true;
 
         let mut proxy = OneShotProxy {
@@ -296,7 +335,7 @@ mod tests {
             stopped: false,
         };
         while !proxy.stopped {
-            let Some((host, paths)) = requests.pop_all(&hosts) else {
+            let Some((host, NativeOpenRequest::Paths(paths))) = requests.pop(&hosts) else {
                 break;
             };
             assert_eq!(host, 1);
@@ -317,14 +356,48 @@ mod tests {
             ]
         );
         assert!(requests.is_empty());
-        assert!(requests.pop_all(&hosts).is_none());
+        assert!(requests.pop(&hosts).is_none());
 
         // Coalescing does not suppress a later explicit open of the same path.
         requests.push(vec!["/first.txt".into()]);
         assert_eq!(
-            requests.pop_all(&hosts),
-            Some((1, vec!["/first.txt".into()]))
+            requests.pop(&hosts),
+            Some((1, NativeOpenRequest::Paths(vec!["/first.txt".into()])))
         );
+    }
+
+    #[test]
+    fn finder_creation_waits_for_the_key_window_or_stays_in_the_closed_copy() {
+        let mut requests = OpenRequests::default();
+        requests.push(vec!["/normal.txt".into()]);
+        requests.push_finder_new_text_file("/first".into());
+        requests.push_finder_new_text_file("/second".into());
+        assert!(requests.pop(&[]).is_none());
+        assert_eq!(
+            requests.pop_finder_for_closed_window(),
+            Some("/first".into())
+        );
+        let hosts = [
+            OpenHost {
+                id: 1,
+                ready: true,
+                key: true,
+            },
+            OpenHost {
+                id: 2,
+                ready: true,
+                key: false,
+            },
+        ];
+        assert_eq!(
+            requests.pop(&hosts),
+            Some((1, NativeOpenRequest::Paths(vec!["/normal.txt".into()])))
+        );
+        assert_eq!(
+            requests.pop(&hosts),
+            Some((1, NativeOpenRequest::FinderNewTextFile("/second".into())))
+        );
+        assert!(requests.is_empty());
     }
 
     #[test]

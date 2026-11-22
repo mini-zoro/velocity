@@ -7,6 +7,8 @@ mod accessibility_adapter;
 mod clipboard;
 #[path = "app_context.rs"]
 mod context_adapter;
+#[path = "app_finder.rs"]
+mod finder;
 #[cfg(test)]
 #[path = "app_lane_c_round20_tests.rs"]
 mod lane_c_round20_tests;
@@ -109,6 +111,8 @@ const WINDOW_COMMANDS: &[&str] = &[
     "build_close_input",
     "unselect_current",
     "open_terminal",
+    "enable_finder_new_file",
+    "disable_finder_new_file",
 ];
 fn image_open_as(name: &str) -> crate::open_requests::OpenAs {
     if name == "open_as_image" {
@@ -2758,6 +2762,12 @@ impl App {
         name: &str,
         args: &Value,
     ) -> Result<(), String> {
+        if matches!(name, "enable_finder_new_file" | "disable_finder_new_file") {
+            if window.is_some() {
+                self.set_finder_new_text_file_enabled(name == "enable_finder_new_file");
+            }
+            return Ok(());
+        }
         if name == "open_terminal" {
             let launch = self.terminal_launch(args)?;
             if window.is_some() {
@@ -5213,6 +5223,9 @@ impl AppHandler for App {
         if let Err(error) = self.receive_request(w, crate::instance::Incoming::local(request)) {
             self.named_error(Some(w), &error);
         }
+    }
+    fn on_finder_new_text_file(&mut self, window: &WindowHandle, directory: &Path) {
+        self.finder_new_text_file(window, directory);
     }
     fn on_reopen(&mut self, w: &WindowHandle) {
         if self.options.mode == Mode::Interactive

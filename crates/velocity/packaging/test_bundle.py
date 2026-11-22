@@ -1,6 +1,11 @@
-"""Headless plist contract tests; no build, signing, bundle assembly or GUI."""
+"""Packaging contract tests; only the extension is built, in a disposable fixture."""
 import copy
+from pathlib import Path
 import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import bundle
@@ -56,10 +61,6 @@ class DocumentTypes(unittest.TestCase):
             bundle.validate_document_types(invalid)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BuildNumber(unittest.TestCase):
     def test_build_number_grows_with_the_source_commit_time(self):
         # LaunchServices launches the copy with the highest CFBundleVersion.
@@ -68,3 +69,56 @@ class BuildNumber(unittest.TestCase):
         self.assertEqual(bundle.build_number(0), "0")
         with self.assertRaises(AssertionError):
             bundle.build_number(-1)
+
+
+class FinderExtension(unittest.TestCase):
+    source = Path(__file__).parent / "finder-new-file"
+    app_plist = {
+        "CFBundleVersion": "1795070000", "CFBundleShortVersionString": "0.0.0",
+        "LSMinimumSystemVersion": "14.0",
+    }
+
+    def test_url_and_extension_contract(self):
+        self.assertEqual(bundle.url_types(), [{
+            "CFBundleTypeRole": "Editor", "CFBundleURLName": "dev.velocity.Velocity",
+            "CFBundleURLSchemes": ["velocity"],
+        }])
+        self.assertEqual(bundle.FINDER_APPEX, Path("Contents/PlugIns/VelocityFinderNewFile.appex"))
+        plist = bundle.finder_plist(self.app_plist)
+        self.assertEqual(plist["CFBundleIdentifier"], "dev.velocity.Velocity.FinderNewFile")
+        self.assertEqual(plist["CFBundlePackageType"], "XPC!")
+        self.assertEqual(plist["CFBundleDisplayName"], "Velocity")
+        self.assertEqual(plist["CFBundleLocalizations"], ["en", "zh-Hans"])
+        self.assertEqual(plist["CFBundleExecutable"], "VelocityFinderNewFile")
+        self.assertEqual(plist["NSExtension"], {
+            "NSExtensionPointIdentifier": "com.apple.FinderSync",
+            "NSExtensionPrincipalClass": "VelocityFinderNewFile",
+        })
+        for key, value in self.app_plist.items():
+            self.assertEqual(plist[key], value)
+        self.assertEqual(plistlib.loads((self.source / "entitlements.plist").read_bytes()),
+                         {"com.apple.security.app-sandbox": True})
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "requires macOS swiftc")
+    def test_compiled_extension_layout_and_signed_entitlements(self):
+        if subprocess.run(["/usr/bin/xcrun", "--find", "swiftc"], capture_output=True).returncode:
+            self.skipTest("no active Swift toolchain")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "Velocity.app"
+            appex = app / "Contents/PlugIns/VelocityFinderNewFile.appex"
+            architectures = ["arm64", "x86_64"]
+            bundle.assemble_finder_extension(app, self.source, self.app_plist, architectures)
+            for language, title in [("en", "New Text File"), ("zh-Hans", "新建文本文件")]:
+                strings = appex / "Contents/Resources" / f"{language}.lproj/Localizable.strings"
+                self.assertEqual(strings.read_text(encoding="utf-8"), f'"New Text File" = "{title}";\n')
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none",
+                            "--entitlements", self.source / "entitlements.plist", appex], check=True)
+            bundle.validate_finder_extension(app, self.app_plist, architectures)
+            subprocess.run(["/usr/bin/codesign", "--verify", "--strict", appex], check=True)
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", appex], check=True)
+            with self.assertRaisesRegex(AssertionError, "invalid Finder extension entitlements"):
+                bundle.validate_finder_extension(app, self.app_plist, architectures)
+
+
+if __name__ == "__main__":
+    unittest.main()

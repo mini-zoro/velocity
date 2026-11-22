@@ -10,6 +10,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 
 
 EXTENSIONS = "txt text md markdown rst rs c h cc cpp hpp m mm swift py js jsx ts tsx json yaml yml toml xml html css sh bash zsh sql go java rb php lua pl ini cfg conf log csv tsv tex cmake make sublime-project sublime-workspace".split()
@@ -25,6 +26,11 @@ ICON_CHUNKS = [
 
 # UI languages with a shipped catalog (English is the source language).
 LOCALIZATIONS = ("en", "zh-Hans")
+APP_ID = "dev.velocity.Velocity"
+MINIMUM_MACOS = "14.0"
+FINDER_EXECUTABLE = "VelocityFinderNewFile"
+FINDER_APPEX = Path("Contents/PlugIns") / f"{FINDER_EXECUTABLE}.appex"
+FINDER_ENTITLEMENTS = {"com.apple.security.app-sandbox": True}
 
 def icon(args):
     # ICNS is a big-endian container of typed PNG chunks. Encode it directly so artwork
@@ -87,6 +93,55 @@ def build_number(epoch):
     return str(epoch)
 
 
+def url_types():
+    return [{"CFBundleTypeRole": "Editor", "CFBundleURLName": APP_ID, "CFBundleURLSchemes": ["velocity"]}]
+
+
+def finder_plist(app_plist):
+    return {
+        "CFBundleDevelopmentRegion": "en", "CFBundleDisplayName": "Velocity",
+        "CFBundleLocalizations": list(LOCALIZATIONS),
+        "CFBundleExecutable": FINDER_EXECUTABLE, "CFBundleName": "Velocity",
+        "CFBundleIdentifier": f"{APP_ID}.FinderNewFile", "CFBundlePackageType": "XPC!",
+        "CFBundleShortVersionString": app_plist["CFBundleShortVersionString"],
+        "CFBundleVersion": app_plist["CFBundleVersion"],
+        "LSMinimumSystemVersion": app_plist["LSMinimumSystemVersion"],
+        "NSExtension": {
+            "NSExtensionPointIdentifier": "com.apple.FinderSync",
+            "NSExtensionPrincipalClass": FINDER_EXECUTABLE,
+        },
+    }
+
+
+def assemble_finder_extension(app, source, app_plist, architectures):
+    contents = app / FINDER_APPEX / "Contents"
+    executable = contents / "MacOS" / FINDER_EXECUTABLE
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    (contents / "Info.plist").write_bytes(plistlib.dumps(finder_plist(app_plist), sort_keys=True))
+    for language in LOCALIZATIONS:
+        local = Path(f"{language}.lproj/Localizable.strings")
+        destination = contents / "Resources" / local
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / local, destination)
+
+    sdk = subprocess.check_output(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+    with tempfile.TemporaryDirectory(prefix="velocity-finder-swift-") as tmp:
+        slices = []
+        for architecture in architectures:
+            output = Path(tmp) / architecture if len(architectures) > 1 else executable
+            subprocess.run([
+                "swiftc", "-O", "-application-extension", "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain",
+                "-framework", "FinderSync", "-sdk", sdk,
+                "-target", f"{architecture}-apple-macosx{app_plist['LSMinimumSystemVersion']}",
+                "-module-cache-path", str(Path(tmp) / "cache"),
+                str(source / "FinderNewFile.swift"), "-o", str(output),
+            ], check=True)
+            slices.append(str(output))
+        if len(slices) > 1:
+            subprocess.run(["/usr/bin/lipo", "-create", *slices, "-output", str(executable)], check=True)
+    executable.chmod(0o755)
+
+
 def assemble(args):
     repo, app = Path(args.repo), Path(args.app)
     metadata = json.loads(Path(args.metadata).read_text())
@@ -102,12 +157,12 @@ def assemble(args):
         # only into languages the bundle declares; keep in step with the UI catalogs.
         "CFBundleLocalizations": list(LOCALIZATIONS),
         "CFBundleExecutable": "velocity", "CFBundleIconFile": "Velocity.icns",
-        "CFBundleIdentifier": "dev.velocity.Velocity", "CFBundleName": "Velocity",
+        "CFBundleIdentifier": APP_ID, "CFBundleName": "Velocity",
         "CFBundlePackageType": "APPL", "CFBundleShortVersionString": numeric_version,
         "CFBundleVersion": build_number(args.epoch), "NSHighResolutionCapable": True,
-        "LSMinimumSystemVersion": "14.0", "NSPrincipalClass": "NSApplication",
+        "LSMinimumSystemVersion": MINIMUM_MACOS, "NSPrincipalClass": "NSApplication",
         "NSRequiresAquaSystemAppearance": False, "NSSupportsAutomaticTermination": False,
-        "CFBundleDocumentTypes": document_types(),
+        "CFBundleDocumentTypes": document_types(), "CFBundleURLTypes": url_types(),
     }
     (contents / "Info.plist").write_bytes(plistlib.dumps(plist, sort_keys=True))
     for language in LOCALIZATIONS:
@@ -118,6 +173,8 @@ def assemble(args):
     shutil.copy2(repo / "crates/velocity/packaging/velocity", contents / "SharedSupport/bin/velocity")
     for path in [contents / "MacOS/velocity", contents / "SharedSupport/bin/velocity"]:
         path.chmod(0o755)
+    assemble_finder_extension(app, repo / "crates/velocity/packaging/finder-new-file",
+                              plist, args.architectures.split())
     copy_tree(repo / "third_party/sublime-packages", resources / "Syntaxes")
     copy_tree(repo / "crates/velocity/resources", resources)
     copy_tree(repo / "crates/vel-spell/dictionaries/en_US", resources / "Dictionaries/en_US")
@@ -144,19 +201,51 @@ def manifest(args):
         os.utime(path, (epoch, epoch), follow_symlinks=False)
 
 
+def validate_macho(executable, architectures, minimum):
+    actual = subprocess.check_output(["/usr/bin/lipo", "-archs", executable], text=True).split()
+    assert set(actual) == set(architectures), f"Mach-O architectures differ for {executable}"
+    load_commands = subprocess.check_output(["/usr/bin/otool", "-l", executable], text=True)
+    minimums = re.findall(r"\bminos\s+(\d+(?:\.\d+)*)", load_commands)
+    assert len(minimums) == len(architectures), f"missing Mach-O deployment target for {executable}"
+    assert all(version.split(".")[:2] == minimum.split(".") for version in minimums), minimums
+    return minimums
+
+
+def validate_finder_extension(app, app_plist, architectures):
+    appex = app / FINDER_APPEX
+    contents = appex / "Contents"
+    plist = plistlib.loads((contents / "Info.plist").read_bytes())
+    for key, expected in finder_plist(app_plist).items():
+        assert plist.get(key) == expected, f"invalid Finder extension {key}"
+    for language in LOCALIZATIONS:
+        strings = contents / "Resources" / f"{language}.lproj/Localizable.strings"
+        localization = subprocess.check_output(["/usr/bin/plutil", "-convert", "xml1", "-o", "-", strings])
+        assert plistlib.loads(localization).get("New Text File"), language
+    executable = contents / "MacOS" / FINDER_EXECUTABLE
+    assert os.access(executable, os.X_OK), executable
+    validate_macho(executable, architectures, app_plist["LSMinimumSystemVersion"])
+    entitlements = subprocess.check_output(
+        ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", appex],
+        stderr=subprocess.PIPE,
+    )
+    assert entitlements and plistlib.loads(entitlements) == FINDER_ENTITLEMENTS, "invalid Finder extension entitlements"
+
+
 def validate(args):
     app = Path(args.app)
     contents, resources = app / "Contents", app / "Contents/Resources"
     plist = plistlib.loads((contents / "Info.plist").read_bytes())
     info = json.loads((resources / "build-info.json").read_text())
-    assert plist["CFBundleIdentifier"] == "dev.velocity.Velocity"
+    assert plist["CFBundleIdentifier"] == APP_ID
     assert plist["CFBundleExecutable"] == "velocity" and plist["CFBundlePackageType"] == "APPL"
     assert plist["CFBundleShortVersionString"] == info["version"].split("-")[0].split("+")[0]
     assert plist["CFBundleVersion"] == build_number(info["source_date_epoch"])
     assert plist["NSHighResolutionCapable"] is True
-    assert plist["LSMinimumSystemVersion"] == "14.0"
+    assert plist["LSMinimumSystemVersion"] == MINIMUM_MACOS
     assert plist["NSRequiresAquaSystemAppearance"] is False
     validate_document_types(plist)
+    assert plist["CFBundleURLTypes"] == url_types()
+    validate_finder_extension(app, plist, info["architectures"])
     assert plist["CFBundleLocalizations"] == list(LOCALIZATIONS)
     for language in LOCALIZATIONS:
         assert (resources / f"{language}.lproj/InfoPlist.strings").stat().st_size > 0, language
@@ -182,13 +271,7 @@ def validate(args):
     assert offset == len(icon_bytes)
     for name in ["MacOS/velocity", "SharedSupport/bin/velocity"]:
         assert os.access(contents / name, os.X_OK), name
-    executable = str(contents / "MacOS/velocity")
-    architectures = subprocess.check_output(["/usr/bin/lipo", "-archs", executable], text=True).split()
-    assert set(architectures) == set(info["architectures"]), "Mach-O architectures differ from build info"
-    load_commands = subprocess.check_output(["/usr/bin/otool", "-l", executable], text=True)
-    minimums = re.findall(r"\bminos\s+(\d+(?:\.\d+)*)", load_commands)
-    assert len(minimums) == len(architectures), "missing Mach-O deployment target"
-    assert all(tuple(map(int, version.split(".")[:2])) == (14, 0) for version in minimums), minimums
+    minimums = validate_macho(contents / "MacOS/velocity", info["architectures"], MINIMUM_MACOS)
     assert not any(path.name in {".git", ".github"} for path in app.rglob("*"))
     expected = json.loads((resources / "bundle-manifest.json").read_text())
     actual = {str(path.relative_to(resources)) for path in resources.rglob("*") if path.is_file() and path.name != "bundle-manifest.json"}
@@ -199,7 +282,7 @@ def validate(args):
     result = {"app": str(app.resolve()), "version": info["version"], "architectures": info["architectures"],
               "resource_files": len(expected), "app_bytes": sum(p.stat().st_size for p in app.rglob("*") if p.is_file()),
               "minimum_macos": plist["LSMinimumSystemVersion"], "mach_o_minimums": minimums,
-              "layout": "passed", "resource_hashes": "passed"}
+              "layout": "passed", "resource_hashes": "passed", "finder_extension": "passed"}
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

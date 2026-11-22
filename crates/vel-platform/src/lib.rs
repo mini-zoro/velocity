@@ -275,6 +275,10 @@ pub trait AppHandler: 'static {
     /// callback, so a one-shot forwarding handler can acknowledge them and quit.
     /// The app handles canonicalization, existing tabs, file kinds, and user-facing errors.
     fn on_open_paths(&mut self, _window: &WindowHandle, _paths: &[std::path::PathBuf]) {}
+    /// An authenticated request from the Finder Sync extension in this app bundle.
+    /// Deliver to the ready key window, or to the last closed handler so it can
+    /// create a window here without handing the request to another app copy.
+    fn on_finder_new_text_file(&mut self, _window: &WindowHandle, _directory: &std::path::Path) {}
     /// Reopen from the Dock, or before an external open with no live windows.
     /// The last closed handler and its handle are retained as a template. Create
     /// a fresh window here (for example with `window.new_window(...)`).
@@ -393,6 +397,13 @@ pub struct MenuEntry {
 /// Main-thread native application bootstrap.
 #[derive(Debug)]
 pub struct Platform;
+#[cfg(target_os = "macos")]
+impl Platform {
+    /// The Finder Sync extension embedded in the running application, if installed.
+    pub fn finder_new_text_file_extension() -> Option<std::path::PathBuf> {
+        macos::finder::extension_bundle()
+    }
+}
 impl Platform {
     /// True when Option is held at native launch, before window creation.
     #[cfg(target_os = "macos")]

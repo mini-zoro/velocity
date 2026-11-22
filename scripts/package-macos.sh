@@ -15,6 +15,7 @@ mkdir -p "$VELOCITY_OUTPUT"
 VELOCITY_OUTPUT=$(CDPATH= cd -- "$VELOCITY_OUTPUT" && pwd -P)
 VELOCITY_STAGE=$(mktemp -d "$VELOCITY_OUTPUT/.package.XXXXXX")
 VELOCITY_LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+VELOCITY_FINDER_APPEX=Contents/PlugIns/VelocityFinderNewFile.appex
 unregister() {
     # Staging and backup copies share the bundle identifier; keep them out of
     # LaunchServices so Finder's Open With never picks one of them.
@@ -102,6 +103,9 @@ if [ "$VELOCITY_IDENTITY" = - ]; then
 else
     VELOCITY_SIGN_ARGS+=(--options runtime --timestamp)
 fi
+# Sign inside out. Deep signing would replace the extension's sandbox entitlements.
+codesign "${VELOCITY_SIGN_ARGS[@]}" --entitlements "$VELOCITY_PACKAGING/finder-new-file/entitlements.plist" \
+    "$VELOCITY_APP/$VELOCITY_FINDER_APPEX"
 codesign "${VELOCITY_SIGN_ARGS[@]}" "$VELOCITY_APP"
 if [ "$VELOCITY_NOTARIZE" = 1 ]; then
     ditto -c -k --keepParent "$VELOCITY_APP" "$VELOCITY_STAGE/notarization.zip"
@@ -188,5 +192,9 @@ for VELOCITY_ARTIFACT in Velocity.app "$VELOCITY_BASENAME.dmg" "$VELOCITY_BASENA
 done
 if [ -x "$VELOCITY_LSREGISTER" ]; then
     "$VELOCITY_LSREGISTER" -f "$VELOCITY_OUTPUT/Velocity.app" >/dev/null 2>&1 || true
+fi
+# Registration does not enable the extension; that is an explicit user choice.
+if ! /usr/bin/pluginkit -a "$VELOCITY_OUTPUT/Velocity.app/$VELOCITY_FINDER_APPEX"; then
+    printf '%s\n' 'Warning: could not register the Finder extension.' >&2
 fi
 cat "$VELOCITY_OUTPUT/packaging-report.json"
