@@ -340,8 +340,13 @@ fn store_lock_rejects_overlapping_mutations_and_is_not_deleted_by_the_failed_cal
         .unwrap();
     held.try_lock().unwrap();
     assert!(manager.remove("Example").is_err());
-    assert_eq!(fs::read_to_string(lock).unwrap(), "other process");
+    assert!(
+        lock.is_file(),
+        "a failed caller must not remove the lock name"
+    );
+    // Windows enforces the byte-range lock against reads on other handles.
     drop(held);
+    assert_eq!(fs::read_to_string(lock).unwrap(), "other process");
     assert!(manager.remove("Example").unwrap().is_empty());
 }
 

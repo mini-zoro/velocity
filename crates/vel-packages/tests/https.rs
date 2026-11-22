@@ -239,5 +239,11 @@ fn r35_anonymous_https_bounds_bytes_redirects_and_credentials() {
     let error = deadline_client
         .fetch_anonymous(&server.url("stall"), 16)
         .unwrap_err();
-    assert!(error.to_string().contains("exit status: 28"), "{error}");
+    // The stall endpoint must time out, not fail at setup, TLS, or the size limit.
+    let status = if cfg!(windows) {
+        "exit code: 28"
+    } else {
+        "exit status: 28"
+    };
+    assert!(error.to_string().contains(status), "{error}");
 }
