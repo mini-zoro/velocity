@@ -11,37 +11,39 @@ final class FinderNewFile: FIFinderSync {
         FIFinderSyncController.default().directoryURLs = [URL(fileURLWithPath: "/")]
     }
 
-    override func menu(for kind: FIMenuKind) -> NSMenu? {
+    /// The folder the new file goes into: the selected folder when exactly one folder is
+    /// selected, otherwise the parent of the first selected item, otherwise the folder whose
+    /// background was clicked.
+    private func targetDirectory() -> URL? {
         let controller = FIFinderSyncController.default()
-        let directory: URL?
-        switch kind {
-        case .contextualMenuForContainer:
-            directory = controller.targetedURL()
-        case .contextualMenuForItems:
-            guard let selection = controller.selectedItemURLs(),
-                  let first = selection.first, first.isFileURL else { return nil }
+        if let selection = controller.selectedItemURLs(), let first = selection.first, first.isFileURL {
             if selection.count == 1 && (first.hasDirectoryPath
                 || (try? first.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true) {
-                directory = first
-            } else {
-                directory = first.deletingLastPathComponent()
+                return first
             }
-        default:
-            return nil
+            return first.deletingLastPathComponent()
         }
-        guard let directory, directory.isFileURL else { return nil }
+        return controller.targetedURL().flatMap { $0.isFileURL ? $0 : nil }
+    }
 
+    override func menu(for kind: FIMenuKind) -> NSMenu? {
+        guard kind == .contextualMenuForContainer || kind == .contextualMenuForItems,
+              targetDirectory() != nil else { return nil }
         let menu = NSMenu()
         let item = NSMenuItem(title: NSLocalizedString("New Text File", comment: "Finder context menu"),
                               action: #selector(newTextFile(_:)), keyEquivalent: "")
         item.target = self
-        item.representedObject = directory
         menu.addItem(item)
         return menu
     }
 
     @objc private func newTextFile(_ item: NSMenuItem) {
-        guard let directory = item.representedObject as? URL else { return }
+        // Finder copies the menu into its own process, so the item carries no
+        // representedObject here; ask the controller for the target again.
+        guard let directory = targetDirectory() else {
+            logger.error("No target folder for New Text File")
+            return
+        }
         var request = URLComponents()
         request.scheme = "velocity"
         request.host = "new-text-file"
