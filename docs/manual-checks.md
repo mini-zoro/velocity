@@ -183,3 +183,19 @@ Third run (2026-11-22, 12:35–12:55, at the user's request "跑复核"):
 Still manual: VoiceOver speech itself (the tree was checked, not the voice), light/dark switch
 (covered by render scenes), native recheck of the German-layout fix, and the Round 35/36 tables.
 
+### Finder New Text File — native verification (2026-11-22, `075979f`)
+
+Packaged into velocity-stable, registered, enabled with `pluginkit -e use -i dev.velocity.Velocity.FinderNewFile`.
+
+| Check | Result |
+| --- | --- |
+| Menu | One item "新建文本文件" on a folder background and on a file. |
+| First build `7d1d60c` | **Failed natively:** the item did nothing. Finder copies the extension's menu into its own process, so `representedObject` never reaches the action. Fixed in `075979f`: the target folder is resolved when the item is chosen. |
+| Cold start | With Velocity quit, the item created `新建文本文档.txt` (0 bytes) and launched Velocity showing it. |
+| Numbering and D4 | With Velocity running, the next file was `新建文本文档 (2).txt`, opened as a new tab in the current window; right-clicking a file created `新建文本文档 (3).txt` in the same folder. |
+| Sender check | `open "velocity://new-text-file?dir=…"` from Terminal created nothing. |
+| After re-signing | A repackaged extension (new ad hoc signature) was not relaunched by Finder until `pluginkit -e ignore` then `-e use`; after a repackage, toggle the extension once. |
+
+Not yet checked: Desktop background, read-only folder message, English system/UI language,
+mixed selections.
+
