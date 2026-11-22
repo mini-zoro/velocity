@@ -105,6 +105,17 @@ impl App {
             return crate::context_menu::tab_close_targets(&tabs, index, kind);
         }
         let sheet = group.sheets[index];
+        // A settings window (Default and User side by side) closes as a pair: Sublime Text
+        // 4215, observed as a black box, closes the whole window on the first Close File.
+        if matches!(name, "close" | "close_file") && self.is_settings_pair_window() {
+            return self
+                .workspace
+                .tabs
+                .iter()
+                .rev()
+                .map(|tab| tab.sheet)
+                .collect();
+        }
         // close_file closes the active view. Only Close Selected closes a set;
         // multi-selection does not change the meaning of a tab's close button.
         // https://docs.sublimetext.io/reference/commands.html#close-file
@@ -119,6 +130,15 @@ impl App {
             })
             .map(|(_, id)| *id)
             .collect()
+    }
+    /// Whether every tab of this window belongs to an edit_settings pair.
+    pub(super) fn is_settings_pair_window(&self) -> bool {
+        !self.workspace.is_empty()
+            && self
+                .workspace
+                .tabs
+                .iter()
+                .all(|tab| tab.editor.settings.get("velocity_settings_label").is_some())
     }
     fn can_close_tab(
         &mut self,

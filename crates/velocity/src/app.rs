@@ -180,6 +180,9 @@ pub struct App {
     open_file_choices: Option<Vec<PathBuf>>,
     pending_menu: Option<context_adapter::PendingMenu>,
     menu_cache: Option<((u64, u64, u64), Vec<MenuEntry>)>,
+    /// Whether this window's menu is the one installed in the menu bar. Only the key window
+    /// may install it; see `install_native_menu`.
+    menu_owner: bool,
     pending_utf8_saves: std::collections::VecDeque<(u64, Option<std::path::PathBuf>, String)>,
     accessibility_focus: Option<accessibility::Id>,
     accessibility_windows: std::cell::RefCell<std::collections::BTreeMap<u64, usize>>,
@@ -387,6 +390,7 @@ impl App {
             open_file_choices: None,
             pending_menu: None,
             menu_cache: None,
+            menu_owner: false,
             pending_utf8_saves: Default::default(),
             accessibility_focus: None,
             accessibility_windows: Default::default(),
@@ -928,6 +932,11 @@ impl App {
     fn poll_workbench(&mut self, w: &WindowHandle) -> Result<(), String> {
         self.poll_restore_safety(w);
         self.publish_open_route();
+        self.sessions
+            .borrow_mut()
+            .handles
+            .entry(self.session_id)
+            .or_insert_with(|| w.clone());
         let merge = self
             .sessions
             .borrow_mut()
@@ -1109,7 +1118,7 @@ impl App {
         self.publish_open_route();
         self.receive_request(w, crate::instance::Incoming::local(request))
     }
-    fn apply_open_request(
+    pub(super) fn apply_open_request(
         &mut self,
         w: &WindowHandle,
         incoming: crate::instance::Incoming,
@@ -1126,7 +1135,10 @@ impl App {
         self.changed(w, Instant::now(), reveal);
         Ok(())
     }
-    fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
+    pub(super) fn accept_request(
+        &mut self,
+        incoming: crate::instance::Incoming,
+    ) -> Result<(), String> {
         self.ensure_startup_services();
         let request = &incoming.request;
         if self.panels.navigation_overlay_open()
@@ -1640,9 +1652,15 @@ impl App {
     }
     fn install_native_menu(&mut self, window: &WindowHandle, focus_changed: bool) {
         let rebuild = self.refresh_native_menu_model();
-        if rebuild || focus_changed {
+        // Only the key window owns the menu bar: its items target the installing window.
+        // A background window that rebuilt its model (recent files, resources), or a window
+        // that just resigned key, must not take the menu back — that sent menu commands
+        // such as Close Window or Close File to a window other than the one in front.
+        let focused = window.is_focused();
+        if menu_install_wanted(focused, rebuild, focus_changed, self.menu_owner) {
             window.set_menu(&self.menu_cache.as_ref().expect("installed menu").1);
         }
+        self.menu_owner = focused;
     }
     fn refresh_native_menu_model(&mut self) -> bool {
         self.sync_recents();
@@ -5524,6 +5542,13 @@ impl AppHandler for App {
         if focus_changed && !focused {
             self.save_on_focus_lost(None);
         }
+        // Take the menu bar as soon as this window is key, also during its startup frames
+        // (before the first scanout the focus branch below does not run).
+        if !focused {
+            self.menu_owner = false;
+        } else if !self.menu_owner {
+            self.install_native_menu(w, true);
+        }
         self.set_window_focused(focused);
         if focused && self.options.mode == Mode::Interactive {
             self.sessions.borrow_mut().active_window = Some(self.session_id);
@@ -6260,6 +6285,12 @@ mod scanout_wait_tests {
             );
         }
     }
+}
+
+/// Whether a window installs its menu: only the key window, and only when its model changed,
+/// it just became key, or another window installed its menu meanwhile.
+fn menu_install_wanted(focused: bool, rebuild: bool, focus_changed: bool, owner: bool) -> bool {
+    focused && (rebuild || focus_changed || !owner)
 }
 
 fn prune_empty_menus(entries: &mut Vec<MenuEntry>) {

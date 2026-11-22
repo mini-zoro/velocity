@@ -123,11 +123,19 @@ fn syntax_settings_args(
 /// Preferences left/default, right/User, as documented at settings.html. The
 /// command's paths/variables follow reference/commands.html and the new-window
 /// edit_settings example in the public community customization guide.
-fn settings_workspace(
+/// What an edit_settings invocation opens: the resolved base resource, its text, and the
+/// User file it pairs with.
+struct SettingsTarget {
+    resource: String,
+    contents: String,
+    name: String,
+    user: PathBuf,
+}
+fn settings_target(
     data: &Path,
     args: &Value,
     resources: &Resources,
-) -> Result<Workspace, String> {
+) -> Result<SettingsTarget, String> {
     // https://www.sublimetext.com/docs/settings.html
     // https://docs.sublimetext.io/reference/commands.html
     let base = args["base_file"]
@@ -157,6 +165,24 @@ fn settings_workspace(
             }
         })
         .unwrap_or_else(|| data.join("Packages/User").join(&name));
+    Ok(SettingsTarget {
+        resource,
+        contents,
+        name,
+        user,
+    })
+}
+fn settings_workspace(
+    data: &Path,
+    args: &Value,
+    target: SettingsTarget,
+) -> Result<Workspace, String> {
+    let SettingsTarget {
+        resource,
+        contents,
+        name,
+        user,
+    } = target;
     create_user(&user, args["default"].as_str().unwrap_or("{\n\t$0\n}\n"))?;
     let mut workspace = Workspace::new(
         Text::from(contents.as_str()),
@@ -195,6 +221,59 @@ fn settings_workspace(
     Ok(workspace)
 }
 impl App {
+    /// Brings the window that already shows `user` to the front and focuses that file.
+    fn focus_open_settings(
+        &mut self,
+        window: Option<&WindowHandle>,
+        user: &Path,
+    ) -> Result<bool, String> {
+        self.publish_open_route();
+        let target = {
+            let sessions = self.sessions.borrow();
+            sessions
+                .open_windows
+                .iter()
+                .find(|(_, route)| {
+                    route
+                        .files
+                        .iter()
+                        .any(|file| crate::open_requests::same_path(file, user))
+                })
+                .map(|(id, _)| *id)
+        };
+        let Some(id) = target else {
+            return Ok(false);
+        };
+        let mut request = crate::instance::Request::new(&crate::cli::Options::default(), None)?;
+        request.native_open = true;
+        request.files = vec![FileLocation::path_only(user.to_owned())];
+        let incoming = crate::instance::Incoming::local(request);
+        if id == self.session_id {
+            match window {
+                Some(window) => self.apply_open_request(window, incoming)?,
+                None => self.accept_request(incoming)?,
+            }
+            return Ok(true);
+        }
+        let handle = {
+            let mut sessions = self.sessions.borrow_mut();
+            let handle = sessions
+                .handles
+                .get(&id)
+                .filter(|h| !h.is_closed())
+                .cloned();
+            if handle.is_none() {
+                return Ok(false);
+            }
+            sessions.open_inbox.entry(id).or_default().push(incoming);
+            handle
+        };
+        if let Some(handle) = handle {
+            handle.focus();
+            handle.request_frame();
+        }
+        Ok(true)
+    }
     pub(super) fn apply_settings_action(
         &mut self,
         window: Option<&WindowHandle>,
@@ -335,7 +414,13 @@ impl App {
                 UiText::tr_fmt("Customizing {name}", [("name", active.to_owned())])
             });
         }
-        let workspace = settings_workspace(&data, &args, &self.workspace.resources)?;
+        let target = settings_target(&data, &args, &self.workspace.resources)?;
+        // Sublime Text 4215 (black box): invoking Settings again brings the open settings
+        // window to the front instead of opening another one.
+        if self.focus_open_settings(window, &target.user)? {
+            return Ok(true);
+        }
+        let workspace = settings_workspace(&data, &args, target)?;
         let mut options = self.options.clone();
         options.files.clear();
         options.file = None;

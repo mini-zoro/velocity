@@ -835,7 +835,6 @@
     "Searching…": "正在查找…",
     "Session Recovery": "会话恢复",
     "Session save failed: {detail}": "保存会话失败：{detail}",
-    "Settings — Velocity": "设置 — Velocity",
     "Source: {source}\nDestination: {destination}\n\nAlternative: {alternative}\n\nThe user-local directory may need to be added to PATH. Existing commands are never overwritten. No sudo is used.": "源位置：{source}\n安装位置：{destination}\n\n备选位置：{alternative}\n\n可能需要将用户目录添加到 PATH。不会覆盖现有命令，也不会使用 sudo。",
     "Spaces: {width}": "空格：{width}",
     "Syntax: {name}": "语法：{name}",

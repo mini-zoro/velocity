@@ -116,6 +116,9 @@ pub struct Sessions {
     pub(crate) open_windows: BTreeMap<u64, crate::open_requests::WindowRoute>,
     pub(crate) open_as_choices: crate::open_requests::OpenAsChoices,
     pub(crate) open_inbox: BTreeMap<u64, Vec<crate::instance::Incoming>>,
+    /// Live window handles by session ID, so one window can bring another to the front.
+    /// Removed when the window closes.
+    pub(crate) handles: BTreeMap<u64, vel_platform::WindowHandle>,
     pub(crate) menu_merges: BTreeMap<u64, u64>,
     pub(crate) persist_project_workspaces: bool,
     // Drop all writers before releasing the per-profile lock.
@@ -168,6 +171,7 @@ impl Sessions {
             open_windows: BTreeMap::new(),
             open_as_choices: Default::default(),
             open_inbox: BTreeMap::new(),
+            handles: BTreeMap::new(),
             menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
         };
@@ -539,6 +543,7 @@ impl Sessions {
         self.live.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
+        self.handles.remove(&id);
         self.menu_merges
             .retain(|source, destination| *source != id && *destination != id);
         self.recent_heads.remove(&id);

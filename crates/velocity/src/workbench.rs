@@ -354,8 +354,19 @@ impl Workspace {
         } else {
             &self.tabs[self.active]
         };
-        if tab.editor.settings.get("velocity_settings_label").is_some() {
-            return self.ui.settings_window.to_string();
+        // A settings view is titled by its file name, as in Sublime Text 4215
+        // ("Preferences.sublime-settings"), for both the Default and the User side.
+        if let Some(name) = tab
+            .editor
+            .settings
+            .get("velocity_settings_resource")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .or(tab.path.as_deref())
+            .filter(|_| tab.editor.settings.get("velocity_settings_label").is_some())
+            .and_then(Path::file_name)
+        {
+            return name.to_string_lossy().into_owned();
         }
         let settings = &tab.editor.settings;
         let project = self

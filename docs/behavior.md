@@ -370,3 +370,26 @@ discussion, not new defaults.
 | **U17. Show encoding and line endings on a fresh profile?** | [Theme status elements][status] document both controls, not their default flags. Velocity shows both with opt-out settings. | A. Keep both visible. B. Hide both until enabled. C. Show only non-default formats by default. **Recommend A** pending confirmation; save format remains discoverable. |
 | **U18. Which operational errors should interrupt editing?** | [Status API][api-status] and [error API][api-error] establish both channels, not per-command policy. | User chose B: the status bar for recoverable errors, dialogs for confirmations and possible data loss. See the call-site inventory above. |
 | **U19. Should atomic save be opt-in?** | The permitted [ST4 references][settings-ref] don't specify the shipping default or exceptional filesystems. Velocity ships false and enables staging/replacement when set and safe. | A. Keep false and document opt-in. B. Default true on eligible files. **Recommend A** pending a confirmed default and file-system acceptance checks. |
+
+### Window pile-up at launch (user report, 2026-11-22)
+
+Launching the packaged app showed about twenty windows (mostly "未命名", plus "设置 — Velocity").
+The session restored exactly what it held; the windows had accumulated while using the app:
+
+1. **Menu commands went to the wrong window.** A window that resigned key reinstalled its own
+   menu on its next frame, and a background window reinstalled its menu whenever its model was
+   rebuilt (recent files, resources). Menu items target the installing window, so right after
+   opening a window (New Window, Settings, Dock reopen) File › Close File and Window › Close
+   Window acted on the previous window: the window meant to be closed stayed open and was saved
+   in the session. Fixed: only the key window installs the menu (`menu_install_wanted`), and a
+   window takes the menu as soon as it becomes key, also during its startup frames.
+   Verified natively: New Window then Window › Close Window closes the new window.
+2. **Every Settings invocation opened another window.** Sublime Text 4215 (black box, menu
+   driven): a second Settings brings the open settings window to the front, Close File in it
+   closes the Default/User pair, and the window is titled `Preferences.sublime-settings`.
+   Velocity opened a new "设置 — Velocity" window each time and closed one view at a time.
+   Fixed to match; verified natively (`settings_window_is_reused_closes_as_a_pair_and_is_titled_by_its_file`).
+
+Repeated quit/relaunch with one, two and three windows, Dock reopen while running or
+windowless, Finder/CLI opens while running, cold launches with files, and a session written by
+`bcfe83f` then restored by `72f6f0c` all kept the window count stable.

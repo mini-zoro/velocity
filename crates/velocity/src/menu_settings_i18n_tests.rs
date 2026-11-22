@@ -1046,21 +1046,22 @@ fn r25_native_alert_buttons_settings_and_accessible_announcements() {
         (
             "en",
             ["Save", "Don't Save", "Cancel"],
-            "Settings — Velocity",
+            "Preferences.sublime-settings",
             "No matches",
             "About Velocity",
         ),
         (
             "zh-Hans",
             ["保存", "不保存", "取消"],
-            "设置 — Velocity",
+            // The settings window is titled by its file name in every language (Sublime 4215).
+            "Preferences.sublime-settings",
             "无匹配项",
             "关于 Velocity",
         ),
         (
             "en",
             ["Save", "Don't Save", "Cancel"],
-            "Settings — Velocity",
+            "Preferences.sublime-settings",
             "No matches",
             "About Velocity",
         ),
@@ -1990,4 +1991,58 @@ fn scene_changes_for_status_and_ui_font_settings() {
             .set(Layer::User, key, value);
         assert_ne!(original, text_runs(&mut app), "{key}");
     }
+}
+
+/// Sublime Text 4215, observed as a black box (2026-11-22): invoking Settings while the
+/// settings window is open brings it back instead of opening another window, Close File in
+/// that window closes the Default/User pair together, and the window is titled by the file.
+/// Each extra settings window used to persist in the session and pile up at launch.
+#[test]
+fn settings_window_is_reused_closes_as_a_pair_and_is_titled_by_its_file() {
+    let data = tempfile::tempdir().unwrap();
+    let mut app = fixture(Some(data.path()));
+    let args = json!({"base_file":"Packages/Default/Preferences.sublime-settings"});
+    app.run_named(None, "edit_settings", &args);
+    let mut settings = app.opened_settings.pop().expect("a settings window");
+    assert!(app.opened_settings.is_empty());
+    assert_eq!(settings.workspace.tabs.len(), 2);
+    assert_eq!(
+        settings.workspace.window_title(),
+        "Preferences.sublime-settings"
+    );
+    // The settings window publishes its route; invoking Settings from it again reuses it.
+    settings.publish_open_route();
+    settings.run_named(None, "edit_settings", &args);
+    assert!(
+        settings.opened_settings.is_empty(),
+        "a second settings window was opened"
+    );
+    assert_eq!(settings.workspace.tabs.len(), 2);
+    // Close File on either side closes both views of the pair.
+    assert!(settings.is_settings_pair_window());
+    assert_eq!(settings.tab_close_sheets("close_file", &json!({})).len(), 2);
+    // An ordinary window is unaffected.
+    assert!(!app.is_settings_pair_window());
+    assert_eq!(app.tab_close_sheets("close_file", &json!({})).len(), 1);
+}
+
+/// Only the key window owns the menu bar: a background window that rebuilt its model, or a
+/// window that just resigned key, must not reinstall its menu (that sent Close Window and
+/// Close File to a window other than the one in front).
+#[test]
+fn only_the_key_window_installs_the_menu() {
+    use super::menu_install_wanted as wanted;
+    // Not key: never, whatever changed.
+    for (rebuild, changed, owner) in [
+        (true, true, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
+        assert!(!wanted(false, rebuild, changed, owner));
+    }
+    // Key: install when the model changed, focus arrived, or another window took the menu.
+    assert!(wanted(true, true, false, true));
+    assert!(wanted(true, false, true, true));
+    assert!(wanted(true, false, false, false));
+    assert!(!wanted(true, false, false, true));
 }
