@@ -18,9 +18,10 @@ fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed={}", root.display());
     println!("cargo:rerun-if-changed=src/bundled_syntax.rs");
     println!("cargo:rerun-if-changed=resources/Packages/Default/Find Results.sublime-syntax");
-    let mut paths = Vec::new();
-    inventory(root, root, &mut paths)?;
-    paths.sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    let mut files = Vec::new();
+    inventory(root, root, &mut files)?;
+    // The runtime binary-searches these slash-separated resource IDs.
+    files.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     dispatch::generate(&out)?;
     i18n::generate(&out)?;
@@ -36,9 +37,7 @@ fn main() -> io::Result<()> {
     }
     let mut out = BufWriter::new(fs::File::create(out.join("shipped.rs"))?);
     writeln!(out, "static SHIPPED: &[File] = &[")?;
-    for path in paths {
-        let relative = path.strip_prefix(root).expect("inventory relative path");
-        let name = format!("Packages/{}", vel_config::paths::slash_separated(relative));
+    for (name, path) in files {
         if name.ends_with(".py") {
             writeln!(
                 out,
@@ -92,7 +91,7 @@ fn main() -> io::Result<()> {
     out.flush()
 }
 
-fn inventory(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+fn inventory(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
     if dir == root && !dir.is_dir() {
         // Source archives without the submodule retain the existing syntax-loader error.
         return Ok(());
@@ -126,7 +125,10 @@ fn inventory(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> 
             .iter()
             .any(|ext| name.ends_with(ext))
         {
-            out.push(entry.path());
+            let path = entry.path();
+            let relative = path.strip_prefix(root).expect("inventory relative path");
+            let name = format!("Packages/{}", vel_config::paths::slash_separated(relative));
+            out.push((name, path));
         }
     }
     Ok(())

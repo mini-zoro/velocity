@@ -15,6 +15,7 @@ GPU. The native window backend and the installer/release job are separate work.
   rebasing use case-insensitive path components on Windows.
 - **Resources:** Package IDs always use `Packages/<package>/<file>` with `/`,
   including files read from loose packages, archives and the embedded inventory.
+  The embedded language inventory is sorted by those IDs for binary lookup.
   The repository checks out its committed bytes on all platforms; this does not
   constrain user files. CRLF settings, keymaps, menus, localization and syntax
   definitions are covered by platform-independent tests. The pinned upstream
@@ -46,8 +47,10 @@ GPU. The native window backend and the installer/release job are separate work.
   `MoveFileExW` publication. Failed validation, encoding, or publication
   leaves the existing destination intact. Existing document DACLs are copied on
   filesystems with persistent ACLs, and read-only destinations are rejected.
-  The document's own validation handles close before `MoveFileExW` replaces it;
-  an external handle may still prevent replacement. An exclusive rename refuses
+  Validation and Replace in Files recovery handles close before `MoveFileExW`
+  replaces the destination; an external handle may still prevent replacement.
+  Replace in Files keeps its byte-exact recovery copy on a save error because it
+  can no longer verify that the same file is in place. An exclusive rename refuses
   a distinct existing hard-link name, but still permits case-only changes to
   the same directory entry.
   Windows does not run the Unix in-place save journal or preserve hard-link
