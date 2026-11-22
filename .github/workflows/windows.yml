@@ -2,7 +2,7 @@ name: Windows
 
 on:
   push:
-    branches: [main, windows-port, lane-c]
+    branches: [main, windows-port, windows-ui]
   workflow_dispatch:
 
 env:
@@ -26,6 +26,7 @@ jobs:
           rustup toolchain install $channel --profile minimal --component clippy --component rustfmt --target $env:CARGO_BUILD_TARGET
       - uses: Swatinem/rust-cache@v2
       - name: Build (all crates, keep going to list every error)
+        id: build
         run: cargo build --workspace --locked --release --keep-going
       - name: Clippy (all targets)
         if: success() || failure()
@@ -34,8 +35,12 @@ jobs:
         if: success() || failure()
         run: cargo test --workspace --locked --release --no-fail-fast
       - name: Package and validate
+        # Packages whenever the release build succeeded, so a test failure still shows the zip.
+        if: (success() || failure()) && steps.build.outcome == 'success'
+        id: package
         run: ./scripts/package-windows.ps1 -OutputDirectory target/windows-artifacts -SkipBuild
       - uses: actions/upload-artifact@v4
+        if: (success() || failure()) && steps.package.outcome == 'success'
         with:
           name: velocity-windows
           path: |
