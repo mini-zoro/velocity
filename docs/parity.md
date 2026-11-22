@@ -15,12 +15,12 @@ The 1.0 target excludes Python plugins, not declarative packages.
 | Editing and selection | 56 | 2 | 0 | 0 |
 | Search and navigation | 57 | 6 | 0 | 0 |
 | Files, projects and sessions | 54 | 7 | 1 | 1 |
-| Windows, tabs and display | 72 | 8 | 0 | 1 |
+| Windows, tabs and display | 73 | 8 | 0 | 1 |
 | Language, completion and Vintage | 55 | 10 | 0 | 0 |
-| Customization and resources | 42 | 11 | 0 | 0 |
+| Customization and resources | 43 | 11 | 0 | 0 |
 | Build, Git and command line | 42 | 11 | 0 | 0 |
 | Scope exclusions | 0 | 0 | 0 | 5 |
-| **Total** | **378** | **55** | **1** | **7** |
+| **Total** | **380** | **55** | **1** | **7** |
 <!-- END PARITY TOTALS -->
 
 ## How to read the audit
