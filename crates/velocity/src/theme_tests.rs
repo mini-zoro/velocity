@@ -478,6 +478,18 @@ fn key_screens_match_structural_goldens() {
         std::fs::write(&path, &actual).unwrap();
     }
     let expected = std::fs::read_to_string(&path).unwrap();
+    // The headless scene uses fixed grid advances and deterministic minihtml
+    // metrics. The status convention and shortcut caption are native by design.
+    #[cfg(windows)]
+    let expected = expected
+        .replace(
+            "Ln 3, Col 1 · UTF-8 · Unix",
+            "Ln 3, Col 1 · UTF-8 · Windows",
+        )
+        .replace(
+            "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
+            "Enter Open · Ctrl+Enter Open in Split · Esc Cancel",
+        );
     let difference = actual
         .lines()
         .zip(expected.lines())

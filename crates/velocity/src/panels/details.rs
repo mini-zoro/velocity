@@ -2230,40 +2230,45 @@ mod tests {
         assert_eq!(w.editor().caret, 4);
     }
     #[test]
-    fn every_quick_panel_paints_a_localized_footer_with_mac_key_glyphs() {
+    fn every_quick_panel_paints_a_localized_footer_with_platform_keys() {
         let (mut w, mut p) = setup("text");
         p.message = "stale find message".into();
+        let (enter, escape, split) = if cfg!(windows) {
+            ("Enter", "Esc", "Ctrl+Enter")
+        } else {
+            ("↩", "⎋", "⌘↩ / ⌃↩")
+        };
         for (overlays, en, zh) in [
             (
                 &[Overlay::Palette][..],
-                "↩ Run · ⎋ Cancel",
-                "↩ 运行 · ⎋ 取消",
+                format!("{enter} Run · {escape} Cancel"),
+                format!("{enter} 运行 · {escape} 取消"),
             ),
             (
                 &[Overlay::Appearance][..],
-                "↑↓ Preview · ↩ Save · ⎋ Cancel",
-                "↑↓ 预览 · ↩ 保存 · ⎋ 取消",
+                format!("↑↓ Preview · {enter} Save · {escape} Cancel"),
+                format!("↑↓ 预览 · {enter} 保存 · {escape} 取消"),
             ),
             (
                 &[Overlay::Syntax, Overlay::Choices][..],
-                "↩ Select · ⎋ Cancel",
-                "↩ 选择 · ⎋ 取消",
+                format!("{enter} Select · {escape} Cancel"),
+                format!("{enter} 选择 · {escape} 取消"),
             ),
             (
                 &[Overlay::ProjectSymbols, Overlay::Locations][..],
-                "↩ Jump · ⎋ Cancel",
-                "↩ 跳转 · ⎋ 取消",
+                format!("{enter} Jump · {escape} Cancel"),
+                format!("{enter} 跳转 · {escape} 取消"),
             ),
             (
                 &[Overlay::Goto][..],
-                "↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel",
-                "↩ 打开 · ⌘↩ / ⌃↩ 在拆分视图中打开 · ⎋ 取消",
+                format!("{enter} Open · {split} Open in Split · {escape} Cancel"),
+                format!("{enter} 打开 · {split} 在拆分视图中打开 · {escape} 取消"),
             ),
         ] {
             for &overlay in overlays {
                 p.overlay = Some(overlay);
                 p.layout(size());
-                for (language, expected) in [("en", en), ("zh-Hans", zh)] {
+                for (language, expected) in [("en", &en), ("zh-Hans", &zh)] {
                     w.settings.set(
                         vel_config::settings::Layer::User,
                         "ui_language",
@@ -2277,7 +2282,7 @@ mod tests {
                             .layers
                             .iter()
                             .flat_map(|layer| &layer.text)
-                            .any(|run| run.text == expected),
+                            .any(|run| &run.text == expected),
                         "{overlay:?} {language:?}: {expected}"
                     );
                 }
@@ -2494,7 +2499,8 @@ mod publication_tests {
         assert!(initial.contains("Ln 1, Col 1"));
         assert!(!initial.contains("selected"));
         assert!(initial.contains("UTF-8"));
-        assert!(initial.contains("Unix"));
+        let ending = if cfg!(windows) { "Windows" } else { "Unix" };
+        assert!(initial.contains(ending), "{initial}");
         assert!(
             initial.contains(&vel_ui::status::indentation(
                 w.editor().preferences.translate_tabs_to_spaces,

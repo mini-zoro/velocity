@@ -3,6 +3,17 @@
 use std::{borrow::Cow, fmt, ops::Deref};
 use vel_i18n::Translator;
 
+fn quick_footer(text: Cow<'static, str>) -> Cow<'static, str> {
+    #[cfg(windows)]
+    return text
+        .replace("⌘↩ / ⌃↩", "Ctrl+Enter")
+        .replace('↩', "Enter")
+        .replace('⎋', "Esc")
+        .into();
+    #[cfg(not(windows))]
+    text
+}
+
 #[derive(Clone, Debug)]
 struct Source {
     key: &'static str,
@@ -346,11 +357,11 @@ impl Chrome {
             console: tr.tr("Console"),
             output: tr.tr("Output"),
             no_matches: tr.tr("No matches"),
-            palette_footer: tr.tr("↩ Run · ⎋ Cancel"),
-            goto_footer: tr.tr("↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel"),
-            choice_footer: tr.tr("↩ Select · ⎋ Cancel"),
-            appearance_footer: tr.tr("↑↓ Preview · ↩ Save · ⎋ Cancel"),
-            jump_footer: tr.tr("↩ Jump · ⎋ Cancel"),
+            palette_footer: quick_footer(tr.tr("↩ Run · ⎋ Cancel")),
+            goto_footer: quick_footer(tr.tr("↩ Open · ⌘↩ / ⌃↩ Open in Split · ⎋ Cancel")),
+            choice_footer: quick_footer(tr.tr("↩ Select · ⎋ Cancel")),
+            appearance_footer: quick_footer(tr.tr("↑↓ Preview · ↩ Save · ⎋ Cancel")),
+            jump_footer: quick_footer(tr.tr("↩ Jump · ⎋ Cancel")),
             indexing: tr.tr("Indexing {percent}%"),
             large_file_hints: [
                 tr.tr("viewport syntax"),

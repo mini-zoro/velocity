@@ -96,7 +96,44 @@ fn preferred_languages() -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn preferred_languages() -> Vec<String> {
+    use windows_sys::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+
+    let (mut count, mut units) = (0, 0);
+    // SAFETY: a null buffer requests the required length in UTF-16 units.
+    if unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            std::ptr::null_mut(),
+            &mut units,
+        )
+    } == 0
+    {
+        return Vec::new();
+    }
+    let mut buffer = vec![0u16; units as usize];
+    // SAFETY: both outputs and the buffer of the requested length are writable.
+    if unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            buffer.as_mut_ptr(),
+            &mut units,
+        )
+    } == 0
+    {
+        return Vec::new();
+    }
+    buffer
+        .split(|&unit| unit == 0)
+        .take_while(|tag| !tag.is_empty())
+        .filter_map(|tag| String::from_utf16(tag).ok())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn preferred_languages() -> Vec<String> {
     Vec::new()
 }

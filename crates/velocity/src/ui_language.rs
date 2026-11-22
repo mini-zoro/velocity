@@ -7,7 +7,7 @@ use vel_i18n::{Catalogs, Language, Translator, format_named};
 
 pub(crate) const DEFAULT_UI_LANGUAGE: &str = "auto";
 
-/// Production follows macOS; test workspaces supply a stable preference list
+/// Production follows the OS; test workspaces supply a stable preference list
 /// (empty by default), including when their configuration is reloaded off-thread.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PreferredLanguages(#[cfg(test)] pub &'static [&'static str]);
