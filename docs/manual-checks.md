@@ -211,3 +211,12 @@ Use a disposable local folder with `新建文本文档.txt`, `.zshrc`, and an al
 | Blur and propagation | Start with dirty text and an open clone plus another window showing the file. Rename via Return, click another tab, and switch to another app or Velocity window during separate attempts. Check that the path follows in every window and in Open Recent, dirty text is still unsaved, and editor Undo still works. Check the restored path after a normal quit with Hot Exit. |
 | Errors and case changes | Submit the occupied name, a path with a slash, and a new name in a folder you can read but cannot modify. Check the status text and VoiceOver announcement, no dialog, full filename selection, and that the existing file is untouched. Try `case.txt` → `CASE.txt` and check the directory's actual spelling in Finder. |
 
+### Inline tab rename — native verification (2026-11-23, `780a26f`)
+
+Fresh profile, Pinyin input method. Double-clicking the permanent tab `新建文本文档.txt` turned its
+label into a field with `新建文本文档` selected; typing `nihao` showed the composition, Space
+committed `你好`, Return renamed the file on disk to `你好.txt`, and the tab and window title
+followed. (The field's accessible label read "Rename" only because the test bundle reused older
+resources without the new catalog entry; the shipped catalog has 「重命名」.)
+Not yet checked natively: Escape, focus loss, collisions, read-only folders, VoiceOver speech.
+
