@@ -294,6 +294,13 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
         app.workspace.select(prev);
         return queued.to_string();
     }
+    // A fresh file for every load probe: reopening the same path right after closing it
+    // can reuse the document loaded under the previous settings on a busy machine.
+    static LOAD_PROBE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let load_name = format!(
+        "load-{}.txt",
+        LOAD_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let (file, bytes): (&str, &[u8]) = match key {
         "fallback_encoding" => ("decode.txt", b"one\xE0two\n"),
         "detect_indentation" => ("indent.txt", b"a\n  b\n    c\n  d\n    e\n"),
@@ -302,7 +309,7 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
             "preview.png",
             include_bytes!("../resources/Packages/Theme - Velocity/palette-edit.png"),
         ),
-        _ => ("load.txt", b"aaaa\n  bbbb\ncccc\n"),
+        _ => (load_name.as_str(), b"aaaa\n  bbbb\ncccc\n"),
     };
     fixture_document(app, &root.join(file), bytes, |app| {
         let tab = &app.workspace.tabs[app.workspace.active];

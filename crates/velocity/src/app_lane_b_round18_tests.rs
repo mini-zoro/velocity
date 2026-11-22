@@ -1294,7 +1294,9 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
     // The file index can rebuild its rows while this test runs; lay out and read the
     // row order right before the click so the click lands on the row it looked up.
     let mut position = None;
-    for _ in 0..200 {
+    let mut previous = Vec::new();
+    let mut stable = 0;
+    for _ in 0..1000 {
         a.panels.layout(a.window_size);
         if let Some(i) = a.panels.side_rows.iter().position(|r| r.path == file) {
             let base = a.panels.folder_row_base(&a.workspace);
@@ -1303,16 +1305,33 @@ fn round18_review_sidebar_preview_palette_cancel_does_not_commit_recent_or_sessi
                 y: 30. + (base + i) as f64 * 24. + 12.,
             });
         }
-        if position.is_some() && !a.panels.file_task.is_some() {
+        // Click only once the rows have stopped changing: the click handler polls first,
+        // and a row list still filling in on a slow machine shifted the click to b.txt.
+        let rows: Vec<_> = a.panels.side_rows.iter().map(|r| r.path.clone()).collect();
+        stable = if rows == previous { stable + 1 } else { 0 };
+        previous = rows;
+        if position.is_some() && a.panels.file_task.is_none() && stable >= 10 {
             break;
         }
         let viewport = a.viewport();
         a.panels.poll(&mut a.workspace, viewport);
         std::thread::sleep(Duration::from_millis(2));
     }
-    a.panels.layout(a.window_size);
-    // One more layout after polling so the geometry matches the rows we clicked.
-    let position = position.expect("the file row is listed");
+    assert!(position.is_some(), "the file row is listed");
+    // Click the row the sidebar actually laid out (its widget rect), not a geometry
+    // formula: the sidebar's sections and offsets change with its settings.
+    a.scene();
+    let index = a
+        .panels
+        .side_rows
+        .iter()
+        .position(|r| r.path == file)
+        .expect("the file row is listed");
+    let rect = a.panels.tree.nodes[&((3u64 << 40) + index as u64)].rect;
+    let position = Point {
+        x: rect.x + rect.width / 2.,
+        y: rect.y + rect.height / 2.,
+    };
     mouse(&mut a, position, 1);
     assert_eq!(
         a.workspace.tabs[a.workspace.active].path.as_ref(),
