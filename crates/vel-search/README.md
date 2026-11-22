@@ -69,9 +69,10 @@ radix index. Headers and gaps need no stored row. Insertion ranks are resolved o
 `FileChange::prepare` reads/expands without writing. After native confirmation, `commit` rechecks
 content/encoding/EOL, writes a temporary recovery copy, and uses vel-fileio's
 permission-preserving save. Changed files fail instead of overwriting a stale preview.
-The batch is not atomic across files. The recovery copy is removed on success or if a
-failed save left the same file with the same raw bytes. Otherwise the error names the
-retained copy, which includes the original filename.
+The batch is not atomic across files. The recovery copy is removed on success. On Unix,
+it is also removed if a failed save left the same file with the same raw bytes. Windows
+closes the original file before publishing the replacement, so a save error retains
+the copy. The error names the retained copy, which includes the original filename.
 Velocity requires dirty target tabs to be saved before disk replacement. An open, clean
 target can undo the edit in its buffer; Undo does not rewrite the saved file.
 

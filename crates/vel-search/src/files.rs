@@ -902,7 +902,12 @@ impl FileChange {
             .map_err(error)?;
         let mut source = vel_fileio::regular::read(&self.path)?;
         io::copy(&mut source, &mut temporary).map_err(error)?;
+        #[cfg(not(windows))]
         let original = same_file::Handle::from_file(source).map_err(error)?;
+        // MoveFileExW cannot replace an open destination. On Windows, keep
+        // the copy on save error rather than using a file ID from a closed handle.
+        #[cfg(windows)]
+        drop(source);
         if vel_fileio::content_identity(temporary.path())? != self.identity {
             return Err(format!(
                 "{} changed during replacement recovery copy",
@@ -919,25 +924,27 @@ impl FileChange {
         let identity = match save(&self.path, &self.after, &self.format, true) {
             Ok(identity) => identity,
             Err(e) => {
-                // An open/encoding error can leave the original completely
-                // untouched. Retain the copy only if that cannot be proved.
-                let same_target = || {
-                    vel_fileio::regular::read(&self.path)
-                        .ok()
-                        .and_then(|file| same_file::Handle::from_file(file).ok())
-                        .is_some_and(|current| current == original)
-                };
-                if same_target()
-                    && matches!(vel_fileio::content_identity(&self.path), Ok(Some(id)) if Some(id) == self.identity)
-                    && same_target()
+                #[cfg(not(windows))]
                 {
-                    return match std::fs::remove_file(&recovery) {
-                        Ok(()) => Err(e),
-                        Err(error) => Err(format!(
-                            "{e}; could not remove {}: {error}",
-                            recovery.display()
-                        )),
+                    // Discard the copy only if the same file still has its original bytes.
+                    let same_target = || {
+                        vel_fileio::regular::read(&self.path)
+                            .ok()
+                            .and_then(|file| same_file::Handle::from_file(file).ok())
+                            .is_some_and(|current| current == original)
                     };
+                    if same_target()
+                        && matches!(vel_fileio::content_identity(&self.path), Ok(Some(id)) if Some(id) == self.identity)
+                        && same_target()
+                    {
+                        return match std::fs::remove_file(&recovery) {
+                            Ok(()) => Err(e),
+                            Err(error) => Err(format!(
+                                "{e}; could not remove {}: {error}",
+                                recovery.display()
+                            )),
+                        };
+                    }
                 }
                 return Err(format!("{e}; original retained at {}", recovery.display()));
             }
@@ -1500,6 +1507,37 @@ mod tests {
         let plan = FileChange::prepare(path.clone(), &search, "x").unwrap();
         std::fs::write(path, "new contents").unwrap();
         assert!(plan.commit().is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn replacement_publishes_after_closing_the_windows_recovery_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.txt");
+        std::fs::write(&path, b"hello cat\r\n").unwrap();
+        let path = path.canonicalize().unwrap();
+        let search = Search::new("cat", crate::text::Options::default()).unwrap();
+        let plan = FileChange::prepare(path.clone(), &search, "dog").unwrap();
+
+        assert!(plan.commit().unwrap().warning.is_none());
+        assert_eq!(std::fs::read(path).unwrap(), b"hello dog\r\n");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn replacement_keeps_windows_recovery_on_save_error_even_with_unchanged_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.txt");
+        let original = b"hello cat\r\n";
+        std::fs::write(&path, original).unwrap();
+        let search = Search::new("cat", crate::text::Options::default()).unwrap();
+        let plan = FileChange::prepare(path.clone(), &search, "dog").unwrap();
+
+        let error = plan
+            .commit_with(|_, _, _, _| Err("simulated save failure".into()))
+            .unwrap_err();
+        let recovery = error.split_once("original retained at ").unwrap().1;
+        assert_eq!(std::fs::read(recovery).unwrap(), original);
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
     #[test]
     fn replacement_leaves_byte_exact_recovery_if_in_place_save_fails() {
