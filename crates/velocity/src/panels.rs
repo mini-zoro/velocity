@@ -5160,6 +5160,12 @@ impl Panels {
                 return Ok(());
             }
         };
+        #[cfg(windows)]
+        for root in &mut scope.roots {
+            if let Ok(canonical) = std::fs::canonicalize(&*root) {
+                *root = canonical;
+            }
+        }
         scope.use_gitignore = self.files_use_gitignore;
         self.cancel_files(workspace);
         self.file_signature = Some(self.files_identity(workspace));

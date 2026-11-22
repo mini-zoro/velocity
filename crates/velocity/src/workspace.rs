@@ -951,6 +951,14 @@ pub(crate) fn absolute(path: &Path) -> Result<PathBuf, String> {
 
 pub(crate) fn absolute_folder(path: &Path) -> Result<PathBuf, String> {
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    for ancestor in path.ancestors() {
+        // Keep the folder, walker and tab keys in the same namespace. A root
+        // may already be gone when persisting a successful Trash operation.
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            return Ok(canonical.join(path.strip_prefix(ancestor).expect("path ancestor")));
+        }
+    }
     // Normalize system aliases to agree with document paths and FSEvents,
     // but keep user-selected components (including symlinks) below them.
     #[cfg(target_os = "macos")]
@@ -1357,6 +1365,13 @@ impl Configuration {
             // before reading them: sampling at the end can associate old
             // bytes with the stamp of a concurrent atomic replacement.
             let _ = std::fs::create_dir_all(data.join("Packages/User"));
+            #[cfg(windows)]
+            for name in ["Preferences.sublime-settings", platform_preferences] {
+                // A same-tick sibling rename may leave the directory stamp
+                // unchanged. Observe these paths even before their first save.
+                let path = data.join("Packages/User").join(name);
+                stamps.push((path.clone(), stamp(&path)));
+            }
             let (mut settings_reports, warnings): (Vec<_>, Vec<_>) = resources
                 .load_with_warnings_observing(data, |path| {
                     stamps.push((path.to_owned(), stamp(path)));
@@ -4362,15 +4377,20 @@ mod tests {
     fn first_frame_uses_profile_language_scheme_and_keymap() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("Packages/User");
-        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(user.join("Localization")).unwrap();
         std::fs::write(
             user.join("Preferences.sublime-settings"),
-            r#"{"ui_language":"auto","color_scheme":"Velocity Light.sublime-color-scheme"}"#,
+            "{\r\n  // Prefer the OS UI language\r\n  \"ui_language\":\"auto\",\r\n  \"color_scheme\":\"Velocity Light.sublime-color-scheme\",\r\n}\r\n",
         )
         .unwrap();
         std::fs::write(
             user.join("Default.sublime-keymap"),
-            r#"[{"keys":["super+d"],"command":"insert","args":{"characters":"first"}}]"#,
+            "[\r\n  // User binding\r\n  {\"keys\":[\"super+d\"],\"command\":\"insert\",\"args\":{\"characters\":\"first\"}},\r\n]\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("Localization/zh-Hans.sublime-localization"),
+            "{\r\n  // User translation\r\n  \"language_name\":\"简体中文\",\r\n  \"strings\":{\"Where…\":\"在此位置…\",},\r\n}\r\n",
         )
         .unwrap();
         let preferred = crate::ui_language::PreferredLanguages(&["zh-Hans-CN", "en"]);
@@ -4387,6 +4407,7 @@ mod tests {
         assert!(startup.startup_services_pending() && startup.palette_pending());
         assert_eq!(startup.ui_language_setting(), "auto");
         assert_eq!(startup.translations.matched_language().as_str(), "zh-Hans");
+        assert_eq!(startup.translations.tr("Where…"), "在此位置…");
         assert!(!startup.themes.ui.borrow().palette.is_dark());
         assert!(
             startup

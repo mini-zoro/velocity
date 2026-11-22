@@ -667,7 +667,12 @@ pub fn apply_trashed(
     let roots: Vec<_> = workspace
         .folders
         .iter()
-        .filter(|folder| paths.iter().any(|path| folder.path.starts_with(path)))
+        .filter(|folder| {
+            #[cfg(windows)]
+            return crate::context_menu::path_was_deleted(&folder.path, paths);
+            #[cfg(not(windows))]
+            paths.iter().any(|path| folder.path.starts_with(path))
+        })
         .map(|folder| folder.path.clone())
         .collect();
     let mut errors = Vec::new();

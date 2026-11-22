@@ -65,13 +65,22 @@ impl Where {
                     } else {
                         let path = Path::new(part);
                         let resolved = base.join(path);
-                        let explicit_relative = part.starts_with("./") || part.starts_with("../");
+                        #[cfg(windows)]
+                        let pattern = part.strip_prefix(r"\\?\").unwrap_or(part);
+                        #[cfg(windows)]
+                        let separators = ['/', '\\'];
+                        #[cfg(not(windows))]
+                        let (pattern, separators) = (part, ['/']);
+                        let explicit_relative = part
+                            .strip_prefix("..")
+                            .or_else(|| part.strip_prefix('.'))
+                            .is_some_and(|suffix| suffix.starts_with(separators));
                         if !part.starts_with("//")
-                            && !part.contains(['*', '?'])
+                            && !pattern.contains(['*', '?'])
                             && (path.is_absolute()
                                 || explicit_relative
-                                || (part.contains('/')
-                                    && !part.ends_with('/')
+                                || (part.contains(separators)
+                                    && !part.ends_with(separators)
                                     && resolved.exists()))
                         {
                             result.roots.push(resolved);
@@ -1424,6 +1433,18 @@ mod tests {
             lines,
             BTreeSet::from([(file, "live needle".into()), (other, "other needle".into())])
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn where_recognizes_verbatim_roots_and_preserves_real_wildcards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let scope = Where::parse(&format!(r#""{}", *.rs"#, path.display()), dir.path()).unwrap();
+        assert_eq!(scope.roots, std::slice::from_ref(&path));
+        assert!(!scope.project);
+        assert!(scope.allows(&path.join("keep.rs"), &path));
+        assert!(!scope.allows(&path.join("drop.txt"), &path));
     }
     #[test]
     fn where_stream_formats_context_and_removes_successful_recovery() {
