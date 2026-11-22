@@ -809,7 +809,9 @@ struct Host {
     drawable_timer: Cell<Option<Retained<NSTimer>>>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
-    menu_commands: RefCell<Vec<(String, String)>>,
+    /// Command, JSON args and the key equivalent Velocity installed (AppKit may rewrite the
+    /// item's own equivalent for the active keyboard layout).
+    menu_commands: RefCell<Vec<(String, String, String)>>,
     title: RefCell<WindowTitle>,
     context: RefCell<ContextRequest<Retained<NSEvent>>>,
     context_scheduled: Cell<bool>,
@@ -1283,23 +1285,26 @@ define_class!(
                 // If the editor declines a chord (e.g. during composition), don't
                 // execute the display shortcut as a fallback menu action.
                 // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/HandlingKeyEvents/HandlingKeyEvents.html
-                // AppKit relocates equivalents for non-US layouts (⌘/ shows as ⌘ß on German).
-                // The keymap never receives that chord, so the shortcut the menu displays
-                // runs the command, as in Sublime Text 4215 (black-box, German layout).
-                if !h.stopped.get() && !item.keyEquivalent().is_empty()
+                // AppKit relocates equivalents for non-US layouts and rewrites the item's own
+                // equivalent (⌘/ becomes ⌘ß on German), so compare the key against the one
+                // Velocity installed. The keymap never receives the relocated chord; the
+                // shortcut the menu displays runs the command, as in Sublime Text 4215
+                // (black-box, German layout).
+                let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
+                if let Some((_, _, installed)) = &command
+                    && !h.stopped.get() && !installed.is_empty()
                     && NSApplication::sharedApplication(h.mtm).currentEvent().is_some_and(|event| {
                         event.r#type() == NSEventType::KeyDown
                             && event.modifierFlags().contains(NSEventModifierFlags::Command)
                             && !relocated_equivalent(
-                                &item.keyEquivalent().to_string(),
+                                installed,
                                 &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
                             )
                     })
                 {
                     return;
                 }
-                let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
-                if let Some((name,args)) = command {
+                if let Some((name,args,_)) = command {
                     if h.stopped.get() && lifecycle::is_template(h.id) {
                         if windowless_command(&name) && let Ok(mut slot) = h.app.try_borrow_mut()
                             && let Some(app) = slot.as_mut() {
@@ -1316,7 +1321,7 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             self.ivars().host.upgrade().is_some_and(|h| {
                 let commands=h.menu_commands.borrow();
-                commands.get(item.tag().max(0) as usize).is_some_and(|(name,args)| {
+                commands.get(item.tag().max(0) as usize).is_some_and(|(name,args,_)| {
                     if h.stopped.get() && lifecycle::is_template(h.id) {
                         windowless_command(name)
                     } else {
@@ -2138,7 +2143,13 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
         if let Some(command) = &entry.command {
             let mut commands = host.menu_commands.borrow_mut();
             item.setTag(commands.len() as isize);
-            commands.push((command.clone(), entry.args.clone()));
+            let installed = entry
+                .shortcut
+                .as_deref()
+                .and_then(menu_key_equivalent)
+                .map(|(key, _)| key.to_string())
+                .unwrap_or_default();
+            commands.push((command.clone(), entry.args.clone(), installed));
             if let Some(view) = host.view.get() {
                 // SAFETY: host retains the view until every menu is torn down.
                 unsafe {

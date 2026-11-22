@@ -118,7 +118,7 @@ pub(super) fn update_menu_bar(host: &Rc<Host>, menu: &NSMenu) {
                     return None;
                 }
                 let index = usize::try_from(item.tag()).ok()?;
-                let (name, args) = commands.get(index)?;
+                let (name, args, _) = commands.get(index)?;
                 Some((
                     item,
                     app.command_enabled(name, args),
