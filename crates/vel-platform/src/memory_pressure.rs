@@ -66,6 +66,10 @@ pub(crate) fn note_activity() {
     }
 }
 
+/// No allocator relief outside macOS, so input activity has nothing to postpone.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn note_activity() {}
+
 #[cfg(target_os = "macos")]
 struct Schedule {
     epoch: Instant,
