@@ -1,6 +1,8 @@
 //! Regression: symlinked definitions must load (users link packages into `Packages/`, and the
 //! editor stages bundled definitions as file symlinks); directories named like grammars must
 //! not be mistaken for files.
+// Creating symlinks on Windows needs Developer Mode or elevation; the loader path is shared.
+#![cfg(unix)]
 use std::path::PathBuf;
 use vel_syntax::SyntaxSet;
 

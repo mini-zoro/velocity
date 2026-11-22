@@ -1,15 +1,13 @@
 //! Bounded UTF-8 streaming and process-tree cancellation.
 use crate::Exec;
+#[cfg(unix)]
+use std::io;
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::sync::atomic::AtomicU32;
-#[cfg(unix)]
-use std::{io::Write, os::fd::AsRawFd, process::ChildStdin};
-#[cfg(windows)]
-use std::{io::Write, os::windows::io::AsRawHandle};
 use std::{
-    io::{self, Read},
+    io::Read,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,6 +15,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{io::Write, os::fd::AsRawFd, process::ChildStdin};
+#[cfg(windows)]
+use std::{io::Write, os::windows::io::AsRawHandle};
 #[cfg(windows)]
 mod windows;
 

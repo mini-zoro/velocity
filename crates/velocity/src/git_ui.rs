@@ -60,7 +60,7 @@ impl GitUi {
         changed
     }
     /// Publishes a status snapshot without a repository service (developer scene renderer).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", test))]
     pub fn insert_snapshot(&mut self, snapshot: StatusSnapshot) {
         self.enabled = true;
         self.labels

@@ -27,6 +27,10 @@ fn loadavg() -> String {
         Err(e) => format!("unavailable: {e}"),
     }
 }
+#[cfg(not(unix))]
+fn loadavg() -> String {
+    "unavailable: no load average on this platform".into()
+}
 #[cfg(unix)]
 fn measure<T>(op: &str, count: usize, f: impl FnOnce() -> T) -> T {
     let load = loadavg();

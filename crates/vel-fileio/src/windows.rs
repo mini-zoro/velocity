@@ -5,7 +5,7 @@ use std::{
     io,
     os::windows::{ffi::OsStrExt, io::AsRawHandle},
     path::{Path, Prefix},
-    ptr::{null, null_mut},
+    ptr::null_mut,
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_SUCCESS, LocalFree},

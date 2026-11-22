@@ -95,7 +95,8 @@ pub struct Publication {
 }
 #[derive(Debug)]
 enum Job {
-    Configure(Config, Text, Text, (BufferId, ChangeId)),
+    // Boxed: the configuration dwarfs every other job and is sent once per change of settings.
+    Configure(Box<Config>, Text, Text, (BufferId, ChangeId)),
     Edit(Text, (BufferId, ChangeId), Option<ChangeSet>),
     Check(ViewId, Arc<ScopeSnapshot>, Range<usize>),
     Suggest(String),
@@ -261,7 +262,7 @@ impl Annotations {
                 return;
             }
             self.send(Job::Configure(
-                config.clone(),
+                Box::new(config.clone()),
                 self.base.clone(),
                 buffer.text().clone(),
                 identity,
@@ -367,7 +368,7 @@ fn worker(jobs: mpsc::Receiver<Job>, results: mpsc::Sender<Publication>) {
     let mut state: Option<State> = None;
     while let Ok(job) = jobs.recv() {
         if let Job::Configure(config, base, text, identity) = job {
-            state = Some(State::new(config, base, text, identity));
+            state = Some(State::new(*config, base, text, identity));
         } else if let Some(s) = &mut state {
             s.job(job);
         }

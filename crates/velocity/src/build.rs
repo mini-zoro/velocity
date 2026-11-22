@@ -621,7 +621,7 @@ pub(crate) fn finish_line_with_signal(
                     }
                 };
                 #[cfg(not(unix))]
-                let name = "Terminated";
+                let name = String::from("Terminated");
                 let suffix = format!(": {signal}");
                 let name = name.strip_suffix(&suffix).unwrap_or(&name);
                 #[cfg(unix)]

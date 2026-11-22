@@ -93,7 +93,6 @@ use std::{
     },
     time::{Instant, SystemTime},
 };
-#[cfg(target_os = "macos")]
 use vel_platform::Size;
 use vel_platform::{Platform, WindowOptions};
 use vel_text::Text;

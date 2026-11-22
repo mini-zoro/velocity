@@ -302,10 +302,10 @@ impl Pipe {
                 } else {
                     millis
                 };
-                // SAFETY: event is live and belongs exclusively to this overlapped operation.
                 let state = if cancelled {
                     WAIT_TIMEOUT
                 } else {
+                    // SAFETY: event is live and belongs exclusively to this overlapped operation.
                     unsafe { WaitForSingleObject(request.hEvent, millis) }
                 };
                 if state == WAIT_OBJECT_0 {

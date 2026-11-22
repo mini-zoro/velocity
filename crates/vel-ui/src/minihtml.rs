@@ -103,13 +103,15 @@ impl FontMetrics for Metrics {
                 descent: run.descent,
             }
         });
-        #[cfg(not(target_os = "macos"))]
-        let native: Option<TextMetrics> = None;
-        let metrics = native.unwrap_or_else(|| TextMetrics {
+        let estimate = || TextMetrics {
             advance: crate::input::cells(text) as f32 * style.font_size * 0.6,
             ascent: style.font_size * 0.8,
             descent: style.font_size * 0.2,
-        });
+        };
+        #[cfg(target_os = "macos")]
+        let metrics = native.unwrap_or_else(estimate);
+        #[cfg(not(target_os = "macos"))]
+        let metrics = estimate();
         let mut cache = self.cache.borrow_mut();
         if cache.len() >= 4096 {
             cache.clear();
