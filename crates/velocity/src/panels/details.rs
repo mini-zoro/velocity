@@ -955,6 +955,7 @@ impl Panels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_keys::{self, chord};
     use vel_text::Text;
 
     fn setup(source: &str) -> (Workspace, Panels) {
@@ -969,7 +970,7 @@ mod tests {
     fn key(p: &mut Panels, w: &mut Workspace, key: &str) {
         let end = w.editor().text.len_bytes();
         if let vel_config::keymap::Resolution::Command(invocation) =
-            p.resolve_key(w, &Key::parse(key).unwrap(), 0..end).unwrap()
+            p.resolve_key(w, &test_keys::parse(key), 0..end).unwrap()
             && !p
                 .action(w, &invocation.command, &invocation.args, 0..end)
                 .unwrap()
@@ -1843,7 +1844,7 @@ mod tests {
         key(&mut p, &mut w, "shift+enter");
         assert_eq!(w.editor().selection(), 0..3);
         assert_eq!(w.editor().text.to_string(), "cat cat cat");
-        key(&mut p, &mut w, "super+alt+e");
+        key(&mut p, &mut w, chord("super+alt+e", "ctrl+shift+h"));
         assert_eq!(w.editor().text.to_string(), "dog cat cat");
         assert_eq!(p.panel, Some(Panel::Replace));
     }
@@ -1934,6 +1935,7 @@ mod tests {
     #[test]
     fn reopen_selects_fields_and_editor_focus_shortcut_focuses_before_toggling() {
         let (mut w, mut p) = setup("cat cat");
+        let find = chord("super+f", "ctrl+f");
         action(
             &mut p,
             &mut w,
@@ -1941,7 +1943,7 @@ mod tests {
             json!({"panel":"find","text":"old"}),
         );
         p.panel_focused = false;
-        key(&mut p, &mut w, "super+f");
+        key(&mut p, &mut w, find);
         assert_eq!(p.panel, Some(Panel::Find));
         assert!(p.panel_focused);
         assert_eq!(
@@ -1963,10 +1965,10 @@ mod tests {
             0..7,
         );
         assert_eq!(p.query.value(), "cat");
-        key(&mut p, &mut w, "super+f");
+        key(&mut p, &mut w, find);
         assert!(p.panel.is_none());
         p.replace.set("replacement");
-        key(&mut p, &mut w, "super+alt+f");
+        key(&mut p, &mut w, chord("super+alt+f", "ctrl+h"));
         assert_eq!(
             p.replace
                 .buffer
@@ -2364,7 +2366,7 @@ mod tests {
             "show_panel",
             json!({"panel":"find","text":"cat"}),
         );
-        action(&mut p, &mut w, "focus_side_bar", json!({}));
+        key(&mut p, &mut w, "ctrl+0");
         assert_eq!(p.panel, Some(Panel::Find));
         assert!(p.side_focused);
         assert!(!p.panel_focused);
@@ -2372,7 +2374,7 @@ mod tests {
         assert_eq!(p.panel, Some(Panel::Find));
         assert!(!p.side_focused);
         assert!(p.input().is_none());
-        key(&mut p, &mut w, "super+f");
+        key(&mut p, &mut w, chord("super+f", "ctrl+f"));
         assert!(p.panel_focused);
         assert_eq!(p.panel, Some(Panel::Find));
         p.layout(size());

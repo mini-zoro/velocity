@@ -1,11 +1,18 @@
 //! App integration tests: use local generated packages and never initialize native services.
 use super::*;
+use crate::test_keys;
 use std::io::Write;
 use vel_config::json;
-use vel_config::keymap::{Key, Resolution};
+use vel_config::keymap::Resolution;
+
+const PACKAGE_CHORD: &str = "ctrl+alt+9";
+
 fn archive(dir: &Path) -> PathBuf {
     let path = dir.join("Round13.sublime-package");
     let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let keymap =
+        json!([{"keys":[PACKAGE_CHORD],"command":"insert","args":{"characters":"package key"}}])
+            .to_string();
     for (name, source) in [
         ("package-metadata.json", r#"{"version":"1.2.3"}"#),
         (
@@ -20,10 +27,7 @@ fn archive(dir: &Path) -> PathBuf {
             "fixture.sublime-theme",
             r##"{"rules":[{"class":"button","layer0.tint":"#123456"}]}"##,
         ),
-        (
-            "Default.sublime-keymap",
-            r#"[{"keys":["ctrl+alt+9"],"command":"insert","args":{"characters":"package key"}}]"#,
-        ),
+        ("Default.sublime-keymap", keymap.as_str()),
         (
             "fixture.sublime-snippet",
             "<snippet><content><![CDATA[package ${1:field}]]></content><tabTrigger>r13</tabTrigger><description>Round 13 snippet</description></snippet>",
@@ -126,6 +130,11 @@ fn package_worker_install_disable_enable_remove_reloads_every_resource_and_keeps
         .unwrap();
     let buffer = w.editor().buffer.id();
     let original = w.editor().text.clone();
+    let key = test_keys::parse(PACKAGE_CHORD);
+    let has_binding = |w: &mut Workspace| {
+        matches!(w.editor_mut().resolve_key(&key), Resolution::Command(i)
+            if i.command == "insert" && i.args["characters"] == "package key")
+    };
     manager_job(&data, move |m| {
         m.install_local("Round13", &source)
             .map(|_| ())
@@ -137,9 +146,7 @@ fn package_worker_install_disable_enable_remove_reloads_every_resource_and_keeps
         &Configuration::load(Some(data.clone()), None).unwrap(),
         true,
     );
-    assert!(
-        matches!(w.editor_mut().resolve_key(&Key::parse("ctrl+alt+9").unwrap()),Resolution::Command(i) if i.args["characters"]=="package key")
-    );
+    assert!(has_binding(&mut w));
     let mut inherited = w.ignored_packages();
     inherited.insert("KeepDisabled".into());
     manager_job(&data, move |m| {
@@ -155,9 +162,7 @@ fn package_worker_install_disable_enable_remove_reloads_every_resource_and_keeps
     );
     assert!(w.ignored_packages().contains("KeepDisabled"));
     assert!(w.ignored_packages().contains("Round13"));
-    assert!(
-        !matches!(w.editor_mut().resolve_key(&Key::parse("ctrl+alt+9").unwrap()),Resolution::Command(i) if i.args["characters"]=="package key")
-    );
+    assert!(!has_binding(&mut w));
     manager_job(&data, |m| {
         m.set_enabled("Round13", true)
             .map(|_| ())
@@ -169,6 +174,7 @@ fn package_worker_install_disable_enable_remove_reloads_every_resource_and_keeps
         &Configuration::load(Some(data.clone()), None).unwrap(),
         true,
     );
+    assert!(has_binding(&mut w));
     manager_job(&data, |m| {
         m.remove("Round13")
             .map(|paths| assert!(!paths.is_empty()))
@@ -177,6 +183,7 @@ fn package_worker_install_disable_enable_remove_reloads_every_resource_and_keeps
     w.request_resource_reload();
     w.wait_resources();
     assert_contributions(&Configuration::load(Some(data), None).unwrap(), false);
+    assert!(!has_binding(&mut w));
     assert_eq!(w.editor().buffer.id(), buffer);
     assert_eq!(w.editor().text, original);
     w.editor_mut().run("undo", &json!({})).unwrap();

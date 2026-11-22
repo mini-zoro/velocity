@@ -68,6 +68,8 @@ mod shipped;
 mod stats;
 mod status_position;
 #[cfg(test)]
+mod test_keys;
+#[cfg(test)]
 #[path = "../../vel-build/tests/support/mod.rs"]
 mod test_login;
 mod theme_bench;

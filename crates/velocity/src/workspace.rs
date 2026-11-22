@@ -4420,6 +4420,65 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_keys::{self, chord};
+    use vel_config::{json, keymap::Resolution};
+
+    const QUICK_ADD_NEXT: &str = chord("super+d", "ctrl+d");
+
+    #[test]
+    fn windows_default_shortcuts_resolve_with_their_expected_arguments() {
+        use vel_config::keymap::{Invocation, Key, SettingsContext};
+        let settings = Settings::default();
+        let context = SettingsContext(&settings);
+        let mut keys = Keymap::windows();
+        keys.append(include_str!(
+            "../resources/Packages/Default/Default (Windows).sublime-keymap"
+        ))
+        .unwrap();
+        let registry = Editor::command_registry();
+        for (sequence, command, args) in [
+            (&["ctrl+e"][..], "slurp_find_string", json!({})),
+            (&["ctrl+shift+e"], "slurp_replace_string", json!({})),
+            (
+                &["alt+o"],
+                "switch_file",
+                json!({"extensions":["h","cpp","c","cc","mm","m"]}),
+            ),
+            (&["ctrl+up"], "scroll_lines", json!({"amount":1})),
+            (&["ctrl+down"], "scroll_lines", json!({"amount":-1})),
+            (&["ctrl+0"], "focus_side_bar", json!({})),
+            (&["alt+1"], "select_by_index", json!({"index":0})),
+            (&["alt+9"], "select_by_index", json!({"index":-1})),
+            (&["ctrl+1"], "focus_group", json!({"group":0})),
+            (&["ctrl+shift+1"], "move_to_group", json!({"group":0})),
+            (&["ctrl+y"], "redo_or_repeat", json!({})),
+            (&["ctrl+shift+z"], "redo", json!({})),
+            (&["ctrl+k", "ctrl+k"], "delete_to_hard_eol", json!({})),
+            (&["ctrl+k", "ctrl+s"], "save_all", json!({})),
+            (&["ctrl+k", "ctrl+="], "reset_font_size", json!({})),
+            (&["alt+-"], "jump_back", json!({})),
+            (&["alt+shift+-"], "jump_forward", json!({})),
+            (&["alt+."], "close_tag", json!({})),
+        ] {
+            assert!(registry.kind(command).is_some(), "{command}");
+            let (last, prefix) = sequence.split_last().unwrap();
+            for key in prefix {
+                assert_eq!(
+                    keys.resolve(&Key::parse_windows(key).unwrap(), &context),
+                    Resolution::Pending,
+                    "{sequence:?}"
+                );
+            }
+            assert_eq!(
+                keys.resolve(&Key::parse_windows(last).unwrap(), &context),
+                Resolution::Command(Invocation {
+                    command: command.into(),
+                    args
+                }),
+                "{sequence:?}"
+            );
+        }
+    }
 
     #[cfg(windows)]
     #[test]
@@ -4488,10 +4547,6 @@ mod tests {
         let mut overridden = Workspace::new_empty(Some(profile), None, false).unwrap();
         expects(&mut overridden, "ctrl+p", "save_all", serde_json::json!({}));
     }
-    use vel_config::{
-        json,
-        keymap::{Key, Resolution},
-    };
     #[test]
     fn first_frame_uses_profile_language_scheme_and_keymap() {
         let dir = tempfile::tempdir().unwrap();
@@ -4503,8 +4558,8 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            user.join("Default.sublime-keymap"),
-            "[\r\n  // User binding\r\n  {\"keys\":[\"super+d\"],\"command\":\"insert\",\"args\":{\"characters\":\"first\"}},\r\n]\r\n",
+            user.join(PLATFORM_KEYMAP),
+            format!("[\r\n  // User binding\r\n  {{\"keys\":[\"{QUICK_ADD_NEXT}\"],\"command\":\"insert\",\"args\":{{\"characters\":\"first\"}}}},\r\n]\r\n"),
         )
         .unwrap();
         std::fs::write(
@@ -4531,7 +4586,7 @@ mod tests {
         assert!(
             startup
                 .editor_mut()
-                .key(&Key::parse("super+d").unwrap())
+                .key(&test_keys::parse(QUICK_ADD_NEXT))
                 .unwrap()
         );
         assert_eq!(startup.editor().text.to_string(), "first");
@@ -5083,8 +5138,9 @@ mod tests {
         std::fs::write(&prefs, "{ // user\n\"tab_size\": 2, \"font_size\": 16,}").unwrap();
         std::fs::write(user.join("Plain Text.sublime-settings"), "{\"tab_size\":3}").unwrap();
         std::fs::write(
-            user.join("Default.sublime-keymap"),
-            r#"[{"keys":["super+d"],"command":"insert","args":{"characters":"override"}}]"#,
+            user.join(PLATFORM_KEYMAP),
+            json!([{"keys":[QUICK_ADD_NEXT],"command":"insert","args":{"characters":"override"}}])
+                .to_string(),
         )
         .unwrap();
         let project = dir.path().join("test.sublime-project");
@@ -5096,7 +5152,8 @@ mod tests {
         assert_eq!(workspace.editor().preferences.tab_size, 3);
         assert_eq!(workspace.editor().preferences.font_size, 16.);
         assert!(
-            matches!(workspace.editor_mut().resolve_key(&Key::parse("super+d").unwrap()),Resolution::Command(i) if i.command=="insert")
+            matches!(workspace.editor_mut().resolve_key(&test_keys::parse(QUICK_ADD_NEXT)),
+                Resolution::Command(i) if i.command == "insert" && i.args["characters"] == "override")
         );
         workspace
             .editor_mut()
@@ -5107,6 +5164,10 @@ mod tests {
         workspace.wait_resources();
         assert_eq!(workspace.editor().preferences.font_size, 20.);
         assert_eq!(workspace.editor().preferences.tab_size, 8);
+        assert!(
+            matches!(workspace.editor_mut().resolve_key(&test_keys::parse(QUICK_ADD_NEXT)),
+                Resolution::Command(i) if i.command == "insert" && i.args["characters"] == "override")
+        );
     }
     #[test]
     fn reload_decisions_and_failed_load_do_not_overwrite_edits() {

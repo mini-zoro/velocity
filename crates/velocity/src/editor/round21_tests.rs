@@ -1,5 +1,5 @@
 use super::*;
-use crate::{panels::Panels, workspace::Workspace};
+use crate::{panels::Panels, test_keys, test_keys::chord, workspace::Workspace};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -58,7 +58,7 @@ fn scopes_ready(e: &mut Editor) {
 
 fn resolve(w: &mut Workspace, panels: &mut Panels, key: &str) -> Resolution {
     panels
-        .resolve_key(w, &Key::parse(key).unwrap(), 0..40)
+        .resolve_key(w, &test_keys::parse(key), 0..40)
         .unwrap()
 }
 
@@ -231,19 +231,43 @@ fn round21_keymap_resolution_and_unicode_quotes() {
     scopes_ready(w.editor_mut());
     let mut panels = Panels::new(&w, false);
     for (chord, name, args) in [
-        ("super+shift+[", "prev_view", json!({})),
-        ("super+shift+]", "next_view", json!({})),
-        ("super+9", "select_by_index", json!({"index":-1})),
-        // Lane B round 21 rebinds these to next/prev_view_in_stack and adds switch_file.
+        (
+            chord("super+shift+[", "ctrl+pageup"),
+            "prev_view",
+            json!({}),
+        ),
+        (
+            chord("super+shift+]", "ctrl+pagedown"),
+            "next_view",
+            json!({}),
+        ),
+        (
+            chord("super+9", "alt+9"),
+            "select_by_index",
+            json!({"index":-1}),
+        ),
         ("ctrl+tab", "next_view_in_stack", json!({})),
         ("ctrl+shift+tab", "prev_view_in_stack", json!({})),
-        ("super+f12", "goto_definition", json!({"side_by_side":true})),
         (
-            "super+shift+f12",
+            chord("super+alt+up", "alt+o"),
+            "switch_file",
+            json!({"extensions":["h","cpp","c","cc","mm","m"]}),
+        ),
+        (
+            chord("super+f12", "ctrl+f12"),
+            "goto_definition",
+            json!({"side_by_side":true}),
+        ),
+        (
+            chord("super+shift+f12", "ctrl+shift+f12"),
             "goto_reference",
             json!({"side_by_side":true}),
         ),
-        ("ctrl+shift+p", "show_scope_name", json!({})),
+        (
+            chord("ctrl+shift+p", "ctrl+alt+shift+p"),
+            "show_scope_name",
+            json!({}),
+        ),
     ] {
         let Resolution::Command(binding) = resolve(&mut w, &mut panels, chord) else {
             panic!("{chord}");
@@ -522,7 +546,7 @@ fn round21_dedent_randomized_typing_and_backspace_model() {
             }
             assert_eq!(w.editor().exact_scope_parses.get(), parses);
             while w.editor().text.len_bytes() > open.len() {
-                key(&mut w, &mut panels, "super+z");
+                key(&mut w, &mut panels, chord("super+z", "ctrl+z"));
             }
             assert_eq!(w.editor().text.to_string(), open);
         }
@@ -612,11 +636,15 @@ fn round21_subword_motion_with_configured_delimiters() {
         e.set_caret(0, false);
         let mut panels = Panels::new(&w, false);
         for &stop in stops {
-            key(&mut w, &mut panels, "ctrl+right");
+            key(&mut w, &mut panels, chord("ctrl+right", "alt+right"));
             assert_eq!(w.editor().caret, stop, "{text}");
         }
         for &stop in std::iter::once(&0).chain(stops).rev().skip(1) {
-            key(&mut w, &mut panels, "ctrl+shift+left");
+            key(
+                &mut w,
+                &mut panels,
+                chord("ctrl+shift+left", "alt+shift+left"),
+            );
             assert_eq!(w.editor().caret, stop, "{text}");
             assert_eq!(w.editor().anchor, text.len());
         }
@@ -641,7 +669,7 @@ fn round21_swap_moves_past_a_whole_fold_and_undo_redo_preserve_the_forest() {
     e.set_caret(e.text.line_to_byte(5), false);
     assert_eq!(e.folded().len(), 2);
     let mut panels = Panels::new(&w, false);
-    key(&mut w, &mut panels, "ctrl+super+up");
+    key(&mut w, &mut panels, chord("ctrl+super+up", "ctrl+shift+up"));
     let e = w.editor_mut();
     assert_eq!(
         e.text.to_string(),
@@ -845,13 +873,13 @@ fn round21_builtin_pair_backspace_is_one_undo_step() {
     let mut panels = Panels::new(&w, false);
     key(&mut w, &mut panels, "backspace");
     assert_eq!(w.editor().text.to_string(), "\n");
-    key(&mut w, &mut panels, "super+z");
+    key(&mut w, &mut panels, chord("super+z", "ctrl+z"));
     assert_eq!(w.editor().text.to_string(), "()\n()");
     assert_eq!(
         w.editor().regions(),
         vec![Region::caret(1), Region::caret(4)]
     );
-    key(&mut w, &mut panels, "super+shift+z");
+    key(&mut w, &mut panels, chord("super+shift+z", "ctrl+y"));
     assert_eq!(w.editor().text.to_string(), "\n");
 }
 
@@ -982,7 +1010,7 @@ fn round21_repeated_stale_block_comment_variant_uses_exact_scope() {
                 .scopes_ready_at(&e.text, e.caret)
         );
         let mut panels = Panels::new(&w, false);
-        key(&mut w, &mut panels, "super+/");
+        key(&mut w, &mut panels, chord("super+/", "ctrl+/"));
         assert_eq!(w.editor().text.to_string(), source);
     }
     let mut w = workspace("    int a;", "C", None);
@@ -993,7 +1021,7 @@ fn round21_repeated_stale_block_comment_variant_uses_exact_scope() {
     assert_eq!(e.text.to_string(), "/*    int a;*/");
     assert_eq!(e.caret, e.text.len_bytes());
     let mut panels = Panels::new(&w, false);
-    key(&mut w, &mut panels, "super+/");
+    key(&mut w, &mut panels, chord("super+/", "ctrl+/"));
     assert_eq!(w.editor().text.to_string(), "    int a;");
 
     let mut w = workspace("const char *s = ", "C", None);
@@ -1001,7 +1029,7 @@ fn round21_repeated_stale_block_comment_variant_uses_exact_scope() {
     w.editor_mut()
         .set_caret("const char *s = \"/*".len(), false);
     let mut panels = Panels::new(&w, false);
-    key(&mut w, &mut panels, "super+/");
+    key(&mut w, &mut panels, chord("super+/", "ctrl+/"));
     assert_eq!(
         w.editor().text.to_string(),
         "// const char *s = \"/*text*/\";"
@@ -1081,8 +1109,13 @@ fn round21_close_and_wrap_tags() {
         ("XML", "<Outer><Leaf/>hello", "<Outer><Leaf/>hello</Outer>"),
     ] {
         let mut w = workspace(original, syntax, None);
+        if cfg!(windows) {
+            let mut panels = Panels::new(&w, false);
+            key(&mut w, &mut panels, "alt+.");
+        } else {
+            w.editor_mut().run("close_tag", &json!({})).unwrap();
+        }
         let e = w.editor_mut();
-        e.run("close_tag", &json!({})).unwrap();
         ready(e, |e| e.pending_closing_tag.is_none());
         assert_eq!(e.text.to_string(), expected);
     }
@@ -1093,7 +1126,7 @@ fn round21_close_and_wrap_tags() {
     ]));
     scopes_ready(w.editor_mut());
     let mut panels = Panels::new(&w, false);
-    key(&mut w, &mut panels, "ctrl+shift+w");
+    key(&mut w, &mut panels, chord("ctrl+shift+w", "alt+shift+w"));
     type_text(w.editor_mut(), "span id=\"x\"");
     assert_eq!(
         w.editor().text.to_string(),

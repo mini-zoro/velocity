@@ -19,9 +19,11 @@ W2 supplied the Win32 host; W3 integrates the editor and packages it.
   the OS-reserved Windows key rather than a Ctrl alias. Ctrl+P opens Goto
   Anything; Ctrl+Shift+P opens the palette; F3 / Shift+F3 find next / previous;
   F11 toggles fullscreen. Ctrl+Tab cycles tabs by recency, Ctrl+Page Up/Down
-  cycles visually, and Ctrl+F6 / Ctrl+Shift+F6 cycle editor windows. Ctrl+K,
-  Ctrl+, opens Settings; Ctrl+Q exits the application. Alt+F4 closes the
-  active window through Win32.
+  cycles visually, and Alt+1 through Alt+8 select numbered tabs (Alt+9 selects
+  the last tab). Ctrl+1 through Ctrl+4 focus split groups (add Shift to move
+  the active tab instead). Ctrl+F6 / Ctrl+Shift+F6 cycle editor windows.
+  Ctrl+K, Ctrl+, opens Settings; Ctrl+Q exits the application. Alt+F4 closes
+  the active window through Win32.
 - **Menus:** File, Edit, Selection, Find, View, Goto, Tools, Project,
   Preferences and Help. Alt or F10 enters the menu bar. The stable access
   keys are F, E, S, I, V, G, T, P, N and H respectively, including in
@@ -46,6 +48,34 @@ W2 supplied the Win32 host; W3 integrates the editor and packages it.
   alternate Explorer Open with registration for common text formats, and an
   unchecked option to add `vel.exe` to the user's PATH. It does not change the
   user's default handlers. [Inno Setup is installed on the runner image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md).
+
+### Windows keymap parity
+
+Ctrl+E and Ctrl+Shift+E use the selection for Find and Replace, Alt+O
+switches between header and implementation, Ctrl+Up/Down scroll by one
+line, and Ctrl+0 focuses the sidebar. Reset Font Size has moved to Ctrl+K,
+Ctrl+= to leave Ctrl+0 available. Ctrl+Y redoes an undone edit or
+repeats the last repeatable command; Ctrl+Shift+Z is plain Redo. Ctrl+K,
+Ctrl+K invokes the native editor command to delete to the end of the
+physical line. Alt+Left/Right move by subword (add Shift to select), so
+history uses Alt+Minus and Alt+Shift+Minus. Alt+Shift+W wraps selections in
+a tag in HTML/XML; Alt+. closes the open tag, and Ctrl+Space shows
+completions. These defaults use Velocity's own commands and resources.
+Public references: [subwords and numbered tabs](https://www.sublimetext.com/2),
+[last tab](https://www.sublimetext.com/blog/articles/sublime-text-4151),
+[history](https://www.sublimetext.com/blog/articles/sublime-text-3-beta-3019),
+[sidebar focus](https://www.sublimetext.com/blog/articles/sublime-text-2-build-2139)
+and [markup shortcuts](https://www.sublimetext.com/updates/2/stable/release_notes.html).
+
+Comparing Velocity's two bundled default keymaps by command and arguments
+(absent args count as `{}`, ignoring chords, contexts and duplicate
+invocations) leaves only these differences:
+
+| Default keymap | Invocation only in that keymap | Reason |
+| --- | --- | --- |
+| macOS | `run_macro_file` with `{"file":"res://Packages/Default/Delete to Hard EOL.sublime-macro"}` | Retain the existing macOS macro shortcut. Windows uses `delete_to_hard_eol` directly, a command also bound on macOS. |
+| Windows | `close_tag` with `{}` | Alt+. on Windows; still available via the menu on macOS. |
+| Windows | `exit`, `next_window` and `prev_window`, each with `{}` | Windows commands for File > Exit and editor-window cycling. macOS quit and window cycling use application/system shortcuts. |
 
 ## Not on Windows
 

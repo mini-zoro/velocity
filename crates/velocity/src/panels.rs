@@ -8318,7 +8318,7 @@ mod tests {
     fn press(panels: &mut Panels, workspace: &mut Workspace, key: &str) -> Option<String> {
         use vel_config::keymap::Resolution;
         match panels
-            .resolve_key(workspace, &Key::parse(key).unwrap(), 0..11)
+            .resolve_key(workspace, &crate::test_keys::parse(key), 0..11)
             .unwrap()
         {
             Resolution::Command(invocation) => {
@@ -8347,10 +8347,14 @@ mod tests {
     }
     #[test]
     fn find_panel_toggles_closes_from_editor_focus_and_hides_matches() {
+        use crate::test_keys::chord;
+
         let mut workspace = workspace();
         let mut panels = Panels::new(&workspace, false);
+        let find = chord("super+f", "ctrl+f");
+        let replace = chord("super+alt+f", "ctrl+h");
         assert_eq!(
-            press(&mut panels, &mut workspace, "super+f").as_deref(),
+            press(&mut panels, &mut workspace, find).as_deref(),
             Some("show_panel")
         );
         assert_eq!(panels.panel, Some(Panel::Find));
@@ -8359,7 +8363,7 @@ mod tests {
         wait_for_matches(&mut panels, &mut workspace);
         assert_eq!(panels.visible_highlights().len(), 3);
         // Pressing the shortcut again closes the panel and hides the matches.
-        press(&mut panels, &mut workspace, "super+f");
+        press(&mut panels, &mut workspace, find);
         assert_eq!(panels.panel, None);
         assert!(panels.visible_highlights().is_empty());
         // Background results and re-validation do not bring the highlights back while closed.
@@ -8368,22 +8372,25 @@ mod tests {
         // The search itself survives. Reset the caret so this checks navigation independently
         // of the new typing-preview selection.
         workspace.editor_mut().set_caret(0, false);
-        press(&mut panels, &mut workspace, "super+g");
+        assert_eq!(
+            press(&mut panels, &mut workspace, chord("super+g", "f3")).as_deref(),
+            Some("find_next")
+        );
         assert_eq!(workspace.editor().selection(), 0..3);
         assert!(panels.visible_highlights().is_empty());
         // Reopening keeps the query and shows the matches again.
-        press(&mut panels, &mut workspace, "super+f");
+        press(&mut panels, &mut workspace, find);
         assert_eq!(panels.panel, Some(Panel::Find));
         assert_eq!(panels.query.value(), "cat");
         wait_for_matches(&mut panels, &mut workspace);
         assert_eq!(panels.visible_highlights().len(), 3);
         // A different find-family shortcut switches panels instead of closing.
-        press(&mut panels, &mut workspace, "super+alt+f");
+        press(&mut panels, &mut workspace, replace);
         assert_eq!(panels.panel, Some(Panel::Replace));
-        press(&mut panels, &mut workspace, "super+alt+f");
+        press(&mut panels, &mut workspace, replace);
         assert_eq!(panels.panel, None);
         // Escape with keyboard focus in the editor closes a visible panel through the keymap.
-        press(&mut panels, &mut workspace, "super+f");
+        press(&mut panels, &mut workspace, find);
         panels.panel_focused = false;
         panels.focus.show(Surface::Panel, false);
         assert!(!panels.captured());

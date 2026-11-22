@@ -40,6 +40,12 @@ fn key(w: &mut Workspace, p: &mut Panels, v: &mut View, name: &str) {
     } else {
         Key::parse(name).unwrap()
     };
+    send_key(w, p, v, key, name);
+}
+fn press_chord(w: &mut Workspace, p: &mut Panels, v: &mut View, chord: &str) {
+    send_key(w, p, v, crate::test_keys::parse(chord), chord);
+}
+fn send_key(w: &mut Workspace, p: &mut Panels, v: &mut View, key: Key, name: &str) {
     match p.resolve_key(w, &key, 0..usize::MAX).unwrap() {
         vel_config::keymap::Resolution::Command(action) => {
             w.editor_mut().run(&action.command, &action.args).unwrap()
@@ -137,7 +143,7 @@ fn visual_block_carets_multicursor_clipboard_and_passthrough_contexts() {
     key(&mut w, &mut p, &mut v, "p");
     assert!(w.editor().text.to_string().contains("paste"));
     w.editor_mut().keymap.append(r#"[{"keys":["ctrl+r"],"command":"insert","args":{"characters":"PASS"},"context":[{"key":"setting.command_mode"},{"key":"vi_mode_normal"}]}]"#).unwrap();
-    key(&mut w, &mut p, &mut v, "ctrl+r");
+    press_chord(&mut w, &mut p, &mut v, "ctrl+r");
     assert!(w.editor().text.to_string().contains("PASS"));
 }
 
@@ -184,13 +190,13 @@ fn insert_ime_multicaret_undo_and_live_enable_disable_keep_native_preview() {
     w.editor_mut().set_caret(0, false);
     text(&mut w, &mut p, &mut v, "x");
     assert!(w.editor().text.to_string().starts_with('x'));
-    key(&mut w, &mut p, &mut v, "ctrl+alt+v");
+    press_chord(&mut w, &mut p, &mut v, "ctrl+alt+v");
     // Toggle is a window command; headless registry preserves the action for its host.
     assert!(
         w.editor_mut()
             .actions
             .iter()
-            .any(|(name, _)| name == "toggle_setting")
+            .any(|(name, args)| name == "toggle_setting" && args["setting"] == "vintage_enabled")
     );
 }
 
