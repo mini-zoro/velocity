@@ -977,6 +977,30 @@ window and 162–186 MB with `sqlite3.c` on this machine, so the 107.5 MB first 
 window-sized drawables right after launch, before the idle pool trims to two) is not a gap
 with Sublime. The budget is kept as a Velocity target, not as a parity requirement.
 
+### 4K HiDPI external display: scrolling (2026-11-22)
+
+The review Mac's main display changed to a 4096×2304 panel at "looks like 2048×1152" (2×,
+60 Hz). On it, `--bench-scroll` at 3840×2000 reports event-to-submit p50 16.6 ms / p95 28–33 ms
+for every build tried — `12879ff` (before round 39), `bcfe83f` and `f038669` alternate within
+0.1 ms. Almost all of it is `acquire_ms` (p50 19 ms): the benchmark produces frames as fast as
+it can and waits for the compositor to return a drawable. Velocity's own work stays small: CPU
+excluding acquire p50 1.05 ms / p95 2.3 ms, GPU render pass p50 1.7 ms / p95 4.7 ms.
+
+What a user sees was measured from outside for both editors with
+`scripts/blackbox-scroll-fps.swift`: ScreenCaptureKit captures only the editor window, scroll
+wheel events (3 lines) are posted to the app at 120 Hz for 3–4 s, and the tool counts frames in
+which the window content changed. Same `sqlite3.c`, same window size (1600×982 points),
+fresh profiles, Sublime 4215 in safe mode:
+
+| Editor | Frames per second | Frame gap p50 | Frame gap p95 | Max gap |
+| --- | ---: | ---: | ---: | ---: |
+| Sublime Text 4215 | 58.1 | 16.7 ms | 25.7 ms | 41.5 ms |
+| Velocity `f038669` | 59.4 | 16.6 ms | 24.7 ms | 31.6 ms |
+
+One clean run per editor: the user returned to the Mac and the remaining alternations were
+skipped (one Velocity run that reported 124.9 fps double-counted frames and is discarded).
+Both editors hold the display rate; the benchmark's acquire wait is not a user-visible stall.
+
 ## Round 36: interactive startup before AppKit
 
 The measured interval starts at `interactive_setup_begin`, just after text

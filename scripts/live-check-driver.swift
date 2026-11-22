@@ -162,7 +162,24 @@ case "type":  // type <pid|hid> text  (unicode string events, bypass layout/IME)
     }
 case "activate":
     guard let pid = pid_t(args[1]), let r = NSRunningApplication(processIdentifier: pid) else { die("no app") }
-    print("activate=\(r.activate(options: [.activateAllWindows]))")
+    let ok = r.activate(options: [.activateAllWindows])
+    // Cooperative activation can be refused; ask the app through accessibility as well.
+    let a = AXUIElementCreateApplication(pid)
+    AXUIElementSetAttributeValue(a, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    if let wins = attr(a, kAXWindowsAttribute) as? [AXUIElement], let w = wins.first {
+        AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(w, kAXMainAttribute as CFString, kCFBooleanTrue)
+    }
+    usleep(300_000)
+    print("activate=\(ok) front=\(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid)")
+case "resize":  // resize <pid> x y w h : move/resize the first standard window (points, top-left origin)
+    let (a, _) = app(args[1])
+    guard let wins = attr(a, kAXWindowsAttribute) as? [AXUIElement], let w = wins.first else { die("no window") }
+    var p = CGPoint(x: Double(args[2])!, y: Double(args[3])!)
+    var sz = CGSize(width: Double(args[4])!, height: Double(args[5])!)
+    let e1 = AXUIElementSetAttributeValue(w, kAXPositionAttribute as CFString, AXValueCreate(.cgPoint, &p)!)
+    let e2 = AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString, AXValueCreate(.cgSize, &sz)!)
+    print("move=\(e1.rawValue) size=\(e2.rawValue)")
 case "mouse":  // current pointer location
     let l = CGEvent(source: nil)!.location
     print("\(Int(l.x)),\(Int(l.y))")
