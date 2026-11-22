@@ -52,6 +52,8 @@ pub struct Tab {
     pub(crate) needs_detection: bool,
     pub(crate) indentation_initialized: bool,
     pub transient: bool,
+    /// A Goto preview is an editor adapter, not a member of any workbench group.
+    pub(crate) goto_preview: bool,
     pub(crate) preview_recent_pending: bool,
     pub editor: Editor,
     pub path: Option<PathBuf>,
@@ -171,6 +173,14 @@ impl Tab {
         }
     }
     pub(crate) fn new(text: Text, settings: &Settings, keymap: &Keymap) -> Result<Self, String> {
+        Self::new_with_sheet(text, settings, keymap, crate::workbench::next_sheet())
+    }
+    fn new_with_sheet(
+        text: Text,
+        settings: &Settings,
+        keymap: &Keymap,
+        sheet: u64,
+    ) -> Result<Self, String> {
         let mut editor = Editor::new(text);
         let tracker = ChangeTracker::new(&editor.buffer);
         editor.settings = settings.clone();
@@ -190,7 +200,7 @@ impl Tab {
             legacy_saved_text: None,
             legacy_text_fingerprint: None,
             overwrite_allowed: None,
-            sheet: crate::workbench::next_sheet(),
+            sheet,
             session_document: crate::workbench::next_sheet(),
             document: editor.buffer.id(),
             shared_view: editor.id,
@@ -200,6 +210,7 @@ impl Tab {
             needs_detection: true,
             indentation_initialized: false,
             transient: false,
+            goto_preview: false,
             preview_recent_pending: false,
             editor,
             path: None,
@@ -2281,7 +2292,7 @@ impl Workspace {
                 let paths: std::collections::BTreeSet<_> = self
                     .tabs
                     .iter()
-                    .filter(|tab| tab.lazy.is_none())
+                    .filter(|tab| tab.lazy.is_none() && !tab.goto_preview)
                     .filter_map(|tab| tab.path.clone())
                     .collect();
                 for path in &paths {
@@ -2881,39 +2892,55 @@ impl Workspace {
             self.preview(location)
         }
     }
-    fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
-        self.materialize_input();
-        let path = absolute(&location.path)?;
-        if let Some(index) = self.tabs.iter().position(|t| {
-            t.path.as_ref() == Some(&path)
-                || (t.load_failed
-                    && t.path.as_deref().and_then(|p| absolute(p).ok()).as_ref() == Some(&path))
-        }) {
-            if self.tabs[index].load_failed {
-                let identity = self.tabs[index].session_document;
-                for tab in &mut self.tabs {
-                    if tab.session_document == identity {
-                        tab.path = Some(path.clone());
-                    }
+    fn open_tab_for_path(&self, path: &Path) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            !tab.goto_preview
+                && (tab.path.as_deref() == Some(path)
+                    || (tab.load_failed
+                        && tab
+                            .path
+                            .as_deref()
+                            .and_then(|p| absolute(p).ok())
+                            .as_deref()
+                            == Some(path)))
+        })
+    }
+    fn visit_open_tab(
+        &mut self,
+        index: usize,
+        path: &Path,
+        location: &FileLocation,
+        preview: bool,
+    ) -> Result<(), String> {
+        if self.tabs[index].load_failed {
+            let identity = self.tabs[index].session_document;
+            for tab in &mut self.tabs {
+                if tab.session_document == identity {
+                    tab.path = Some(path.to_owned());
                 }
-                self.retry_failed_document(index)?;
             }
-            self.select(index);
-            if !preview {
-                self.make_permanent(index);
-            }
-            self.goto_open_tab(index, &location);
-            return Ok(());
+            self.retry_failed_document(index)?;
         }
+        self.select(index);
+        if !preview {
+            self.make_permanent(index);
+        }
+        self.goto_open_tab(index, location);
+        Ok(())
+    }
+    fn load_open_tab(
+        &mut self,
+        path: &Path,
+        location: FileLocation,
+        sheet: u64,
+    ) -> Result<Tab, String> {
         let started = Instant::now();
-        let mut tab = Tab::new(Text::new(), &self.settings, &self.keymap)?;
+        let mut tab = Tab::new_with_sheet(Text::new(), &self.settings, &self.keymap, sheet)?;
         tab.open_as_choices = Some(self.open_as_choices.clone());
-        tab.transient = preview;
-        tab.preview_recent_pending = preview;
-        tab.path = Some(path.clone());
+        tab.path = Some(path.to_owned());
         tab.location = location.has_position().then_some(location);
         let decode = fileio::DecodeOptions::from_settings(&tab.editor.preferences);
-        let metadata = fileio::regular::metadata(&path, true)?;
+        let metadata = fileio::regular::metadata(path, true)?;
         let size = metadata.as_ref().map_or(0, |m| m.len());
         if metadata.is_none() {
             if let Some(location) = tab.location.take() {
@@ -2939,14 +2966,29 @@ impl Workspace {
         }
         // Installation suppresses restore-thread filesystem probes. Ordinary
         // opens still need initial stamps for focus-save and deletion handling.
-        tab.disk_saved = vel_session::DiskStamp::read(&path);
-        tab.disk_stamp = stamp(&path);
+        tab.disk_saved = vel_session::DiskStamp::read(path);
+        tab.disk_stamp = stamp(path);
         self.telemetry.push(serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}));
+        Ok(tab)
+    }
+    fn watch_open_path(&mut self, path: &Path) -> Result<(), String> {
         if let Some(w) = self.watcher.as_mut()
             && path.parent().is_some_and(Path::is_dir)
         {
-            w.watch(&path)?;
+            w.watch(path)?;
         }
+        Ok(())
+    }
+    fn open_mode(&mut self, location: FileLocation, preview: bool) -> Result<(), String> {
+        self.materialize_input();
+        let path = absolute(&location.path)?;
+        if let Some(index) = self.open_tab_for_path(&path) {
+            return self.visit_open_tab(index, &path, &location, preview);
+        }
+        let mut tab = self.load_open_tab(&path, location, crate::workbench::next_sheet())?;
+        tab.transient = preview;
+        tab.preview_recent_pending = preview;
+        self.watch_open_path(&path)?;
         // The empty window's input adapter is never a sheet, including during preview.
         if self.empty
             || (self.tabs.len() == 1
@@ -2973,6 +3015,95 @@ impl Workspace {
         }
         self.configure_language(self.active, None, true)?;
         Ok(())
+    }
+    pub(crate) fn preview_goto(
+        &mut self,
+        location: FileLocation,
+        group: usize,
+    ) -> Result<(), String> {
+        let path = absolute(&location.path)?;
+        // Prefer a clone already in the destination group.
+        let existing = self.open_tab_for_path(&path).map(|first| {
+            if self.workbench.group_of(self.tabs[first].sheet) == Some(group) {
+                first
+            } else {
+                self.tabs
+                    .iter()
+                    .enumerate()
+                    .skip(first + 1)
+                    .find(|(_, tab)| {
+                        tab.path.as_ref() == Some(&path)
+                            && self.workbench.group_of(tab.sheet) == Some(group)
+                    })
+                    .map_or(first, |(index, _)| index)
+            }
+        });
+        if let Some(index) = existing {
+            return self.visit_open_tab(index, &path, &location, true);
+        }
+        let slot = self.tabs.iter().rposition(|tab| tab.goto_preview);
+        if let Some(index) = slot.filter(|&i| self.tabs[i].path.as_deref() == Some(&path)) {
+            self.active = index;
+            self.workbench.active = group;
+            self.goto_open_tab(index, &location);
+            return Ok(());
+        }
+        let sheet = slot.map_or_else(crate::workbench::next_sheet, |i| self.tabs[i].sheet);
+        let mut tab = self.load_open_tab(&path, location, sheet)?;
+        tab.goto_preview = true;
+        if let Some(index) = slot {
+            // Replacing the preview drops the previous load receiver (and cancels
+            // that load) without running the real tab open/close lifecycle.
+            self.tabs[index] = tab;
+            self.active = index;
+        } else {
+            self.active = self.tabs.len();
+            self.tabs.push(tab);
+        }
+        self.workbench.active = group;
+        self.configure_language(self.active, None, true)
+    }
+    pub(crate) fn discard_goto_preview(&mut self) {
+        if let Some(index) = self.tabs.iter().rposition(|tab| tab.goto_preview) {
+            let tab = self.tabs.remove(index);
+            if tab.editor.text.len_bytes() >= vel_platform::memory_pressure::LARGE_WORK_BYTES {
+                vel_platform::memory_pressure::request();
+            }
+            if self.active == index {
+                self.active = self.workbench.groups[self.workbench.active]
+                    .focused
+                    .and_then(|sheet| self.sheet_index(sheet))
+                    .unwrap_or(0);
+            } else if self.active > index {
+                self.active -= 1;
+            }
+        }
+    }
+    pub(crate) fn commit_goto_preview(&mut self) {
+        if !self.tabs[self.active].goto_preview {
+            self.discard_goto_preview();
+            self.make_permanent(self.active);
+            return;
+        }
+        let path = self.tabs[self.active]
+            .path
+            .clone()
+            .expect("Goto preview path");
+        if self.empty {
+            // Same input adapter as before the preview; it was never a real tab.
+            self.tabs.remove(0);
+            self.active -= 1;
+            self.empty = false;
+        }
+        let tab = &mut self.tabs[self.active];
+        tab.goto_preview = false;
+        tab.preview_recent_pending = true;
+        let sheet = tab.sheet;
+        self.insert_opened_sheet(self.workbench.active, sheet);
+        self.make_permanent(self.active);
+        if let Err(error) = self.watch_open_path(&path) {
+            self.load_notices.push(error);
+        }
     }
     fn goto_open_tab(&mut self, index: usize, location: &FileLocation) {
         if location.has_position() {
@@ -3433,7 +3564,8 @@ impl Workspace {
         let mut failed = Vec::new();
         let mut close_deleted = Vec::new();
         for tab in &mut self.tabs {
-            if tab.loading.is_some()
+            if tab.goto_preview
+                || tab.loading.is_some()
                 || tab.binary_loading.is_some()
                 || tab.lazy.is_some()
                 || tab.editor.shared_shadow
@@ -5496,7 +5628,10 @@ mod review15_tests {
         panels
             .action(&mut w, "show_overlay", &json!({"overlay":"goto"}), 0..0)
             .unwrap();
-        w.preview(location(&file)).unwrap();
+        let original = w.tabs[0].sheet;
+        w.preview_goto(location(&file), 0).unwrap();
+        assert!(w.is_empty());
+        assert!(w.workbench.groups[0].sheets.is_empty());
         panels
             .key(
                 &mut w,
@@ -5505,9 +5640,54 @@ mod review15_tests {
             )
             .unwrap();
         assert!(w.is_empty());
+        assert_eq!(w.tabs[0].sheet, original);
         assert!(w.workbench.groups.iter().all(|g| g.sheets.is_empty()));
         assert!(w.snapshot().unwrap().1.is_empty());
         assert!(w.closed_files.is_empty());
+    }
+    #[test]
+    fn r41_retarget_reuses_sheet_and_only_committed_files_are_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut w = workspace(false);
+        w.watcher = Some(Watcher::new().unwrap());
+        w.settings
+            .set(Layer::User, "large_file.load_bytes", serde_json::json!(16));
+        let origin = w.workbench.groups[0].sheets.clone();
+        let mut hidden = None;
+        for index in 0..12 {
+            let file = root.join(format!("preview-{index}.txt"));
+            std::fs::write(&file, "background read candidate\n").unwrap();
+            w.preview_goto(location(&file), 0).unwrap();
+            let tab = &w.tabs[w.active];
+            assert_eq!(*hidden.get_or_insert(tab.sheet), tab.sheet);
+            assert!(
+                tab.loading.is_some(),
+                "large-file policy still queues a load"
+            );
+            assert_eq!(w.tabs.len(), 2);
+            assert_eq!(w.workbench.groups[0].sheets, origin);
+            std::fs::write(&file, "updated candidate (different size)\n").unwrap();
+        }
+        w.discard_goto_preview();
+        assert!(w.watcher.as_ref().unwrap().changed().is_empty());
+        assert!(w.recent_files.is_empty());
+        let committed = root.join("commit.txt");
+        std::fs::write(&committed, "accepted").unwrap();
+        w.preview_goto(location(&committed), 0).unwrap();
+        w.commit_goto_preview();
+        std::fs::write(&committed, "different size after acceptance").unwrap();
+        assert!(
+            w.watcher
+                .as_ref()
+                .unwrap()
+                .changed()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|path| path == committed)
+        );
+        assert_eq!(w.recent_files, vec![committed]);
     }
     #[test]
     fn recreated_files_clear_deletion_and_reload_only_without_real_edits() {

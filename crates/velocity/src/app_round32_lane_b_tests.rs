@@ -78,7 +78,7 @@ fn r32_goto_right_opens_and_retains_picker_but_escape_restores_origin() {
     goto(&mut a, "txt");
     assert_eq!(a.panels.quick.items.len(), 2);
     let preview = a.workspace.tabs[a.workspace.active].sheet;
-    assert!(a.workspace.tabs[a.workspace.active].transient);
+    assert!(a.workspace.tabs[a.workspace.active].goto_preview);
 
     // Cocoa uses ordinary text selectors when the key itself is not consumed.
     for (chord, selector) in [
@@ -96,13 +96,13 @@ fn r32_goto_right_opens_and_retains_picker_but_escape_restores_origin() {
     }
     assert!(a.panels.input().unwrap().caret_at_end());
     assert!(
-        a.workspace.tabs[a.workspace.active].transient,
+        a.workspace.tabs[a.workspace.active].goto_preview,
         "caret motion did not open the item"
     );
     key(&mut a, "right");
     assert_eq!(a.panels.overlay, Some(Overlay::Goto));
     let tab = &a.workspace.tabs[a.workspace.sheet_index(preview).unwrap()];
-    assert!(!tab.transient && !tab.preview_recent_pending);
+    assert!(!tab.goto_preview && !tab.transient && !tab.preview_recent_pending);
     assert!(
         a.workspace
             .recent_files
@@ -110,7 +110,7 @@ fn r32_goto_right_opens_and_retains_picker_but_escape_restores_origin() {
     );
 
     key(&mut a, "down");
-    assert!(a.workspace.tabs[a.workspace.active].transient);
+    assert!(a.workspace.tabs[a.workspace.active].goto_preview);
     key(&mut a, "escape");
     assert!(a.panels.overlay.is_none());
     assert_eq!(a.workspace.tabs[a.workspace.active].sheet, origin);

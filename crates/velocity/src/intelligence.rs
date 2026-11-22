@@ -444,7 +444,8 @@ impl Intelligence {
             .chain(self.projects.iter().map(|p| p.engine.clone()))
             .collect();
         for tab in &mut workspace.tabs {
-            if tab.lazy.is_some()
+            if tab.goto_preview
+                || tab.lazy.is_some()
                 || !tab.editor.features.indexing
                 || tab.editor.binary.is_some()
                 || tab.loading.is_some()
@@ -513,7 +514,13 @@ impl Intelligence {
             }
         }
         // A pending edit retains its overlay until replacement analysis is available.
-        live.extend(workspace.tabs.iter().filter_map(|t| t.path.clone()));
+        live.extend(
+            workspace
+                .tabs
+                .iter()
+                .filter(|t| !t.goto_preview)
+                .filter_map(|t| t.path.clone()),
+        );
         for path in self
             .published
             .keys()
@@ -850,10 +857,10 @@ pub(crate) fn restore(workspace: &mut Workspace, jump: &Jump) -> bool {
     true
 }
 
-pub fn jump(
+fn jump(
     workspace: &mut Workspace,
     location: &SymbolLocation,
-    preview: bool,
+    preview_group: Option<usize>,
 ) -> Result<(), String> {
     if let Some(id) = location
         .file
@@ -873,8 +880,8 @@ pub fn jump(
         line: location.row + 1,
         column: 1,
     };
-    if preview {
-        workspace.preview(target)?;
+    if let Some(group) = preview_group {
+        workspace.preview_goto(target, group)?;
     } else {
         workspace.open(target)?;
     }
@@ -894,21 +901,74 @@ pub(crate) struct OpenOptions {
     pub side_by_side: bool,
     pub clear_to_right: bool,
     pub origin: u64,
+    pub reference: bool,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocationOpen {
+    Jump,
+    AcceptPreview,
+    PreviewSplitReference,
+}
+pub(crate) fn preview_location(
+    workspace: &mut Workspace,
+    location: &SymbolLocation,
+    group: usize,
+    options: OpenOptions,
+) -> Result<(), String> {
+    // Goto Reference's explicit split mode can preview an already-open view
+    // beside the source (including another view of the source document).
+    if options.reference
+        && options.side_by_side
+        && location.file.is_absolute()
+        && workspace.workbench.group_of(options.origin).is_some()
+        && workspace
+            .tabs
+            .iter()
+            .any(|tab| !tab.goto_preview && tab.path.as_ref() == Some(&location.file))
+    {
+        return open_location(
+            workspace,
+            location,
+            options,
+            LocationOpen::PreviewSplitReference,
+        );
+    }
+    jump(workspace, location, Some(group))
+}
+
+pub(crate) fn accept_location_preview(
+    workspace: &mut Workspace,
+    location: &SymbolLocation,
+    options: OpenOptions,
+) -> Result<(), String> {
+    workspace.commit_goto_preview();
+    open_location(workspace, location, options, LocationOpen::AcceptPreview)
+}
+
 pub(crate) fn jump_with_options(
     workspace: &mut Workspace,
     location: &SymbolLocation,
-    preview: bool,
     options: OpenOptions,
 ) -> Result<(), String> {
+    open_location(workspace, location, options, LocationOpen::Jump)
+}
+fn open_location(
+    workspace: &mut Workspace,
+    location: &SymbolLocation,
+    options: OpenOptions,
+    mode: LocationOpen,
+) -> Result<(), String> {
     let _history = crate::editor::navigation::Guard::suppress(&workspace.jump_history);
+    let positioned = mode == LocationOpen::AcceptPreview;
+    let reference_preview = mode == LocationOpen::PreviewSplitReference;
     let source = workspace.sheet_index(options.origin);
     let group = source.and_then(|i| workspace.workbench.group_of(workspace.tabs[i].sheet));
-    if !location.file.is_absolute() {
-        return jump(workspace, location, preview);
-    }
-    let Some(group) = group.filter(|_| options.side_by_side) else {
-        return jump(workspace, location, preview);
+    let Some(group) = group.filter(|_| options.side_by_side && location.file.is_absolute()) else {
+        return if positioned {
+            Ok(())
+        } else {
+            jump(workspace, location, None)
+        };
     };
     let source = source.expect("source group");
     let source_sheet = workspace.tabs[source].sheet;
@@ -950,7 +1010,9 @@ pub(crate) fn jump_with_options(
         selected.retain(|sheet| sheets[..=source_at].contains(sheet));
     }
     selected.insert(source_sheet);
-    workspace.tabs[source].transient = false;
+    if !reference_preview {
+        workspace.make_permanent(source);
+    }
     workspace.workbench.active = group;
     let existing = workspace.tabs.iter().position(|tab| {
         tab.sheet != source_sheet
@@ -958,15 +1020,16 @@ pub(crate) fn jump_with_options(
             && workspace.workbench.group_of(tab.sheet) == Some(group)
     });
     if let Some(index) = existing {
-        // Reuse a side preview of this document, including a clone of the source.
-        // Repeated arrow navigation must not accumulate hidden transient clones.
-        workspace.select(index);
-        if !preview {
-            workspace.tabs[index].transient = false;
+        // Use an existing view alongside the source, including a clone of it.
+        if !positioned || workspace.active != index {
+            workspace.select(index);
+            select_symbol(workspace, location);
         }
-        select_symbol(workspace, location);
-    } else {
-        jump(workspace, location, preview)?;
+        if !reference_preview {
+            workspace.make_permanent(index);
+        }
+    } else if !positioned {
+        jump(workspace, location, reference_preview.then_some(group))?;
     }
     let target = workspace.tabs[workspace.active].sheet;
     if target == source_sheet || workspace.workbench.group_of(target) != Some(group) {
@@ -976,7 +1039,7 @@ pub(crate) fn jump_with_options(
         if workspace.workbench.active != group {
             workspace.workbench.move_selected(group)?;
         }
-        workspace.tabs[workspace.active].transient = preview;
+        workspace.tabs[workspace.active].transient = reference_preview;
         let clone_sheet = workspace.tabs[workspace.active].sheet;
         if target == source_sheet {
             restore(workspace, &source_jump);

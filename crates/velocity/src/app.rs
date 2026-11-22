@@ -39,6 +39,9 @@ mod round35_lane_b_tests;
 #[cfg(test)]
 #[path = "app_round36_lane_c_tests.rs"]
 mod round36_lane_c_tests;
+#[cfg(test)]
+#[path = "app_round41_tests.rs"]
+mod round41_tests;
 #[path = "settings_entry.rs"]
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
@@ -240,6 +243,8 @@ pub struct App {
     restore_safety: crate::safe_mode::Startup,
     skipped_recovery: Option<std::sync::mpsc::Receiver<vel_session::Recovery>>,
     view_buffer: Option<u64>,
+    /// The hidden sheet ID is reused; its document identity invalidates the view on retarget.
+    view_goto_preview: Option<(u64, u64)>,
     options: Options,
     clock: Clock,
     reporter: Reporter,
@@ -306,6 +311,7 @@ impl App {
         self.panels.review.native_context = true;
         self.title_theme = None;
         self.view_buffer = None;
+        self.view_goto_preview = None;
         self.sheet_views.clear();
         if let Some(window) = &first {
             self.restore_ui(window);
@@ -454,6 +460,7 @@ impl App {
             #[cfg(test)]
             empty_close_requested: false,
             view_buffer: None,
+            view_goto_preview: None,
             options,
             clock,
             reporter,
@@ -1119,6 +1126,12 @@ impl App {
     fn accept_request(&mut self, incoming: crate::instance::Incoming) -> Result<(), String> {
         self.ensure_startup_services();
         let request = &incoming.request;
+        if self.panels.navigation_overlay_open()
+            && (!request.files.is_empty() || request.project.is_some() || request.stdin.is_some())
+        {
+            self.panels.cancel_overlay(&mut self.workspace);
+            self.sync_active_view();
+        }
         if self.accessibility_focus.is_some()
             && (!request.files.is_empty() || request.project.is_some() || request.stdin.is_some())
         {
@@ -3515,8 +3528,23 @@ impl App {
         }
     }
     fn sync_active_view(&mut self) {
-        let current = self.workspace.tabs[self.workspace.active].sheet;
-        let switched = self.view_buffer != Some(current);
+        let tab = &self.workspace.tabs[self.workspace.active];
+        let (current, document) = (tab.sheet, tab.session_document);
+        let replaced = self
+            .view_goto_preview
+            .is_some_and(|(sheet, previous)| sheet == current && previous != document);
+        if tab.goto_preview {
+            self.view_goto_preview = Some((current, document));
+        } else if let Some((sheet, _)) = self.view_goto_preview
+            && (sheet == current || self.workspace.sheet_index(sheet).is_none())
+        {
+            self.view_goto_preview = None;
+            if sheet != current {
+                self.sheet_views.remove(&sheet);
+                self.inactive_image_decodes.remove(&sheet);
+            }
+        }
+        let switched = self.view_buffer != Some(current) || replaced;
         if switched {
             let system_overlay = self.view.system_scroller_overlay;
             // An image's size or decode-failure note belongs to the document it was shown for.
@@ -3527,23 +3555,25 @@ impl App {
             }
             register_window_commands(self.workspace.editor_mut());
             if let Some(old) = self.view_buffer {
-                self.save_on_focus_lost(Some(old));
-                if let Some(index) = self.workspace.sheet_index(old) {
-                    self.workspace.tabs[index].scroll = (self.view.scroll_x, self.view.scroll_y);
-                    self.workspace.tabs[index].scroll_line_height = self.view.line_height;
-                }
                 let replacement = View::new(
                     self.view.size,
                     self.fonts.as_ref().map_or(8., |f| f.cell as f64),
                     self.fonts.as_ref().map_or(12., |f| f.ascent as f64),
                 );
-                if self.view.image_preview.busy() {
-                    self.inactive_image_decodes.insert(old);
+                let view = std::mem::replace(&mut self.view, replacement);
+                if !(replaced && old == current)
+                    && let Some(index) = self.workspace.sheet_index(old)
+                {
+                    self.save_on_focus_lost(Some(old));
+                    self.workspace.tabs[index].scroll = (view.scroll_x, view.scroll_y);
+                    self.workspace.tabs[index].scroll_line_height = view.line_height;
+                    if view.image_preview.busy() {
+                        self.inactive_image_decodes.insert(old);
+                    }
+                    self.sheet_views.insert(old, view);
                 }
-                self.sheet_views
-                    .insert(old, std::mem::replace(&mut self.view, replacement));
             }
-            let existing = self.sheet_views.remove(&current);
+            let existing = self.sheet_views.remove(&current).filter(|_| !replaced);
             self.inactive_image_decodes.remove(&current);
             let reused = existing.is_some();
             if let Some(view) = existing {
@@ -3580,7 +3610,7 @@ impl App {
                 .workbench
                 .groups
                 .iter()
-                .any(|g| g.visible().contains(&sheet))
+                .any(|g| g.selected.contains(&sheet))
             {
                 return view.image_preview.busy();
             }
@@ -3622,8 +3652,12 @@ impl App {
         if !focused {
             self.typing_hides_chrome = false;
         }
-        if !focused && self.panels.overlay == Some(crate::panels::Overlay::Appearance) {
+        if !focused
+            && (self.panels.overlay == Some(crate::panels::Overlay::Appearance)
+                || self.panels.navigation_overlay_open())
+        {
             self.panels.cancel_overlay(&mut self.workspace);
+            self.sync_active_view();
         }
         self.workspace.navigation_focus(focused);
         self.window_focused = focused;
@@ -3644,7 +3678,8 @@ impl App {
             .editor
             .finish_closing_tag_on_leave();
         let tab = &self.workspace.tabs[index];
-        if !tab.dirty()
+        if tab.goto_preview
+            || !tab.dirty()
             || !tab.editor.settings.bool("save_on_focus_lost", false)
             || tab.editor.read_only
             || tab.editor.marked.is_some()
@@ -3872,6 +3907,15 @@ impl App {
                 }
             }
         }
+        let active_tab = &self.workspace.tabs[self.workspace.active];
+        if active_tab.goto_preview {
+            self.visible_view_scratch.push((
+                active_tab.document.0,
+                active_tab.shared_view.0,
+                active_tab.editor.settings.revision(),
+                std::rc::Rc::as_ptr(&active_tab.editor.language) as usize,
+            ));
+        }
         if self.visible_view_keys != self.visible_view_scratch || self.panels.overlay.is_some() {
             let mut visible = std::collections::BTreeMap::<
                 vel_buffer::BufferId,
@@ -3921,6 +3965,11 @@ impl App {
         let mut theme_animating = false;
         let active = self.workspace.active;
         let focused = self.workspace.tabs[active].sheet;
+        let focused_tab = if self.workspace.tabs[active].goto_preview {
+            self.workspace.workbench.groups[self.workspace.workbench.active].focused
+        } else {
+            Some(focused)
+        };
         let mut scene = vel_render::scene::Scene::default();
         let mut chrome = SceneLayer::default();
         let mut exact = true;
@@ -3952,17 +4001,11 @@ impl App {
                 continue;
             };
             self.group_bounds.push(group_bounds);
-            let visible = group.visible();
-            // An empty window has an editor in the active group but no tab to select.
-            let input = [focused];
-            let editor_sheets =
-                if self.workspace.is_empty() && group_index == self.workspace.workbench.active {
-                    input.as_slice()
-                } else {
-                    visible.as_slice()
-                };
-            let count = editor_sheets.len().max(1);
-            for (position, sheet) in editor_sheets.iter().enumerate() {
+            // The active group of an empty window shows its tabless input; a Goto preview
+            // shows its tabless sheet (both via displayed_sheets).
+            let visible = self.workspace.displayed_sheets(group_index);
+            let count = visible.len().max(1);
+            for (position, sheet) in visible.iter().enumerate() {
                 let Some(index) = self.workspace.sheet_index(*sheet) else {
                     continue;
                 };
@@ -4198,7 +4241,7 @@ impl App {
                     let mut n = 0;
                     for (enabled, attr) in [
                         (selected, "selected"),
-                        (*sheet == focused, "focused"),
+                        (Some(*sheet) == focused_tab, "focused"),
                         (tab.dirty(), "dirty"),
                         (tab.transient, "transient"),
                     ] {
@@ -4403,7 +4446,7 @@ impl App {
                     if selected {
                         node.attributes.insert("selected");
                     }
-                    if *sheet == focused {
+                    if Some(*sheet) == focused_tab {
                         node.attributes.insert("focused");
                     }
                     if tab.dirty() {
@@ -4462,8 +4505,8 @@ impl App {
         for (_, divider) in self.workspace.workbench.layout.dividers(bounds, thickness) {
             vel_ui::fill(&mut chrome, divider, bounds, color);
         }
-        for (group_index, group) in groups.iter().enumerate() {
-            let visible = group.visible();
+        for group_index in 0..groups.len() {
+            let visible = self.workspace.displayed_sheets(group_index);
             if visible.len() < 2 {
                 continue;
             }

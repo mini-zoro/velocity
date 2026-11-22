@@ -680,6 +680,35 @@ fn overlay_scene(fixture: &Fixture, dark: bool, overlay: &str, text: &str) -> Re
     Ok(app)
 }
 
+fn goto_tab_scene(fixture: &Fixture, dark: bool, commit: bool) -> Result<App, String> {
+    let mut app = overlay_scene(fixture, dark, "goto", "README")?;
+    settle(&mut app);
+    if app.workspace.tabs[app.workspace.active].path.as_deref()
+        != Some(fixture.path("README.md").as_path())
+    {
+        return Err("Goto did not preview README.md".into());
+    }
+    if commit {
+        app.dispatch_key_binding(
+            None,
+            &vel_config::keymap::Key::parse("enter")?,
+            Instant::now(),
+            0..0,
+        );
+    }
+    Ok(app)
+}
+
+fn sidebar_tab_scene(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = project_app(fixture, dark)?;
+    open(&mut app, &fixture.file)?;
+    app.workspace.open_from_sidebar(
+        crate::cli::FileLocation::path_only(fixture.path("README.md")),
+        false,
+    )?;
+    Ok(app)
+}
+
 fn chinese_scene(fixture: &Fixture, dark: bool, scale: f64, query: &str) -> Result<App, String> {
     let mut app = find_scene(fixture, dark, "find_in_files", "task")?;
     // Keep the original Chinese screenshots when no language was requested.
@@ -1510,6 +1539,21 @@ const SCENARIOS: &[Scenario] = &[
         build: |f, d| overlay_scene(f, d, "goto", "rs"),
     },
     Scenario {
+        name: "r41-goto-preview",
+        size: (1200., 800.),
+        build: |f, d| goto_tab_scene(f, d, false),
+    },
+    Scenario {
+        name: "r41-goto-committed",
+        size: (1200., 800.),
+        build: |f, d| goto_tab_scene(f, d, true),
+    },
+    Scenario {
+        name: "r41-sidebar-preview",
+        size: (1200., 800.),
+        build: sidebar_tab_scene,
+    },
+    Scenario {
         name: "goto_symbol",
         size: (1200., 800.),
         build: |f, d| overlay_scene(f, d, "goto", "@"),
@@ -1943,12 +1987,8 @@ fn settle(app: &mut App) {
         if app.workspace.themes.ui.borrow().metrics.images_pending() {
             reasons.push("images pending".into());
         }
-        let visible: Vec<u64> = app
-            .workspace
-            .workbench
-            .groups
-            .iter()
-            .flat_map(|g| g.selected.iter().copied())
+        let visible: Vec<u64> = (0..app.workspace.workbench.groups.len())
+            .flat_map(|group| app.workspace.displayed_sheets(group))
             .collect();
         for tab in &app.workspace.tabs {
             if !visible.contains(&tab.sheet) {
@@ -2381,7 +2421,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                             if matches!(
                                 scenario.name,
                                 "r6-cjk-zh" | "r5_sidebar" | "empty_window" | "empty_folder_window"
-                            ) || scenario.name.starts_with("settings_ui") =>
+                            ) || scenario.name.starts_with("r41-")
+                                || scenario.name.starts_with("settings_ui") =>
                         {
                             eprintln!("velocity: {error}; using flat software text snapshot");
                             None

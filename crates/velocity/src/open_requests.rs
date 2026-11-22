@@ -520,7 +520,13 @@ impl WindowRoute {
             self.folders.sort_unstable();
             self.folders.dedup();
         }
-        let files = || workspace.tabs.iter().filter_map(|t| t.path.as_ref());
+        let files = || {
+            workspace
+                .tabs
+                .iter()
+                .filter(|t| !t.goto_preview)
+                .filter_map(|t| t.path.as_ref())
+        };
         if !self.files.iter().eq(files()) {
             self.files = files().cloned().collect();
         }

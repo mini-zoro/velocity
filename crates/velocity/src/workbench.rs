@@ -271,6 +271,9 @@ impl Workspace {
     }
     /// Converts a preview to an ordinary tab and records it in recent files once.
     pub fn make_permanent(&mut self, index: usize) {
+        if self.tabs[index].goto_preview {
+            return; // Goto acceptance must also attach the sheet and start watching.
+        }
         if self.tabs[index].transient || self.tabs[index].preview_recent_pending {
             self.tabs[index].transient = false;
             self.tabs[index].preview_recent_pending = false;
@@ -337,7 +340,18 @@ impl Workspace {
         // https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#global-settings
         // https://docs.sublimetext.io/reference/settings.html#global-settings
         // https://www.sublimetext.com/download
-        let tab = &self.tabs[self.active];
+        let tab = if self.tabs[self.active].goto_preview {
+            // AppKit uses this title for the Window menu as well.
+            let Some(index) = self.workbench.groups[self.workbench.active]
+                .focused
+                .and_then(|sheet| self.sheet_index(sheet))
+            else {
+                return "Velocity".into();
+            };
+            &self.tabs[index]
+        } else {
+            &self.tabs[self.active]
+        };
         if tab.editor.settings.get("velocity_settings_label").is_some() {
             return self.ui.settings_window.to_string();
         }
@@ -523,6 +537,17 @@ impl Workspace {
     pub fn sheet_index(&self, id: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.sheet == id)
     }
+    /// Sheets drawn as editors in a group. The active group of an empty window shows its
+    /// tabless input, and a Goto preview shows its tabless sheet; otherwise the group's
+    /// visible (selected) sheets.
+    pub(crate) fn displayed_sheets(&self, group: usize) -> Vec<u64> {
+        let active = &self.tabs[self.active];
+        if (active.goto_preview || self.is_empty()) && group == self.workbench.active {
+            vec![active.sheet]
+        } else {
+            self.workbench.groups[group].visible()
+        }
+    }
     pub fn focus_current_group(&mut self) -> Result<(), String> {
         let group = &self.workbench.groups[self.workbench.active];
         if let Some(index) = group.focused.and_then(|id| self.sheet_index(id)) {
@@ -605,6 +630,7 @@ impl Workspace {
                 // A read failure is retryable. Register the path even when the
                 // first restore failed before reaching the normal watch boundary.
                 if let Some(watcher) = &mut self.watcher
+                    && !self.tabs[index].goto_preview
                     && let Some(path) = &self.tabs[index].path
                 {
                     let _ = watcher.watch(path);
@@ -1332,7 +1358,11 @@ impl Workspace {
         let ids = if self.empty {
             BTreeSet::new()
         } else {
-            self.tabs.iter().map(|tab| tab.sheet).collect()
+            self.tabs
+                .iter()
+                .filter(|tab| !tab.goto_preview)
+                .map(|tab| tab.sheet)
+                .collect()
         };
         if self.workbench.normalize(&ids) {
             eprintln!("Repaired window workbench before checkpoint");

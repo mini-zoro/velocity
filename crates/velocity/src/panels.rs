@@ -54,6 +54,7 @@ fn open_file_count(workspace: &Workspace) -> usize {
         0
     } else {
         workspace.tabs.len()
+            - usize::from(workspace.tabs.last().is_some_and(|tab| tab.goto_preview))
     }
 }
 
@@ -302,15 +303,42 @@ pub enum Overlay {
 #[derive(Debug)]
 struct Preview {
     sheet: u64,
-    sheets: BTreeSet<u64>,
-    selected: BTreeSet<u64>,
+    group: usize,
+    groups: Vec<vel_ui::workbench::Group>,
     buffer: BufferId,
     version: vel_buffer::ChangeId,
     selection: Selection,
     scroll: (f64, f64),
     transient: bool,
+    pending_center: bool,
     path: Option<Arc<PathBuf>>,
     position: vel_text::Point,
+}
+
+impl Preview {
+    fn restore_groups(&self, workspace: &mut Workspace) {
+        if self.groups.is_empty() {
+            return;
+        }
+        workspace.workbench.active = self.group;
+        for (group, original) in workspace.workbench.groups.iter_mut().zip(&self.groups) {
+            // Right Arrow can open real tabs without dismissing Goto. Keep those
+            // tabs and their order, but undo the preview's focus/selection changes.
+            if group.sheets == original.sheets {
+                group.clone_from(original);
+            } else {
+                group.selected.clone_from(&original.selected);
+                group.selected.retain(|id| group.sheets.contains(id));
+                group.focused = original.focused.filter(|id| group.sheets.contains(id));
+                group.anchor = original.anchor.filter(|id| group.sheets.contains(id));
+                group.tab_scroll = original.tab_scroll;
+                if let Some(focus) = group.focused {
+                    group.selected.insert(focus);
+                    group.touch_focus();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,7 +530,6 @@ pub struct Panels {
     hover_source: Option<(u64, BufferId, vel_buffer::ChangeId, usize)>,
     hover_caret: usize,
     navigation_options: crate::intelligence::OpenOptions,
-    navigation_selection: Option<(usize, BTreeSet<u64>)>,
     navigation_preview_guard: Option<crate::editor::navigation::Guard>,
     hover_point: Point,
     hover_term: String,
@@ -649,6 +676,7 @@ pub struct Panels {
     uses: u64,
     preview: Option<Preview>,
     last_preview: Option<(PathBuf, Target)>,
+    last_location_preview: Option<vel_index::SymbolLocation>,
     goto_highlights: Option<GotoHighlights>,
     tab_dropdown_anchor: Option<Rect>,
     preview_symbol_version: Option<(u64, vel_buffer::ChangeId)>,
@@ -702,7 +730,6 @@ impl Default for Panels {
             hover_source: None,
             hover_caret: 0,
             navigation_options: Default::default(),
-            navigation_selection: None,
             navigation_preview_guard: None,
             hover_point: Point::default(),
             hover_term: String::new(),
@@ -841,6 +868,7 @@ impl Default for Panels {
             uses: 0,
             preview: None,
             last_preview: None,
+            last_location_preview: None,
             goto_highlights: None,
             tab_dropdown_anchor: None,
             preview_symbol_version: None,
@@ -2263,12 +2291,7 @@ impl Panels {
                     .jump_history
                     .borrow_mut()
                     .remember(crate::intelligence::capture(workspace));
-                crate::intelligence::jump_with_options(
-                    workspace,
-                    &location,
-                    false,
-                    Default::default(),
-                )?;
+                crate::intelligence::jump_with_options(workspace, &location, Default::default())?;
                 workspace
                     .jump_history
                     .borrow_mut()
@@ -2399,13 +2422,8 @@ impl Panels {
                         side_by_side: args["side_by_side"].as_bool().unwrap_or(false),
                         clear_to_right: args["clear_to_right"].as_bool().unwrap_or(false),
                         origin: workspace.tabs[workspace.active].sheet,
+                        reference: name == "goto_reference",
                     };
-                    self.navigation_selection = Some((
-                        workspace.workbench.active,
-                        workspace.workbench.groups[workspace.workbench.active]
-                            .selected
-                            .clone(),
-                    ));
                     self.intel.query(
                         if name == "goto_definition" {
                             crate::intelligence::Query::Definition(term)
@@ -2473,14 +2491,17 @@ impl Panels {
                 });
                 self.preview = Some(Preview {
                     sheet: workspace.tabs[workspace.active].sheet,
-                    sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
-                    selected: workspace.workbench.groups[workspace.workbench.active]
-                        .selected
-                        .clone(),
+                    group: workspace.workbench.active,
+                    groups: if self.overlay == Some(Overlay::Goto) {
+                        workspace.workbench.groups.clone()
+                    } else {
+                        Vec::new()
+                    },
                     buffer: workspace.editor().buffer.id(),
                     version: workspace.editor().buffer.change_id(),
                     scroll: workspace.tabs[workspace.active].scroll,
                     transient: workspace.tabs[workspace.active].transient,
+                    pending_center: workspace.tabs[workspace.active].pending_center,
                     path: workspace.tabs[workspace.active].path.clone().map(Arc::new),
                     position: crate::editor::navigation::position(
                         &workspace.editor().text,
@@ -2493,13 +2514,13 @@ impl Panels {
                         .sel()
                         .clone(),
                 });
-                // Keep a pre-existing side-bar preview alive while Goto reuses its own transient tab.
                 if self.overlay == Some(Overlay::Goto) {
                     self.navigation_preview_guard = Some(
                         crate::editor::navigation::Guard::suppress(&workspace.jump_history),
                     );
+                } else {
+                    workspace.tabs[workspace.active].transient = false;
                 }
-                workspace.tabs[workspace.active].transient = false;
                 self.focus.show(Surface::Overlay, true);
                 self.focus.set(Surface::Overlay, 1);
                 self.side_focused = false;
@@ -2511,6 +2532,7 @@ impl Panels {
                 // Keep @/: prefixes while placing the caret after them.
                 self.quick_input.command(Command::End(false));
                 self.last_preview = None;
+                self.last_location_preview = None;
                 self.preview_symbol_version = None;
                 self.quick.set_items(Vec::new());
                 self.prepared.clear();
@@ -2572,13 +2594,14 @@ impl Panels {
                     self.incremental_origin = Some((
                         Preview {
                             sheet: workspace.tabs[workspace.active].sheet,
-                            sheets: workspace.tabs.iter().map(|tab| tab.sheet).collect(),
-                            selected: BTreeSet::new(),
+                            group: workspace.workbench.active,
+                            groups: Vec::new(),
                             buffer: editor.buffer.id(),
                             version: editor.buffer.change_id(),
                             selection: editor.buffer.view(editor.id).sel().clone(),
                             scroll: workspace.tabs[workspace.active].scroll,
                             transient: workspace.tabs[workspace.active].transient,
+                            pending_center: workspace.tabs[workspace.active].pending_center,
                             path: workspace.tabs[workspace.active].path.clone().map(Arc::new),
                             position: crate::editor::navigation::position(
                                 &editor.text,
@@ -3937,7 +3960,8 @@ impl Panels {
         self.local = None;
         let mut extra = Vec::new();
         for tab in &workspace.tabs {
-            if let Some(path) = &tab.path
+            if !tab.goto_preview
+                && let Some(path) = &tab.path
                 && paths.binary_search(path).is_err()
                 && (!filter_gitignore
                     || !workspace
@@ -4161,13 +4185,33 @@ impl Panels {
                 .and_then(|i| self.locations.get(i))
                 .cloned()
             {
-                crate::intelligence::jump_with_options(
-                    workspace,
-                    &location,
-                    true,
-                    self.navigation_options,
-                )?;
-                self.cleanup_navigation_previews(workspace, true);
+                let positioned = self.last_location_preview.as_ref() == Some(&location);
+                if !positioned {
+                    let was_hidden = workspace.tabs[workspace.active].goto_preview;
+                    let group = self
+                        .preview
+                        .as_ref()
+                        .map_or(workspace.workbench.active, |p| p.group);
+                    crate::intelligence::preview_location(
+                        workspace,
+                        &location,
+                        group,
+                        self.navigation_options,
+                    )?;
+                    self.cleanup_split_reference_previews(workspace, true);
+                    if !was_hidden {
+                        self.restore_tabs_behind_preview(workspace);
+                    }
+                    self.last_location_preview = Some(location.clone());
+                }
+                if accepting {
+                    self.preserve_scroll |= positioned;
+                    crate::intelligence::accept_location_preview(
+                        workspace,
+                        &location,
+                        self.navigation_options,
+                    )?;
+                }
             }
             return Ok(());
         }
@@ -4221,11 +4265,22 @@ impl Panels {
             Target::Line(l, c) => (*l, *c),
             _ => (1, 1),
         };
-        workspace.preview(FileLocation {
-            path: path.clone(),
-            line,
-            column,
-        })?;
+        let group = self
+            .preview
+            .as_ref()
+            .map_or(workspace.workbench.active, |p| p.group);
+        let was_hidden = workspace.tabs[workspace.active].goto_preview;
+        workspace.preview_goto(
+            FileLocation {
+                path: path.clone(),
+                line,
+                column,
+            },
+            group,
+        )?;
+        if !was_hidden {
+            self.restore_tabs_behind_preview(workspace);
+        }
         self.last_preview = Some((path, target.clone()));
         if let Target::Word(term) = target {
             self.refresh_goto_highlights(workspace, &term, true);
@@ -4315,16 +4370,33 @@ impl Panels {
             }
         }
     }
-    fn cleanup_navigation_previews(&self, workspace: &mut Workspace, keep_active: bool) {
-        let Some(preview) = &self.preview else {
+    fn restore_tabs_behind_preview(&self, workspace: &mut Workspace) {
+        if workspace.tabs[workspace.active].goto_preview
+            && let Some(origin) = &self.preview
+        {
+            origin.restore_groups(workspace);
+        }
+    }
+    pub(crate) fn navigation_overlay_open(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Goto | Overlay::ProjectSymbols | Overlay::Locations)
+        )
+    }
+    fn cleanup_split_reference_previews(&self, workspace: &mut Workspace, keep_active: bool) {
+        if !self.navigation_options.reference || !self.navigation_options.side_by_side {
             return;
-        };
-        for index in (0..self.visible_open_files(workspace)).rev() {
+        }
+        let Some(origin) = &self.preview else { return };
+        for index in (0..workspace.tabs.len()).rev() {
             let tab = &workspace.tabs[index];
             if (!keep_active || index != workspace.active)
                 && tab.transient
                 && !tab.dirty()
-                && !preview.sheets.contains(&tab.sheet)
+                && !origin
+                    .groups
+                    .iter()
+                    .any(|group| group.sheets.contains(&tab.sheet))
             {
                 let _ = workspace.close(index);
             }
@@ -4346,12 +4418,12 @@ impl Panels {
         self.palette_accept = None;
         if self.overlay.take().is_none() {
             self.navigation_origin = None;
-            self.navigation_selection = None;
             self.navigation_options = Default::default();
             self.navigation_preview_guard = None;
             return;
         }
-        self.cleanup_navigation_previews(workspace, false);
+        self.cleanup_split_reference_previews(workspace, false);
+        workspace.discard_goto_preview();
         if let Some(preview) = self.preview.take()
             && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == preview.sheet)
         {
@@ -4362,14 +4434,16 @@ impl Panels {
                     buffer: preview.buffer,
                     version: preview.version,
                     caret_count: preview.selection.len(),
-                    selection: preview.selection,
+                    selection: preview.selection.clone(),
                     scroll: preview.scroll,
-                    path: preview.path,
+                    path: preview.path.clone(),
                     position: preview.position,
                 },
             );
             workspace.tabs[index].scroll = preview.scroll;
             workspace.tabs[index].transient = preview.transient;
+            workspace.tabs[index].pending_center = preview.pending_center;
+            preview.restore_groups(workspace);
             self.restore_scroll = Some(preview.scroll);
             self.preserve_scroll = true;
         }
@@ -4378,17 +4452,6 @@ impl Panels {
         self.local = None;
         self.prepared.clear();
         self.navigation_origin = None;
-        if let Some((group, selected)) = self.navigation_selection.take()
-            && let Some(group) = workspace.workbench.groups.get_mut(group)
-        {
-            group.selected = selected
-                .into_iter()
-                .filter(|sheet| group.sheets.contains(sheet))
-                .collect();
-            if let Some(focused) = group.focused {
-                group.selected.insert(focused);
-            }
-        }
         workspace
             .jump_history
             .borrow_mut()
@@ -4418,7 +4481,7 @@ impl Panels {
             workspace.tabs[workspace.active].sheet
         };
         let g = &mut workspace.workbench.groups[group];
-        g.selected = origin
+        g.selected = origin.groups[origin.group]
             .selected
             .iter()
             .copied()
@@ -4572,8 +4635,8 @@ impl Panels {
             }
             if keep_open {
                 self.show_quick_target(workspace, true)?;
+                workspace.commit_goto_preview();
                 let active = workspace.active;
-                workspace.make_permanent(active);
                 if let Some(origin) = &mut self.preview
                     && origin.sheet == workspace.tabs[active].sheet
                 {
@@ -4608,7 +4671,9 @@ impl Panels {
                         });
                 }
             }
+            self.preserve_scroll |= workspace.tabs[workspace.active].goto_preview;
             self.show_quick_target(workspace, true)?;
+            workspace.commit_goto_preview();
             if let Some(source) = &self.preview
                 && let Some(index) = workspace.tabs.iter().position(|t| t.sheet == source.sheet)
                 && index != workspace.active
@@ -4621,12 +4686,10 @@ impl Panels {
             {
                 Self::accept_tab_selection(workspace, origin, tab_action)?;
             }
-            workspace.tabs[workspace.active].transient = false;
             workspace
                 .jump_history
                 .borrow_mut()
                 .reset_current(crate::intelligence::capture(workspace));
-            self.navigation_selection = None;
             self.navigation_options = Default::default();
             workspace.remember_goto_file();
             self.overlay = None;
@@ -5627,29 +5690,24 @@ impl Panels {
                         let _ = crate::intelligence::jump_with_options(
                             workspace,
                             &result.locations[0],
-                            false,
                             self.navigation_options,
                         );
                         workspace
                             .jump_history
                             .borrow_mut()
                             .reset_current(crate::intelligence::capture(workspace));
-                        self.navigation_selection = None;
                         self.navigation_options = Default::default();
                     } else if result.locations.is_empty() {
                         self.set_message(UiText::tr("No indexed locations"));
                         self.navigation_origin = None;
-                        self.navigation_selection = None;
                         self.navigation_options = Default::default();
                     } else {
                         let origin = self.navigation_origin.take();
                         let options = self.navigation_options;
-                        let selection = self.navigation_selection.take();
                         let _ =
                             self.action(workspace, "show_overlay", &json!({}), viewport.clone());
                         self.navigation_origin = origin;
                         self.navigation_options = options;
-                        self.navigation_selection = selection;
                         self.overlay = Some(Overlay::Locations);
                         self.fuzzy_worker.cancel();
                         self.locations = result.locations;
@@ -8505,11 +8563,7 @@ mod tests {
             .action(&mut workspace, "show_overlay", &json!({}), 0..1)
             .unwrap();
         workspace
-            .preview(FileLocation {
-                path: b,
-                line: 1,
-                column: 1,
-            })
+            .preview_goto(FileLocation::path_only(b), 0)
             .unwrap();
         panels
             .key(&mut workspace, &Key::parse("escape").unwrap(), 0..1)
@@ -8517,6 +8571,50 @@ mod tests {
         assert_eq!(workspace.editor().buffer.id(), source);
         assert!(workspace.tabs[workspace.active].transient);
         assert_eq!(panels.restore_scroll, Some((12., 80.)));
+    }
+    #[test]
+    fn r41_project_symbol_and_definition_locations_use_tabless_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mut w = workspace();
+        let mut p = Panels::new(&w, false);
+        let source = w.tabs[w.active].sheet;
+        for (overlay, file, exit) in [
+            (Overlay::ProjectSymbols, "symbol.rs", "escape"),
+            (Overlay::Locations, "definition.rs", "enter"),
+        ] {
+            let file = root.join(file);
+            std::fs::write(&file, "fn target() {}\n").unwrap();
+            p.action(&mut w, "show_overlay", &json!({}), 0..0).unwrap();
+            p.overlay = Some(overlay);
+            p.fuzzy_worker.cancel();
+            p.quick_pending = false;
+            p.locations = vec![vel_index::SymbolLocation {
+                file: file.clone(),
+                name: "target".into(),
+                row: 0,
+                column: 3,
+                range: 3..9,
+                kind: vel_index::SymbolKind::Function,
+            }];
+            p.location_items(&w);
+            p.preview_current(&mut w).unwrap();
+            let sheet = w.tabs[w.active].sheet;
+            assert!(w.tabs[w.active].goto_preview);
+            assert_eq!(w.workbench.groups[0].sheets, [source]);
+            assert_eq!(w.editor().caret, 3);
+            p.key(&mut w, &Key::parse(exit).unwrap(), 0..0).unwrap();
+            assert!(p.overlay.is_none());
+            if exit == "escape" {
+                assert_eq!(w.tabs[w.active].sheet, source);
+                assert!(w.sheet_index(sheet).is_none());
+            } else {
+                assert_eq!(w.workbench.groups[0].sheets, [source, sheet]);
+                let tab = &w.tabs[w.active];
+                assert!(!tab.goto_preview && !tab.transient);
+                assert_eq!(tab.editor.caret, 3);
+            }
+        }
     }
     /// Status-bar items never overlap each other or the position text: at every width and UI
     /// scale they are laid out right to left, and the ones that do not fit are left out.

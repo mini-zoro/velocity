@@ -42,11 +42,12 @@ fn shortcut_word(word: &str, text: &str) -> bool {
 fn fixture_label(scene: &str, text: &str, word: &str, root: &Path) -> bool {
     match scene {
         // Goto Anything's details are styled a path component at a time.
-        "goto_anything" | "r5_goto_anything" | "overlay_small" => {
+        "goto_anything" | "r5_goto_anything" | "overlay_small" | "r41-goto-preview" => {
             if root
                 .components()
                 .any(|part| words(&part.as_os_str().to_string_lossy()).any(|w| w == word))
                 || ["velocity", "render", "scenes", "src", "mod.rs", "rs"].contains(&word)
+                || (scene == "r41-goto-preview" && word == "README")
                 || root
                     .file_name()
                     .is_some_and(|name| name.to_string_lossy().split('-').next_back() == Some(word))

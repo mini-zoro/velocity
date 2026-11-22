@@ -98,6 +98,14 @@ impl App {
                 }
             }
         }
+        if event.kind == MouseKind::Down
+            && event.is_context_click()
+            && self.panels.navigation_overlay_open()
+        {
+            self.panels.cancel_overlay(&mut self.workspace);
+            self.named_changed(w, false);
+            return;
+        }
         if self.panels.overlay.is_some() && !captured && !event.is_context_click() {
             if event.kind == MouseKind::Move {
                 self.panels.tree.pointer(event.position, None);
