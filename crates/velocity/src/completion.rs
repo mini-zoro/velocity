@@ -1374,7 +1374,9 @@ mod tests {
     use vel_config::{json, keymap::Key, settings::Layer};
     use vel_text::Text;
     fn ready(e: &mut Editor, completion: bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Syntax loading competes with every parallel test on 2-4 core CI runners
+        // (two Windows runs saw the list ready but the language not yet after 10 s).
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             e.poll_language();
             e.poll_completion();
