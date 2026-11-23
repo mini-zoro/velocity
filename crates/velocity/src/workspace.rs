@@ -94,9 +94,26 @@ pub struct Tab {
     pub(crate) external_load: bool,
     load_started: Option<Instant>,
     pub(crate) disk_stamp: Option<(u64, SystemTime)>,
+    /// Disk version sampled before the pending background load started reading.
+    read_from: Option<DiskVersion>,
     /// Pending disk change owned by the real buffer, not by its shadow views.
     reload_deferred: bool,
     pub external: Option<Loaded>,
+}
+/// The disk version a load samples before it reads: the change-detection stamp and the
+/// revision recorded for focus-save and sessions.
+#[derive(Clone, Debug, PartialEq)]
+struct DiskVersion {
+    stamp: Option<(u64, SystemTime)>,
+    saved: Option<vel_session::DiskStamp>,
+}
+impl DiskVersion {
+    fn read(path: &Path) -> Self {
+        Self {
+            stamp: stamp(path),
+            saved: vel_session::DiskStamp::read(path),
+        }
+    }
 }
 /// A remembered `image_file_patterns` decision and what it depends on.
 #[derive(Debug, Clone)]
@@ -240,6 +257,7 @@ impl Tab {
             external_load: false,
             load_started: None,
             disk_stamp: None,
+            read_from: None,
             reload_deferred: false,
             external: None,
         };
@@ -257,6 +275,7 @@ impl Tab {
     /// remains on each sheet so completion restores that sheet's own selection.
     pub(crate) fn transfer_document_io(&mut self, target: &mut Self) {
         target.loading = self.loading.take();
+        target.read_from = self.read_from.take();
         target.binary_loading = self.binary_loading.take();
         target.previous_document = self.previous_document.take();
         target.external = self.external.take();
@@ -535,6 +554,9 @@ impl Tab {
         workers: Option<(&fileio::IoWorkers, usize)>,
     ) -> Result<(), String> {
         let path = self.path.clone().ok_or("load requires a saved file")?;
+        // Sample the version before reading: a change made while the load reads must not
+        // be acknowledged as the version that was read.
+        let before = DiskVersion::read(&path);
         let prepared = prepare_disk_load_on(
             &path,
             options,
@@ -542,9 +564,32 @@ impl Tab {
             external && !self.load_failed,
             workers,
         )?;
+        let read = matches!(prepared, PreparedLoad::Text(_));
         self.install_disk_load(prepared, external);
         self.reload_deferred = false;
+        if read {
+            self.verify_read(before);
+        } else if self.loading.is_some() {
+            self.read_from = Some(before);
+        }
         Ok(())
+    }
+    /// The file changed after `before` was sampled, so the completed read may predate
+    /// the change or mix both versions, and the change notification arrived while the
+    /// load was running. Keep the sampled version instead of acknowledging the current
+    /// one (a pending conflict keeps the revision it was compared with), and check the
+    /// file again on the next poll.
+    fn verify_read(&mut self, before: DiskVersion) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        if DiskVersion::read(path) != before {
+            if self.external.is_none() {
+                self.disk_stamp = before.stamp;
+                self.disk_saved = before.saved;
+            }
+            self.reload_deferred = true;
+        }
     }
 
     fn defer_external_reload(&self, active_document: u64) -> bool {
@@ -554,6 +599,7 @@ impl Tab {
             && self.editor.marked.is_none()
     }
     pub(crate) fn install_disk_load(&mut self, prepared: PreparedLoad, external: bool) {
+        self.read_from = None;
         match prepared {
             PreparedLoad::Text(loaded) => {
                 if external {
@@ -3066,9 +3112,12 @@ impl Workspace {
             }
         }
         // Installation suppresses restore-thread filesystem probes. Ordinary
-        // opens still need initial stamps for focus-save and deletion handling.
-        tab.disk_saved = vel_session::DiskStamp::read(path);
-        tab.disk_stamp = stamp(path);
+        // opens still need initial stamps for focus-save and deletion handling,
+        // unless the file changed while it was read (the load kept its sample).
+        if !tab.reload_deferred {
+            tab.disk_saved = vel_session::DiskStamp::read(path);
+            tab.disk_stamp = stamp(path);
+        }
         self.telemetry.push(serde_json::json!({"kind":"file_open","phase":if tab.loading.is_some(){"queued"}else{"fully_loaded"},"source_bytes":size,"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"background":tab.loading.is_some(),"path":path}));
         Ok(tab)
     }
@@ -3894,6 +3943,7 @@ impl Workspace {
                 tab.load_started = None;
                 let binary = tab.loading.as_ref().is_some_and(LoadTask::binary);
                 tab.loading = None;
+                let read_from = tab.read_from.take();
                 let external = tab.external_load;
                 match result {
                     Ok(loaded) => {
@@ -3901,6 +3951,9 @@ impl Workspace {
                             tab.accept_reload(loaded);
                         } else {
                             tab.install(loaded);
+                        }
+                        if let Some(before) = read_from {
+                            tab.verify_read(before);
                         }
                     }
                     Err(error) if binary => {
@@ -5246,6 +5299,63 @@ mod round15_tests {
     }
     fn workspace() -> Workspace {
         Workspace::new(Text::new(), None, None, false).unwrap()
+    }
+    #[test]
+    fn a_change_while_a_reload_reads_is_loaded_instead_of_acknowledged() {
+        // A tool that rewrites a file in steps (truncate, write, touch) can change it
+        // while a background reload reads. Notifications are not processed while the tab
+        // loads, and the finished load used to acknowledge the *current* stamp, so the
+        // newer bytes were never loaded (CI showed an empty, stale or mixed decode).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("doc.txt");
+        std::fs::write(&path, "first revision\n").unwrap();
+        let mut w = workspace();
+        w.settings
+            .set(Layer::User, "large_file.load_bytes", json!(1));
+        w.open(location(path.clone())).unwrap();
+        let settle = |w: &mut Workspace, done: &dyn Fn(&Workspace) -> bool| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !done(w) {
+                w.poll();
+                assert!(Instant::now() < until, "load did not settle");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        settle(&mut w, &|w| w.tabs[0].loading.is_none());
+        let base = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let rewrite = |text: &str, seconds: u64| {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+            file.set_modified(base + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        rewrite("older revision\n", 2);
+        w.apply_file_changes(vec![Ok(vec![path.clone()])]);
+        let task = w.tabs[0].loading.as_ref().expect("background reload");
+        let (read, total) = (task.read.clone(), task.total);
+        // The worker has read every byte of the older revision; only then does the file
+        // change again (same length, so the worker's final EOF read is unaffected).
+        let until = Instant::now() + Duration::from_secs(10);
+        while read.load(Ordering::Relaxed) < total {
+            assert!(Instant::now() < until, "reload did not read");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        rewrite("newer revision\n", 4);
+        let newer = stamp(&path);
+        settle(&mut w, &|w| {
+            w.tabs[0].loading.is_none() && w.tabs[0].disk_stamp == newer
+        });
+        assert_eq!(w.editor().text.to_string(), "newer revision\n");
+        assert_eq!(
+            w.tabs[0].disk_saved,
+            vel_session::DiskStamp::read(&path),
+            "focus-save compares this revision with the disk"
+        );
     }
     #[test]
     fn missing_paths_are_named_new_documents_and_save_errors_keep_the_buffer() {
