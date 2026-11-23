@@ -31,7 +31,7 @@ jobs:
       - name: Clippy (all targets)
         if: success() || failure()
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test
+      - name: Test (including Win32 DX12 presentation and handle inheritance)
         if: success() || failure()
         run: cargo test --workspace --locked --release --no-fail-fast
       - name: Package and validate

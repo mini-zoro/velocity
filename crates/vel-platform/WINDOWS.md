@@ -1,8 +1,10 @@
 # Windows backend (W2/W3)
 
-The production Windows editor uses the same App as macOS. Tests do not create
-windows. The native backend assumes Windows 10/11-era desktop APIs; the build
-target is x86_64-pc-windows-msvc. W1 defines the profile, pipe and DX12 surface.
+The production Windows editor uses the same App as macOS. The backend model
+tests are device-free; regular Windows CI also presents one frame to a small
+test HWND through DX12. The native backend assumes Windows 10/11-era desktop
+APIs; the build target is x86_64-pc-windows-msvc. W1 defines the profile, pipe
+and DX12 surface.
 
 ## Native lifecycle
 
@@ -37,8 +39,9 @@ target is x86_64-pc-windows-msvc. W1 defines the profile, pipe and DX12 surface.
   translated to the existing keycode vocabulary.
 - The app keymap is offered each eligible key before Win32 text translation.
   Standard editing/navigation commands are the fallback. Alt+F4, Alt+Space,
-  Alt menu access and F10 remain native; Ctrl+Q is the app's remappable Exit
-  command and Ctrl+M is available for bracket navigation.
+  Alt menu access and F10 remain native even when an editor widget has focus;
+  Ctrl+Q is the app's remappable Exit command and Ctrl+M is available for
+  bracket navigation.
 - IMM32 supplies inline preedit, result and cancellation; the candidate window
   is anchored to the app's caret in the focused window. This is the IMM32
   compatibility path, not a TSF implementation. Pinyin and switching IMEs

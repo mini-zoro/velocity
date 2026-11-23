@@ -90,15 +90,18 @@ function Test-Console {
     }
     Invoke-Probe 'Cold vel.exe starts the adjacent GUI and forwards the file' {
         Assert-That (@(Get-SuiteProcesses -GuiOnly).Count -eq 0) 'An earlier GUI is still running; cannot validate cold start'
+        $profile = Join-Path $ctx.CaseRoot 'cold-profile'
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        $null = Complete-Native (Start-Helper 'cold-helper' @('--width', '850', '--height', '550', '--output',
+        $null = Complete-Native (Start-Helper 'cold-helper' @('--data-dir', $profile, '--width', '850', '--height', '550', '--output',
                     (Join-Path $ctx.Logs 'cold-gui.jsonl'), $cold)) 30
-        $window = Wait-Until 'cold-started GUI HWND' { Get-EditorWindows | Select-Object -First 1 }
-        $null = Wait-Title $window 'cold.txt'
+        $window = Wait-Until 'cold-started GUI with the requested file, after both helper streams closed' {
+            Get-EditorWindows | Where-Object { [VelocityDesktop.Native]::Title($_).Contains('cold.txt') } | Select-Object -First 1
+        }
         Focus-Window $window
         $null = Wait-Frame $window
         $ctx.Check.metrics['cold_open_ms'] = $timer.ElapsedMilliseconds
         Save-Evidence $window 'cold-opened'
+        Exit-Editor $window
     }
 }
 
@@ -304,6 +307,18 @@ function Read-RegistryValue([string] $Key, [string] $Name) {
     if (Test-Path -LiteralPath $Key) { (Get-Item -LiteralPath $Key).GetValue($Name) }
 }
 
+function Read-UninstallRegistration([string] $Key, [Microsoft.Win32.RegistryView] $View) {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('CurrentUser', $View)
+    try {
+        $entry = $base.OpenSubKey($Key)
+        if ($null -eq $entry) { return }
+        try {
+            [ordered]@{ display_name=$entry.GetValue('DisplayName'); version=$entry.GetValue('DisplayVersion');
+                command=$entry.GetValue('UninstallString'); view=$View.ToString() }
+        } finally { $entry.Dispose() }
+    } finally { $base.Dispose() }
+}
+
 function Get-PathEntries([string] $Value) {
     $Value -split ';' | ForEach-Object { $_.Trim().TrimEnd('\') } | Where-Object { $_ }
 }
@@ -312,15 +327,18 @@ function Test-Installer {
     Assert-That ($null -ne $ctx.Setup) "Missing validated setup.exe: $($ctx.PackageError)"
     $dir = Join-Path $env:LOCALAPPDATA 'Programs/Velocity'
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Velocity.lnk'
-    $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.velocity.Velocity_is1'
+    $uninstall = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.velocity.Velocity_is1'
     $classes = 'HKCU:\Software\Classes'
     $ownerKey = 'HKCU:\Software\Velocity\Installer'
     $registrations = @("$classes\Velocity.TextFile", "$classes\Applications\velocity.exe")
     $extensions = 'txt','text','log','md','json','toml','yaml','yml','ini','csv','xml'
     $originalPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $originalChoice = Read-RegistryValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.txt\UserChoice' 'ProgId'
-    foreach ($key in @($dir, $shortcut, $uninstall, $ownerKey) + $registrations) {
+    foreach ($key in @($dir, $shortcut, $ownerKey) + $registrations) {
         Assert-That (-not (Test-Path -LiteralPath $key)) "Existing Velocity installation/state; refusing to change $key"
+    }
+    foreach ($view in 'Registry64','Registry32') {
+        Assert-That ($null -eq (Read-UninstallRegistration $uninstall $view)) "Existing per-user uninstall registration ($view)"
     }
     Assert-That ($dir -notin @(Get-PathEntries $originalPath)) 'Velocity is already present in the user PATH'
     foreach ($extension in $extensions) {
@@ -335,8 +353,13 @@ function Test-Installer {
         Invoke-Probe 'Start menu and per-user uninstall registration' {
             $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
             Assert-That ((Test-Path -LiteralPath $shortcut) -and $link.TargetPath -ieq $ctx.InstalledGui) 'Missing or incorrect Start menu shortcut'
-            Assert-That ((Read-RegistryValue $uninstall 'DisplayName') -eq 'Velocity') 'Missing per-user uninstall entry'
-            Assert-That ((Read-RegistryValue $uninstall 'DisplayVersion') -eq $report.package.version) 'Wrong uninstall version'
+            $entry = Wait-Until 'per-user uninstall registry entry (64-bit view)' { Read-UninstallRegistration $uninstall Registry64 }
+            $ctx.Check.metrics['uninstall_registration'] = $entry
+            # Inno's default DisplayName is AppVerName, not the bare AppName.
+            Assert-That ($entry.display_name -match '^Velocity(\s|$)') "Wrong uninstall display name: $($entry.display_name)"
+            Assert-That ($entry.version -eq $report.package.version) "Wrong uninstall version: $($entry.version)"
+            $uninstallExe = $entry.command -replace '^"([^"]+)".*$', '$1'
+            Assert-That ((Split-Path -Parent $uninstallExe) -ieq $dir -and (Test-Path -LiteralPath $uninstallExe -PathType Leaf)) 'UninstallString does not point to the installed uninstaller'
         }
         Invoke-Probe 'Explorer Open with registrations, without replacing UserChoice' {
             foreach ($registration in $registrations) {
@@ -375,8 +398,11 @@ function Test-Installer {
         }
         Invoke-Probe 'Uninstall removes binaries, shortcut, Open with and PATH entry' {
             $null = Wait-Until 'uninstaller removes packaged executables' { -not (Test-Path -LiteralPath $ctx.InstalledGui) -and -not (Test-Path -LiteralPath $ctx.InstalledCli) }
-            foreach ($key in @($shortcut, $uninstall, $ownerKey) + $registrations) {
+            foreach ($key in @($shortcut, $ownerKey) + $registrations) {
                 Assert-That (-not (Test-Path -LiteralPath $key)) "Uninstall left $key"
+            }
+            foreach ($view in 'Registry64','Registry32') {
+                Assert-That ($null -eq (Read-UninstallRegistration $uninstall $view)) "Uninstall registration remains ($view)"
             }
             foreach ($extension in $extensions) {
                 Assert-That ($null -eq (Read-RegistryValue "$classes\.$extension\OpenWithProgids" 'Velocity.TextFile')) "Uninstall left the .$extension association"
@@ -415,15 +441,49 @@ function Test-Pinyin {
         $ctx.Check.skip_reason = 'The runner does not have the inbox user language-list cmdlet.'
         return
     }
-    $tips = @(Get-WinUserLanguageList | ForEach-Object { $_.InputMethodTips })
-    $ctx.Check.metrics['input_method_tips'] = $tips
+    $original = Get-WinUserLanguageList
     $pinyin = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
-    if ($pinyin -notin $tips -or @($tips | Where-Object { $_ -like '0804:*' }).Count -ne 1) {
-        $ctx.Check.skip_reason = 'Microsoft Pinyin is not uniquely configured for the runner user. No language-pack downloads, profile changes, or reboot.'
-        return
+    $tips = @($original | ForEach-Object { $_.InputMethodTips })
+    $ctx.Check.metrics['original_input_method_tips'] = $tips
+    $restore = $false
+    try {
+        if ($pinyin -notin $tips -or @($tips | Where-Object { $_ -like '0804:*' }).Count -ne 1) {
+            $ime = Join-Path $env:windir 'System32/InputMethod/CHS/ChsIME.exe'
+            if ($env:GITHUB_ACTIONS -ne 'true' -or -not (Test-Path -LiteralPath $ime -PathType Leaf)) {
+                $ctx.Check.skip_reason = 'Pinyin is not configured and no inbox Pinyin activation will be attempted on this machine.'
+                return
+            }
+            $restore = $true
+            try {
+                $list = Get-WinUserLanguageList
+                $zh = $list | Where-Object { $_.LanguageTag -eq 'zh-CN' } | Select-Object -First 1
+                if (-not $zh) {
+                    $zh = (New-WinUserLanguageList -Language 'zh-CN')[0]
+                    $list.Add($zh)
+                }
+                $zh.InputMethodTips.Clear()
+                $zh.InputMethodTips.Add($pinyin)
+                Set-WinUserLanguageList -LanguageList $list -Force
+                $tips = @(Get-WinUserLanguageList | ForEach-Object { $_.InputMethodTips })
+                if ($pinyin -notin $tips -or @($tips | Where-Object { $_ -like '0804:*' }).Count -ne 1) {
+                    $ctx.Check.skip_reason = 'The inbox language setting did not register a unique Pinyin input method.'
+                    return
+                }
+            } catch {
+                $ctx.Check.skip_reason = 'Could not enable inbox Pinyin without installing capabilities: ' + $_.Exception.Message
+                return
+            }
+        }
+        $ctx.Check.metrics['input_method_tips'] = $tips
+        Test-PinyinComposition $tips.Count
+    } finally {
+        if ($restore) { Set-WinUserLanguageList -LanguageList $original -Force }
     }
+}
+
+function Test-PinyinComposition([int] $TipCount) {
     $window = Start-Editor 'pinyin'
-    for ($i = 0; $i -lt $tips.Count -and [VelocityDesktop.Native]::InputLanguage($window) -ne 0x0804; $i++) {
+    for ($i = 0; $i -lt $TipCount -and [VelocityDesktop.Native]::InputLanguage($window) -ne 0x0804; $i++) {
         Send-Key $window @('Win', 'Space')
         try { $null = Wait-Until 'Pinyin active in editor' { [VelocityDesktop.Native]::InputLanguage($window) -eq 0x0804 } 2 }
         catch { Focus-Window $window }
@@ -432,6 +492,7 @@ function Test-Pinyin {
         $ctx.Check.skip_reason = 'Configured Pinyin could not be selected in the runner desktop without changing its configuration.'
         return
     }
+    Focus-Window $window
     $old = @([VelocityDesktop.Native]::Windows(0))
     Send-Ascii $window nihao
     $candidate = Wait-Until 'IME candidate HWND' {

@@ -99,10 +99,10 @@ function Get-EditorWindows([uint32] $ProcessId = 0) {
 function Save-Evidence([IntPtr] $Window, [string] $Step, [IntPtr[]] $Include = @()) {
     Require-Desktop
     $desktop = [VelocityDesktop.Native]::DesktopBounds()
-    $area = if ($Window -eq [IntPtr]::Zero) { $desktop } else { [VelocityDesktop.Native]::Outer($Window) }
+    $area = if ($Window -eq [IntPtr]::Zero) { $desktop } else { [VelocityDesktop.Native]::VisibleBounds($Window) }
     if ($Window -ne [IntPtr]::Zero) {
         foreach ($extra in @($Include) + @([VelocityDesktop.Native]::Menus($Window))) {
-            $other = [VelocityDesktop.Native]::Outer($extra)
+            $other = [VelocityDesktop.Native]::VisibleBounds($extra)
             if (-not $other.IsEmpty) { $area = [Drawing.Rectangle]::Union($area, $other) }
         }
     }
@@ -151,12 +151,12 @@ function Wait-Frame([IntPtr] $Window, [int] $Seconds = 20) {
     } $Seconds
 }
 
-function Wait-Changed([IntPtr] $Window, $Before, [string] $Region, [int] $Minimum = 400) {
+function Wait-Changed([IntPtr] $Window, $Before, [string] $Region, [int] $Minimum = 400, [int] $Tolerance = 24) {
     Wait-Until "rendered $Region changes by at least $Minimum pixels" {
         $image = Get-Frame $Window $Region
         try {
             if ($Before.Size -eq $image.Size) {
-                $pixels = [VelocityDesktop.Native]::Difference($Before, $image)
+                $pixels = [VelocityDesktop.Native]::Difference($Before, $image, $Tolerance)
                 if ($pixels -ge $Minimum) { $pixels }
             }
         } finally { $image.Dispose() }
@@ -176,12 +176,13 @@ function Set-Preferences([System.Collections.IDictionary] $Settings) {
     Write-Json $ctx.Preferences $Settings
 }
 
-function Start-Editor([string] $Label = 'gui', [string[]] $Locations = @(), [switch] $ExplicitProfile,
+function Start-Editor([string] $Label = 'gui', [string[]] $Locations = @(), [switch] $ExplicitProfile, [switch] $LogInput,
         [string] $Executable = $ctx.Gui) {
     Require-Desktop
     Assert-That (Test-Path -LiteralPath $Executable -PathType Leaf) "Missing GUI executable: $Executable ($($ctx.PackageError))"
     $arguments = @('--width', '850', '--height', '550', '--output', (Join-Path $ctx.Logs "$Label.jsonl"))
     if ($ExplicitProfile) { $arguments += @('--data-dir', $ctx.Profile) }
+    if ($LogInput) { $arguments += '--log-input' }
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $child = Start-Native $Executable $Label ($arguments + $Locations)
     $window = Wait-Until "visible editor window (pid $($child.Process.Id))" {
@@ -230,38 +231,93 @@ function Expect-Bytes([string] $File, [string] $Expected) {
     }
 }
 
-function Read-Editor([IntPtr] $Window, [switch] $SelectionOnly) {
-    Focus-Window $Window
-    $marker = [Guid]::NewGuid().ToString('N')
-    Set-Clipboard -Value $marker
-    if (-not $SelectionOnly) { Send-Key $Window @('Ctrl', 'A') }
-    Send-Key $Window @('Ctrl', 'C')
-    Wait-Until 'editor selection copied to clipboard' {
-        $value = Get-Clipboard -Raw
-        if ($value -and $value -cne $marker) { $value }
+function Invoke-Clipboard([string] $Operation, [scriptblock] $Action) {
+    $counts = $ctx.Check.metrics['clipboard_retries']
+    if ($null -eq $counts) {
+        $counts = @{ set=0; get=0; last_busy_owner=$null }
+        $ctx.Check.metrics['clipboard_retries'] = $counts
+    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try { return (& $Action) }
+        catch {
+            if ($timer.Elapsed.TotalSeconds -ge 4 -or $_.Exception.Message -notmatch 'Clipboard|0x800401D0') { throw }
+            $counts[$Operation]++
+            $owner = [VelocityDesktop.Native]::GetOpenClipboardWindow()
+            if ($owner -ne [IntPtr]::Zero) {
+                $counts.last_busy_owner = @{ pid=[VelocityDesktop.Native]::Pid($owner); class=[VelocityDesktop.Native]::Class($owner) }
+            }
+            Start-Sleep -Milliseconds 60
+        }
     }
 }
 
-function Exit-Editor([IntPtr] $Window) {
+function Read-Editor([IntPtr] $Window, [switch] $SelectionOnly) {
     Focus-Window $Window
-    Send-Key $Window @('Alt', 'F')
-    $null = Wait-Until 'File menu opened' { [VelocityDesktop.Native]::Menus($Window).Length -gt 0 }
+    $sequence = [VelocityDesktop.Native]::GetClipboardSequenceNumber()
+    if (-not $SelectionOnly) { Send-Key $Window @('Ctrl', 'A') }
+    Send-Key $Window @('Ctrl', 'C')
+    $null = Wait-Until 'editor publishes a new clipboard sequence' {
+        [VelocityDesktop.Native]::GetClipboardSequenceNumber() -ne $sequence
+    }
+    Invoke-Clipboard get { Get-Clipboard -Raw -ErrorAction Stop }
+}
+
+function Exit-Editor([IntPtr] $Window) {
+    $null = Open-TopMenu $Window 0 F
     # Exit's Win32 access key works even if this tall File menu overflows the display.
     Send-Key $Window X
     $null = Wait-Until 'all packaged editor processes exit' { @(Get-SuiteProcesses -GuiOnly).Count -eq 0 }
 }
 
-function Invoke-Menu([IntPtr] $Window, [string] $AccessKey, [string] $CaptionPattern) {
+function Open-TopMenu([IntPtr] $Window, [int] $Index, [string] $AccessKey, [switch] $MouseOnly) {
     Focus-Window $Window
-    Send-Key $Window @('Alt', $AccessKey)
-    $item = Wait-Until "native menu item $CaptionPattern" {
-        Get-PopupItems $Window | Where-Object { (Get-MenuCaption $_.Current.Name) -match $CaptionPattern } | Select-Object -First 1
+    Dismiss-Menu $Window
+    $source = 'mnemonic'
+    if (-not $MouseOnly) {
+        Send-Key $Window @('Alt', $AccessKey)
+        try {
+            $popup = Wait-Until "the Alt+$AccessKey native popup is visible" { [VelocityDesktop.Native]::MenuPopup($Window, $Index) } 2
+            return [pscustomobject]@{ Popup=$popup; Source=$source }
+        } catch {
+            Dismiss-Menu $Window
+            $source = 'click fallback'
+        }
+    } else { $source = 'click' }
+    $area = [VelocityDesktop.Native]::MenuItemArea($Window, [VelocityDesktop.Native]::MenuBar($Window), $Index)
+    Assert-That (-not $area.IsEmpty) "Win32 returned no clickable rectangle for top-level item $Index"
+    Click-Rectangle $area
+    $popup = Wait-Until "native popup $Index after mouse click" { [VelocityDesktop.Native]::MenuPopup($Window, $Index) } 3
+    [pscustomobject]@{ Popup=$popup; Source=$source }
+}
+
+function Click-Rectangle([Drawing.Rectangle] $Area) {
+    [VelocityDesktop.Native]::Click($Area.X + [int]($Area.Width / 2), $Area.Y + [int]($Area.Height / 2))
+}
+
+function Invoke-Menu([IntPtr] $Window, [string] $AccessKey, [string] $CaptionPattern) {
+    $bar = [VelocityDesktop.Native]::MenuBar($Window)
+    for ($index = 0; $index -lt [VelocityDesktop.Native]::GetMenuItemCount($bar); $index++) {
+        if ([VelocityDesktop.Native]::MenuLabel($bar, $index) -match "&$AccessKey") { break }
     }
-    $action = $null
-    if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$action)) { $action.Invoke() }
-    else {
-        $at = $item.GetClickablePoint()
-        [VelocityDesktop.Native]::Click([int]$at.X, [int]$at.Y)
+    Assert-That ($index -lt [VelocityDesktop.Native]::GetMenuItemCount($bar)) "No native menu with access key $AccessKey"
+    $opened = Open-TopMenu $Window $index $AccessKey
+    try {
+        $bar = [VelocityDesktop.Native]::MenuBar($Window)
+        $sub = [VelocityDesktop.Native]::GetSubMenu($bar, $index)
+        for ($row = 0; $row -lt [VelocityDesktop.Native]::GetMenuItemCount($sub); $row++) {
+            if ((Get-MenuCaption ([VelocityDesktop.Native]::MenuLabel($sub, $row))) -notmatch $CaptionPattern) { continue }
+            Assert-That ([VelocityDesktop.Native]::MenuItemEnabled($sub, $row)) "Menu item disabled: $CaptionPattern"
+            $area = [VelocityDesktop.Native]::MenuItemArea([IntPtr]::Zero, $sub, $row)
+            Assert-That (-not $area.IsEmpty) "Menu item has no rectangle: $CaptionPattern"
+            Click-Rectangle $area
+            $null = Wait-Until 'native popup closes after selection' { -not [VelocityDesktop.Native]::InMenu($Window) }
+            return
+        }
+        throw "Missing native menu item: $CaptionPattern ($($opened.Source))"
+    } catch {
+        Dismiss-Menu $Window
+        throw
     }
 }
 

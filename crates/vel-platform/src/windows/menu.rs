@@ -264,6 +264,7 @@ struct Popup {
 
 pub(super) struct MenuBar {
     root: OwnedMenu,
+    access_keys: Vec<u16>,
     popups: Vec<Popup>,
     actions: Actions,
 }
@@ -276,6 +277,7 @@ impl MenuBar {
     fn new(entries: &[MenuEntry], app: &dyn AppHandler) -> Option<Self> {
         let mut menu = Self {
             root: OwnedMenu::new(false)?,
+            access_keys: Vec::new(),
             popups: Vec::new(),
             actions: Actions::default(),
         };
@@ -298,6 +300,9 @@ impl MenuBar {
             if let Some(native) =
                 OwnedMenu::new(true).and_then(|popup| menu.root.add_popup(&title, popup))
             {
+                if let Some(key) = mnemonic.filter(char::is_ascii_alphanumeric) {
+                    menu.access_keys.push(key.to_ascii_uppercase() as u16);
+                }
                 let mut ids = Vec::new();
                 populate(
                     native,
@@ -339,6 +344,14 @@ impl MenuBar {
 }
 
 impl Host {
+    pub(super) fn menu_access_key(&self, vk: u16) -> bool {
+        self.fullscreen.get().is_none()
+            && self.menu.try_borrow().ok().is_some_and(|menu| {
+                menu.as_ref()
+                    .is_some_and(|menu| menu.access_keys.contains(&vk))
+            })
+    }
+
     pub(super) fn update_menu_bar(&self) {
         if self.menu_tracking.get() || !self.menu_dirty.get() || self.closing.get() {
             return;

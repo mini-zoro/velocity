@@ -3981,7 +3981,7 @@ impl Panels {
         self.extra_candidates = Arc::new(
             self.extra_paths
                 .iter()
-                .map(|path| fuzzy::Candidate::new(path.to_string_lossy()))
+                .map(|path| fuzzy::Candidate::new(vel_config::paths::display(path)))
                 .collect(),
         );
         self.file_recency = workspace
@@ -9421,6 +9421,28 @@ mod intelligence_tests {
             .unwrap();
         wait(&mut workspace, &mut panels, |_, p| p.file_complete);
         assert_eq!(panels.file_matches, 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn goto_open_tab_label_hides_verbatim_prefix_but_keeps_io_path() {
+        let mut workspace = Workspace::new(vel_text::Text::new(), None, None, false).unwrap();
+        let path = PathBuf::from(r"\\?\C:\fixture path\open.txt");
+        workspace.tabs[0].path = Some(path.clone());
+        let mut panels = Panels::new(&workspace, false);
+        panels
+            .action(
+                &mut workspace,
+                "show_overlay",
+                &json!({"overlay":"goto"}),
+                0..10,
+            )
+            .unwrap();
+        assert_eq!(
+            panels.extra_candidates[0].label,
+            r"C:\fixture path\open.txt"
+        );
+        assert_eq!(panels.extra_paths, [path]);
     }
 
     #[test]

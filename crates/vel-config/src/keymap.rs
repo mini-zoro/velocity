@@ -596,6 +596,15 @@ impl Keymap {
             .copied()
             .or_else(|| self.nodes[0].children.get(key).copied());
         let Some(node) = next else {
+            // A Windows chord such as Ctrl+K, Ctrl+B also works when Ctrl is
+            // released and pressed again between the two keystrokes.
+            if self.windows
+                && self.pending != 0
+                && key.modifiers == 0
+                && matches!(key.name.as_str(), "shift" | "ctrl" | "alt" | "super")
+            {
+                return Resolution::Pending;
+            }
             self.cancel();
             return Resolution::Unbound;
         };
@@ -632,6 +641,38 @@ impl Keymap {
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn windows_chords_survive_repressing_the_modifier() {
+    let settings = Settings::default();
+    let context = SettingsContext(&settings);
+    let prefix = Key::parse_windows("ctrl+k").unwrap();
+    let suffix = Key::parse_windows("ctrl+b").unwrap();
+    let ctrl_down = Key::from_parts("super", 0); // Windows native logical Command bit
+    let mut keys = Keymap::windows();
+    keys.append(
+        r#"[
+        {"keys":["ctrl+b"],"command":"build"},
+        {"keys":["ctrl+k","ctrl+b"],"command":"toggle_side_bar"}
+    ]"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        keys.resolve(&prefix, &context),
+        Resolution::Pending
+    ));
+    assert!(matches!(
+        keys.resolve(&ctrl_down, &context),
+        Resolution::Pending
+    ));
+    assert!(
+        matches!(keys.resolve(&suffix, &context), Resolution::Command(i) if i.command == "toggle_side_bar")
+    );
+    assert!(
+        matches!(keys.resolve(&suffix, &context), Resolution::Command(i) if i.command == "build")
+    );
 }
 
 fn menu_chord(key: &Key, windows: bool) -> String {

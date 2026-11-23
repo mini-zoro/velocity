@@ -36,6 +36,16 @@ impl Host {
         let state = keyboard_state();
         let flags = model::modifiers(&state);
         let alt_graph = model::alt_graph(&state);
+        crate::memory_pressure::note_activity();
+        if alt_graph
+            || self.menu_tracking.get()
+            || model::native_menu_key(vk, flags, || self.menu_access_key(vk))
+        {
+            // Keep the entire key sequence in Win32, including TranslateMessage
+            // and its WM_SYSCHAR. A focused sidebar or widget can otherwise
+            // swallow a mnemonic even without a matching editor key binding.
+            return false;
+        }
         let mut ignoring = state;
         for index in [
             VK_CONTROL,
@@ -51,11 +61,7 @@ impl Host {
             (String::new(), String::new())
         } else {
             let characters = key_characters(vk, scan, &state);
-            let ignoring = if alt_graph {
-                characters.clone()
-            } else {
-                key_characters(vk, scan, &ignoring)
-            };
+            let ignoring = key_characters(vk, scan, &ignoring);
             (characters, ignoring)
         };
         let key = KeyEvent {
@@ -74,18 +80,9 @@ impl Host {
                 KeyState::Up
             },
         };
-        crate::memory_pressure::note_activity();
-        let native_system_key = !alt_graph
-            && matches!(message.message, WM_SYSKEYDOWN | WM_SYSKEYUP)
-            && (flags.option() && matches!(vk, VK_F4 | VK_SPACE)
-                || vk == VK_F10 && !flags.command() && !flags.shift());
-        let consumed = if native_system_key || alt_graph {
-            false
-        } else {
-            self.with_app(|app, w| app.on_key(w, key)).unwrap_or(false)
-        };
+        let consumed = self.with_app(|app, w| app.on_key(w, key)).unwrap_or(false);
         self.flush_ime_anchor();
-        if native_system_key || modifier.is_some() || alt_graph || !down {
+        if modifier.is_some() || !down {
             return false;
         }
         if consumed {

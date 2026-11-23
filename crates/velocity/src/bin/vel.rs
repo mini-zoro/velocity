@@ -21,6 +21,9 @@ mod instance_pipe;
 #[allow(dead_code)] // Some protocol fields are only read by the primary.
 mod instance_protocol;
 #[cfg(windows)]
+#[path = "../windows_gui_spawn.rs"]
+mod windows_gui_spawn;
+#[cfg(windows)]
 #[path = "../windows_launch.rs"]
 #[allow(dead_code)]
 mod windows_launch;
@@ -47,7 +50,7 @@ fn run() -> Result<i32, String> {
     use cli::{Mode, Options};
     use instance_protocol::{Forward, Request, TIMEOUT};
     use std::{
-        process::{Command, Stdio},
+        process::Command,
         time::{Duration, Instant},
     };
 
@@ -108,19 +111,14 @@ fn run() -> Result<i32, String> {
     }
 
     let mut command = Command::new(&gui);
-    command
-        .arg(windows_launch::SERVE)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .args([
-            "--width",
-            &options.width.to_string(),
-            "--height",
-            &options.height.to_string(),
-            "--groups",
-            &options.groups.to_string(),
-        ]);
+    command.arg(windows_launch::SERVE).args([
+        "--width",
+        &options.width.to_string(),
+        "--height",
+        &options.height.to_string(),
+        "--groups",
+        &options.groups.to_string(),
+    ]);
     if let Some(normal) = normal {
         command.arg("--data-dir").arg(normal);
     }
@@ -139,8 +137,7 @@ fn run() -> Result<i32, String> {
     if let Some(output) = options.output {
         command.arg("--output").arg(output);
     }
-    let mut child = command
-        .spawn()
+    let child = windows_gui_spawn::spawn(&command)
         .map_err(|e| format!("could not launch {}: {e}", gui.display()))?;
     let until = Instant::now() + TIMEOUT;
     loop {

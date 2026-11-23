@@ -108,17 +108,19 @@ impl WindowHandle {
 
     /// Copies a snapshot of CF_UNICODETEXT, normalizing CRLF to editor line feeds.
     pub fn clipboard_text(&self) -> Option<String> {
-        let _clipboard = Clipboard::open(self.parent())?;
-        // SAFETY: The clipboard is open; the data remains owned by the system.
-        let data = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
-        let locked = LockedGlobal::new(data)?;
-        // SAFETY: The locked memory is aligned as a HGLOBAL allocation and
-        // GlobalSize bounds the readable data. A missing terminator is rejected.
-        let units = unsafe {
-            slice::from_raw_parts(locked.pointer.as_ptr().cast::<u16>(), GlobalSize(data) / 2)
+        let text = {
+            let _clipboard = Clipboard::open(self.parent())?;
+            // SAFETY: The clipboard is open; the data remains owned by the system.
+            let data = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
+            let locked = LockedGlobal::new(data)?;
+            // SAFETY: The locked memory is aligned as a HGLOBAL allocation and
+            // GlobalSize bounds the readable data. A missing terminator is rejected.
+            let units = unsafe {
+                slice::from_raw_parts(locked.pointer.as_ptr().cast::<u16>(), GlobalSize(data) / 2)
+            };
+            units[..units.iter().position(|unit| *unit == 0)?].to_vec()
         };
-        let end = units.iter().position(|unit| *unit == 0)?;
-        Some(String::from_utf16_lossy(&units[..end]).replace("\r\n", "\n"))
+        Some(String::from_utf16_lossy(&text).replace("\r\n", "\n"))
     }
 
     /// Publishes CF_UNICODETEXT using the Windows CRLF convention.
@@ -132,32 +134,35 @@ impl WindowHandle {
 
     fn put_clipboard(&self, text: &str, html: Option<&str>) -> bool {
         let owner = self.parent();
-        let Some(_clipboard) = Clipboard::open(owner) else {
+        if owner.is_null() {
             return false;
-        };
+        }
         let units = wide(&text.replace("\r\n", "\n").replace('\n', "\r\n"));
         let bytes: Vec<_> = units.into_iter().flat_map(u16::to_le_bytes).collect();
         let Some(text) = ClipboardData::allocate(&bytes) else {
             return false;
         };
-        // SAFETY: Clipboard::open succeeded using this non-null, live owner.
-        if owner.is_null() || unsafe { EmptyClipboard() } == 0 {
-            return false;
-        }
-        if !text.publish(u32::from(CF_UNICODETEXT)) {
-            return false;
-        }
-        if let Some(html) = html {
+        let html = if let Some(html) = html {
             // SAFETY: A statically terminated format name; no retained pointer.
             let format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
-            if format == 0
-                || !ClipboardData::allocate(&clipboard_html(html))
-                    .is_some_and(|data| data.publish(format))
-            {
+            if format == 0 {
                 return false;
             }
-        }
-        true
+            let Some(data) = ClipboardData::allocate(&clipboard_html(html)) else {
+                return false;
+            };
+            Some((format, data))
+        } else {
+            None
+        };
+        // Allocate and encode everything before locking the system clipboard.
+        let Some(_clipboard) = Clipboard::open(owner) else {
+            return false;
+        };
+        // SAFETY: Clipboard::open succeeded using this non-null, live owner.
+        (unsafe { EmptyClipboard() } != 0)
+            && text.publish(u32::from(CF_UNICODETEXT))
+            && html.is_none_or(|(format, data)| data.publish(format))
     }
 
     /// Uses the W1 adapter, which never silently deletes an unrecyclable item.

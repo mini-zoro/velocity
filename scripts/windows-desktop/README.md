@@ -44,14 +44,14 @@ Use a new result directory per run.
 12. Approximately 50 MiB of numbered text: time to the first content frame, working set and three Page Downs.
 13. Silent install, shortcut, Explorer and uninstall registration, PATH, installed launch and uninstall cleanup.
 14. Force-kill after a durable dirty-buffer autosave, then relaunch and verify recovered text.
-15. Microsoft Pinyin candidate position and commit if configured and selectable; otherwise SKIP without downloading a language pack or rebooting.
+15. Microsoft Pinyin candidate position and commit. On a hosted runner with the inbox Pinyin binary, the driver tries adding its user input profile and restores the original list in `finally`. Otherwise, or if activation needs a sign-in, report SKIP. No language-pack downloads or reboot.
 
 ## Evidence
 
 Download `velocity-desktop-windows-2022` or `velocity-desktop-windows-2025`.
 `report.json` and `summary.md` have timings, outcomes and PNG names. The
 Markdown is also posted to the job summary. Screenshots under `screenshots/`
-are screen crops of the app, widened for native menus, dialogs or the IME
+are cropped to the visible app frame (excluding invisible resize borders), widened for native menus, dialogs or the IME
 candidate window as needed. The driver saves the entire desktop when the
 assertion is that the app is no longer there. Non-visual shell and registry
 assertions use process output and report entries. `logs/` contains per-check
@@ -71,5 +71,8 @@ Windows. Its virtual panels are checked by changed pixel regions, with
 file bytes, clipboard text or window geometry asserted where possible.
 The first hosted run should establish whether both images expose a usable
 interactive desktop and WARP, and whether popup UIA and pixel thresholds
-need adjustment. Unsigned installer reputation, multi-monitor DPI changes
+need adjustment. Where UIA does not enumerate the menu, the report includes
+the Win32 menu captions and records whether the popup opened by mnemonic or
+click. A click fallback does not pass a failed mnemonic. Clipboard retries
+are counted per check. Unsigned installer reputation, multi-monitor DPI changes
 and immediate power-loss recovery before autosave are out of scope.

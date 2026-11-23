@@ -165,6 +165,31 @@ pub(super) fn modifiers(state: &[u8; 256]) -> Modifiers {
     Modifiers(flags)
 }
 
+pub(super) fn native_menu_key(vk: u16, flags: Modifiers, mnemonic: impl FnOnce() -> bool) -> bool {
+    if flags.option() && matches!(vk, VK_F4 | VK_SPACE) {
+        return true;
+    }
+    if flags.command() || flags.control() || flags.shift() {
+        return false;
+    }
+    vk == VK_F10 || (flags.option() && mnemonic())
+}
+
+#[test]
+fn only_native_menu_keys_bypass_focused_controls() {
+    let alt = Modifiers(1 << 19);
+    let ctrl = Modifiers(1 << 20);
+    let shift = Modifiers(1 << 17);
+    assert!(native_menu_key(VK_F10, Modifiers(0), || false));
+    assert!(native_menu_key(VK_F4, alt, || false));
+    assert!(native_menu_key(VK_SPACE, alt, || false));
+    assert!(native_menu_key(VK_F, alt, || true));
+    assert!(!native_menu_key(VK_R, alt, || false));
+    assert!(!native_menu_key(VK_F, ctrl, || true));
+    assert!(!native_menu_key(VK_F, Modifiers(alt.0 | shift.0), || true));
+    assert!(!native_menu_key(VK_F10, shift, || true));
+}
+
 pub(super) fn responder(vk: u16, m: Modifiers) -> Option<Command> {
     let extend = m.shift();
     let word = m.command();

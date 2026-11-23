@@ -1,8 +1,9 @@
 # Windows x64 port
 
 The supported build target for this pass is `x86_64-pc-windows-msvc` on the
-`windows-2022` GitHub runner. Build, Clippy, package validation and tests do not
-require an interactive desktop or GPU. W1 supplied the portability foundation;
+`windows-2022` GitHub runner. Build, Clippy and package validation are headless.
+Regular CI also has a tiny Win32 frame test that can run on a software adapter.
+W1 supplied the portability foundation;
 W2 supplied the Win32 host; W3 integrates the editor and packages it.
 
 ## W3: editor and distribution
@@ -104,8 +105,11 @@ and Clippy. It cannot link, run or package Windows executables.
 `windows.yml` builds the workspace with native MSVC, runs Clippy and release
 tests, validates the packaged ZIP and compiles the installer, then uploads
 `velocity-windows`. Windows tests check device-free components, the
-production executable's headless mode and console forwarding through a real
-named pipe to a headless peer. Legacy App unit fixtures remain macOS-only;
+production executable's headless mode, console forwarding through a real
+named pipe, and that a detached GUI launch does not inherit redirected pipes.
+The Windows frame test constructs a small non-activating HWND and submits
+and presents a frame through the real DX12 swap chain. Legacy App unit fixtures
+remain macOS-only;
 they contain macOS-specific key, clipboard, filesystem and lifecycle
 assumptions. The tag workflow builds and packages both platforms before
 publishing, and hashes every release asset in the combined `SHA256SUMS`.

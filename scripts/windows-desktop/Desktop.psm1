@@ -26,6 +26,12 @@ namespace VelocityDesktop {
             public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
             public Rect CaretRect;
         }
+        [StructLayout(LayoutKind.Sequential)] struct MenuBarInfo {
+            public uint Size;
+            public Rect Bounds;
+            public IntPtr Menu, Popup;
+            public uint Flags;
+        }
         [StructLayout(LayoutKind.Sequential)] struct Mouse {
             public int X, Y;
             public uint Data, Flags, Time;
@@ -50,6 +56,9 @@ namespace VelocityDesktop {
         [DllImport("user32.dll")] static extern bool EnumThreadWindows(uint thread, WindowCallback callback, IntPtr data);
         [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent, IntPtr child);
+        [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr control);
         [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hwnd, int command);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder value, int length);
@@ -70,6 +79,7 @@ namespace VelocityDesktop {
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
         [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+        [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect rect, int bytes);
         [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
         [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
         [DllImport("user32.dll", SetLastError=true)]
@@ -77,11 +87,18 @@ namespace VelocityDesktop {
         [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr hwnd, int index);
         [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr dest, uint flags);
         [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp, uint flags, uint ms, out UIntPtr result);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageTimeoutW", ExactSpelling=true)]
+        static extern IntPtr GetTextMessage(IntPtr hwnd, uint msg, IntPtr wp, StringBuilder lp, uint flags, uint ms, out UIntPtr result);
         [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, Input[] input, int size);
         [DllImport("user32.dll")] static extern uint MapVirtualKeyW(uint vk, uint mode);
         [DllImport("user32.dll", SetLastError=true)] static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
         [DllImport("user32.dll")] static extern IntPtr GetMenu(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool GetMenuBarInfo(IntPtr hwnd, int objectId, int itemId, ref MenuBarInfo info);
+        [DllImport("user32.dll")] static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint index, out Rect rect);
+        [DllImport("user32.dll")] static extern uint GetMenuState(IntPtr menu, uint index, uint flags);
+        [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] public static extern IntPtr GetOpenClipboardWindow();
         [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr menu, int index);
         [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr menu);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)]
@@ -129,11 +146,41 @@ namespace VelocityDesktop {
             uint thread = ThreadOf(hwnd);
             return thread != 0 && GetGUIThreadInfo(thread, ref info) && info.MenuOwner == hwnd && (info.Flags & 4) != 0;
         }
+        public static bool OwnedBy(IntPtr popup, IntPtr owner) { return GetAncestor(popup, 3) == owner; }
+        public static IntPtr FilenameFocus(IntPtr dialog) {
+            var info = new GuiThread { Size = (uint)Marshal.SizeOf(typeof(GuiThread)) };
+            if (!GetGUIThreadInfo(ThreadOf(dialog), ref info) || !IsChild(dialog, info.Focus)) return IntPtr.Zero;
+            // The common item dialog uses an Edit within the file-name shell combo.
+            return Class(info.Focus) == "Edit" || GetDlgCtrlID(info.Focus) == 1001 ? info.Focus : IntPtr.Zero;
+        }
+        public static string ControlText(IntPtr hwnd) {
+            var value = new StringBuilder(32768); UIntPtr ignored;
+            return GetTextMessage(hwnd, 0x000d, new IntPtr(value.Capacity), value, 2, 500, out ignored) == IntPtr.Zero
+                ? null : value.ToString();
+        }
         public static bool Responding(IntPtr hwnd) {
             UIntPtr ignored;
             return SendMessageTimeoutW(hwnd, 0, IntPtr.Zero, IntPtr.Zero, 2, 250, out ignored) != IntPtr.Zero;
         }
         public static IntPtr MenuBar(IntPtr hwnd) { return GetMenu(hwnd); }
+        public static IntPtr MenuPopup(IntPtr hwnd, int index) {
+            var info = new MenuBarInfo { Size = (uint)Marshal.SizeOf(typeof(MenuBarInfo)) };
+            if (GetMenuBarInfo(hwnd, -3, index + 1, ref info) && info.Popup != IntPtr.Zero && IsWindowVisible(info.Popup))
+                return info.Popup;
+            // Some builds do not expose the popup HWND through GetMenuBarInfo.
+            // Compare the displayed submenu's item geometry with the actual popup.
+            IntPtr branch = GetSubMenu(GetMenu(hwnd), index);
+            Rectangle row = MenuItemArea(IntPtr.Zero, branch, 0);
+            if (!row.IsEmpty)
+                foreach (IntPtr popup in Menus(hwnd))
+                    if (Outer(popup).Contains(row.Location)) return popup;
+            return IntPtr.Zero;
+        }
+        public static Rectangle MenuItemArea(IntPtr hwnd, IntPtr menu, uint index) {
+            Rect rect;
+            return menu != IntPtr.Zero && GetMenuItemRect(hwnd, menu, index, out rect) ? rect.Area : Rectangle.Empty;
+        }
+        public static bool MenuItemEnabled(IntPtr menu, uint index) { return (GetMenuState(menu, index, 0x400) & 3) == 0; }
         public static string MenuLabel(IntPtr menu, uint index) {
             var value = new StringBuilder(1024);
             GetMenuString(menu, index, value, value.Capacity, 0x400);
@@ -168,6 +215,12 @@ namespace VelocityDesktop {
         }
         public static Rectangle Outer(IntPtr hwnd) {
             Rect rect; return GetWindowRect(hwnd, out rect) ? rect.Area : Rectangle.Empty;
+        }
+        public static Rectangle VisibleBounds(IntPtr hwnd) {
+            Rect rect;
+            if (DwmGetWindowAttribute(hwnd, 9, out rect, Marshal.SizeOf(typeof(Rect))) == 0 && !rect.Area.IsEmpty)
+                return rect.Area;
+            return Outer(hwnd);
         }
         public static Rectangle Client(IntPtr hwnd) {
             var at = new Point(); Rect rect;
@@ -251,12 +304,15 @@ namespace VelocityDesktop {
             return counts;
         }
         public static int Difference(Bitmap a, Bitmap b) {
+            return Difference(a, b, 24);
+        }
+        public static int Difference(Bitmap a, Bitmap b, int tolerance) {
             if (a.Size != b.Size) throw new ArgumentException("Frame comparison bounds changed");
             int[] left = Pixels(a), right = Pixels(b);
             int count = 0;
             for (int i = 0; i < left.Length; ++i) {
                 for (int shift = 0; shift <= 16; shift += 8) {
-                    if (Math.Abs(((left[i] >> shift) & 255) - ((right[i] >> shift) & 255)) > 24) { ++count; break; }
+                    if (Math.Abs(((left[i] >> shift) & 255) - ((right[i] >> shift) & 255)) > tolerance) { ++count; break; }
                 }
             }
             return count;
@@ -296,31 +352,31 @@ function Get-Elements($Root, [string] $Type, [switch] $Children) {
     $scope = if ($Children) { [TreeScope]::Children } else { [TreeScope]::Descendants }
     $kind = [ControlType].GetField($Type).GetValue($null)
     $filter = [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, $kind)
-    $Root.FindAll($scope, $filter)
+    $found = $Root.FindAll($scope, $filter)
+    for ($i = 0; $i -lt $found.Count; $i++) { $found[$i] }
 }
 
 function Get-TopMenus([IntPtr] $Window) {
     $root = [AutomationElement]::FromHandle($Window)
     # A window also exposes its system menu bar; the resource bar has multiple items.
-    foreach ($bar in @(Get-Elements $root MenuBar)) {
-        $items = @(Get-Elements $bar MenuItem -Children)
-        if ($items.Count -gt 1) { return $items }
-    }
+    try {
+        foreach ($bar in @(Get-Elements $root MenuBar)) {
+            $items = @(Get-Elements $bar MenuItem -Children)
+            if ($items.Count -gt 1) { return $items }
+        }
+    } catch [ElementNotAvailableException], [System.Runtime.InteropServices.COMException] { return }
 }
 
-function Get-PopupItems([IntPtr] $Window) {
-    if (-not [VelocityDesktop.Native]::InMenu($Window)) { return }
+function Get-PopupItems([IntPtr] $Window, [IntPtr] $Popup, [int] $Index) {
     try {
-        foreach ($popup in [VelocityDesktop.Native]::Menus($Window)) {
-            $root = [AutomationElement]::FromHandle($popup)
-            $items = @(Get-Elements $root MenuItem -Children)
-            if (-not $items.Count) { $items = @(Get-Elements $root MenuItem) }
-            if ($items.Count) { return $items }
-        }
+        $root = [AutomationElement]::FromHandle($Popup)
+        $items = @(Get-Elements $root MenuItem -Children)
+        if (-not $items.Count) { $items = @(Get-Elements $root MenuItem) }
+        if ($items.Count) { return $items }
         # The Win32 accessibility proxy can nest the popup under the expanded menu item.
-        foreach ($top in @(Get-TopMenus $Window)) {
-            $items = @(Get-Elements $top MenuItem -Children | Where-Object { -not $_.Current.IsOffscreen })
-            if ($items.Count) { return $items }
+        $top = @(Get-TopMenus $Window)
+        if ($Index -lt $top.Count) {
+            Get-Elements $top[$Index] MenuItem -Children | Where-Object { -not $_.Current.IsOffscreen }
         }
     } catch [ElementNotAvailableException], [System.Runtime.InteropServices.COMException] { return }
 }

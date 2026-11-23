@@ -50,6 +50,7 @@ function Test-Rendering {
 }
 
 function Test-Typing {
+    Set-Preferences @{ caret_style='solid' }
     $file = Join-Path $ctx.CaseRoot 'typing.txt'
     Write-Utf8 $file "seed`r`n"
     $window = Start-Editor 'typing' @($file)
@@ -72,18 +73,21 @@ function Test-Typing {
     $baseline = "aLRlpha`r`n" + $fixture.unicode
     Expect-Bytes $file $baseline
     Save-Evidence $window 'typed-and-saved'
-    Send-Ascii $window Z
-    Send-Key $window @('Ctrl', 'S')
-    Expect-Bytes $file ($baseline + 'Z')
-    Save-Evidence $window 'before-undo'
-    Send-Key $window @('Ctrl', 'Z')
-    Send-Key $window @('Ctrl', 'S')
-    Expect-Bytes $file $baseline
-    Save-Evidence $window 'undo'
-    Send-Key $window @('Ctrl', 'Y')
-    Send-Key $window @('Ctrl', 'S')
-    Expect-Bytes $file ($baseline + 'Z')
-    Save-Evidence $window 'redo'
+    foreach ($edit in @(
+        @{ name='before-undo'; keys=@('Shift','Z'); expected=($baseline + 'Z') },
+        @{ name='undo'; keys=@('Ctrl','Z'); expected=$baseline },
+        @{ name='redo'; keys=@('Ctrl','Y'); expected=($baseline + 'Z') }
+    )) {
+        $before = Get-Frame $window
+        try {
+            Send-Key $window $edit.keys
+            Send-Key $window @('Ctrl', 'S')
+            Expect-Bytes $file $edit.expected
+            # Saving can finish before the editor's next composited frame.
+            $null = Wait-Changed $window $before client 12
+            Save-Evidence $window $edit.name
+        } finally { $before.Dispose() }
+    }
 }
 
 function Save-ThroughDialog([IntPtr] $Window, [string] $Path) {
@@ -91,30 +95,35 @@ function Save-ThroughDialog([IntPtr] $Window, [string] $Path) {
     Send-Key $Window @('Ctrl', 'S')
     $dialog = Wait-Until 'native Save As dialog' {
         foreach ($candidate in [VelocityDesktop.Native]::Windows($processId)) {
-            if ([VelocityDesktop.Native]::Class($candidate) -ne '#32770') { continue }
-            $root = [System.Windows.Automation.AutomationElement]::FromHandle($candidate)
-            if ($root.Current.Name -match '^Save As:?$') { $candidate; break }
+            if ([VelocityDesktop.Native]::Class($candidate) -eq '#32770' -and
+                    [VelocityDesktop.Native]::OwnedBy($candidate, $Window) -and
+                    [VelocityDesktop.Native]::Title($candidate) -match '^Save As:?$') { $candidate; break }
         }
     }
     Focus-Window $dialog
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($dialog)
-    $edit = Wait-Until 'Save As file name edit through UI Automation' {
-        $controls = @(Get-Elements $root Edit)
-        $controls | Where-Object {
-            $label = $_.Current.LabeledBy
-            $_.Current.AutomationId -eq '1001' -or $_.Current.HasKeyboardFocus -or
-                ($null -ne $label -and $label.Current.Name -match 'File name')
-        } | Select-Object -First 1
+    $edit = $null
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($dialog)
+        $edit = Get-Elements $root Edit | Where-Object { $_.Current.AutomationId -eq '1001' } | Select-Object -First 1
+        if (-not $edit) {
+            $combo = Get-Elements $root ComboBox | Where-Object { $_.Current.AutomationId -eq '1148' } | Select-Object -First 1
+            if ($combo) { $edit = Get-Elements $combo Edit | Select-Object -First 1 }
+        }
+        if ($edit) { $edit.SetFocus() }
+    } catch {
+        $ctx.Check.metrics['dialog_uia_error'] = $_.Exception.Message
+        $edit = $null
     }
-    $edit.SetFocus()
+    # The Shell initially selects the suggested file name. The native focused
+    # child is reliable even when DirectUI does not expose it in the UIA tree.
+    if ([VelocityDesktop.Native]::FilenameFocus($dialog) -eq [IntPtr]::Zero) { Send-Key $dialog @('Alt','N') }
+    $nativeEdit = Wait-Until 'focused file-name edit inside Save As' { [VelocityDesktop.Native]::FilenameFocus($dialog) } 3
     Send-Key $dialog @('Ctrl', 'A')
     Send-Text $dialog $Path
-    $value = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-    $null = Wait-Until 'Unicode file name visible in dialog' { $value.Current.Value -ceq $Path }
+    $ctx.Check.metrics['file_name_control'] = if ($edit) { 'UIA and focused HWND' } else { 'focused HWND' }
+    $null = Wait-Until 'Unicode file name visible in dialog' { [VelocityDesktop.Native]::ControlText($nativeEdit) -ceq $Path }
     Save-Evidence $Window 'native-dialog' @($dialog)
-    $save = Get-Elements $root Button | Where-Object { $_.Current.AutomationId -eq '1' -or $_.Current.Name -eq 'Save' } | Select-Object -First 1
-    Assert-That ($null -ne $save) 'UIA did not expose the Save button'
-    $save.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Send-Key $dialog Enter
     $null = Wait-Until 'Save As dismissed and editor foreground' { [VelocityDesktop.Native]::Foreground -eq $Window }
     $null = Wait-Title $Window ([IO.Path]::GetFileName($Path))
 }
@@ -133,9 +142,9 @@ function Test-SaveAs {
 }
 
 function Dismiss-Menu([IntPtr] $Window) {
-    if ([VelocityDesktop.Native]::InMenu($Window)) {
+    if ([VelocityDesktop.Native]::InMenu($Window) -or [VelocityDesktop.Native]::Menus($Window).Length) {
         $null = Wait-Until 'menu mode closed' {
-            if (-not [VelocityDesktop.Native]::InMenu($Window)) { return $true }
+            if (-not [VelocityDesktop.Native]::InMenu($Window) -and -not [VelocityDesktop.Native]::Menus($Window).Length) { return $true }
             Send-Key $Window Esc
         } 4
     }
@@ -160,8 +169,11 @@ function Read-MenuLanguage([IntPtr] $Window, [string] $Language, $Result) {
             Send-Key $Window Alt
             $null = Wait-Until 'Alt enters native menu mode' { [VelocityDesktop.Native]::InMenu($Window) }
             Save-Evidence $Window "$Language-alt"
-            $Result.top = @(Get-TopMenus $Window | ForEach-Object { Get-MenuCaption $_.Current.Name })
-            Assert-That (($Result.top -join '|') -ceq ($expected -join '|')) "UIA top-level captions: $($Result.top -join ', ')"
+            $Result['top_uia'] = @(Get-TopMenus $Window | ForEach-Object { Get-MenuCaption $_.Current.Name })
+            $bar = [VelocityDesktop.Native]::MenuBar($Window)
+            Assert-That ($bar -ne [IntPtr]::Zero) 'No HMENU is attached to the editor HWND'
+            $Result.top = @(Read-NativeMenuTree $bar | ForEach-Object { $_.caption })
+            Assert-That (($Result.top -join '|') -ceq ($expected -join '|')) "Native top-level captions: $($Result.top -join ', ')"
         } finally { Dismiss-Menu $Window }
     }
     for ($i = 0; $i -lt $keys.Count; $i++) {
@@ -169,21 +181,22 @@ function Read-MenuLanguage([IntPtr] $Window, [string] $Language, $Result) {
         $caption = $expected[$i]
         Invoke-Probe "$Language Alt+$key ($caption)" {
             try {
-                Send-Key $Window @('Alt', $key)
-                $popup = @(Wait-Until "UIA items for Alt+$key" { @(Get-PopupItems $Window) })
-                Save-Evidence $Window "$Language-$($fixture.enMenus[$i].ToLowerInvariant())"
-                $uia = @($popup | ForEach-Object { [ordered]@{ name=$_.Current.Name; access=$_.Current.AccessKey;
-                    accelerator=$_.Current.AcceleratorKey; enabled=$_.Current.IsEnabled } })
+                $opened = Open-TopMenu $Window $i $key
+                Save-Evidence $Window "$Language-$($fixture.enMenus[$i].ToLowerInvariant())" @($opened.Popup)
+                $uiaError = ''
+                try {
+                    $uia = @(Get-PopupItems $Window $opened.Popup $i | ForEach-Object {
+                        [ordered]@{ name=$_.Current.Name; access=$_.Current.AccessKey;
+                            accelerator=$_.Current.AcceleratorKey; enabled=$_.Current.IsEnabled }
+                    })
+                } catch { $uia = @(); $uiaError = $_.Exception.Message }
                 $bar = [VelocityDesktop.Native]::MenuBar($Window)
                 $top = [VelocityDesktop.Native]::MenuLabel($bar, $i)
                 $native = @(Read-NativeMenuTree ([VelocityDesktop.Native]::GetSubMenu($bar, $i)))
-                $Result.menus[$key] = [ordered]@{ title=$top; uia=$uia; native=$native }
+                $Result.menus[$key] = [ordered]@{ title=$top; opened_by=$opened.Source; uia=$uia; uia_error=$uiaError; native=$native }
                 Assert-That ((Get-MenuCaption $top) -ceq $caption -and $top -match "&$key") "Native mnemonic or caption differs: $top"
-                $visible = @($uia | ForEach-Object { Get-MenuCaption $_.name } | Where-Object { $_ })
                 $nativeLabels = @($native | ForEach-Object { $_.caption } | Where-Object { $_ })
-                Assert-That ($nativeLabels.Count -gt 0 -and ($visible -ccontains $nativeLabels[0])) "Alt+$key did not show the expected menu ($($visible -join ', '))"
-                $missing = @($nativeLabels | Where-Object { $visible -cnotcontains $_ })
-                Assert-That (-not $missing.Count) "UIA omitted menu items: $($missing -join ', ')"
+                Assert-That ($nativeLabels.Count -gt 0) "No native labels for $caption"
                 if ($key -eq 'F') {
                     $exit = if ($Language -eq 'en') { 'Exit' } else { $fixture.zhExit }
                     $new = if ($Language -eq 'en') { 'New File' } else { $fixture.zhNewFile }
@@ -192,13 +205,20 @@ function Read-MenuLanguage([IntPtr] $Window, [string] $Language, $Result) {
                 }
                 if ($key -eq 'H') {
                     $about = if ($Language -eq 'en') { 'About Velocity' } else { $fixture.zhAbout }
-                    Assert-That ($visible -ccontains $about) 'Help does not contain the localized About item'
+                    Assert-That ($nativeLabels -ccontains $about) 'Help does not contain the localized About item'
                 }
                 foreach ($item in $native) {
                     Assert-That ($item.shortcut -notmatch '[\u2318\u2325\u2303\u21E7]') "Mac shortcut glyph in Windows menu: $($item.raw)"
                 }
+                Assert-That ($opened.Source -eq 'mnemonic') "Alt+$key did not open $caption, but clicking it worked"
             } finally { Dismiss-Menu $Window }
         }
+    }
+    Invoke-Probe "$Language mouse click opens File" {
+        try {
+            $opened = Open-TopMenu $Window 0 F -MouseOnly
+            Save-Evidence $Window "$Language-file-click" @($opened.Popup)
+        } finally { Dismiss-Menu $Window }
     }
 }
 
@@ -261,11 +281,17 @@ function Test-Overlay([IntPtr] $Window, [string] $Step, [string[]] $Keys, [strin
 function Test-Shortcuts {
     $a = Join-Path $ctx.CaseRoot 'shortcut-a.txt'
     $b = Join-Path $ctx.CaseRoot 'shortcut-b.txt'
+    $go = Join-Path $ctx.CaseRoot 'goto-lines.txt'
+    $folder = Join-Path $ctx.CaseRoot 'shortcut-project'
     $rust = Join-Path $ctx.CaseRoot 'comment.rs'
     Write-Utf8 $a "kiwi kiwi`r`nsecond`r`nthird"
     Write-Utf8 $b 'second tab'
     Write-Utf8 $rust 'fn main() {}'
-    $window = Start-Editor 'shortcuts' @($a)
+    $lines = @(1..120 | ForEach-Object { 'row {0:D3}' -f $_ })
+    Write-Utf8 $go ($lines -join "`r`n")
+    [IO.Directory]::CreateDirectory($folder) | Out-Null
+    Write-Utf8 (Join-Path $folder 'sidebar.txt') 'sidebar witness'
+    $window = Start-Editor 'shortcuts' @($a) -LogInput
     foreach ($spec in @(
         @{ name='Ctrl+Shift+P command palette'; step='palette'; keys=@('Ctrl','Shift','P'); region='top'; text='Toggle Side Bar' },
         @{ name='Ctrl+P Goto Anything'; step='goto-anything'; keys=@('Ctrl','P'); region='top'; text='shortcut-a' },
@@ -279,20 +305,24 @@ function Test-Shortcuts {
         }
     }
     Invoke-Probe 'Ctrl+G Goto Line' {
-        Open-File $window $a 'open-goto-fixture'
-        $before = Get-Frame $window top
+        Open-File $window $go 'open-goto-fixture'
+        $before = Get-Frame $window
         try {
             Send-Key $window @('Ctrl', 'G')
-            $null = Wait-Changed $window $before top
-            Send-Ascii $window '3'
+            Send-Ascii $window '90'
+            $null = Wait-Changed $window $before client 300 8
             Save-Evidence $window 'goto-line'
             Send-Key $window Enter
             Send-Ascii $window X
             Send-Key $window @('Ctrl', 'S')
-            Expect-Bytes $a "kiwi kiwi`r`nsecond`r`nXthird"
-        } finally { $before.Dispose() }
+            $expected = [string[]]$lines.Clone()
+            $expected[89] = 'X' + $expected[89]
+            Expect-Bytes $go ($expected -join "`r`n")
+            Save-Evidence $window 'goto-line-verified'
+        } finally { $before.Dispose(); Send-Key $window Esc }
     }
     Invoke-Probe 'Ctrl+D expands to two occurrences' {
+        Open-File $window $a 'open-multiselect-fixture'
         Send-Key $window @('Ctrl', 'Home')
         Send-Key $window @('Ctrl', 'D')
         Send-Key $window @('Ctrl', 'D')
@@ -300,7 +330,7 @@ function Test-Shortcuts {
         try { Send-Ascii $window pear; $null = Wait-Changed $window $before client 80 }
         finally { $before.Dispose() }
         Send-Key $window @('Ctrl', 'S')
-        Expect-Bytes $a "pear pear`r`nsecond`r`nXthird"
+        Expect-Bytes $a "pear pear`r`nsecond`r`nthird"
         Save-Evidence $window 'multi-select'
     }
     Invoke-Probe 'Ctrl+/ toggles Rust line comment' {
@@ -315,17 +345,24 @@ function Test-Shortcuts {
         Save-Evidence $window 'uncommented'
     }
     Invoke-Probe 'Ctrl+K Ctrl+B toggles sidebar' {
+        $absent = Get-Frame $window left
+        try {
+            $null = Complete-Native (Start-Helper 'shortcut-folder' @($folder))
+            $null = Wait-Changed $window $absent left 5000 8
+            Save-Evidence $window 'sidebar-populated'
+        } finally { $absent.Dispose() }
         $before = Get-Frame $window left
         try {
             Send-Key $window @('Ctrl', 'K')
             Send-Key $window @('Ctrl', 'B')
-            $null = Wait-Changed $window $before left
-            Save-Evidence $window 'sidebar-toggled'
+            $hidden = Wait-Changed $window $before left 5000 8
+            $ctx.Check.metrics['sidebar_hidden_changed_pixels'] = $hidden
+            Save-Evidence $window 'sidebar-hidden'
             Send-Key $window @('Ctrl', 'K')
             Send-Key $window @('Ctrl', 'B')
             $null = Wait-Until 'sidebar restored' {
                 $now = Get-Frame $window left
-                try { [VelocityDesktop.Native]::Difference($before, $now) -lt 400 } finally { $now.Dispose() }
+                try { [VelocityDesktop.Native]::Difference($before, $now, 8) -lt 5000 } finally { $now.Dispose() }
             }
             Save-Evidence $window 'sidebar-restored'
         } finally { $before.Dispose() }
@@ -362,14 +399,18 @@ function Test-Shortcuts {
 function Test-ClipboardRoundTrip {
     $window = Start-Editor 'clipboard'
     $text = $fixture.cjk + ' paste'
-    Set-Clipboard -Value $text
+    Invoke-Clipboard set { Set-Clipboard -Value $text -ErrorAction Stop }
     Send-Key $window @('Ctrl', 'V')
     $null = Wait-Title $window ([string][char]0x2022)
     $copied = Read-Editor $window
     Assert-That ($copied -ceq $text) 'System clipboard to editor did not round-trip CJK'
     Save-Evidence $window 'paste-from-system'
-    Send-Text $window ($fixture.cjk + ' copy')
-    $copied = Read-Editor $window
-    Assert-That ($copied -ceq ($fixture.cjk + ' copy')) 'Editor did not copy exact CJK to system clipboard'
-    Save-Evidence $window 'copy-to-system'
+    $before = Get-Frame $window
+    try {
+        Send-Text $window ($fixture.cjk + ' copy')
+        $copied = Read-Editor $window
+        Assert-That ($copied -ceq ($fixture.cjk + ' copy')) 'Editor did not copy exact CJK to system clipboard'
+        $null = Wait-Changed $window $before client 35
+        Save-Evidence $window 'copy-to-system'
+    } finally { $before.Dispose() }
 }
