@@ -529,6 +529,9 @@ fn load_cancellable(
                 let ending = reader.ending();
                 let line_counts = reader.counts;
                 drop(reader);
+                if !plan.read_matches_decision(options, &raw.prefix)? {
+                    continue;
+                }
                 progress(Progress { read: total, total });
                 let loaded = finish_decoding(
                     path,

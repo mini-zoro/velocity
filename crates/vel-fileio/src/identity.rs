@@ -21,12 +21,15 @@ impl Digest {
 pub(crate) struct DigestReader<R> {
     pub input: R,
     pub digest: Digest,
+    /// The first bytes read, as much as the decode decision inspects.
+    pub prefix: Vec<u8>,
 }
 impl<R> DigestReader<R> {
     pub fn new(input: R) -> Self {
         Self {
             input,
             digest: Digest::default(),
+            prefix: Vec::new(),
         }
     }
 }
@@ -34,6 +37,8 @@ impl<R: Read> Read for DigestReader<R> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let n = self.input.read(bytes)?;
         self.digest.update(&bytes[..n]);
+        let room = crate::decoding::PREFIX_BYTES.saturating_sub(self.prefix.len());
+        self.prefix.extend_from_slice(&bytes[..n.min(room)]);
         Ok(n)
     }
 }

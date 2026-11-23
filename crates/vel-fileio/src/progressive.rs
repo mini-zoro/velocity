@@ -206,7 +206,8 @@ pub fn load_on_workers(
                         (result, decoder.ending(), decoder.counts)
                     };
                 match result {
-                    Ok(text) => {
+                    // Otherwise the file changed after the decision and the plan restarts.
+                    Ok(text) if plan.read_matches_decision(&options, &raw.prefix)? => {
                         let loaded = super::finish_decoding(
                             &path,
                             &options,
@@ -223,6 +224,7 @@ pub fn load_on_workers(
                             return Ok(loaded);
                         }
                     }
+                    Ok(_) => {}
                     Err(LoadError::DecodeRequired) => {}
                     Err(LoadError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
                         failure = error.to_string();

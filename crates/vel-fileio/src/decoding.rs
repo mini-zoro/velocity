@@ -11,6 +11,8 @@ pub struct ContentIdentity {
     /// BLAKE3 digest computed as the bytes are read or written.
     pub hash: [u8; 32],
 }
+/// Bytes of a document's beginning that decide its decoding.
+pub(crate) const PREFIX_BYTES: usize = 8192;
 /// Bounded evidence, independent of the tab's choice and the load path.
 #[derive(Clone, Debug)]
 pub struct PrefixFacts {
@@ -34,7 +36,7 @@ pub struct PrefixFacts {
 impl PrefixFacts {
     /// Inspects at most the first 8 KiB, without any document-sized work.
     pub fn inspect(bytes: &[u8]) -> Self {
-        let bytes = &bytes[..bytes.len().min(8192)];
+        let bytes = &bytes[..bytes.len().min(PREFIX_BYTES)];
         let bom = if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
             Some((UTF_8, 3))
         } else if bytes.starts_with(&[0xff, 0xfe]) {
@@ -46,7 +48,7 @@ impl PrefixFacts {
         };
         let valid_utf8 = match std::str::from_utf8(bytes) {
             Ok(_) => true,
-            Err(e) => bytes.len() == 8192 && e.error_len().is_none(),
+            Err(e) => bytes.len() == PREFIX_BYTES && e.error_len().is_none(),
         };
         Self {
             bom,
@@ -59,6 +61,14 @@ impl PrefixFacts {
             legacy_text_matches: false,
             revision_stamp_matches: false,
         }
+    }
+    /// The byte evidence `decide_decoding` reads, without the revision proofs.
+    fn same_bytes_evidence(&self, other: &Self) -> bool {
+        self.bom == other.bom
+            && self.nuls == other.nuls
+            && self.valid_utf8 == other.valid_utf8
+            && self.utf16 == other.utf16
+            && self.binary_signature == other.binary_signature
     }
 }
 pub(super) fn binary_signature(bytes: &[u8]) -> bool {
@@ -381,9 +391,9 @@ pub fn decoding_for_path(
     options: &DecodeOptions,
 ) -> Result<(PrefixFacts, DecodingDecision), String> {
     let result = (|| {
-        let mut prefix = Vec::with_capacity(8192);
+        let mut prefix = Vec::with_capacity(PREFIX_BYTES);
         crate::regular::read(path)?
-            .take(8192)
+            .take(PREFIX_BYTES as u64)
             .read_to_end(&mut prefix)
             .map_err(|e| e.to_string())?;
         let mut facts = PrefixFacts::inspect(&prefix);
@@ -412,15 +422,55 @@ pub(crate) struct DecodePlan {
     pub facts: PrefixFacts,
     decision: DecodingDecision,
     index: usize,
+    redecided: usize,
 }
+#[cfg(test)]
+type Hook = Box<dyn FnOnce() + Send>;
+/// Test hooks that run once, right after a plan for their path sampled its prefix.
+#[cfg(test)]
+pub(crate) static AFTER_DECISION: std::sync::Mutex<Vec<(std::path::PathBuf, Hook)>> =
+    std::sync::Mutex::new(Vec::new());
 impl DecodePlan {
     pub fn new(path: &Path, options: &DecodeOptions) -> Result<Self, String> {
         let (facts, decision) = decoding_for_path(path, options)?;
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut hooks = AFTER_DECISION.lock().expect("decision hooks");
+                let found = hooks.iter().position(|(hooked, _)| hooked == path);
+                found.map(|i| hooks.remove(i).1)
+            };
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         Ok(Self {
             facts,
             decision,
             index: 0,
+            redecided: 0,
         })
+    }
+    /// The decision comes from a prefix sampled before the attempt opened the file.
+    /// When the bytes the attempt read begin with different evidence, the file changed
+    /// in between and the decoded text would mix one version's decision with the
+    /// other's bytes (and record the new bytes' identity as if they had been decided).
+    /// Decide again from what was read and restart. A file that keeps changing is
+    /// eventually accepted as read; its changed stamp makes the caller read it again.
+    pub fn read_matches_decision(
+        &mut self,
+        options: &DecodeOptions,
+        read: &[u8],
+    ) -> Result<bool, String> {
+        let read = PrefixFacts::inspect(read);
+        if self.redecided >= 4 || read.same_bytes_evidence(&self.facts) {
+            return Ok(true);
+        }
+        self.redecided += 1;
+        self.decision = decide_decoding(&read, options)?;
+        self.facts = read;
+        self.index = 0;
+        Ok(false)
     }
     pub fn next(&mut self) -> Option<DecodeAttempt> {
         let attempt = self.decision.attempts.get(self.index)?.clone();
@@ -462,5 +512,52 @@ impl DecodePlan {
             (!attempt.verify_raw_revision || loaded.disk_content == options.saved_content)
                 && (!attempt.verify_legacy_revision || loaded.unchanged),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rewrite_between_decision_and_read_is_decoded_by_its_own_evidence() {
+        // An external tool rewrote a UTF-16 file as ASCII after the loader sampled the
+        // prefix. Both executors then decoded the new bytes with the old decision
+        // (UTF-16, then the windows-1252 replacement attempt) and recorded the new bytes'
+        // identity, so every later reload kept windows-1252 as "unchanged".
+        let dir = tempfile::tempdir().unwrap();
+        for background in [false, true] {
+            let path = dir.path().join(format!("rewritten-{background}.txt"));
+            let utf16: Vec<u8> = "base text\n"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            std::fs::write(&path, utf16).unwrap();
+            let rewritten = path.clone();
+            AFTER_DECISION.lock().unwrap().push((
+                path.clone(),
+                Box::new(move || std::fs::write(rewritten, b"odd!\n").unwrap()),
+            ));
+            let options = DecodeOptions {
+                encoding: Some("UTF-16 LE".into()),
+                fallback_encoding: "Western (Windows 1252)".into(),
+                ..Default::default()
+            };
+            let loaded = if background {
+                crate::load_background_with_options(path.clone(), options)
+                    .unwrap()
+                    .result
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap()
+            } else {
+                crate::load_with_options(&path, &options, |_| {})
+            }
+            .unwrap();
+            assert!(AFTER_DECISION.lock().unwrap().is_empty(), "hook ran");
+            assert_eq!(loaded.text.to_string(), "odd!\n", "background={background}");
+            assert_eq!(loaded.format.encoding, "UTF-8", "background={background}");
+            assert!(!loaded.encoding_chosen);
+            assert_eq!(loaded.disk_content, crate::content_identity(&path).unwrap());
+        }
     }
 }
