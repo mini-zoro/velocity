@@ -44,7 +44,9 @@ close, new-tab, side-bar and branch icons, plus nine-sliced hairline edges, the 
 the focus indicator. Strokes are one DIP wide and axis-aligned strokes are snapped per density,
 so the 1x/2x/3x PNGs are crisp. The script uses only Python's standard library and produces
 78 compact, supersampled PNGs. File type icons use the matching `.sublime-file-icons` mapping
-rather than overriding the dynamic `icon_file_type` texture in the main theme.
+rather than overriding the dynamic `icon_file_type` texture in the main theme. The Settings
+window adds two control glyphs (`check`, `updown`) and two category masks (`palette-keys`,
+`palette-appearance`) beside the palette masks; it tints them itself.
 
 Run `python3 crates/velocity/scripts/theme/generate.py` from the repository
 root to reproduce the JSON and PNG resources, then list any new PNG in `theme_ui.rs` (`BUNDLED`).

@@ -125,7 +125,23 @@ def palette_icons():
     png("palette-neutral", lambda x, y, s: any(math.hypot(x - cx, y - 8) <= .8 for cx in (4, 8, 12)))
 
 
+def settings_icons():
+    """Settings window glyphs: the Keys & Vintage page icon and the control marks that the
+    window paints itself (checkbox check, popup up/down chevrons)."""
+    keyboard = lines([(2.5, 4.5, 13.5, 4.5), (13.5, 4.5, 13.5, 11.5), (13.5, 11.5, 2.5, 11.5),
+                      (2.5, 11.5, 2.5, 4.5), (5.5, 9.5, 10.5, 9.5)], snapped=True)
+    keys = [(x, 7) for x in (5, 7, 9, 11)]
+    png("palette-keys", lambda x, y, s: keyboard(x, y, s)
+        or any(abs(x - kx) <= .65 and abs(y - ky) <= .65 for kx, ky in keys))
+    # Half-filled circle: light and dark appearance.
+    png("palette-appearance", lambda x, y, s: abs(math.hypot(x - 8, y - 8) - 5.5) <= STROKE / 2
+        or (x >= 8 and math.hypot(x - 8, y - 8) <= 5.5))
+    png("check", lines([(3.5, 8.5, 6.5, 11.5), (6.5, 11.5, 12.5, 4.5)], width=1.7))
+    png("updown", lines([(5, 6.5, 8, 3.5), (8, 3.5, 11, 6.5), (5, 9.5, 8, 12.5), (8, 12.5, 11, 9.5)]))
+
+
 palette_icons()
+settings_icons()
 if sys.argv[1:] == ["--palette-icons"]:
     sys.exit(0)
 

@@ -475,6 +475,8 @@ const PALETTE_MASKS: &[(&str, &[u8])] = palette_masks![
     "snippet",
     "bookmarks",
     "neutral",
+    "keys",
+    "appearance",
 ];
 
 const BUNDLED: &[(&str, &[u8])] = &[
@@ -561,6 +563,18 @@ const BUNDLED: &[(&str, &[u8])] = &[
     (
         "chevron@3x.png",
         include_bytes!("../resources/Packages/Theme - Velocity/chevron@3x.png"),
+    ),
+    (
+        "check.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/check.png"),
+    ),
+    (
+        "check@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/check@2x.png"),
+    ),
+    (
+        "check@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/check@3x.png"),
     ),
     (
         "close.png",
@@ -849,6 +863,18 @@ const BUNDLED: &[(&str, &[u8])] = &[
     (
         "tab-indicator-rounded@3x.png",
         include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded@3x.png"),
+    ),
+    (
+        "updown.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/updown.png"),
+    ),
+    (
+        "updown@2x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/updown@2x.png"),
+    ),
+    (
+        "updown@3x.png",
+        include_bytes!("../resources/Packages/Theme - Velocity/updown@3x.png"),
     ),
     (
         "wrap.png",
