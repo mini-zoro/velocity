@@ -679,7 +679,7 @@ impl Page {
             self.paint_footer(theme, tr, &ink, &mut layer, &mut controls, footer, scale);
         }
         let mut layers = vec![layer, controls, fields];
-        if let Some(popup) = self.paint_popup(theme, settings, &ink, scale) {
+        if let Some(popup) = self.paint_popup(theme, &ink, scale) {
             layers.push(popup);
         } else if let Some(tip) = self.paint_tooltip(theme, &ink, scale) {
             layers.push(tip);
@@ -1501,13 +1501,7 @@ impl Page {
         }
     }
 
-    fn paint_popup(
-        &mut self,
-        theme: &mut ThemeUi,
-        settings: &Settings,
-        ink: &Ink,
-        scale: f64,
-    ) -> Option<Layer> {
+    fn paint_popup(&mut self, theme: &ThemeUi, ink: &Ink, scale: f64) -> Option<Layer> {
         let popup = self.popup.as_mut()?;
         let anchor_wanted = match popup.kind {
             PopupKind::Tags(row) => Target::MoreTags(row),
@@ -1644,7 +1638,6 @@ impl Page {
                 1.5,
             );
         }
-        let _ = settings;
         Some(layer)
     }
 

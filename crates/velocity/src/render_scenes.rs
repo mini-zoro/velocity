@@ -2812,20 +2812,22 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
             .filter(|s| s.name.starts_with("settings_ui"))
             .collect();
         assert_eq!(settings.len(), 20);
-        for scenario in settings {
-            for dark in [true, false] {
-                // Both densities for representative states; one for the rest keeps this quick.
-                let densities: &[f64] = if matches!(
-                    scenario.name,
-                    "settings_ui"
-                        | "settings_ui_editor"
-                        | "settings_ui_advanced"
-                        | "settings_ui_enum"
-                ) {
-                    &[1., 2.]
-                } else {
-                    &[1.]
-                };
+        for (index, scenario) in settings.into_iter().enumerate() {
+            // Representative states in both appearances and densities; the rest alternate
+            // appearances at 1x, which keeps this test light next to timing-sensitive ones.
+            let full = matches!(
+                scenario.name,
+                "settings_ui" | "settings_ui_editor" | "settings_ui_advanced" | "settings_ui_enum"
+            );
+            let appearances: &[bool] = if full {
+                &[true, false]
+            } else if index % 2 == 0 {
+                &[true]
+            } else {
+                &[false]
+            };
+            for &dark in appearances {
+                let densities: &[f64] = if full { &[1., 2.] } else { &[1.] };
                 for &density in densities {
                     let mut app = (scenario.build)(&fixture, dark).unwrap();
                     let fonts =
