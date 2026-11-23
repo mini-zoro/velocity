@@ -23,14 +23,17 @@ W2 supplied the Win32 host; W3 integrates the editor and packages it.
   cycles visually, and Alt+1 through Alt+8 select numbered tabs (Alt+9 selects
   the last tab). Ctrl+1 through Ctrl+4 focus split groups (add Shift to move
   the active tab instead). Ctrl+F6 / Ctrl+Shift+F6 cycle editor windows.
-  Ctrl+K, Ctrl+, opens Settings; Ctrl+Q exits the application. Alt+F4 closes
-  the active window through Win32.
+  Ctrl+, opens the Settings window and Ctrl+K, Ctrl+, the JSON settings;
+  previous modification is Ctrl+Shift+. (next stays Ctrl+.). Ctrl+Q exits the
+  application. Alt+F4 closes the active window through Win32.
 - **Menus:** File, Edit, Selection, Find, View, Goto, Tools, Project,
   Preferences and Help. Alt or F10 enters the menu bar. The stable access
   keys are F, E, S, I, V, G, T, P, N and H respectively, including in
   Simplified Chinese. Exit is in File, window actions are under View >
-  Window, and About is in Help. Preferences contains Settings, Key Bindings,
-  Color Scheme and Theme. Shortcut labels follow the effective Windows keymap.
+  Window, and About is in Help. Preferences contains Settings, Settings (JSON),
+  Key Bindings, Color Scheme and Theme. Shortcut labels follow the effective
+  Windows keymap. The Settings window has no menu bar and is not part of the
+  Ctrl+F6 editor-window cycle.
 - **Executables:** `velocity.exe` is the GUI subsystem executable for Explorer
   and shortcuts. In cmd or PowerShell, use adjacent `vel.exe` for files,
   projects, line/column, `--wait`, stdin and redirected output. On a cold start

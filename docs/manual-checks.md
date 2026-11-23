@@ -19,8 +19,9 @@ Turn on VoiceOver (⌘F5). In Velocity:
 - [ ] Tabs: VO-arrows move across tabs and read their titles and the modified state.
 - [ ] Command palette (⇧⌘P): typing reads the first result; arrows read each row.
 - [ ] Find (⌘F): the Find field, option buttons (Regex, Case, Whole word, …) and the match count are read.
-- [ ] Settings (Graphical) (Preferences › Settings (Graphical)…): toggles read as switches with their state
-      ("自动换行，关" / "Word Wrap, off"); popups and text fields read their value.
+- [ ] Settings window (⌘,): the search field reads as a search field, the categories as a list whose
+      selected row is announced; checkboxes, radio buttons and popups read their label and value
+      ("Show line numbers, checked" / "Tab shape, Angled, selected"); "?" descriptions are read as help.
 - [ ] Switch UI language to 简体中文 (Preferences › Language): the same places are read in Chinese.
 Note anything silent, mislabeled or read in the wrong language.
 
@@ -219,4 +220,35 @@ committed `你好`, Return renamed the file on disk to `你好.txt`, and the tab
 followed. (The field's accessible label read "Rename" only because the test bundle reused older
 resources without the new catalog entry; the shipped catalog has 「重命名」.)
 Not yet checked natively: Escape, focus loss, collisions, read-only folders, VoiceOver speech.
+
+## Settings window (2026-11-23, native review pending)
+
+Use a fixture profile (`--data-dir`), fixture HOME/SHELL, both appearances and both UI languages.
+Compare side by side with Typora's Preferences window.
+
+- [ ] ⌘, opens a 720×480 "Settings" / "设置" window centred over the editor window; ⌘, again (from the
+      editor or the Settings window) brings the same window forward with the search field focused.
+      The app menu shows Settings… ⌘,; Preferences shows Settings… and Settings (JSON)….
+- [ ] The window cannot be made smaller than 600×400, is absent from the Window menu, cannot enter
+      full screen on its own, and joins an editor window's full-screen space when opened from it.
+- [ ] Close button, ⌘W and Esc close it (Esc clears a search first). No save prompt, ever.
+- [ ] Toggle Show line numbers and pick a color scheme: every open editor window changes at once.
+      Edit `Preferences.sublime-settings` in the JSON window and save: the Settings window updates
+      within a second. Comments and formatting in the file survive both directions.
+- [ ] Font popup: lists installed families, type a few letters to jump, the preview box redraws in
+      the chosen family and size. Indentation preview follows tab width and Insert spaces.
+- [ ] Tab / Shift+Tab, arrows in the category list, Space on a checkbox, Enter on a popup, Left/Right
+      on a radio group; focus rings are visible in light and dark.
+- [ ] Pinyin input: type 换行 in the search field (candidate window under the field, results filter on
+      commit); type in the Encoding field and the Hidden files list.
+- [ ] Hover the "?" of a row: the description and the "Takes effect" note appear after a short delay.
+- [ ] Buttons: Edit Settings in JSON…, Key Bindings…, Mouse Bindings…, Browse Packages, Customize
+      Color Scheme… each do what the menu item does.
+- [ ] Quit with the Settings window open, relaunch: it does not come back; editor windows restore as
+      before. Open a file from Finder while Settings is in front: it opens in an editor window.
+- [ ] Close every editor window while Settings stays open; ⌘N opens a new editor window; Dock click
+      brings Settings forward. Close Settings last, then ⌘, from the menu bar opens it again.
+- [ ] VoiceOver: see section 2.
+- [ ] Windows (VM or CI artifact): Ctrl+, opens the window (no menu bar), Ctrl+K, Ctrl+, opens the
+      JSON pair, Ctrl+Shift+. jumps to the previous modification, Ctrl+F6 skips the Settings window.
 

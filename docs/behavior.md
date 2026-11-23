@@ -10,14 +10,14 @@ public sources, the decision is the user's and is recorded here.
 
 | # | Topic | Decision | Status |
 | --- | --- | --- | --- |
-| D1 | ⌘, | Opens the Default/User two-pane JSON settings, as in Sublime. Use Preferences › Settings (Graphical)… or Preferences: Settings (Graphical) for the page. The palette command also works from the JSON window. | Done (round 31 lane B) |
+| D1 | ⌘, | **Revised 2026-11-23, a deliberate departure from Sublime:** ⌘, (Ctrl+, on Windows) opens the graphical Settings window, as in Typora and most Mac apps. The Default/User JSON pair stays one step away: Preferences › Settings (JSON)…, Preferences: Settings (JSON) in the palette, Ctrl+K, Ctrl+, on Windows, and the Edit buttons in the window. (Round 31 had ⌘, open the JSON pair.) | Done (Settings window, 2026-11-23) |
 | D2 | Default UI language | `ui_language: "auto"`: the first supported macOS preferred language, otherwise English. Explicit language preferences override it. | Done (round 31 lane B) |
 | D3 | Find in Files results | A "Find Results" tab like Sublime: scrollable, editable, double-click / Return jumps to the match; a "Use Buffer"-style toggle in the panel switches to the bottom output panel. | Done (round 31 lane C) |
 | D4 | Opening files from Finder / Dock | `open_files_in_new_window: "never"` stays the default: files open as tabs in the current window. | Done (unchanged) |
 | D5 | Closing windows / relaunch | Closed windows do not come back at launch; quitting restores the windows open at quit (`hot_exit`). Closing a non-project window with unsaved changes prompts. | Done (round 28 lane A) |
 
 ## Velocity-only additions (kept, opt-in or out of the way)
-- Graphical Settings page (`specs/vel-settings-ui.md`); JSON editing stays the primary Sublime path (D1).
+- Graphical Settings window (`specs/vel-settings-ui.md`, `docs/settings.md`): a standalone, single-instance utility window opened by ⌘, / Ctrl+, (D1). Curated pages, an Advanced page with every setting, and search over all settings. It writes the same User file as the JSON editor, which stays available from the menu, the palette and the window.
 - Simplified Chinese UI and the i18n framework (`docs/i18n.md`); English text and behaviour are unchanged.
 
 | Addition | Behavior |
@@ -183,7 +183,7 @@ Audit totals: **39 same**, **6 differs on purpose**, **13 differs — bug** (4 f
 
 | Step | Sublime (source) | Velocity (test or code) | Verdict |
 | --- | --- | --- | --- |
-| ⌘, and Preferences routing | [Settings][settings] and [Font settings][font] document the Default/User JSON pair. D1 assigns ⌘, to that pair. | Since round 31 ⌘, and Settings… open the two-view JSON pair (`settings_entry.rs`); the graphical page is Preferences › Settings (Graphical)… and the palette command. | **same** (B10 fixed in round 31 lane B) |
+| ⌘, and Preferences routing | [Settings][settings] and [Font settings][font] document the Default/User JSON pair, opened by ⌘,. | Since 2026-11-23 ⌘, / Ctrl+, and Settings… open the Settings window (`app_settings_window.rs`); Settings (JSON)… and Preferences: Settings (JSON) open the two-view JSON pair (`settings_entry.rs`). Tests: `settings_ui_entry_points_open_one_settings_window_and_keep_json_pairs`, `menu_roles_and_exact_shortcuts_survive_renaming_and_reload`. | **differs on purpose** (D1 revised by the user; the JSON pair itself is unchanged) |
 | Syntax-specific settings and User key bindings | [Settings][settings], [Key bindings][keys] describe layer precedence and custom bindings. | `settings_entry.rs`, `settings_project_view_and_user_keymap_precedence_reload`, `menu_roles_and_exact_shortcuts_survive_renaming_and_reload`. | **same** (editor settings and bindings) |
 | Select color scheme/theme and preview | [Themes][theme], [Color schemes][schemes], [Build 4121][r4121] distinguish scheme from chrome and describe the chooser. | `r19_appearance_preview_commit_cancel_and_broken_scheme`; Esc rolls back, accepting saves the chosen resource. | **same** |
 | Font zoom (⌘+/⌘−) | [Font settings][font] documents editable `font_size`; [Build 4200][r4200] documents the reset preference, not the full Mac key aliases, increment or bounds. | Shipped `super+=` / `super+-` map to `Workspace::zoom_font`, one point per press, persist in User settings, and respect syntax/view overrides. | **uncertain** (U16: exact aliases and increment) |
@@ -227,7 +227,8 @@ status bar; errors are logged rather than opening a standalone alert.
 
 ### Follow-up order
 
-B10 (⌘, back to JSON) was done by lane B in round 31. Start with
+B10 (⌘, back to JSON) was done by lane B in round 31 and superseded by the user's
+2026-11-23 decision (D1): ⌘, now opens the Settings window. Start with
 B05 and B06, which affect frequent navigation/search use;
 then B07 and B04, which need preservation of file state or decoder coverage. B08, B09,
 B12, B13 and B14 can follow. The current code evidence for B08 and B12 supersedes the older

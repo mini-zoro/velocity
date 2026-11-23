@@ -2,13 +2,10 @@
 
 Use fixture HOME/SHELL and a temporary data directory.
 
-- [ ] Press ⌘, from the editor and from graphical Settings. Verify the JSON
-  window has a read-only Default pane and an editable User pane. Repeat via
-  Velocity › Settings…, Preferences › Settings…, and Preferences: Settings
-  in the palette. Only the application-menu row advertises ⌘,.
-- [ ] Open Preferences › Settings (Graphical)… and Preferences: Settings
-  (Graphical). Run the latter from the JSON window; use Edit in JSON from
-  the page to return to the two-pane editor.
+- [ ] (Superseded 2026-11-23: ⌘, opens the Settings window; see
+  docs/manual-checks.md, "Settings window".) Open Preferences › Settings
+  (JSON)… and Preferences: Settings (JSON). Verify the JSON window has a
+  read-only Default pane and an editable User pane.
 - [ ] With no User `ui_language`, check Follow System. Use macOS preferences
   with an unsupported language followed by Simplified Chinese, then with
   English before Simplified Chinese. Check that an explicit language wins.

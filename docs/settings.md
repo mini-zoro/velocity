@@ -230,18 +230,71 @@ pending replacements from the old search. Goto Anything's
 `regex_auto_escape` defaults to `true` and applies when text from an editor
 selection seeds a regex query, not to typed or explicit command patterns.
 
-**⌘,**, **Velocity › Settings…**, **Preferences › Settings…**, and
-**Preferences: Settings** in the command palette open the two-pane JSON editor.
-The bundled file is read-only; the User file is editable. Save the User file to
-publish changes to open windows.
+### The Settings window
 
-Choose **Preferences › Settings (Graphical)…** or **Preferences: Settings
-(Graphical)** for the graphical sheet. The palette command works from the JSON
-window too; **Edit in JSON** on the sheet opens the files. The plain *Settings*
-caption keeps the Sublime route familiar, and *Graphical* labels the Velocity
-addition. Search by key, alias, or by name or description in English or
-Simplified Chinese, regardless of the display language. Valid edits update
-`Packages/User/Preferences.sublime-settings`; Reset (✕) removes the override.
+**⌘,** (**Ctrl+,** on Windows), **Velocity › Settings…**, **Preferences ›
+Settings…** and **Preferences: Settings** in the command palette open the
+Settings window. This is a deliberate departure from Sublime Text, where ⌘,
+opens the JSON files (see D1 in `docs/behavior.md`). There is only one Settings
+window: invoking it again brings it to the front with the search field focused.
+It closes with its close button, ⌘W / Ctrl+W or Esc (Esc first clears a
+search). Changes apply immediately; there is no Save or Apply button.
+
+The sidebar lists the categories, with a search field above them:
+
+| Category | Sections |
+| --- | --- |
+| General | Language; Startup (reopen files, keep unsaved changes); Window Behavior; Settings File (Edit Settings in JSON…) |
+| Appearance | Theme (light and dark variants for Automatic); Color Scheme (light and dark variants); Window (status bar, full path, title bar, scroll bars, animations) |
+| Editor | Editor Font (font family popup, size, live preview); Indentation (tab width, spaces, detection, auto indent, live preview); Word Wrap; Display; Editing; Auto Complete |
+| Files | New Documents (encoding, line endings); Saving; Changes on Disk |
+| Find | Find; Find Panel; Find in Files; Goto Anything |
+| Side Bar & Tabs | Side Bar (including hidden files and folders); Tabs; Git; Index |
+| Keys & Vintage | Bindings (Key Bindings…, Mouse Bindings…); Keyboard; Vintage |
+| Packages | Packages Folder (Browse Packages); Customize (color scheme, theme); Disabled Packages |
+| Advanced | Every setting with its key, a group filter, *Show modified only*, *Reset all* and *Edit in JSON* |
+
+Curated pages use checkboxes, popups, radio buttons, number fields with
+steppers, text fields and lists. They show captions, not setting keys; the
+**?** at the end of a row shows the description and when the change takes
+effect. A note beside a section heading applies to every option in it.
+Options that only matter when another is on are dimmed until it is; options
+whose `show_when` condition is false are hidden, as on Advanced. The font
+popup lists the installed families the first time it opens; type to jump to
+a family. The page layout lives in `Packages/Default/settings-pages.json`.
+
+Search covers every setting, not just the curated ones: type a key, alias, or
+a name or description in English or Simplified Chinese, regardless of the
+display language. Results show keys like Advanced. Typing while the sidebar or
+a control has focus also searches; ⌘F / Ctrl+F returns to the field.
+
+Keyboard: Tab / Shift+Tab move through the search field, the category list and
+the controls; Up/Down change category in the list and move between controls on
+a page; Space toggles a checkbox; Enter opens a popup or edits a field;
+Left/Right change a radio choice; Esc cancels an edit, clears the search, then
+closes the window.
+
+Every control writes `Packages/User/Preferences.sublime-settings`, the file
+the JSON editor uses, through the same guarded writer: comments and formatting
+are kept, the file is replaced atomically, and a value changed outside the
+window is never overwritten (the row reports the conflict). Open editor windows
+apply each change at once; edits saved in the JSON file appear in the window
+within half a second. Reset (✕ on Advanced) removes an override; *Reset all*
+restores the file as it was when the window opened.
+
+The JSON pair stays one step away: **Preferences › Settings (JSON)…**,
+**Preferences: Settings (JSON)**, **Ctrl+K, Ctrl+,** on Windows, *Edit
+Settings in JSON…* on General and *Edit in JSON* on Advanced open the
+two-pane editor. Its bundled file is read-only; the User file is editable.
+Save the User file to publish changes to open windows.
+
+The Settings window is a utility window: it is not saved in the session or
+restored by hot exit, files opened from Finder or the command line go to an
+editor window, it is not listed in the Window menu (or, on Windows, in the
+Ctrl+F6 cycle and has no menu bar), and quitting never prompts for it. Nothing
+of it is loaded before it first opens, and closing it frees it.
+
+### When changes apply
 
 `ui_language` defaults to `"auto"`: use the first supported macOS preferred
 language, or English if none match. Set `"en"` or `"zh-Hans"` to override it.
