@@ -444,6 +444,7 @@ impl App {
                         width: options.width as f64,
                         height: options.height as f64,
                     },
+                    ..Default::default()
                 },
                 app,
             )?;

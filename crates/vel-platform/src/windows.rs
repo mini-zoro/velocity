@@ -528,6 +528,10 @@ impl Runtime {
         }
         let activate = app.activate_on_open();
         let host = Host::new(self, options.size, options.title.clone(), app);
+        if let Some(minimum) = options.min_size {
+            // WM_GETMINMAXINFO reads this from the first CreateWindowExW callback on.
+            host.minimum_size.set(minimum);
+        }
         let title = wide(&options.title);
         // Start with system-DPI estimates; resize to the actual monitor DPI as
         // soon as Windows chooses the initial monitor, still behind the scenes.

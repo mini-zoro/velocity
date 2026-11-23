@@ -39,6 +39,10 @@ pub enum Role {
     PopupButton,
     /// Navigates from a visible minihtml link.
     Link,
+    /// One choice of a group of mutually exclusive options.
+    RadioButton,
+    /// Single line query that filters content (a text field with the search subrole).
+    SearchField,
 }
 impl Role {
     /// The corresponding public AX role string.
@@ -59,7 +63,20 @@ impl Role {
             Self::Switch => "AXSwitch",
             Self::PopupButton => "AXPopUpButton",
             Self::Link => "AXLink",
+            Self::RadioButton => "AXRadioButton",
+            Self::SearchField => "AXTextField",
         }
+    }
+    /// The public AX subrole that refines [`Role::native`], if any.
+    pub const fn subrole(self) -> Option<&'static str> {
+        match self {
+            Self::SearchField => Some("AXSearchField"),
+            _ => None,
+        }
+    }
+    /// Whether this role edits a single line of text.
+    pub const fn is_text_field(self) -> bool {
+        matches!(self, Self::TextField | Self::SearchField)
     }
 }
 /// A bounded value with range coordinates relative to that value, as required by AX.
@@ -252,7 +269,11 @@ impl Node {
     /// Whether the control participates in linear keyboard navigation.
     pub fn focusable(&self) -> bool {
         self.enabled
-            && (self.activation.is_some() || matches!(self.role, Role::TextArea | Role::TextField))
+            && (self.activation.is_some()
+                || matches!(
+                    self.role,
+                    Role::TextArea | Role::TextField | Role::SearchField
+                ))
     }
 }
 /// Current hierarchy in logical navigation order. Built only for accessibility requests.

@@ -224,6 +224,7 @@ define_class!(
     impl AxElement {
         #[unsafe(method(isAccessibilityElement))] fn is_element(&self) -> bool { self.node().is_some() }
         #[unsafe(method_id(accessibilityRole))] fn role(&self) -> Option<Retained<NSString>> { self.node().map(|n| NSString::from_str(n.role.native()))  }
+        #[unsafe(method_id(accessibilitySubrole))] fn subrole(&self) -> Option<Retained<NSString>> { self.node().and_then(|n| n.role.subrole()).map(NSString::from_str)  }
         #[unsafe(method_id(accessibilityRoleDescription))] fn role_description(&self) -> Option<Retained<NSString>> { self.node().filter(|n| n.role == crate::accessibility::Role::Tab).map(|_| NSString::from_str("tab"))  }
         #[unsafe(method_id(accessibilityIdentifier))] fn identifier(&self) -> Retained<NSString> { NSString::from_str(&format!("velocity-{}",self.ivars().id))  }
         #[unsafe(method_id(accessibilityLabel))] fn label(&self) -> Option<Retained<NSString>> { self.node().map(|n| NSString::from_str(&n.label))  }

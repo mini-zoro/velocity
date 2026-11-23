@@ -888,6 +888,7 @@ impl App {
                     width: app.options.width as f64,
                     height: app.options.height as f64,
                 },
+                ..Default::default()
             },
             app,
         )
@@ -1083,6 +1084,7 @@ impl App {
                     width: app.options.width as f64,
                     height: app.options.height as f64,
                 },
+                ..Default::default()
             },
             app,
         )
@@ -3314,6 +3316,7 @@ impl App {
                             width: 720.,
                             height: 480.,
                         },
+                        ..Default::default()
                     },
                     crate::intelligence::StatusWindow::new(source, w.clone()),
                 )?;

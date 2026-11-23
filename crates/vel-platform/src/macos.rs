@@ -481,6 +481,7 @@ impl WindowHandle {
             for window in lifecycle::live_hosts()
                 .iter()
                 .filter_map(|h| h.window.get())
+                .filter(|window| !window.isExcludedFromWindowsMenu())
             {
                 app.addWindowsItem_title_filename(window, &window.title(), false);
             }
@@ -1826,15 +1827,44 @@ impl Delegate {
             msg_send![super(allocated), initWithContentRect: frame, styleMask: style, backing: NSBackingStoreType::Buffered, defer: false]
         };
         let window = window.into_super();
+        let utility = self.ivars().options.kind == crate::WindowKind::Utility;
+        let minimum = self
+            .ivars()
+            .options
+            .min_size
+            .map_or(NSSize::new(320., 200.), |size| {
+                NSSize::new(size.width.max(320.), size.height.max(200.))
+            });
         // SAFETY: the host retains the window until explicit teardown after run returns.
         unsafe {
             window.setReleasedWhenClosed(false);
-            window.setContentMinSize(NSSize::new(320., 200.));
+            window.setContentMinSize(minimum);
         }
         window.setTitle(&NSString::from_str(&self.ivars().options.title));
-        // ST4 build 4152: cascade from the front window's top-left corner.
-        // https://www.sublimetext.com/download
-        if let Some(previous) = NSApplication::sharedApplication(mtm).keyWindow() {
+        let key = NSApplication::sharedApplication(mtm).keyWindow();
+        if utility {
+            // A utility window (Settings) opens over the window it was invoked from, near its
+            // top, and stays inside that screen's visible frame.
+            match key.as_ref().and_then(|previous| {
+                let screen = previous.screen()?.visibleFrame();
+                Some((previous.frame(), screen))
+            }) {
+                Some((anchor, screen)) => {
+                    let size = window.frame().size;
+                    let x = (anchor.origin.x + (anchor.size.width - size.width) / 2.)
+                        .min(screen.origin.x + screen.size.width - size.width)
+                        .max(screen.origin.x);
+                    let top = (anchor.origin.y + anchor.size.height - 64.)
+                        .min(screen.origin.y + screen.size.height)
+                        .max(screen.origin.y + size.height);
+                    window.setFrameTopLeftPoint(NSPoint::new(x, top));
+                }
+                None => window.center(),
+            }
+            window.setExcludedFromWindowsMenu(true);
+        } else if let Some(previous) = key {
+            // ST4 build 4152: cascade from the front window's top-left corner.
+            // https://www.sublimetext.com/download
             let frame = previous.frame();
             let next = window.cascadeTopLeftFromPoint(NSPoint::new(
                 frame.origin.x,
@@ -1845,7 +1875,11 @@ impl Delegate {
         // ST4 4126/4131 added fixes for native tabs (https://www.sublimetext.com/download).
         // Keep them off until native tab groups participate in Velocity's window/session model.
         window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-        window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
+        window.setCollectionBehavior(if utility {
+            NSWindowCollectionBehavior::FullScreenAuxiliary
+        } else {
+            NSWindowCollectionBehavior::FullScreenPrimary
+        });
         window.setDelegate(Some(ProtocolObject::from_ref(self)));
         let view = EditorView::alloc(mtm).set_ivars(ViewIvars {
             host: Rc::downgrade(h),
@@ -2066,6 +2100,7 @@ fn windowless_command(name: &str) -> bool {
     matches!(
         name,
         "new_window"
+            | "show_settings"
             | "edit_settings"
             | "open_url"
             | "open_crash_reports"

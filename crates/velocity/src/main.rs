@@ -524,6 +524,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                         width: options.width as f64,
                         height: options.height as f64,
                     },
+                    ..Default::default()
                 },
                 native,
             )?;
@@ -589,6 +590,7 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     width: options.width as f64,
                     height: options.height as f64,
                 },
+                ..Default::default()
             };
             let session_data = workspace_data.as_deref().filter(|_| {
                 !options.forward_native_opens

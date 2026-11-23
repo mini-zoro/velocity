@@ -89,6 +89,16 @@ pub enum Appearance {
     #[default]
     Dark,
 }
+/// What a native window is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowKind {
+    /// An editor window: it can enter full screen and is listed in the Window menu.
+    #[default]
+    Document,
+    /// A utility window such as Settings: it opens centered on the key window, joins a
+    /// full-screen space instead of taking one, and is not listed in the Window menu.
+    Utility,
+}
 /// Configuration for a native editor window.
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
@@ -96,6 +106,10 @@ pub struct WindowOptions {
     pub title: String,
     /// Requested logical size. The actual size is reported separately.
     pub size: Size,
+    /// Smallest logical content size, applied before the window is first shown.
+    pub min_size: Option<Size>,
+    /// Editor or utility window.
+    pub kind: WindowKind,
 }
 impl Default for WindowOptions {
     fn default() -> Self {
@@ -105,6 +119,8 @@ impl Default for WindowOptions {
                 width: 1200.,
                 height: 800.,
             },
+            min_size: None,
+            kind: WindowKind::Document,
         }
     }
 }

@@ -63,6 +63,7 @@ impl App {
                         width: app.options.width as f64,
                         height: app.options.height as f64,
                     },
+                    ..Default::default()
                 },
                 app,
             )
