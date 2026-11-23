@@ -152,6 +152,17 @@ fn fixture_document<T>(
     bytes: &[u8],
     f: impl FnOnce(&mut App) -> T,
 ) -> T {
+    fixture_document_opened(app, path, bytes, |app, _| f(app))
+}
+
+/// Like `fixture_document`, and also tells the observer whether the open queued a
+/// background load. That choice is only visible until the load completes.
+fn fixture_document_opened<T>(
+    app: &mut App,
+    path: &Path,
+    bytes: &[u8],
+    f: impl FnOnce(&mut App, bool) -> T,
+) -> T {
     fs::write(path, bytes).unwrap();
     let prev = app.workspace.active;
     app.workspace
@@ -162,6 +173,7 @@ fn fixture_document<T>(
         })
         .unwrap();
     let index = app.workspace.active;
+    let queued = app.workspace.tabs[index].loading.is_some();
     app.workspace.prepare_sheet(index).unwrap();
     let sheet = app.workspace.tabs[index].sheet;
     let until = Instant::now() + Duration::from_secs(5);
@@ -176,7 +188,7 @@ fn fixture_document<T>(
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    let observation = f(app);
+    let observation = f(app, queued);
     if let Some(index) = app.workspace.sheet_index(sheet) {
         app.workspace.close(index).unwrap();
     }
@@ -311,7 +323,9 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
         ),
         _ => (load_name.as_str(), b"aaaa\n  bbbb\ncccc\n"),
     };
-    fixture_document(app, &root.join(file), bytes, |app| {
+    // `large_file.load_bytes` chooses a queued background read over a synchronous one.
+    // Both end in the same document, so the open itself is part of the observation.
+    fixture_document_opened(app, &root.join(file), bytes, |app, queued| {
         let tab = &app.workspace.tabs[app.workspace.active];
         if key == "syntax_detection_size_limit" {
             return tab
@@ -323,7 +337,7 @@ fn document_probe(app: &mut App, key: &str, root: &Path) -> String {
                 .unwrap_or_default();
         }
         format!(
-            "{:?}|{}|{}|{:?}|{}|{}",
+            "{queued}|{:?}|{}|{}|{:?}|{}|{}",
             tab.format,
             tab.editor.text,
             tab.editor.binary.is_some(),
@@ -375,11 +389,34 @@ fn session_probe(app: &mut App, key: &str, root: &Path) -> String {
     })
 }
 
+/// Digest of the settled scene. The first frame after a settings change can precede
+/// the active document's highlighting; a setting must not appear to have an effect
+/// (or lose one) because a worker delivered between two baselines.
 fn scene_digest(app: &mut App) -> u64 {
-    let scene = app.scene();
-    let mut hasher = std::hash::DefaultHasher::new();
-    format!("{scene:?}").hash(&mut hasher);
-    hasher.finish()
+    let until = Instant::now() + Duration::from_secs(30);
+    let mut previous = None;
+    loop {
+        let scene = app.scene();
+        let mut hasher = std::hash::DefaultHasher::new();
+        format!("{scene:?}").hash(&mut hasher);
+        let digest = hasher.finish();
+        let busy = app
+            .workspace
+            .editor()
+            .language
+            .borrow()
+            .as_ref()
+            .is_some_and(|language| language.busy());
+        if !busy && previous == Some(digest) {
+            return digest;
+        }
+        assert!(
+            Instant::now() < until,
+            "scene did not settle (busy: {busy})"
+        );
+        previous = Some(digest);
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn in_new_tab<T>(app: &mut App, run: impl FnOnce(&mut App) -> T) -> T {
