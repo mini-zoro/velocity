@@ -150,6 +150,10 @@ pub struct Sheet {
     pub syntax: Option<String>,
     /// Whether the sheet is a semi-transient preview.
     pub transient: bool,
+    /// Name given to an untitled sheet (Sublime's `set_name`); absent in older sessions
+    /// and for sheets that show their file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 /// Restorable window and project UI state.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

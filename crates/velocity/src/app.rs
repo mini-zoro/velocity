@@ -1351,7 +1351,7 @@ impl App {
             return false;
         }
         if name == tab_rename::RENAME_TAB {
-            return self.tab_rename_path(target).is_some();
+            return self.tab_rename_target(target).is_some();
         }
         if name == "open_terminal" {
             return args["dir"].is_string()

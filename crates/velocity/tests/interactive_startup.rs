@@ -35,6 +35,7 @@ fn restore_fixture(root: &Path, profile: &Path) -> std::path::PathBuf {
             transient: false,
             html: None,
             settings: None,
+            name: None,
         });
         window.workbench.groups[0].add(id, false);
         if id == 5 {

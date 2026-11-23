@@ -408,6 +408,7 @@ fn salvage(damaged: &[Vec<u8>]) -> Session {
                 view: ViewState::default(),
                 syntax: None,
                 transient: false,
+                name: None,
             });
             window.workbench.groups[0].add(id, false);
         }

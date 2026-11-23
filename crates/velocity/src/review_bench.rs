@@ -92,6 +92,7 @@ pub fn history(reporter: &Reporter, options: &Options) -> Result<(), String> {
                 view: ViewState::capture(&buffer, view, (0., 0.)),
                 syntax: None,
                 transient: false,
+                name: None,
             });
             workbench.groups[0].add(id, false);
         }

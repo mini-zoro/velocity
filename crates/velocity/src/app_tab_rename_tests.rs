@@ -165,13 +165,13 @@ fn preview_is_only_promoted_and_empty_bar_still_opens_new_file() {
 
 #[test]
 fn virtual_settings_find_results_read_only_and_byte_views_are_ineligible() {
+    // Untitled sheets are named in place instead (untitled_tab_is_named_in_place...).
     for kind in [
-        "untitled", "settings", "results", "resource", "binary", "remote", "missing",
+        "settings", "results", "resource", "binary", "remote", "missing",
     ] {
         let (_dir, path, mut app) = fixture("real.txt");
         let tab = &mut app.workspace.tabs[0];
         match kind {
-            "untitled" => tab.path = None,
             "settings" => {
                 tab.editor
                     .settings
@@ -535,4 +535,105 @@ fn context_menu_opens_the_clicked_tabs_localized_accessible_field() {
         key(&mut app, "escape");
         assert!(app.accessible_tree().node(RENAME_FIELD).is_none());
     }
+}
+
+fn untitled(first_line: &str) -> App {
+    let mut workspace = Workspace::new(Text::new(), None, None, false).unwrap();
+    workspace
+        .editor_mut()
+        .run(
+            "insert",
+            &json!({"characters": format!("{first_line}\nbody")}),
+        )
+        .unwrap();
+    app(workspace, Rc::new(RefCell::new(Sessions::new(None))))
+}
+
+#[test]
+fn untitled_tab_is_named_in_place_without_touching_disk() {
+    let mut app = untitled("http://127.0.0.1:57889/channels");
+    let automatic = app.workspace.tabs[0].name();
+    assert_eq!(automatic, "http://127.0.0.1:57889/channels");
+    let rect = start(&mut app);
+    // A first-line name has no extension to keep: the whole name is selected.
+    assert_eq!(
+        value_and_selection(&app),
+        (automatic.clone(), automatic.clone())
+    );
+    assert!(
+        app.headless_context_menu(center(rect))
+            .iter()
+            .any(|item| item.command.as_deref() == Some(RENAME_TAB)),
+        "the tab context menu offers Rename… for untitled tabs too"
+    );
+    insert(&mut app, "接口记录.md");
+    assert!(key(&mut app, "enter"));
+    assert!(app.tab_rename.is_none());
+    let tab = &app.workspace.tabs[0];
+    assert!(tab.path.is_none(), "naming never creates a file");
+    assert!(tab.dirty(), "the buffer stays unsaved");
+    assert_eq!(tab.name(), "接口记录.md");
+    // Save As proposes the given name.
+    assert_eq!(tab.ui_name(&app.workspace.ui), "接口记录.md");
+    assert!(app.workspace.window_title().contains("接口记录.md"));
+    // Editing the first line no longer renames the tab.
+    app.run_named(None, "move_to", &json!({"to": "bof", "extend": false}));
+    app.run_named(None, "insert", &json!({"characters": "x"}));
+    assert!(
+        app.workspace.tabs[0]
+            .editor
+            .text
+            .to_string()
+            .starts_with("xhttp")
+    );
+    assert_eq!(app.workspace.tabs[0].name(), "接口记录.md");
+
+    // Escape keeps the name.
+    start(&mut app);
+    insert(&mut app, "discarded");
+    assert!(key(&mut app, "escape"));
+    assert_eq!(app.workspace.tabs[0].name(), "接口记录.md");
+
+    // A pasted line break cannot enter a tab name (the single-line field drops it).
+    start(&mut app);
+    insert(&mut app, "two\nlines");
+    assert!(key(&mut app, "enter"));
+    assert_eq!(app.workspace.tabs[0].name(), "twolines");
+
+    // An empty name returns to the automatic first-line name.
+    start(&mut app);
+    app.tab_rename_command(None, Command::SelectAll);
+    app.tab_rename_command(None, Command::DeleteBackward);
+    assert!(key(&mut app, "enter"));
+    assert!(app.workspace.tabs[0].suggested_name.is_none());
+    assert_eq!(
+        app.workspace.tabs[0].name(),
+        "xhttp://127.0.0.1:57889/channels"
+    );
+}
+
+#[test]
+fn untitled_name_survives_the_session_but_unchanged_names_are_not_pinned() {
+    let mut app = untitled("draft");
+    start(&mut app);
+    assert!(key(&mut app, "enter"));
+    assert!(
+        app.workspace.tabs[0].suggested_name.is_none(),
+        "committing the automatic name unchanged keeps it automatic"
+    );
+    start(&mut app);
+    insert(&mut app, "notes");
+    assert!(key(&mut app, "enter"));
+    let (window, documents) = app.workspace.snapshot().unwrap();
+    assert_eq!(window.sheets[0].name.as_deref(), Some("notes"));
+    let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+    restored.restore_window(&window, &documents).unwrap();
+    let tab = &restored.tabs[restored.active];
+    assert!(tab.path.is_none());
+    assert_eq!(tab.name(), "notes");
+
+    // File tabs keep showing their file name and store no name.
+    let (_dir, _, mut file) = fixture("real.txt");
+    let (window, _) = file.workspace.snapshot().unwrap();
+    assert!(window.sheets.iter().all(|sheet| sheet.name.is_none()));
 }

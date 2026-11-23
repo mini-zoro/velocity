@@ -8,12 +8,22 @@ use vel_ui::{input::Input, theme};
 pub(super) const RENAME_TAB: &str = "rename_tab";
 pub(super) const RENAME_FIELD: Id = 102;
 
+/// What Return commits.
+#[derive(Debug)]
+pub(super) enum RenameTarget {
+    /// A file on a local volume: renamed on disk, every view follows.
+    File(PathBuf),
+    /// An untitled sheet: names the tab (Sublime's `set_name`), which is also the
+    /// default name when it is first saved. Nothing is written to disk.
+    Untitled { original: String },
+}
+
 #[derive(Debug)]
 pub(super) struct TabRename {
     pub sheet: u64,
     pub input: Input,
     pub bounds: Rect,
-    from: PathBuf,
+    target: RenameTarget,
     selecting: bool,
 }
 
@@ -120,7 +130,7 @@ impl TabRename {
 }
 
 impl App {
-    pub(super) fn tab_rename_path(&self, index: usize) -> Option<&Path> {
+    pub(super) fn tab_rename_target(&self, index: usize) -> Option<RenameTarget> {
         let tab = self.workspace.tabs.get(index)?;
         if tab.transient
             || tab.goto_preview
@@ -141,13 +151,17 @@ impl App {
         {
             return None;
         }
-        let path = tab.path.as_deref()?;
+        let Some(path) = tab.path.as_deref() else {
+            return Some(RenameTarget::Untitled {
+                original: tab.ui_name(&self.workspace.ui),
+            });
+        };
         let name = path.file_name()?.to_str()?;
         (path.is_absolute()
             && !name.contains(['\r', '\n'])
             && path.is_file()
             && files::local_volume(path))
-        .then_some(path)
+        .then(|| RenameTarget::File(path.to_owned()))
     }
 
     pub(super) fn double_click_tab(
@@ -165,7 +179,7 @@ impl App {
     }
 
     pub(super) fn start_tab_rename(&mut self, window: Option<&WindowHandle>, index: usize) {
-        let Some(from) = self.tab_rename_path(index).map(Path::to_owned) else {
+        let Some(target) = self.tab_rename_target(index) else {
             return;
         };
         let sheet = self.workspace.tabs[index].sheet;
@@ -184,26 +198,33 @@ impl App {
         self.tab_click = None;
         self.hovered_close = None;
         self.workspace.editor_mut().completion.hide();
-        let name = from
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("checked name");
-        let stem = Path::new(name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(name);
+        let (name, selected) = match &target {
+            RenameTarget::File(from) => {
+                let name = from
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("checked name");
+                let stem = Path::new(name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name);
+                (name, stem.len())
+            }
+            // A first-line name such as a URL has no extension to keep: select it all.
+            RenameTarget::Untitled { original } => (original.as_str(), original.len()),
+        };
         let mut input = Input::new(name);
         input.bounds = bounds;
         input.buffer.set_selection(
             input.view,
-            vel_buffer::Selection::from_regions([vel_buffer::Region::from(0..stem.len())]),
+            vel_buffer::Selection::from_regions([vel_buffer::Region::from(0..selected)]),
         );
         self.tab_close_hits.retain(|(id, _)| *id != sheet);
         self.tab_rename = Some(Box::new(TabRename {
             sheet,
             input,
             bounds,
-            from,
+            target,
             selecting: false,
         }));
         self.named_changed(window, false);
@@ -216,7 +237,26 @@ impl App {
         };
         rename.input.text_input(TextInput::Unmark);
         let name = rename.input.value();
-        let from = &rename.from;
+        let from = match &rename.target {
+            RenameTarget::File(from) => from,
+            RenameTarget::Untitled { original } => {
+                // A pasted line break or control character cannot be part of a tab name.
+                let name: String = name
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                let name = name.trim();
+                if name != original
+                    && let Some(index) = self.workspace.sheet_index(rename.sheet)
+                {
+                    // Empty returns the tab to its automatic first-line name.
+                    self.workspace.tabs[index].suggested_name =
+                        (!name.is_empty()).then(|| name.to_owned());
+                }
+                self.named_changed(window, false);
+                return true;
+            }
+        };
         let result = if from.file_name().is_some_and(|old| old == name.as_str()) {
             Ok(from.clone())
         } else {

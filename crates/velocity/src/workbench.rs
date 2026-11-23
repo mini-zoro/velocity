@@ -51,6 +51,16 @@ pub(crate) fn sheet_state(tab: &crate::workspace::Tab) -> Option<vel_session::Se
         label,
     })
 }
+/// The name an untitled editor sheet carries across sessions (Sublime's `set_name`).
+/// Files show their file name; Find Results, HTML and settings sheets keep their own state.
+fn untitled_name(tab: &crate::workspace::Tab) -> Option<String> {
+    (tab.path.is_none()
+        && !tab.find_results
+        && tab.editor.settings.get("velocity_html_sheet").is_none()
+        && tab.editor.settings.get("velocity_settings_label").is_none())
+    .then(|| tab.suggested_name.clone())
+    .flatten()
+}
 pub(crate) fn restore_settings_tab(
     tab: &mut crate::workspace::Tab,
     state: &vel_session::SettingsSheet,
@@ -1446,6 +1456,7 @@ impl Workspace {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     transient: tab.transient,
+                    name: untitled_name(tab),
                 });
                 continue;
             }
@@ -1488,6 +1499,7 @@ impl Workspace {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 transient: tab.transient,
+                name: untitled_name(tab),
             });
             if seen.insert(identity) {
                 let owner = &mut self.tabs[owner];
@@ -1708,6 +1720,9 @@ impl Workspace {
             tab.disk_content = document.disk_content;
             tab.saved_in_effective_encoding = document.saved_in_effective_encoding;
             tab.transient = sheet.transient;
+            if document.path.is_none() {
+                tab.suggested_name.clone_from(&sheet.name);
+            }
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
             if let Some(html) = &sheet.html {
                 tab.editor

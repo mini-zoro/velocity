@@ -70,6 +70,7 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
             view: ViewState::default(),
             syntax: None,
             transient: false,
+            name: None,
         });
         workbench.groups[0].add(id, false);
     }

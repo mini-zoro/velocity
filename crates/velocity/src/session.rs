@@ -28,6 +28,7 @@ fn repair_window(window: &mut Window, documents: &[Document]) {
                 transient: false,
                 html: None,
                 settings: None,
+                name: None,
             });
             repaired = true;
         }

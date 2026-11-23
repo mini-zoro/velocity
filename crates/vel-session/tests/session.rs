@@ -36,6 +36,7 @@ fn sample() -> Session {
                 view,
                 syntax: Some("Packages/Rust/Rust.sublime-syntax".into()),
                 transient: false,
+                name: None,
             }],
             workbench,
             find_history: vec!["find".into()],
@@ -231,4 +232,17 @@ fn r36_foreign_workspace_survives_velocity_checkpoints() {
         Some(project.with_extension("velocity-workspace"))
     );
     assert_eq!(recovered.session.recent_files, session.recent_files);
+}
+
+#[test]
+fn untitled_sheet_names_are_optional_on_the_wire() {
+    let mut sheet = sample().windows[0].sheets[0].clone();
+    let unnamed = serde_json::to_value(&sheet).unwrap();
+    assert!(unnamed.get("name").is_none(), "no field for unnamed sheets");
+    // Sessions written before names existed still load.
+    let old: Sheet = serde_json::from_value(unnamed).unwrap();
+    assert!(old.name.is_none());
+    sheet.name = Some("接口记录.md".into());
+    let named: Sheet = serde_json::from_value(serde_json::to_value(&sheet).unwrap()).unwrap();
+    assert_eq!(named.name.as_deref(), Some("接口记录.md"));
 }
