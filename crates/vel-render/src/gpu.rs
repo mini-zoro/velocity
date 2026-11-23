@@ -33,11 +33,15 @@ unsafe fn win32_surface(
     instance: &wgpu::Instance,
     hwnd: NativeWindow,
 ) -> Result<wgpu::Surface<'static>, String> {
-    use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+    use raw_window_handle::{
+        RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
+    };
     // SAFETY: the caller keeps hwnd valid on this thread through surface destruction.
     unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: None,
+            // The instance is created without a display handle, so the surface must name
+            // one: with `None`, wgpu 30 refuses to create any surface ("No DisplayHandle").
+            raw_display_handle: Some(RawDisplayHandle::Windows(WindowsDisplayHandle::new())),
             raw_window_handle: RawWindowHandle::Win32(Win32WindowHandle::new(hwnd)),
         })
     }
