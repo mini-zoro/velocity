@@ -41,6 +41,17 @@ function Write-Json([string] $Path, $Value) {
     Write-Utf8 $Path (ConvertTo-Json -InputObject $Value -Depth 16)
 }
 
+function Read-SharedBytes([string] $Path) {
+    # Share writes and deletes: a plain ReadAllBytes (FileShare.Read) racing the editor's
+    # save made Velocity's own save fail with a sharing violation (os error 32).
+    $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite, Delete')
+    try {
+        $buffer = [IO.MemoryStream]::new()
+        $stream.CopyTo($buffer)
+        $buffer.ToArray()
+    } finally { $stream.Dispose() }
+}
+
 function Read-SharedText([string] $Path) {
     # Velocity appends telemetry while it is live and atomically replaces session saves.
     $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite, Delete')
@@ -233,12 +244,12 @@ function Expect-Bytes([string] $File, [string] $Expected) {
     $hex = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Expected))
     try {
         $null = Wait-Until "exact UTF-8 bytes in $File" {
-            try { [Convert]::ToBase64String([IO.File]::ReadAllBytes($File)) -ceq $hex }
+            try { [Convert]::ToBase64String((Read-SharedBytes $File)) -ceq $hex }
             catch [IO.IOException] { $false }
         }
     } catch {
         if (Test-Path -LiteralPath $File -PathType Leaf) {
-            $actual = [IO.File]::ReadAllBytes($File)
+            $actual = Read-SharedBytes $File
             Write-Utf8 (Join-Path $ctx.Logs ((Split-Path $File -Leaf) + '.actual-base64.txt')) ([Convert]::ToBase64String($actual))
         }
         throw

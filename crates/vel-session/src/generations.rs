@@ -320,6 +320,10 @@ fn preserve_previous(path: &Path, destination: &Path) -> Result<(), String> {
         && fs::hard_link(path, &link).is_ok()
     {
         fs::rename(link, destination).map_err(|e| regular::error(destination, e))?;
+        // Directory entries are made durable with a directory fsync on Unix only; Windows
+        // cannot open a directory as a file (Access is denied on every checkpoint), and
+        // NTFS journals the rename itself (as vel-fileio's own parent sync does).
+        #[cfg(unix)]
         if let Err(e) =
             fs::File::open(parent).and_then(|file| atomic::sync(&file, Durability::Barrier))
         {
