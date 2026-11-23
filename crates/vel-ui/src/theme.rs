@@ -327,6 +327,15 @@ impl Default for ThemeUi {
     }
 }
 impl ThemeUi {
+    /// The active color scheme's background (the selected tab and the editor sheet), as
+    /// straight sRGB components.
+    pub fn scheme_background(&self) -> scene::Color {
+        rgba(self.scheme_color)
+    }
+    /// The theme's accent color, as straight sRGB components.
+    pub fn accent(&self) -> scene::Color {
+        rgba(self.accent_color)
+    }
     /// Creates a painter without initializing native fonts or a GPU.
     pub fn new(theme: Arc<Theme>, palette: Palette) -> Self {
         let now = Instant::now();

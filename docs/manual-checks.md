@@ -252,3 +252,14 @@ Compare side by side with Typora's Preferences window.
 - [ ] Windows (VM or CI artifact): Ctrl+, opens the window (no menu bar), Ctrl+K, Ctrl+, opens the
       JSON pair, Ctrl+Shift+. jumps to the previous modification, Ctrl+F6 skips the Settings window.
 
+## Tab rename field (2026-11-23, native review pending)
+
+- [ ] Double-click a file tab, then an untitled tab: the rounded field starts right of the file icon,
+      keeps a few points from the tab edges, and shows a translucent accent ring; light and dark.
+- [ ] Change System Settings › Appearance › Accent color (Windows: Personalization › Colors) and
+      rename again: ring, selection and caret follow it; the Settings window's checkboxes and focus
+      rings follow it too.
+- [ ] Pinyin: type `nihao` in the field; the candidate window sits directly under the field, not under
+      the whole tab. Return, Escape, click-away and stem selection behave as before.
+- [ ] Windows 11: the field is rounded and the ring is visible on light and dark tab strips.
+

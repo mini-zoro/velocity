@@ -418,7 +418,7 @@ fn case_only_rename_updates_the_actual_directory_entry() {
 }
 
 #[test]
-fn pinyin_preedit_uses_the_tab_geometry_then_commits_before_rename() {
+fn pinyin_preedit_uses_the_field_geometry_then_commits_before_rename() {
     let (_dir, from, mut app) = fixture("新建文本文档.txt");
     start(&mut app);
     app.handle_text_input(
@@ -436,13 +436,16 @@ fn pinyin_preedit_uses_the_tab_geometry_then_commits_before_rename() {
     assert_eq!(marked, Utf16Range::new(0, 6));
     let (rect, actual) = app.text_input_rect(marked);
     assert_eq!(marked, actual);
-    let bounds = app.tab_rename.as_ref().unwrap().bounds;
-    assert_eq!(rect.y + rect.height, bounds.y + bounds.height);
+    // Candidates anchor below the rounded field, not the whole tab.
+    let field = app.tab_rename.as_ref().unwrap().field;
+    assert_eq!(rect.y, field.y);
+    assert_eq!(rect.y + rect.height, field.y + field.height);
+    assert!(rect.x >= field.x && rect.x + rect.width <= field.x + field.width);
     let underline = scene
         .layers
         .iter()
         .flat_map(|l| &l.underlines)
-        .find(|u| u.thickness == 1. && vel_ui::contains(bounds, center(u.rect)))
+        .find(|u| u.thickness == 1. && vel_ui::contains(field, center(u.rect)))
         .unwrap();
     assert_eq!(rect.x, underline.rect.x);
     assert!(from.exists());
@@ -636,4 +639,78 @@ fn untitled_name_survives_the_session_but_unchanged_names_are_not_pinned() {
     let (_dir, _, mut file) = fixture("real.txt");
     let (window, _) = file.workspace.snapshot().unwrap();
     assert!(window.sheets.iter().all(|sheet| sheet.name.is_none()));
+}
+
+#[test]
+fn rename_field_is_rounded_after_the_icon_with_an_accent_ring() {
+    use vel_render::scene::Surface;
+    for dark in [false, true] {
+        let (_dir, _, mut app) = fixture("新建文本文档.txt");
+        app.workspace.set_appearance(dark).unwrap();
+        start(&mut app);
+        let scene = app.scene();
+        let rename = app.tab_rename.as_ref().unwrap();
+        let (tab, field) = (rename.bounds, rename.field);
+        // Inside the tab with a few points to spare on every side but the icon's.
+        assert!(field.y - tab.y >= 3. && tab.y + tab.height - (field.y + field.height) >= 3.);
+        assert!(tab.x + tab.width - (field.x + field.width) >= 3.);
+        assert!(field.width > 40. && field.height >= 16.);
+        // The file icon stays visible, left of the field.
+        let surfaces: Vec<_> = scene.layers.iter().flat_map(|l| &l.surfaces).collect();
+        let icon = surfaces
+            .iter()
+            .find_map(|surface| match surface {
+                Surface::Image(quad)
+                    if quad.rect.x >= tab.x
+                        && quad.rect.x + quad.rect.width <= tab.x + tab.width
+                        && quad.rect.y >= tab.y
+                        && quad.rect.y + quad.rect.height <= tab.y + tab.height =>
+                {
+                    Some(quad.rect)
+                }
+                _ => None,
+            })
+            .expect("file icon");
+        assert!(icon.x + icon.width <= field.x, "{icon:?} {field:?}");
+        // A rounded face with a low-contrast hairline, and a translucent accent ring.
+        let css = |rect: Rect| {
+            surfaces.iter().find_map(|surface| match surface {
+                Surface::CssBox(css) if css.rect == rect => Some(css.clone()),
+                _ => None,
+            })
+        };
+        let face = css(field).expect("field face");
+        assert!(face.radii.iter().all(|r| (4. ..=6.).contains(r)));
+        assert_eq!(face.borders[0].width, 1.);
+        assert!(face.borders[0].color[3] < 0.3);
+        assert_eq!(face.background[3], 1.);
+        let ring_rect = Rect {
+            x: field.x - 3.,
+            y: field.y - 3.,
+            width: field.width + 6.,
+            height: field.height + 6.,
+        };
+        let ring = css(ring_rect).expect("focus ring");
+        let accent = crate::field_chrome::accent(&app.workspace.themes.ui.borrow());
+        assert_eq!(ring.borders[0].width, 3.);
+        assert_eq!(ring.borders[0].color[..3], accent[..3]);
+        assert!(ring.borders[0].color[3] < 1. && ring.background[3] == 0.);
+        // The stem selection is accent-tinted and inside the field.
+        let selection = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.rects)
+            .find(|r| r.color[..3] == accent[..3] && r.color[3] < 1.)
+            .expect("accent selection");
+        assert!(selection.rect.x >= field.x && selection.rect.y >= field.y);
+        assert!(selection.rect.y + selection.rect.height <= field.y + field.height);
+        // Text does not move when editing starts: it begins where the label was.
+        let label = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .find(|run| run.text == "新建文本文档.txt")
+            .unwrap();
+        assert!(f64::from(label.x) > field.x && f64::from(label.x) - field.x <= 8.);
+    }
 }

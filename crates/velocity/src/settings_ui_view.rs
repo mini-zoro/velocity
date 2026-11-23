@@ -86,6 +86,7 @@ impl Ink {
     fn new(theme: &mut ThemeUi, settings: &Settings, dark: bool) -> Self {
         use vel_theme::{Element, ElementPath};
         // Calm neutral surfaces: a slightly darker sidebar, lighter control faces.
+        let system = crate::field_chrome::accent(theme);
         let (bg, sidebar, control, fg, accent, fill, red) = if dark {
             (
                 [0.122, 0.127, 0.139, 1.],
@@ -141,7 +142,13 @@ impl Ink {
             field: mix(bg, fg, 0.07),
             line: mix(bg, fg, 0.13),
             accent,
-            fill,
+            // Checked boxes, chosen radios and focus rings follow the system accent, like
+            // native controls; accent-colored text keeps the fixed, contrast-checked blue.
+            fill: if vel_platform::system_accent_color().is_some() {
+                system
+            } else {
+                fill
+            },
             control,
             border: mix(bg, fg, if dark { 0.22 } else { 0.20 }),
             outline: mix(bg, fg, if dark { 0.50 } else { 0.47 }),
@@ -227,17 +234,12 @@ pub(super) fn boxed(
     }));
 }
 
-/// The keyboard focus ring: a two-point accent outline just outside the control.
+/// The keyboard focus ring, shared with the tab rename field: a translucent accent band just
+/// outside the control.
 pub(super) fn focus_ring(layer: &mut Layer, ink: &Ink, r: Rect, clip: Rect, radius: f32) {
     let mut color = ink.fill;
-    color[3] = 0.55;
-    layer.surfaces.push(Surface::CssBox(CssBox {
-        rect: rect(r.x - 3., r.y - 3., r.width + 6., r.height + 6.),
-        clip,
-        background: [0.; 4],
-        radii: [radius + 3.; 4],
-        borders: [BorderEdge { color, width: 2. }; 4],
-    }));
+    color[3] = 0.5;
+    crate::field_chrome::focus_ring(layer, r, clip, color, radius);
 }
 
 /// A push button: a raised face with a hairline and a centered caption.
@@ -742,6 +744,9 @@ impl Page {
             &mut self.search,
             search_focused,
         );
+        if search_focused {
+            focus_ring(controls, ink, search_bounds, clip, 5.);
+        }
         if self.search.value().is_empty() && !self.search.composing() {
             let mut placeholder = search_style.clone();
             placeholder.foreground = mix(search_style.foreground, ink.bg, 0.3);

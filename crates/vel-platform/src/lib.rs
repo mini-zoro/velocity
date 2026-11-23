@@ -39,6 +39,17 @@ pub use windows::WindowHandle;
 
 use std::time::Instant;
 
+/// The user's accent color in straight sRGB: the macOS control accent, or the Windows accent
+/// color. `None` when the system has none (other platforms) or it cannot be read.
+pub fn system_accent_color() -> Option<[f32; 4]> {
+    #[cfg(target_os = "macos")]
+    return macos::accent_color();
+    #[cfg(windows)]
+    return windows::accent_color();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    None
+}
+
 /// A position in logical points, with a top-left origin in the content view.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {

@@ -24,6 +24,8 @@ mod editor;
 mod feature_bench;
 #[cfg(test)]
 mod feature_tests;
+#[cfg(any(target_os = "macos", windows))]
+mod field_chrome;
 mod git_ui;
 #[cfg(unix)]
 mod gui_launch;

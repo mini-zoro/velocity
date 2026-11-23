@@ -2,7 +2,7 @@
 use super::*;
 use crate::context_menu as files;
 use vel_platform::accessibility::Id;
-use vel_render::scene::{SolidRect, Surface};
+use vel_render::scene::SolidRect;
 use vel_ui::{input::Input, theme};
 
 pub(super) const RENAME_TAB: &str = "rename_tab";
@@ -22,7 +22,10 @@ pub(super) enum RenameTarget {
 pub(super) struct TabRename {
     pub sheet: u64,
     pub input: Input,
+    /// The tab: clicks inside it stay in the field.
     pub bounds: Rect,
+    /// The rounded field itself, right of the file icon; input methods anchor to it.
+    pub field: Rect,
     target: RenameTarget,
     selecting: bool,
 }
@@ -30,15 +33,19 @@ pub(super) struct TabRename {
 impl TabRename {
     pub fn range_rect(&self, range: Utf16Range) -> (Rect, Utf16Range) {
         let (mut rect, actual) = self.input.range_rect(range);
-        let right = (self.bounds.x + self.bounds.width - 1.).max(self.bounds.x);
-        rect.x = rect.x.clamp(self.bounds.x, right);
+        let field = self.field;
+        let right = (field.x + field.width - 1.).max(field.x);
+        rect.x = rect.x.clamp(field.x, right);
         rect.width = rect.width.min(right + 1. - rect.x);
-        // AppKit anchors candidate windows below the returned rectangle.
-        rect.y = self.bounds.y;
-        rect.height = self.bounds.height;
+        // AppKit anchors candidate windows below the returned rectangle: the field's bottom.
+        rect.y = field.y;
+        rect.height = field.height;
         (rect, actual)
     }
 
+    /// A rounded field like Finder's and Xcode's rename fields: it starts after the file
+    /// icon, keeps a few points from the tab's edges, and has a hairline border, a text
+    /// background and the accent focus ring shared with the Settings window.
     pub fn paint(
         &mut self,
         layer: &mut SceneLayer,
@@ -50,62 +57,73 @@ impl TabRename {
     ) {
         self.bounds = tab;
         self.input.scale = scale;
-        let left =
-            (origin.x - 4. * scale).clamp(tab.x, (tab.x + tab.width - 12. * scale).max(tab.x));
+        let inset = 4. * scale;
+        let pad = 5. * scale;
+        let right = tab.x + tab.width - inset;
+        let left = (origin.x - pad).clamp(tab.x + inset, (right - 16. * scale).max(tab.x + inset));
+        let height = (f64::from(label.size) + 10. * scale).min(tab.height - 2. * inset);
+        // Centered on the label's text, so the name does not move when editing starts.
+        let middle = origin.y - f64::from(label.size) * 0.34;
+        let top = (middle - height / 2.).clamp(tab.y + inset, tab.y + tab.height - inset - height);
         let field = Rect {
             x: left,
-            width: tab.x + tab.width - left,
-            ..tab
+            y: top,
+            width: (right - left).max(0.),
+            height: height.max(0.),
         };
+        self.field = field;
         self.input.bounds = field;
         let mut style = label.clone();
-        style.margin.left = (4. * scale) as f32;
+        style.margin.left = (origin.x - left).max(0.) as f32;
         style.case = None; // Edit the actual filename, not a theme's display transform.
         self.input.configure_theme(&style, theme.metrics.clone());
+        let colors = crate::field_chrome::FieldColors::new(
+            theme.scheme_background(),
+            style.foreground,
+            crate::field_chrome::accent(theme),
+            dark,
+        );
+        crate::field_chrome::focus_ring(
+            layer,
+            field,
+            tab,
+            colors.ring,
+            crate::field_chrome::RADIUS,
+        );
+        crate::field_chrome::face(layer, field, tab, &colors);
         let state = self.input.state();
         let text = state.text.to_string();
         let x = |byte| self.input.x_for_byte(&text, byte);
         let selection = state.selected.bytes(&state.text);
-        let y = (origin.y - f64::from(style.size) - 1.).max(tab.y + 1.);
-        let bottom = (origin.y + 4. * scale).min(tab.y + tab.height);
-        let body = Rect {
-            y,
-            height: (bottom - y).max(0.),
-            ..tab
-        };
-        let mut border = style.foreground;
-        border[3] *= 0.65;
-        layer.rects.push(SolidRect::outline(body, tab, border));
-        layer.surfaces.push(Surface::Fill(SolidRect {
-            rect: body,
-            clip: tab,
-            color: if dark {
-                [0.12, 0.13, 0.15, 1.]
-            } else {
-                [1., 1., 1., 1.]
-            },
-            radius: 0.,
-        }));
         let text_clip = Rect {
-            y: y + 1.,
-            height: (bottom - y - 2.).max(0.),
-            width: (field.width - 1.).max(0.),
-            ..field
+            x: field.x + 2.,
+            y: field.y + 1.,
+            width: (field.width - 4.).max(0.),
+            height: (field.height - 2.).max(0.),
         };
         let (a, b) = (x(selection.start), x(selection.end));
+        let line = Rect {
+            y: field.y + 3. * scale,
+            height: (field.height - 6. * scale).max(0.),
+            ..text_clip
+        };
         layer.rects.push(SolidRect {
             rect: Rect {
                 x: a,
-                width: if selection.is_empty() { 1. } else { b - a },
-                ..text_clip
+                width: if selection.is_empty() {
+                    1.5_f64.max(1. / f64::from(theme.density))
+                } else {
+                    b - a
+                },
+                ..line
             },
             clip: text_clip,
             color: if selection.is_empty() {
-                style.foreground
+                colors.caret
             } else {
-                [0.25, 0.48, 0.85, 0.42]
+                colors.selection
             },
-            radius: 0.,
+            radius: if selection.is_empty() { 0. } else { 2. },
         });
         theme.text(
             layer,
@@ -121,7 +139,7 @@ impl TabRename {
                 layer,
                 text_clip,
                 [x(marked.start), x(marked.end)],
-                (origin.y + 2. * scale).min(bottom - 2.),
+                (origin.y + 2. * scale).min(field.y + field.height - 2.),
                 f64::from(theme.density),
                 style.foreground,
             );
@@ -224,6 +242,7 @@ impl App {
             sheet,
             input,
             bounds,
+            field: bounds,
             target,
             selecting: false,
         }));

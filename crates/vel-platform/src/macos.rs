@@ -2096,6 +2096,16 @@ fn screen_rect(frame: NSRect) -> Rect {
         height: frame.size.height,
     }
 }
+/// NSColor.controlAccentColor as component values; it follows System Settings › Appearance.
+pub(crate) fn accent_color() -> Option<[f32; 4]> {
+    let color = NSColor::controlAccentColor().colorUsingType(NSColorType::ComponentBased)?;
+    Some([
+        color.redComponent() as f32,
+        color.greenComponent() as f32,
+        color.blueComponent() as f32,
+        color.alphaComponent() as f32,
+    ])
+}
 fn windowless_command(name: &str) -> bool {
     matches!(
         name,

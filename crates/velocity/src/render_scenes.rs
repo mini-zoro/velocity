@@ -1312,6 +1312,21 @@ fn r26_tabs(fixture: &Fixture, dark: bool, rounded: bool, left: bool) -> Result<
     Ok(app)
 }
 
+/// An untitled tab named after its first line, renamed in place.
+fn r46_tab_rename_untitled(fixture: &Fixture, dark: bool) -> Result<App, String> {
+    let mut app = r5_editor(fixture, dark)?;
+    named(&mut app, "new_file", json!({}));
+    let text = if app.workspace.translations.language().is_english() {
+        "Meeting notes\nAgenda\n"
+    } else {
+        "会议纪要\n议程\n"
+    };
+    named(&mut app, "insert", json!({ "characters": text }));
+    settle(&mut app);
+    app.panels.message.clear();
+    Ok(app)
+}
+
 fn r46_tab_rename(fixture: &Fixture, dark: bool) -> Result<App, String> {
     let mut app = r5_editor(fixture, dark)?;
     let name = if app.workspace.translations.language().is_english() {
@@ -2048,12 +2063,17 @@ const SCENARIOS: &[Scenario] = &[
         size: (800., 240.),
         build: r46_tab_rename,
     },
+    Scenario {
+        name: "r46-tab-rename-untitled",
+        size: (800., 240.),
+        build: r46_tab_rename_untitled,
+    },
 ];
 
 /// Pointer-driven states are applied after layout because hit testing needs real geometry.
 fn after_layout(name: &str, app: &mut App) {
     match name {
-        "r46-tab-rename" | "r46-tab-rename-ime" => {
+        "r46-tab-rename" | "r46-tab-rename-ime" | "r46-tab-rename-untitled" => {
             let sheet = app.workspace.tabs[app.workspace.active].sheet;
             if let Some((_, rect)) = app.tab_hits.iter().find(|(id, _)| *id == sheet).copied() {
                 for click_count in [1, 2] {
@@ -2629,6 +2649,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
                                     | "r43-empty-folder-goto"
                                     | "r46-tab-rename"
                                     | "r46-tab-rename-ime"
+                                    | "r46-tab-rename-untitled"
                             ) || scenario.name.starts_with("r41-")
                                 || scenario.name.starts_with("settings_ui") =>
                         {
