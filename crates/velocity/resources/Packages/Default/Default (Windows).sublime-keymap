@@ -190,7 +190,7 @@
   { "keys":["down"], "command":"move", "args":{"by":"lines","forward":true}, "context":[{"key":"auto_complete_visible","operand":true}] },
   { "keys":["ctrl+space"], "command":"replace_completion_with_next_completion", "context":[{"key":"auto_complete_visible","operand":true}] },
   { "keys":["ctrl+."], "command":"next_modification" },
-  { "keys":["ctrl+,"], "command":"prev_modification" },
+  { "keys":["ctrl+shift+."], "command":"prev_modification" },
   { "keys":["ctrl+k","ctrl+/"], "command":"toggle_inline_diff" },
   { "keys":["ctrl+k","ctrl+;"], "command":"toggle_inline_diff", "args":{"show_only":true} },
   { "keys":["ctrl+k","ctrl+z"], "command":"revert_hunk" },
@@ -246,5 +246,7 @@
   { "keys":["ctrl+alt+3"], "command":"set_layout", "args":{"preset":"columns3"} },
   { "keys":["ctrl+alt+4"], "command":"set_layout", "args":{"preset":"columns4"} },
   { "keys":["ctrl+alt+5"], "command":"set_layout", "args":{"preset":"grid4"} },
-  { "keys":["ctrl+k","ctrl+,"], "command":"edit_settings", "args":{"base_file":"${packages}/Default/Preferences.sublime-settings","default":"{\n\t$0\n}\n"} }
+  { "keys":["ctrl+k","ctrl+,"], "command":"edit_settings", "args":{"base_file":"${packages}/Default/Preferences.sublime-settings","default":"{\n\t$0\n}\n"} },
+  // Ctrl+, opens the graphical Settings window; previous modification moved to Ctrl+Shift+.
+  { "keys":["ctrl+,"], "command":"show_settings" }
 ]

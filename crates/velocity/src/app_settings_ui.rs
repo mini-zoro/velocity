@@ -1,6 +1,6 @@
 //! Routes commands and events to the workspace Settings sheet, not the editor underneath it.
 use super::*;
-use crate::settings_ui::{Navigation, Page};
+use crate::settings_ui::Navigation;
 use vel_config::keymap::Key;
 
 impl App {
@@ -8,7 +8,19 @@ impl App {
         self.workspace.settings_page.is_some() && self.panels.overlay.is_none()
     }
 
+    /// Settings open in their own window (⌘, / Ctrl+,). Invoked in that window, the command
+    /// brings it forward with the search field focused.
     pub(super) fn show_settings_page(&mut self, window: Option<&WindowHandle>) {
+        if !self.settings_window || self.workspace.settings_page.is_none() {
+            if let Err(error) = self.open_settings_window(window) {
+                let detail = self
+                    .workspace
+                    .translations
+                    .tr_fmt("Could not open Settings: {detail}", &[("detail", error)]);
+                self.named_error(window, &detail);
+            }
+            return;
+        }
         if self.panels.overlay.is_some() {
             self.panels.cancel_overlay(&mut self.workspace);
         }
@@ -17,9 +29,9 @@ impl App {
             page.refresh(&self.workspace);
             page.focus_search(&mut self.workspace);
             self.workspace.settings_page = Some(page);
-        } else {
-            self.workspace.editor_mut().cancel_composition();
-            self.workspace.settings_page = Some(Box::new(Page::new(&self.workspace)));
+        }
+        if let Some(window) = window {
+            window.focus();
         }
         self.settings_redraw(window);
     }
@@ -90,11 +102,33 @@ impl App {
     }
 
     fn settings_navigation(&mut self, window: Option<&WindowHandle>, nav: Navigation) {
+        // The font popup lists the system's families, asked for only when it first opens.
+        if let Some(mut page) = self.workspace.settings_page.take() {
+            if page.take_font_request() {
+                let families = match window {
+                    #[cfg(target_os = "macos")]
+                    Some(window) => window.font_families(),
+                    #[cfg(windows)]
+                    Some(_) => vel_platform::fonts::font_families(),
+                    _ => Vec::new(),
+                };
+                page.provide_fonts(&self.workspace, families);
+            }
+            self.workspace.settings_page = Some(page);
+        }
         match nav {
             Navigation::Stay => {}
+            Navigation::Close if self.settings_window => match window {
+                Some(window) => window.request_close(),
+                None => self.close_settings_window(),
+            },
             Navigation::Close => {
                 self.workspace.settings_page = None;
                 self.named_changed(window, false);
+            }
+            Navigation::Command(name, args) => {
+                let args = crate::settings_ui::platform_args(args);
+                self.run_named(window, name, &args);
             }
             Navigation::NewWindow => {
                 if let Some(window) = window {
@@ -168,6 +202,16 @@ impl App {
             ("enter" | "keypad_enter", 0) => Newline,
             ("up", 0) => Up(false),
             ("down", 0) => Down(false),
+            ("left", 0) => Left(false),
+            ("right", 0) => Right(false),
+            ("f", 8) => {
+                // ⌘F / Ctrl+F searches the settings.
+                let mut page = self.workspace.settings_page.take().unwrap();
+                page.focus_search(&mut self.workspace);
+                self.workspace.settings_page = Some(page);
+                self.settings_redraw(window);
+                return true;
+            }
             ("pageup", 0) => PageUp,
             ("pagedown", 0) => PageDown,
             ("space", 0)
@@ -197,7 +241,8 @@ impl App {
                 return true;
             }
             // Printable input and selection/editing selectors go through NSTextInputClient.
-            _ => return key.modifiers & 8 != 0 && key.name != "q",
+            // The Settings window resolves other shortcuts through the keymap.
+            _ => return key.modifiers & 8 != 0 && key.name != "q" && !self.settings_window,
         };
         self.settings_command(window, cmd, now);
         true

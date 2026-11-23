@@ -1116,7 +1116,7 @@ const PLATFORM_KEYMAP: &str = if cfg!(windows) {
 };
 
 #[cfg(windows)]
-fn use_windows_keymap_paths(args: &mut Value) {
+pub(crate) fn use_windows_keymap_paths(args: &mut Value) {
     if args["base_file"] == "${packages}/Default/Velocity.sublime-keymap"
         && args["user_file"] == "${packages}/User/Default (OSX).sublime-keymap"
     {
@@ -2127,6 +2127,26 @@ impl Workspace {
         watch: bool,
     ) -> Result<Self, String> {
         Self::new_with_window_overrides(None, data_dir, project, watch, Some(Default::default()))
+    }
+
+    /// The Settings window's own workspace: the same data directory and language
+    /// preference as this one, no document watcher and no window overrides. Built only
+    /// when the window opens and dropped with it.
+    pub(crate) fn for_settings_window(&self) -> Result<Self, String> {
+        let mut workspace = Self::new_configured(
+            None,
+            self.data_dir.clone(),
+            None,
+            false,
+            Some(Default::default()),
+            self.preferred_languages,
+            &mut Default::default(),
+        )?;
+        workspace.dark = self.dark;
+        if let Err(e) = workspace.themes.select(&workspace.settings, workspace.dark) {
+            workspace.messages.push(e);
+        }
+        Ok(workspace)
     }
 
     pub(crate) fn new_with_window_overrides(

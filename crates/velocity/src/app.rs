@@ -54,6 +54,8 @@ mod round43_tests;
 mod settings_entry;
 #[path = "app_settings_ui.rs"]
 mod settings_ui_adapter;
+#[path = "app_settings_window.rs"]
+mod settings_window;
 #[cfg(test)]
 #[path = "app_startup_tests.rs"]
 mod startup_tests;
@@ -174,6 +176,10 @@ pub struct App {
     /// A playback may edit only the workbench sheet that started it, including nested chains.
     macro_origin: Option<u64>,
     opened_settings: Vec<App>,
+    /// The Settings window opened by a window-less App (tests and the scene renderer).
+    opened_preferences: Vec<App>,
+    /// This App is the Settings window: no session state, routing or document commands.
+    settings_window: bool,
     typing_hides_chrome: bool,
     revealed_directory: Option<std::path::PathBuf>,
     format_hits: Vec<(status_adapter::FormatItem, Rect)>,
@@ -382,6 +388,8 @@ impl App {
         Self {
             macro_origin: None,
             opened_settings: Vec::new(),
+            opened_preferences: Vec::new(),
+            settings_window: false,
             typing_hides_chrome: false,
             revealed_directory: None,
             format_hits: Vec::new(),
@@ -721,6 +729,9 @@ impl App {
         self.checkpoint_reason(quitting, false)
     }
     fn checkpoint_reason(&mut self, quitting: bool, closing: bool) -> Result<(), String> {
+        if self.settings_window {
+            return Ok(());
+        }
         self.receive_file_renames();
         self.sync_recents();
         // Cache stdin clients' current contents before a project switch can replace
@@ -1114,6 +1125,9 @@ impl App {
         route(&request, &sessions.open_windows, Some(self.session_id))
     }
     fn publish_open_route(&self) {
+        if self.settings_window {
+            return;
+        }
         self.sessions
             .borrow_mut()
             .open_windows
@@ -1584,7 +1598,12 @@ impl App {
         if self.settings_page_has_focus()
             && !matches!((key.name.as_str(), key.modifiers), (",", 8) | ("p", 12))
         {
-            return self.settings_key(window, key, received);
+            let handled = self.settings_key(window, key, received);
+            // In the Settings window a shortcut the page does not use resolves through the
+            // keymap; run_named then runs or forwards it, or ignores a document command.
+            if handled || !(self.settings_window && key.modifiers & 8 != 0) {
+                return handled;
+            }
         }
         if key.name == "escape" {
             self.keyboard_center = None;
@@ -1682,6 +1701,15 @@ impl App {
         self.build_application_menu()
     }
     fn install_native_menu(&mut self, window: &WindowHandle, focus_changed: bool) {
+        if cfg!(windows) && self.settings_window {
+            // A utility window on Windows has no menu bar; it is also left out of the
+            // editor-window cycle, which only counts windows with menus.
+            if !self.menu_owner {
+                window.set_menu(&[]);
+                self.menu_owner = true;
+            }
+            return;
+        }
         let rebuild = self.refresh_native_menu_model();
         // Only the key window owns the menu bar: its items target the installing window.
         // A background window that rebuilt its model (recent files, resources), or a window
@@ -2000,6 +2028,10 @@ impl App {
         }
     }
     fn run_named(&mut self, window: Option<&WindowHandle>, name: &str, args: &Value) {
+        if self.settings_window && !self.settings_window_runs(name) {
+            self.forward_from_settings(window, name, args);
+            return;
+        }
         let overlay = self.panels.overlay;
         if let Err(error) = self.run_named_depth(window, name, args, 0) {
             self.named_error(window, &error);
@@ -5392,7 +5424,9 @@ impl AppHandler for App {
             // A minimized HWND cannot present, but must still service the pipe
             // and any outstanding CLI wait replies.
             self.ensure_startup_services();
-            if let Err(error) = self.poll_workbench(w) {
+            if self.settings_window {
+                self.poll_settings_window(w);
+            } else if let Err(error) = self.poll_workbench(w) {
                 self.named_error(Some(w), &error);
             }
             self.builds.poll(&mut self.panels);
@@ -5415,6 +5449,9 @@ impl AppHandler for App {
         }
     }
     fn command_enabled(&self, name: &str, args: &str) -> bool {
+        if let Some(enabled) = self.settings_window_command_enabled(name) {
+            return enabled;
+        }
         let Ok(args) = serde_json::from_str::<Value>(args) else {
             return false;
         };
@@ -5671,7 +5708,11 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_frame(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), String> {
-        let minimum = self.pane_window_minimum();
+        let minimum = if self.settings_window {
+            settings_window::SETTINGS_MINIMUM
+        } else {
+            self.pane_window_minimum()
+        };
         if self.native_pane_minimum != Some((minimum.width, minimum.height)) {
             ctx.window.set_minimum_content_size(minimum);
             self.native_pane_minimum = Some((minimum.width, minimum.height));
@@ -5728,7 +5769,7 @@ impl AppHandler for App {
             self.install_native_menu(w, true);
         }
         self.set_window_focused(focused);
-        if focused && self.options.mode == Mode::Interactive {
+        if focused && self.options.mode == Mode::Interactive && !self.settings_window {
             self.sessions.borrow_mut().active_window = Some(self.session_id);
         }
         if self.startup_done
@@ -5770,7 +5811,12 @@ impl AppHandler for App {
                 self.session_due = Some(Instant::now() + Duration::from_millis(300));
             }
             if self.options.mode == Mode::Interactive {
-                self.poll_workbench(w)?;
+                if self.settings_window {
+                    self.poll_settings_window(w);
+                } else {
+                    changed |= self.receive_preference_updates();
+                    self.poll_workbench(w)?;
+                }
             }
             if focus_changed {
                 self.install_native_menu(w, true);
@@ -6150,6 +6196,10 @@ impl AppHandler for App {
         Ok(())
     }
     fn on_quit_requested(&mut self, w: &WindowHandle) -> bool {
+        if self.settings_window {
+            self.close_settings_window();
+            return true;
+        }
         if !self.finish_tab_rename(Some(w)) {
             return false;
         }
@@ -6159,6 +6209,9 @@ impl AppHandler for App {
         self.prepare_quit(Some(w))
     }
     fn on_session_ending(&mut self, _window: &WindowHandle) {
+        if self.settings_window {
+            return;
+        }
         // ST dev build 4075 checkpoints on system shutdown (sublimetext.com/dev).
         // Keep the ordinary quit path responsible for prompts and the final flush.
         if self.options.mode == Mode::Interactive
@@ -6172,6 +6225,10 @@ impl AppHandler for App {
         }
     }
     fn on_window_close_requested(&mut self, w: &WindowHandle) -> bool {
+        if self.settings_window {
+            self.close_settings_window();
+            return true;
+        }
         if !self.finish_tab_rename(Some(w)) {
             return false;
         }

@@ -1,0 +1,307 @@
+// Curated pages of the Settings window, written for Velocity. Each page shows the options
+// people change most, grouped into titled sections; Advanced lists every setting.
+//
+// Items:
+//   {"key": <setting>, "label": <sentence-case caption>}  a control for a key in
+//       settings-ui.json. Optional: "control": "radio" (small enums) or "font" (installed
+//       font families), "choices": [...]
+//       (the popup's subset of the key's choices; the current value is always offered),
+//       "enabled_when": {<key>: <condition>} (dimmed, not hidden, when false; conditions use
+//       the settings-ui.json show_when grammar), "platform": "macos" | "windows",
+//       "indent": true (a sub-option of the row above).
+//   {"button": <caption>, "command": <name>, "args": {...}}  runs a command.
+//   {"button": <caption>, "action": "json"}  opens the User file beside its defaults.
+//   {"preview": "font" | "indentation"}  a live sample of the controls above it.
+// Captions are English sources for the catalogs in Localization/. Pages, sections and labels
+// never show raw setting keys; search and Advanced do.
+{
+  "pages": [
+    {
+      "id": "general",
+      "name": "General",
+      "icon": "Theme - Velocity/palette-settings.png",
+      "sections": [
+        {
+          "title": "Language",
+          "items": [{"key": "ui_language", "label": "Interface language"}]
+        },
+        {
+          "title": "Startup",
+          "items": [
+            {"key": "remember_open_files", "label": "Reopen files from the last session"},
+            {"key": "hot_exit", "label": "Keep unsaved changes", "choices": ["always", "only_on_quit", "disabled"]}
+          ]
+        },
+        {
+          "title": "Window Behavior",
+          "items": [
+            {"key": "open_files_in_new_window", "label": "Open files in a new window", "choices": ["never", "finder_only", "always"]},
+            {"key": "close_windows_when_empty", "label": "Close a window when its last tab closes"}
+          ]
+        },
+        {
+          "title": "Settings File",
+          "items": [{"button": "Edit Settings in JSON…", "action": "json"}]
+        }
+      ]
+    },
+    {
+      "id": "appearance",
+      "name": "Appearance",
+      "icon": "Theme - Velocity/palette-appearance.png",
+      "sections": [
+        {
+          "title": "Theme",
+          "items": [
+            {"key": "theme", "label": "Theme"},
+            {"key": "light_theme", "label": "Light theme", "indent": true, "enabled_when": {"theme": "auto"}},
+            {"key": "dark_theme", "label": "Dark theme", "indent": true, "enabled_when": {"theme": "auto"}}
+          ]
+        },
+        {
+          "title": "Color Scheme",
+          "items": [
+            {"key": "color_scheme", "label": "Color scheme"},
+            {"key": "light_color_scheme", "label": "Light color scheme", "indent": true, "enabled_when": {"color_scheme": "auto"}},
+            {"key": "dark_color_scheme", "label": "Dark color scheme", "indent": true, "enabled_when": {"color_scheme": "auto"}}
+          ]
+        },
+        {
+          "title": "Window",
+          "items": [
+            {"key": "show_status_bar", "label": "Show the status bar"},
+            {"key": "show_full_path", "label": "Show the full path in the title bar"},
+            {"key": "themed_title_bar", "label": "Use theme colors in the title bar", "platform": "macos"},
+            {"key": "overlay_scroll_bars", "label": "Overlay scroll bars"},
+            {"key": "animation_enabled", "label": "Animate interface transitions"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "editor",
+      "name": "Editor",
+      "icon": "Theme - Velocity/palette-edit.png",
+      "sections": [
+        {
+          "title": "Editor Font",
+          "items": [
+            {"key": "font_face", "label": "Font", "control": "font"},
+            {"key": "font_size", "label": "Size"},
+            {"preview": "font"}
+          ]
+        },
+        {
+          "title": "Indentation",
+          "items": [
+            {"key": "tab_size", "label": "Tab width"},
+            {"key": "translate_tabs_to_spaces", "label": "Insert spaces when pressing Tab"},
+            {"key": "detect_indentation", "label": "Detect indentation when opening a file"},
+            {"key": "auto_indent", "label": "Indent new lines automatically"},
+            {"preview": "indentation"}
+          ]
+        },
+        {
+          "title": "Word Wrap",
+          "items": [
+            {"key": "word_wrap", "label": "Wrap long lines", "control": "radio"},
+            {"key": "wrap_width", "label": "Wrap column", "indent": true},
+            {"key": "indent_subsequent_lines", "label": "Indent wrapped lines", "indent": true, "enabled_when": {"word_wrap": {"not": false}}}
+          ]
+        },
+        {
+          "title": "Display",
+          "items": [
+            {"key": "line_numbers", "label": "Show line numbers"},
+            {"key": "highlight_line", "label": "Highlight the current line"},
+            {"key": "draw_indent_guides", "label": "Show indentation guides"},
+            {"key": "show_minimap", "label": "Show the minimap"},
+            {"key": "draw_white_space", "label": "Show white space"},
+            {"key": "rulers", "label": "Column guides"},
+            {"key": "caret_style", "label": "Caret style"}
+          ]
+        },
+        {
+          "title": "Editing",
+          "items": [
+            {"key": "auto_match_enabled", "label": "Auto-pair brackets and quotes"},
+            {"key": "auto_close_tags", "label": "Close HTML and XML tags automatically"},
+            {"key": "copy_with_empty_selection", "label": "Copy or cut the whole line when nothing is selected"},
+            {"key": "drag_text", "label": "Drag and drop selected text"},
+            {"key": "spell_check", "label": "Check spelling"}
+          ]
+        },
+        {
+          "title": "Auto Complete",
+          "items": [
+            {"key": "auto_complete", "label": "Show completions while typing"},
+            {"key": "auto_complete_commit_on_tab", "label": "Accept the highlighted completion with Tab", "indent": true},
+            {"key": "tab_completion", "label": "Complete words with Tab"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "files",
+      "name": "Files",
+      "icon": "Theme - Velocity/palette-file.png",
+      "sections": [
+        {
+          "title": "New Documents",
+          "items": [
+            {"key": "default_encoding", "label": "Encoding"},
+            {"key": "default_line_ending", "label": "Line endings"}
+          ]
+        },
+        {
+          "title": "Saving",
+          "items": [
+            {"key": "trim_trailing_white_space_on_save", "label": "Trim trailing white space", "choices": [false, "all", "not_on_caret"]},
+            {"key": "trim_only_modified_white_space", "label": "Only on lines I changed", "indent": true},
+            {"key": "ensure_newline_at_eof_on_save", "label": "End files with a newline"},
+            {"key": "save_on_focus_lost", "label": "Save files when switching to another tab or app"},
+            {"key": "atomic_save", "label": "Save through a temporary file"}
+          ]
+        },
+        {
+          "title": "Changes on Disk",
+          "items": [
+            {"key": "reload_file_on_change", "label": "Reload files changed by other apps"},
+            {"key": "close_deleted_files", "label": "Close tabs whose files were deleted"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "find",
+      "name": "Find",
+      "icon": "Theme - Velocity/palette-find.png",
+      "sections": [
+        {
+          "title": "Find",
+          "items": [
+            {"key": "find_selected_text", "label": "Search for the selected text"},
+            {"key": "auto_find_in_selection", "label": "Search inside a multi-line selection"},
+            {"key": "highlight_find_results_in_scrollbar", "label": "Mark matches in the scroll bar"},
+            {"key": "use_find_clipboard", "label": "Share the search text with other apps", "platform": "macos"}
+          ]
+        },
+        {
+          "title": "Find Panel",
+          "items": [
+            {"key": "close_find_after_find_all", "label": "Close the panel after Find All"},
+            {"key": "close_find_after_replace_all", "label": "Close the panel after Replace All"},
+            {"key": "regex_auto_escape", "label": "Escape the selection in regular expression searches"}
+          ]
+        },
+        {
+          "title": "Find in Files",
+          "items": [
+            {"key": "find_in_files_side_by_side", "label": "Open matches beside the results"},
+            {"key": "find_in_files_context_lines", "label": "Context lines"}
+          ]
+        },
+        {
+          "title": "Goto Anything",
+          "items": [
+            {"key": "goto_anything_file_preview", "label": "Preview files while browsing"},
+            {"key": "goto_anything_exclude_gitignore", "label": "Skip files ignored by Git"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sidebar",
+      "name": "Side Bar & Tabs",
+      "icon": "Theme - Velocity/sidebar.png",
+      "sections": [
+        {
+          "title": "Side Bar",
+          "items": [
+            {"key": "show_side_bar", "label": "Show the side bar"},
+            {"key": "sidebar_on_right", "label": "Place the side bar on the right"},
+            {"key": "preview_on_click", "label": "Preview files on click"},
+            {"key": "file_exclude_patterns", "label": "Hidden files"},
+            {"key": "folder_exclude_patterns", "label": "Hidden folders"}
+          ]
+        },
+        {
+          "title": "Tabs",
+          "items": [
+            {"key": "show_tabs", "label": "Show tabs"},
+            {"key": "file_tab_style", "label": "Tab shape", "control": "radio"},
+            {"key": "show_tab_close_buttons", "label": "Show close buttons on tabs"},
+            {"key": "highlight_modified_tabs", "label": "Highlight tabs with unsaved changes"},
+            {"key": "open_tabs_after_current", "label": "Open new tabs next to the current tab"}
+          ]
+        },
+        {
+          "title": "Git",
+          "items": [
+            {"key": "show_git_status", "label": "Show Git status in the side bar"},
+            {"key": "mini_diff", "label": "Mark changed lines in the gutter"}
+          ]
+        },
+        {
+          "title": "Index",
+          "items": [
+            {"key": "index_files", "label": "Index project files for Goto Definition"},
+            {"key": "show_definitions", "label": "Show definitions on hover", "indent": true, "enabled_when": {"index_files": true}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "name": "Keys & Vintage",
+      "icon": "Theme - Velocity/palette-keys.png",
+      "sections": [
+        {
+          "title": "Bindings",
+          "items": [
+            {"button": "Key Bindings…", "command": "edit_settings", "args": {"base_file": "${packages}/Default/Velocity.sublime-keymap", "user_file": "${packages}/User/Default (OSX).sublime-keymap", "default": "[\n\t$0\n]\n"}},
+            {"button": "Mouse Bindings…", "command": "edit_settings", "args": {"base_file": "${packages}/Default/Velocity.sublime-mousemap", "default": "[\n\t$0\n]\n"}}
+          ]
+        },
+        {
+          "title": "Keyboard",
+          "items": [
+            {"key": "shift_tab_unindent", "label": "Shift+Tab always unindents"},
+            {"key": "move_to_limit_on_up_down", "label": "Up and Down reach the start and end of the document"}
+          ]
+        },
+        {
+          "title": "Vintage",
+          "items": [
+            {"key": "vintage_enabled", "label": "Enable Vintage (Vim emulation)"},
+            {"key": "vintage_start_in_command_mode", "label": "Start in command mode", "indent": true, "enabled_when": {"vintage_enabled": true}},
+            {"key": "vintage_use_clipboard", "label": "Use the system clipboard", "indent": true, "enabled_when": {"vintage_enabled": true}},
+            {"key": "vintage_ctrl_keys", "label": "Ctrl key shortcuts", "indent": true, "enabled_when": {"vintage_enabled": true}}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "packages",
+      "name": "Packages",
+      "icon": "Theme - Velocity/palette-package.png",
+      "sections": [
+        {
+          "title": "Packages Folder",
+          "items": [{"button": "Browse Packages", "command": "open_dir", "args": {"dir": "$packages"}}]
+        },
+        {
+          "title": "Customize",
+          "items": [
+            {"button": "Customize Color Scheme…", "command": "customize_color_scheme", "args": {}},
+            {"button": "Customize Theme…", "command": "customize_theme", "args": {}}
+          ]
+        },
+        {
+          "title": "Disabled Packages",
+          "items": [{"key": "ignored_packages", "label": "Ignored packages"}]
+        }
+      ]
+    }
+  ]
+}

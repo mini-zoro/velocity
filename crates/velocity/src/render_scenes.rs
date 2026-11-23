@@ -1062,13 +1062,21 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
     settings["tab_size"] = json!(8);
     settings["translate_tabs_to_spaces"] = json!(true);
     settings["word_separators"] = json!(":/.");
-    if variant == "array" {
-        settings["file_exclude_patterns"] = json!([
-            "*.log", "*.bak", "*.o", "*.pyc", "*.swp", "*.cache", "*.tmp"
-        ]);
-    } else if variant == "dependent" {
-        settings["word_wrap"] = json!(true);
-        settings["wrap_width"] = json!(96);
+    settings["show_minimap"] = json!(false);
+    match variant {
+        "array" => {
+            settings["file_exclude_patterns"] = json!([
+                "*.log", "*.bak", "*.o", "*.pyc", "*.swp", "*.cache", "*.tmp"
+            ]);
+        }
+        "dependent" | "editor_wrap" => {
+            settings["word_wrap"] = json!(true);
+            settings["wrap_width"] = json!(96);
+        }
+        "sidebar" => {
+            settings["file_exclude_patterns"] = json!(["*.log", "*.tmp"]);
+        }
+        _ => {}
     }
     std::fs::write(&path, settings.to_string()).map_err(|e| e.to_string())?;
     let mut workspace = Workspace::new(vel_text::Text::new(), Some(data), None, false)?;
@@ -1078,14 +1086,47 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
         std::fs::write(&path, "{\n  \"tab_size\": ,\n}\n").map_err(|e| e.to_string())?;
     }
     named(&mut app, "show_settings", json!({}));
+    let mut app = app
+        .opened_preferences
+        .pop()
+        .ok_or("Settings window not opened")?;
+    app.workspace.set_appearance(dark)?;
     let mut page = app
         .workspace
         .settings_page
         .take()
-        .ok_or("Settings sheet not opened")?;
+        .ok_or("Settings page missing")?;
     page.use_fixture_home(fixture.root.clone());
+    let pane = |name: &str| crate::settings_ui::Pane::page(name);
     match variant {
-        "modified" => page.show_modified(),
+        "appearance" | "editor" | "files" | "find" | "sidebar" | "keys" | "packages" => {
+            page.show_pane(&mut app.workspace, pane(variant));
+        }
+        "editor_wrap" | "help" => {
+            page.show_pane(&mut app.workspace, pane("editor"));
+            if variant == "editor_wrap" {
+                page.focus_setting("wrap_width");
+            }
+        }
+        "keyboard" => {
+            page.show_pane(&mut app.workspace, pane("files"));
+            page.focus_setting("ensure_newline_at_eof_on_save");
+        }
+        "advanced" | "modified" => {
+            page.show_pane(&mut app.workspace, crate::settings_ui::Pane::Advanced);
+            if variant == "modified" {
+                page.show_modified();
+            }
+        }
+        "popup" => {
+            page.show_pane(&mut app.workspace, pane("appearance"));
+            page.focus_setting("theme");
+            page.command(
+                &mut app.workspace,
+                vel_platform::Command::Newline,
+                Instant::now(),
+            );
+        }
         "search" => page.search_for(
             if app.workspace.translations.matched_language().as_str() == "zh-Hans" {
                 "换行"
@@ -1768,43 +1809,103 @@ const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "settings_ui",
-        size: (900., 800.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "default"),
     },
     Scenario {
+        name: "settings_ui_appearance",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "appearance"),
+    },
+    Scenario {
+        name: "settings_ui_editor",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "editor"),
+    },
+    Scenario {
+        name: "settings_ui_editor_wrap",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "editor_wrap"),
+    },
+    Scenario {
+        name: "settings_ui_files",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "files"),
+    },
+    Scenario {
+        name: "settings_ui_find",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "find"),
+    },
+    Scenario {
+        name: "settings_ui_sidebar",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "sidebar"),
+    },
+    Scenario {
+        name: "settings_ui_keys",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "keys"),
+    },
+    Scenario {
+        name: "settings_ui_packages",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "packages"),
+    },
+    Scenario {
+        name: "settings_ui_advanced",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "advanced"),
+    },
+    Scenario {
         name: "settings_ui_search",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "search"),
     },
     Scenario {
         name: "settings_ui_modified",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "modified"),
     },
     Scenario {
         name: "settings_ui_broken",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "broken"),
     },
     Scenario {
         name: "settings_ui_enum",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "enum"),
     },
     Scenario {
+        name: "settings_ui_popup",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "popup"),
+    },
+    Scenario {
         name: "settings_ui_array",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "array"),
     },
     Scenario {
         name: "settings_ui_guides",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "guides"),
     },
     Scenario {
         name: "settings_ui_dependent",
-        size: (900., 650.),
+        size: (720., 480.),
         build: |f, d| settings_ui_scene(f, d, "dependent"),
+    },
+    Scenario {
+        name: "settings_ui_help",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "help"),
+    },
+    Scenario {
+        name: "settings_ui_keyboard",
+        size: (720., 480.),
+        build: |f, d| settings_ui_scene(f, d, "keyboard"),
     },
     Scenario {
         name: "distraction_free",
@@ -1980,6 +2081,13 @@ fn after_layout(name: &str, app: &mut App) {
             let editor = app.workspace.editor();
             let x = app.content.x + app.view.right(editor) + app.view.minimap_width(editor) / 2.;
             pointer(app, MouseKind::Move, x, app.content.y + 60.);
+        }
+        "settings_ui_help" => {
+            // Rest the pointer on the first "?" long enough for its description to show.
+            let _ = app.scene();
+            if let Some(page) = app.workspace.settings_page.as_mut() {
+                page.hover_first_help();
+            }
         }
         "status_bar" | "status_narrow" => {
             // Hover the syntax item (the rightmost one): status items are buttons and
@@ -2644,35 +2752,81 @@ fn r41_empty_window_scenes_in_both_appearances_and_languages() {
 #[cfg(test)]
 #[test]
 fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_scales() {
-    for (language, search, repair, add_tag, wrap, description, json_link) in [
+    let sample = "fn main() { println!(\"Hello, 世界\"); }";
+    for (language, strings) in [
         (
             "en",
-            "Search settings",
-            "Edit JSON to fix",
-            "Add tag…",
-            "Word Wrap",
-            "Wrap long lines to fit the editor or a set column.",
-            "Edit in JSON",
+            [
+                "Search settings",
+                "Edit JSON to fix",
+                "Add tag…",
+                "Word Wrap",
+                "Wrap long lines to fit the editor or a set column.",
+                "Edit in JSON",
+                "Color Scheme",
+                "Wrap column",
+                "End files with a newline",
+                "Find Panel",
+                "Key Bindings…",
+                "Browse Packages",
+                "Changes on Disk",
+            ],
         ),
         (
             "zh-Hans",
-            "搜索设置",
-            "在 JSON 中修复",
-            "添加标签…",
-            "自动换行",
-            "在编辑器边缘或指定列自动换行。",
-            "在 JSON 中编辑",
+            [
+                "搜索设置",
+                "在 JSON 中修复",
+                "添加标签…",
+                "自动换行",
+                "在编辑器边缘或指定列自动换行。",
+                "在 JSON 中编辑",
+                "配色方案",
+                "换行列",
+                "文件以换行符结尾",
+                "查找面板",
+                "键盘快捷键…",
+                "浏览软件包",
+                "磁盘上的更改",
+            ],
         ),
     ] {
+        let [
+            search,
+            repair,
+            add_tag,
+            wrap,
+            description,
+            json_link,
+            scheme,
+            wrap_column,
+            newline,
+            find_panel,
+            bindings,
+            browse,
+            disk,
+        ] = strings;
         let fixture = Fixture::create(Some(language), &[]).unwrap();
         let settings: Vec<_> = SCENARIOS
             .iter()
             .filter(|s| s.name.starts_with("settings_ui"))
             .collect();
-        assert_eq!(settings.len(), 8);
+        assert_eq!(settings.len(), 20);
         for scenario in settings {
             for dark in [true, false] {
-                for density in [1., 2.] {
+                // Both densities for representative states; one for the rest keeps this quick.
+                let densities: &[f64] = if matches!(
+                    scenario.name,
+                    "settings_ui"
+                        | "settings_ui_editor"
+                        | "settings_ui_advanced"
+                        | "settings_ui_enum"
+                ) {
+                    &[1., 2.]
+                } else {
+                    &[1.]
+                };
+                for &density in densities {
                     let mut app = (scenario.build)(&fixture, dark).unwrap();
                     let fonts =
                         Fonts::load_named(&app.workspace.editor().preferences.font_face).unwrap();
@@ -2681,6 +2835,7 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                         height: scenario.size.1,
                     };
                     attach(&mut app, fonts, size, density).unwrap();
+                    finish_layout(&mut app, scenario.name);
                     let scene = app.scene();
                     let texts: Vec<_> = scene
                         .layers
@@ -2690,6 +2845,17 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                         .collect();
                     let expected = match scenario.name {
                         "settings_ui" => search,
+                        "settings_ui_appearance" => scheme,
+                        "settings_ui_editor" | "settings_ui_help" => sample,
+                        "settings_ui_editor_wrap" => wrap_column,
+                        "settings_ui_files" => newline,
+                        "settings_ui_find" => find_panel,
+                        "settings_ui_sidebar" => "*.log",
+                        "settings_ui_keys" => bindings,
+                        "settings_ui_packages" => browse,
+                        "settings_ui_keyboard" => disk,
+                        "settings_ui_advanced" => "added_words",
+                        "settings_ui_popup" => "Velocity Light",
                         "settings_ui_search" | "settings_ui_enum" => "word_wrap",
                         "settings_ui_modified" => "tab_size",
                         "settings_ui_broken" => repair,
@@ -2703,8 +2869,10 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                         "{} {language} dark={dark} @{density}: missing {expected}: {texts:?}",
                         scenario.name
                     );
+                    if matches!(scenario.name, "settings_ui_enum" | "settings_ui_popup") {
+                        assert!(texts.contains(&"✓"), "{texts:?}");
+                    }
                     if scenario.name == "settings_ui_enum" {
-                        assert!(texts.iter().any(|text| text.starts_with("✓  ")));
                         assert!(
                             texts.contains(&wrap) && texts.contains(&description),
                             "{texts:?}"
@@ -2713,6 +2881,10 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                     }
                     if scenario.name == "settings_ui_array" {
                         assert!(texts.contains(&"*.log"));
+                    }
+                    if scenario.name == "settings_ui_help" {
+                        // The "?" tooltip is drawn last, above the page.
+                        assert!(!scene.layers.last().unwrap().text.is_empty());
                     }
                 }
             }

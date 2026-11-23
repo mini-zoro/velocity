@@ -123,6 +123,11 @@ pub struct Sessions {
     pub(crate) handles: BTreeMap<u64, vel_platform::WindowHandle>,
     pub(crate) menu_merges: BTreeMap<u64, u64>,
     pub(crate) persist_project_workspaces: bool,
+    /// The one Settings window, by its window ID. It has no session state of its own and is
+    /// never a target for opened files. The handle is absent for a window-less (test) App.
+    pub(crate) settings_window: Option<(u64, Option<vel_platform::WindowHandle>)>,
+    /// User preferences that the Settings window wrote, waiting for each editor window.
+    pub(crate) preference_updates: BTreeMap<u64, Vec<(String, Option<vel_config::Value>)>>,
     // Drop all writers before releasing the per-profile lock.
     pub instance: Option<crate::instance::Instance>,
 }
@@ -177,6 +182,8 @@ impl Sessions {
             handles: BTreeMap::new(),
             menu_merges: BTreeMap::new(),
             persist_project_workspaces: true,
+            settings_window: None,
+            preference_updates: BTreeMap::new(),
         };
         if !defer_writer {
             sessions.start_writer();
@@ -203,6 +210,34 @@ impl Sessions {
         self.recent_heads
             .insert(id, self.recent.each_ref().map(|p| p.first().cloned()));
         id
+    }
+    /// Takes a utility window (Settings) back out of the session: it never saves, restores,
+    /// receives tabs or becomes the window that serves command-line requests.
+    pub(crate) fn release_utility(&mut self, id: u64, active: Option<u64>) {
+        self.live.remove(&id);
+        self.recent_heads.remove(&id);
+        self.active_window = active.filter(|id| self.live.contains(id));
+    }
+    /// Whether a window has published state to the session (tests).
+    #[cfg(test)]
+    pub(crate) fn publishes(&self, id: u64) -> bool {
+        self.windows.contains_key(&id) || self.open_windows.contains_key(&id)
+    }
+    #[cfg(test)]
+    pub(crate) fn is_live(&self, id: u64) -> bool {
+        self.live.contains(&id)
+    }
+    /// Live editor windows, for the Settings window: whether one exists to forward to.
+    pub(crate) fn has_live_windows(&self) -> bool {
+        !self.live.is_empty()
+    }
+    /// Queues a User preference written by the Settings window for every editor window.
+    pub(crate) fn broadcast_preference(&mut self, key: &str, value: Option<vel_config::Value>) {
+        for &id in &self.live {
+            let queue = self.preference_updates.entry(id).or_default();
+            queue.retain(|(old, _)| old != key);
+            queue.push((key.to_owned(), value.clone()));
+        }
     }
     pub fn can_receive_tab(&self, id: u64) -> bool {
         self.can_receive_tabs(id, 1)
@@ -604,6 +639,7 @@ impl Sessions {
     ) -> Result<(), String> {
         self.live.remove(&id);
         self.file_renames.remove(&id);
+        self.preference_updates.remove(&id);
         self.open_windows.remove(&id);
         self.open_inbox.remove(&id);
         self.handles.remove(&id);
