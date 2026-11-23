@@ -153,6 +153,8 @@ pub struct Editor {
     pub registry: Registry,
     pub keymap: Keymap,
     pub clipboard: String,
+    #[cfg(any(windows, test))]
+    pub(crate) clipboard_revision: u64,
     /// Window UI state mirrored for keymap contexts (`panel_visible`, `overlay_visible`).
     pub ui_panel_visible: bool,
     pub ui_overlay_visible: bool,
@@ -308,6 +310,8 @@ impl Editor {
             registry,
             keymap,
             clipboard: String::new(),
+            #[cfg(any(windows, test))]
+            clipboard_revision: 0,
             ui_panel_visible: false,
             ui_overlay_visible: false,
             ui_panel: "",
@@ -1543,6 +1547,10 @@ impl Host for Editor {
     }
     fn set_clipboard(&mut self, text: &str) {
         self.clipboard = text.into();
+        #[cfg(any(windows, test))]
+        {
+            self.clipboard_revision = self.clipboard_revision.wrapping_add(1);
+        }
     }
     fn set_clipboard_regions(&mut self, parts: Vec<String>, whole_lines: bool) {
         crate::editing::remember_copy(&self.clipboard, parts, whole_lines);
@@ -2289,6 +2297,23 @@ mod keymap_tests {
         editor.run("cut", &json!({})).unwrap();
         assert_eq!(editor.text.to_string(), "two\n");
         assert_eq!(editor.clipboard, "one\n");
+    }
+    #[test]
+    fn copying_identical_text_records_a_write_but_copying_no_selection_does_not() {
+        let mut editor = Editor::new(Text::from("中文"));
+        editor.clipboard = "中文".into(); // Snapshot from another clipboard owner.
+        let before = editor.clipboard_revision;
+        editor
+            .settings
+            .set(Layer::View, "copy_with_empty_selection", json!(false));
+        editor.sync();
+        select(&mut editor, &[(0, 0)]);
+        editor.run("copy", &json!({})).unwrap();
+        assert_eq!(editor.clipboard_revision, before);
+        select(&mut editor, &[(0, "中文".len())]);
+        editor.run("copy", &json!({})).unwrap();
+        assert_eq!(editor.clipboard, "中文");
+        assert_ne!(editor.clipboard_revision, before);
     }
     #[test]
     fn enter_on_an_indentation_only_line_leaves_it_empty() {

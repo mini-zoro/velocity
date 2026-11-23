@@ -2,6 +2,7 @@
 use super::{WindowHandle, wide};
 use std::{
     ffi::{OsString, c_void},
+    io,
     mem::{size_of, transmute},
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Component, Path, PathBuf, Prefix},
@@ -155,14 +156,22 @@ impl WindowHandle {
         } else {
             None
         };
-        // Allocate and encode everything before locking the system clipboard.
-        let Some(_clipboard) = Clipboard::open(owner) else {
-            return false;
-        };
-        // SAFETY: Clipboard::open succeeded using this non-null, live owner.
-        (unsafe { EmptyClipboard() } != 0)
-            && text.publish(u32::from(CF_UNICODETEXT))
-            && html.is_none_or(|(format, data)| data.publish(format))
+        // Keep allocation and logging outside the open clipboard scope.
+        let result = (|| {
+            let _clipboard = Clipboard::open(owner)
+                .ok_or_else(|| ("OpenClipboard", io::Error::last_os_error()))?;
+            // SAFETY: Clipboard::open succeeded using this non-null, live owner.
+            if unsafe { EmptyClipboard() } == 0 {
+                return Err(("EmptyClipboard", io::Error::last_os_error()));
+            }
+            text.publish(u32::from(CF_UNICODETEXT))
+                .and_then(|()| html.map_or(Ok(()), |(format, data)| data.publish(format)))
+                .map_err(|error| ("SetClipboardData", error))
+        })();
+        if let Err((operation, error)) = &result {
+            eprintln!("Windows clipboard: {operation} failed: {error}");
+        }
+        result.is_ok()
     }
 
     /// Uses the W1 adapter, which never silently deletes an unrecyclable item.
@@ -444,14 +453,14 @@ impl ClipboardData {
         Some(data)
     }
 
-    fn publish(self, format: u32) -> bool {
+    fn publish(self, format: u32) -> io::Result<()> {
         // SAFETY: The clipboard is open and the moved clipboard allocation is initialized.
         if unsafe { SetClipboardData(format, self.0) }.is_null() {
-            false
+            Err(io::Error::last_os_error())
         } else {
             // Windows owns the allocation now; the sender must not free it.
             std::mem::forget(self);
-            true
+            Ok(())
         }
     }
 }

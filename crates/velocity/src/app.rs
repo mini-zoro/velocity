@@ -2263,6 +2263,8 @@ impl App {
             self.workspace.editor_mut().clipboard = window.clipboard_text().unwrap_or_default();
         }
         let before = self.workspace.editor().clipboard.clone();
+        #[cfg(windows)]
+        let clipboard_revision = self.workspace.editor().clipboard_revision;
         let document_before = if self.workspace.editor().registry.kind(name)
             == Some(vel_commands::Kind::TextCommand)
         {
@@ -2282,11 +2284,18 @@ impl App {
             self.view
                 .prepare_keyboard_scroll(self.workspace.editor(), now)
         });
-        let result = self.workspace.editor_mut().run(name, args);
-        if self.workspace.editor().clipboard != before
-            && let Some(window) = window
-        {
-            window.set_clipboard_text(&self.workspace.editor().clipboard);
+        let mut result = self.workspace.editor_mut().run(name, args);
+        let publish_clipboard = self.workspace.editor().clipboard != before;
+        // An explicit Windows Copy takes ownership even if the plain text
+        // matches, replacing any unrelated formats from the previous owner.
+        #[cfg(windows)]
+        let publish_clipboard =
+            publish_clipboard || self.workspace.editor().clipboard_revision != clipboard_revision;
+        if publish_clipboard && let Some(window) = window {
+            let written = window.set_clipboard_text(&self.workspace.editor().clipboard);
+            if cfg!(windows) && !written && result.is_ok() {
+                result = Err("Could not write to the clipboard".into());
+            }
         }
         let actions = self.handle_named_actions(window);
         if self.accessibility_focus.is_some()

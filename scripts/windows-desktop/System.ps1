@@ -4,6 +4,20 @@ function Start-CmdHelper([string] $Label, [string] $Arguments) {
     Start-Native $env:ComSpec $Label -RawArguments ('/D /V:OFF /S /C ""{0}" {1}"' -f $ctx.Cli, $Arguments)
 }
 
+function Confirm-StdinClose([IntPtr] $Window, [IntPtr] $Dialog) {
+    $null = Wait-Until 'owned save prompt is foreground' { [VelocityDesktop.Native]::Foreground -eq $Dialog }
+    # Both native alert implementations use 100 + index for their buttons.
+    $button = Wait-Until "native Don't Save button" {
+        $control = [VelocityDesktop.Native]::GetDlgItem($Dialog, 101)
+        if ($control -ne [IntPtr]::Zero -and [VelocityDesktop.Native]::Class($control) -eq 'Button' -and
+                [VelocityDesktop.Native]::ControlText($control) -ceq "Don't Save") { $control }
+    } 4
+    $area = [VelocityDesktop.Native]::Outer($button)
+    Assert-That (-not $area.IsEmpty -and [VelocityDesktop.Native]::Foreground -eq $Dialog) 'The save prompt no longer owns the input target'
+    Click-Rectangle $area
+    $null = Wait-Until 'stdin save prompt is dismissed' { -not (Get-OwnedDialog $Window '^Velocity$') }
+}
+
 function Test-Console {
     $cliLiteral = "'" + $ctx.Cli.Replace("'", "''") + "'"
     $powershell = Join-Path $PSHOME 'powershell.exe'
@@ -33,7 +47,7 @@ function Test-Console {
     Write-Utf8 $cold 'opened by the cold helper'
     Invoke-Probe 'Warm GUI using --data-dir over a different environment profile' {
         $env:VELOCITY_DATA_DIR = Join-Path $ctx.CaseRoot 'decoy-profile'
-        try { $ctx.WarmWindow = Start-Editor 'explicit-profile' -ExplicitProfile }
+        try { $ctx.WarmWindow = Start-Editor 'explicit-profile' -ExplicitProfile -LogInput }
         finally { $env:VELOCITY_DATA_DIR = $ctx.Profile }
     }
     if ($ctx.ContainsKey('WarmWindow')) {
@@ -63,19 +77,6 @@ function Test-Console {
             $null = Wait-Until 'wait sheet no longer active' { [VelocityDesktop.Native]::Title($window) -notlike '*wait.txt*' }
             Save-Evidence $window 'wait-closed'
         }
-        Invoke-Probe 'PowerShell stdin becomes an editable tab and returns stdout on close' {
-            $before = [VelocityDesktop.Native]::Title($window)
-            $child = Start-Native $powershell 'stdin' @('-NoProfile', '-NonInteractive', '-Command', "'hello' | & $cliLiteral -; exit `$LASTEXITCODE")
-            $null = Wait-Until 'stdin activates a new tab' { [VelocityDesktop.Native]::Title($window) -cne $before }
-            Assert-That (-not $child.Process.HasExited) 'Stdin did not wait for its tab'
-            Assert-That ((Read-Editor $window).Trim() -ceq 'hello') 'Stdin did not put hello in the editor'
-            Send-Text $window 'edited hello'
-            $null = Wait-Until 'edited stdin tab is dirty' { [VelocityDesktop.Native]::Title($window).EndsWith([string][char]0x2022) }
-            Save-Evidence $window 'stdin-edited'
-            Send-Key $window @('Ctrl', 'W')
-            $output = Complete-Native $child
-            Assert-That ($output.Trim() -ceq 'edited hello') 'Console stdout was not the edited stdin text'
-        }
         Invoke-Probe '-n opens a second HWND in the existing process' {
             # vel treats piped stdin as an implied wait when invoked without paths.
             $null = Complete-Native (Start-CmdHelper 'new-window' '-n < NUL')
@@ -84,12 +85,54 @@ function Test-Console {
             Focus-Window $extra
             $null = Wait-Frame $extra
             Save-Evidence $extra 'cli-new-window'
+            Send-Key $extra @('Alt', 'F4')
+            $null = Wait-Until 'extra CLI window closes, leaving the original HWND' {
+                $windows = @(Get-EditorWindows $processId)
+                $windows.Count -eq 1 -and $windows[0] -eq $window
+            }
+        }
+        Invoke-Probe 'PowerShell stdin becomes an editable tab and returns stdout on close' {
+            Focus-Window $window
+            $before = [VelocityDesktop.Native]::Title($window)
+            $child = Start-Native $powershell 'stdin' @('-NoProfile', '-NonInteractive', '-Command', "'hello' | & $cliLiteral -; exit `$LASTEXITCODE")
+            $null = Wait-Until 'stdin activates a new tab' { [VelocityDesktop.Native]::Title($window) -cne $before }
+            Assert-That (-not $child.Process.HasExited) 'Stdin did not wait for its tab'
+            Assert-That ((Read-Editor $window).TrimEnd([char[]]"`r`n") -ceq 'hello') 'Stdin did not put hello in the editor'
+            Send-Text $window 'edited hello'
+            $null = Wait-Until 'edited stdin tab is dirty' { [VelocityDesktop.Native]::Title($window).EndsWith([string][char]0x2022) }
+            Save-Evidence $window 'stdin-edited'
+            Send-Key $window @('Ctrl', 'W')
+            $close = Wait-Until 'stdin closes or shows a save prompt' {
+                $dialog = Get-OwnedDialog $window '^Velocity$'
+                if ($dialog) { [pscustomobject]@{ Dialog=$dialog } }
+                elseif ($child.Process.HasExited) { [pscustomobject]@{ Dialog=[IntPtr]::Zero } }
+            }
+            if ($close.Dialog -ne [IntPtr]::Zero) {
+                Save-Evidence $window 'stdin-save-prompt' @($close.Dialog)
+                Assert-That (-not $child.Process.HasExited) 'Stdin helper exited before the save decision'
+                # This skips writing a file. The CLI still returns the edited sheet on close.
+                Confirm-StdinClose $window $close.Dialog
+            }
+            $output = Complete-Native $child
+            Assert-That ($output.TrimEnd([char[]]"`r`n") -ceq 'edited hello') 'Console stdout was not the edited stdin text'
+            $null = Wait-Until 'stdin sheet closes and the preceding sheet regains its title' { [VelocityDesktop.Native]::Title($window) -ceq $before }
+            Save-Evidence $window 'stdin-closed'
         }
         Invoke-Probe 'Exit before cold start' { Exit-Editor $window }
         $ctx.Remove('WarmWindow')
     }
     Invoke-Probe 'Cold vel.exe starts the adjacent GUI and forwards the file' {
-        Assert-That (@(Get-SuiteProcesses -GuiOnly).Count -eq 0) 'An earlier GUI is still running; cannot validate cold start'
+        # Keep the warm exit assertion separate. Even if it fails, the cold
+        # start/stream check must run from a verified process-free state.
+        $stale = @(Get-SuiteProcesses -GuiOnly)
+        if ($stale.Count) {
+            $ctx.Check.metrics['cold_start_cleanup_pids'] = @($stale | ForEach-Object { $_.Id })
+            foreach ($process in $stale) {
+                if (-not $process.HasExited) { $process.Kill() }
+                Assert-That ($process.WaitForExit(3000)) "Could not clean up test GUI PID $($process.Id) for cold start"
+            }
+        }
+        Assert-That (@(Get-SuiteProcesses -GuiOnly).Count -eq 0) 'Cold start requires a process-free desktop for the packaged executable'
         $profile = Join-Path $ctx.CaseRoot 'cold-profile'
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $null = Complete-Native (Start-Helper 'cold-helper' @('--data-dir', $profile, '--width', '850', '--height', '550', '--output',
@@ -222,7 +265,7 @@ function Test-Project {
 function Test-Settings {
     $window = Start-Editor 'settings'
     Invoke-Probe 'Preferences > Settings opens a native window with both JSON panes' {
-        Invoke-Menu $window N '^Settings\u2026$'
+        Invoke-Menu $window N '^Settings\u2026$' 'preferences-json-menu'
         $pair = Wait-Until 'paired settings window appears' {
             Get-EditorWindows | Where-Object { $_ -ne $window -and [VelocityDesktop.Native]::Title($_) -eq 'Preferences.sublime-settings' } | Select-Object -First 1
         }
@@ -239,9 +282,13 @@ function Test-Settings {
         $null = Wait-Until 'paired settings window closed' { $pair -notin @(Get-EditorWindows) }
     }
     Invoke-Probe 'Preferences > Settings (Graphical) writes User Preferences' {
-        Invoke-Menu $window N '^Settings \(Graphical\)\u2026$'
-        $null = Wait-Until 'graphical Settings title' { [VelocityDesktop.Native]::Title($window) -eq 'Settings' }
-        $null = Wait-Frame $window
+        Focus-Window $window
+        $editor = Get-Frame $window
+        try {
+            Invoke-Menu $window N '^Settings \(Graphical\)\u2026$' 'preferences-graphical-menu'
+            $null = Wait-Until 'graphical Settings title' { [VelocityDesktop.Native]::Title($window) -eq 'Settings' }
+            $null = Wait-Changed $window $editor client
+        } finally { $editor.Dispose() }
         Save-Evidence $window 'graphical'
         $before = Get-Frame $window top
         try { Send-Text $window 'line_numbers'; $null = Wait-Changed $window $before top }

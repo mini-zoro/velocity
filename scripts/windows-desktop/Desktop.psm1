@@ -59,6 +59,7 @@ namespace VelocityDesktop {
         [DllImport("user32.dll")] static extern bool IsChild(IntPtr parent, IntPtr child);
         [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
         [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr control);
+        [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
         [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hwnd, int command);
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder value, int length);
@@ -98,6 +99,7 @@ namespace VelocityDesktop {
         [DllImport("user32.dll")] static extern bool GetMenuItemRect(IntPtr hwnd, IntPtr menu, uint index, out Rect rect);
         [DllImport("user32.dll")] static extern uint GetMenuState(IntPtr menu, uint index, uint flags);
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] public static extern IntPtr GetClipboardOwner();
         [DllImport("user32.dll")] public static extern IntPtr GetOpenClipboardWindow();
         [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr menu, int index);
         [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr menu);
@@ -111,6 +113,10 @@ namespace VelocityDesktop {
         }
         public static string Class(IntPtr hwnd) {
             var value = new StringBuilder(256); GetClassName(hwnd, value, value.Capacity); return value.ToString();
+        }
+        public static string Describe(IntPtr hwnd) {
+            if (hwnd == IntPtr.Zero) return "(no window)";
+            return string.Format("HWND=0x{0:X} PID={1} class={2} title='{3}'", hwnd.ToInt64(), Pid(hwnd), Class(hwnd), Title(hwnd));
         }
         public static IntPtr[] Windows(uint pid) {
             var list = new List<IntPtr>();
@@ -181,6 +187,14 @@ namespace VelocityDesktop {
             return menu != IntPtr.Zero && GetMenuItemRect(hwnd, menu, index, out rect) ? rect.Area : Rectangle.Empty;
         }
         public static bool MenuItemEnabled(IntPtr menu, uint index) { return (GetMenuState(menu, index, 0x400) & 3) == 0; }
+        public static int HighlightedMenuRow(IntPtr menu) {
+            int count = GetMenuItemCount(menu);
+            for (int i = 0; i < count; ++i) {
+                uint state = GetMenuState(menu, (uint)i, 0x400); // MF_BYPOSITION
+                if (state != uint.MaxValue && (state & 0x80) != 0) return i; // MF_HILITE
+            }
+            return -1;
+        }
         public static string MenuLabel(IntPtr menu, uint index) {
             var value = new StringBuilder(1024);
             GetMenuString(menu, index, value, value.Capacity, 0x400);
@@ -322,8 +336,15 @@ namespace VelocityDesktop {
 '@
 }
 
+function Assert-InputTarget([IntPtr] $Window) {
+    $actual = [VelocityDesktop.Native]::Foreground
+    if ($actual -ne $Window) {
+        throw "Refusing input. Target: $([VelocityDesktop.Native]::Describe($Window)); foreground: $([VelocityDesktop.Native]::Describe($actual))"
+    }
+}
+
 function Send-Key([IntPtr] $Window, [string[]] $Keys) {
-    if ([VelocityDesktop.Native]::Foreground -ne $Window) { throw 'Refusing input: target is not foreground' }
+    Assert-InputTarget $Window
     $named = @{ Ctrl=0xa2; Shift=0xa0; Alt=0xa4; Win=0x5b; Esc=27; Enter=13; Backspace=8; Tab=9; Space=32;
         Left=37; Up=38; Right=39; Down=40; Home=36; End=35; PageDown=34; Slash=0xbf }
     [uint32[]] $codes = foreach ($key in $Keys) {
@@ -344,7 +365,7 @@ function Send-Ascii([IntPtr] $Window, [string] $Value) {
 }
 
 function Send-Text([IntPtr] $Window, [string] $Value) {
-    if ([VelocityDesktop.Native]::Foreground -ne $Window) { throw 'Refusing Unicode input: target is not foreground' }
+    Assert-InputTarget $Window
     [VelocityDesktop.Native]::Text($Value)
 }
 

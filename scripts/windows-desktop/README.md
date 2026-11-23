@@ -73,6 +73,12 @@ The first hosted run should establish whether both images expose a usable
 interactive desktop and WARP, and whether popup UIA and pixel thresholds
 need adjustment. Where UIA does not enumerate the menu, the report includes
 the Win32 menu captions and records whether the popup opened by mnemonic or
-click. A click fallback does not pass a failed mnemonic. Clipboard retries
-are counted per check. Unsigned installer reputation, multi-monitor DPI changes
+click. A click fallback does not pass a failed mnemonic. Settings item
+selection uses visible popup geometry or verifies the native keyboard highlight.
+The stdin check handles the owned save prompt without writing a file and still
+requires the edited text on stdout. Cold start runs from an isolated profile and
+verifies both helper streams reach EOF while the editor is open.
+Clipboard copies must advance the sequence and transfer ownership to the tested
+window, even for identical text. Clipboard retries are counted per check.
+Unsigned installer reputation, multi-monitor DPI changes
 and immediate power-loss recovery before autosave are out of scope.

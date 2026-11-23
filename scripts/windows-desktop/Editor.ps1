@@ -91,15 +91,8 @@ function Test-Typing {
 }
 
 function Save-ThroughDialog([IntPtr] $Window, [string] $Path) {
-    $processId = [VelocityDesktop.Native]::Pid($Window)
     Send-Key $Window @('Ctrl', 'S')
-    $dialog = Wait-Until 'native Save As dialog' {
-        foreach ($candidate in [VelocityDesktop.Native]::Windows($processId)) {
-            if ([VelocityDesktop.Native]::Class($candidate) -eq '#32770' -and
-                    [VelocityDesktop.Native]::OwnedBy($candidate, $Window) -and
-                    [VelocityDesktop.Native]::Title($candidate) -match '^Save As:?$') { $candidate; break }
-        }
-    }
+    $dialog = Wait-Until 'native Save As dialog' { Get-OwnedDialog $Window '^Save As:?$' }
     Focus-Window $dialog
     $edit = $null
     try {
@@ -347,8 +340,12 @@ function Test-Shortcuts {
     Invoke-Probe 'Ctrl+K Ctrl+B toggles sidebar' {
         $absent = Get-Frame $window left
         try {
-            $null = Complete-Native (Start-Helper 'shortcut-folder' @($folder))
+            # A bare folder path opens its own project window when the current one is in use.
+            $null = Complete-Native (Start-Helper 'shortcut-folder' @('--add', $folder))
+            Focus-Window $window
             $null = Wait-Changed $window $absent left 5000 8
+            $windows = @(Get-EditorWindows ([VelocityDesktop.Native]::Pid($window)))
+            Assert-That ($windows.Count -eq 1 -and $windows[0] -eq $window) 'Adding the sidebar fixture changed the editor HWND'
             Save-Evidence $window 'sidebar-populated'
         } finally { $absent.Dispose() }
         $before = Get-Frame $window left
@@ -368,6 +365,7 @@ function Test-Shortcuts {
         } finally { $before.Dispose() }
     }
     Invoke-Probe 'F11 enters and leaves fullscreen' {
+        Focus-Window $window
         $bounds = [VelocityDesktop.Native]::Outer($window)
         Send-Key $window F11
         $null = Wait-Until 'window is borderless fullscreen' { -not [VelocityDesktop.Native]::HasCaption($window) -and
@@ -397,20 +395,24 @@ function Test-Shortcuts {
 }
 
 function Test-ClipboardRoundTrip {
-    $window = Start-Editor 'clipboard'
+    $window = Start-Editor 'clipboard' -LogInput
     $text = $fixture.cjk + ' paste'
     Invoke-Clipboard set { Set-Clipboard -Value $text -ErrorAction Stop }
     Send-Key $window @('Ctrl', 'V')
     $null = Wait-Title $window ([string][char]0x2022)
-    $copied = Read-Editor $window
-    Assert-That ($copied -ceq $text) 'System clipboard to editor did not round-trip CJK'
-    Save-Evidence $window 'paste-from-system'
-    $before = Get-Frame $window
-    try {
-        Send-Text $window ($fixture.cjk + ' copy')
+    Invoke-Probe 'Pasted CJK can be copied back even when the text matches' {
+        # Deliberately leave the source on the clipboard. Read-Editor must
+        # observe new ownership, so stale identical text cannot pass this check.
         $copied = Read-Editor $window
-        Assert-That ($copied -ceq ($fixture.cjk + ' copy')) 'Editor did not copy exact CJK to system clipboard'
-        $null = Wait-Changed $window $before client 35
+        Assert-That ($copied -ceq $text) 'System clipboard to editor did not round-trip CJK'
+        Save-Evidence $window 'paste-from-system'
+    }
+    Invoke-Probe 'Different CJK text replaces the system clipboard' {
+        Send-Key $window @('Ctrl', 'A')
+        $replacement = $fixture.cjk + ' copy'
+        Send-Text $window $replacement
+        $null = Wait-Title $window $replacement
+        Assert-That ((Read-Editor $window) -ceq $replacement) 'Editor did not copy exact CJK to system clipboard'
         Save-Evidence $window 'copy-to-system'
-    } finally { $before.Dispose() }
+    }
 }

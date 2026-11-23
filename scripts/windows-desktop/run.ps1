@@ -22,10 +22,15 @@ function Wait-Until([string] $Description, [scriptblock] $Probe, [int] $Seconds 
 }
 
 function Focus-Window([IntPtr] $Window) {
-    $null = Wait-Until 'foreground window' {
-        [VelocityDesktop.Native]::Focus($Window)
-        [VelocityDesktop.Native]::Foreground -eq $Window
-    } 4
+    try {
+        $null = Wait-Until 'foreground window' {
+            [VelocityDesktop.Native]::Focus($Window)
+            [VelocityDesktop.Native]::Foreground -eq $Window
+        } 4
+    } catch {
+        $actual = [VelocityDesktop.Native]::Foreground
+        throw "Could not focus $([VelocityDesktop.Native]::Describe($Window)); foreground: $([VelocityDesktop.Native]::Describe($actual))"
+    }
 }
 
 function Write-Utf8([string] $Path, [AllowEmptyString()] [string] $Value) {
@@ -96,6 +101,14 @@ function Get-EditorWindows([uint32] $ProcessId = 0) {
     }
 }
 
+function Get-OwnedDialog([IntPtr] $Window, [string] $CaptionPattern) {
+    [VelocityDesktop.Native]::Windows([VelocityDesktop.Native]::Pid($Window)) | Where-Object {
+        [VelocityDesktop.Native]::Class($_) -eq '#32770' -and
+        [VelocityDesktop.Native]::OwnedBy($_, $Window) -and
+        [VelocityDesktop.Native]::Title($_) -match $CaptionPattern
+    } | Select-Object -First 1
+}
+
 function Save-Evidence([IntPtr] $Window, [string] $Step, [IntPtr[]] $Include = @()) {
     Require-Desktop
     $desktop = [VelocityDesktop.Native]::DesktopBounds()
@@ -153,6 +166,7 @@ function Wait-Frame([IntPtr] $Window, [int] $Seconds = 20) {
 
 function Wait-Changed([IntPtr] $Window, $Before, [string] $Region, [int] $Minimum = 400, [int] $Tolerance = 24) {
     Wait-Until "rendered $Region changes by at least $Minimum pixels" {
+        if ([VelocityDesktop.Native]::Foreground -ne $Window) { return }
         $image = Get-Frame $Window $Region
         try {
             if ($Before.Size -eq $image.Size) {
@@ -254,12 +268,23 @@ function Invoke-Clipboard([string] $Operation, [scriptblock] $Action) {
 
 function Read-Editor([IntPtr] $Window, [switch] $SelectionOnly) {
     Focus-Window $Window
-    $sequence = [VelocityDesktop.Native]::GetClipboardSequenceNumber()
     if (-not $SelectionOnly) { Send-Key $Window @('Ctrl', 'A') }
-    Send-Key $Window @('Ctrl', 'C')
-    $null = Wait-Until 'editor publishes a new clipboard sequence' {
-        [VelocityDesktop.Native]::GetClipboardSequenceNumber() -ne $sequence
+    $copies = $ctx.Check.metrics['clipboard_copies']
+    if ($null -eq $copies) {
+        $copies = [Collections.Generic.List[object]]::new()
+        $ctx.Check.metrics['clipboard_copies'] = $copies
     }
+    $copy = [ordered]@{ before=[VelocityDesktop.Native]::GetClipboardSequenceNumber(); after=$null;
+        target=[VelocityDesktop.Native]::Describe($Window); prior_owner=[VelocityDesktop.Native]::Describe([VelocityDesktop.Native]::GetClipboardOwner());
+        final_owner=$null }
+    $copies.Add($copy)
+    try {
+        Send-Key $Window @('Ctrl', 'C')
+        $null = Wait-Until 'new clipboard sequence owned by the editor HWND' {
+            $copy.after = [VelocityDesktop.Native]::GetClipboardSequenceNumber()
+            $copy.after -ne $copy.before -and [VelocityDesktop.Native]::GetClipboardOwner() -eq $Window
+        }
+    } finally { $copy.final_owner = [VelocityDesktop.Native]::Describe([VelocityDesktop.Native]::GetClipboardOwner()) }
     Invoke-Clipboard get { Get-Clipboard -Raw -ErrorAction Stop }
 }
 
@@ -295,7 +320,24 @@ function Click-Rectangle([Drawing.Rectangle] $Area) {
     [VelocityDesktop.Native]::Click($Area.X + [int]($Area.Width / 2), $Area.Y + [int]($Area.Height / 2))
 }
 
-function Invoke-Menu([IntPtr] $Window, [string] $AccessKey, [string] $CaptionPattern) {
+function Select-NativeMenuRow([IntPtr] $Window, [IntPtr] $Menu, [int] $Row) {
+    # Up/Down skip separators. Observe the native highlight after each key so
+    # neither pointer hover nor the starting selection can choose the wrong row.
+    $current = [VelocityDesktop.Native]::HighlightedMenuRow($Menu)
+    for ($moves = 0; $current -ne $Row -and $moves -lt [VelocityDesktop.Native]::GetMenuItemCount($Menu); $moves++) {
+        Assert-That ([VelocityDesktop.Native]::InMenu($Window)) 'Menu closed during keyboard selection'
+        Send-Key $Window Down
+        $next = Wait-Until 'next highlighted native menu item' {
+            $selected = [VelocityDesktop.Native]::HighlightedMenuRow($Menu)
+            if ($selected -ge 0 -and $selected -ne $current) { $selected + 1 }
+        } 2
+        $current = $next - 1
+    }
+    Assert-That ($current -eq $Row) "Native menu navigation did not highlight row $Row"
+    Send-Key $Window Enter
+}
+
+function Invoke-Menu([IntPtr] $Window, [string] $AccessKey, [string] $CaptionPattern, [string] $Step) {
     $bar = [VelocityDesktop.Native]::MenuBar($Window)
     for ($index = 0; $index -lt [VelocityDesktop.Native]::GetMenuItemCount($bar); $index++) {
         if ([VelocityDesktop.Native]::MenuLabel($bar, $index) -match "&$AccessKey") { break }
@@ -303,14 +345,28 @@ function Invoke-Menu([IntPtr] $Window, [string] $AccessKey, [string] $CaptionPat
     Assert-That ($index -lt [VelocityDesktop.Native]::GetMenuItemCount($bar)) "No native menu with access key $AccessKey"
     $opened = Open-TopMenu $Window $index $AccessKey
     try {
+        Save-Evidence $Window $Step @($opened.Popup)
         $bar = [VelocityDesktop.Native]::MenuBar($Window)
         $sub = [VelocityDesktop.Native]::GetSubMenu($bar, $index)
         for ($row = 0; $row -lt [VelocityDesktop.Native]::GetMenuItemCount($sub); $row++) {
             if ((Get-MenuCaption ([VelocityDesktop.Native]::MenuLabel($sub, $row))) -notmatch $CaptionPattern) { continue }
             Assert-That ([VelocityDesktop.Native]::MenuItemEnabled($sub, $row)) "Menu item disabled: $CaptionPattern"
-            $area = [VelocityDesktop.Native]::MenuItemArea([IntPtr]::Zero, $sub, $row)
-            Assert-That (-not $area.IsEmpty) "Menu item has no rectangle: $CaptionPattern"
-            Click-Rectangle $area
+            $area = $null
+            try {
+                $area = Wait-Until "visible rectangle for native menu item $CaptionPattern" {
+                    $popup = [VelocityDesktop.Native]::MenuPopup($Window, $index)
+                    if ($popup -eq [IntPtr]::Zero) { return }
+                    $visible = [Drawing.Rectangle]::Intersect([VelocityDesktop.Native]::Outer($popup), [VelocityDesktop.Native]::DesktopBounds())
+                    foreach ($owner in @($popup, [IntPtr]::Zero)) {
+                        $rect = [VelocityDesktop.Native]::MenuItemArea($owner, $sub, $row)
+                        if (-not $rect.IsEmpty -and $visible.Contains($rect)) { return $rect }
+                    }
+                } 2
+            } catch {
+                $ctx.Check.metrics["menu_row_$row"] = 'keyboard fallback'
+            }
+            if ($null -ne $area) { Click-Rectangle $area }
+            else { Select-NativeMenuRow $Window $sub $row }
             $null = Wait-Until 'native popup closes after selection' { -not [VelocityDesktop.Native]::InMenu($Window) }
             return
         }
@@ -325,7 +381,9 @@ function Save-FailureEvidence([string] $Step) {
     if ($ctx.DesktopError) { return }
     try {
         $foreground = [VelocityDesktop.Native]::Foreground
-        $window = Get-EditorWindows | Select-Object -First 1
+        $ctx.Check.metrics["${Step}_foreground"] = [VelocityDesktop.Native]::Describe($foreground)
+        $editors = @(Get-EditorWindows)
+        $window = if ($foreground -in $editors) { $foreground } else { $editors | Select-Object -First 1 }
         if (-not $window) { $window = [IntPtr]::Zero }
         $dialog = @()
         if ($window -ne [IntPtr]::Zero -and $foreground -ne $window -and
