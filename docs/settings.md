@@ -265,8 +265,18 @@ a family. The page layout lives in `Packages/Default/settings-pages.json`.
 
 Search covers every setting, not just the curated ones: type a key, alias, or
 a name or description in English or Simplified Chinese, regardless of the
-display language. Results show keys like Advanced. Typing while the sidebar or
-a control has focus also searches; ⌘F / Ctrl+F returns to the field.
+display language. Matches on the curated pages come first, with the same
+controls and no keys, each captioned with where it lives (*Editor › Word
+Wrap*); click the caption to show the option on its page. The rest follow under
+*More in Advanced* as Advanced rows with their keys. Typing while the sidebar
+or a control has focus also searches; ⌘F / Ctrl+F returns to the field.
+
+On Advanced each row shows the name and key, then the description, then (when
+the change applies later) when it takes effect, each on its own line left of the
+control; a list's add field and the row's *Edit in JSON* link stay in the
+control column. Number fields use the same up/down stepper everywhere.
+Descriptions name keys for the platform: *Option* on macOS reads *Alt* on
+Windows (tokens `{alt}`, `{command}` and `{os}` in `settings-ui.json`).
 
 Keyboard: Tab / Shift+Tab move through the search field, the category list and
 the controls; Up/Down change category in the list and move between controls on

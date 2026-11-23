@@ -1134,11 +1134,23 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
                 "wrap"
             },
         ),
-        "enum" | "array" | "guides" | "dependent" => {
+        "enum" | "guides" => {
+            // The full list's own controls: legacy choices in a popup, and a tag list.
+            page.show_pane(&mut app.workspace, crate::settings_ui::Pane::Advanced);
+            page.focus_setting(if variant == "enum" {
+                "word_wrap"
+            } else {
+                "indent_guide_options"
+            });
+            page.command(
+                &mut app.workspace,
+                vel_platform::Command::Newline,
+                Instant::now(),
+            );
+        }
+        "array" | "dependent" => {
             page.search_for(match variant {
-                "enum" => "word_wrap",
                 "array" => "file_exclude_patterns",
-                "guides" => "indent_guide_options",
                 _ => "wrap_width",
             });
             page.command(
@@ -1146,7 +1158,7 @@ fn settings_ui_scene(fixture: &Fixture, dark: bool, variant: &str) -> Result<App
                 vel_platform::Command::Newline,
                 Instant::now(),
             );
-            if variant != "dependent" {
+            if variant == "array" {
                 page.command(
                     &mut app.workspace,
                     vel_platform::Command::Newline,
@@ -2770,6 +2782,7 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                 "Key Bindings…",
                 "Browse Packages",
                 "Changes on Disk",
+                "Editor › Word Wrap",
             ],
         ),
         (
@@ -2788,6 +2801,7 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                 "键盘快捷键…",
                 "浏览软件包",
                 "磁盘上的更改",
+                "编辑器 › 自动换行",
             ],
         ),
     ] {
@@ -2805,6 +2819,7 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
             bindings,
             browse,
             disk,
+            location,
         ] = strings;
         let fixture = Fixture::create(Some(language), &[]).unwrap();
         let settings: Vec<_> = SCENARIOS
@@ -2858,7 +2873,8 @@ fn settings_ui_scene_matrix_draws_each_state_in_both_languages_appearances_and_s
                         "settings_ui_keyboard" => disk,
                         "settings_ui_advanced" => "added_words",
                         "settings_ui_popup" => "Velocity Light",
-                        "settings_ui_search" | "settings_ui_enum" => "word_wrap",
+                        "settings_ui_search" => location,
+                        "settings_ui_enum" => "word_wrap",
                         "settings_ui_modified" => "tab_size",
                         "settings_ui_broken" => repair,
                         "settings_ui_array" => add_tag,

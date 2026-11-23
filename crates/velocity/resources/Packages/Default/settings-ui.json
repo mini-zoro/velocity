@@ -2,6 +2,8 @@
 // Only names and descriptions are localized; keys and values are data.
 // Numeric bounds apply to the page; JSON still accepts the full runtime domain.
 // Mixed-type legacy values remain intact and can be edited in JSON.
+// Descriptions name keys and the system through {alt}, {command} and {os}, which read
+// Option, Command, macOS on a Mac and Alt, Ctrl, Windows on Windows.
 {
 
   // Editing and Vintage.
@@ -18,7 +20,7 @@
   "indent_to_bracket": {"group": "editing", "control": "bool", "name": "Indent to Bracket", "description": "Align the next line just after an unmatched opening bracket."},
   "auto_match_enabled": {"group": "editing", "control": "bool", "name": "Auto Pair Brackets and Quotes", "description": "Insert the closing bracket or quote as you type."},
   "auto_close_tags": {"group": "editing", "control": "bool", "name": "Auto Close Tags", "description": "Finish an HTML or XML closing tag as you start typing it."},
-  "drag_text": {"group": "editing", "control": "bool", "name": "Drag Selected Text", "description": "Move selected text by dragging. Hold Option to copy it."},
+  "drag_text": {"group": "editing", "control": "bool", "name": "Drag Selected Text", "description": "Move selected text by dragging. Hold {alt} to copy it."},
   "trim_automatic_white_space": {"group": "editing", "control": "bool", "name": "Trim Auto-Inserted Spaces", "description": "Clear auto-inserted indentation when leaving an empty line."},
   "shift_tab_unindent": {"group": "editing", "control": "bool", "name": "Always Unindent with Shift+Tab", "description": "Let Shift+Tab unindent even outside leading whitespace."},
   "use_tab_stops": {"group": "editing", "control": "bool", "name": "Use Tab Stops", "description": "When indenting with spaces, Tab and Backspace move to tab stops."},
@@ -79,7 +81,7 @@
   "show_line_column": {"group": "appearance", "control": "enum", "choices": ["enabled","compact","disabled"], "name": "Show Line and Column", "description": "Show the caret’s line and column in full, in brief, or not at all."},
   "show_full_path": {"group": "appearance", "control": "bool", "name": "Show Full Path in Title", "description": "Include the file’s full path in the window title."},
   "show_rel_path": {"group": "appearance", "control": "bool", "name": "Show Relative Path in Title", "description": "Include the path relative to the project in the window title."},
-  "overlay_scroll_bars": {"group": "appearance", "control": "enum", "choices": ["system","enabled","disabled"], "labels": ["System Setting","Always Overlay","Never Overlay"], "name": "Overlay Scroll Bars", "description": "Overlay the editor, reserve space, or follow macOS."},
+  "overlay_scroll_bars": {"group": "appearance", "control": "enum", "choices": ["system","enabled","disabled"], "labels": ["System Setting","Always Overlay","Never Overlay"], "name": "Overlay Scroll Bars", "description": "Overlay the editor, reserve space, or follow {os}."},
   "use_simple_full_screen": {"group": "appearance", "control": "bool", "name": "Simple Full Screen", "description": "Go full screen without creating a separate macOS Space."},
   "themed_title_bar": {"group": "appearance", "control": "bool", "name": "Themed Title Bar", "description": "Apply the selected theme to the window title bar."},
   "animation_enabled": {"group": "appearance", "control": "bool", "name": "Interface Animations", "description": "Animate interface transitions unless Reduce Motion is on."},
@@ -121,7 +123,7 @@
   "set_unsaved_view_name": {"group": "files", "control": "bool", "name": "Name Untitled Tabs from Text", "description": "Use the first line of text to name untitled tabs."},
   "open_files_in_new_window": {"group": "files", "control": "enum", "choices": ["never","finder_only","always",true,false], "labels": ["Never","Only from {file_manager}","Always",null,null], "name": "Open Files in New Window", "description": "Choose when opening a file creates a new window."},
   "new_window_settings": {"group": "files", "control": "json_only", "name": "New Window Settings", "description": "Override preferences for windows created with New Window."},
-  "update_system_recent_files": {"group": "files", "control": "bool", "name": "Update System Recent Files", "description": "Add opened files to the macOS recent documents list."},
+  "update_system_recent_files": {"group": "files", "control": "bool", "name": "Update System Recent Files", "description": "Add opened files to the {os} recent documents list."},
   "image_file_patterns": {"group": "files", "control": "array", "name": "Image File Patterns", "description": "Open matching files in the image viewer."},
 
   // Find and navigation.
@@ -186,7 +188,7 @@
   "package_index_url": {"group": "packages", "control": "json_only", "name": "Package Index URL", "description": "Choose the address used to look up packages."},
 
   // Language and spelling.
-  "ui_language": {"group": "language", "control": "enum", "choices": ["en","zh-Hans","auto"], "aliases": ["locale","语言","简体中文","English"], "name": "UI Language", "description": "Choose a language or follow the first supported macOS preferred language."},
+  "ui_language": {"group": "language", "control": "enum", "choices": ["en","zh-Hans","auto"], "aliases": ["locale","语言","简体中文","English"], "name": "UI Language", "description": "Choose a language or follow the first supported {os} preferred language."},
   "spell_check": {"group": "language", "control": "bool", "aliases": ["拼写"], "name": "Spell Check", "description": "Check spelling in supported parts of a document."},
   "spelling_selector": {"group": "language", "control": "text", "name": "Spelling Scope Selector", "description": "Choose the syntax scopes to check for spelling mistakes."},
   "dictionary": {"group": "language", "control": "text", "name": "Dictionary", "description": "Choose the dictionary resource used for spell checking."},

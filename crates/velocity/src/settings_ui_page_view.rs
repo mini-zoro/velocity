@@ -1,9 +1,11 @@
-//! Curated Settings pages: bold section headings with their controls indented below,
-//! native-looking checkboxes, popups, radios, steppers and push buttons, "?" help, and live
-//! previews of the editor font and indentation.
+//! The right side of the Settings window, as one scrolling list: curated pages (bold section
+//! headings with their controls indented below, native-looking checkboxes, popups, radios,
+//! steppers and push buttons, "?" help, live font and indentation previews), search results
+//! (curated controls with where they live, then Advanced rows), and Advanced rows, whose
+//! description and effect note each have their own line beside the control column.
 use super::{
-    Entry, Focus, Ink, Kind, Page, Target, boxed, checkbox, focus_ring, mix, paint_chips,
-    popup_button, push_button, radio, rect, rounded, text,
+    Control, Entry, Focus, Ink, Kind, Page, PopupKind, Target, boxed, checkbox, divider,
+    focus_ring, mix, paint_chips, popup_button, push_button, radio, rect, rounded, text,
 };
 use vel_config::Value;
 use vel_i18n::Translator;
@@ -29,6 +31,14 @@ enum Line {
     Buttons(Vec<usize>),
 }
 
+/// The position of entry `i` among the rows of `filtered`.
+fn index_of(entries: &[Entry], i: usize) -> usize {
+    entries[..i]
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Setting { .. } | Entry::Row(_)))
+        .count()
+}
+
 impl Page {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_page(
@@ -41,14 +51,12 @@ impl Page {
         content: Rect,
         scale: f64,
         focused: bool,
+        curated: bool,
     ) {
-        let super::Pane::Page(page) = self.pane else {
-            return;
-        };
-        let entries = std::mem::take(&mut self.entries[page]);
+        let entries = std::mem::take(&mut self.display);
         self.page_bounds = content;
-        let pad_left = 30. * scale;
-        let pad_right = 22. * scale;
+        let pad_left = if curated { 30. } else { 26. } * scale;
+        let pad_right = if curated { 22. } else { 16. } * scale;
         let inner = rect(
             content.x + pad_left,
             content.y,
@@ -82,12 +90,12 @@ impl Page {
 
         // Layout.
         let mut lines = Vec::new();
-        let mut y = 22. * scale;
+        let mut y = if curated { 22. } else { 12. } * scale;
         let mut first = true;
         let mut i = 0;
         while i < entries.len() {
             match &entries[i] {
-                Entry::Heading { .. } => {
+                Entry::Heading { .. } | Entry::Group { .. } => {
                     if !first {
                         y += 20. * scale;
                     }
@@ -95,12 +103,24 @@ impl Page {
                     lines.push((Line::Entry(i), y, 22. * scale));
                     y += 28. * scale;
                 }
-                Entry::Setting { kind, .. } => {
+                Entry::Setting { kind, location, .. } => {
+                    first = false;
                     let h = match kind {
                         Kind::Check => 28.,
                         Kind::Tags => 60.,
                         _ => 34.,
-                    } * scale;
+                    } + if location.is_some() { 16. } else { 0. };
+                    lines.push((Line::Entry(i), y, h * scale));
+                    y += h * scale;
+                }
+                Entry::Row(id) => {
+                    if !first
+                        && matches!(entries.get(i.wrapping_sub(1)), Some(Entry::Setting { .. }))
+                    {
+                        y += 8. * scale;
+                    }
+                    first = false;
+                    let h = self.row_height(*id, scale);
                     lines.push((Line::Entry(i), y, h));
                     y += h;
                 }
@@ -128,8 +148,9 @@ impl Page {
             let wanted = lines.iter().find(|(line, _, _)| match line {
                 Line::Entry(i) => matches!(
                     &entries[*i],
-                    Entry::Setting { row, .. }
-                        if self.focus == Focus::List && self.selected_row() == Some(*row)
+                    Entry::Setting { row, .. } | Entry::Row(row)
+                        if matches!(self.focus, Focus::List | Focus::Edit)
+                            && self.selected_row() == Some(*row)
                 ),
                 Line::Buttons(ids) => ids.iter().any(|i| {
                     matches!(&entries[*i], Entry::Button { id, .. }
@@ -151,6 +172,16 @@ impl Page {
             .clamp(0., (self.page_extent - viewport).max(0.));
         let offset = self.page_offset;
         let writable = self.writable();
+        if entries.is_empty() && !curated {
+            text(
+                theme,
+                layer,
+                &ink.quiet,
+                &tr.tr("No matching settings."),
+                rect(inner.x, content.y + 12. * scale, inner.width, 28. * scale),
+                content,
+            );
+        }
 
         for (line, top, h) in &lines {
             let sy = content.y + top - offset;
@@ -185,6 +216,43 @@ impl Page {
                     }
                 }
                 Line::Entry(i) => match &entries[*i] {
+                    Entry::Row(id) => {
+                        let bounds =
+                            rect(content.x + 13. * scale, sy, content.width - 26. * scale, *h);
+                        self.paint_row(
+                            theme,
+                            tr,
+                            ink,
+                            styles,
+                            [layer, controls, fields],
+                            (index_of(&entries, *i), *id),
+                            bounds,
+                            content,
+                            scale,
+                            focused,
+                        );
+                    }
+                    Entry::Group { title } => {
+                        let title_w = theme.advance(&ink.strong, title).min(inner.width);
+                        divider(
+                            layer,
+                            ink,
+                            rect(inner.x, sy - 9. * scale, inner.width, 1.),
+                            content,
+                        );
+                        text(
+                            theme,
+                            layer,
+                            &ink.strong,
+                            title,
+                            rect(inner.x, sy, inner.width, *h),
+                            content,
+                        );
+                        self.headings.push((
+                            intersection(content, rect(inner.x, sy, title_w, *h)),
+                            title.clone(),
+                        ));
+                    }
                     Entry::Heading { title, hint } => {
                         let r = rect(inner.x, sy, inner.width, *h);
                         let title_w = theme.advance(&ink.strong, title).min(inner.width);
@@ -218,9 +286,28 @@ impl Page {
                         enabled,
                         hint,
                         choices,
+                        location,
                         ..
                     } => {
                         let row = *row;
+                        if let Some((_, caption)) = location {
+                            // Where the option lives: click to show it on its page.
+                            let x = inner.x + indent + if *nested { sub } else { 0. };
+                            let w = theme.advance(&ink.link, caption).min(right - x);
+                            // The last line of the result, below a list's add field too.
+                            let r = rect(x, sy + h - 19. * scale, w + 1., 16. * scale);
+                            text(theme, layer, &ink.link, caption, r, content);
+                            let target = Target::Locate(row);
+                            if focused && self.focus == Focus::Action(target) {
+                                vel_ui::fill(
+                                    layer,
+                                    rect(r.x, r.y + r.height - 1., w, 1.),
+                                    content,
+                                    ink.accent,
+                                );
+                            }
+                            self.hits.push((intersection(content, r), target));
+                        }
                         let x = inner.x + indent + if *nested { sub } else { 0. };
                         let entry = &self.rows[row];
                         let enabled = *enabled && writable && entry.editable();
@@ -409,53 +496,16 @@ impl Page {
                                                 17. * scale,
                                                 field_h,
                                             );
-                                            boxed(
+                                            super::stepper(
+                                                theme,
                                                 controls,
+                                                ink,
                                                 stepper,
-                                                content,
-                                                ink.control,
-                                                ink.border,
-                                                5.,
-                                            );
-                                            let icon = 13. * scale;
-                                            theme.icon(
-                                                controls,
-                                                "Theme - Velocity/updown.png",
-                                                rect(
-                                                    stepper.x + (stepper.width - icon) / 2.,
-                                                    stepper.y + (stepper.height - icon) / 2.,
-                                                    icon,
-                                                    icon,
-                                                ),
                                                 content,
                                                 label_style.foreground,
                                             );
                                             if enabled && !conflict {
-                                                let half = stepper.height / 2.;
-                                                self.hits.push((
-                                                    intersection(
-                                                        content,
-                                                        rect(
-                                                            stepper.x,
-                                                            stepper.y,
-                                                            stepper.width,
-                                                            half,
-                                                        ),
-                                                    ),
-                                                    Target::Step(row, true),
-                                                ));
-                                                self.hits.push((
-                                                    intersection(
-                                                        content,
-                                                        rect(
-                                                            stepper.x,
-                                                            stepper.y + half,
-                                                            stepper.width,
-                                                            half,
-                                                        ),
-                                                    ),
-                                                    Target::Step(row, false),
-                                                ));
+                                                self.push_steps(row, stepper, content);
                                             }
                                         }
                                     }
@@ -609,7 +659,385 @@ impl Page {
                 2.,
             );
         }
-        self.entries[page] = entries;
+        self.display = entries;
+    }
+
+    /// Step targets: the top half of a stepper increases, the bottom half decreases.
+    fn push_steps(&mut self, row: usize, stepper: Rect, clip: Rect) {
+        let half = stepper.height / 2.;
+        self.hits.push((
+            intersection(clip, rect(stepper.x, stepper.y, stepper.width, half)),
+            Target::Step(row, true),
+        ));
+        self.hits.push((
+            intersection(clip, rect(stepper.x, stepper.y + half, stepper.width, half)),
+            Target::Step(row, false),
+        ));
+    }
+
+    /// An Advanced row is two lines, or three when it has an effect note or a list: the
+    /// description and the note each get their own line beside the control column.
+    pub(super) fn row_height(&self, id: usize, scale: f64) -> f64 {
+        let row = &self.rows[id];
+        let array = row.control() == Control::Array && row.editable();
+        if array || row.effect.is_some() {
+            70. * scale
+        } else {
+            52. * scale
+        }
+    }
+
+    /// One Advanced row: name and key, then the description, then (when present) the effect
+    /// note, all left of the control column; the control, a list's add field and the row's
+    /// links stay in that column, so nothing covers the text.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_row(
+        &mut self,
+        theme: &ThemeUi,
+        tr: &Translator,
+        ink: &Ink,
+        styles: [&Style; 3],
+        [layer, controls, fields]: [&mut Layer; 3],
+        (i, id): (usize, usize),
+        bounds: Rect,
+        list: Rect,
+        scale: f64,
+        focused: bool,
+    ) {
+        let visible = intersection(list, bounds);
+        if visible.width == 0. || visible.height == 0. {
+            return;
+        }
+        let writable = self.writable();
+        let row = &self.rows[id];
+        let y = bounds.y;
+        self.hits.push((visible, Target::Row(id)));
+        self.tooltips.push((visible, row.description.clone()));
+        let selected = self.selected == i
+            && matches!(
+                self.focus,
+                Focus::List
+                    | Focus::Edit
+                    | Focus::Action(
+                        Target::RowJson(_)
+                            | Target::NewWindow(_)
+                            | Target::Reset(_)
+                            | Target::RemoveTag(..)
+                            | Target::MoreTags(_)
+                    )
+            );
+        let hovered = self.hovered.is_some_and(|p| vel_ui::contains(visible, p));
+        if selected || hovered {
+            rounded(
+                layer,
+                bounds,
+                list,
+                if selected { ink.selection } else { ink.sidebar },
+                5.,
+            );
+        }
+        divider(
+            layer,
+            ink,
+            rect(bounds.x, y + bounds.height - 1., bounds.width, 1.),
+            list,
+        );
+        let left = bounds.x + 13. * scale;
+        if row.modified {
+            rounded(
+                layer,
+                rect(left - 9. * scale, y + 13. * scale, 5. * scale, 5. * scale),
+                list,
+                ink.accent,
+                2.5,
+            );
+        }
+        let reset_w = 23. * scale;
+        let right = (bounds.x + bounds.width - reset_w).max(left);
+        let is_array = row.control() == Control::Array && row.editable();
+        let control_w = match row.control() {
+            Control::Bool if row.editable() => 24. * scale,
+            Control::Number if row.editable() => 100. * scale,
+            Control::Array if row.editable() => (300. * scale).min(bounds.width * 0.46),
+            _ => (190. * scale).min(bounds.width * 0.4),
+        };
+        let control = rect(right - control_w, y + 5. * scale, control_w, 24. * scale);
+        let text_end = (control.x - 16. * scale).max(left);
+        let title_w = text_end - left;
+        let name_w = theme.advance(&ink.strong, &row.name).min(title_w * 0.62);
+        text(
+            theme,
+            layer,
+            &ink.strong,
+            &row.name,
+            rect(left, y + 5. * scale, name_w + 1., 24. * scale),
+            list,
+        );
+        let key_x = left + name_w + 8. * scale;
+        text(
+            theme,
+            layer,
+            &ink.code,
+            row.key(),
+            rect(
+                key_x,
+                y + 5. * scale,
+                (text_end - key_x).max(0.),
+                24. * scale,
+            ),
+            list,
+        );
+
+        let edit = self.edit.as_ref().filter(|edit| edit.row == id);
+        let saved = self.conflicts.contains_key(&id);
+        let control_focused =
+            focused && selected && self.focus == Focus::List && self.popup.is_none();
+        let conflict = saved || edit.is_some_and(|edit| edit.conflict);
+        let error = edit.and_then(|edit| edit.error.clone());
+        let enabled = writable && row.editable() && !conflict;
+        let caption_style = if enabled { &ink.normal } else { &ink.muted };
+        match row.control() {
+            Control::Bool if row.editable() => {
+                let size = 15. * scale;
+                let check = rect(
+                    control.x + control.width - size - 4. * scale,
+                    control.y + (control.height - size) / 2.,
+                    size,
+                    size,
+                );
+                checkbox(
+                    theme,
+                    controls,
+                    ink,
+                    check,
+                    list,
+                    row.value.as_bool().unwrap_or(false),
+                    enabled,
+                );
+                if control_focused {
+                    focus_ring(controls, ink, check, list, 4.);
+                }
+                self.hits.push((
+                    intersection(list, rect(check.x - 6., y, size + 12., 34. * scale)),
+                    Target::Control(id),
+                ));
+            }
+            Control::Enum if row.editable() => {
+                popup_button(
+                    theme,
+                    controls,
+                    ink,
+                    &row.display(tr),
+                    control,
+                    list,
+                    enabled,
+                    control_focused,
+                );
+                self.hits
+                    .push((intersection(list, control), Target::Control(id)));
+            }
+            Control::Number if row.editable() => {
+                let stepper_w = 17. * scale;
+                let field = rect(
+                    control.x,
+                    control.y,
+                    control.width - stepper_w - 5. * scale,
+                    control.height,
+                );
+                self.paint_field(
+                    theme, tr, ink, styles, controls, fields, id, field, list, scale, focused,
+                    enabled, "",
+                );
+                if control_focused {
+                    focus_ring(controls, ink, field, list, 5.);
+                }
+                let stepper = rect(
+                    field.x + field.width + 5. * scale,
+                    control.y,
+                    stepper_w,
+                    control.height,
+                );
+                super::stepper(
+                    theme,
+                    controls,
+                    ink,
+                    stepper,
+                    list,
+                    caption_style.foreground,
+                );
+                if enabled {
+                    self.push_steps(id, stepper, list);
+                }
+            }
+            Control::Text if row.editable() => {
+                self.paint_field(
+                    theme, tr, ink, styles, controls, fields, id, control, list, scale, focused,
+                    enabled, "",
+                );
+                if control_focused {
+                    focus_ring(controls, ink, control, list, 5.);
+                }
+            }
+            Control::Array if row.editable() => {
+                paint_chips(
+                    theme,
+                    controls,
+                    ink,
+                    tr,
+                    &mut self.hits,
+                    &self.rows[id],
+                    id,
+                    control,
+                    list,
+                    scale,
+                    enabled,
+                    self.focus,
+                );
+                let field = rect(control.x, y + 33. * scale, control.width, 22. * scale);
+                let placeholder = tr.tr("Add tag…");
+                self.paint_field(
+                    theme,
+                    tr,
+                    ink,
+                    styles,
+                    controls,
+                    fields,
+                    id,
+                    field,
+                    list,
+                    scale,
+                    focused,
+                    enabled,
+                    &placeholder,
+                );
+                if control_focused {
+                    focus_ring(controls, ink, field, list, 5.);
+                }
+            }
+            _ => text(
+                theme,
+                layer,
+                &ink.quiet,
+                &self.rows[id].display(tr),
+                control,
+                list,
+            ),
+        }
+        let row = &self.rows[id];
+        if row.modified {
+            let reset = rect(
+                right + 3. * scale,
+                control.y,
+                reset_w - 3. * scale,
+                control.height,
+            );
+            if self.focus == Focus::Action(Target::Reset(id)) {
+                rounded(layer, reset, list, ink.field, 4.);
+            }
+            text(
+                theme,
+                layer,
+                if writable { &ink.normal } else { &ink.muted },
+                &tr.tr("✕"),
+                rect(
+                    reset.x + 4. * scale,
+                    reset.y,
+                    reset.width - 4. * scale,
+                    reset.height,
+                ),
+                list,
+            );
+            self.hits
+                .push((intersection(list, reset), Target::Reset(id)));
+            self.tooltips.push((
+                intersection(list, reset),
+                tr.tr("Reset setting").into_owned(),
+            ));
+        }
+        // Second line: the description (or a warning). Third line: the effect note.
+        let line2 = rect(
+            left,
+            y + 29. * scale,
+            (text_end - left).max(0.),
+            20. * scale,
+        );
+        let conflict_text = tr.tr("This value changed outside Settings.");
+        let warning = if conflict {
+            Some(conflict_text.as_ref())
+        } else {
+            error.as_deref()
+        };
+        text(
+            theme,
+            layer,
+            if warning.is_some() {
+                &ink.error
+            } else {
+                &ink.quiet
+            },
+            warning.unwrap_or(&row.description),
+            line2,
+            list,
+        );
+        if let Some(warning) = warning {
+            self.tooltips
+                .push((intersection(list, line2), warning.to_owned()));
+        }
+        let line3 = rect(
+            left,
+            y + 48. * scale,
+            (text_end - left).max(0.),
+            18. * scale,
+        );
+        if let Some(effect) = &row.effect {
+            text(theme, layer, &ink.quiet, effect, line3, list);
+        }
+        // Links sit in the control column: under the control, or on the third line beside a
+        // list's add field.
+        let edit_json = tr.tr("Edit in JSON");
+        let link_w = theme.advance(&ink.link, &edit_json) + 2. * scale;
+        let link_y = if is_array {
+            y + 49. * scale
+        } else {
+            y + 30. * scale
+        };
+        let link = rect(right - link_w, link_y, link_w, 18. * scale);
+        let enum_open = self
+            .popup
+            .as_ref()
+            .is_some_and(|p| p.kind == PopupKind::Choices(id));
+        let column = control.x.min(right - link_w);
+        if (selected || hovered) && !enum_open && link.x >= column - 1. {
+            text(theme, layer, &ink.link, &edit_json, link, list);
+            if self.focus == Focus::Action(Target::RowJson(id)) {
+                vel_ui::fill(
+                    layer,
+                    rect(link.x, link.y + link.height - 2., link.width, 1.),
+                    list,
+                    ink.accent,
+                );
+            }
+            self.hits
+                .push((intersection(list, link), Target::RowJson(id)));
+            if row.next_window() && writable {
+                let caption = tr.tr("New Window");
+                let width = theme.advance(&ink.link, &caption) + scale;
+                let button = rect(link.x - 12. * scale - width, link.y, width, link.height);
+                if button.x >= column - 1. {
+                    text(theme, layer, &ink.link, &caption, button, list);
+                    let target = Target::NewWindow(id);
+                    if self.focus == Focus::Action(target) {
+                        vel_ui::fill(
+                            layer,
+                            rect(button.x, button.y + button.height - 2., button.width, 1.),
+                            list,
+                            ink.accent,
+                        );
+                    }
+                    self.hits.push((intersection(list, button), target));
+                }
+            }
+        }
     }
 
     /// A single-line editor for text and numbers; the live input while it is being edited.
@@ -632,10 +1060,10 @@ impl Page {
     ) {
         let tags = self.rows[row].control() == super::Control::Array;
         let visible = intersection(field, clip) == field;
-        if enabled {
-            self.hits
-                .push((intersection(clip, field), Target::Control(row)));
-        }
+        // Disabled fields keep their place in hit testing and accessibility, reported as
+        // disabled; activation checks the row itself.
+        self.hits
+            .push((intersection(clip, field), Target::Control(row)));
         let label_bounds = rect(
             field.x + 7. * scale,
             field.y,

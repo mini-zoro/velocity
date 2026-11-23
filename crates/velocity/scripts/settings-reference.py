@@ -293,7 +293,11 @@ def ui_reference(defaults, notes):
             value = meta.get(field)
             if not isinstance(value, str) or not value.strip() or len(value.splitlines()) != 1:
                 raise ValueError(f"{key}: needs a one-line {field} in Settings UI metadata")
-        row = {"description": meta["description"], "effect": timing.get(key, "immediate")}
+        # The reference documents macOS; the app resolves {alt}, {command}, {os} per platform.
+        description = meta["description"]
+        for token, name in (("{alt}", "Option"), ("{command}", "Command"), ("{os}", "macOS")):
+            description = description.replace(token, name)
+        row = {"description": description, "effect": timing.get(key, "immediate")}
         if NO_EFFECT in notes.get(key, "").lower():
             row["compatibility"] = True
         data[key] = row

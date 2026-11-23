@@ -82,11 +82,18 @@ fn type_text(app: &mut App, text: &str) {
     );
 }
 
+/// Activates a setting's Advanced row, as the full list shows it (key, legacy choices,
+/// reset): Advanced, the row selected, then Return.
 fn edit(app: &mut App, key_name: &str) {
     app.run_named(None, "show_settings", &json!({}));
-    type_text(app, key_name);
-    key(app, "enter"); // Search -> list
-    key(app, "enter"); // List -> field or switch
+    advanced(app, key_name);
+    key(app, "enter"); // Row -> field, switch or popup
+}
+
+/// Shows a setting's row on Advanced with keyboard focus.
+fn advanced(app: &mut App, key_name: &str) {
+    show(app, Pane::Advanced);
+    with_page(app, |page, _| page.focus_setting(key_name));
 }
 
 #[track_caller]
@@ -736,6 +743,7 @@ fn settings_ui_reset_preserves_bytes_and_invalid_input_never_writes() {
         fs::read_to_string(path).unwrap(),
         user.replace("  \"tab_size\"  :  8,\n", "")
     );
+    type_text(&mut app, "tab");
     key(&mut app, "escape"); // Clears the search.
     assert!(app.workspace.settings_page.is_some());
     key(&mut app, "escape"); // Closes the window.
@@ -958,11 +966,13 @@ fn settings_ui_search_uses_find_field_style_and_passes_wcag_contrast() {
         let scene = painted(&mut app, 800.);
         let text = text_ink(&scene, "wrap");
         assert!(contrast(text, settings.0) >= 4.5, "dark: {dark}");
-        let description = "Wrap long lines to fit the editor or a set column.";
-        assert!(
-            contrast(text_ink(&scene, description), scene.background) >= 4.5,
-            "dark: {dark}: {description}"
-        );
+        let description = "Disable automatic wrapping at this file size in bytes.";
+        for text in [description, "Editor › Word Wrap", "More in Advanced"] {
+            assert!(
+                contrast(text_ink(&scene, text), scene.background) >= 4.5,
+                "dark: {dark}: {text}"
+            );
+        }
         editor.run_named(None, "show_panel", &json!({"panel":"find"}));
         type_text(&mut editor, "wrap");
         let find = painted(&mut editor, 800.);
@@ -1079,11 +1089,7 @@ fn settings_ui_broken_controls_keep_geometry_and_are_dimmed() {
     let (_data, mut good, _) = app(r#"{"tab_size":4}"#);
     let (_broken_data, mut broken, _) = app("{\"tab_size\": }");
     let snapshots = [&mut good, &mut broken].map(|app| {
-        app.workspace
-            .settings_page
-            .as_mut()
-            .unwrap()
-            .search_for("auto_close_tags");
+        advanced(app, "auto_close_tags");
         let scene = painted(app, 800.);
         let tree = app.accessible_tree();
         let row = tree
@@ -1117,11 +1123,7 @@ fn settings_ui_broken_controls_keep_geometry_and_are_dimmed() {
     assert_eq!(snapshots[0].2, snapshots[1].2);
     assert_ne!(snapshots[0].3, snapshots[1].3);
     for app in [&mut good, &mut broken] {
-        app.workspace
-            .settings_page
-            .as_mut()
-            .unwrap()
-            .search_for("tab_size");
+        advanced(app, "tab_size");
         painted(app, 800.);
     }
     let field = |app: &App| {
@@ -1132,7 +1134,9 @@ fn settings_ui_broken_controls_keep_geometry_and_are_dimmed() {
             .unwrap()
     };
     let (good, broken) = (field(&good), field(&broken));
-    assert_eq!(good.frame, broken.frame);
+    // The read-only notice makes the list shorter, so only the row's scroll position differs.
+    let shape = |r: Rect| (r.x, r.width, r.height);
+    assert_eq!(shape(good.frame), shape(broken.frame));
     assert!(good.enabled && good.editable && !broken.enabled && !broken.editable);
 }
 
@@ -1186,17 +1190,269 @@ fn settings_ui_footer_shortens_in_the_middle_and_tooltip_has_full_path() {
 }
 
 #[test]
-fn settings_ui_deferred_effect_is_kept_on_the_second_line() {
+fn settings_ui_advanced_rows_keep_description_and_effect_clear_of_controls() {
     let (_data, mut app, _) = app("{}");
-    type_text(&mut app, "hot_exit");
-    let scene = painted(&mut app, 800.);
-    let runs: Vec<_> = scene.layers.iter().flat_map(|layer| &layer.text).collect();
-    let effect = runs
-        .iter()
-        .find(|run| run.text == "Takes effect: Next close or quit")
-        .unwrap();
-    let name = runs.iter().find(|run| run.text == "Hot Exit").unwrap();
-    assert!((18. ..=28.).contains(&(effect.baseline - name.baseline)));
+    show(&mut app, Pane::Advanced);
+    for width in [720., 600.] {
+        app.window_size = Size {
+            width,
+            height: 2400.,
+        };
+        let scene = app.scene();
+        let runs: Vec<_> = scene.layers.iter().flat_map(|layer| &layer.text).collect();
+        let run = |text: &str| {
+            *runs
+                .iter()
+                .find(|run| {
+                    run.text == text
+                        || run.text.trim_end_matches('…').len() > 3
+                            && text.starts_with(run.text.trim_end_matches('…'))
+                })
+                .unwrap_or_else(|| panic!("{width}: missing {text}"))
+        };
+        let tree = app.accessible_tree();
+        let control = |label: &str| {
+            tree.nodes
+                .iter()
+                .find(|n| n.label.starts_with(label) && n.role != Role::Row)
+                .unwrap_or_else(|| panic!("{width}: no control {label}"))
+                .frame
+        };
+        // A list's add field stays in the control column, right of the description.
+        let description = run("Treat these extra words as valid spelling.");
+        let field = control("Added Words, Add tag…");
+        assert!(f64::from(description.x) < field.x);
+        let words = theme_width(&app, description);
+        assert!(f64::from(description.x) + words <= field.x - 8., "{width}");
+        // The effect note has its own line, below a description that is not squeezed.
+        let atomic = run("Write to a temporary file and replace the original when possible.");
+        let effect = runs
+            .iter()
+            .find(|run| {
+                run.text == "Takes effect: Next save"
+                    && (run.baseline - atomic.baseline).abs() < 40.
+            })
+            .expect("effect note");
+        assert!(effect.baseline - atomic.baseline >= 14., "{width}");
+        assert!((f64::from(effect.x) - f64::from(atomic.x)).abs() < 1.);
+        let check = control("Atomic Save");
+        assert!(
+            f64::from(atomic.x) + theme_width(&app, atomic) <= check.x,
+            "{width}"
+        );
+    }
+}
+
+/// The drawn advance of a run, measured with the window's own text metrics.
+fn theme_width(app: &App, run: &vel_render::scene::TextRun) -> f64 {
+    use vel_theme::{Element, ElementPath};
+    let mut theme = app.workspace.themes.ui.borrow_mut();
+    let mut style = theme.style(
+        crate::panels::StyleId::SettingsLabel.at(0),
+        &ElementPath(&[
+            Element::new("window", &[]),
+            Element::new("label_control", &[]),
+        ]),
+        &app.workspace.settings,
+    );
+    style.size = run.size;
+    style.family = run.family.clone();
+    style.font = run.style;
+    theme.advance(&style, &run.text)
+}
+
+#[test]
+fn settings_ui_number_fields_share_one_stepper() {
+    let (_data, mut app, _) = app("{}");
+    for pane in [Pane::page("editor"), Pane::Advanced] {
+        show(&mut app, pane);
+        if pane == Pane::Advanced {
+            advanced(&mut app, "tab_size");
+        }
+        let scene = painted(&mut app, 900.);
+        let texts: Vec<_> = scene
+            .layers
+            .iter()
+            .flat_map(|l| &l.text)
+            .map(|r| r.text.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&"−") && !texts.contains(&"+"),
+            "{pane:?}: {texts:?}"
+        );
+        let tree = app.accessible_tree();
+        let field = tree
+            .nodes
+            .iter()
+            .find(|n| {
+                n.role == Role::TextField && ["Tab width", "Tab Size"].contains(&n.label.as_str())
+            })
+            .unwrap()
+            .frame;
+        let beside = |label: &str| {
+            tree.nodes
+                .iter()
+                .find(|n| {
+                    n.label == label
+                        && n.frame.y >= field.y - 1.
+                        && n.frame.y + n.frame.height <= field.y + field.height + 1.
+                        && n.frame.x > field.x
+                })
+                .unwrap()
+                .clone()
+        };
+        let (up, down) = (beside("Increase"), beside("Decrease"));
+        // One stepper: the halves of the same chevron button, increase on top.
+        assert_eq!(up.frame.x, down.frame.x);
+        assert!(up.frame.y < down.frame.y);
+        assert!((up.frame.y + up.frame.height - down.frame.y).abs() < 0.5);
+        let target = up;
+        let before = app.workspace.editor().settings.usize("tab_size", 0);
+        press(&mut app, &target);
+        assert!(app.poll_settings_input(Instant::now() + Duration::from_secs(1)));
+        assert_eq!(
+            app.workspace.editor().settings.usize("tab_size", 0),
+            before + 1
+        );
+    }
+}
+
+#[test]
+fn settings_search_shows_curated_matches_first_and_jumps_to_their_page() {
+    for (language, query, location, more) in [
+        ("en", "wrap", "Editor › Word Wrap", "More in Advanced"),
+        ("zh-Hans", "换行", "编辑器 › 自动换行", "高级中的更多结果"),
+    ] {
+        let (_data, mut app, _) = app(&json!({"ui_language": language}).to_string());
+        type_text(&mut app, query);
+        let scene = painted(&mut app, 1600.);
+        let runs: Vec<_> = scene.layers.iter().flat_map(|l| &l.text).collect();
+        let caption = runs
+            .iter()
+            .find(|r| r.text == location)
+            .expect("location caption");
+        let group = runs
+            .iter()
+            .find(|r| r.text == more)
+            .expect("Advanced group");
+        assert!(caption.baseline < group.baseline);
+        // Curated results show no keys; the Advanced group below may.
+        let keys: Vec<_> = runs
+            .iter()
+            .filter(|r| r.family.as_deref() == Some("Menlo") && r.text.contains('_'))
+            .collect();
+        assert!(
+            keys.iter().all(|r| r.baseline > group.baseline),
+            "{language}"
+        );
+        assert!(!keys.is_empty());
+        let page = app.workspace.settings_page.as_ref().unwrap();
+        let results: Vec<_> = page.results().map(|(key, _)| key).collect();
+        assert_eq!(
+            results.first(),
+            Some(&"word_wrap"),
+            "{language}: {results:?}"
+        );
+        // Activating a curated result edits it in place, with its curated control.
+        let radio = app
+            .accessible_tree()
+            .nodes
+            .into_iter()
+            .find(|n| n.role == Role::RadioButton && n.checked == Some(false))
+            .unwrap();
+        press(&mut app, &radio);
+        assert!(
+            app.workspace
+                .settings
+                .layer(Layer::User)
+                .contains_key("word_wrap")
+        );
+        // The caption shows the option on its page, focused and in view.
+        painted(&mut app, 1600.);
+        let link = app
+            .accessible_tree()
+            .nodes
+            .into_iter()
+            .find(|n| n.role == Role::Link && n.label == location)
+            .unwrap();
+        press(&mut app, &link);
+        let page = app.workspace.settings_page.as_ref().unwrap();
+        assert_eq!(page.pane(), Pane::page("editor"));
+        assert_eq!(page.results().next().map(|(key, _)| key), Some("font_face"));
+        painted(&mut app, 480.);
+        let tree = app.accessible_tree();
+        let focused = tree.node(tree.focused().unwrap()).unwrap();
+        assert_eq!(focused.role, Role::RadioButton, "{language}");
+        assert!(focused.frame.y >= 0. && focused.frame.y + focused.frame.height <= 480.);
+    }
+}
+
+#[test]
+fn settings_descriptions_name_keys_and_system_for_the_platform() {
+    use crate::settings_ui::platform_text_for;
+    let drag = "Move selected text by dragging. Hold {alt} to copy it.";
+    assert_eq!(
+        platform_text_for(drag, true),
+        "Move selected text by dragging. Hold Alt to copy it."
+    );
+    assert_eq!(
+        platform_text_for(drag, false),
+        "Move selected text by dragging. Hold Option to copy it."
+    );
+    assert_eq!(platform_text_for("{command}+{os}", true), "Ctrl+Windows");
+    assert_eq!(platform_text_for("{command}+{os}", false), "Command+macOS");
+    // Every description, in English and in each catalog, names keys through the tokens.
+    let metadata = Document::parse(include_str!(
+        "../resources/Packages/Default/settings-ui.json"
+    ))
+    .unwrap()
+    .value;
+    let catalogs: Vec<_> = crate::ui_language::shipped_catalogs().collect();
+    let words = regex_lite_words();
+    for (key, meta) in metadata.as_object().unwrap() {
+        let source = meta["description"].as_str().unwrap();
+        let mut texts = vec![source.to_owned()];
+        texts.extend(
+            catalogs
+                .iter()
+                .filter_map(|(_, catalog)| catalog.strings.get(source).cloned()),
+        );
+        for text in texts {
+            for windows in [true, false] {
+                let resolved = platform_text_for(&text, windows);
+                assert!(!resolved.contains('{'), "{key}: {resolved}");
+                if windows {
+                    for word in &words {
+                        assert!(
+                            !resolved
+                                .split(|c: char| !c.is_alphanumeric() && c != '⌘' && c != '⌥')
+                                .any(|w| w == *word),
+                            "{key}: {resolved} names a Mac key on Windows"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // The window shows the platform's wording, in both languages.
+    for (language, wanted) in [("en", "Hold "), ("zh-Hans", "按住 ")] {
+        let (_data, app, _) = app(&json!({"ui_language": language}).to_string());
+        let page = app.workspace.settings_page.as_ref().unwrap();
+        let (_, _, description) = page
+            .localized_copy()
+            .find(|(key, _, _)| *key == "drag_text")
+            .unwrap();
+        let name = if cfg!(windows) { "Alt" } else { "Option" };
+        assert!(
+            description.contains(&format!("{wanted}{name}")),
+            "{language}: {description}"
+        );
+    }
+}
+
+/// Mac-only key names that must not appear in a Windows description.
+fn regex_lite_words() -> [&'static str; 5] {
+    ["Option", "Command", "Cmd", "⌘", "⌥"]
 }
 
 #[test]

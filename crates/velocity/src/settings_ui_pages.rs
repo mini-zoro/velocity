@@ -261,6 +261,28 @@ pub(super) fn expand_label(label: &'static str, tr: &vel_i18n::Translator) -> St
     }
 }
 
+/// Resolves the key and system names in a description for the platform being built.
+pub(crate) fn platform_text(text: &str) -> String {
+    platform_text_for(text, cfg!(windows))
+}
+
+/// `{alt}`, `{command}` and `{os}` read Option, Command, macOS on a Mac and Alt, Ctrl,
+/// Windows on Windows, in every language.
+pub(crate) fn platform_text_for(text: &str, windows: bool) -> String {
+    let names: [(&str, &str); 3] = if windows {
+        [("{alt}", "Alt"), ("{command}", "Ctrl"), ("{os}", "Windows")]
+    } else {
+        [
+            ("{alt}", "Option"),
+            ("{command}", "Command"),
+            ("{os}", "macOS"),
+        ]
+    };
+    names.iter().fold(text.to_owned(), |text, (token, name)| {
+        text.replace(token, name)
+    })
+}
+
 /// The display name of a color scheme or theme value: its file name without the extension.
 pub(super) fn resource_label(value: &str) -> String {
     let name = value.rsplit('/').next().unwrap_or(value);

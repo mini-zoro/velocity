@@ -30,7 +30,6 @@ const AX_PANES: u64 = AX_ROOT + 6;
 const AX_PANE: u64 = AX_ROOT + 0x1000;
 const AX_SECTION: u64 = AX_ROOT + 0x1800;
 const AX_BUTTON: u64 = AX_ROOT + 0x1c00;
-const ROW_HEIGHT: f64 = 48.;
 const MAX_CHIPS: usize = 3;
 
 pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
@@ -316,6 +315,31 @@ pub(super) fn popup_button(
             bounds.height,
         ),
         clip,
+    );
+}
+
+/// The up/down half of a number field: the top increases, the bottom decreases.
+pub(super) fn stepper(
+    theme: &ThemeUi,
+    layer: &mut Layer,
+    ink: &Ink,
+    r: Rect,
+    clip: Rect,
+    color: Color,
+) {
+    boxed(layer, r, clip, ink.control, ink.border, 5.);
+    let icon = (r.width * 0.78).min(13. * r.height / 24.);
+    theme.icon(
+        layer,
+        "Theme - Velocity/updown.png",
+        rect(
+            r.x + (r.width - icon) / 2.,
+            r.y + (r.height - icon) / 2.,
+            icon,
+            icon,
+        ),
+        clip,
+        color,
     );
 }
 
@@ -625,7 +649,7 @@ impl Page {
             focused,
         );
         let searching = !self.search.value().trim().is_empty();
-        let curated = self.page_entries().is_some();
+        let curated = self.curated_pane();
         let footer_h = if self.error.is_some() || self.notice.is_some() {
             64.
         } else if !curated && !searching {
@@ -650,6 +674,7 @@ impl Page {
                 content,
                 scale,
                 focused,
+                true,
             );
         } else {
             self.paint_list_pane(
@@ -987,7 +1012,8 @@ impl Page {
             content.width,
             (content.y + content.height - list_top).max(0.),
         );
-        self.paint_rows(
+        self.row_list = list;
+        self.paint_page(
             theme,
             tr,
             ink,
@@ -996,6 +1022,7 @@ impl Page {
             list,
             scale,
             focused,
+            false,
         );
     }
 
@@ -1079,425 +1106,6 @@ impl Page {
             text(theme, layer, &ink.quiet, &prefix(short), path_rect, footer);
             self.tooltips
                 .push((path_rect, path.to_string_lossy().into_owned()));
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn paint_rows(
-        &mut self,
-        theme: &ThemeUi,
-        tr: &Translator,
-        ink: &Ink,
-        styles: [&Style; 3],
-        [layer, controls, fields]: [&mut Layer; 3],
-        list: Rect,
-        scale: f64,
-        focused: bool,
-    ) {
-        let clip = list;
-        let pad = 13. * scale;
-        self.row_list = list;
-        self.scroll.row_height = ROW_HEIGHT * scale;
-        self.scroll.set_viewport(list.height);
-        if self.filtered.is_empty() {
-            text(
-                theme,
-                layer,
-                &ink.quiet,
-                &tr.tr("No matching settings."),
-                rect(clip.x + pad, list.y, clip.width - 2. * pad, 32. * scale),
-                list,
-            );
-            return;
-        }
-
-        let edit_json = tr.tr("Edit in JSON");
-        let link_w = (theme.advance(&ink.link, &edit_json) + 2. * scale).min(list.width * 0.27);
-        let writable = self.writable();
-        let conflict_text = tr.tr("This value changed outside Settings.");
-        for i in self.scroll.visible() {
-            let id = self.filtered[i];
-            let row = &self.rows[id];
-            let y = list.y + self.scroll.row_height * i as f64 - self.scroll.offset;
-            let bounds = rect(
-                list.x + pad,
-                y,
-                list.width - 2. * pad,
-                self.scroll.row_height,
-            );
-            let visible = intersection(list, bounds);
-            if visible.width == 0. || visible.height == 0. {
-                continue;
-            }
-            self.hits.push((visible, Target::Row(id)));
-            self.tooltips.push((visible, row.description.clone()));
-            let selected = self.selected == i
-                && matches!(
-                    self.focus,
-                    Focus::List
-                        | Focus::Edit
-                        | Focus::Action(
-                            Target::RowJson(_)
-                                | Target::NewWindow(_)
-                                | Target::Reset(_)
-                                | Target::RemoveTag(..)
-                                | Target::MoreTags(_)
-                        )
-                );
-            let hovered = self.hovered.is_some_and(|p| vel_ui::contains(visible, p));
-            if selected || hovered {
-                rounded(
-                    layer,
-                    bounds,
-                    list,
-                    if selected { ink.selection } else { ink.sidebar },
-                    4.,
-                );
-            }
-            divider(
-                layer,
-                ink,
-                rect(bounds.x, y + bounds.height - 1., bounds.width, 1.),
-                list,
-            );
-            let left = bounds.x + 13. * scale;
-            if row.modified {
-                rounded(
-                    layer,
-                    rect(left - 9. * scale, y + 13. * scale, 5. * scale, 5. * scale),
-                    list,
-                    ink.accent,
-                    2.5,
-                );
-            }
-            let reset_w = 23. * scale;
-            let right = (bounds.x + bounds.width - reset_w).max(left);
-            let control_w = match row.control() {
-                Control::Bool => 40.,
-                Control::Array => 304.,
-                _ => 151.,
-            } * scale;
-            let control_w = control_w.min(bounds.width * 0.46);
-            let is_array = row.control() == Control::Array && row.editable();
-            let control = rect(right - control_w, y + 4. * scale, control_w, 23. * scale);
-            let title_end = (control.x - 8. * scale).max(left);
-            let title_w = title_end - left;
-            let name_w = theme.advance(&ink.strong, &row.name).min(title_w * 0.59);
-            text(
-                theme,
-                layer,
-                &ink.strong,
-                &row.name,
-                rect(left, y + 3. * scale, name_w + 1., 23. * scale),
-                list,
-            );
-            let key_x = left + name_w + 8. * scale;
-            text(
-                theme,
-                layer,
-                &ink.code,
-                row.key(),
-                rect(key_x, y + 3. * scale, title_end - key_x, 23. * scale),
-                list,
-            );
-
-            let edit = self.edit.as_mut().filter(|edit| edit.row == id);
-            let saved = self.conflicts.get(&id).map(String::as_str);
-            let control_focused =
-                focused && selected && self.focus == Focus::List && self.popup.is_none();
-            let conflict = saved.is_some() || edit.as_ref().is_some_and(|edit| edit.conflict);
-            let error = edit.as_ref().and_then(|edit| edit.error.clone());
-            let enabled = writable && row.editable() && !conflict;
-            let caption_style = if enabled { &ink.normal } else { &ink.muted };
-            let mut field = control;
-            match row.control() {
-                Control::Bool if row.editable() => {
-                    let size = 15. * scale;
-                    let check = rect(
-                        control.x + control.width - size - 4. * scale,
-                        y + 8. * scale,
-                        size,
-                        size,
-                    );
-                    checkbox(
-                        theme,
-                        controls,
-                        ink,
-                        check,
-                        list,
-                        row.value.as_bool().unwrap_or(false),
-                        enabled,
-                    );
-                    if control_focused {
-                        focus_ring(controls, ink, check, list, 4.);
-                    }
-                    self.hits.push((
-                        intersection(list, rect(check.x - 6., y, size + 12., 31. * scale)),
-                        Target::Control(id),
-                    ));
-                }
-                Control::Enum if row.editable() => {
-                    popup_button(
-                        theme,
-                        controls,
-                        ink,
-                        &row.display(tr),
-                        control,
-                        list,
-                        enabled,
-                        false,
-                    );
-                    self.hits
-                        .push((intersection(list, control), Target::Control(id)));
-                }
-                Control::Number | Control::Text | Control::Array if row.editable() => {
-                    if is_array {
-                        paint_chips(
-                            theme,
-                            controls,
-                            ink,
-                            tr,
-                            &mut self.hits,
-                            row,
-                            id,
-                            control,
-                            list,
-                            scale,
-                            enabled,
-                            self.focus,
-                        );
-                        field = rect(control.x, y + 27. * scale, control.width, 19. * scale);
-                    } else if row.control() == Control::Number {
-                        let step_w = (20. * scale).min(control.width * 0.25);
-                        field.width = (control.width - 2. * step_w).max(0.);
-                        for (j, (up, caption)) in [(false, tr.tr("−")), (true, tr.tr("+"))]
-                            .into_iter()
-                            .enumerate()
-                        {
-                            let step = rect(
-                                field.x + field.width + step_w * j as f64 + 1.,
-                                field.y,
-                                step_w - 1.,
-                                field.height,
-                            );
-                            rounded(layer, step, list, ink.field, 3.);
-                            text(
-                                theme,
-                                layer,
-                                caption_style,
-                                &caption,
-                                rect(
-                                    step.x + 4. * scale,
-                                    step.y,
-                                    step.width - 4. * scale,
-                                    step.height,
-                                ),
-                                list,
-                            );
-                            if enabled {
-                                self.hits
-                                    .push((intersection(list, step), Target::Step(id, up)));
-                            }
-                        }
-                    }
-                    self.hits
-                        .push((intersection(list, field), Target::Control(id)));
-                    let placeholder = tr.tr("Add tag…");
-                    let label_bounds = rect(
-                        field.x + 7. * scale,
-                        field.y,
-                        field.width - 14. * scale,
-                        field.height,
-                    );
-                    if let Some(edit) =
-                        edit.filter(|_| intersection(field, list) == field && writable)
-                    {
-                        edit.input.bounds = field;
-                        edit.input.scale = scale * if is_array { 0.82 } else { 1. };
-                        let style = if conflict || error.is_some() {
-                            styles[2]
-                        } else if focused {
-                            styles[1]
-                        } else {
-                            styles[0]
-                        };
-                        crate::panels::paint_themed_input(
-                            theme,
-                            style,
-                            fields,
-                            &mut edit.input,
-                            focused,
-                        );
-                        if is_array && edit.input.value().is_empty() && !edit.input.composing() {
-                            text(
-                                theme,
-                                fields,
-                                &ink.quiet,
-                                &placeholder,
-                                rect(
-                                    label_bounds.x + 5. * scale,
-                                    label_bounds.y,
-                                    label_bounds.width - 5. * scale,
-                                    label_bounds.height,
-                                ),
-                                list,
-                            );
-                        }
-                    } else {
-                        if enabled {
-                            boxed(controls, field, list, ink.control, ink.border, 5.);
-                        } else {
-                            boxed(controls, field, list, ink.field, [0.; 4], 5.);
-                        }
-                        let caption = saved
-                            .map(str::to_owned)
-                            .or_else(|| {
-                                self.edit
-                                    .as_ref()
-                                    .filter(|edit| edit.row == id)
-                                    .map(|edit| edit.input.value())
-                            })
-                            .unwrap_or_else(|| {
-                                if is_array {
-                                    placeholder.into_owned()
-                                } else {
-                                    row.display(tr)
-                                }
-                            });
-                        text(
-                            theme,
-                            fields,
-                            if is_array && enabled {
-                                &ink.quiet
-                            } else {
-                                caption_style
-                            },
-                            &caption,
-                            label_bounds,
-                            list,
-                        );
-                    }
-                }
-                _ => text(theme, layer, &ink.quiet, &row.display(tr), control, list),
-            }
-
-            if row.modified {
-                let reset = rect(
-                    right + 3. * scale,
-                    y + 4. * scale,
-                    reset_w - 3. * scale,
-                    23. * scale,
-                );
-                if self.focus == Focus::Action(Target::Reset(id)) {
-                    rounded(layer, reset, list, ink.field, 4.);
-                }
-                text(
-                    theme,
-                    layer,
-                    if writable { &ink.normal } else { &ink.muted },
-                    &tr.tr("✕"),
-                    rect(
-                        reset.x + 4. * scale,
-                        reset.y,
-                        reset.width - 4. * scale,
-                        reset.height,
-                    ),
-                    list,
-                );
-                self.hits
-                    .push((intersection(list, reset), Target::Reset(id)));
-                self.tooltips.push((
-                    intersection(list, reset),
-                    tr.tr("Reset setting").into_owned(),
-                ));
-            }
-            let second_end = if is_array {
-                control.x - 8. * scale
-            } else {
-                right + reset_w
-            };
-            let link = rect(second_end - link_w, y + 26. * scale, link_w, 19. * scale);
-            let enum_open = self
-                .popup
-                .as_ref()
-                .is_some_and(|p| p.kind == PopupKind::Choices(id));
-            if (selected || hovered) && link.x > left && !enum_open {
-                text(theme, layer, &ink.link, &edit_json, link, list);
-                if self.focus == Focus::Action(Target::RowJson(id)) {
-                    fill(
-                        layer,
-                        rect(link.x, link.y + link.height - 2., link.width, 1.),
-                        list,
-                        ink.accent,
-                    );
-                }
-                self.hits
-                    .push((intersection(list, link), Target::RowJson(id)));
-            }
-            let mut description_end = (link.x - 8. * scale).max(left);
-            if row.next_window() && writable && (selected || hovered) {
-                let caption = tr.tr("New Window");
-                let width = (theme.advance(&ink.link, &caption) + scale)
-                    .min((description_end - left) * 0.35);
-                let button = rect(description_end - width, link.y, width, link.height);
-                text(theme, layer, &ink.link, &caption, button, list);
-                let target = Target::NewWindow(id);
-                if self.focus == Focus::Action(target) {
-                    fill(
-                        layer,
-                        rect(button.x, button.y + button.height - 2., button.width, 1.),
-                        list,
-                        ink.accent,
-                    );
-                }
-                self.hits.push((intersection(list, button), target));
-                description_end = (button.x - 8. * scale).max(left);
-            }
-            let warning = if conflict {
-                Some(conflict_text.as_ref())
-            } else {
-                error.as_deref()
-            };
-            if warning.is_none()
-                && let Some(effect) = &row.effect
-            {
-                let width = theme
-                    .advance(&ink.quiet, effect)
-                    .min((description_end - left) * 0.49);
-                let note = rect(description_end - width, link.y, width, link.height);
-                text(theme, layer, &ink.quiet, effect, note, list);
-                description_end = note.x - 10. * scale;
-            }
-            let description = rect(left, link.y, description_end - left, link.height);
-            text(
-                theme,
-                layer,
-                if warning.is_some() {
-                    &ink.error
-                } else {
-                    &ink.quiet
-                },
-                warning.unwrap_or(&row.description),
-                description,
-                list,
-            );
-            if let Some(warning) = warning {
-                self.tooltips
-                    .push((intersection(list, description), warning.to_owned()));
-            }
-        }
-        let total = self.scroll.rows as f64 * self.scroll.row_height;
-        if total > list.height && list.height > 0. {
-            let thumb =
-                (list.height * list.height / total).clamp(12f64.min(list.height), list.height);
-            let y = list.y + (list.height - thumb) * self.scroll.offset / (total - list.height);
-            rounded(
-                layer,
-                rect(list.x + list.width - 6., y, 3., thumb),
-                list,
-                ink.line,
-                1.5,
-            );
         }
     }
 
@@ -1708,16 +1316,29 @@ impl Page {
         Some(layer)
     }
 
-    /// The curated caption of a row on the current page.
+    /// The curated caption of a row on screen.
     fn curated_label(&self, row: usize) -> Option<&str> {
-        self.page_entries()?.iter().find_map(|entry| match entry {
+        self.display.iter().find_map(|entry| match entry {
             Entry::Setting { row: id, label, .. } if *id == row => Some(label.as_str()),
             _ => None,
         })
     }
 
+    /// A search result's "Page › Section" caption.
+    fn location_of(&self, row: usize) -> Option<&str> {
+        self.display.iter().find_map(|entry| match entry {
+            Entry::Setting {
+                row: id,
+                location: Some((_, caption)),
+                ..
+            } if *id == row => Some(caption.as_str()),
+            _ => None,
+        })
+    }
+
     pub(crate) fn accessibility(&self, tr: &Translator, include_text: bool) -> Tree {
-        let curated = self.page_entries().is_some();
+        let curated = self.curated_pane();
+        let searching = !self.search.value().trim().is_empty();
         let pane_name = match self.pane {
             Pane::Page(index) if curated => tr.tr(&pages::pages()[index].name),
             _ => std::borrow::Cow::Owned(self.heading.clone()),
@@ -1735,7 +1356,11 @@ impl Page {
                 Node::new(
                     AX_LIST,
                     Some(AX_ROOT),
-                    if curated { Role::Group } else { Role::List },
+                    if matches!(self.pane, Pane::Advanced) && !searching {
+                        Role::List
+                    } else {
+                        Role::Group
+                    },
                     pane_name.as_ref(),
                     if curated {
                         self.page_bounds
@@ -1796,7 +1421,13 @@ impl Page {
             }
             let row_id = |row: usize| AX_ROW + row as Id;
             let control_id = |row: usize| AX_CONTROL + row as Id * 64;
-            let owner = |row: usize| if curated { AX_LIST } else { row_id(row) };
+            let owner = |row: usize| {
+                if self.curated(row).is_some() {
+                    AX_LIST
+                } else {
+                    row_id(row)
+                }
+            };
             let center = Point {
                 x: frame.x + frame.width / 2.,
                 y: frame.y + frame.height / 2.,
@@ -1867,6 +1498,17 @@ impl Page {
                     frame,
                 ),
                 Target::Help(_) => continue,
+                Target::Locate(row) => {
+                    let mut node = Node::new(
+                        control_id(row) + 13,
+                        Some(AX_LIST),
+                        Role::Link,
+                        self.location_of(row).unwrap_or_default(),
+                        frame,
+                    );
+                    node.help = tr.tr("Show on its page").into_owned();
+                    node
+                }
                 Target::Choice(row, index) => {
                     let entry = &self.rows[row];
                     let Some((_, enabled, choices)) = self.curated(row) else {
@@ -1946,7 +1588,7 @@ impl Page {
                         false,
                     ));
                     node.region = Some(Region::Panel);
-                    tree.nodes.push(node);
+                    content.push(node);
                     continue;
                 }
                 Target::Control(row) => {
@@ -2113,7 +1755,7 @@ impl Page {
             if node.enabled {
                 node.activation = Some((center, false));
             }
-            if curated && node.parent == Some(AX_LIST) {
+            if node.parent == Some(AX_LIST) {
                 content.push(node);
             } else {
                 tree.nodes.push(node);

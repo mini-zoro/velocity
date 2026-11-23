@@ -414,6 +414,8 @@ mod model {
         Choice(usize, usize),
         /// The "?" beside a curated control: hover shows the description.
         Help(usize),
+        /// A search result's "Page › Section" caption: shows it on its page.
+        Locate(usize),
         #[allow(dead_code)] // Also used by the native application.
         Row(usize),
         Control(usize),
@@ -487,8 +489,9 @@ mod model {
         Tags,
     }
 
-    /// One drawn element of a curated page, in order.
-    #[derive(Debug)]
+    /// One drawn element of the right side, in order: a curated page, search results, or
+    /// the Advanced list.
+    #[derive(Clone, Debug)]
     pub(super) enum Entry {
         Heading {
             title: String,
@@ -505,7 +508,15 @@ mod model {
             choices: Vec<Value>,
             /// Lists installed font families, fetched from the system when first opened.
             font: bool,
+            /// In search results: the page and "Page › Section" caption it lives on.
+            location: Option<(usize, String)>,
         },
+        /// A titled group of search results.
+        Group {
+            title: String,
+        },
+        /// A full row with its key, as on Advanced.
+        Row(usize),
         Button {
             id: usize,
             caption: String,
@@ -535,6 +546,11 @@ mod model {
         pub(super) pane: Pane,
         /// Each curated page resolved against the current values.
         pub(super) entries: Vec<Vec<Entry>>,
+        /// What the right side draws now; `filtered` lists its rows in the same order.
+        pub(super) display: Vec<Entry>,
+        /// Localized page names and the search group title, kept for filtering.
+        page_names: Vec<String>,
+        more_title: String,
         /// Section headings as drawn, for accessibility.
         pub(super) headings: Vec<(Rect, String)>,
         /// Curated page scroll offset and content extent.
@@ -568,7 +584,6 @@ mod model {
         pub(super) row_list: Rect,
         pub(super) announcement: Option<String>,
         pub(super) conflicts: BTreeMap<usize, String>,
-        pub(super) scroll: Scroll,
         pub(super) category_scroll: Scroll,
         pub(super) hits: Vec<(Rect, Target)>,
         pub(super) list_bounds: Rect,
@@ -596,6 +611,9 @@ mod model {
                 category: None,
                 pane: Pane::Page(0),
                 entries: Vec::new(),
+                display: Vec::new(),
+                page_names: Vec::new(),
+                more_title: String::new(),
                 headings: Vec::new(),
                 page_offset: 0.,
                 page_extent: 0.,
@@ -621,7 +639,6 @@ mod model {
                 row_list: Rect::default(),
                 announcement: None,
                 conflicts: BTreeMap::new(),
-                scroll: Scroll::default(),
                 category_scroll: Scroll::default(),
                 hits: Vec::new(),
                 list_bounds: Rect::default(),
@@ -735,13 +752,17 @@ mod model {
                 *self.groups.entry(def.meta.group).or_default() += usize::from(modified);
                 self.modified_count += usize::from(modified);
                 let name = tr.tr(&def.meta.name).into_owned();
-                let description = tr.tr(&def.meta.description).into_owned();
-                let mut search = format!("{key}\n{}\n{}", def.meta.name, def.meta.description);
+                let description = pages::platform_text(&tr.tr(&def.meta.description));
+                let mut search = format!(
+                    "{key}\n{}\n{}",
+                    def.meta.name,
+                    pages::platform_text(&def.meta.description)
+                );
                 for catalog in tr.installed_catalogs() {
                     for source in [&def.meta.name, &def.meta.description] {
                         if let Some(localized) = catalog.strings.get(source) {
                             search.push('\n');
-                            search.push_str(localized);
+                            search.push_str(&pages::platform_text(localized));
                         }
                     }
                 }
@@ -782,6 +803,11 @@ mod model {
                 .enumerate()
                 .map(|(index, page)| self.page_entries_for(index, page, tr))
                 .collect();
+            self.page_names = pages::pages()
+                .iter()
+                .map(|page| tr.tr(&page.name).into_owned())
+                .collect();
+            self.more_title = tr.tr("More in Advanced").into_owned();
             if let Some(edit) = &mut self.edit {
                 let row = &self.rows[edit.row];
                 let base = (user.get(row.key()).cloned(), row.value.clone());
@@ -890,6 +916,7 @@ mod model {
                                 hint: entry.effect.clone(),
                                 choices: values,
                                 font,
+                                location: None,
                             });
                         }
                         Item::Button { button, .. } => {
@@ -928,19 +955,14 @@ mod model {
             out
         }
 
-        /// The curated page on screen, if the right side shows one.
-        pub(super) fn page_entries(&self) -> Option<&[Entry]> {
-            match self.pane {
-                Pane::Page(page) if self.search.value().trim().is_empty() => {
-                    self.entries.get(page).map(Vec::as_slice)
-                }
-                _ => None,
-            }
+        /// Whether the right side shows a curated page (no search).
+        pub(super) fn curated_pane(&self) -> bool {
+            matches!(self.pane, Pane::Page(_)) && self.search.value().trim().is_empty()
         }
 
-        /// The curated presentation of a row on the current page.
+        /// The curated presentation of a row on screen (a page or a search result).
         pub(super) fn curated(&self, row: usize) -> Option<(Kind, bool, &[Value])> {
-            self.page_entries()?.iter().find_map(|entry| match entry {
+            self.display.iter().find_map(|entry| match entry {
                 Entry::Setting {
                     row: id,
                     kind,
@@ -953,10 +975,17 @@ mod model {
         }
 
         fn is_font_popup(&self, row: usize) -> bool {
-            self.page_entries().is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    matches!(entry, Entry::Setting { row: id, font: true, .. } if *id == row)
-                })
+            self.display.iter().any(
+                |entry| matches!(entry, Entry::Setting { row: id, font: true, .. } if *id == row),
+            )
+        }
+
+        /// The curated page that shows a row, if any.
+        fn page_of(&self, row: usize) -> Option<usize> {
+            self.entries.iter().position(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Setting { row: id, .. } if *id == row))
             })
         }
 
@@ -991,42 +1020,88 @@ mod model {
 
         fn filter(&mut self, selected: Option<usize>) {
             let query = self.search.value().to_lowercase();
-            self.filtered.clear();
-            if let Some(entries) = self.page_entries() {
-                let rows = entries
+            let query = query.trim();
+            self.display.clear();
+            if query.is_empty() {
+                match self.pane {
+                    Pane::Page(page) => {
+                        self.display = self.entries.get(page).cloned().unwrap_or_default();
+                    }
+                    Pane::Advanced => {
+                        let rows = self.rows.iter().enumerate().filter(|(_, row)| {
+                            row.visible
+                                && (!self.modified_only || row.modified)
+                                && self
+                                    .category
+                                    .is_none_or(|group| group == row.def.meta.group)
+                        });
+                        self.display = rows.map(|(i, _)| Entry::Row(i)).collect();
+                    }
+                }
+            } else {
+                // Search covers every setting: curated controls first, with where they live,
+                // then the rest as Advanced rows. The group and modified filters are Advanced's.
+                let matches = |row: &Row| {
+                    row.visible
+                        && query
+                            .split_whitespace()
+                            .all(|part| row.search.contains(part))
+                };
+                let exact = |entry: &Entry| match entry {
+                    Entry::Setting { row, .. } | Entry::Row(row) => self.rows[*row].key() == query,
+                    _ => false,
+                };
+                let mut curated = Vec::new();
+                for (page, entries) in self.entries.iter().enumerate() {
+                    let mut section = "";
+                    for entry in entries {
+                        match entry {
+                            Entry::Heading { title, .. } => section = title,
+                            Entry::Setting { row, .. } if matches(&self.rows[*row]) => {
+                                let mut entry = entry.clone();
+                                if let Entry::Setting { location, hint, .. } = &mut entry {
+                                    let name = self.page_names.get(page).map_or("", String::as_str);
+                                    *location = Some((page, format!("{name} › {section}")));
+                                    hint.clone_from(&self.rows[*row].effect);
+                                }
+                                curated.push(entry);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let shown: std::collections::BTreeSet<_> = curated
                     .iter()
                     .filter_map(|entry| match entry {
                         Entry::Setting { row, .. } => Some(*row),
                         _ => None,
                     })
-                    .collect::<Vec<_>>();
-                self.filtered = rows;
-            } else {
-                // Search covers every setting; the group and modified filters are Advanced's.
-                let advanced = query.trim().is_empty();
-                self.filtered
-                    .extend(self.rows.iter().enumerate().filter_map(|(i, row)| {
-                        (row.visible
-                            && if advanced {
-                                (!self.modified_only || row.modified)
-                                    && self
-                                        .category
-                                        .is_none_or(|group| group == row.def.meta.group)
-                            } else {
-                                query
-                                    .split_whitespace()
-                                    .all(|part| row.search.contains(part))
-                            })
-                        .then_some(i)
-                    }));
+                    .collect();
+                let mut rest: Vec<_> = (0..self.rows.len())
+                    .filter(|i| !shown.contains(i) && matches(&self.rows[*i]))
+                    .map(Entry::Row)
+                    .collect();
+                for group in [&mut curated, &mut rest] {
+                    if let Some(at) = group.iter().position(exact) {
+                        group[..=at].rotate_right(1);
+                    }
+                }
+                self.display = curated;
+                if !rest.is_empty() {
+                    self.display.push(Entry::Group {
+                        title: self.more_title.clone(),
+                    });
+                    self.display.append(&mut rest);
+                }
             }
-            if let Some(exact) = self
-                .filtered
+            self.filtered = self
+                .display
                 .iter()
-                .position(|&i| self.rows[i].key() == query.trim())
-            {
-                self.filtered[..=exact].rotate_right(1);
-            }
+                .filter_map(|entry| match entry {
+                    Entry::Setting { row, .. } | Entry::Row(row) => Some(*row),
+                    _ => None,
+                })
+                .collect();
             self.selected = selected
                 .and_then(|row| self.filtered.iter().position(|&i| i == row))
                 .unwrap_or_else(|| {
@@ -1036,8 +1111,6 @@ mod model {
                         0
                     }
                 });
-            self.scroll.rows = self.filtered.len();
-            self.scroll.scroll(0.);
         }
 
         pub(super) fn selected_row(&self) -> Option<usize> {
@@ -1124,7 +1197,7 @@ mod model {
         fn input_changed(&mut self, tr: &Translator, before: String, now: Instant) {
             if self.focus == Focus::Search {
                 if before != self.search.value() {
-                    self.scroll.offset = 0.;
+                    self.page_offset = 0.;
                     self.filter(None);
                 }
             } else if let Some(edit) = &mut self.edit {
@@ -1376,7 +1449,6 @@ mod model {
         fn select(&mut self, id: usize) {
             if let Some(index) = self.filtered.iter().position(|&r| r == id) {
                 self.selected = index;
-                self.scroll.reveal(index);
                 self.reveal = true;
             }
         }
@@ -1505,7 +1577,7 @@ mod model {
         fn category(&mut self, group: Option<Group>) {
             self.category = group;
             self.search.set("");
-            self.scroll.offset = 0.;
+            self.page_offset = 0.;
             self.filter(None);
         }
 
@@ -1517,7 +1589,7 @@ mod model {
             self.popup = None;
             self.pane = pane;
             self.search.set("");
-            self.scroll.offset = 0.;
+            self.page_offset = 0.;
             self.page_offset = 0.;
             self.filter(None);
         }
@@ -1711,7 +1783,10 @@ mod model {
             match target {
                 Target::Search => self.focus = Focus::Search,
                 Target::Pane(_) => self.focus = Focus::Sidebar,
-                Target::Row(row) | Target::Help(row) | Target::Choice(row, _) => {
+                Target::Row(row)
+                | Target::Help(row)
+                | Target::Choice(row, _)
+                | Target::Locate(row) => {
                     self.select(row);
                     self.focus = Focus::List;
                 }
@@ -1773,6 +1848,14 @@ mod model {
                 Help(row) => {
                     self.focus = Focus::List;
                     self.select(row);
+                }
+                Locate(row) => {
+                    if let Some(page) = self.page_of(row) {
+                        self.show_pane(workspace, self::Pane::Page(page));
+                        self.select(row);
+                        self.focus = Focus::List;
+                        self.reveal = true;
+                    }
                 }
                 Row(row) | Control(row) => {
                     self.focus = Focus::List;
@@ -1900,34 +1983,12 @@ mod model {
             self.filter(self.selected_row());
         }
 
-        /// Keyboard focus stops in drawing order: search, the sidebar, then the right side.
+        /// Keyboard focus stops in drawing order: search, the sidebar, the header buttons,
+        /// then every curated control and button. A run of Advanced rows is one stop (arrows
+        /// move inside it), followed by the selected row's own buttons.
         fn focus_order(&self) -> Vec<(Focus, Option<usize>)> {
             let mut order = vec![(Focus::Search, None), (Focus::Sidebar, None)];
-            if let Some(entries) = self.page_entries() {
-                let mut index = 0;
-                for entry in entries {
-                    match entry {
-                        Entry::Setting { row, enabled, .. } => {
-                            if *enabled || self.selected_row() == Some(*row) {
-                                order.push((Focus::List, Some(index)));
-                            }
-                            if self.writable() && self.selected_row() == Some(*row) {
-                                for &(_, target) in &self.hits {
-                                    if matches!(target, Target::RemoveTag(owner, _) | Target::MoreTags(owner) if owner == *row)
-                                    {
-                                        order.push((Focus::Action(target), None));
-                                    }
-                                }
-                            }
-                            index += 1;
-                        }
-                        Entry::Button { id, .. } => {
-                            order.push((Focus::Action(Target::Button(*id)), None));
-                        }
-                        _ => {}
-                    }
-                }
-            } else {
+            if !self.curated_pane() {
                 if self.search.value().trim().is_empty() {
                     order.push((Focus::Action(Target::Groups), None));
                     order.push((Focus::Action(Target::Modified), None));
@@ -1936,25 +1997,67 @@ mod model {
                     }
                 }
                 order.push((Focus::Action(Target::Json), None));
-                if !self.filtered.is_empty() {
-                    order.push((Focus::List, None));
+            }
+            let selected = self.selected_row();
+            let chips = |row: usize, order: &mut Vec<_>| {
+                for &(_, target) in &self.hits {
+                    if matches!(target, Target::RemoveTag(owner, _) | Target::MoreTags(owner) if owner == row)
+                    {
+                        order.push((Focus::Action(target), None));
+                    }
                 }
-                if let Some(row) = self.selected_row() {
-                    order.push((Focus::Action(Target::RowJson(row)), None));
-                    if self.writable() {
-                        if self.rows[row].next_window() {
-                            order.push((Focus::Action(Target::NewWindow(row)), None));
+            };
+            let first_row = self
+                .display
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Setting { .. } | Entry::Row(_)))
+                .position(|entry| matches!(entry, Entry::Row(_)));
+            let row_stop = match selected {
+                Some(row) if self.curated(row).is_none() => Some(self.selected),
+                _ => first_row,
+            };
+            let mut index = 0;
+            for entry in &self.display {
+                match entry {
+                    Entry::Setting {
+                        row,
+                        enabled,
+                        location,
+                        ..
+                    } => {
+                        if *enabled || selected == Some(*row) {
+                            order.push((Focus::List, Some(index)));
                         }
-                        for &(_, target) in &self.hits {
-                            if matches!(target, Target::RemoveTag(owner, _) | Target::MoreTags(owner) if owner == row)
-                            {
-                                order.push((Focus::Action(target), None));
+                        if selected == Some(*row) {
+                            if self.writable() {
+                                chips(*row, &mut order);
+                            }
+                            if location.is_some() {
+                                order.push((Focus::Action(Target::Locate(*row)), None));
                             }
                         }
-                        if self.rows[row].modified {
-                            order.push((Focus::Action(Target::Reset(row)), None));
-                        }
+                        index += 1;
                     }
+                    Entry::Row(row) => {
+                        if row_stop == Some(index) {
+                            order.push((Focus::List, Some(index)));
+                            order.push((Focus::Action(Target::RowJson(*row)), None));
+                            if self.writable() {
+                                if self.rows[*row].next_window() {
+                                    order.push((Focus::Action(Target::NewWindow(*row)), None));
+                                }
+                                chips(*row, &mut order);
+                                if self.rows[*row].modified {
+                                    order.push((Focus::Action(Target::Reset(*row)), None));
+                                }
+                            }
+                        }
+                        index += 1;
+                    }
+                    Entry::Button { id, .. } => {
+                        order.push((Focus::Action(Target::Button(*id)), None));
+                    }
+                    _ => {}
                 }
             }
             if self.error.is_some() && self.path.is_some() {
@@ -1968,12 +2071,14 @@ mod model {
 
         fn tab(&mut self, backwards: bool) {
             let order = self.focus_order();
-            let curated = self.page_entries().is_some();
+            let row_run = self
+                .selected_row()
+                .is_some_and(|row| self.curated(row).is_none());
             let index = order
                 .iter()
                 .position(|&(focus, selected)| {
                     self.focus == focus
-                        && (!curated || selected.is_none() || selected == Some(self.selected))
+                        && (selected.is_none() || selected == Some(self.selected) || row_run)
                 })
                 .unwrap_or(0);
             let (focus, selected) = if backwards {
@@ -1986,7 +2091,6 @@ mod model {
                 self.selected = selected;
             }
             if self.focus == Focus::List {
-                self.scroll.reveal(self.selected);
                 self.reveal = true;
             }
         }
@@ -2042,7 +2146,7 @@ mod model {
                     } else if !self.search.value().is_empty() {
                         self.search.set("");
                         self.focus = Focus::Search;
-                        self.scroll.offset = 0.;
+                        self.page_offset = 0.;
                         self.page_offset = 0.;
                         self.filter(None);
                     } else {
@@ -2084,14 +2188,11 @@ mod model {
                 Up(false) | Down(false) | PageUp | PageDown
                     if self.focus == Focus::List || self.focus == Focus::Search =>
                 {
+                    let page = ((self.page_bounds.height / 52.) as isize).max(1);
                     let delta = match cmd {
                         Up(false) => -1,
-                        PageUp => -((self.scroll.viewport / self.scroll.row_height.max(1.))
-                            as isize)
-                            .max(1),
-                        PageDown => ((self.scroll.viewport / self.scroll.row_height.max(1.))
-                            as isize)
-                            .max(1),
+                        PageUp => -page,
+                        PageDown => page,
                         _ => 1,
                     };
                     if self.focus == Focus::Search {
@@ -2102,7 +2203,6 @@ mod model {
                             .saturating_add_signed(delta)
                             .min(self.filtered.len().saturating_sub(1));
                     }
-                    self.scroll.reveal(self.selected);
                     self.reveal = true;
                 }
                 Up(false) | Down(false) if self.focus == Focus::Edit => {
@@ -2126,7 +2226,6 @@ mod model {
                     }
                     Focus::Search | Focus::Sidebar => {
                         self.focus = Focus::List;
-                        self.scroll.reveal(self.selected);
                         self.reveal = true;
                     }
                     Focus::List => {
@@ -2137,7 +2236,10 @@ mod model {
                     Focus::Action(target) => return self.use_target(workspace, target, now),
                 },
                 DeleteBackward | DeleteForward
-                    if self.focus == Focus::List && self.page_entries().is_none() =>
+                    if self.focus == Focus::List
+                        && self
+                            .selected_row()
+                            .is_some_and(|row| self.curated(row).is_none()) =>
                 {
                     if let Some(row) = self.selected_row() {
                         self.write(workspace, row, None);
@@ -2159,12 +2261,10 @@ mod model {
                 popup.panel.scroll.scroll(delta);
             } else if vel_ui::contains(self.sidebar_bounds, point) {
                 self.category_scroll.scroll(delta);
-            } else if self.page_entries().is_some() {
+            } else {
                 self.reveal = false;
                 self.page_offset = (self.page_offset + delta)
                     .clamp(0., (self.page_extent - self.page_bounds.height).max(0.));
-            } else if self.focus != Focus::Edit {
-                self.scroll.scroll(delta);
             }
         }
 
@@ -2190,7 +2290,7 @@ mod model {
 
         pub(crate) fn search_for(&mut self, query: &str) {
             self.search.set(query);
-            self.scroll.offset = 0.;
+            self.page_offset = 0.;
             self.filter(None);
         }
 
@@ -2518,10 +2618,10 @@ pub(crate) use model::Page;
 pub(crate) use model::Pane;
 #[cfg(all(target_os = "macos", test))]
 pub(crate) use model::source_text;
-#[cfg(all(target_os = "macos", test))]
-pub(crate) use pages::pages as pages_for_tests;
 #[cfg(any(target_os = "macos", all(windows, not(test))))]
 pub(crate) use pages::platform_args;
+#[cfg(all(target_os = "macos", test))]
+pub(crate) use pages::{pages as pages_for_tests, platform_text_for};
 #[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug)]
 pub(crate) struct Page;
