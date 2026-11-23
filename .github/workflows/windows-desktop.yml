@@ -1,0 +1,64 @@
+name: Windows Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows-desktop]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build release package once
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: |
+          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel = "([^"]+)"').Matches.Groups[1].Value
+          rustup toolchain install $channel --profile minimal --target x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and package the unsigned release
+        run: ./scripts/package-windows.ps1 -OutputDirectory target/windows-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-package
+          path: |
+            target/windows-artifacts/Velocity-*-windows-x64.zip
+            target/windows-artifacts/Velocity-*-windows-x64-setup.exe
+            target/windows-artifacts/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  desktop:
+    name: Desktop (${{ matrix.image }})
+    needs: package
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-release-package
+          path: target/windows-artifacts
+      - name: Exercise packaged Velocity on the desktop
+        shell: powershell
+        run: ./scripts/windows-desktop/run.ps1 -PackageDirectory target/windows-artifacts -ResultDirectory target/desktop-results
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: velocity-desktop-${{ matrix.image }}
+          path: target/desktop-results
+          if-no-files-found: error
+          retention-days: 14

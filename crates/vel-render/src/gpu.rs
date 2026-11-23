@@ -209,6 +209,7 @@ impl Renderer {
         timestamps: bool,
         cache_dir: &Path,
         mut phase: impl FnMut(&'static str),
+        adapter_selected: impl FnOnce(&wgpu::AdapterInfo) -> Result<(), String>,
     ) -> Result<Self, String> {
         let window = NativeWindow::new(hwnd as isize).ok_or("null window handle")?;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -222,9 +223,11 @@ impl Renderer {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
+            // wgpu ranks CPU adapters behind hardware, but leaves WARP eligible.
             ..Default::default()
         }))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("DX12 adapter (hardware or software): {e}"))?;
+        adapter_selected(&adapter.get_info())?;
         phase("adapter");
         let device = DeviceParts::request(&adapter, timestamps)?;
         phase("device_queue");

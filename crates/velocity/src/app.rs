@@ -5151,6 +5151,16 @@ impl AppHandler for App {
                     false,
                     &cache_dir,
                     |phase| self.clock.mark(phase),
+                    |adapter| {
+                        self.reporter.emit(json!({
+                            "kind": "dx12_adapter",
+                            "name": adapter.name,
+                            "backend": format!("{:?}", adapter.backend),
+                            "device_type": format!("{:?}", adapter.device_type),
+                            "driver": adapter.driver,
+                            "driver_info": adapter.driver_info,
+                        }))
+                    },
                 )?
             }
         };

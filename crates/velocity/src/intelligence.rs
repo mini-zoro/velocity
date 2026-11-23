@@ -1159,6 +1159,7 @@ impl vel_platform::AppHandler for StatusWindow {
                     false,
                     &cache,
                     |_| {},
+                    |_| Ok(()),
                 )?
             }
         };

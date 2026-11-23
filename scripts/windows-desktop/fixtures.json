@@ -1,0 +1,10 @@
+{
+  "cjk": "\u4e2d\u6587\u3001\u65e5\u672c\u8a9e",
+  "unicode": "\u4e2d\u6587\u3001\u65e5\u672c\u8a9e\u3001\ud83d\ude03",
+  "filename": "\u4fdd\u5b58 \u65e5\u672c\u8a9e.txt",
+  "enMenus": ["File", "Edit", "Selection", "Find", "View", "Goto", "Tools", "Project", "Preferences", "Help"],
+  "zhMenus": ["\u6587\u4ef6", "\u7f16\u8f91", "\u9009\u533a", "\u67e5\u627e", "\u663e\u793a", "\u524d\u5f80", "\u5de5\u5177", "\u9879\u76ee", "\u504f\u597d\u8bbe\u7f6e", "\u5e2e\u52a9"],
+  "zhExit": "\u9000\u51fa",
+  "zhAbout": "\u5173\u4e8e Velocity",
+  "zhNewFile": "\u65b0\u5efa\u6587\u4ef6"
+}

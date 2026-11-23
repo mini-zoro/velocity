@@ -110,12 +110,14 @@ they contain macOS-specific key, clipboard, filesystem and lifecycle
 assumptions. The tag workflow builds and packages both platforms before
 publishing, and hashes every release asset in the combined `SHA256SUMS`.
 
-No Windows desktop or installed copy was tested locally. CI does not exercise
-DX12 window creation or presentation, IME/candidate placement, multi-monitor
-DPI, keyboard menu tracking, real Shell dialogs/Explorer integration,
-SmartScreen, install/uninstall behavior, or helper cold start into a live GUI.
-See [the backend handoff](../crates/vel-platform/WINDOWS.md) for the desktop
-smoke checklist.
+No Windows desktop or installed copy was tested locally. The opt-in
+[`windows-desktop.yml`](../.github/workflows/windows-desktop.yml) workflow
+builds one release package and runs that same ZIP and installer on
+`windows-2022` and `windows-2025`. See the
+[desktop driver](../scripts/windows-desktop/README.md) for its checks,
+evidence, and limits. Hosted-runner results do not cover SmartScreen,
+physical multi-monitor DPI, or precision touchpads. See also
+[the backend handoff](../crates/vel-platform/WINDOWS.md).
 
 ## W1: platform behavior
 
