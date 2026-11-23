@@ -346,7 +346,7 @@ function Assert-InputTarget([IntPtr] $Window) {
 function Send-Key([IntPtr] $Window, [string[]] $Keys) {
     Assert-InputTarget $Window
     $named = @{ Ctrl=0xa2; Shift=0xa0; Alt=0xa4; Win=0x5b; Esc=27; Enter=13; Backspace=8; Tab=9; Space=32;
-        Left=37; Up=38; Right=39; Down=40; Home=36; End=35; PageDown=34; Slash=0xbf }
+        Left=37; Up=38; Right=39; Down=40; Home=36; End=35; PageDown=34; Slash=0xbf; Comma=0xbc; Period=0xbe }
     [uint32[]] $codes = foreach ($key in $Keys) {
         if ($named.ContainsKey($key)) { $named[$key] }
         elseif ($key -match '^F([1-9]|1[0-2])$') { 111 + [int]$key.Substring(1) }

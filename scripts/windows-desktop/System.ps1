@@ -262,48 +262,151 @@ function Test-Project {
     Save-Evidence $window 'keyboard-opened'
 }
 
+function Get-SettingsWindows([IntPtr] $Editor) {
+    # The Settings window is a top-level HWND of the same process and window class; it is
+    # titled Settings (or the Simplified Chinese caption) and has no menu bar.
+    $titles = @('Settings', ([string][char]0x8BBE + [char]0x7F6E))
+    @(Get-EditorWindows ([VelocityDesktop.Native]::Pid($Editor)) | Where-Object {
+        $_ -ne $Editor -and [VelocityDesktop.Native]::Title($_) -cin $titles
+    })
+}
+
+function Assert-EditorUnchanged([IntPtr] $Window, $Before, [string] $When) {
+    Assert-That ($Window -in @(Get-EditorWindows ([VelocityDesktop.Native]::Pid($Window)))) "The editor window closed $When"
+    Assert-That ([VelocityDesktop.Native]::Title($Window) -ceq $Before.Title) "The editor title changed $When"
+    Assert-That ([VelocityDesktop.Native]::Outer($Window) -eq $Before.Bounds) "The editor window moved or resized $When"
+    Assert-That ([VelocityDesktop.Native]::MenuBar($Window) -ne [IntPtr]::Zero) "The editor lost its menu bar $When"
+}
+
+function Assert-EditorText([IntPtr] $Window, [string] $Expected, [string] $When) {
+    $text = Read-Editor $Window
+    Assert-That ($text.TrimEnd([char[]]"`r`n") -ceq $Expected.TrimEnd([char[]]"`r`n")) "The editor text changed $When"
+}
+
 function Test-Settings {
-    $window = Start-Editor 'settings'
-    Invoke-Probe 'Preferences > Settings opens a native window with both JSON panes' {
-        Invoke-Menu $window N '^Settings\u2026$' 'preferences-json-menu'
-        $pair = Wait-Until 'paired settings window appears' {
-            Get-EditorWindows | Where-Object { $_ -ne $window -and [VelocityDesktop.Native]::Title($_) -eq 'Preferences.sublime-settings' } | Select-Object -First 1
+    # A numbered document gives the gutter enough line numbers to see them disappear.
+    $fixture = Join-Path $ctx.CaseRoot 'numbered.txt'
+    $content = ((1..40 | ForEach-Object { 'line {0:D2} of the settings fixture' -f $_ }) -join "`r`n") + "`r`n"
+    Write-Utf8 $fixture $content
+    $window = Start-Editor 'settings' @($fixture)
+    $null = Wait-Title $window 'numbered.txt'
+    $processId = [VelocityDesktop.Native]::Pid($window)
+    # Probe bodies run in child scopes; they share state through this table.
+    $state = @{ Editor=[pscustomobject]@{ Title=[VelocityDesktop.Native]::Title($window); Bounds=[VelocityDesktop.Native]::Outer($window) } }
+    try {
+        Invoke-Probe 'Preferences > Settings (JSON) opens a native window with both JSON panes' {
+            Focus-Window $window
+            Invoke-Menu $window N '^Settings \(JSON\)\u2026$' 'preferences-json-menu'
+            $pair = Wait-Until 'paired settings window appears' {
+                Get-EditorWindows | Where-Object { $_ -ne $window -and [VelocityDesktop.Native]::Title($_) -eq 'Preferences.sublime-settings' } | Select-Object -First 1
+            }
+            Focus-Window $pair
+            $null = Wait-Frame $pair
+            $right = Read-Editor $pair
+            Assert-That ($right -match '"ui_language"\s*:\s*"en"') 'Right pane did not show User Preferences'
+            Send-Key $pair @('Ctrl', '1')
+            $left = Read-Editor $pair
+            Assert-That ($left -match '"default_line_ending"') 'Left pane did not show bundled Default Preferences'
+            Send-Key $pair @('Ctrl', '2')
+            Save-Evidence $pair 'paired-json'
+            Send-Key $pair @('Alt', 'F4')
+            $null = Wait-Until 'paired settings window closed' { $pair -notin @(Get-EditorWindows) }
         }
-        Focus-Window $pair
-        $null = Wait-Frame $pair
-        $right = Read-Editor $pair
-        Assert-That ($right -match '"ui_language"\s*:\s*"en"') 'Right pane did not show User Preferences'
-        Send-Key $pair @('Ctrl', '1')
-        $left = Read-Editor $pair
-        Assert-That ($left -match '"default_line_ending"') 'Left pane did not show bundled Default Preferences'
-        Send-Key $pair @('Ctrl', '2')
-        Save-Evidence $pair 'paired-json'
-        Send-Key $pair @('Alt', 'F4')
-        $null = Wait-Until 'paired settings window closed' { $pair -notin @(Get-EditorWindows) }
-    }
-    Invoke-Probe 'Preferences > Settings (Graphical) writes User Preferences' {
-        Focus-Window $window
-        $editor = Get-Frame $window
-        try {
-            Invoke-Menu $window N '^Settings \(Graphical\)\u2026$' 'preferences-graphical-menu'
-            $null = Wait-Until 'graphical Settings title' { [VelocityDesktop.Native]::Title($window) -eq 'Settings' }
-            $null = Wait-Changed $window $editor client
-        } finally { $editor.Dispose() }
-        Save-Evidence $window 'graphical'
-        $before = Get-Frame $window top
-        try { Send-Text $window 'line_numbers'; $null = Wait-Changed $window $before top }
-        finally { $before.Dispose() }
-        Send-Key $window Enter # Search -> results
-        Send-Key $window Enter # First result -> toggle
-        $null = Wait-Until 'line_numbers is false in User Preferences' {
+        Invoke-Probe 'Preferences > Settings opens one Settings window without a menu bar' {
+            Focus-Window $window
+            Assert-That (@(Get-SettingsWindows $window).Count -eq 0) 'A Settings window was already open'
+            $state.Gutter = Get-Frame $window left
+            Invoke-Menu $window N '^Settings\u2026$' 'preferences-settings-menu'
+            $settings = Wait-Until 'a new Settings HWND in the editor process' { Get-SettingsWindows $window | Select-Object -First 1 }
+            $state.Settings = $settings
+            $null = Wait-Until 'the Settings window is foreground' { [VelocityDesktop.Native]::Foreground -eq $settings }
+            $null = Wait-Frame $settings
+            Assert-That ([VelocityDesktop.Native]::MenuBar($settings) -eq [IntPtr]::Zero) 'The Settings window has a menu bar'
+            Assert-That (@(Get-SettingsWindows $window).Count -eq 1) 'More than one Settings window opened'
+            Assert-EditorUnchanged $window $state.Editor 'when Settings opened'
+            $client = [VelocityDesktop.Native]::Client($settings)
+            $ctx.Check.metrics['settings_window'] = [ordered]@{ client=('{0}x{1}' -f $client.Width, $client.Height);
+                dpi=[VelocityDesktop.Native]::GetDpiForWindow($settings); title=[VelocityDesktop.Native]::Title($settings) }
+            Save-Evidence $settings 'settings-window'
+        }
+        Invoke-Probe 'Search, Return and Space turn line numbers off in the User file and the editor' {
+            $settings = $state.Settings
+            Assert-That ($null -ne $settings) 'The Settings window did not open'
+            Focus-Window $settings
+            $before = Get-Frame $settings top
+            try { Send-Text $settings 'line_numbers'; $null = Wait-Changed $settings $before top }
+            finally { $before.Dispose() }
+            Save-Evidence $settings 'settings-search'
+            Send-Key $settings Enter # Search -> first result: the curated "Show line numbers" checkbox
+            Send-Key $settings Space # Space toggles a checkbox
+            $null = Wait-Until 'line_numbers is false in User Preferences' {
+                try {
+                    $preferences = ConvertFrom-Json (Read-SharedText $ctx.Preferences)
+                    $setting = $preferences.PSObject.Properties['line_numbers']
+                    $null -ne $setting -and $setting.Value -is [bool] -and -not $setting.Value
+                } catch [IO.IOException] { $false }
+            }
+            Copy-Item -LiteralPath $ctx.Preferences -Destination (Join-Path $ctx.Logs 'User-Preferences.json')
+            Save-Evidence $settings 'line-numbers-off'
+        }
+        Invoke-Probe 'Esc clears the search, then closes Settings; the editor keeps focus and text' {
+            $settings = $state.Settings
+            Assert-That ($null -ne $settings) 'The Settings window did not open'
+            Focus-Window $settings
+            $before = Get-Frame $settings top
+            try { Send-Key $settings Esc; $null = Wait-Changed $settings $before top }
+            finally { $before.Dispose() }
+            Assert-That ($settings -in @(Get-EditorWindows $processId)) 'The first Esc closed Settings instead of clearing the search'
+            Send-Key $settings Esc
+            $null = Wait-Until 'Esc closes the Settings window' { $settings -notin @(Get-EditorWindows $processId) }
+            $null = Wait-Until 'the editor window is foreground again' { [VelocityDesktop.Native]::Foreground -eq $window } 5
+            Assert-EditorUnchanged $window $state.Editor 'when Settings closed'
+            # The editor applied the change: its gutter lost the line numbers.
+            $null = Wait-Changed $window $state.Gutter left
+            Save-Evidence $window 'editor-without-line-numbers'
+            Assert-EditorText $window $content 'after Settings closed'
+        }
+        Invoke-Probe 'Ctrl+, opens Settings and a second Ctrl+, focuses the same window' {
+            Focus-Window $window
+            Assert-That (@(Get-SettingsWindows $window).Count -eq 0) 'Settings stayed open after Esc'
+            Send-Key $window @('Ctrl', 'Comma')
+            $settings = Wait-Until 'Ctrl+, opens a Settings HWND' { Get-SettingsWindows $window | Select-Object -First 1 }
+            $state.Settings = $settings
+            $null = Wait-Until 'the Settings window is foreground' { [VelocityDesktop.Native]::Foreground -eq $settings }
+            $null = Wait-Frame $settings
+            Focus-Window $window
+            Send-Key $window @('Ctrl', 'Comma')
+            $null = Wait-Until 'a second Ctrl+, brings Settings forward' { [VelocityDesktop.Native]::Foreground -eq $settings }
+            $open = @(Get-SettingsWindows $window)
+            Assert-That ($open.Count -eq 1 -and $open[0] -eq $settings) 'A second Ctrl+, created another Settings window'
+            Assert-EditorUnchanged $window $state.Editor 'after Ctrl+,'
+        }
+        Invoke-Probe 'The Settings window follows a Simplified Chinese ui_language from the User file' {
+            $settings = $state.Settings
+            Assert-That ($null -ne $settings) 'The Settings window did not open'
+            Focus-Window $settings
+            $before = Get-Frame $settings left
             try {
-                $preferences = ConvertFrom-Json (Read-SharedText $ctx.Preferences)
-                $setting = $preferences.PSObject.Properties['line_numbers']
-                $null -ne $setting -and $setting.Value -is [bool] -and -not $setting.Value
-            } catch [IO.IOException] { $false }
+                Set-Preferences @{ line_numbers=$false; ui_language='zh-Hans' }
+                $chinese = [string][char]0x8BBE + [char]0x7F6E
+                $null = Wait-Until 'Settings window title becomes Chinese' { [VelocityDesktop.Native]::Title($settings) -ceq $chinese } 15
+                $null = Wait-Changed $settings $before left
+            } finally { $before.Dispose() }
+            Save-Evidence $settings 'settings-zh-Hans'
         }
-        Copy-Item -LiteralPath $ctx.Preferences -Destination (Join-Path $ctx.Logs 'User-Preferences.json')
-        Save-Evidence $window 'line-numbers-off'
+        Invoke-Probe 'Ctrl+W closes Settings; the editor keeps focus and text' {
+            $settings = $state.Settings
+            Assert-That ($null -ne $settings) 'The Settings window did not open'
+            Focus-Window $settings
+            Send-Key $settings @('Ctrl', 'W')
+            $null = Wait-Until 'Ctrl+W closes the Settings window' { $settings -notin @(Get-EditorWindows $processId) }
+            $null = Wait-Until 'the editor window is foreground again' { [VelocityDesktop.Native]::Foreground -eq $window } 5
+            Assert-EditorUnchanged $window $state.Editor 'when Ctrl+W closed Settings'
+            Assert-EditorText $window $content 'after Ctrl+W closed Settings'
+            Save-Evidence $window 'editor-after-ctrl-w'
+        }
+    } finally {
+        if ($state.ContainsKey('Gutter') -and $null -ne $state.Gutter) { $state.Gutter.Dispose() }
     }
 }
 

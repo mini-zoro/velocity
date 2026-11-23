@@ -40,7 +40,13 @@ Use a new result directory per run.
 8. Multi-window move, resize, Alt+F4, File > Exit, dirty text and window restore, and no orphan process after Exit.
 9. CJK clipboard in both directions.
 10. Folder forwarding and keyboard open from the sidebar.
-11. Both paired JSON settings panes and a graphical setting write to the User file.
+11. Settings: Preferences > Settings (JSON) opens the paired Default/User panes. Preferences > Settings opens
+    one separate Settings HWND (title `Settings`, no menu bar) while the editor window keeps its title, bounds
+    and menu. Typing `line_numbers`, Return and Space turn line numbers off in the User file and in the
+    editor's gutter. Esc first clears the search, then closes the window. Ctrl+, opens it again; a second
+    Ctrl+, from the editor brings the same HWND forward. With `ui_language` switched to `zh-Hans` in the
+    User file, the open window retitles itself `设置` and redraws in Chinese. Ctrl+W closes it. After each
+    close the editor is foreground again with its text unchanged.
 12. Approximately 50 MiB of numbered text: time to the first content frame, working set and three Page Downs.
 13. Silent install, shortcut, Explorer and uninstall registration, PATH, installed launch and uninstall cleanup.
 14. Force-kill after a durable dirty-buffer autosave, then relaunch and verify recovered text.
@@ -75,6 +81,11 @@ need adjustment. Where UIA does not enumerate the menu, the report includes
 the Win32 menu captions and records whether the popup opened by mnemonic or
 click. A click fallback does not pass a failed mnemonic. Settings item
 selection uses visible popup geometry or verifies the native keyboard highlight.
+The Settings window shares the editor window class; the driver finds it as the
+other HWND of the editor process titled `Settings` (or `设置`) and checks that it
+has no menu bar. Its screenshots are `settings-window`, `settings-search`,
+`line-numbers-off` and `settings-zh-Hans`; `editor-without-line-numbers` shows
+the editor after the change.
 The stdin check handles the owned save prompt without writing a file and still
 requires the edited text on stdout. Cold start runs from an isolated profile and
 verifies both helper streams reach EOF while the editor is open.
