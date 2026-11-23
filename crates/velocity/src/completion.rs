@@ -1387,8 +1387,12 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "completion/language timeout: {:?}",
-                e.completion
+                "completion/language timeout: {:?}; language: {:?}",
+                e.completion,
+                e.language
+                    .borrow()
+                    .as_ref()
+                    .map(crate::language::Language::readiness)
             );
             std::thread::park_timeout(Duration::from_millis(1));
         }

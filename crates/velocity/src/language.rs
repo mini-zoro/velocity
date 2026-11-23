@@ -638,6 +638,18 @@ struct AnalysisTask {
     tx: mpsc::Sender<Job>,
     rx: mpsc::Receiver<Result<Arc<Analysis>, String>>,
     latest: Arc<AtomicU64>,
+    /// Test probe: the version of the last job the worker finished with, whether it
+    /// published an analysis or dropped the job as stale.
+    #[cfg(test)]
+    handled: Arc<AtomicU64>,
+}
+#[cfg(test)]
+thread_local! {
+    /// Simulates a UI thread that is descheduled right after an edit reaches the
+    /// highlighter: `Language::change` returns only after the analysis worker has
+    /// finished with that version's job.
+    pub(crate) static ANALYSIS_RUNS_AHEAD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 #[derive(Debug)]
 struct Job {
@@ -660,6 +672,10 @@ impl AnalysisTask {
         let (results, rx) = mpsc::channel();
         let latest = Arc::new(AtomicU64::new(version.0));
         let current = latest.clone();
+        #[cfg(test)]
+        let handled = Arc::new(AtomicU64::new(u64::MAX));
+        #[cfg(test)]
+        let finished = handled.clone();
         std::thread::Builder::new()
             .name("velocity-language".into())
             .spawn(move || {
@@ -668,6 +684,8 @@ impl AnalysisTask {
                         job = next;
                     }
                     if current.load(Ordering::Acquire) != job.scopes.version.0 {
+                        #[cfg(test)]
+                        finished.store(job.scopes.version.0, Ordering::Release);
                         continue;
                     }
                     match analyze(&job, &current) {
@@ -681,10 +699,18 @@ impl AnalysisTask {
                             let _ = results.send(Err(error));
                         }
                     }
+                    #[cfg(test)]
+                    finished.store(job.scopes.version.0, Ordering::Release);
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Self { tx, rx, latest })
+        Ok(Self {
+            tx,
+            rx,
+            latest,
+            #[cfg(test)]
+            handled,
+        })
     }
 }
 
@@ -877,12 +903,25 @@ impl Language {
                 }
             }
         }
+        // Publish the version to the analysis worker before the highlighter can parse
+        // it. The highlighter hands each version's job to the worker exactly once; a job
+        // that arrived before this store was dropped as stale and analysis never came.
+        self.task.latest.store(version.0, Ordering::Release);
         self.service.send(HighlightCommand::Edit(
             text.clone(),
             version,
             changes.clone(),
             tab,
         ));
+        #[cfg(test)]
+        if ANALYSIS_RUNS_AHEAD.get() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self.task.handled.load(Ordering::Acquire) != version.0
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+        }
         self.version = version;
         self.text = text.clone();
         if let Some(analysis) = self.analysis.take() {
@@ -890,7 +929,6 @@ impl Language {
         }
         self.styled.clear();
         self.requested = None;
-        self.task.latest.store(version.0, Ordering::Release);
         self.viewport_scopes.clear();
         if let Some(viewport) = viewport {
             self.request_visible(viewport);
@@ -1064,6 +1102,29 @@ impl Language {
                     .analysis
                     .as_ref()
                     .is_some_and(|a| a.version == self.version))
+    }
+    /// Test timeout diagnostics: which publication `ready` is still waiting for, and
+    /// whether the highlight dispatcher and the analysis worker are still running
+    /// (each holds a clone of its version counter until its thread exits).
+    #[cfg(test)]
+    pub(crate) fn readiness(&self) -> String {
+        format!(
+            "version={:?} policy={:?} scopes={:?} lines={} analysis={:?} \
+             highlight_complete={} analysis_handled={} dispatcher_alive={} \
+             analysis_alive={} errors={:?}",
+            self.version,
+            self.policy,
+            self.scopes
+                .as_ref()
+                .map(|s| (s.version, s.range.clone(), s.complete())),
+            self.text.len_lines(),
+            self.analysis.as_ref().map(|a| a.version),
+            self.highlight_complete(),
+            self.task.handled.load(Ordering::Acquire),
+            Arc::strong_count(&self.service.latest) > 1,
+            Arc::strong_count(&self.task.latest) > 1,
+            self.errors,
+        )
     }
     pub fn scopes_ready(&self) -> bool {
         self.scopes.as_ref().is_some_and(|s| {
@@ -1877,6 +1938,63 @@ mod tests {
                 .unwrap()
                 .scopes_ready_at(&editor.text, 0)
         );
+    }
+
+    #[test]
+    fn analysis_survives_workers_that_finish_an_edit_before_it_returns() {
+        // A UI thread descheduled right after sending an edit to the highlighter (common
+        // on loaded Windows runners) let the highlighter parse it and hand the analysis
+        // worker its job before `change` published the version to that worker. The
+        // worker dropped the job as stale, the highlighter publishes each version once,
+        // and the language never became ready (no folds, pairs, guides or words).
+        let mut editor = crate::editor::Editor::new(Text::from("fn f() {}\n"));
+        editor
+            .attach_language(
+                Assets::bundled().unwrap(),
+                "Rust",
+                Arc::new(ColorScheme::velocity_dark()),
+            )
+            .unwrap();
+        let wait_ready = |editor: &mut crate::editor::Editor| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                editor.poll_language();
+                if let Some(language) = editor.language.borrow().as_ref() {
+                    if language.ready() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "language never ready: {}",
+                        language.readiness()
+                    );
+                }
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
+            }
+        };
+        wait_ready(&mut editor);
+        ANALYSIS_RUNS_AHEAD.set(true);
+        editor
+            .run("insert", &vel_config::json!({"characters":"x"}))
+            .unwrap();
+        ANALYSIS_RUNS_AHEAD.set(false);
+        let version = editor.language.borrow().as_ref().unwrap().version;
+        assert_eq!(
+            editor
+                .language
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .task
+                .handled
+                .load(Ordering::Acquire),
+            version.0,
+            "the analysis worker finished with the edit's job before `change` returned"
+        );
+        wait_ready(&mut editor);
+        let language = editor.language.borrow();
+        let analysis = language.as_ref().unwrap().analysis.as_ref().unwrap();
+        assert_eq!(analysis.version, version);
     }
 
     #[test]
