@@ -130,11 +130,27 @@ ln -s /Applications "$VELOCITY_STAGE/dmg-root/Applications"
 # still passes `codesign --verify --deep --strict` (required for notarization). It needs to attach
 # a disk device, which restricted sandboxes forbid; there we fall back to DiscRecording
 # (`makehybrid`), which works without a device but stamps com.apple.FinderInfo on every file.
+# `hdiutil create` can fail transiently on hosted runners ("Resource busy" while another image
+# detaches, or diskimages-helper still starting), so retry before giving up on it.
 VELOCITY_DMG_METHOD=create
-if ! hdiutil create -quiet -volname Velocity -srcfolder "$VELOCITY_STAGE/dmg-root" -fs HFS+ -layout SPUD \
-        -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" 2>/dev/null; then
+VELOCITY_DMG_ERRORS="$VELOCITY_STAGE/hdiutil-create.log"
+velocity_dmg_create() {
+    hdiutil create -quiet -volname Velocity -srcfolder "$VELOCITY_STAGE/dmg-root" -fs HFS+ -layout SPUD \
+        -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg" 2>>"$VELOCITY_DMG_ERRORS"
+}
+VELOCITY_DMG_CREATED=0
+for velocity_attempt in 1 2 3 4; do
+    if velocity_dmg_create; then
+        VELOCITY_DMG_CREATED=1
+        break
+    fi
+    rm -f "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
+    sleep $((velocity_attempt * 5))
+done
+if [ "$VELOCITY_DMG_CREATED" = 0 ]; then
     VELOCITY_DMG_METHOD=makehybrid
-    printf '%s\n' 'warning: hdiutil create unavailable; using makehybrid (app inside the DMG will fail strict codesign verification)' >&2
+    printf '%s\n' 'warning: hdiutil create failed 4 times; using makehybrid (app inside the DMG will fail strict codesign verification)' >&2
+    sed 's/^/  hdiutil create: /' "$VELOCITY_DMG_ERRORS" >&2 || true
     rm -f "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
     hdiutil makehybrid -quiet -hfs -hfs-volume-name Velocity -o "$VELOCITY_STAGE/payload.dmg" "$VELOCITY_STAGE/dmg-root"
     hdiutil convert -quiet "$VELOCITY_STAGE/payload.dmg" -format UDZO -imagekey zlib-level=9 -o "$VELOCITY_STAGE/$VELOCITY_BASENAME.dmg"
