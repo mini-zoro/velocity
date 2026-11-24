@@ -533,16 +533,17 @@ fn settings_keyboard_tab_space_arrows_and_popups() {
     // Radios move with Left and Right.
     show(&mut app, Pane::page("sidebar"));
     with_page(&mut app, |page, _| page.focus_setting("file_tab_style"));
+    // Rounded is the default and the last choice: Right wraps to Angled.
     key(&mut app, "right");
     assert_eq!(
         app.workspace.settings.layer(Layer::User)["file_tab_style"],
-        "square"
+        "angled"
     );
     key(&mut app, "left");
     key(&mut app, "left");
     assert_eq!(
         app.workspace.settings.layer(Layer::User)["file_tab_style"],
-        "rounded"
+        "square"
     );
     // ⌘F returns to the search field; typing in a list also searches.
     key(&mut app, "super+f");
@@ -622,11 +623,11 @@ fn settings_window_accessibility_roles() {
     show(&mut app, Pane::page("sidebar"));
     painted(&mut app, 480.);
     assert_eq!(
-        node(&app, Role::RadioButton, "Tab shape, Angled").checked,
+        node(&app, Role::RadioButton, "Tab shape, Rounded").checked,
         Some(true)
     );
     assert_eq!(
-        node(&app, Role::RadioButton, "Tab shape, Rounded").checked,
+        node(&app, Role::RadioButton, "Tab shape, Angled").checked,
         Some(false)
     );
     // Pressing a category through accessibility shows it.

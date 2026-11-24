@@ -225,10 +225,6 @@ png("edge-top", lambda x, y, s: y < 1)
 png("edge-bottom", lambda x, y, s: y >= 15)
 png("edge-right", lambda x, y, s: x >= 15)
 png("tab-indicator", lambda x, y, s: y < 2)
-# The rounded bar is nine-sliced at [6, 2, 6, 0]: its ink starts one DIP inside each corner
-# slice, so the stretched middle never filters against transparent texels (that faded
-# the bar's ends over several DIPs) and the ends stay crisp, 5 DIPs from the tab's sides.
-png("tab-indicator-rounded", lambda x, y, s: 5 <= x < 11 and y < 2)
 png("tab-divider", lambda x, y, s: x >= 15 and 7 <= y < 9)
 
 
@@ -255,6 +251,10 @@ dark = dict(surface=hex_mix(SCHEME["dark"], "#000000", .25),
             teal="#7dd2c2", rose="#e9a8c0")
 dark["selected"] = hex_mix(dark["surface"], dark["accent"], .24)
 dark["selected_focus"] = hex_mix(dark["surface"], dark["accent"], .36)
+# Selection and focus fills follow the system accent: the host replaces `focus` with it at
+# load time (theme_ui.rs). Accent-coloured text keeps the contrast-checked `accent`.
+dark.update(focus="#0a84ff", on_focus="#ffffff", ring="color(var(focus) a(0.5))",
+            card_line="#ffffff1f", card_shadow="#00000070", popup_shadow="#0000008c", wash="#ffffff")
 light = dict(surface=hex_mix(SCHEME["light"], "#000000", .06),
              overlay=hex_mix(SCHEME["light"], "#ffffff", .6),
              inset="#ffffff", fg="#243843", muted="#51626b", accent="#1d6290",
@@ -263,6 +263,8 @@ light = dict(surface=hex_mix(SCHEME["light"], "#000000", .06),
              rose="#8d3d61")
 light["selected"] = hex_mix(light["surface"], light["accent"], .18)
 light["selected_focus"] = hex_mix(light["surface"], light["accent"], .3)
+light.update(focus="#007aff", on_focus="#ffffff", ring="color(var(focus) a(0.45))",
+             card_line="#0000001f", card_shadow="#00000033", popup_shadow="#00000038", wash="#000000")
 rules = []
 
 
@@ -280,9 +282,20 @@ def texture(name, color, margin, layer=1, opacity=1.0):
             f"layer{layer}.opacity": opacity, f"layer{layer}.inner_margin": margin, f"layer{layer}.draw_center": False}
 
 
+# Shared shape tokens, in points: one place for every rounded control in the chrome. The
+# Settings window's own controls (settings_ui_view.rs) use the same radii.
+RADIUS = dict(control=6, card=8, popup=10, panel=12, badge=5)
+HAIRLINE = 0.5
+# Soft, larger shadows than Sublime's fixed 4-point blur (Velocity theme extensions).
+POPUP_SHADOW = {"shadow_color": "var(popup_shadow)", "shadow_offset": [0, 6], "shadow_blur": 18, "shadow_spread": 0}
+PANEL_SHADOW = {"shadow_color": "var(popup_shadow)", "shadow_offset": [0, 12], "shadow_blur": 32, "shadow_spread": 0}
+# The focus ring: a translucent accent band outside the control, as in the Settings window.
+FOCUS_RING = {"shadow_color": "var(ring)", "shadow_offset": [0, 0], "shadow_blur": 0, "shadow_spread": 3}
+# Rows highlight as rounded pills inset from the list's sides.
+ROW_PILL = {"surface_inset": [6, 1], "radius": RADIUS["control"]}
 CHROME = {"layer0.tint": "var(surface)", "layer0.opacity": 1.0}
-FLOATING = {"layer0.tint": "var(overlay)", "layer0.opacity": 1.0, "radius": 6,
-            "border_color": "var(border)", "shadow_color": "var(shadow)", "shadow_offset": [0, 3]}
+FLOATING = {"layer0.tint": "var(overlay)", "layer0.opacity": 1.0, "radius": RADIUS["popup"],
+            "border_color": "var(border)", "border_size": HAIRLINE, **POPUP_SHADOW}
 
 # Baselines state only what differs from the engine defaults (regular weight, no margin):
 # a transparent layer 0, the UI font and the foreground. Fewer values keep start-up cheap.
@@ -299,6 +312,8 @@ rule("status_bar", **texture("edge-top", "line", [0, 1, 0, 0]))
 rule("panel_control", **texture("edge-top", "line", [0, 1, 0, 0]))
 for cls in ("overlay_control", "popup_control", "tool_tip_control", "auto_complete_detail_pane"):
     rule(cls, content_margin=8, **FLOATING)
+# Quick panels float higher, Spotlight-like: larger corners and a larger, softer shadow.
+rule("overlay_control", radius=RADIUS["panel"], **PANEL_SHADOW)
 rule("title_bar", fg="var(muted)", bg="var(surface)", style="dark")
 rule("sidebar_tree", indent=16, indent_offset=4, indent_top_level=False, spacer_rows=True)
 rule("sidebar_heading", **{"fg": "var(muted)", "font.size": 11, "font.bold": True, "case": "upper"})
@@ -334,29 +349,35 @@ rule("tab_label", attributes=["transient"], **{"font.italic": True})
 rule("tab_label", parents=[{"class": "tab_control", "attributes": ["transient"]}], **{"font.italic": True})
 # Rows and buttons use translucent fills so they read on any derived surface.
 for cls in ("tree_row", "quick_panel_row", "mini_quick_panel_row", "table_row", "file_system_entry"):
+    rule(cls, **ROW_PILL)
     rule(cls, attributes=["hover"], **fill("fg", .06, animated=True))
-    rule(cls, attributes=["selected"], **fill("selected", 1.0))
-    rule(cls, attributes=["pressed"], **fill("accent", .32))
+    rule(cls, attributes=["selected"], **fill("focus", .3))
+    rule(cls, attributes=["pressed"], **fill("focus", .4))
     rule(cls, attributes=["disabled"], opacity=.45)
+# Side bar rows: Finder's pill, inset from both sides; neutral grey unless the side bar has
+# focus, then the accent tint.
+for cls in ("tree_row", "file_system_entry"):
+    rule(cls, surface_inset=[8, 1])
+    rule(cls, attributes=["selected"], **fill("fg", .11))
+rule("table_row", surface_inset=[2, 1])
 # Base button fill first: later state rules must win over it.
-rule("button_control", min_size=[56, 24], content_margin=[10, 4], radius=4, **fill("fg", .08))
+rule("button_control", min_size=[56, 24], content_margin=[10, 4], radius=RADIUS["control"], **fill("fg", .08))
 # Toggles that are on are solid accent with an inverse glyph: unmistakable in both appearances.
 for cls in ("button_control", "icon_button_control", "status_button"):
     rule(cls, attributes=["hover"], **fill("fg", .14, animated=True))
     rule(cls, attributes=["pressed"], **fill("fg", .22))
-    rule(cls, attributes=["selected"], fg="var(surface)", **fill("accent", 1.0))
-    rule(cls, attributes=["selected", "hover"], **fill("accent", .85))
-    rule(cls, attributes=["selected", "pressed"], **fill("accent", .7))
+    rule(cls, attributes=["selected"], fg="var(on_focus)", **fill("focus", 1.0))
+    rule(cls, attributes=["selected", "hover"], **fill("focus", .85))
+    rule(cls, attributes=["selected", "pressed"], **fill("focus", .7))
     rule(cls, attributes=["disabled"], opacity=.45)
 # The panel's default (Enter) action is tinted with the accent.
-rule("button_control", attributes=["primary"], **fill("accent", .28))
-rule("button_control", attributes=["primary", "hover"], **fill("accent", .4))
-rule("button_control", attributes=["primary", "pressed"], **fill("accent", .52))
-rule("tab_connector", attributes=["selected"], **fill("accent", 1.0))
-rule("table_row", radius=4)
+rule("button_control", attributes=["primary"], **fill("focus", .28))
+rule("button_control", attributes=["primary", "hover"], **fill("focus", .4))
+rule("button_control", attributes=["primary", "pressed"], **fill("focus", .52))
+rule("tab_connector", attributes=["selected"], **fill("focus", 1.0))
 # A focused side bar shows its selection in the accent; unfocused it stays quiet.
 for cls in ("tree_row", "file_system_entry"):
-    rule(cls, parents=[{"class": "sidebar_container", "attributes": ["focused"]}], attributes=["selected"], **fill("selected_focus", 1.0))
+    rule(cls, parents=[{"class": "sidebar_container", "attributes": ["focused"]}], attributes=["selected"], **fill("focus", .3))
 # Secondary labels brighten on selected rows (tab labels: see above; other labels already use fg).
 for cls in ("quick_panel_path_label", "quick_panel_detail_label"):
     for parent in ("quick_panel_row", "mini_quick_panel_row"):
@@ -369,7 +390,7 @@ rule("quick_panel_label", **{"font.size": 13})
 for cls in ("quick_panel_path_label", "quick_panel_label hint", "quick_panel_label key_binding", "quick_panel_detail_label", "auto_complete_details", "auto_complete_label auto_complete_hint"):
     rule(cls, **{"fg": "var(muted)", "font.size": 11, "link_color": "var(accent)", "monospace_color": "var(teal)", "monospace_background_color": "var(inset)"})
 rule("quick_panel_entry", spacing=4)
-rule("kind_container", content_margin=[4, 2], radius=3, **fill("muted", .16))
+rule("kind_container", content_margin=[4, 2], radius=RADIUS["badge"], **fill("muted", .16))
 rule("kind_label", **{"font.bold": True, "font.size": 11})
 for kind, color in dict(ambiguous="muted", keyword="rose", type="violet", function="red", namespace="accent", navigation="amber", markup="amber", variable="teal", snippet="green").items():
     rule(f"kind_container kind_{kind}", **fill(color, .16))
@@ -378,22 +399,23 @@ for kind, color in dict(redish="red", orangish="amber", yellowish="amber", green
     rule(f"kind_container kind_color_{kind}", **fill(color, .16))
     rule("kind_label", parents=[{"class": f"kind_container kind_color_{kind}"}], fg=f"var({color})")
 # Inputs: inset well with a hairline; focus turns the hairline into the accent.
-rule("text_line_control", **{"content_margin": [8, 6], "layer0.tint": "var(inset)", "layer0.opacity": 1.0, "color_scheme_tint": "var(inset)", "radius": 4, "border_color": "var(border)"})
+rule("text_line_control", **{"content_margin": [8, 6], "layer0.tint": "var(inset)", "layer0.opacity": 1.0, "color_scheme_tint": "var(inset)", "radius": RADIUS["control"], "border_color": "var(border)"})
 rule("text_line_control", match_fg="var(accent)")
-rule("text_line_control", attributes=["focused"], border_color="var(accent)")
+rule("text_line_control", attributes=["focused"], border_color="var(focus)", **FOCUS_RING)
 rule("text_line_control", attributes=["invalid"], border_color="var(red)")
 rule("panel_grid_control", inside_spacing=8, outside_vspacing=4, outside_hspacing=8)
 rule("label_control", fg="var(muted)")
 rule("label_control", attributes=["invalid"], fg="var(red)")
-rule("status_button", content_margin=[8, 4], min_size=[24, 24], radius=4)
+rule("status_button", content_margin=[8, 4], min_size=[24, 24], radius=RADIUS["control"])
 rule("status_container", fg="var(muted)")
 rule("vcs_status", fg="var(muted)")
 rule("grid_layout_control", border_size=1, border_color="var(line)")
-rule("minimap_control", viewport_color="var(accent)", viewport_opacity=.12)
+rule("minimap_control", viewport_color="var(accent)", viewport_opacity=.12, viewport_radius=4)
 rule("minimap_control", attributes=["hover"], viewport_opacity=.2)
 rule("minimap_control", settings=["always_show_minimap_viewport"], viewport_opacity=.2)
 rule("scroll_bar_control", content_margin=[2, 2], **{"layer0.opacity": 0.0})
-rule("puck_control", **{"layer0.tint": "var(muted)", "layer0.opacity": .4, "content_margin": [3, 3], "radius": 3})
+# Capsule thumbs at any scroll-bar width.
+rule("puck_control", **{"layer0.tint": "var(muted)", "layer0.opacity": .4, "content_margin": [3, 3], "pill": True})
 rule("puck_control", attributes=["hover"], **{"layer0.opacity": {"target": .75, "speed": 8}})
 rule("scroll_area_control", settings=["overlay_scroll_bars"], overlay=True)
 rule("scroll_area_control", settings={"overlay_scroll_bars": ["enabled", "system"]}, overlay=True)
@@ -421,7 +443,7 @@ BUTTONS = ("close_button", "tab_close_button", "panel_close_button", "annotation
            "show_tabs_dropdown_button", "scroll_tabs_left_button", "scroll_tabs_right_button", "dropdown_button_control")
 for cls, name in ICONS.items():
     # Clickable icon buttons also carry a (hidden) layer-0 wash for hover and press.
-    wash = {"layer0.tint": "var(fg)", "layer0.opacity": 0.0, "radius": 4, "content_margin": [10, 10]} if cls in BUTTONS else {"content_margin": [8, 8]}
+    wash = {"layer0.tint": "var(fg)", "layer0.opacity": 0.0, "radius": RADIUS["control"], "content_margin": [10, 10]} if cls in BUTTONS else {"content_margin": [8, 8]}
     rule(cls, **{"layer1.texture": f"Theme - Velocity/{name}.png", "layer1.tint": "var(muted)", "layer1.opacity": 1.0}, **wash)
 for cls in BUTTONS:
     rule(cls, attributes=["hover"], **{"layer0.opacity": .14, "layer1.tint": "var(fg)"})
@@ -437,11 +459,11 @@ rule("tab_close_button", attributes=["hover"], **{"layer1.texture": "Theme - Vel
 # Search toggles: the icon follows the toggle's state.
 for icon in ("icon_regex", "icon_case", "icon_whole_word", "icon_wrap", "icon_in_selection", "icon_preserve_case"):
     rule(icon, parents=[{"class": "button_control", "attributes": ["hover"]}], **{"layer1.tint": "var(fg)"})
-    rule(icon, parents=[{"class": "button_control", "attributes": ["selected"]}], **{"layer1.tint": "var(surface)"})
+    rule(icon, parents=[{"class": "button_control", "attributes": ["selected"]}], **{"layer1.tint": "var(on_focus)"})
 rule("disclosure_button_control", parents=[{"class": "tree_row", "attributes": ["expanded"]}], **{"layer1.texture": "Theme - Velocity/chevron-down.png"})
 rule("fold_button_control", attributes=["expanded"], **{"layer1.texture": "Theme - Velocity/chevron-down.png"})
 for cls in ("progress_bar_control", "progress_gauge_control"):
-    rule(cls, **{"layer0.tint": "var(accent)" if cls == "progress_gauge_control" else "var(inset)", "layer0.opacity": 1.0, "content_margin": [0, 2], "radius": 2})
+    rule(cls, **{"layer0.tint": "var(focus)" if cls == "progress_gauge_control" else "var(inset)", "layer0.opacity": 1.0, "content_margin": [0, 2], "pill": True})
 # Git: the badge glyph and its letter share the status colour.
 for attribute, color in dict(added="green", untracked="green", modified="amber", staged="teal", deleted="red", missing="red", unmerged="red", ignored="muted").items():
     rule("vcs_status_badge", attributes=[attribute], fg=f"var({color})", **{"layer1.tint": f"var({color})"})
@@ -453,12 +475,21 @@ for cls, setting in (("tab_close_button", "!show_tab_close_buttons"), ("scroll_t
 
 # Where inherits Close's button states; only the mask is different.
 rule("panel_where_button", **{"layer1.texture": "Theme - Velocity/palette-neutral.png"})
-# Only geometry changes in the rounded variant; it inherits the normal accent.
-# The base square geometry is also the fallback for legacy angled tabs.
-rule("tab_control", settings={"file_tab_style": "rounded"}, radius=6)
-rule("tab_control", attributes=["selected", "focused"], settings={"file_tab_style": "rounded"},
-     **{"layer2.texture": "Theme - Velocity/tab-indicator-rounded.png",
-        "layer2.inner_margin": [6, 2, 6, 0]})
+# `rounded` (the default) is a floating card, as in Safari and Xcode: no dividers and no
+# accent bar; hover is a rounded wash; the selected tab is a card in the editor's colour
+# with a hairline, and the focused group's card also casts a soft shadow. `angled` and
+# `square` keep the strip above. The card is inset in the tab's hit area, so the gaps
+# between tabs come from the inset alone and nothing is drawn per gap.
+ROUNDED = {"file_tab_style": "rounded"}
+rule("tab_control", settings=ROUNDED, radius=RADIUS["card"], surface_inset=[3, 4], **{"layer1.opacity": 0.0})
+# Another group's selected card is half-filled, so the focused group stands out without an accent.
+rule("tab_control", attributes=["selected"], settings=ROUNDED, border_color="var(card_line)", border_size=HAIRLINE,
+     **{"layer0.opacity": 0.55})
+rule("tab_control", attributes=["selected", "focused"], settings=ROUNDED,
+     shadow_color="var(card_shadow)", shadow_offset=[0, 1], shadow_blur=6, shadow_spread=0, **{"layer0.opacity": 1.0, "layer2.opacity": 0.0})
+rule("tab_close_button", settings=ROUNDED, pill=True)
+# Several selected sheets (split view in one group): a short capsule under each card.
+rule("tab_connector", attributes=["selected"], settings=ROUNDED, surface_inset=[56, 0], pill=True)
 
 def compact(value):
     return json.dumps(value, separators=(", ", ": "))

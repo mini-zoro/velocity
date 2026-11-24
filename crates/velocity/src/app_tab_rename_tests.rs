@@ -691,7 +691,7 @@ fn rename_field_is_rounded_after_the_icon_with_an_accent_ring() {
             height: field.height + 6.,
         };
         let ring = css(ring_rect).expect("focus ring");
-        let accent = crate::field_chrome::accent(&app.workspace.themes.ui.borrow());
+        let accent = crate::field_chrome::accent(dark);
         assert_eq!(ring.borders[0].width, 3.);
         assert_eq!(ring.borders[0].color[..3], accent[..3]);
         assert!(ring.borders[0].color[3] < 1. && ring.background[3] == 0.);

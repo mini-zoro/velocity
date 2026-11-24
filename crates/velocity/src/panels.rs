@@ -10175,7 +10175,15 @@ pub(crate) fn paint_themed_input(
     let text = layer.text.len();
     Panels::paint_input(layer, input, focused, style, f64::from(theme.density));
     layer.rects.remove(first);
-    theme.surface(layer, style, input.bounds, input.bounds);
+    // A Velocity focus ring paints outside the field (outset is zero for Sublime themes).
+    let ring = style.outset();
+    let clip = Rect {
+        x: input.bounds.x - ring,
+        y: input.bounds.y - ring,
+        width: input.bounds.width + 2. * ring,
+        height: input.bounds.height + 2. * ring,
+    };
+    theme.surface(layer, style, input.bounds, clip);
     for run in &mut layer.text[text..] {
         run.color = style.foreground;
         run.size = style.size;

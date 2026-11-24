@@ -271,8 +271,9 @@
   // fades when idle, while "disabled" reserves space for an always-visible bar.
   "overlay_scroll_bars": "system",
   "themed_title_bar": true,
-  // Bundled themes: "rounded" or "square". "angled" (legacy) and unknown styles use square tabs.
-  "file_tab_style": "angled",
+  // Bundled themes: "rounded" (floating card tabs, the default) or "square". "angled" (legacy)
+  // and unknown styles use square tabs with dividers and an accent bar.
+  "file_tab_style": "rounded",
   "show_tab_close_buttons": true,
   // Put the close button and dirty marker on the left when the button is enabled.
   "show_tab_close_buttons_on_left": false,

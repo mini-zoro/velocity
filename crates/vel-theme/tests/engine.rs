@@ -273,12 +273,27 @@ fn original_theme_registry_and_lane_a_coverage() {
             .resolve(&path, &settings, Platform::Mac)
             .color(&Property::Fg)
             .unwrap();
+        // The selected row is a translucent accent pill over the quick panel: the label is
+        // checked against the color actually drawn under it.
         let row = ElementPath(&[Element::new("quick_panel_row", &["selected"])]);
-        let bg = resolver
-            .resolve(&row, &settings, Platform::Mac)
+        let row = resolver.resolve(&row, &settings, Platform::Mac);
+        let mut tint = row.color(&Property::Layer(0, LayerProperty::Tint)).unwrap();
+        let opacity = row
+            .number(&Property::Layer(0, LayerProperty::Opacity))
+            .unwrap_or(1.);
+        tint.a = (f32::from(tint.a) * opacity).round() as u8;
+        let panel = ElementPath(&[Element::new("overlay_control", &[])]);
+        let panel = resolver
+            .resolve(&panel, &settings, Platform::Mac)
             .color(&Property::Layer(0, LayerProperty::Tint))
             .unwrap();
-        assert!(fg.contrast(bg) >= 4.5);
+        assert_eq!(panel.a, 255);
+        let bg = tint.over(panel);
+        assert!(
+            fg.contrast(bg) >= 4.5,
+            "{appearance:?}: {}",
+            fg.contrast(bg)
+        );
     }
 }
 #[test]

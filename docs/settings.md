@@ -326,9 +326,11 @@ reopening the window. Indexing options restart the index in the background.
 
 No other shipped preference was found to require an application restart.
 `show_at_startup` is not documented as a Sublime Text setting and is no longer
-shipped. For tab styles, the bundled themes follow the square and rounded forms
-described in the [public changelog](https://www.sublimetext.com/dev); `angled`
-uses square geometry. The scrollbar default uses
+shipped. For tab styles, `rounded` (the default, decision D6 in `docs/behavior.md`)
+draws floating card tabs: a rounded card for the selected tab, rounded hover washes,
+circular close buttons and no dividers; `square` and `angled` draw the square strip
+with dividers and an accent bar, after the forms described in the
+[public changelog](https://www.sublimetext.com/dev). The scrollbar default uses
 [AppKit's preferred scroller style](https://developer.apple.com/documentation/appkit/nsscroller/preferredscrollerstyle).
 
 ### Related behavior without a preference
@@ -426,7 +428,7 @@ including typed consumers, shipped theme guards and key-binding contexts.
 | `fallback_encoding` | `` "Western (Windows 1252)" `` |  | Next file open | Try this encoding when a file cannot be decoded as UTF-8. | Used when decoding non-UTF-8 data on the next open or reopen. [vel-config/settings.rs](../crates/vel-config/src/settings.rs), [vel-fileio/lib.rs](../crates/vel-fileio/src/lib.rs), [velocity/annotations.rs](../crates/velocity/src/annotations.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `file_exclude_patterns` | `` ["*.pyc", "*.pyo", "*.exe", "*.dll", "*.obj", "*.o", "*.a", "*.lib", "*.so", "*.dylib", "*.ncb", "*.sdf", "*.suo", "*.pdb", "*.idb", ".DS_Store", "*.class", "*.psd", "*.db", "*.sublime-workspace", ".velocity-save-*"] `` |  | Immediately | Omit matching files from the sidebar’s file tree. | [velocity/panels.rs](../crates/velocity/src/panels.rs), [velocity/workbench.rs](../crates/velocity/src/workbench.rs), [velocity/workspace.rs](../crates/velocity/src/workspace.rs) |
 | `file_icon_theme` | Not shipped |  |  |  | [velocity/theme_ui.rs](../crates/velocity/src/theme_ui.rs) |
-| `file_tab_style` | `` "angled" `` |  | Immediately | Choose the shape of document tabs. | Bundled themes: "rounded" or "square". "angled" (legacy) and unknown styles use square tabs. [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme) |
+| `file_tab_style` | `` "rounded" `` |  | Immediately | Choose the shape of document tabs. | Bundled themes: "rounded" (floating card tabs, the default) or "square". "angled" (legacy) and unknown styles use square tabs with dividers and an accent bar. [velocity/Velocity.sublime-theme](../crates/velocity/resources/Packages/Theme%20-%20Velocity/Velocity.sublime-theme) |
 | `find_highlight_matches_max_size` | `` 0 `` |  | Immediately | Skip automatic literal match highlighting above this many bytes. Zero removes the limit. | [Build 4121](https://www.sublimetext.com/download#build-4121). Explicit Find Next/Previous, Find All and Replace still work. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_context_characters` | `` 0 `` |  | Immediately | Limit characters per result line. Zero keeps the standard preview. | [Build 4166](https://www.sublimetext.com/download#build-4166). A positive value uses Unicode scalar columns and preserves the source jump column. Zero uses the previous disk previews and live-buffer formatting. [velocity/panels.rs](../crates/velocity/src/panels.rs) |
 | `find_in_files_context_lines` | `` 1 `` |  | Immediately | Set how many lines appear before and after each match when Context is on. | [Build 4151](https://www.sublimetext.com/download#build-4151). Applies to the next search with Context enabled; Velocity accepts 0–100 lines on each side and defaults to one. [velocity/panels.rs](../crates/velocity/src/panels.rs) |

@@ -3,7 +3,6 @@
 //! focus ring outside it, as on macOS and Windows 11 fields.
 use vel_platform::Rect;
 use vel_render::scene::{BorderEdge, Color, CssBox, Layer, Surface};
-use vel_ui::theme::ThemeUi;
 
 /// Corner radius of a field, in points.
 pub(crate) const RADIUS: f32 = 5.;
@@ -14,10 +13,44 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
 }
 
+/// The system accent as 0xRRGGBBAA, plus one in the top bits when known. AppKit colors are
+/// read on the main thread (`refresh_system_accent`); theme workers only read this copy.
+static SYSTEM_ACCENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Reads the platform accent on the main thread. Returns whether it changed. Tests and the
+/// offscreen renderer never call this, so they use the theme's own deterministic accent.
+pub(crate) fn refresh_system_accent() -> bool {
+    use std::sync::atomic::Ordering;
+    let packed = vel_platform::system_accent_color().map_or(0, |color| {
+        let [r, g, b, a] = color.map(|c| (c.clamp(0., 1.) * 255.).round() as u64);
+        1 << 32 | r << 24 | g << 16 | b << 8 | a
+    });
+    SYSTEM_ACCENT.swap(packed, Ordering::Relaxed) != packed
+}
+
+/// The system accent as `#rrggbb`, once the main thread has read it.
+pub(crate) fn system_accent_hex() -> Option<String> {
+    let packed = SYSTEM_ACCENT.load(std::sync::atomic::Ordering::Relaxed);
+    (packed >> 32 == 1).then(|| format!("#{:06x}", (packed >> 8) & 0xff_ffff))
+}
+
+/// The system accent the main thread last read, if the platform has one.
+pub(crate) fn system_accent() -> Option<Color> {
+    let packed = SYSTEM_ACCENT.load(std::sync::atomic::Ordering::Relaxed);
+    (packed >> 32 == 1)
+        .then(|| [24, 16, 8].map(|shift| ((packed >> shift) & 0xff) as f32 / 255.))
+        .map(|[r, g, b]| [r, g, b, 1.])
+}
+
 /// The accent for fills, selections, carets and focus rings: the system accent where the
-/// platform has one, otherwise the theme's.
-pub(crate) fn accent(theme: &ThemeUi) -> Color {
-    vel_platform::system_accent_color().unwrap_or_else(|| theme.accent())
+/// platform has one, otherwise the default system blue of the appearance (the Velocity
+/// theme's `focus` variable), never a color scheme's accent, which may be any hue.
+pub(crate) fn accent(dark: bool) -> Color {
+    system_accent().unwrap_or(if dark {
+        [0.039, 0.518, 1., 1.] // #0a84ff
+    } else {
+        [0., 0.478, 1., 1.] // #007aff
+    })
 }
 
 /// Colors of a field drawn over the given background.

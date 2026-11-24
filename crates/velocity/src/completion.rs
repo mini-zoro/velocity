@@ -420,6 +420,12 @@ impl Completion {
         );
         let mut layer = Layer::default();
         theme.surface(&mut layer, &popup, rect, rect);
+        // Only a Velocity shadow paints past the popup, within the view (outset is zero for
+        // Sublime themes, whose shadow stays clipped to the popup as before).
+        let shadow_clip = vel_ui::minihtml::intersection(grow(rect, popup.outset()), area);
+        for shadow in &mut layer.shadows {
+            shadow.clip = shadow_clip;
+        }
         let first = self.selected.saturating_sub(n.saturating_sub(1));
         self.painted_rows.set(PaintedRows {
             first,
@@ -1368,6 +1374,16 @@ impl Editor {
     }
 }
 
+/// `rect` grown by `by` on every side.
+fn grow(rect: Rect, by: f64) -> Rect {
+    Rect {
+        x: rect.x - by,
+        y: rect.y - by,
+        width: rect.width + 2. * by,
+        height: rect.height + 2. * by,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1677,7 +1693,8 @@ mod tests {
             .surfaces
             .iter()
             .filter_map(|s| match s {
-                vel_render::scene::Surface::Fill(r) if r.rect.height == 24. => Some(r),
+                // Rows are 24 points; the selected row's pill is inset by one at top and bottom.
+                vel_render::scene::Surface::Fill(r) if r.rect.height == 22. => Some(r),
                 _ => None,
             })
             .next_back()

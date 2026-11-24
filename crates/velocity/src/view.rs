@@ -4342,7 +4342,18 @@ impl View {
                 .viewport_color
                 .unwrap_or_else(|| color(scheme, "minimap_border"));
             shade[3] *= style.viewport_opacity;
-            fill(layer, rect, bounds, shade);
+            if style.viewport_radius > 0. {
+                layer.rects.push(SolidRect {
+                    rect,
+                    clip: bounds,
+                    color: shade,
+                    radius: style
+                        .viewport_radius
+                        .min((rect.width.min(rect.height) / 2.) as f32),
+                });
+            } else {
+                fill(layer, rect, bounds, shade);
+            }
         }
         // This setting borders the visible-text region independently of hover:
         // https://docs.sublimetext.io/reference/settings.html#visual-settings

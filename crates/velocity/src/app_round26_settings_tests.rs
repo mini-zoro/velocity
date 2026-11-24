@@ -42,65 +42,74 @@ fn user_file(data: &Path, contents: &Value) -> PathBuf {
     path
 }
 
+/// The selected tab of a rounded strip is a card inset in its hit area: radius 8, 3 points
+/// from the sides and 4 from the strip's top and bottom.
+fn card(tab: Rect, scale: f64) -> Rect {
+    Rect {
+        x: tab.x + 3. * scale,
+        y: tab.y + 4. * scale,
+        width: tab.width - 6. * scale,
+        height: tab.height - 8. * scale,
+    }
+}
+
 #[test]
 fn rounded_and_square_tab_styles_change_the_drawn_tab_not_the_hit_rect() {
     let mut app = app(None);
     for dark in [false, true] {
         app.workspace.set_appearance(dark).unwrap();
         let mut original_hit = None;
-        for (style, radius) in [
-            ("square", 0.),
-            ("rounded", 6.),
-            ("angled", 0.),
-            ("other", 0.),
-        ] {
+        for style in ["square", "rounded", "angled", "other"] {
             preference(&mut app, "file_tab_style", json!(style));
             let scene = app.scene();
             let tab = app.tab_hits[0].1;
             assert_eq!(tab, *original_hit.get_or_insert(tab));
-            // A selected rounded tab's box runs one radius below the strip, clipped there.
-            let below = f64::from(radius);
-            assert!(scene.layers.iter().flat_map(|l| &l.surfaces).any(|s| {
-                matches!(s, Surface::Fill(q) if q.rect == Rect { height: tab.height + below, ..tab }
-                    && q.clip.y + q.clip.height == tab.y + tab.height
-                    && (q.radius - radius).abs() < 0.01)
-            }), "{dark} {style} {tab:?}");
+            let fills = || {
+                scene
+                    .layers
+                    .iter()
+                    .flat_map(|l| &l.surfaces)
+                    .filter_map(|s| match s {
+                        Surface::Fill(q) => Some(q),
+                        _ => None,
+                    })
+            };
+            if style == "rounded" {
+                // A floating card, inside the strip.
+                assert!(
+                    fills().any(|q| q.rect == card(tab, 1.) && (q.radius - 8.).abs() < 0.01),
+                    "{dark} {style} {tab:?}"
+                );
+            } else {
+                // A square tab fills its strip cell and joins the sheet below.
+                assert!(
+                    fills().any(|q| q.rect == tab
+                        && q.clip.y + q.clip.height == tab.y + tab.height
+                        && q.radius == 0.),
+                    "{dark} {style} {tab:?}"
+                );
+            }
         }
     }
 }
 
-/// `file_tab_style: "rounded"`: the selected tab rounds only its top corners (its bottom
-/// joins the sheet without notches), and a focused one keeps the accent line, 5 DIPs inside
-/// the round corners, with crisp ends. The rounded indicator texture was not bundled, so the
-/// line was lost.
+/// `file_tab_style: "square"` (and `angled`): the selected tab joins the sheet and a focused
+/// one keeps its accent line with crisp ends. `rounded` (the default): the selected tab is a
+/// floating card with a hairline and, while its group is focused, a soft shadow; no accent
+/// line, no divider, and nothing reaches the sheet below the strip.
 #[test]
-fn selected_rounded_tabs_join_the_sheet_and_keep_their_accent_line() {
+fn selected_square_tabs_keep_their_accent_line_and_rounded_tabs_float_as_cards() {
     let mut app = app(None);
     for scale in [1., 2.] {
         preference(&mut app, "ui_scale", json!(scale));
         for dark in [false, true] {
             app.workspace.set_appearance(dark).unwrap();
-            for (style, inset) in [("square", 0.), ("rounded", 5.)] {
+            for style in ["square", "rounded"] {
                 preference(&mut app, "file_tab_style", json!(style));
                 let scene = app.scene();
                 let tab = app.tab_hits[0].1;
                 let bottom = tab.y + tab.height;
                 let surfaces: Vec<_> = scene.layers.iter().flat_map(|l| &l.surfaces).collect();
-                // No visible fill of the tab ends inside the strip with rounded corners.
-                for surface in &surfaces {
-                    if let Surface::Fill(q) = surface
-                        && q.radius > 0.
-                        && q.rect.x == tab.x
-                        && q.rect.width == tab.width
-                        && q.rect.y == tab.y
-                    {
-                        assert!(
-                            q.rect.y + q.rect.height >= bottom + f64::from(q.radius) - 0.01
-                                && q.clip.y + q.clip.height <= bottom + 0.01,
-                            "{style} {dark} ×{scale}: bottom corners are visible: {q:?}"
-                        );
-                    }
-                }
                 // The indicator's slices at the tab's top, and the extent of their ink.
                 let alpha = |q: &vel_render::scene::ImageQuad, col: usize, row: usize| {
                     q.image.rgba[(row * q.image.width as usize + col) * 4 + 3]
@@ -120,6 +129,62 @@ fn selected_rounded_tabs_join_the_sheet_and_keep_their_accent_line() {
                         _ => None,
                     })
                     .collect();
+                if style == "rounded" {
+                    let card = card(tab, scale);
+                    assert!(
+                        slices.is_empty(),
+                        "{dark} ×{scale}: rounded cards have no accent line"
+                    );
+                    assert!(
+                        surfaces.iter().any(|s| matches!(s, Surface::Fill(q)
+                            if q.rect == card && (q.radius - 8. * scale as f32).abs() < 0.01)),
+                        "{dark} ×{scale}: card fill"
+                    );
+                    assert!(
+                        surfaces.iter().any(|s| matches!(s, Surface::CssBox(b)
+                            if b.rect == card && (b.borders[0].width - 0.5 * scale as f32).abs() < 0.01
+                                && b.background[3] == 0.)),
+                        "{dark} ×{scale}: card hairline"
+                    );
+                    // Nothing of the tab reaches the sheet: every tab fill ends inside the strip.
+                    for surface in &surfaces {
+                        if let Surface::Fill(q) = surface
+                            && q.rect.x >= tab.x
+                            && q.rect.x + q.rect.width <= tab.x + tab.width
+                            && q.rect.y >= tab.y
+                            && q.rect.y < bottom
+                        {
+                            assert!(
+                                q.rect.y + q.rect.height <= bottom - 4. * scale + 0.01,
+                                "{q:?}"
+                            );
+                        }
+                    }
+                    let shadow = scene
+                        .layers
+                        .iter()
+                        .flat_map(|l| &l.shadows)
+                        .find(|shadow| shadow.rect.x == card.x && shadow.rect.width == card.width)
+                        .expect("the focused card casts a shadow");
+                    assert!((shadow.blur - 6. * scale as f32).abs() < 0.01);
+                    assert_eq!(shadow.rect.y, card.y + scale);
+                    continue;
+                }
+                // Square: no visible fill of the tab ends inside the strip with rounded corners.
+                for surface in &surfaces {
+                    if let Surface::Fill(q) = surface
+                        && q.radius > 0.
+                        && q.rect.x == tab.x
+                        && q.rect.width == tab.width
+                        && q.rect.y == tab.y
+                    {
+                        assert!(
+                            q.rect.y + q.rect.height >= bottom + f64::from(q.radius) - 0.01
+                                && q.clip.y + q.clip.height <= bottom + 0.01,
+                            "{style} {dark} ×{scale}: bottom corners are visible: {q:?}"
+                        );
+                    }
+                }
                 let (mut left, mut right) = (f64::MAX, f64::MIN);
                 for q in &slices {
                     let [x, y, w, h] = q.source.map(|v| v as usize);
@@ -151,12 +216,9 @@ fn selected_rounded_tabs_join_the_sheet_and_keep_their_accent_line() {
                     }
                 }
                 assert!(left < right, "{style} {dark} ×{scale}: no accent line");
+                assert!((left - tab.x).abs() < 0.01, "{style} {left}");
                 assert!(
-                    (left - (tab.x + inset * scale)).abs() < 0.01,
-                    "{style} {left}"
-                );
-                assert!(
-                    (right - (tab.x + tab.width - inset * scale)).abs() < 0.01,
+                    (right - (tab.x + tab.width)).abs() < 0.01,
                     "{style} {right}"
                 );
             }

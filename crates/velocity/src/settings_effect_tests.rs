@@ -65,7 +65,7 @@ fn alternate(key: &str, default: &Value, root: &Path) -> Value {
         "find_in_files_context_lines" => json!(0),
         "console_max_history_lines" => json!(1),
         "file_exclude_patterns" | "index_exclude_patterns" => json!(["*.rs"]),
-        "file_tab_style" => json!("rounded"),
+        "file_tab_style" => json!("square"),
         "folder_exclude_patterns" => json!(["subdir"]),
         "font_face" => json!("Monaco"),
         "font_options" => json!(["no_antialias", "bold"]),

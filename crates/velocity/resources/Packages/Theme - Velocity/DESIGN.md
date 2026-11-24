@@ -11,16 +11,36 @@ matches the sheet below it. The host selects `Velocity.sublime-theme` or
 and overrides variables, title-bar style and content darkness.
 
 Structure comes from hairlines rather than frames: one-DIP `line` edges between the side bar
-and the editor, under the tab strip, above the status bar and above panels, and a short divider
-between inactive tabs. The selected tab takes the editor background so it reads as part of the
-sheet below it; the focused group's selected tab also carries a two-DIP accent bar. Inactive tab
-labels are muted. Close buttons appear on the selected and hovered tab; a dirty tab shows a dot
-in their place until hovered. Group and Split View dividers use `grid_layout_control`.
+and the editor, under the tab strip, above the status bar and above panels. The default tab style
+(`file_tab_style: "rounded"`) is a floating card, as in Safari and Xcode: the selected tab is a
+rounded card inset in the strip, in the editor's colour with a half-point hairline, and the focused
+group's card casts a soft shadow (other groups' selected cards are half-filled, so the focused group
+reads without an accent); there are no dividers or accent bar, hover is a rounded wash and
+close buttons are circular. `square` and `angled` keep the earlier strip: a short divider between
+inactive tabs, the selected tab joining the sheet below and a two-DIP accent bar on the focused
+group's tab. Inactive tab labels are muted. Close buttons appear on the selected and hovered tab;
+a dirty tab shows a dot in their place until hovered. Group and Split View dividers use
+`grid_layout_control`.
+
+Shapes follow one set of tokens in `generate.py` (`RADIUS`): 6-point controls (buttons, inputs,
+dropdowns, toggles, row pills), 8-point tab cards, 10-point popups (completion, hover, tool tips)
+and 12-point quick panels, with soft blurred shadows on floating surfaces. Side-bar and list
+selections are pills inset from the list's sides. Focused inputs get a three-point translucent
+ring in the focus colour; scroll thumbs are capsules and the minimap viewport is rounded. These use
+Velocity theme extensions (`surface_inset`, `shadow_blur`, `shadow_spread`, `pill`,
+`viewport_radius`; see `crates/vel-theme/COVERAGE.md`), which other themes never set.
+
+Selection and focus fills use the `focus` variable. The host replaces it with the system accent
+(macOS: the control accent colour; Windows: the DWM accent colour) through a theme fragment merged
+after this package and before User; without one the theme's own blue applies. Accent-coloured text
+(matches, links) keeps the contrast-checked `accent`.
+Native-drawn fields (the tab rename field, the Settings window's controls) use the same system
+accent, falling back to the same blues (#0a84ff dark, #007aff light), never a colour scheme's accent.
 
 Spacing follows a 4-DIP scale: 4 for tight gaps, 8 for standard insets, 12 for tab side insets,
-16 for side-bar indentation and icon columns. Tabs are 32 DIPs high; buttons, toggles and tab
-controls are at least 20–24 DIPs. Icons are drawn at their intrinsic 16-DIP size and snapped to
-device pixels, never stretched. Popup containers and inputs have 4–6 DIP radii; kind badges 3.
+16 for side-bar indentation and icon columns. Tabs are 32 DIPs high (cards 24, inset 4 from the
+strip's top and bottom); buttons, toggles and tab controls are at least 20–24 DIPs. Icons are drawn at their intrinsic 16-DIP size and snapped to
+device pixels, never stretched. Radii come from the shape tokens below; kind badges are 5.
 UI text uses the platform system family at 12 DIPs (quick-panel captions 13), secondary text and
 headings at 11; headings are bold uppercase. Long labels end in an ellipsis. Preview/transient
 tabs and open files use italic text.

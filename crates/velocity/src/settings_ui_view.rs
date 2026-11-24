@@ -86,7 +86,6 @@ impl Ink {
     fn new(theme: &mut ThemeUi, settings: &Settings, dark: bool) -> Self {
         use vel_theme::{Element, ElementPath};
         // Calm neutral surfaces: a slightly darker sidebar, lighter control faces.
-        let system = crate::field_chrome::accent(theme);
         let (bg, sidebar, control, fg, accent, fill, red) = if dark {
             (
                 [0.122, 0.127, 0.139, 1.],
@@ -144,11 +143,8 @@ impl Ink {
             accent,
             // Checked boxes, chosen radios and focus rings follow the system accent, like
             // native controls; accent-colored text keeps the fixed, contrast-checked blue.
-            fill: if vel_platform::system_accent_color().is_some() {
-                system
-            } else {
-                fill
-            },
+            // The main thread's copy, so headless renders and tests stay deterministic.
+            fill: crate::field_chrome::system_accent().unwrap_or(fill),
             control,
             border: mix(bg, fg, if dark { 0.22 } else { 0.20 }),
             outline: mix(bg, fg, if dark { 0.50 } else { 0.47 }),
@@ -744,9 +740,6 @@ impl Page {
             &mut self.search,
             search_focused,
         );
-        if search_focused {
-            focus_ring(controls, ink, search_bounds, clip, 5.);
-        }
         if self.search.value().is_empty() && !self.search.composing() {
             let mut placeholder = search_style.clone();
             placeholder.foreground = mix(search_style.foreground, ink.bg, 0.3);

@@ -9,32 +9,36 @@ thread_local! { static DEFAULT:Rc<RefCell<ThemeUi>>=Rc::new(RefCell::new(ThemeUi
 pub fn default_ui() -> Rc<RefCell<ThemeUi>> {
     DEFAULT.with(Clone::clone)
 }
+/// A compiled theme: theme name, dark appearance, color scheme and system accent.
+type CompiledKey = (String, bool, String, Option<String>);
+/// The applied choice: theme, dark appearance, color scheme, file icons and system accent.
+type Selection = (String, bool, String, String, Option<String>);
 #[derive(Debug)]
 pub struct Themes {
     pub ui: Rc<RefCell<ThemeUi>>,
     sources: Sources,
-    compiled: BTreeMap<(String, bool, String), Result<Compiled, String>>,
+    compiled: BTreeMap<CompiledKey, Result<Compiled, String>>,
     unconditional: Option<Sources>,
     guards: Vec<SettingsGuard>,
     palettes: BTreeMap<String, Palette>,
     mappings: Vec<(String, FileIcons)>,
     icon_paths: BTreeMap<String, String>,
     pub icons: FileIcons,
-    selected: Option<(String, bool, String, String)>,
+    selected: Option<Selection>,
 }
 /// Send-only resource preparation, including compiled appearance variants and decoded PNGs.
 #[derive(Debug)]
 pub struct Prepared {
     ui: vel_ui::theme::PreparedUi,
     sources: Sources,
-    compiled: BTreeMap<(String, bool, String), Result<Compiled, String>>,
+    compiled: BTreeMap<CompiledKey, Result<Compiled, String>>,
     unconditional: Option<Sources>,
     guards: Vec<SettingsGuard>,
     palettes: BTreeMap<String, Palette>,
     mappings: Vec<(String, FileIcons)>,
     icon_paths: BTreeMap<String, String>,
     icons: FileIcons,
-    selected: Option<(String, bool, String, String)>,
+    selected: Option<Selection>,
     images: BTreeMap<String, Arc<[u8]>>,
 }
 impl Themes {
@@ -283,11 +287,16 @@ impl Themes {
             scheme
         };
         let global_icons = settings.string("file_icon_theme", "Velocity.sublime-file-icons");
+        let accent = crate::field_chrome::system_accent_hex();
         if self
             .selected
             .as_ref()
-            .is_some_and(|(old, appearance, old_scheme, icons)| {
-                old == name && *appearance == dark && old_scheme == scheme && icons == global_icons
+            .is_some_and(|(old, appearance, old_scheme, icons, old_accent)| {
+                old == name
+                    && *appearance == dark
+                    && old_scheme == scheme
+                    && icons == global_icons
+                    && *old_accent == accent
             })
         {
             return Ok(());
@@ -338,7 +347,7 @@ impl Themes {
         if let Some(unconditional) = theme.1 {
             ui.set_unconditional(unconditional, self.guards.clone());
         }
-        self.selected = Some((key.0, key.1, key.2, global_icons.into()));
+        self.selected = Some((key.0, key.1, key.2, global_icons.into(), accent));
         error.map_or(Ok(()), Err)
     }
     /// Validates a picker entry without changing the selected UI theme.
@@ -368,14 +377,24 @@ impl Themes {
         scheme: &str,
         palette: &Palette,
     ) -> Result<Compiled, String> {
-        let key = (name.to_owned(), dark, scheme.to_owned());
+        let accent = crate::field_chrome::system_accent_hex();
+        let key = (name.to_owned(), dark, scheme.to_owned(), accent.clone());
         if let Some(compiled) = self.compiled.get(&key) {
             return compiled.clone();
         }
+        // The bundled themes take selection and focus fills from the `focus` variable; with a
+        // system accent, a fragment after the Velocity package (and before User) sets it.
+        // Themes that do not extend Velocity's never read the variable.
+        let fragment = accent.as_deref().map(accent_fragment);
         let resources = self
             .sources
             .iter()
             .map(|(path, contents)| vel_theme::Resource { path, contents })
+            .chain(fragment.iter().flat_map(|contents| {
+                ACCENT_FRAGMENTS
+                    .iter()
+                    .map(move |path| vel_theme::Resource { path, contents })
+            }))
             .collect::<Vec<_>>();
         let compiled = vel_theme::load_resources(&resources, name, palette)
             .map(|full| {
@@ -407,6 +426,15 @@ impl Themes {
             .or(Some("Theme - Velocity/file.png"))
     }
 }
+/// The theme fragment that sets Velocity's `focus` variable to a system accent.
+fn accent_fragment(hex: &str) -> String {
+    format!("{{\"variables\": {{\"focus\": \"{hex}\"}}}}")
+}
+/// Synthetic fragments carrying the system accent, merged into the bundled themes by name.
+const ACCENT_FRAGMENTS: [&str; 2] = [
+    "Packages/Velocity System Accent/Velocity.sublime-theme",
+    "Packages/Velocity System Accent/Velocity Light.sublime-theme",
+];
 fn settings_free_sources(sources: &[(String, String)]) -> (Option<Sources>, Vec<SettingsGuard>) {
     let mut guards = Vec::new();
     let mut filtered = Vec::new();
@@ -853,18 +881,6 @@ const BUNDLED: &[(&str, &[u8])] = &[
         include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator@3x.png"),
     ),
     (
-        "tab-indicator-rounded.png",
-        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded.png"),
-    ),
-    (
-        "tab-indicator-rounded@2x.png",
-        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded@2x.png"),
-    ),
-    (
-        "tab-indicator-rounded@3x.png",
-        include_bytes!("../resources/Packages/Theme - Velocity/tab-indicator-rounded@3x.png"),
-    ),
-    (
         "updown.png",
         include_bytes!("../resources/Packages/Theme - Velocity/updown.png"),
     ),
@@ -894,9 +910,95 @@ const BUNDLED: &[(&str, &[u8])] = &[
 mod tests {
     use super::*;
 
-    /// Every texture the bundled themes and file icons name is embedded at 1x, 2x and 3x.
-    /// `tab-indicator-rounded.png` was missing, so `file_tab_style: "rounded"` silently
-    /// dropped the focused tab's accent line.
+    /// The system accent reaches Velocity's selection fills through its `focus` variable; a
+    /// theme that does not extend Velocity's never reads it and renders the same.
+    #[test]
+    fn system_accent_fragment_drives_velocity_focus_and_leaves_other_themes_alone() {
+        use vel_theme::{Element, ElementPath};
+        let mut sources: Vec<(String, String)> = BUNDLED
+            .iter()
+            .filter(|(name, _)| name.ends_with(".sublime-theme"))
+            .map(|(name, bytes)| {
+                (
+                    format!("Packages/Theme - Velocity/{name}"),
+                    String::from_utf8(bytes.to_vec()).unwrap(),
+                )
+            })
+            .collect();
+        sources.push((
+            "Packages/Other/Other.sublime-theme".into(),
+            r##"{"rules":[{"class":"quick_panel_row","attributes":["selected"],"layer0.tint":"#123456","layer0.opacity":1.0,"radius":2}]}"##.into(),
+        ));
+        let fragment = accent_fragment("#ff2d55");
+        let palette = Palette::default();
+        let fill = |name: &str, accent: bool| {
+            let resources =
+                sources
+                    .iter()
+                    .map(|(path, contents)| vel_theme::Resource { path, contents })
+                    .chain(ACCENT_FRAGMENTS.iter().filter(|_| accent).map(|path| {
+                        vel_theme::Resource {
+                            path,
+                            contents: &fragment,
+                        }
+                    }))
+                    .collect::<Vec<_>>();
+            let theme = vel_theme::load_resources(&resources, name, &palette).unwrap();
+            let mut ui = ThemeUi::new(Arc::new(theme), palette.clone());
+            let style = ui.style(
+                1,
+                &ElementPath(&[
+                    Element::new("quick_panel", &[]),
+                    Element::new("quick_panel_row", &["selected"]),
+                ]),
+                &Settings::default(),
+            );
+            let mut layer = vel_render::scene::Layer::default();
+            let row = vel_platform::Rect {
+                x: 0.,
+                y: 0.,
+                width: 200.,
+                height: 24.,
+            };
+            ui.surface(&mut layer, &style, row, row);
+            layer
+                .surfaces
+                .iter()
+                .find_map(|surface| match surface {
+                    vel_render::scene::Surface::Fill(fill) => Some((fill.color, fill.rect)),
+                    _ => None,
+                })
+                .expect("selected row fill")
+        };
+        for name in ["Velocity.sublime-theme", "Velocity Light.sublime-theme"] {
+            let (with, pill) = fill(name, true);
+            assert_eq!(
+                with[..3],
+                [1., 0x2d as f32 / 255., 0x55 as f32 / 255.],
+                "{name}"
+            );
+            assert!(with[3] < 1., "{name}: a translucent accent tint");
+            assert!(pill.x > 0. && pill.width < 200., "{name}: an inset pill");
+            assert_ne!(fill(name, false).0[..3], with[..3], "{name}");
+        }
+        assert_eq!(
+            fill("Other.sublime-theme", true),
+            fill("Other.sublime-theme", false)
+        );
+        assert_eq!(
+            fill("Other.sublime-theme", true).0,
+            [
+                0x12 as f32 / 255.,
+                0x34 as f32 / 255.,
+                0x56 as f32 / 255.,
+                1.
+            ]
+        );
+    }
+
+    /// Every texture the bundled themes and file icons name is embedded at 1x, 2x and 3x
+    /// (a missing `tab-indicator-rounded.png` once dropped the rounded tab's accent line).
+    /// The angled/square strip still uses `tab-indicator`; rounded card tabs use no texture.
     #[test]
     fn every_texture_named_by_a_bundled_theme_is_bundled_at_every_density() {
         let names: std::collections::BTreeSet<_> = BUNDLED
@@ -916,7 +1018,8 @@ mod tests {
                 referenced.insert(texture.strip_suffix(".png").unwrap_or(texture));
             }
         }
-        assert!(referenced.contains("tab-indicator-rounded"));
+        assert!(referenced.contains("tab-indicator") && referenced.contains("tab-divider"));
+        assert!(!referenced.contains("tab-indicator-rounded"));
         assert!(referenced.contains("file-code"));
         for stem in referenced {
             for variant in [

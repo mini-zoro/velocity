@@ -18,7 +18,14 @@
     "teal": "#1f6b60",
     "rose": "#8d3d61",
     "selected": "#c3ced1",
-    "selected_focus": "#abbec7"
+    "selected_focus": "#abbec7",
+    "focus": "#007aff",
+    "on_focus": "#ffffff",
+    "ring": "color(var(focus) a(0.45))",
+    "card_line": "#0000001f",
+    "card_shadow": "#00000033",
+    "popup_shadow": "#00000038",
+    "wash": "#000000"
   },
   "rules": [
     {

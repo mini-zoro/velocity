@@ -80,7 +80,7 @@ impl TabRename {
         let colors = crate::field_chrome::FieldColors::new(
             theme.scheme_background(),
             style.foreground,
-            crate::field_chrome::accent(theme),
+            crate::field_chrome::accent(dark),
             dark,
         );
         crate::field_chrome::focus_ring(

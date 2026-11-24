@@ -757,7 +757,8 @@ impl App {
                 height: self.window_size.height,
             },
             background: [0.; 4],
-            radii: [0.; 4],
+            // Rounded like the theme's other focus rings.
+            radii: [6. * self.panels.ui_scale as f32; 4],
             borders: [edge; 4],
         }));
         scene.layers.push(layer);
@@ -781,9 +782,9 @@ mod tests {
                 .iter()
                 .flat_map(|l| &l.surfaces)
                 .find_map(|s| match s {
-                    vel_render::scene::Surface::CssBox(b)
-                        if b.borders.iter().any(|e| e.width > 0.) =>
-                    {
+                    // The region ring, not a card tab's half-point hairline.
+                    vel_render::scene::Surface::CssBox(b) if b.borders[0].width == 1.5 => {
+                        assert_eq!(b.radii, [6.; 4]);
                         Some(b.borders[0].color)
                     }
                     _ => None,

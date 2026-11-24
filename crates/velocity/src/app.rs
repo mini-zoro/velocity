@@ -4117,6 +4117,9 @@ impl App {
         };
         let mut scene = vel_render::scene::Scene::default();
         let mut chrome = SceneLayer::default();
+        // Tab strip backgrounds sit below the tabs' layer, so a card tab's shadow (drawn first
+        // within its layer) falls on the strip instead of behind it.
+        let mut strip = SceneLayer::default();
         let mut exact = true;
         let tabset_style = self.workspace.themes.ui.borrow_mut().style(
             crate::panels::StyleId::TabSet.at(0),
@@ -4324,7 +4327,7 @@ impl App {
                     &vel_theme::ElementPath(&bar_path),
                     &self.workspace.editor().settings,
                 );
-                theme.surface(&mut chrome, &bar_style, bar, bar);
+                theme.surface(&mut strip, &bar_style, bar, bar);
                 drop(theme);
                 let bar = self.paint_tab_buttons(
                     &mut chrome,
@@ -4422,7 +4425,9 @@ impl App {
                     // A selected rounded tab joins the sheet below it, so only its top
                     // corners are round: its box runs one radius past the strip and is
                     // clipped there, leaving no notches at the sheet's edge.
-                    let surface = if selected && tab_style.radius > 0. {
+                    // An inset (card) tab floats inside the strip instead.
+                    let surface = if selected && tab_style.radius > 0. && tab_style.inset.is_none()
+                    {
                         Rect {
                             height: rect.height + f64::from(tab_style.radius),
                             ..rect
@@ -4698,6 +4703,9 @@ impl App {
         let _ = self.workspace.prepare_sheet(active);
         self.sync_workspace_after_panels();
         self.exact_scene = exact;
+        if !strip.surfaces.is_empty() || !strip.rects.is_empty() {
+            scene.layers.push(strip);
+        }
         scene.layers.push(chrome);
         self.panels.paint(&self.workspace, &mut scene);
         self.paint_accessibility_focus(&mut scene);
@@ -5157,6 +5165,8 @@ impl AppHandler for App {
         self.window_size = w.content_size();
         self.workspace.themes.ui.borrow_mut().density = w.scale_factor() as f32;
         self.view.appearance = w.appearance();
+        // The theme's selection and focus fills follow the system accent.
+        crate::field_chrome::refresh_system_accent();
         self.workspace
             .set_appearance(w.appearance() == Appearance::Dark)?;
         self.workspace
@@ -5695,6 +5705,7 @@ impl AppHandler for App {
         w.request_frame();
     }
     fn on_appearance(&mut self, w: &WindowHandle, appearance: Appearance) {
+        crate::field_chrome::refresh_system_accent();
         self.view.appearance = appearance;
         for view in self.sheet_views.values_mut() {
             view.appearance = appearance;
