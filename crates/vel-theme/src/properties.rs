@@ -268,7 +268,7 @@ properties! {
     LinkColor => "link_color": Color, MonospaceColor => "monospace_color": Color,
     MonospaceBackgroundColor => "monospace_background_color": Color,
     BackgroundModifier => "background_modifier": Text,
-    BorderSize => "border_size": Integer, ViewportColor => "viewport_color": Color,
+    BorderSize => "border_size": Number, ViewportColor => "viewport_color": Color,
     ViewportOpacity => "viewport_opacity": Number, FgBlend => "fg_blend": Bool,
     InsideSpacing => "inside_spacing": Integer, OutsideVspacing => "outside_vspacing": Integer,
     OutsideHspacing => "outside_hspacing": Integer, MinSize => "min_size": Point,
@@ -279,7 +279,11 @@ properties! {
     BottomShadow => "bottom_shadow": Color, BottomShadowSize => "bottom_shadow_size": Integer,
     ColorSchemeTint => "color_scheme_tint": Color, ColorSchemeTint2 => "color_scheme_tint_2": Color,
     IconColor => "icon_color": Color, IconSize => "icon_size": Point,
-    IconMargin => "icon_margin": Insets, Radius => "radius": Number
+    IconMargin => "icon_margin": Insets, Radius => "radius": Number,
+    // Velocity extensions. Sublime Text themes do not set them, so they render as before.
+    SurfaceInset => "surface_inset": Insets, ShadowBlur => "shadow_blur": Number,
+    ShadowSpread => "shadow_spread": Number, Pill => "pill": Bool,
+    ViewportRadius => "viewport_radius": Number
 }
 
 /// Validated values used by the renderer without JSON interpretation.

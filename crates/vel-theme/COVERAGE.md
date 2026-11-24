@@ -48,7 +48,7 @@ including compatible extensions; `color` is an alias of `fg`. No drawing code is
 | `monospace_color` | Color |
 | `monospace_background_color` | Color |
 | `background_modifier` | Text |
-| `border_size` | Integer |
+| `border_size` | Number (fractional sizes draw hairlines) |
 | `viewport_color` | Color |
 | `viewport_opacity` | Number |
 | `fg_blend` | Bool |
@@ -71,6 +71,17 @@ including compatible extensions; `color` is an alias of `fg`. No drawing code is
 | `icon_size` | Point |
 | `icon_margin` | Insets |
 | `radius` | Number |
+
+Velocity extensions. Sublime Text themes do not set these, so their elements render as before;
+Velocity's bundled theme uses them for inset cards, soft shadows, focus rings and capsules.
+
+| Property | Type | Effect |
+| --- | --- | --- |
+| `surface_inset` | Insets | Paints layers, border and shadow inside the element's bounds by these margins; the hit target is unchanged. |
+| `shadow_blur` | Number | Blur of `shadow_color` (default 4). |
+| `shadow_spread` | Number | How far the shadow extends past the surface before blurring (default 4); its corners follow `radius` plus the spread. With `shadow_blur: 0` this draws a focus ring outside an opaque control. |
+| `pill` | Boolean | Corner radius is half the shorter side: capsules and circles at any size. |
+| `viewport_radius` | Number | Corner radius of the minimap viewport box (`minimap_control`). |
 
 Layer indices 0–3 each expose `tint` (animated color), `opacity` (animated float), `texture`
 (PNG or frame sequence), `inner_margin` (Insets), `draw_center` / `repeat` (boolean), and the

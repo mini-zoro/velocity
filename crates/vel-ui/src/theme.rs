@@ -72,6 +72,14 @@ pub struct StyleData {
     border_size: f32,
     shadow: Option<scene::Color>,
     shadow_offset: [f32; 2],
+    /// Velocity extension: blur and spread of the shadow when the theme sets either.
+    shadow_shape: Option<[f32; 2]>,
+    /// Velocity extension: paint inside the bounds by these margins (UI-scaled).
+    pub inset: Option<Insets>,
+    /// Velocity extension: corner radius is half the shorter side.
+    pub pill: bool,
+    /// Velocity extension: minimap viewport corner radius.
+    pub viewport_radius: f32,
 }
 #[derive(Clone, Debug, Default)]
 struct PaintLayer {
@@ -252,6 +260,43 @@ impl Prepared {
     }
 }
 impl StyleData {
+    /// The painted rectangle within an element's bounds: `surface_inset` applied.
+    pub fn painted(&self, bounds: Rect) -> Rect {
+        let Some(m) = self.inset else {
+            return bounds;
+        };
+        let (left, top, right, bottom) = (
+            f64::from(m.left),
+            f64::from(m.top),
+            f64::from(m.right),
+            f64::from(m.bottom),
+        );
+        Rect {
+            x: bounds.x + left,
+            y: bounds.y + top,
+            width: (bounds.width - left - right).max(0.),
+            height: (bounds.height - top - bottom).max(0.),
+        }
+    }
+    /// The corner radius of a painted rectangle: half its shorter side for a pill.
+    pub fn radius_for(&self, painted: Rect) -> f32 {
+        if self.pill {
+            (painted.width.min(painted.height) / 2.).max(0.) as f32
+        } else {
+            self.radius
+        }
+    }
+    /// How far a surface paints outside its bounds: a Velocity shadow's spread, blur and
+    /// offset. Zero for Sublime themes, so hosts that widen their clip by it keep their
+    /// output unchanged.
+    pub fn outset(&self) -> f64 {
+        match (self.shadow, self.shadow_shape) {
+            (Some(_), Some([blur, spread])) => f64::from(
+                blur + spread + self.shadow_offset[0].abs().max(self.shadow_offset[1].abs()),
+            ),
+            _ => 0.,
+        }
+    }
     /// Theme border colour and width in logical points, when the element draws one.
     pub fn border(&self) -> Option<(scene::Color, f32)> {
         self.border.map(|c| (c, self.border_size))
@@ -752,26 +797,17 @@ impl ThemeUi {
                 });
             }
         }
+        let rect = style.painted(rect);
+        let radius = style.radius_for(rect);
         if let Some(color) = style.shadow {
-            layer.shadows.push(Shadow {
-                rect: Rect {
-                    x: rect.x + f64::from(style.shadow_offset[0]) - 4.,
-                    y: rect.y + f64::from(style.shadow_offset[1]) - 4.,
-                    width: rect.width + 8.,
-                    height: rect.height + 8.,
-                },
-                radius: style.radius,
-                blur: 4.,
-                color,
-                clip,
-            });
+            paint_shadow(layer, style, rect, radius, color, clip);
         }
         let fill = |layer: &mut Layer, rect, color| {
             layer.surfaces.push(Surface::Fill(SolidRect {
                 rect,
                 clip,
                 color,
-                radius: style.radius,
+                radius,
             }))
         };
         if let Some(color) = style.background {
@@ -802,11 +838,22 @@ impl ThemeUi {
                 fill(layer, rect, paint.color);
             }
         }
-        self.border(layer, style, rect, clip);
+        self.border_painted(layer, style, rect, radius, clip);
     }
     /// Paints only the theme border. Rounded containers use one CSS box so corners follow
     /// the radius; hosts may repaint it above content that covers the surface (popups).
     pub fn border(&self, layer: &mut Layer, style: &Style, rect: Rect, clip: Rect) {
+        let rect = style.painted(rect);
+        self.border_painted(layer, style, rect, style.radius_for(rect), clip);
+    }
+    fn border_painted(
+        &self,
+        layer: &mut Layer,
+        style: &Style,
+        rect: Rect,
+        radius: f32,
+        clip: Rect,
+    ) {
         let Some(color) = style.border.filter(|c| c[3] > 0.) else {
             return;
         };
@@ -818,7 +865,7 @@ impl ThemeUi {
             rect,
             clip,
             background: [0.; 4],
-            radii: [style.radius; 4],
+            radii: [radius; 4],
             borders: [edge; 4],
         }));
     }
@@ -826,12 +873,14 @@ impl ThemeUi {
     /// pressed backgrounds), while plain textures keep their intrinsic size, centered and
     /// snapped to device pixels instead of being stretched. Nine-sliced layers still stretch.
     pub fn icon_surface(&self, layer: &mut Layer, style: &Style, rect: Rect, clip: Rect) {
+        let wash = style.painted(rect);
+        let radius = style.radius_for(wash);
         let fill = |layer: &mut Layer, color| {
             layer.surfaces.push(Surface::Fill(SolidRect {
-                rect,
+                rect: wash,
                 clip,
                 color,
-                radius: style.radius,
+                radius,
             }))
         };
         if let Some(color) = style.background {
@@ -1155,7 +1204,9 @@ impl ThemeUi {
             Some(Keyword::Lower) => text.to_lowercase(),
             _ => text.replace(['\n', '\r', '\t'], " "),
         };
-        if let Some(color) = style.shadow {
+        // Sublime text shadows. A Velocity shape shadow (blur/spread) belongs to the surface:
+        // a focused field's ring must not also ghost its placeholder.
+        if let Some(color) = style.shadow.filter(|_| style.shadow_shape.is_none()) {
             layer.text.push(TextRun {
                 family: style.family.clone(),
                 style: style.font,
@@ -1366,6 +1417,22 @@ fn prepare_style(
             Some(V::Point(p)) => p.map(|n| n * scale),
             _ => [0., 2. * scale],
         },
+        shadow_shape: (style.get(&P::ShadowBlur).is_some()
+            || style.get(&P::ShadowSpread).is_some())
+        .then(|| {
+            [
+                style.number(&P::ShadowBlur).unwrap_or(4.).max(0.) * scale,
+                style.number(&P::ShadowSpread).unwrap_or(4.) * scale,
+            ]
+        }),
+        inset: style.insets(&P::SurfaceInset).map(|m| Insets {
+            left: m.left * scale,
+            top: m.top * scale,
+            right: m.right * scale,
+            bottom: m.bottom * scale,
+        }),
+        pill: style.boolean(&P::Pill).unwrap_or(false),
+        viewport_radius: style.number(&P::ViewportRadius).unwrap_or(0.) * scale,
     }))
 }
 /// Sanitized UI scale. Zero/automatic use the platform's logical DIP scale.
@@ -1375,6 +1442,57 @@ pub fn ui_scale(settings: &Settings) -> f64 {
         1.
     } else {
         n.clamp(0.5, 3.)
+    }
+}
+/// A surface's shadow, offset and grown by its spread.
+fn paint_shadow(
+    layer: &mut Layer,
+    style: &Style,
+    rect: Rect,
+    radius: f32,
+    color: scene::Color,
+    clip: Rect,
+) {
+    let grown = |spread: f32| {
+        let spread = f64::from(spread);
+        Rect {
+            x: rect.x + f64::from(style.shadow_offset[0]) - spread,
+            y: rect.y + f64::from(style.shadow_offset[1]) - spread,
+            width: rect.width + 2. * spread,
+            height: rect.height + 2. * spread,
+        }
+    };
+    match style.shadow_shape {
+        // A sharp Velocity shadow is a ring outside the surface, drawn in order with the
+        // surfaces so that a container's fill cannot hide it: a focus ring.
+        Some([blur, spread]) if blur <= 0. && spread > 0. => {
+            layer.surfaces.push(Surface::CssBox(scene::CssBox {
+                rect: grown(spread),
+                clip,
+                background: [0.; 4],
+                radii: [radius + spread; 4],
+                borders: [scene::BorderEdge {
+                    color,
+                    width: spread,
+                }; 4],
+            }));
+        }
+        // A soft Velocity shadow: its corners follow the surface's, grown by the spread.
+        Some([blur, spread]) => layer.shadows.push(Shadow {
+            rect: grown(spread),
+            radius: radius + spread,
+            blur,
+            color,
+            clip,
+        }),
+        // Sublime themes: a 4-point blur around the offset box, with the surface's corners.
+        None => layer.shadows.push(Shadow {
+            rect: grown(4.),
+            radius,
+            blur: 4.,
+            color,
+            clip,
+        }),
     }
 }
 /// Converts engine byte RGBA to scene channels.
@@ -1741,6 +1859,176 @@ mod tests {
             }
         }
         assert!(fast.cache_stats()[2] > 0 && fast.cache_stats()[2] < fast.cache_stats()[0]);
+    }
+    /// Sublime Text themes never set Velocity's shape extensions, so their surfaces paint
+    /// exactly as before: full bounds, the theme's radius, a 4-point shadow blur and spread,
+    /// no ring, and nothing outside the element for a host to unclip.
+    #[test]
+    fn sublime_themes_paint_as_before_without_velocity_extensions() {
+        let palette = Palette::default();
+        let source = r##"{"rules":[
+            {"class":"tab_control","layer0.tint":"#202020","layer0.opacity":1.0,"radius":6,"border_color":"#ffffff","border_size":1},
+            {"class":"popup_control","layer0.tint":"#303030","layer0.opacity":1.0,"radius":4,"shadow_color":"#00000080","shadow_offset":[0,3]},
+            {"class":"text_line_control","attributes":["focused"],"layer0.tint":"#101010","layer0.opacity":1.0,"border_color":"#4488ff","radius":3},
+            {"class":"puck_control","layer0.tint":"#808080","layer0.opacity":0.5,"radius":3}
+        ]}"##;
+        let mut theme = ThemeUi::new(Arc::new(Theme::parse(source, &palette).unwrap()), palette);
+        let settings = Settings::default();
+        let bounds = Rect {
+            x: 10.,
+            y: 20.,
+            width: 180.,
+            height: 32.,
+        };
+        for (id, class, attrs) in [
+            (1, "tab_control", &[][..]),
+            (2, "popup_control", &[]),
+            (3, "text_line_control", &["focused"]),
+            (4, "puck_control", &[]),
+        ] {
+            let style = theme.style(id, &ElementPath(&[Element::new(class, attrs)]), &settings);
+            assert!(style.inset.is_none() && !style.pill && style.viewport_radius == 0.);
+            assert_eq!(style.outset(), 0., "{class}");
+            assert_eq!(style.painted(bounds), bounds);
+            let mut layer = Layer::default();
+            theme.surface(&mut layer, &style, bounds, bounds);
+            assert!(!layer.surfaces.is_empty());
+            for surface in &layer.surfaces {
+                match surface {
+                    Surface::Fill(fill) => {
+                        assert_eq!((fill.rect, fill.radius), (bounds, style.radius), "{class}");
+                    }
+                    // Only the theme border: never a ring outside the element.
+                    Surface::CssBox(border) => {
+                        assert_eq!(border.rect, bounds, "{class}");
+                        assert_eq!(border.radii, [style.radius; 4]);
+                        assert_eq!(border.background, [0.; 4]);
+                    }
+                    Surface::Image(_) => {}
+                }
+            }
+            if class == "popup_control" {
+                // A Sublime shadow colour also shadows the element's text.
+                let mut text = Layer::default();
+                theme.text(&mut text, &style, "label", 0., 10., bounds);
+                assert_eq!(text.text.len(), 2);
+                let [shadow] = layer.shadows.as_slice() else {
+                    panic!("one shadow")
+                };
+                assert_eq!((shadow.blur, shadow.radius), (4., 4.));
+                assert_eq!(
+                    shadow.rect,
+                    Rect {
+                        x: 6.,
+                        y: 19.,
+                        width: 188.,
+                        height: 40.,
+                    }
+                );
+            } else {
+                assert!(layer.shadows.is_empty(), "{class}");
+            }
+        }
+    }
+    /// Velocity's own theme insets cards and row pills, softens shadows, draws focus rings in
+    /// order with the surfaces, and rounds capsules at any size.
+    #[test]
+    fn velocity_shape_extensions_inset_soften_ring_and_round() {
+        let palette = Palette::default();
+        let source = r##"{"rules":[
+            {"class":"tab_control","layer0.tint":"#202020","layer0.opacity":1.0,"radius":8,"surface_inset":[3,4],
+             "border_color":"#ffffff40","border_size":0.5,"shadow_color":"#00000070","shadow_offset":[0,1],"shadow_blur":6,"shadow_spread":0},
+            {"class":"text_line_control","layer0.tint":"#101010","layer0.opacity":1.0,"radius":6,
+             "shadow_color":"#0a84ff80","shadow_offset":[0,0],"shadow_blur":0,"shadow_spread":3},
+            {"class":"puck_control","layer0.tint":"#808080","layer0.opacity":0.5,"pill":true}
+        ]}"##;
+        let mut theme = ThemeUi::new(Arc::new(Theme::parse(source, &palette).unwrap()), palette);
+        let settings = Settings::default();
+        let bounds = Rect {
+            x: 10.,
+            y: 20.,
+            width: 180.,
+            height: 32.,
+        };
+        let card = theme.style(
+            1,
+            &ElementPath(&[Element::new("tab_control", &[])]),
+            &settings,
+        );
+        let painted = Rect {
+            x: 13.,
+            y: 24.,
+            width: 174.,
+            height: 24.,
+        };
+        assert_eq!(card.painted(bounds), painted);
+        assert_eq!(card.border(), Some(([1., 1., 1., 0x40 as f32 / 255.], 0.5)));
+        let mut layer = Layer::default();
+        theme.surface(&mut layer, &card, bounds, bounds);
+        assert!(layer.surfaces.iter().all(|surface| match surface {
+            Surface::Fill(fill) => fill.rect == painted && fill.radius == 8.,
+            Surface::CssBox(border) => border.rect == painted && border.radii == [8.; 4],
+            Surface::Image(_) => true,
+        }));
+        let [shadow] = layer.shadows.as_slice() else {
+            panic!("one card shadow")
+        };
+        assert_eq!((shadow.blur, shadow.radius), (6., 8.));
+        assert_eq!(shadow.rect, Rect { y: 25., ..painted });
+        assert_eq!(card.outset(), 7.);
+
+        let field = theme.style(
+            2,
+            &ElementPath(&[Element::new("text_line_control", &[])]),
+            &settings,
+        );
+        let mut layer = Layer::default();
+        theme.surface(&mut layer, &field, bounds, bounds);
+        assert!(
+            layer.shadows.is_empty(),
+            "a sharp shadow is a ring, not a blur"
+        );
+        let ring = layer
+            .surfaces
+            .iter()
+            .find_map(|surface| match surface {
+                Surface::CssBox(ring) if ring.borders[0].width == 3. => Some(ring),
+                _ => None,
+            })
+            .expect("focus ring");
+        assert_eq!(
+            ring.rect,
+            Rect {
+                x: 7.,
+                y: 17.,
+                width: 186.,
+                height: 38.,
+            }
+        );
+        assert_eq!(ring.radii, [9.; 4]);
+        assert_eq!(field.outset(), 3.);
+        // The ring belongs to the field, not to text painted in its style (a placeholder).
+        let mut text = Layer::default();
+        theme.text(&mut text, &field, "placeholder", 0., 10., bounds);
+        assert_eq!(text.text.len(), 1);
+
+        let puck = theme.style(
+            3,
+            &ElementPath(&[Element::new("puck_control", &[])]),
+            &settings,
+        );
+        for (width, height) in [(6., 80.), (11., 40.), (30., 12.)] {
+            let thumb = Rect {
+                x: 0.,
+                y: 0.,
+                width,
+                height,
+            };
+            assert_eq!(
+                puck.radius_for(thumb),
+                (f64::min(width, height) / 2.) as f32
+            );
+        }
     }
     #[test]
     fn recycled_resolver_address_cannot_reuse_a_settled_widget_style() {
