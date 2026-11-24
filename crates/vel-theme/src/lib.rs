@@ -166,6 +166,7 @@ impl ThemeSource {
         for v in vars.values() {
             properties::resolve_variable(v, &vars, 0)?;
         }
+        let scope = properties::Scope::new(&vars, palette)?;
         let mut rules = Vec::new();
         let mut setting_keys = Vec::new();
         let mut diagnostics = Vec::new();
@@ -195,7 +196,7 @@ impl ThemeSource {
                 if matches!(property, Property::Extension(_)) {
                     diagnostics.push(format!("rule {index}: unrecognized property {name}"));
                 }
-                let value = properties::parse_value(&property, value, &vars, palette)
+                let value = properties::parse_value(&property, value, &scope)
                     .map_err(|e| Error::Format(format!("rule {index}, {name}: {e}")))?;
                 values.insert(property, value);
             }

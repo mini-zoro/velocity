@@ -421,13 +421,44 @@ pub(crate) fn resolve_variable(
     }
     Ok(v.clone())
 }
+/// What a theme's values resolve against: its variables, and the table that `var()` in string
+/// colors uses (the palette's variables, then the theme's). The table is the same for every
+/// value, so it is built once per compile rather than once per color, which made compiling
+/// grow with colors times variables.
+pub(crate) struct Scope<'a> {
+    vars: &'a BTreeMap<String, Value>,
+    palette: &'a Palette,
+    colors: BTreeMap<String, String>,
+}
+impl<'a> Scope<'a> {
+    pub(crate) fn new(
+        vars: &'a BTreeMap<String, Value>,
+        palette: &'a Palette,
+    ) -> Result<Self, Error> {
+        let mut colors = palette.variables.clone();
+        for (k, v) in vars {
+            let v = resolve_variable(v, vars, 0)?;
+            if let Some(s) = v.as_str() {
+                colors.insert(k.clone(), s.into());
+            } else if let Some(a) = v.as_array()
+                && let Ok(color) = array_color(a, palette)
+            {
+                colors.insert(k.clone(), crate::palette::css(color));
+            }
+        }
+        Ok(Self {
+            vars,
+            palette,
+            colors,
+        })
+    }
+}
 pub(crate) fn parse_value(
     p: &Property,
     value: &Value,
-    vars: &BTreeMap<String, Value>,
-    palette: &Palette,
+    scope: &Scope<'_>,
 ) -> Result<PropertyValue, Error> {
-    let v = resolve_variable(value, vars, 0)?;
+    let v = resolve_variable(value, scope.vars, 0)?;
     if v.is_null() {
         return Ok(PropertyValue::Reset);
     }
@@ -470,7 +501,7 @@ pub(crate) fn parse_value(
         Kind::Color => {
             let (target, animation) = animation(&v)?;
             PropertyValue::Color(Animated {
-                target: parse_color(&target, vars, palette)?,
+                target: parse_color(&target, scope)?,
                 animation,
             })
         }
@@ -516,7 +547,7 @@ pub(crate) fn parse_value(
         Kind::Text => {
             let s = text(&v)?;
             if *p == Property::BackgroundModifier {
-                palette.color(&format!("color(white {s})"))?;
+                scope.palette.color(&format!("color(white {s})"))?;
             }
             PropertyValue::Text(s.into())
         }
@@ -548,9 +579,7 @@ pub(crate) fn parse_value(
         }
         Kind::Modifier => {
             if v.is_string() {
-                return Ok(PropertyValue::Modifier(
-                    parse_color(&v, vars, palette)?.rgba8(),
-                ));
+                return Ok(PropertyValue::Modifier(parse_color(&v, scope)?.rgba8()));
             }
             let a = v
                 .as_array()
@@ -580,31 +609,22 @@ pub(crate) fn parse_value(
         }
     })
 }
-fn parse_color(
-    v: &Value,
-    vars: &BTreeMap<String, Value>,
-    palette: &Palette,
-) -> Result<Color, Error> {
-    let v = resolve_variable(v, vars, 0)?;
+fn parse_color(v: &Value, scope: &Scope<'_>) -> Result<Color, Error> {
+    let v = resolve_variable(v, scope.vars, 0)?;
     if let Some(s) = v.as_str() {
-        let mut colors = palette.variables.clone();
-        for (k, v) in vars {
-            let v = resolve_variable(v, vars, 0)?;
-            if let Some(s) = v.as_str() {
-                colors.insert(k.clone(), s.into());
-            } else if v.is_array()
-                && let Ok(color) = parse_color(&v, &BTreeMap::new(), palette)
-            {
-                colors.insert(k.clone(), crate::palette::css(color));
-            }
-        }
-        return Ok(Color::parse(s, &colors)?);
+        return Ok(Color::parse(s, &scope.colors)?);
     }
-    let a = v.as_array().ok_or_else(|| invalid("expected color"))?;
+    array_color(
+        v.as_array().ok_or_else(|| invalid("expected color"))?,
+        scope.palette,
+    )
+}
+/// A color written as an array: bytes, `hsl`, or a derived palette color.
+fn array_color(a: &[Value], palette: &Palette) -> Result<Color, Error> {
     if let Some(base @ ("background" | "foreground" | "accent")) = a.first().and_then(Value::as_str)
     {
         let c = palette.color(&format!("var(--{base})"))?;
-        let expression = match a.as_slice() {
+        let expression = match a {
             [_, alpha] => format!("color({} a({}))", crate::palette::css(c), number(alpha)?),
             [_, mode, saturation] if mode == "grayscale" => format!(
                 "color({} s(* {}%))",
@@ -612,7 +632,7 @@ fn parse_color(
                 number(saturation)?
             ),
             [_, tail @ ..] if tail.len() == 4 || tail.len() == 5 => {
-                let tint = parse_color(&Value::Array(tail.to_vec()), vars, palette)?;
+                let tint = array_color(tail, palette)?;
                 format!(
                     "color({} blend({} {}))",
                     crate::palette::css(c),

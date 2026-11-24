@@ -618,6 +618,9 @@ fn run(entered: Instant, wall: SystemTime, gui: gui_launch::Startup) -> Result<(
                     .filter(|p| p.is_file())
                     .cloned()
             });
+            // The startup workspace compiles both theme appearances, keyed by the system
+            // accent. Reading it first lets on_start reuse them instead of compiling again.
+            field_chrome::refresh_system_accent();
             let initial_workspace = workspace::Workspace::new_for_startup(
                 if stdin.is_some() { Text::new() } else { text },
                 workspace_data.clone(),
