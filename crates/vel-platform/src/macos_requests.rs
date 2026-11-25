@@ -1,4 +1,4 @@
-//! Process-wide open routing and the retained, closed-window template.
+//! Deferred retirement and process-wide open routing, including without windows.
 use super::*;
 use crate::requests::{
     NativeOpenRequest, OpenHost, OpenRequests, ReopenPlan, open_target, reopen_plan,
@@ -10,7 +10,8 @@ type WindowFactory = Box<dyn FnMut() -> Result<(WindowOptions, Box<dyn AppHandle
 struct ApplicationState {
     requests: RefCell<OpenRequests>,
     factory: RefCell<Option<WindowFactory>>,
-    template: RefCell<Option<Rc<Host>>>,
+    delegate: RefCell<Option<Retained<ApplicationDelegate>>>,
+    retirements: RefCell<Vec<u64>>,
     idle_timer: Cell<Option<Retained<NSTimer>>>,
     reopen: Cell<bool>,
     scheduled: Cell<bool>,
@@ -26,7 +27,7 @@ fn hosts() -> Vec<Rc<Host>> {
     WINDOWS.with(|windows| {
         windows
             .borrow()
-            .iter()
+            .owners()
             .map(|delegate| Rc::clone(&delegate.ivars().host))
             .collect()
     })
@@ -43,18 +44,20 @@ fn destinations(hosts: &[Rc<Host>]) -> Vec<OpenHost> {
         .map(|host| OpenHost {
             id: host.id,
             ready: host.ready.get() && !host.starting.get(),
-            key: host.window.get().is_some_and(|window| window.isKeyWindow()),
+            key: host.window().is_some_and(|window| window.isKeyWindow()),
         })
         .collect()
 }
 
 pub(super) fn hosts_busy() -> bool {
-    hosts().iter().any(|host| {
+    let busy = |host: &Rc<Host>| {
         host.dispatching.get()
             || host.drawing.get()
             || host.input_depth.get() != 0
+            || host.context_tracking.get()
             || host.app.try_borrow_mut().is_err()
-    })
+    };
+    hosts().iter().any(busy) || template().as_ref().is_some_and(busy)
 }
 pub(super) fn register_context(host: &Rc<Host>) {
     APPLICATION.with(|app| {
@@ -92,20 +95,59 @@ pub(super) fn set_factory(factory: WindowFactory) {
     });
     schedule();
 }
-pub(super) fn is_template(id: u64) -> bool {
-    APPLICATION.with(|app| {
-        app.template
-            .borrow()
-            .as_ref()
-            .is_some_and(|host| host.id == id)
-    })
+pub(super) fn set_delegate(delegate: Retained<ApplicationDelegate>) {
+    APPLICATION.with(|app| app.delegate.replace(Some(delegate)));
 }
-pub(super) fn keep_template(host: Rc<Host>) {
-    let previous = APPLICATION.with(|app| app.template.replace(Some(host)));
-    if let Some(previous) = previous
-        && let Ok(mut slot) = previous.app.try_borrow_mut()
+pub(super) fn delegate() -> Option<Retained<ApplicationDelegate>> {
+    APPLICATION.with(|app| app.delegate.borrow().clone())
+}
+pub(super) fn template() -> Option<Rc<Host>> {
+    WINDOWS.with(|windows| windows.borrow().template().cloned())
+}
+pub(super) fn with_template(host: &Rc<Host>, f: impl FnOnce(&mut dyn AppHandler, &WindowHandle)) {
+    if let Ok(mut slot) = host.app.try_borrow_mut()
+        && let Some(app) = slot.as_mut()
     {
-        slot.take();
+        f(&mut **app, &host.handle());
+    }
+    schedule_contexts();
+    schedule();
+}
+pub(super) fn queue_retirement(id: u64) {
+    APPLICATION.with(|app| app.retirements.borrow_mut().push(id));
+    schedule();
+}
+fn retire_closed_windows() {
+    let ids = APPLICATION.with(|app| app.retirements.take());
+    if ids.is_empty() {
+        return;
+    }
+    for id in ids {
+        let Some((delegate, last)) = WINDOWS.with(|windows| windows.borrow_mut().remove(id)) else {
+            continue;
+        };
+        let host = &delegate.ivars().host;
+        APPLICATION.with(|app| {
+            let closed = Rc::downgrade(host);
+            app.context_waiters
+                .borrow_mut()
+                .retain(|waiter| !waiter.ptr_eq(&closed));
+        });
+        let handler = host.app.take();
+        let controller = if last {
+            handler.and_then(|handler| handler.into_windowless())
+        } else {
+            drop(handler);
+            None
+        };
+        // Dropping the handler releases the wgpu surface before disposing of its layer.
+        host.release_native_window();
+        if let Some(controller) = controller {
+            // A fresh handle supplies app-level services without keeping the old host alive.
+            let template = new_host(host.mtm, &WindowOptions::default(), controller);
+            template.stopped.set(true);
+            WINDOWS.with(|windows| windows.borrow_mut().keep_template(template));
+        }
     }
     update_idle_timer();
 }
@@ -135,15 +177,15 @@ pub(super) fn reopen() {
 }
 pub(super) fn schedule() {
     let needs_schedule = APPLICATION.with(|app| {
-        !app.awaiting_new_request.get()
-            && (app.reopen.get() || !app.requests.borrow().is_empty())
+        (!app.retirements.borrow().is_empty()
+            || !app.awaiting_new_request.get()
+                && (app.reopen.get() || !app.requests.borrow().is_empty()))
             && !app.scheduled.replace(true)
     });
     if !needs_schedule {
         return;
     }
-    let delegate = WINDOWS.with(|windows| windows.borrow().first().cloned());
-    if let Some(delegate) = delegate {
+    if let Some(delegate) = delegate() {
         // SAFETY: AppKit retains this NSObject until its one-object selector runs
         // on a later default-mode turn, outside the current host callback.
         unsafe {
@@ -156,33 +198,31 @@ pub(super) fn schedule() {
 
 pub(super) fn drain() {
     APPLICATION.with(|app| app.scheduled.set(false));
-    if APPLICATION.with(|app| !app.reopen.get() && app.requests.borrow().is_empty()) {
-        return;
-    }
     if hosts_busy() || APPLICATION.with(|app| app.processing.replace(true)) {
         // The outer host calls schedule again when its borrow ends. Do not spin
         // a zero-delay selector inside an alert's nested modal loop.
         return;
     }
+    retire_closed_windows();
+    if APPLICATION.with(|app| {
+        app.awaiting_new_request.get() || !app.reopen.get() && app.requests.borrow().is_empty()
+    }) {
+        APPLICATION.with(|app| app.processing.set(false));
+        schedule();
+        return;
+    }
     let mut live = live_hosts();
     if reopen_plan(&destinations(&live)) == ReopenPlan::CreateWindow {
-        let template = APPLICATION.with(|app| app.template.borrow().clone());
-        if let Some(template) = template {
-            template.dispatching.set(true);
-            {
-                let mut slot = template.app.borrow_mut();
-                if let Some(app) = slot.as_mut() {
-                    let directory = APPLICATION
-                        .with(|state| state.requests.borrow_mut().pop_finder_for_closed_window());
-                    if let Some(directory) = directory {
-                        app.on_finder_new_text_file(&template.handle(), &directory);
-                    } else {
-                        app.on_reopen(&template.handle());
-                    }
+        if let Some(template) = template() {
+            with_template(&template, |app, window| {
+                let directory = APPLICATION
+                    .with(|state| state.requests.borrow_mut().pop_finder_for_closed_window());
+                if let Some(directory) = directory {
+                    app.on_finder_new_text_file(window, &directory);
+                } else {
+                    app.on_reopen(window);
                 }
-            }
-            template.dispatching.set(false);
-            schedule_contexts();
+            });
         }
         live = live_hosts();
         if live.is_empty() {
@@ -245,10 +285,13 @@ pub(super) fn drain() {
     }
     update_idle_timer();
     APPLICATION.with(|app| app.processing.set(false));
+    if APPLICATION.with(|app| !app.retirements.borrow().is_empty()) {
+        schedule();
+    }
 }
 
 fn update_idle_timer() {
-    let needed = live_hosts().is_empty() && APPLICATION.with(|app| app.template.borrow().is_some());
+    let needed = live_hosts().is_empty() && template().is_some();
     if !needed {
         APPLICATION.with(|app| {
             if let Some(timer) = app.idle_timer.take() {
@@ -266,8 +309,7 @@ fn update_idle_timer() {
     if exists {
         return;
     }
-    let delegate = WINDOWS.with(|windows| windows.borrow().first().cloned());
-    if let Some(delegate) = delegate {
+    if let Some(delegate) = delegate() {
         // SAFETY: the retained application delegate implements this NSTimer selector;
         // common modes allow background IPC during native menu/alert tracking.
         let timer = unsafe {
@@ -293,23 +335,15 @@ pub(super) fn idle() {
         update_idle_timer();
         return;
     }
-    let template = APPLICATION.with(|app| app.template.borrow().clone());
-    if let Some(template) = template {
-        template.dispatching.set(true);
-        {
-            let mut slot = template.app.borrow_mut();
-            if let Some(app) = slot.as_mut() {
-                app.on_idle(&template.handle());
-            }
-        }
-        template.dispatching.set(false);
-        schedule_contexts();
+    if let Some(template) = template() {
+        with_template(&template, |app, window| app.on_idle(window));
     }
     schedule();
     update_idle_timer();
 }
 
 pub(super) fn launched() {
+    WINDOWS.with(|windows| windows.borrow_mut().launched());
     APPLICATION.with(|app| app.awaiting_new_request.set(false));
     update_idle_timer();
     schedule();
@@ -320,7 +354,8 @@ pub(super) fn reset() {
         if let Some(timer) = app.idle_timer.take() {
             timer.invalidate();
         }
-        app.template.borrow_mut().take();
+        app.delegate.take();
+        app.retirements.borrow_mut().clear();
         app.factory.borrow_mut().take();
         *app.requests.borrow_mut() = OpenRequests::default();
         app.reopen.set(false);

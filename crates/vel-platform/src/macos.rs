@@ -7,6 +7,8 @@ mod a11y;
 pub(super) mod finder;
 #[path = "macos_requests.rs"]
 mod lifecycle;
+#[path = "macos_lifetime.rs"]
+mod lifetime;
 #[path = "macos_menu.rs"]
 mod menus;
 use crate::requests::{ContextRequest, MenuInstallation, WindowTitle};
@@ -56,7 +58,7 @@ use objc2_quartz_core::{
     CATransaction,
 };
 use std::{
-    cell::{Cell, OnceCell, RefCell},
+    cell::{Cell, RefCell},
     collections::VecDeque,
     ffi::c_void,
     fmt,
@@ -70,7 +72,7 @@ use std::{
     time::Duration,
 };
 
-/// Retains the native window and layer on the main thread. Clones are inexpensive.
+/// A main-thread handle. Clones are inexpensive and do not keep native objects alive after close.
 #[derive(Clone)]
 pub struct WindowHandle(Rc<Host>);
 impl fmt::Debug for WindowHandle {
@@ -83,13 +85,14 @@ impl fmt::Debug for WindowHandle {
 }
 thread_local! {
     static SIMPLE_PRESENTATION: RefCell<Option<NSApplicationPresentationOptions>> = const { RefCell::new(None) };
-    static WINDOWS: RefCell<Vec<Retained<Delegate>>> = const { RefCell::new(Vec::new()) };
+    static WINDOWS: RefCell<lifetime::Windows<Retained<Delegate>, Rc<Host>>> =
+        const { RefCell::new(lifetime::Windows::new()) };
 }
 fn restore_simple_presentation(mtm: MainThreadMarker) {
     let any = WINDOWS.with(|windows| {
         windows
             .borrow()
-            .iter()
+            .owners()
             .any(|d| d.ivars().host.simple_fullscreen.borrow().is_some())
     });
     if !any {
@@ -117,14 +120,14 @@ impl WindowHandle {
     pub fn hide_pointer_until_motion(&self) {
         NSCursor::setHiddenUntilMouseMoves(true);
     }
-    /// Whether this handle represents the windowless application template.
+    /// Whether this handle no longer represents a live native window.
     pub fn is_closed(&self) -> bool {
         self.0.stopped.get()
     }
     /// Converts a point in the flipped client view to native screen coordinates.
     pub fn screen_point(&self, point: Point) -> Option<Point> {
-        let window = self.0.window.get()?;
-        let view = self.0.view.get()?;
+        let window = self.0.window()?;
+        let view = self.0.view()?;
         let p = view.convertPoint_toView(NSPoint::new(point.x, point.y), None);
         let p = window.convertPointToScreen(p);
         Some(Point { x: p.x, y: p.y })
@@ -152,7 +155,7 @@ impl WindowHandle {
     }
     /// Reads the last windowed frame, excluding AppKit's full-screen transition.
     pub fn frame(&self) -> Option<Rect> {
-        let w = self.0.window.get()?;
+        let w = self.0.window()?;
         if w.styleMask().contains(NSWindowStyleMask::FullScreen) {
             return None;
         }
@@ -166,7 +169,7 @@ impl WindowHandle {
     }
     /// Restores a frame within the current visible screen geometry.
     pub fn restore_frame(&self, frame: Rect) {
-        if let Some(w) = self.0.window.get() {
+        if let Some(w) = self.0.window() {
             let screens: Vec<_> = NSScreen::screens(self.0.mtm)
                 .into_iter()
                 .map(|s| screen_rect(s.visibleFrame()))
@@ -223,33 +226,12 @@ impl WindowHandle {
             return;
         }
         self.0.visible.set(false);
-        *self.0.context.borrow_mut() = ContextRequest::default();
         self.0.pace();
-        if let Some(timer) = self.0.timer.take() {
-            timer.invalidate();
-        }
-        if let Some(timer) = self.0.drawable_timer.take() {
-            timer.invalidate();
-        }
-        if self.0.simple_fullscreen.take().is_some() {
-            restore_simple_presentation(self.0.mtm);
-        }
-        if let Some(window) = self.0.window.get() {
-            window.orderOut(None);
-        }
-        let any = WINDOWS.with(|windows| {
-            windows
-                .borrow()
-                .iter()
-                .any(|d| !d.ivars().host.stopped.get())
-        });
-        if !any {
-            lifecycle::keep_template(Rc::clone(&self.0));
-        }
+        lifecycle::queue_retirement(self.0.id);
     }
     /// Brings this window forward for an interactive file/project request.
     pub fn focus(&self) {
-        if let Some(window) = self.0.window.get() {
+        if let Some(window) = self.0.window() {
             if window.isMiniaturized() {
                 window.deminiaturize(None);
             }
@@ -263,8 +245,7 @@ impl WindowHandle {
         self.0.simple_fullscreen.borrow().is_some()
             || self
                 .0
-                .window
-                .get()
+                .window()
                 .is_some_and(|w| w.styleMask().contains(NSWindowStyleMask::FullScreen))
     }
     /// Enters/exits native full screen without enabling macOS window tabs.
@@ -275,7 +256,7 @@ impl WindowHandle {
     /// Public behavior: <https://sublime-text-unofficial-documentation.readthedocs.io/en/latest/reference/settings.html#use-simple-full-screen>
     /// Current native support: <https://forum.sublimetext.com/t/build-4180-cannot-type-in-full-screen-mode/73072/17>
     pub fn toggle_full_screen_with_mode(&self, simple: bool) {
-        let Some(window) = self.0.window.get() else {
+        let Some(window) = self.0.window() else {
             return;
         };
         let action = crate::fullscreen::transition(
@@ -320,13 +301,12 @@ impl WindowHandle {
     /// Sequence of the most recently acquired Metal drawable, for scanout correlation.
     pub fn last_acquired_drawable(&self) -> Option<u64> {
         self.0
-            .layer
-            .get()
+            .layer()
             .and_then(|l| l.ivars().sequence.load(Ordering::Relaxed).checked_sub(1))
     }
     /// Current effective macOS appearance, including before the first redraw.
     pub fn appearance(&self) -> Appearance {
-        let Some(view) = self.0.view.get() else {
+        let Some(view) = self.0.view() else {
             return Appearance::Dark;
         };
         // SAFETY: AppKit's immutable appearance constants are read on the main thread.
@@ -348,19 +328,18 @@ impl WindowHandle {
     }
     /// Whether this native window currently receives keyboard input.
     pub fn is_focused(&self) -> bool {
-        self.0.window.get().is_some_and(|w| w.isKeyWindow())
+        self.0.window().is_some_and(|w| w.isKeyWindow())
     }
     /// Whether any part of the window is on screen (not minimized, hidden or covered).
     pub fn is_visible(&self) -> bool {
         self.0
-            .window
-            .get()
+            .window()
             .is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible))
     }
     /// Insertion indicators animate only in a key, active, visible window.
     pub fn caret_is_active(&self) -> bool {
         NSApplication::sharedApplication(self.0.mtm).isActive()
-            && self.0.window.get().is_some_and(|w| {
+            && self.0.window().is_some_and(|w| {
                 w.isKeyWindow() && w.occlusionState().contains(NSWindowOcclusionState::Visible)
             })
     }
@@ -397,7 +376,7 @@ impl WindowHandle {
     }
     /// Schedules a one-shot deadline; it does not keep the display link spinning.
     pub fn request_frame_at(&self, deadline: Instant) {
-        let Some(view) = self.0.view.get() else {
+        let Some(view) = self.0.view() else {
             return;
         };
         if let Some(timer) = self.0.timer.take() {
@@ -412,7 +391,7 @@ impl WindowHandle {
         let timer = unsafe {
             NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
                 delay,
-                view,
+                &view,
                 sel!(wake:),
                 None,
                 false,
@@ -434,7 +413,7 @@ impl WindowHandle {
         appearance: Option<Appearance>,
         background: Option<[f32; 4]>,
     ) {
-        let Some(window) = self.0.window.get() else {
+        let Some(window) = self.0.window() else {
             return;
         };
         if let Some(view) = window
@@ -472,7 +451,7 @@ impl WindowHandle {
     }
     /// Changes the native title only when its text changes.
     pub fn set_title(&self, title: &str) {
-        let Some(w) = self.0.window.get() else {
+        let Some(w) = self.0.window() else {
             return;
         };
         if !self.0.title.borrow_mut().update(title) {
@@ -484,13 +463,26 @@ impl WindowHandle {
     /// current menu are ignored: rebuilding NSMenu forces AppKit to relayout and redraw the
     /// menu bar, which dominated main-thread time while background results streamed in.
     pub fn set_menu(&self, entries: &[MenuEntry]) {
-        if !INSTALLED_MENU.with(|installed| installed.borrow_mut().update(self.0.id, entries)) {
+        let Some(delegate) = lifecycle::delegate() else {
+            return;
+        };
+        if self.is_closed()
+            || !delegate
+                .ivars()
+                .menu
+                .borrow_mut()
+                .update(self.0.id, entries)
+        {
             return;
         }
         let app = NSApplication::sharedApplication(self.0.mtm);
         let main = NSMenu::new(self.0.mtm);
-        self.0.menu_commands.borrow_mut().clear();
-        append_menu(&self.0, &main, entries);
+        let mut commands = MenuBarActions {
+            first_tag: delegate.ivars().commands.borrow().next_tag(),
+            entries: Vec::new(),
+        };
+        append_menu(&delegate, &main, entries, &mut commands);
+        delegate.ivars().commands.replace(commands);
         app.setMainMenu(Some(&main));
         let submenu = |id: &str| {
             let index = entries.iter().position(|entry| entry.id == id)?;
@@ -505,10 +497,10 @@ impl WindowHandle {
         if windows.is_some() {
             for window in lifecycle::live_hosts()
                 .iter()
-                .filter_map(|h| h.window.get())
+                .filter_map(|h| h.window())
                 .filter(|window| !window.isExcludedFromWindowsMenu())
             {
-                app.addWindowsItem_title_filename(window, &window.title(), false);
+                app.addWindowsItem_title_filename(&window, &window.title(), false);
             }
         }
     }
@@ -665,7 +657,7 @@ impl WindowHandle {
     }
     /// Updates the minimum content extent needed by the current pane layout.
     pub fn set_minimum_content_size(&self, size: Size) {
-        if let Some(window) = self.0.window.get() {
+        if let Some(window) = self.0.window() {
             let minimum = NSSize::new(size.width.max(320.), size.height.max(200.));
             window.setContentMinSize(minimum);
             let current = self.content_size();
@@ -680,16 +672,15 @@ impl WindowHandle {
     /// Maximum frames per second on the hosting display.
     pub fn maximum_frames_per_second(&self) -> f32 {
         self.0
-            .window
-            .get()
+            .window()
             .and_then(|w| w.screen())
             .map_or(60., |s| s.maximumFramesPerSecond().max(1) as f32)
     }
     /// Borrowed CAMetalLayer pointer. A renderer must retain this handle for the
     /// entire surface lifetime, and may only create/use the surface on this thread.
     pub fn metal_layer_ptr(&self) -> *mut c_void {
-        self.0.layer.get().map_or(std::ptr::null_mut(), |l| {
-            Retained::as_ptr(l).cast_mut().cast()
+        self.0.layer().map_or(std::ptr::null_mut(), |l| {
+            Retained::as_ptr(&l).cast_mut().cast()
         })
     }
     /// Updates the native drawable pool before acquisition. Idle service polls
@@ -723,23 +714,17 @@ impl WindowHandle {
     }
     /// Checks the hosting display, session lock and live window occlusion state.
     pub fn display_status(&self) -> DisplayStatus {
-        let display = self
-            .0
-            .window
-            .get()
-            .and_then(|w| w.screen())
-            .and_then(|screen| {
-                let key = NSString::from_str("NSScreenNumber");
-                screen.deviceDescription().objectForKey(&key).map(|number| {
-                    // SAFETY: NSScreenNumber is documented as an NSNumber display ID.
-                    unsafe { msg_send![&*number, unsignedIntValue] }
-                })
-            });
+        let display = self.0.window().and_then(|w| w.screen()).and_then(|screen| {
+            let key = NSString::from_str("NSScreenNumber");
+            screen.deviceDescription().objectForKey(&key).map(|number| {
+                // SAFETY: NSScreenNumber is documented as an NSNumber display ID.
+                unsafe { msg_send![&*number, unsignedIntValue] }
+            })
+        });
         let mut status = crate::display::status_for_display(display);
         status.window_occluded = self
             .0
-            .window
-            .get()
+            .window()
             .is_some_and(|w| !w.occlusionState().contains(NSWindowOcclusionState::Visible));
         status
     }
@@ -804,11 +789,14 @@ enum Event {
     AccessibilityPreferences,
     ScrollerStyle,
 }
-thread_local! {
-    /// Window that installed the current application menu, and the entries it installed.
-    static INSTALLED_MENU: RefCell<MenuInstallation> = RefCell::new(MenuInstallation::default());
-}
 static NEXT_HOST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+#[derive(Default)]
+struct NativeWindow {
+    window: Option<Retained<NSWindow>>,
+    view: Option<Retained<EditorView>>,
+    layer: Option<Retained<ObservedLayer>>,
+    link: Option<Retained<CADisplayLink>>,
+}
 struct Host {
     /// Unique for the process lifetime, unlike the Rc address.
     id: u64,
@@ -830,18 +818,12 @@ struct Host {
     scale: Cell<f64>,
     simple_fullscreen:
         RefCell<Option<(NSRect, NSWindowStyleMask, NSApplicationPresentationOptions)>>,
-    window: OnceCell<Retained<NSWindow>>,
-    view: OnceCell<Retained<EditorView>>,
-    layer: OnceCell<Retained<ObservedLayer>>,
-    link: OnceCell<Retained<CADisplayLink>>,
+    native: RefCell<NativeWindow>,
     timer: Cell<Option<Retained<NSTimer>>>,
     drawable_pool: Cell<DrawablePool>,
     drawable_timer: Cell<Option<Retained<NSTimer>>>,
     presentations: Arc<Mutex<VecDeque<Presentation>>>,
     error: RefCell<Option<String>>,
-    /// Command, JSON args and the key equivalent Velocity installed (AppKit may rewrite the
-    /// item's own equivalent for the active keyboard layout).
-    menu_commands: RefCell<Vec<MenuBarAction>>,
     title: RefCell<WindowTitle>,
     context: RefCell<ContextRequest<Retained<NSEvent>>>,
     context_scheduled: Cell<bool>,
@@ -857,6 +839,69 @@ struct Host {
     ax_layout: Cell<u64>,
 }
 impl Host {
+    // Keep the native object, not a RefCell borrow, across reentrant AppKit calls.
+    fn window(&self) -> Option<Retained<NSWindow>> {
+        self.native.borrow().window.clone()
+    }
+    fn view(&self) -> Option<Retained<EditorView>> {
+        self.native.borrow().view.clone()
+    }
+    fn layer(&self) -> Option<Retained<ObservedLayer>> {
+        self.native.borrow().layer.clone()
+    }
+    fn link(&self) -> Option<Retained<CADisplayLink>> {
+        self.native.borrow().link.clone()
+    }
+    fn release_native_window(&self) {
+        self.stopped.set(true);
+        let native = self.native.take();
+        if let Some(link) = native.link {
+            link.invalidate();
+        }
+        for timer in [self.timer.take(), self.drawable_timer.take()]
+            .into_iter()
+            .flatten()
+        {
+            timer.invalidate();
+        }
+        self.drawable_pool.set(DrawablePool::default());
+        self.pending.borrow_mut().clear();
+        self.context.take();
+        self.input.take();
+        self.ax_elements.borrow_mut().clear();
+        self.ax_cache.clear();
+        if let Some(view) = &native.view {
+            // SAFETY: undo the two selector registrations and any delayed context menu
+            // while the observation target is still alive, on the main thread.
+            unsafe {
+                NSWorkspace::sharedWorkspace()
+                    .notificationCenter()
+                    .removeObserver(view);
+                NSNotificationCenter::defaultCenter().removeObserver(view);
+                NSObject::cancelPreviousPerformRequestsWithTarget(view);
+            }
+        }
+        if let Some(layer) = &native.layer {
+            layer.setDrawableSize(objc2_core_foundation::CGSize::new(0., 0.));
+        }
+        if let Some(window) = &native.window {
+            window.setDelegate(None);
+            window.makeFirstResponder(None);
+            window.setContentView(None);
+            NSApplication::sharedApplication(self.mtm).removeWindowsItem(window);
+            window.orderOut(None);
+            // Explicitly close AppKit's window as well. This does not ask
+            // windowShouldClose again, and releasedWhenClosed is false.
+            window.close();
+        }
+        if let Some(view) = &native.view {
+            view.setWantsLayer(false);
+            view.setLayer(None);
+        }
+        if self.simple_fullscreen.take().is_some() {
+            restore_simple_presentation(self.mtm);
+        }
+    }
     fn update_pointer_cursor(&self, point: Point) {
         let Some(shape) = self
             .app
@@ -883,12 +928,12 @@ impl Host {
         WindowHandle(Rc::clone(self))
     }
     fn set_drawable_limit(&self, limit: usize) {
-        if let Some(layer) = self.layer.get() {
+        if let Some(layer) = self.layer() {
             layer.setMaximumDrawableCount(limit);
         }
     }
     fn arm_drawable_timer(&self, pool: DrawablePool, now: Instant) {
-        let (Some(due), Some(view)) = (pool.deadline(), self.view.get()) else {
+        let (Some(due), Some(view)) = (pool.deadline(), self.view()) else {
             return;
         };
         let current = self.drawable_timer.take();
@@ -902,7 +947,7 @@ impl Host {
         let timer = unsafe {
             NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
                 due.saturating_duration_since(now).as_secs_f64().max(0.0001),
-                view,
+                &view,
                 sel!(settleDrawablePool:),
                 None,
                 false,
@@ -951,6 +996,7 @@ impl Host {
     fn drain(self: &Rc<Self>) {
         if self.stopped.get() {
             self.pending.borrow_mut().clear();
+            lifecycle::schedule();
             return;
         }
         if self.dispatching.get() || self.drawing.get() {
@@ -1000,6 +1046,9 @@ impl Host {
                     }
                 }
             }
+            if self.stopped.get() {
+                break;
+            }
             let current = app.text_input_state();
             let previous = self.input.replace(current.clone());
             drop(slot);
@@ -1007,10 +1056,6 @@ impl Host {
             if self.stopped.get() {
                 break;
             }
-        }
-        if self.stopped.get() && !lifecycle::is_template(self.id) {
-            self.app.borrow_mut().take();
-            *self.input.borrow_mut() = TextInputState::default();
         }
         self.dispatching.set(false);
         self.flush_ime_coordinates();
@@ -1052,7 +1097,7 @@ impl Host {
             return;
         }
         // Query callbacks now see the freshly published text/geometry snapshot.
-        if let Some(context) = self.view.get().and_then(|v| v.inputContext()) {
+        if let Some(context) = self.view().and_then(|v| v.inputContext()) {
             context.invalidateCharacterCoordinates();
         }
     }
@@ -1114,7 +1159,7 @@ impl Host {
         self.pace();
     }
     fn pace(&self) {
-        if let Some(link) = self.link.get() {
+        if let Some(link) = self.link() {
             link.setPaused(
                 self.stopped.get()
                     || !self.visible.get()
@@ -1135,7 +1180,7 @@ impl Host {
         {
             return;
         }
-        if let Some(view) = self.view.get() {
+        if let Some(view) = self.view() {
             // SAFETY: the delayed selector takes one optional object. AppKit retains
             // the view until delivery; no app borrow crosses this scheduling call.
             unsafe {
@@ -1164,10 +1209,13 @@ impl Host {
         menus::popup(self, &entries, &event);
         self.context_tracking.set(false);
         lifecycle::schedule_contexts();
+        lifecycle::schedule();
     }
     fn resize(self: &Rc<Self>) {
-        let (Some(view), Some(window), Some(layer)) =
-            (self.view.get(), self.window.get(), self.layer.get())
+        if self.stopped.get() {
+            return;
+        }
+        let (Some(view), Some(window), Some(layer)) = (self.view(), self.window(), self.layer())
         else {
             return;
         };
@@ -1192,7 +1240,7 @@ impl Host {
             (size.height * scale).round(),
         ));
         CATransaction::commit();
-        if let Some(link) = self.link.get() {
+        if let Some(link) = self.link() {
             let max = self.handle().maximum_frames_per_second();
             link.setPreferredFrameRateRange(CAFrameRateRange::new(30f32.min(max), max, max));
         }
@@ -1345,58 +1393,6 @@ define_class!(
             })
             } else { false }
         }
-        #[unsafe(method(velocityCommand:))]
-        fn named_command(&self, item: &NSMenuItem) {
-            if let Some(h) = self.ivars().host.upgrade() {
-                // The key window gets performKeyEquivalent: before the menu bar.
-                // If the editor declines a chord (e.g. during composition), don't
-                // execute the display shortcut as a fallback menu action.
-                // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/HandlingKeyEvents/HandlingKeyEvents.html
-                // AppKit relocates equivalents for non-US layouts and rewrites the item's own
-                // equivalent (⌘/ becomes ⌘ß on German), so compare the key against the one
-                // Velocity installed. The keymap never receives the relocated chord; the
-                // shortcut the menu displays runs the command, as in Sublime Text 4215
-                // (black-box, German layout).
-                let command = h.menu_commands.borrow().get(item.tag().max(0) as usize).cloned();
-                if let Some(command) = &command
-                    && !h.stopped.get() && !command.installed_equivalent.is_empty()
-                    && NSApplication::sharedApplication(h.mtm).currentEvent().is_some_and(|event| {
-                        event.r#type() == NSEventType::KeyDown
-                            && event.modifierFlags().contains(NSEventModifierFlags::Command)
-                            && !relocated_equivalent(
-                                &command.installed_equivalent,
-                                &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
-                            )
-                    })
-                {
-                    return;
-                }
-                if let Some(MenuBarAction { name, args, .. }) = command {
-                    if h.stopped.get() && lifecycle::is_template(h.id) {
-                        if windowless_command(&name) && let Ok(mut slot) = h.app.try_borrow_mut()
-                            && let Some(app) = slot.as_mut() {
-                            app.on_named_command(&h.handle(), &name, &args);
-                        }
-                    } else {
-                        h.dispatch(Event::NamedCommand(name,args));
-                        h.flush();
-                    }
-                }
-            }
-        }
-        #[unsafe(method(validateMenuItem:))]
-        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
-            self.ivars().host.upgrade().is_some_and(|h| {
-                let commands=h.menu_commands.borrow();
-                commands.get(item.tag().max(0) as usize).is_some_and(|command| {
-                    if h.stopped.get() && lifecycle::is_template(h.id) {
-                        windowless_command(&command.name)
-                    } else {
-                        h.app.try_borrow().ok().is_some_and(|app|app.as_ref().is_some_and(|app|app.command_enabled(&command.name,&command.args)))
-                    }
-                })
-            })
-        }
         #[unsafe(method(keyUp:))] fn key_up(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::Up))); } }
         #[unsafe(method(flagsChanged:))] fn flags_changed(&self, e: &NSEvent) { if let Some(h) = self.ivars().host.upgrade() { h.dispatch(Event::Key(key_event(e, KeyState::FlagsChanged))); } }
         #[unsafe(method(mouseDown:))] fn mouse_down(&self, e: &NSEvent) { self.mouse(e, MouseKind::Down); }
@@ -1430,14 +1426,6 @@ define_class!(
         #[unsafe(method(copy:))] fn copy(&self, _sender: Option<&AnyObject>) { self.command(Command::Copy); }
         #[unsafe(method(paste:))] fn paste(&self, _sender: Option<&AnyObject>) { self.command(Command::Paste); }
         #[unsafe(method(selectAll:))] fn select_all(&self, _sender: Option<&AnyObject>) { self.command(Command::SelectAll); }
-    }
-    // SAFETY: selectors match NSMenuDelegate; menu updates snapshot app flags
-    // before mutating AppKit objects and never initiate nested menu tracking.
-    unsafe impl NSMenuDelegate for EditorView {
-        #[unsafe(method(menuNeedsUpdate:))]
-        fn menu_needs_update(&self, menu: &NSMenu) {
-            if let Some(host) = self.ivars().host.upgrade() { menus::update_menu_bar(&host, menu); }
-        }
     }
     // SAFETY: the view is main-thread-only and the sender is AppKit's live drag
     // session. Only file URLs are accepted; the source item is never moved.
@@ -1704,24 +1692,27 @@ fn pasteboard_paths(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
             .collect()
     })
 }
-struct DelegateIvars {
-    host: Rc<Host>,
-    options: WindowOptions,
+#[derive(Default)]
+struct ApplicationDelegateIvars {
+    menu: RefCell<MenuInstallation>,
+    commands: RefCell<MenuBarActions>,
 }
 define_class!(
-    // SAFETY: NSObject has no subclassing invariants; delegate stays on the main thread.
+    // SAFETY: NSObject has no subclassing invariants; the application delegate
+    // stays on the main thread and does not own a window.
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[ivars = DelegateIvars]
-    struct Delegate;
+    #[ivars = ApplicationDelegateIvars]
+    struct ApplicationDelegate;
     // SAFETY: NSObjectProtocol has no additional requirements.
-    unsafe impl NSObjectProtocol for Delegate {}
+    unsafe impl NSObjectProtocol for ApplicationDelegate {}
     // SAFETY: methods implement the documented NSApplicationDelegate signatures.
-    unsafe impl NSApplicationDelegate for Delegate {
+    unsafe impl NSApplicationDelegate for ApplicationDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn launched(&self, _n: &NSNotification) {
-            if let Err(e) = self.launch() {
-                self.ivars().host.fail(e);
+            let initial = WINDOWS.with(|windows| windows.borrow().owners().next().cloned());
+            if let Some(delegate) = initial && let Err(error) = delegate.launch() {
+                delegate.ivars().host.fail(error);
             }
         }
         #[unsafe(method(application:openURLs:))]
@@ -1754,63 +1745,146 @@ define_class!(
         fn terminate_after_close(&self, _app: &NSApplication) -> bool { false }
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            let hosts = WINDOWS.with(|windows| {
-                windows
-                    .borrow()
-                    .iter()
-                    .map(|d| d.ivars().host.clone())
-                    .collect::<Vec<_>>()
-            });
-            for host in &hosts {
-                if host.stopped.get() {
-                    continue;
-                }
-                let Ok(mut slot) = host.app.try_borrow_mut() else {
-                    return termination_reply(false);
-                };
-                if let Some(app) = slot.as_mut()
-                    && !app.on_quit_requested(&host.handle())
-                {
-                    return termination_reply(false);
-                }
+            // Even an approved close can still be unwinding an App callback.
+            if lifecycle::hosts_busy() {
+                return termination_reply(false);
             }
+            let approved = lifecycle::live_hosts().iter().all(|host| {
+                host.app.try_borrow_mut().is_ok_and(|mut slot| {
+                    slot.as_mut().is_none_or(|app| app.on_quit_requested(&host.handle()))
+                })
+            });
+            lifecycle::schedule();
             // AppKit completes Quit and system logout only if the delegate
             // approves. Do not stop the run loop and then tell loginwindow no.
             // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/AppArchitecture/Tasks/GracefulAppTermination.html
-            termination_reply(true)
+            termination_reply(approved)
         }
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            let app = NSApplication::sharedApplication(self.ivars().host.mtm);
+            let app = NSApplication::sharedApplication(self.mtm());
             if let Err(error) = teardown(&app) {
                 eprintln!("{error}");
             }
         }
     }
-    impl Delegate {
+    impl ApplicationDelegate {
         #[unsafe(method(velocityOpenURL:withReplyEvent:))]
         fn open_url_event(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
             finder::open_event(event);
         }
         #[unsafe(method(velocitySessionEnding:))]
         fn session_ending(&self, _notification: &NSNotification) {
-            let hosts = WINDOWS.with(|windows| {
-                windows.borrow().iter().map(|d| d.ivars().host.clone()).collect::<Vec<_>>()
-            });
-            for host in hosts {
-                if !host.stopped.get()
-                    && let Ok(mut slot) = host.app.try_borrow_mut()
+            for host in lifecycle::live_hosts() {
+                if let Ok(mut slot) = host.app.try_borrow_mut()
                     && let Some(app) = slot.as_mut()
                 {
                     app.on_session_ending(&host.handle());
                 }
             }
+            lifecycle::schedule();
         }
         #[unsafe(method(drainPlatformRequests:))]
         fn drain_platform_requests(&self, _sender: Option<&AnyObject>) { lifecycle::drain(); }
         #[unsafe(method(pollClosedWindow:))]
         fn poll_closed_window(&self, _timer: &NSTimer) { lifecycle::idle(); }
+
+        #[unsafe(method(velocityCommand:))]
+        fn named_command(&self, item: &NSMenuItem) {
+            let Some(command) = self.ivars().commands.borrow().get(item.tag()).cloned() else {
+                return;
+            };
+            let Some(host) = self.menu_host() else {
+                return;
+            };
+            if host.stopped.get() {
+                if windowless_command(&command.name) {
+                    lifecycle::with_template(&host, |app, window| {
+                        app.on_named_command(window, &command.name, &command.args);
+                    });
+                }
+                return;
+            }
+            // The key window handles ordinary shortcuts first; don't fall back
+            // to the menu when it declines (e.g. while composing). Accept a
+            // shortcut AppKit relocated to the current keyboard layout.
+            if !command.installed_equivalent.is_empty()
+                && NSApplication::sharedApplication(self.mtm()).currentEvent().is_some_and(|event| {
+                    event.r#type() == NSEventType::KeyDown
+                        && event.modifierFlags().contains(NSEventModifierFlags::Command)
+                        && !relocated_equivalent(
+                            &command.installed_equivalent,
+                            &event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default(),
+                        )
+                })
+            {
+                return;
+            }
+            host.dispatch(Event::NamedCommand(command.name, command.args));
+            host.flush();
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let commands = self.ivars().commands.borrow();
+            let Some(command) = commands.get(item.tag()) else {
+                return false.into();
+            };
+            self.menu_host().is_some_and(|host| {
+                if host.stopped.get() {
+                    windowless_command(&command.name)
+                } else {
+                    host.app.try_borrow().ok().is_some_and(|slot| {
+                        slot.as_ref().is_some_and(|app| app.command_enabled(&command.name, &command.args))
+                    })
+                }
+            })
+        }
     }
+    // SAFETY: menu updates snapshot app flags before mutating AppKit objects.
+    unsafe impl NSMenuDelegate for ApplicationDelegate {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            if let Some(host) = self.menu_host() && !host.stopped.get() {
+                menus::update_menu_bar(&host, menu, &self.ivars().commands);
+            }
+        }
+    }
+);
+impl ApplicationDelegate {
+    fn menu_host(&self) -> Option<Rc<Host>> {
+        let id = self.ivars().menu.borrow().owner();
+        let owner = WINDOWS.with(|windows| {
+            let windows = windows.borrow();
+            id.and_then(|id| windows.owner(id))
+                .filter(|d| !d.ivars().host.stopped.get())
+                .map(|d| Rc::clone(&d.ivars().host))
+        });
+        owner.or_else(|| {
+            // The old menu can outlive its window until the next key window
+            // installs one. Do not send its actions to a background window.
+            let live = lifecycle::live_hosts();
+            if live.is_empty() {
+                lifecycle::template()
+            } else {
+                live.into_iter().find(|host| host.handle().is_focused())
+            }
+        })
+    }
+}
+
+struct DelegateIvars {
+    host: Rc<Host>,
+    options: WindowOptions,
+}
+define_class!(
+    // SAFETY: NSObject has no subclassing invariants; delegate stays on the main thread.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = DelegateIvars]
+    struct Delegate;
+    // SAFETY: NSObjectProtocol has no additional requirements.
+    unsafe impl NSObjectProtocol for Delegate {}
     // SAFETY: methods match NSWindowDelegate; the host owns the NSWindow.
     unsafe impl NSWindowDelegate for Delegate {
         #[unsafe(method(windowShouldClose:))]
@@ -1838,8 +1912,7 @@ define_class!(
         fn occlusion(&self, _n: &NSNotification) {
             let h = &self.ivars().host;
             let visible = h
-                .window
-                .get()
+                .window()
                 .is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible));
             h.visible.set(visible);
             if visible {
@@ -1862,7 +1935,7 @@ define_class!(
         fn resigned(&self, _n: &NSNotification) {
             let h = &self.ivars().host;
             let inline = h.inline_text_input();
-            if let Some(v) = h.view.get() {
+            if let Some(v) = h.view() {
                 v.finish_marked_text(h, inline);
             }
             if inline {
@@ -1908,7 +1981,7 @@ impl Delegate {
             .map_or(NSSize::new(320., 200.), |size| {
                 NSSize::new(size.width.max(320.), size.height.max(200.))
             });
-        // SAFETY: the host retains the window until explicit teardown after run returns.
+        // SAFETY: the host owns the window until explicit teardown.
         unsafe {
             window.setReleasedWhenClosed(false);
             window.setContentMinSize(minimum);
@@ -2029,13 +2102,12 @@ impl Delegate {
         h.dispatch(Event::AccessibilityPreferences);
         window.setAcceptsMouseMovedEvents(true);
         window.makeFirstResponder(Some(&view));
-        h.window
-            .set(window.clone())
-            .map_err(|_| "window initialized twice")?;
-        h.view
-            .set(view.clone())
-            .map_err(|_| "view initialized twice")?;
-        h.layer.set(layer).map_err(|_| "layer initialized twice")?;
+        h.native.replace(NativeWindow {
+            window: Some(window.clone()),
+            view: Some(view.clone()),
+            layer: Some(layer),
+            link: None,
+        });
         h.resize();
         h.phase("window_layer_ready");
         if NSApplication::sharedApplication(mtm).mainMenu().is_none() {
@@ -2046,9 +2118,7 @@ impl Delegate {
         link.setPaused(true);
         // SAFETY: register only on the main run loop, also during live-resize tracking.
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
-        h.link
-            .set(link)
-            .map_err(|_| "display link initialized twice")?;
+        h.native.borrow_mut().link = Some(link);
         h.resize();
         h.dispatching.set(true);
         let started = {
@@ -2066,6 +2136,9 @@ impl Delegate {
         h.dispatching.set(false);
         started?;
         h.drain();
+        if h.stopped.get() {
+            return Ok(());
+        }
         h.ready.set(true);
         let activate = h
             .app
@@ -2292,13 +2365,57 @@ struct MenuBarAction {
     shortcut_hint: Option<String>,
 }
 
-fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
-    if let Some(view) = host.view.get() {
-        menu.setDelegate(Some(ProtocolObject::from_ref(&**view)));
+#[derive(Default)]
+struct MenuBarActions {
+    first_tag: isize,
+    entries: Vec<MenuBarAction>,
+}
+
+impl MenuBarActions {
+    // AppKit can still be tracking the old menu while the key window installs a
+    // new one. Never let an old item index into the new command table.
+    fn next_tag(&self) -> isize {
+        self.first_tag + self.entries.len() as isize
     }
+
+    fn get(&self, tag: isize) -> Option<&MenuBarAction> {
+        self.entries
+            .get(usize::try_from(tag.checked_sub(self.first_tag)?).ok()?)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn menu_items_from_a_replaced_menu_cannot_run_a_new_command() {
+    let old = MenuBarActions {
+        first_tag: 0,
+        entries: vec![MenuBarAction {
+            id: String::new(),
+            name: "close_window".into(),
+            args: "{}".into(),
+            installed_equivalent: String::new(),
+            shortcut_hint: None,
+        }],
+    };
+    let new = MenuBarActions {
+        first_tag: old.next_tag(),
+        entries: old.entries.clone(),
+    };
+    assert!(new.get(0).is_none());
+    assert!(new.get(1).is_some());
+}
+
+fn append_menu(
+    delegate: &ApplicationDelegate,
+    menu: &NSMenu,
+    entries: &[MenuEntry],
+    commands: &mut MenuBarActions,
+) {
+    let mtm = delegate.mtm();
+    menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     for entry in entries {
         if entry.caption == "-" {
-            menu.addItem(&NSMenuItem::separatorItem(host.mtm));
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
             continue;
         }
         let services = entry.command.as_deref() == Some("native_services");
@@ -2335,37 +2452,34 @@ fn append_menu(host: &Rc<Host>, menu: &NSMenu, entries: &[MenuEntry]) {
         }
         if services {
             // https://developer.apple.com/documentation/appkit/nsapplication/servicesmenu
-            let child = NSMenu::initWithTitle(NSMenu::alloc(host.mtm), &item.title());
+            let child = NSMenu::initWithTitle(NSMenu::alloc(mtm), &item.title());
             item.setSubmenu(Some(&child));
-            NSApplication::sharedApplication(host.mtm).setServicesMenu(Some(&child));
+            NSApplication::sharedApplication(mtm).setServicesMenu(Some(&child));
             continue;
         }
         if let Some(command) = &entry.command {
-            let mut commands = host.menu_commands.borrow_mut();
-            item.setTag(commands.len() as isize);
+            item.setTag(commands.next_tag());
             let installed = entry
                 .shortcut
                 .as_deref()
                 .and_then(menu_key_equivalent)
                 .map(|(key, _)| key.to_string())
                 .unwrap_or_default();
-            commands.push(MenuBarAction {
+            commands.entries.push(MenuBarAction {
                 id: entry.id.clone(),
                 name: command.clone(),
                 args: entry.args.clone(),
                 installed_equivalent: installed,
                 shortcut_hint: entry.shortcut_hint.clone(),
             });
-            if let Some(view) = host.view.get() {
-                // SAFETY: host retains the view until every menu is torn down.
-                unsafe {
-                    item.setTarget(Some(view));
-                }
+            // SAFETY: run retains the application delegate until the menu is removed.
+            unsafe {
+                item.setTarget(Some(delegate));
             }
         }
         if !entry.children.is_empty() {
-            let child = NSMenu::initWithTitle(NSMenu::alloc(host.mtm), &item.title());
-            append_menu(host, &child, &entry.children);
+            let child = NSMenu::initWithTitle(NSMenu::alloc(mtm), &item.title());
+            append_menu(delegate, &child, &entry.children, commands);
             item.setSubmenu(Some(&child));
         }
     }
@@ -2463,10 +2577,18 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
         return Err("invalid window size".into());
     }
     let host = create_host(mtm, &options, app)?;
-    let delegate = create_delegate(mtm, host.clone(), options);
-    WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
     let nsapp = NSApplication::sharedApplication(mtm);
     host.phase("nsapplication_ready");
+    let id = host.id;
+    WINDOWS.with(|windows| {
+        windows
+            .borrow_mut()
+            .insert(id, create_delegate(mtm, host, options))
+    });
+    let delegate = ApplicationDelegate::alloc(mtm).set_ivars(ApplicationDelegateIvars::default());
+    // SAFETY: NSObject initializer after all Rust ivars were installed.
+    let delegate: Retained<ApplicationDelegate> = unsafe { msg_send![super(delegate), init] };
+    lifecycle::set_delegate(delegate.clone());
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     nsapp.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -2493,10 +2615,14 @@ pub(super) fn run(options: WindowOptions, app: Box<dyn AppHandler>) -> Result<()
             );
     }
     nsapp.run();
-    // SAFETY: both arguments are UInt32 event codes, matching the registration.
+    // SAFETY: this target is still retained and the event codes match registration.
     unsafe {
         let _: () = msg_send![&*apple_events, removeEventHandlerForEventClass: finder::INTERNET_EVENT,
             andEventID: finder::INTERNET_EVENT];
+        NSWorkspace::sharedWorkspace()
+            .notificationCenter()
+            .removeObserver(&delegate);
+        NSObject::cancelPreviousPerformRequestsWithTarget(&delegate);
     }
     teardown(&nsapp)
 }
@@ -2510,30 +2636,22 @@ fn termination_reply(approved: bool) -> NSApplicationTerminateReply {
 }
 
 fn teardown(nsapp: &NSApplication) -> Result<(), String> {
-    let windows = WINDOWS.with(|windows| std::mem::take(&mut *windows.borrow_mut()));
+    let windows = WINDOWS.with(|windows| windows.replace(lifetime::Windows::new()));
     let mut error = None;
-    for delegate in windows {
+    for delegate in windows.into_owners() {
         let host = &delegate.ivars().host;
-        if let Some(link) = host.link.get() {
-            link.invalidate();
-        }
-        if let Some(timer) = host.timer.take() {
-            timer.invalidate();
-        }
         host.app.borrow_mut().take();
-        if let Some(window) = host.window.get() {
-            window.setDelegate(None);
-            window.orderOut(None);
-            window.setContentView(None);
-        }
+        host.release_native_window();
         if let Some(e) = host.error.borrow_mut().take() {
             error.get_or_insert(e);
         }
     }
     nsapp.setDelegate(None);
+    nsapp.setWindowsMenu(None);
+    nsapp.setHelpMenu(None);
+    nsapp.setServicesMenu(None);
     nsapp.setMainMenu(None);
     lifecycle::reset();
-    INSTALLED_MENU.with(|installed| *installed.borrow_mut() = MenuInstallation::default());
     error.map_or(Ok(()), Err)
 }
 
@@ -2557,28 +2675,14 @@ fn launch_window(
 ) -> Result<WindowHandle, String> {
     let host = create_host(mtm, &options, app)?;
     let delegate = create_delegate(mtm, Rc::clone(&host), options);
-    WINDOWS.with(|windows| windows.borrow_mut().push(delegate.clone()));
+    WINDOWS.with(|windows| windows.borrow_mut().insert(host.id, delegate.clone()));
     if let Err(error) = delegate.launch() {
         // Failed construction must not leave an unready live destination, or
         // replace the approved closed-window template needed for another retry.
         host.stopped.set(true);
-        if let Some(link) = host.link.get() {
-            link.invalidate();
-        }
-        if let Some(timer) = host.timer.take() {
-            timer.invalidate();
-        }
+        WINDOWS.with(|windows| windows.borrow_mut().remove(host.id));
         host.app.borrow_mut().take();
-        if let Some(window) = host.window.get() {
-            window.setDelegate(None);
-            window.orderOut(None);
-            window.setContentView(None);
-        }
-        WINDOWS.with(|windows| {
-            windows
-                .borrow_mut()
-                .retain(|delegate| delegate.ivars().host.id != host.id)
-        });
+        host.release_native_window();
         return Err(error);
     }
     Ok(host.handle())
@@ -2596,7 +2700,11 @@ fn create_host(
     {
         return Err("invalid window size".into());
     }
-    let host = Rc::new(Host {
+    Ok(new_host(mtm, options, app))
+}
+
+fn new_host(mtm: MainThreadMarker, options: &WindowOptions, app: Box<dyn AppHandler>) -> Rc<Host> {
+    Rc::new(Host {
         id: NEXT_HOST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         mtm,
         app: RefCell::new(Some(app)),
@@ -2615,16 +2723,12 @@ fn create_host(
         size: Cell::new(options.size),
         scale: Cell::new(1.),
         simple_fullscreen: RefCell::new(None),
-        window: OnceCell::new(),
-        view: OnceCell::new(),
-        layer: OnceCell::new(),
-        link: OnceCell::new(),
+        native: Default::default(),
         timer: Cell::new(None),
         drawable_pool: Cell::new(DrawablePool::default()),
         drawable_timer: Cell::new(None),
         presentations: Arc::new(Mutex::new(VecDeque::new())),
         error: RefCell::new(None),
-        menu_commands: RefCell::new(Vec::new()),
         title: RefCell::new(WindowTitle::new(options.title.clone())),
         context: RefCell::new(ContextRequest::default()),
         context_scheduled: Cell::new(false),
@@ -2638,8 +2742,7 @@ fn create_host(
         ax_announcements: Default::default(),
         ax_focus: Cell::new(None),
         ax_layout: Cell::new(0),
-    });
-    Ok(host)
+    })
 }
 fn create_delegate(
     mtm: MainThreadMarker,

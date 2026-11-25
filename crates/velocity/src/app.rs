@@ -358,9 +358,23 @@ impl App {
         options: Options,
         clock: Clock,
         reporter: Reporter,
+        workspace: Workspace,
+        done: Arc<AtomicBool>,
+        sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
+    ) -> Self {
+        let session_id = sessions.borrow_mut().register();
+        Self::new_with_session_id(
+            options, clock, reporter, workspace, done, sessions, session_id,
+        )
+    }
+    fn new_with_session_id(
+        options: Options,
+        clock: Clock,
+        reporter: Reporter,
         mut workspace: Workspace,
         done: Arc<AtomicBool>,
         sessions: std::rc::Rc<std::cell::RefCell<crate::session::Sessions>>,
+        session_id: u64,
     ) -> Self {
         #[cfg(test)]
         crate::test_login::install();
@@ -398,7 +412,6 @@ impl App {
         );
         let startup_services_pending =
             workspace.startup_services_pending() || sessions.borrow().startup_writer_pending();
-        let session_id = sessions.borrow_mut().register();
         Self {
             macro_origin: None,
             opened_settings: Vec::new(),
@@ -1201,7 +1214,9 @@ impl App {
         mut request: crate::instance::Request,
     ) -> Result<(), String> {
         request.new_window = true;
-        self.publish_open_route();
+        if !w.is_closed() {
+            self.publish_open_route();
+        }
         self.receive_request(w, crate::instance::Incoming::local(request))
     }
     pub(super) fn apply_open_request(
@@ -5262,7 +5277,17 @@ impl App {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[path = "app_windowless.rs"]
+mod windowless;
+
 impl AppHandler for App {
+    #[cfg(target_os = "macos")]
+    fn into_windowless(self: Box<Self>) -> Option<Box<dyn AppHandler>> {
+        (self.options.mode == Mode::Interactive)
+            .then(|| Box::new(windowless::Controller::new(&self)) as Box<dyn AppHandler>)
+    }
+
     fn activate_on_open(&self) -> bool {
         !self.options.background
     }

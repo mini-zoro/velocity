@@ -147,6 +147,11 @@ struct NativeForwarder {
 }
 #[cfg(target_os = "macos")]
 impl vel_platform::AppHandler for NativeForwarder {
+    fn into_windowless(self: Box<Self>) -> Option<Box<dyn vel_platform::AppHandler>> {
+        // The relay has no editor workspace or rendering resources.
+        Some(self)
+    }
+
     fn on_start(&mut self, window: &vel_platform::WindowHandle) -> Result<(), String> {
         window.close();
         Ok(())

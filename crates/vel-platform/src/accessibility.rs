@@ -290,6 +290,11 @@ pub struct Tree {
 pub(crate) struct TreeCache(std::cell::RefCell<Option<std::rc::Rc<Tree>>>);
 #[cfg(any(target_os = "macos", test))]
 impl TreeCache {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn clear(&self) {
+        self.0.take();
+    }
+
     pub(crate) fn invalidate(&self) {
         self.0.take();
     }

@@ -232,6 +232,10 @@ impl Sessions {
     pub(crate) fn has_live_windows(&self) -> bool {
         !self.live.is_empty()
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn recent_items(&self) -> [Vec<PathBuf>; 3] {
+        self.recent.clone()
+    }
     /// Queues a User preference written by the Settings window for every editor window.
     pub(crate) fn broadcast_preference(&mut self, key: &str, value: Option<vel_config::Value>) {
         for &id in &self.live {
@@ -706,7 +710,9 @@ impl Sessions {
     }
     pub fn clear_recent_kind(&mut self, id: u64, kind: usize) {
         self.forgotten_recent[kind].extend(self.recent[kind].drain(..));
-        self.recent_heads.entry(id).or_default()[kind] = None;
+        if let Some(heads) = self.recent_heads.get_mut(&id) {
+            heads[kind] = None;
+        }
     }
     pub fn remove_deleted_recent_projects(&mut self, id: u64, local: &mut Vec<PathBuf>) {
         let projects = &mut self.recent[2];

@@ -363,14 +363,12 @@ pub trait AppHandler: 'static {
     /// The app handles canonicalization, existing tabs, file kinds, and user-facing errors.
     fn on_open_paths(&mut self, _window: &WindowHandle, _paths: &[std::path::PathBuf]) {}
     /// An authenticated request from the Finder Sync extension in this app bundle.
-    /// Deliver to the ready key window, or to the last closed handler so it can
+    /// Deliver to the ready key window, or to the windowless handler so it can
     /// create a window here without handing the request to another app copy.
     fn on_finder_new_text_file(&mut self, _window: &WindowHandle, _directory: &std::path::Path) {}
     /// Reopen from the Dock, or before an external open with no live windows.
-    /// The last closed handler and its handle are retained as a template. Create
-    /// a fresh window here (for example with `window.new_window(...)`).
-    /// Called directly with the template borrowed once; ordinary events are not
-    /// dispatched to its closed view. A registered factory is a fallback.
+    /// Called on the windowless handler from `into_windowless`. Create a fresh
+    /// window with `window.new_window(...)`. A registered factory is a fallback.
     fn on_reopen(&mut self, _window: &WindowHandle) {}
     /// Poll background work such as IPC without acquiring a drawable.
     /// Runs on the main thread every 100 ms on the retained template while
@@ -420,6 +418,13 @@ pub trait AppHandler: 'static {
     /// Approve closing this window, distinct from quitting the application.
     fn on_window_close_requested(&mut self, window: &WindowHandle) -> bool {
         self.on_quit_requested(window)
+    }
+
+    /// The last macOS window may supply a windowless command and open-request handler.
+    /// Return only application state, not the closed window's renderer or workspace.
+    #[cfg(target_os = "macos")]
+    fn into_windowless(self: Box<Self>) -> Option<Box<dyn AppHandler>> {
+        None
     }
     /// Supplies an on-demand accessibility hierarchy; never called by the scene hot path.
     fn accessibility_tree(&self) -> accessibility::Tree {

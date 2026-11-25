@@ -64,6 +64,64 @@ fn cmd_w(app: &mut App) {
     ));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_window_close_lifecycle_drops_the_editor_when_it_becomes_windowless() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let profile = sessions(root);
+    let mut editor = app(root, &profile, None);
+    let file = fixture_file(root, "closed.txt");
+    editor.workspace.open(location(&file)).unwrap();
+    editor.publish_open_route();
+    let closed_id = editor.session_id;
+    let editor_lifetime = Arc::downgrade(&editor.done);
+
+    assert!(editor.prepare_window_close(None));
+    let handler: Box<dyn AppHandler> = Box::new(editor);
+    let template = handler.into_windowless().unwrap();
+
+    assert!(editor_lifetime.upgrade().is_none());
+    let profile = profile.borrow();
+    assert!(!profile.is_live(closed_id));
+    assert!(!profile.open_windows.contains_key(&closed_id));
+    assert!(!profile.handles.contains_key(&closed_id));
+    assert_eq!(profile.recent_items()[0], vec![file]);
+    drop(template);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_window_close_lifecycle_builds_a_fresh_editor_and_settings_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let profile = sessions(root);
+    let mut editor = app(root, &profile, None);
+    let file = fixture_file(root, "closed.txt");
+    editor.workspace.open(location(&file)).unwrap();
+    assert!(editor.prepare_window_close(None));
+    let template = windowless::Controller::new(&editor);
+    let closed_id = editor.session_id;
+    drop(editor);
+
+    let mut commands = template.command_app().unwrap();
+    assert!(commands.renderer.is_none() && commands.fonts.is_none());
+    assert_eq!(commands.workspace.editor().text, "");
+    assert!(commands.workspace.tabs.iter().all(|tab| tab.path.is_none()));
+    assert!(!profile.borrow().has_live_windows());
+
+    commands.open_settings_window(None).unwrap();
+    assert!(commands.opened_preferences[0].settings_window);
+    assert!(!profile.borrow().has_live_windows());
+    let mut fresh = commands.window_app(None, None, true).unwrap();
+    assert_ne!(fresh.session_id, closed_id);
+    assert_eq!(fresh.workspace.editor().text, "");
+    assert_eq!(fresh.workspace.recent_files, vec![file]);
+    assert!(profile.borrow().is_live(fresh.session_id));
+    assert!(!profile.borrow().is_live(closed_id));
+    assert!(fresh.prepare_window_close(None));
+}
+
 #[test]
 fn r32_cmd_w_closes_anonymous_window_without_quitting_or_restoring_it() {
     for hot in ["always", "only_on_quit", "disabled"] {
