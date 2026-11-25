@@ -170,6 +170,16 @@ impl WindowHandle {
         )));
     }
 
+    /// Whether the window is shown and not minimized.
+    pub fn is_visible(&self) -> bool {
+        self.hwnd().is_some_and(|hwnd| {
+            // SAFETY: both functions only query this thread's live window.
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd.as_ptr()) != 0
+                    && windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hwnd.as_ptr()) == 0
+            }
+        })
+    }
     /// True if this window receives native keyboard input.
     pub fn is_focused(&self) -> bool {
         self.hwnd().is_some_and(|hwnd| {

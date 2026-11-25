@@ -1169,6 +1169,14 @@ impl Renderer {
         self.prepare(scene, fonts, scale)?;
         self.draw(false, query)
     }
+    /// Submits nothing but this frame's staged buffer and texture writes. Without a
+    /// drawable (a minimized or fully covered window) the frame is dropped after
+    /// `prepare`, and wgpu keeps each write's staging buffer until some submission
+    /// carries it: a hidden window polling every 200 ms grew by megabytes per second
+    /// until it was shown again (2.5 GB peak, bug report 2026-11-25).
+    fn discard_staged_writes(&self) {
+        self.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+    }
     fn draw(&mut self, first: bool, query: Option<u32>) -> Result<Option<FrameTimes>, String> {
         if query.is_some_and(|i| i >= MAX_MEASURED_FRAMES) {
             return Err("GPU query index exceeds benchmark capacity".into());
@@ -1185,12 +1193,14 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.discard_staged_writes();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 surface.configure(&self.device, &self.config);
                 #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
+                self.discard_staged_writes();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -1214,6 +1224,7 @@ impl Renderer {
                 #[cfg(target_os = "macos")]
                 window.drawable_surface_configured();
                 self.surface = Some(surface);
+                self.discard_staged_writes();
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Validation => {

@@ -350,6 +350,13 @@ impl WindowHandle {
     pub fn is_focused(&self) -> bool {
         self.0.window.get().is_some_and(|w| w.isKeyWindow())
     }
+    /// Whether any part of the window is on screen (not minimized, hidden or covered).
+    pub fn is_visible(&self) -> bool {
+        self.0
+            .window
+            .get()
+            .is_some_and(|w| w.occlusionState().contains(NSWindowOcclusionState::Visible))
+    }
     /// Insertion indicators animate only in a key, active, visible window.
     pub fn caret_is_active(&self) -> bool {
         NSApplication::sharedApplication(self.0.mtm).isActive()

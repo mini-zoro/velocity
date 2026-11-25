@@ -6327,7 +6327,12 @@ impl AppHandler for App {
             self.record(w, times, ctx.received)?;
         } else {
             self.retries += 1;
-            w.request_frame_at(Instant::now() + Duration::from_millis(16));
+            // A hidden window cannot get a drawable: retrying at 60 Hz rebuilt and
+            // re-uploaded the scene for nothing. The ordinary poll keeps running, and
+            // becoming visible again marks the window dirty for a fresh frame.
+            if w.is_visible() {
+                w.request_frame_at(Instant::now() + Duration::from_millis(16));
+            }
         }
         Ok(())
     }

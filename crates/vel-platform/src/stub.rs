@@ -66,6 +66,10 @@ impl WindowHandle {
     pub fn appearance(&self) -> crate::Appearance {
         crate::Appearance::Dark
     }
+    /// Without a native window, frames are always produced (tests and tools).
+    pub fn is_visible(&self) -> bool {
+        true
+    }
     /// Unsupported platforms have no focused native window.
     pub fn is_focused(&self) -> bool {
         false
