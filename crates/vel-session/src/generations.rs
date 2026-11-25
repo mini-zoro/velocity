@@ -413,6 +413,7 @@ fn salvage(damaged: &[Vec<u8>]) -> Session {
                 syntax: None,
                 transient: false,
                 name: None,
+                untitled_name: None,
             });
             window.workbench.groups[0].add(id, false);
         }

@@ -154,6 +154,10 @@ pub struct Sheet {
     /// and for sheets that show their file name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The name an untitled sheet displayed when the session was written (usually its
+    /// first line), so a restart shows it before the stored text is materialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untitled_name: Option<String>,
 }
 /// Restorable window and project UI state.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

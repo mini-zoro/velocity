@@ -316,6 +316,7 @@ impl Workspace {
                 tab.pending_restore = None;
             }
             tab.lazy = None;
+            tab.restored_name = None;
             tab.document = document;
             tab.shared_view = views[at];
             tab.editor.buffer = Buffer::new(text.clone());

@@ -638,7 +638,49 @@ fn untitled_name_survives_the_session_but_unchanged_names_are_not_pinned() {
     // File tabs keep showing their file name and store no name.
     let (_dir, _, mut file) = fixture("real.txt");
     let (window, _) = file.workspace.snapshot().unwrap();
+    assert!(
+        window
+            .sheets
+            .iter()
+            .all(|sheet| sheet.name.is_none() && sheet.untitled_name.is_none())
+    );
+}
+
+#[test]
+fn a_lazily_restored_untitled_tab_shows_its_first_line_before_it_loads() {
+    // The active sheet is materialized on restore; the others stay lazy until opened,
+    // which is why a restart used to show placeholders for every inactive untitled tab.
+    let mut app = untitled("光标和拖动");
+    app.run_named(None, "new_file", &json!({}));
+    app.workspace
+        .editor_mut()
+        .run("insert", &json!({"characters":"第二份\nbody"}))
+        .unwrap();
+    let (window, documents) = app.workspace.snapshot().unwrap();
+    let names: Vec<_> = window
+        .sheets
+        .iter()
+        .map(|sheet| sheet.untitled_name.as_deref())
+        .collect();
+    assert_eq!(names, [Some("光标和拖动"), Some("第二份")]);
     assert!(window.sheets.iter().all(|sheet| sheet.name.is_none()));
+    let mut restored = Workspace::new(Text::new(), None, None, false).unwrap();
+    restored.restore_window(&window, &documents).unwrap();
+    let index = restored
+        .tabs
+        .iter()
+        .position(|tab| tab.name() == "光标和拖动" && tab.lazy.is_some())
+        .expect("the inactive untitled tab is restored lazily");
+    assert_eq!(
+        restored.tabs[index].name(),
+        "光标和拖动",
+        "named before opening"
+    );
+    // Opening the tab materializes its text; the first line supplies the name again.
+    restored.prepare_sheet(index).unwrap();
+    assert!(restored.tabs[index].lazy.is_none());
+    assert!(restored.tabs[index].restored_name.is_none());
+    assert_eq!(restored.tabs[index].name(), "光标和拖动");
 }
 
 #[test]

@@ -59,6 +59,9 @@ pub struct Tab {
     pub path: Option<PathBuf>,
     pub(crate) find_results: bool,
     pub(crate) suggested_name: Option<String>,
+    /// The display name stored with a lazily restored untitled sheet: shown until its
+    /// text is materialized, then dropped so the stored text supplies the name.
+    pub(crate) restored_name: Option<String>,
     pub format: Format,
     /// Explicit encoding commands set this; automatic detection never does.
     pub encoding_chosen: bool,
@@ -233,6 +236,7 @@ impl Tab {
             path: None,
             find_results: false,
             suggested_name: None,
+            restored_name: None,
             encoding_chosen: false,
             preferred_encoding: None,
             load_warning: None,
@@ -523,6 +527,11 @@ impl Tab {
                         .is_some_and(|l| l.name != "Plain Text")
                 {
                     return untitled.into();
+                }
+                // A sheet restored lazily still has no text: show the name it had when the
+                // session was written instead of a placeholder until the tab is opened.
+                if let Some(name) = &self.restored_name {
+                    return name.clone();
                 }
                 let name: String = self
                     .editor

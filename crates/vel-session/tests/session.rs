@@ -37,6 +37,7 @@ fn sample() -> Session {
                 syntax: Some("Packages/Rust/Rust.sublime-syntax".into()),
                 transient: false,
                 name: None,
+                untitled_name: None,
             }],
             workbench,
             find_history: vec!["find".into()],
@@ -242,6 +243,7 @@ fn untitled_sheet_names_are_optional_on_the_wire() {
     // Sessions written before names existed still load.
     let old: Sheet = serde_json::from_value(unnamed).unwrap();
     assert!(old.name.is_none());
+    assert!(old.untitled_name.is_none());
     sheet.name = Some("接口记录.md".into());
     let named: Sheet = serde_json::from_value(serde_json::to_value(&sheet).unwrap()).unwrap();
     assert_eq!(named.name.as_deref(), Some("接口记录.md"));

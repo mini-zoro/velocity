@@ -71,6 +71,7 @@ pub fn run(reporter: &Reporter, options: &Options) -> Result<(), String> {
             syntax: None,
             transient: false,
             name: None,
+            untitled_name: None,
         });
         workbench.groups[0].add(id, false);
     }

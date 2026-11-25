@@ -61,6 +61,22 @@ fn untitled_name(tab: &crate::workspace::Tab) -> Option<String> {
     .then(|| tab.suggested_name.clone())
     .flatten()
 }
+/// The name an untitled sheet displayed when the session was written (normally its first
+/// line). A restored sheet shows it before its stored text is materialized, so a restart
+/// does not show placeholder names until each tab is clicked. Display only: a later edit
+/// of the first line still renames the tab once the text is loaded.
+fn auto_untitled_name(tab: &crate::workspace::Tab) -> Option<String> {
+    if tab.path.is_some()
+        || tab.find_results
+        || tab.suggested_name.is_some()
+        || tab.editor.settings.get("velocity_html_sheet").is_some()
+        || tab.editor.settings.get("velocity_settings_label").is_some()
+    {
+        return None;
+    }
+    let name = tab.name();
+    (name != "Untitled" && !name.is_empty()).then_some(name)
+}
 pub(crate) fn restore_settings_tab(
     tab: &mut crate::workspace::Tab,
     state: &vel_session::SettingsSheet,
@@ -692,6 +708,7 @@ impl Workspace {
                     self.tabs[index].pending_restore = Some(state);
                 }
                 self.tabs[index].lazy = None;
+                self.tabs[index].restored_name = None;
                 self.tabs[index].shared_view = view;
                 self.tabs[index].editor.shared_shadow = true;
                 self.prepare_sheet(index)?;
@@ -828,6 +845,7 @@ impl Workspace {
             }
             let tab = &mut self.tabs[index];
             tab.lazy = None;
+            tab.restored_name = None;
             tab.editor.read_only = tab.load_failed
                 || tab.binary_loading.is_some()
                 || (tab.loading.is_some() && !tab.external_load)
@@ -1457,6 +1475,7 @@ impl Workspace {
                         .map(str::to_owned),
                     transient: tab.transient,
                     name: untitled_name(tab),
+                    untitled_name: auto_untitled_name(tab),
                 });
                 continue;
             }
@@ -1500,6 +1519,7 @@ impl Workspace {
                     .map(str::to_owned),
                 transient: tab.transient,
                 name: untitled_name(tab),
+                untitled_name: auto_untitled_name(tab),
             });
             if seen.insert(identity) {
                 let owner = &mut self.tabs[owner];
@@ -1722,6 +1742,7 @@ impl Workspace {
             tab.transient = sheet.transient;
             if document.path.is_none() {
                 tab.suggested_name.clone_from(&sheet.name);
+                tab.restored_name.clone_from(&sheet.untitled_name);
             }
             tab.lazy = Some(((*document).clone(), sheet.view.clone()));
             if let Some(html) = &sheet.html {
