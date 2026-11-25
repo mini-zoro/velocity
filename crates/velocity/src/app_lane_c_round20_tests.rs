@@ -42,7 +42,14 @@ fn until(app: &mut App, predicate: impl Fn(&App) -> bool) {
     // A 25-megapixel image decode runs on a worker beside every other test in the suite;
     // on a loaded CI runner it has taken longer than 12 s (see the project's watchdog
     // guidance of 20-30 s for worker scheduling).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    until_within(app, Duration::from_secs(30), predicate)
+}
+/// A wait for work that is itself heavy: writing and decoding a 25-megapixel PNG takes
+/// seconds on an unloaded machine and several times longer beside the rest of the suite,
+/// so the decode's own start is given a wider deadline than ordinary worker scheduling.
+#[track_caller]
+fn until_within(app: &mut App, limit: Duration, predicate: impl Fn(&App) -> bool) {
+    let deadline = Instant::now() + limit;
     loop {
         poll(app);
         if predicate(app) {
@@ -964,7 +971,9 @@ fn r20_hidden_image_decode_is_cancelled_and_folder_edits_are_independent() {
     let mut a = app("", Some(project.clone()), sessions());
     a.panels.review.native_context = true;
     a.run_named(None, "open_file", &json!({"file":image}));
-    until(&mut a, |a| a.view.image_preview.busy());
+    until_within(&mut a, Duration::from_secs(180), |a| {
+        a.view.image_preview.busy()
+    });
     let cancelled = a.view.image_preview.cancellation_flag().unwrap();
     assert!(!cancelled.load(Ordering::Acquire));
     a.run_named(None, "add_folder", &json!({"dir":folder}));
