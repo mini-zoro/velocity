@@ -8,6 +8,11 @@ use std::{
 };
 use vel_text::{Edit, Text};
 
+#[path = "history_budget.rs"]
+mod history_budget;
+pub use history_budget::HistoryBudget;
+use history_budget::{History, SoftRecord, default_buffer_bytes};
+
 #[path = "history.rs"]
 mod history;
 pub use history::{HistoryError, HistorySnapshot};
@@ -39,7 +44,7 @@ pub enum EditKind {
 pub struct HistoryLimits {
     /// Maximum retained committed transactions, including redo.
     pub entries: usize,
-    /// Maximum accounted retained bytes, including redo.
+    /// Maximum accounted retained bytes for this buffer, including soft history and change maps.
     pub bytes: usize,
     /// Per-view selection-event limit (minimum 256).
     pub selection_entries: usize,
@@ -50,7 +55,7 @@ impl Default for HistoryLimits {
     fn default() -> Self {
         Self {
             entries: 10_000,
-            bytes: 256 * 1024 * 1024,
+            bytes: default_buffer_bytes(),
             selection_entries: 256,
             changes: 10_000,
         }
@@ -115,7 +120,7 @@ enum SoftEvent {
         at: ChangeId,
         state: u64,
     },
-    Edit(Arc<Step>),
+    Edit(u64),
 }
 /// Per-view state. Change selections through `Buffer::set_selection` to record soft undo.
 #[derive(Clone, Debug)]
@@ -125,8 +130,6 @@ pub struct ViewState {
     regions: BTreeMap<String, RegionSet>,
     /// Word and indentation preferences for this view.
     pub settings: Settings,
-    soft: VecDeque<SoftEvent>,
-    soft_redo: Vec<SoftEvent>,
     pub(crate) find: Option<FindState>,
 }
 #[derive(Clone, Debug)]
@@ -163,7 +166,15 @@ struct Step {
     changes: Arc<ChangeSet>,
     before_state: u64,
     after_state: u64,
+    age: u64,
+    // Rope and transaction bookkeeping; shared selections and maps are charged separately.
     bytes: usize,
+}
+impl Step {
+    fn fixed_bytes(retained_text: usize) -> usize {
+        // Include the Arc, group slots, and revision index entry.
+        retained_text + std::mem::size_of::<Self>() + 128
+    }
 }
 #[derive(Clone, Debug)]
 struct Group {
@@ -191,6 +202,7 @@ enum Run {
 #[derive(Clone, Debug)]
 struct LoggedChange {
     id: ChangeId,
+    age: u64,
     map: Arc<ChangeSet>,
     old_len: usize,
 }
@@ -200,41 +212,44 @@ pub struct Buffer {
     id: BufferId,
     text: Text,
     views: BTreeMap<ViewId, ViewState>,
-    undo: VecDeque<Group>,
-    redo: Vec<Group>,
-    log: VecDeque<LoggedChange>,
-    log_bytes: usize,
+    budget: HistoryBudget,
     change: ChangeId,
-    limits: HistoryLimits,
-    retained: usize,
-    entries: usize,
     state: u64,
     next_state: u64,
     saved: u64,
     group_open: bool,
-    live: BTreeSet<u64>,
+}
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.budget.lock().remove(self.id);
+    }
 }
 impl Buffer {
     /// Creates a saved buffer; attach one or more views with `new_view()`.
     pub fn new(text: impl Into<Text>) -> Self {
-        Self {
+        Self::with_history_budget(text, HistoryBudget::process())
+    }
+    /// Creates a buffer that shares the supplied budget instead of the process default.
+    pub fn with_history_budget(text: impl Into<Text>, budget: HistoryBudget) -> Self {
+        let buffer = Self {
             id: BufferId(NEXT_BUFFER.fetch_add(1, Ordering::Relaxed)),
             text: text.into(),
             views: BTreeMap::new(),
-            undo: VecDeque::new(),
-            redo: Vec::new(),
-            log: VecDeque::new(),
-            log_bytes: 0,
+            budget,
             change: ChangeId(0),
-            limits: HistoryLimits::default(),
-            retained: 0,
-            entries: 0,
             state: 0,
             next_state: 1,
             saved: 0,
             group_open: false,
-            live: BTreeSet::new(),
-        }
+        };
+        buffer.budget.lock().insert(buffer.id, History::default());
+        buffer
+    }
+    fn update_history<R>(&mut self, f: impl FnOnce(&mut Self, &mut History, u64) -> R) -> R {
+        let budget = self.budget.clone();
+        budget
+            .lock()
+            .update(self.id, |history, age| f(self, history, age))
     }
     /// Unique document identity.
     pub fn id(&self) -> BufferId {
@@ -254,8 +269,6 @@ impl Buffer {
                 selection: Selection::default(),
                 regions: BTreeMap::new(),
                 settings: Settings::default(),
-                soft: VecDeque::new(),
-                soft_redo: Vec::new(),
                 find: None,
             },
         );
@@ -264,7 +277,11 @@ impl Buffer {
     /// Detaches a view; undo can still restore text from its transactions.
     pub fn close_view(&mut self, id: ViewId) -> bool {
         self.break_undo_group();
-        self.views.remove(&id).is_some()
+        let removed = self.views.remove(&id).is_some();
+        if removed {
+            self.update_history(|_, h, _| h.close_view(id));
+        }
+        removed
     }
     /// Attached view identities.
     pub fn views(&self) -> impl Iterator<Item = ViewId> + '_ {
@@ -292,17 +309,24 @@ impl Buffer {
             return;
         }
         let before = std::mem::replace(&mut v.selection, selection.clone());
-        v.soft.push_back(SoftEvent::Selection {
-            before,
-            after: selection,
-            at: self.change,
-            state: self.state,
-        });
-        v.soft_redo.clear();
         v.find = None;
-        while v.soft.len() > self.limits.selection_entries {
-            v.soft.pop_front();
-        }
+        let limit = self.budget.limit_bytes();
+        self.update_history(|buffer, h, age| {
+            h.clear_soft_redo(id);
+            h.record_selection(
+                id,
+                SoftRecord {
+                    age,
+                    event: SoftEvent::Selection {
+                        before,
+                        after: selection,
+                        at: buffer.change,
+                        state: buffer.state,
+                    },
+                },
+                limit,
+            );
+        });
     }
     /// Adds or replaces a named annotation set.
     pub fn add_regions(
@@ -346,29 +370,14 @@ impl Buffer {
         self.change
     }
     /// Maps an old point, or returns `None` for an expired/future ID or out-of-bounds point.
-    pub fn transform_point_from(
-        &self,
-        mut point: usize,
-        from: ChangeId,
-        bias: Bias,
-    ) -> Option<usize> {
-        if !self.retains(from) {
-            return None;
-        }
-        let first = self.log.partition_point(|c| c.id <= from);
-        let mut maps = self.log.range(first..);
-        if let Some(first) = maps.next() {
-            if point > first.old_len {
-                return None;
-            }
-            point = first.map.transform_point(point, bias);
-            for c in maps {
-                point = c.map.transform_point(point, bias);
-            }
-        } else if point > self.text.len_bytes() {
-            return None;
-        }
-        Some(point)
+    pub fn transform_point_from(&self, point: usize, from: ChangeId, bias: Bias) -> Option<usize> {
+        let budget = self.budget.lock();
+        self.map_point(budget.get(self.id), point, from, bias)
+    }
+    fn map_point(&self, h: &History, point: usize, from: ChangeId, bias: Bias) -> Option<usize> {
+        let mut maps = h.maps_from(from, self.change)?.peekable();
+        (point <= maps.peek().map_or(self.text.len_bytes(), |c| c.old_len))
+            .then(|| maps.fold(point, |p, c| c.map.transform_point(p, bias)))
     }
     /// Projects sorted current byte points back through retained edits. For each
     /// point, picks the largest old byte with a left-biased image at or below it.
@@ -376,40 +385,24 @@ impl Buffer {
     /// the points are out of bounds. Results need not be UTF-8 boundaries.
     pub fn unmap_left_points_to(&self, points: &mut [usize], to: ChangeId) -> bool {
         debug_assert!(points.is_sorted());
-        if !self.retains(to) || points.last().is_some_and(|&p| p > self.text.len_bytes()) {
+        let budget = self.budget.lock();
+        let Some(maps) = budget.get(self.id).maps_from(to, self.change) else {
+            return false;
+        };
+        if points.last().is_some_and(|&p| p > self.text.len_bytes()) {
             return false;
         }
-        let first = self.log.partition_point(|c| c.id <= to);
-        for change in self.log.range(first..).rev() {
+        for change in maps.rev() {
             change.map.unmap_left_points(points);
         }
         true
     }
     /// Maps a historic named region with exclusion bias at its boundaries.
-    pub fn transform_region_from(&self, mut region: Region, from: ChangeId) -> Option<Region> {
-        if !self.retains(from) {
-            return None;
-        }
-        let mut maps = self.log.iter().filter(|c| c.id > from);
-        if let Some(first) = maps.next() {
-            if region.end() > first.old_len {
-                return None;
-            }
-            region = first.map.transform_region(region);
-            for c in maps {
-                region = c.map.transform_region(region);
-            }
-        } else if region.end() > self.text.len_bytes() {
-            return None;
-        }
-        Some(region)
-    }
-    fn retains(&self, id: ChangeId) -> bool {
-        id <= self.change
-            && self
-                .log
-                .front()
-                .map_or(id == self.change, |c| id.0 >= c.id.0 - 1)
+    pub fn transform_region_from(&self, region: Region, from: ChangeId) -> Option<Region> {
+        let budget = self.budget.lock();
+        let mut maps = budget.get(self.id).maps_from(from, self.change)?.peekable();
+        (region.end() <= maps.peek().map_or(self.text.len_bytes(), |c| c.old_len))
+            .then(|| maps.fold(region, |r, c| c.map.transform_region(r)))
     }
     /// Ends continuous typing explicitly.
     pub fn break_undo_group(&mut self) {
@@ -432,56 +425,51 @@ impl Buffer {
         if marker.buffer != self.id || marker.state == self.state {
             return false;
         }
-        let Some(start) = self.undo.iter().rposition(|g| {
-            g.steps
-                .first()
-                .is_some_and(|s| s.before_state == marker.state)
-        }) else {
-            return false;
-        };
-        let groups = self.undo.split_off(start);
-        let mut group = Group {
-            steps: Vec::new(),
-            run: None,
-            has_word: false,
-        };
-        for mut next in groups {
-            group.steps.append(&mut next.steps);
-        }
-        self.undo.push_back(group);
-        true
+        self.update_history(|_, h, _| {
+            let Some(start) = h
+                .undo
+                .iter()
+                .rposition(|g| g.steps[0].before_state == marker.state)
+            else {
+                return false;
+            };
+            let groups = h.undo.split_off(start);
+            let mut group = Group {
+                steps: Vec::new(),
+                run: None,
+                has_word: false,
+            };
+            for mut next in groups {
+                group.steps.append(&mut next.steps);
+            }
+            h.undo.push_back(group);
+            true
+        })
     }
     /// Replaces all history limits and immediately enforces them.
     pub fn set_history_limits(&mut self, mut limits: HistoryLimits) {
         limits.selection_entries = limits.selection_entries.max(256);
-        self.limits = limits;
-        // Limit changes are rare; bound selection redo here without walking it
-        // on every typing transaction.
-        for view in self.views.values_mut() {
-            let excess = view
-                .soft_redo
-                .len()
-                .saturating_sub(limits.selection_entries);
-            view.soft_redo.drain(..excess);
-        }
-        self.prune();
+        self.update_history(|_, h, _| h.set_limits(limits));
     }
     /// Current history limits.
     pub fn history_limits(&self) -> HistoryLimits {
-        self.limits
+        self.budget.lock().get(self.id).limits
     }
     /// Number of transactions retained across undo and redo.
     pub fn history_entries(&self) -> usize {
-        self.entries
+        self.budget.lock().get(self.id).entries
     }
-    /// Accounted retained history bytes (metadata and exclusive snapshot allocations).
+    /// Accounted bytes retained by text, selection, and change-map history.
     pub fn history_retained_bytes(&self) -> usize {
-        self.retained
+        self.budget.lock().get(self.id).bytes()
     }
     /// Metadata owned by the last undo transaction, including both selection arrays.
     /// Shared document storage is accounted separately by `history_retained_bytes()`.
     pub fn last_undo_metadata_bytes(&self) -> usize {
-        self.undo
+        self.budget
+            .lock()
+            .get(self.id)
+            .undo
             .back()
             .and_then(|g| g.steps.last())
             .map_or(0, |s| {
@@ -641,12 +629,6 @@ impl Buffer {
             &self.view(id).settings,
             &before_selection,
         );
-        let merge = self.group_open
-            && self
-                .undo
-                .back()
-                .is_some_and(|g| can_group(g, id, &before_selection, run, caret_edits));
-        self.clear_redo();
         let state = self.next_state;
         self.next_state = self.next_state.checked_add(1).expect("revision overflow");
         // Account both possible current roots; unchanged shared allocations cost zero.
@@ -666,13 +648,7 @@ impl Buffer {
                 .estimated_retained_bytes(&after)
                 .max(after.estimated_retained_bytes(&before))
         };
-        let bytes = retained_text
-            + changes.storage_bytes()
-            + before_selection.storage_bytes()
-            + new_selection.storage_bytes()
-            + std::mem::size_of::<Step>()
-            + 256;
-        let step = Arc::new(Step {
+        let step = Step {
             before: if inserted.is_some() {
                 None
             } else {
@@ -690,38 +666,52 @@ impl Buffer {
             changes: changes.clone(),
             before_state: self.state,
             after_state: state,
-            bytes,
-        });
+            age: 0,
+            bytes: Step::fixed_bytes(retained_text),
+        };
         self.text = after;
         self.state = state;
-        self.publish(changes, Some(id));
+        let old_len = self.publish(&changes, Some(id));
         self.views.get_mut(&id).expect("attached view").selection = new_selection;
-        if merge {
-            let g = self.undo.back_mut().expect("merge group");
-            g.steps.push(step.clone());
-            g.run = run;
-            g.has_word |= run == Some(Run::Word);
-        } else {
-            self.undo.push_back(Group {
-                steps: vec![step.clone()],
-                run,
-                has_word: run == Some(Run::Word),
+        self.update_history(|buffer, h, age| {
+            let merge = buffer.group_open
+                && h.undo
+                    .back()
+                    .is_some_and(|g| can_group(g, id, &step.before_selection, run, caret_edits));
+            h.clear_redo();
+            let step = Arc::new(Step { age, ..step });
+            h.record_step(&step);
+            if merge {
+                let g = h.undo.back_mut().expect("merge group");
+                g.steps.push(step);
+                g.run = run;
+                g.has_word |= run == Some(Run::Word);
+            } else {
+                h.undo.push_back(Group {
+                    steps: vec![step],
+                    run,
+                    has_word: run == Some(Run::Word),
+                });
+            }
+            buffer.group_open = run.is_some();
+            h.record_map(LoggedChange {
+                id: buffer.change,
+                age,
+                map: changes,
+                old_len,
             });
-        }
-        self.group_open = run.is_some();
-        self.entries += 1;
-        self.retained += bytes;
-        self.live.insert(state);
-        let v = self.views.get_mut(&id).expect("attached view");
-        v.soft.push_back(SoftEvent::Edit(step));
-        v.soft_redo.clear();
-        while v.soft.len() > self.limits.selection_entries {
-            v.soft.pop_front();
-        }
-        self.prune();
+            h.record_soft(
+                id,
+                SoftRecord {
+                    age,
+                    event: SoftEvent::Edit(state),
+                },
+                false,
+            );
+        });
         self.change
     }
-    fn publish(&mut self, map: Arc<ChangeSet>, owner: Option<ViewId>) {
+    fn publish(&mut self, map: &ChangeSet, owner: Option<ViewId>) -> usize {
         // Recover the pre-edit length from the net delta, avoiding a second text snapshot.
         let mut old_len = self.text.len_bytes();
         for c in map.changes() {
@@ -750,21 +740,9 @@ impl Buffer {
                 set.regions.sort_by_key(|r| r.begin());
             }
         }
-        self.log_bytes += map.storage_bytes() + std::mem::size_of::<LoggedChange>();
-        self.log.push_back(LoggedChange {
-            id: self.change,
-            map,
-            old_len,
-        });
-        while self.log.len() > self.limits.changes || self.log_bytes > self.limits.bytes {
-            if let Some(old) = self.log.pop_front() {
-                self.log_bytes -= old.map.storage_bytes() + std::mem::size_of::<LoggedChange>();
-            } else {
-                break;
-            }
-        }
+        old_len
     }
-    fn apply_step(&mut self, s: &Step, forward: bool) {
+    fn apply_step(&mut self, s: &Step, forward: bool, age: u64) -> LoggedChange {
         let (selection, state, map) = if forward {
             (&s.after_selection, s.after_state, s.changes.clone())
         } else {
@@ -794,9 +772,15 @@ impl Buffer {
             .clone();
         }
         self.state = state;
-        self.publish(map, Some(s.owner));
+        let old_len = self.publish(&map, Some(s.owner));
         if let Some(v) = self.views.get_mut(&s.owner) {
             v.selection = selection.clone();
+        }
+        LoggedChange {
+            id: self.change,
+            age,
+            map,
+            old_len,
         }
     }
     /// Undoes the latest global edit group, restoring the originating view's selection.
@@ -804,204 +788,135 @@ impl Buffer {
         // ST-BEHAVIOR: unverified [H3]: undo/redo are buffer-global and restore the originating view; soft edit undo only proceeds at the current revision.
         self.view(id);
         self.break_undo_group();
-        let Some(group) = self.undo.pop_back() else {
-            return false;
-        };
-        for step in group.steps.iter().rev() {
-            self.apply_step(step, false);
-        }
-        self.redo.push(group);
-        true
+        self.update_history(|buffer, h, age| {
+            let Some(group) = h.undo.pop_back() else {
+                return false;
+            };
+            for step in group.steps.iter().rev() {
+                h.record_map(buffer.apply_step(step, false, age));
+            }
+            h.redo.push_back(group);
+            true
+        })
     }
     /// Reapplies the most recently undone group.
     pub fn redo(&mut self, id: ViewId) -> bool {
         self.view(id);
         self.break_undo_group();
-        let Some(group) = self.redo.pop() else {
-            return false;
-        };
-        for step in &group.steps {
-            self.apply_step(step, true);
-        }
-        self.undo.push_back(group);
-        true
+        self.update_history(|buffer, h, age| {
+            let Some(group) = h.redo.pop_back() else {
+                return false;
+            };
+            for step in &group.steps {
+                h.record_map(buffer.apply_step(step, true, age));
+            }
+            h.undo.push_back(group);
+            true
+        })
     }
     /// Undoes the latest live selection event or individual transaction of this view.
     pub fn soft_undo(&mut self, id: ViewId) -> bool {
         self.view(id);
         self.break_undo_group();
-        loop {
-            let Some(event) = self
-                .views
-                .get_mut(&id)
-                .expect("attached view")
-                .soft
-                .pop_back()
-            else {
-                return false;
-            };
-            match &event {
-                SoftEvent::Selection {
-                    before, at, state, ..
-                } => {
-                    let selection = if *state == self.state {
-                        Some(before.clone())
-                    } else {
-                        self.map_selection_from(before, *at)
-                    };
-                    let Some(selection) = selection else {
-                        continue;
-                    };
-                    self.views.get_mut(&id).expect("view").selection = selection;
+        self.update_history(|buffer, h, age| {
+            while let Some(record) = h.pop_soft(id, false) {
+                match &record.event {
+                    SoftEvent::Selection {
+                        before, at, state, ..
+                    } => {
+                        let selection = if *state == buffer.state {
+                            Some(before.clone())
+                        } else {
+                            buffer.map_selection_from(h, before, *at)
+                        };
+                        let Some(selection) = selection else {
+                            continue;
+                        };
+                        buffer.views.get_mut(&id).expect("view").selection = selection;
+                    }
+                    SoftEvent::Edit(state) => {
+                        if buffer.state != *state {
+                            continue;
+                        }
+                        let Some(group) = h.undo.back_mut() else {
+                            continue;
+                        };
+                        if !group.steps.last().is_some_and(|s| s.after_state == *state) {
+                            continue;
+                        }
+                        let step = group.steps.pop().expect("last step");
+                        if group.steps.is_empty() {
+                            h.undo.pop_back();
+                        }
+                        h.record_map(buffer.apply_step(&step, false, age));
+                        h.redo.push_back(Group {
+                            steps: vec![step],
+                            run: None,
+                            has_word: false,
+                        });
+                    }
                 }
-                SoftEvent::Edit(step) => {
-                    if self.state != step.after_state {
-                        continue;
-                    }
-                    let Some(group) = self.undo.back_mut() else {
-                        continue;
-                    };
-                    if !group.steps.last().is_some_and(|s| Arc::ptr_eq(s, step)) {
-                        continue;
-                    }
-                    let step = group.steps.pop().expect("last step");
-                    if group.steps.is_empty() {
-                        self.undo.pop_back();
-                    }
-                    self.apply_step(&step, false);
-                    self.redo.push(Group {
-                        steps: vec![step],
-                        run: None,
-                        has_word: false,
-                    });
-                }
+                h.record_soft(id, record, true);
+                return true;
             }
-            self.views.get_mut(&id).expect("view").soft_redo.push(event);
-            return true;
-        }
+            false
+        })
     }
     /// Reapplies the most recently soft-undone event, if still applicable.
     pub fn soft_redo(&mut self, id: ViewId) -> bool {
         self.view(id);
         self.break_undo_group();
-        let Some(event) = self.views.get_mut(&id).expect("view").soft_redo.pop() else {
-            return false;
-        };
-        match &event {
-            SoftEvent::Selection {
-                after, at, state, ..
-            } => {
-                let s = if *state == self.state {
-                    Some(after.clone())
-                } else {
-                    self.map_selection_from(after, *at)
-                };
-                let Some(s) = s else {
-                    return false;
-                };
-                self.views.get_mut(&id).expect("view").selection = s;
-            }
-            SoftEvent::Edit(step) => {
-                if self.state != step.before_state
-                    || !self
-                        .redo
-                        .last()
-                        .is_some_and(|g| g.steps.len() == 1 && Arc::ptr_eq(&g.steps[0], step))
-                {
-                    return false;
+        self.update_history(|buffer, h, age| {
+            let Some(record) = h.pop_soft(id, true) else {
+                return false;
+            };
+            match &record.event {
+                SoftEvent::Selection {
+                    after, at, state, ..
+                } => {
+                    let s = if *state == buffer.state {
+                        Some(after.clone())
+                    } else {
+                        buffer.map_selection_from(h, after, *at)
+                    };
+                    let Some(s) = s else {
+                        return false;
+                    };
+                    buffer.views.get_mut(&id).expect("view").selection = s;
                 }
-                self.redo.pop();
-                self.apply_step(step, true);
-                self.undo.push_back(Group {
-                    steps: vec![step.clone()],
-                    run: None,
-                    has_word: false,
-                });
+                SoftEvent::Edit(state) => {
+                    let Some(group) = h.redo.back().filter(|g| {
+                        g.steps.len() == 1
+                            && g.steps[0].after_state == *state
+                            && g.steps[0].before_state == buffer.state
+                    }) else {
+                        return false;
+                    };
+                    h.record_map(buffer.apply_step(&group.steps[0], true, age));
+                    let group = h.redo.pop_back().expect("matched redo group");
+                    h.undo.push_back(group);
+                }
             }
-        }
-        self.views.get_mut(&id).expect("view").soft.push_back(event);
-        true
+            h.record_soft(id, record, false);
+            true
+        })
     }
-    fn map_selection_from(&self, s: &Selection, at: ChangeId) -> Option<Selection> {
+    fn map_selection_from(
+        &self,
+        history: &History,
+        s: &Selection,
+        at: ChangeId,
+    ) -> Option<Selection> {
         let r: Option<Vec<_>> = s
             .iter()
             .map(|r| {
                 Some(Region::new(
-                    self.transform_point_from(r.a, at, Bias::Right)?,
-                    self.transform_point_from(r.b, at, Bias::Right)?,
+                    self.map_point(history, r.a, at, Bias::Right)?,
+                    self.map_point(history, r.b, at, Bias::Right)?,
                 ))
             })
             .collect();
         Some(Selection::from_regions(r?).with_primary(s.primary_index()))
-    }
-    fn clear_redo(&mut self) {
-        let invalidated = !self.redo.is_empty();
-        for g in self.redo.drain(..) {
-            for s in g.steps {
-                self.retained -= s.bytes;
-                self.entries -= 1;
-                self.live.remove(&s.after_state);
-            }
-        }
-        for v in self.views.values_mut() {
-            v.soft_redo.clear();
-            if invalidated {
-                v.soft.retain(|e| match e {
-                    SoftEvent::Edit(s) => self.live.contains(&s.after_state),
-                    _ => true,
-                });
-            }
-        }
-    }
-    fn prune(&mut self) {
-        // ST-BEHAVIOR: unverified [H4]: count transactions, evict complete oldest groups; mark_saved breaks groups; stale soft events are skipped.
-        let mut evicted = false;
-        while self.entries > self.limits.entries || self.retained > self.limits.bytes {
-            let group = self.undo.pop_front().or_else(|| {
-                if self.redo.is_empty() {
-                    None
-                } else {
-                    Some(self.redo.remove(0))
-                }
-            });
-            let Some(g) = group else {
-                break;
-            };
-            evicted = true;
-            for s in g.steps {
-                self.retained -= s.bytes;
-                self.entries -= 1;
-                self.live.remove(&s.after_state);
-            }
-        }
-        for v in self.views.values_mut() {
-            // Live edit events cannot become stale without eviction or redo
-            // invalidation. Avoid visiting the entire soft history on each key;
-            // selection-only redo is still cleared by every new transaction.
-            if evicted {
-                v.soft.retain(|e| match e {
-                    SoftEvent::Edit(s) => self.live.contains(&s.after_state),
-                    _ => true,
-                });
-                v.soft_redo.retain(|e| match e {
-                    SoftEvent::Edit(s) => self
-                        .redo
-                        .iter()
-                        .any(|g| g.steps.iter().any(|x| Arc::ptr_eq(s, x))),
-                    _ => true,
-                });
-            }
-            while v.soft.len() > self.limits.selection_entries {
-                v.soft.pop_front();
-            }
-        }
-        while self.log.len() > self.limits.changes || self.log_bytes > self.limits.bytes {
-            if let Some(old) = self.log.pop_front() {
-                self.log_bytes -= old.map.storage_bytes() + std::mem::size_of::<LoggedChange>();
-            } else {
-                break;
-            }
-        }
     }
     pub(crate) fn view_mut(&mut self, id: ViewId) -> &mut ViewState {
         self.views.get_mut(&id).expect("attached view")
