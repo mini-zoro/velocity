@@ -537,6 +537,24 @@ impl Input {
             self.scroll += 1;
         }
         self.scroll = self::cells(&value[..byte_at_column(&value, self.scroll)]);
+        // Never hide text at the left while the field has room at the right. Replacing a
+        // long, scrolled selection (a rename's selected name) with one typed character
+        // put the caret column above at the first visible cell, so that character sat
+        // just left of the edge. Scroll back one grapheme at a time while the whole tail
+        // still fits; only text that fits is measured, so this stays field-width bounded.
+        let right = self.bounds.x + self.bounds.width - self.margin();
+        while self.scroll > 0 {
+            let start = byte_at_column(&value, self.scroll);
+            let Some((previous, _)) = value[..start].grapheme_indices(true).next_back() else {
+                break;
+            };
+            let scrolled = self.scroll;
+            self.scroll = self::cells(&value[..previous]);
+            if self.x_for_byte(&value, value.len()) > right {
+                self.scroll = scrolled;
+                break;
+            }
+        }
     }
     /// Places a caret from an input-local pointer column.
     pub fn click(&mut self, x: f64, extend: bool) {
@@ -715,5 +733,97 @@ mod tests {
         input.cancel_composition();
         input.command(Command::End(false));
         assert_eq!(input.utf16_at_x(144.), input.buffer.text().len_utf16());
+    }
+    #[test]
+    fn replacing_a_scrolled_selection_shows_the_new_text_from_its_start() {
+        // A long name selected for rename scrolls to its end; typing replaces it. The
+        // field must scroll back so the first typed character is not left of the edge.
+        // Painting reveals the caret once per frame, so every step reveals like a frame.
+        fn field(value: &str) -> Input {
+            let mut input = Input::new(value);
+            input.bounds = Rect {
+                x: 0.,
+                y: 0.,
+                width: 150.,
+                height: 24.,
+            };
+            input.run("select_all", &serde_json::json!({})).unwrap();
+            input.reveal();
+            input
+        }
+        fn type_text(input: &mut Input, event: TextInput) {
+            input.text_input(event);
+            input.reveal();
+        }
+        let mut input = field(&"POST /v1/messages?beta=true HTTP/1.1 ".repeat(3));
+        assert!(
+            input.scroll > 0,
+            "the selected long name is scrolled to its end"
+        );
+        for typed in ["网", "关"] {
+            type_text(
+                &mut input,
+                TextInput::Insert {
+                    text: typed.into(),
+                    replacement: None,
+                },
+            );
+            assert_eq!(input.scroll, 0, "nothing typed is hidden");
+        }
+        assert_eq!(input.visible_text(), "网关");
+        // The same happens through an input method: the preedit replaces the selection.
+        let mut input = field(&"x".repeat(80));
+        type_text(
+            &mut input,
+            TextInput::Marked {
+                text: "wang".into(),
+                selected: Utf16Range::new(4, 0),
+                replacement: None,
+            },
+        );
+        assert_eq!(input.scroll, 0);
+        type_text(
+            &mut input,
+            TextInput::Insert {
+                text: "网".into(),
+                replacement: None,
+            },
+        );
+        assert_eq!((input.scroll, input.visible_text().as_str()), (0, "网"));
+        // Text wider than the field still keeps its end (the caret) inside the right edge.
+        type_text(
+            &mut input,
+            TextInput::Insert {
+                text: "y".repeat(60),
+                replacement: None,
+            },
+        );
+        assert!(input.scroll > 0);
+        let value = input.state().text.to_string();
+        let right = input.bounds.width - input.margin();
+        assert!(input.x_for_byte(&value, value.len()) <= right);
+        // Deleting back to a short value scrolls back to the start as well.
+        input.command(Command::SelectAll);
+        type_text(
+            &mut input,
+            TextInput::Insert {
+                text: "ab".into(),
+                replacement: None,
+            },
+        );
+        assert_eq!((input.scroll, input.visible_text().as_str()), (0, "ab"));
+        // Moving the caret left past the edge still scrolls to show it.
+        let mut input = field(&"z".repeat(80));
+        input.command(Command::End(false));
+        input.reveal();
+        let scrolled = input.scroll;
+        for _ in 0..70 {
+            input.command(Command::Left(false));
+        }
+        input.reveal();
+        assert!(input.scroll < scrolled);
+        let state = input.state();
+        let caret = state.selected.bytes(&state.text).end;
+        assert!(input.x_for_byte(&state.text.to_string(), caret) >= input.margin());
     }
 }
