@@ -32,5 +32,7 @@ raw-window-handle = "=0.6.2"
 wgpu = { version = "=30.0.2", default-features = false, features = ["dx12", "wgsl", "std", "parking_lot"] }
 
 [dev-dependencies]
+# Internal resource counters for the GPU memory regression tests only.
+wgpu = { version = "=30.0.2", default-features = false, features = ["counters"] }
 proptest = "1"
 naga = { version = "=30.0.2", features = ["wgsl-in"] }

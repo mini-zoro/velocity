@@ -1558,3 +1558,7 @@ fn quad(r: Rect, c: Rect, color: Color, s: f32, params: [f32; 4], kind: Primitiv
         ],
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "gpu_memory_tests.rs"]
+mod memory_tests;
