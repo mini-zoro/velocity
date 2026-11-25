@@ -1,7 +1,8 @@
 use proptest::prelude::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Barrier, thread};
 use vel_buffer::{
-    Bias, Buffer, Edit, EditKind, HistoryError, HistorySnapshot, Region, Selection, ViewId, ops,
+    Bias, Buffer, Edit, EditKind, HistoryBudget, HistoryError, HistorySnapshot, Region, Selection,
+    ViewId, ops,
 };
 
 fn remap(b: &Buffer) -> BTreeMap<ViewId, ViewId> {
@@ -272,4 +273,243 @@ fn reducing_history_limits_bounds_selection_soft_redo() {
         assert!(buffer.soft_redo(view));
     }
     assert!(!buffer.soft_redo(view));
+}
+
+const MATCHES: usize = 33_000;
+const LINE: &str = "a matches on this line........\n";
+
+fn dense_selection(start: usize, width: usize) -> Selection {
+    Selection::from_match_regions((0..MATCHES).map(|i| {
+        let at = i * LINE.len() + start;
+        Region::new(at + width, at)
+    }))
+}
+
+#[test]
+fn repeated_large_replacements_bound_history_and_roundtrip_exactly() {
+    const SHARE: usize = 8 * 1024 * 1024;
+    let budget = HistoryBudget::new(2 * SHARE);
+    let initial = LINE.repeat(MATCHES);
+    let replaced = LINE.replacen('a', "b", 1).repeat(MATCHES);
+    let mut b = Buffer::with_history_budget(initial.as_str(), budget.clone());
+    let v = b.new_view();
+    b.set_history_limits(vel_buffer::HistoryLimits {
+        bytes: SHARE,
+        ..b.history_limits()
+    });
+    let note = Region::new(5, 8);
+    b.add_regions(v, "note", vec![note], false);
+    let edits: Vec<_> = (0..MATCHES)
+        .map(|i| Edit {
+            range: i * LINE.len()..i * LINE.len() + 1,
+            text: "b",
+        })
+        .collect();
+    let mut peak = 0;
+    for i in 0..110 {
+        let before = dense_selection(2 + i % 2, 2);
+        let after = dense_selection(4, 2);
+        b.set_selection(v, before.clone());
+        b.transact(v, EditKind::Other, &edits, after.clone());
+        assert_eq!(b.text().to_string(), replaced);
+        assert_eq!(b.view(v).sel(), &after);
+        peak = peak.max(b.history_retained_bytes());
+        assert!(b.undo(v), "the most recent replacement must still fit");
+        assert_eq!(b.text().to_string(), initial);
+        assert_eq!(b.view(v).sel(), &before);
+        assert_eq!(b.view(v).get_regions("note").unwrap().regions, [note]);
+        peak = peak.max(b.history_retained_bytes());
+        if i == 109 {
+            assert!(b.redo(v));
+            assert_eq!(b.text().to_string(), replaced);
+            assert_eq!(b.view(v).sel(), &after);
+            assert_eq!(b.view(v).get_regions("note").unwrap().regions, [note]);
+            peak = peak.max(b.history_retained_bytes());
+        }
+    }
+    assert!(peak >= 2 * dense_selection(0, 1).storage_bytes());
+    assert!(peak <= SHARE, "held {peak} bytes with a {SHARE}-byte share");
+    eprintln!("110 replacements, {MATCHES} regions: peak {peak} / {SHARE} history bytes");
+    assert_eq!(budget.retained_bytes(), b.history_retained_bytes());
+    drop(b);
+    assert_eq!(budget.retained_bytes(), 0);
+}
+
+#[test]
+fn repeated_find_all_selection_history_drops_the_oldest_sets() {
+    const SHARE: usize = 2 * 1024 * 1024;
+    let mut b = Buffer::new(LINE.repeat(MATCHES).as_str());
+    let v = b.new_view();
+    b.set_history_limits(vel_buffer::HistoryLimits {
+        bytes: SHARE,
+        ..b.history_limits()
+    });
+    // Find All sends a new selection built from its match ranges to set_selection.
+    // Alternate matches so each iteration produces a distinct history event.
+    for i in 0..110 {
+        b.set_selection(v, dense_selection(2 + i % 2, 1));
+        assert!(b.history_retained_bytes() <= SHARE);
+    }
+    let last = dense_selection(3, 1);
+    let previous = dense_selection(2, 1);
+    assert_eq!(b.view(v).sel(), &last);
+    let used = b.history_retained_bytes();
+    assert!(used >= last.storage_bytes() + previous.storage_bytes());
+    assert!(b.soft_undo(v));
+    assert_eq!(b.view(v).sel(), &previous);
+    assert_eq!(
+        b.history_retained_bytes(),
+        used,
+        "undo to redo should only move the entry"
+    );
+    assert!(b.soft_redo(v));
+    assert_eq!(b.view(v).sel(), &last);
+    let mut steps = 0;
+    while b.soft_undo(v) {
+        steps += 1;
+    }
+    assert!((1..4).contains(&steps), "retained {steps} selection steps");
+    eprintln!("110 Find All selections: retained {steps} steps, {used} / {SHARE} history bytes");
+    assert!(b.close_view(v));
+    assert_eq!(b.history_retained_bytes(), 0);
+}
+
+#[test]
+fn an_oversized_soft_event_does_not_evict_text_undo() {
+    const SHARE: usize = 64 * 1024;
+    let budget = HistoryBudget::new(SHARE);
+    let initial = LINE.repeat(MATCHES);
+    let mut b = Buffer::with_history_budget(initial.as_str(), budget.clone());
+    let v = b.new_view();
+    b.transact(
+        v,
+        EditKind::Other,
+        &[Edit {
+            range: 0..0,
+            text: "x",
+        }],
+        Selection::default(),
+    );
+    let text_history = b.history_retained_bytes();
+    let huge = dense_selection(3, 1);
+    assert!(huge.storage_bytes() > SHARE);
+    b.set_selection(v, huge.clone());
+    assert_eq!(b.view(v).sel(), &huge);
+    assert_eq!(b.history_retained_bytes(), text_history);
+    assert!(b.soft_undo(v));
+    assert_eq!(b.text().to_string(), initial);
+    assert_eq!(b.view(v).sel(), &Selection::default());
+}
+
+#[test]
+fn an_oversized_text_step_does_not_leave_a_gap_in_undo() {
+    let budget = HistoryBudget::new(1024 * 1024);
+    let text = LINE.repeat(MATCHES);
+    let mut b = Buffer::with_history_budget(text.as_str(), budget.clone());
+    let v = b.new_view();
+    b.set_history_limits(vel_buffer::HistoryLimits {
+        bytes: 64 * 1024,
+        ..b.history_limits()
+    });
+    ops::insert(&mut b, v, "x");
+    assert_eq!(b.history_entries(), 1);
+    b.transact(
+        v,
+        EditKind::Other,
+        &[Edit {
+            range: 0..0,
+            text: "y",
+        }],
+        dense_selection(3, 1),
+    );
+    assert_eq!(b.history_entries(), 0);
+    assert!(b.history_retained_bytes() <= b.history_limits().bytes);
+    assert!(!b.undo(v));
+    assert!(!b.soft_undo(v));
+    assert_eq!(b.text().to_string(), format!("yx{text}"));
+}
+
+#[test]
+fn shared_budget_evicts_the_oldest_group_of_an_idle_buffer() {
+    let budget = HistoryBudget::new(900 * 1024);
+    let text = LINE.repeat(MATCHES);
+    let mut old = Buffer::with_history_budget(text.as_str(), budget.clone());
+    let mut new = Buffer::with_history_budget(text.as_str(), budget.clone());
+    let a = old.new_view();
+    let z = new.new_view();
+    let selection = dense_selection(2, 1);
+    let edit = Edit {
+        range: 0..0,
+        text: "x",
+    };
+    old.transact(
+        a,
+        EditKind::Other,
+        std::slice::from_ref(&edit),
+        selection.clone(),
+    );
+    assert_eq!(old.history_entries(), 1);
+    new.transact(z, EditKind::Other, &[edit], selection);
+    assert_eq!(old.history_entries(), 0);
+    assert_eq!(old.history_retained_bytes(), 0);
+    assert!(!old.undo(a));
+    assert_eq!(old.text().to_string(), format!("x{text}"));
+    assert!(new.undo(z));
+    assert_eq!(new.text().to_string(), text);
+}
+
+#[test]
+fn concurrent_buffers_share_one_budget_and_release_it_on_drop() {
+    const WORKERS: usize = 4;
+    const SHARE: usize = 2 * 1024 * 1024;
+    const TOTAL: usize = 3 * 1024 * 1024;
+    let budget = HistoryBudget::new(TOTAL);
+    let start = Barrier::new(WORKERS);
+    let text = LINE.repeat(MATCHES);
+    let buffers = thread::scope(|scope| {
+        let threads: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut b = Buffer::with_history_budget(text.as_str(), budget.clone());
+                    let v = b.new_view();
+                    b.set_history_limits(vel_buffer::HistoryLimits {
+                        bytes: SHARE,
+                        ..b.history_limits()
+                    });
+                    start.wait();
+                    for i in 0..24 {
+                        b.transact(
+                            v,
+                            EditKind::Other,
+                            &[Edit {
+                                range: 0..0,
+                                text: "x",
+                            }],
+                            dense_selection(2 + i % 2, 1),
+                        );
+                        assert!(budget.retained_bytes() <= TOTAL);
+                        assert!(b.history_retained_bytes() <= SHARE);
+                    }
+                    b
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let total = buffers
+        .iter()
+        .map(Buffer::history_retained_bytes)
+        .sum::<usize>();
+    assert_eq!(budget.retained_bytes(), total);
+    assert!((dense_selection(2, 1).storage_bytes()..=TOTAL).contains(&total));
+    assert!(buffers.iter().any(|b| b.history_entries() == 0));
+    for b in buffers {
+        let remaining = budget.retained_bytes() - b.history_retained_bytes();
+        drop(b);
+        assert_eq!(budget.retained_bytes(), remaining);
+    }
+    assert_eq!(budget.retained_bytes(), 0);
 }

@@ -44,7 +44,7 @@ impl Jump {
         self
     }
     fn advance(&mut self, editor: &Editor, budget: usize) -> usize {
-        let Some(maps) = editor.buffer.retained_changes_since(self.version) else {
+        let Some(maps) = editor.buffer.retained_changes_up_to(self.version, budget) else {
             return 0;
         };
         // Records are already compact: at most 64 regions, independent of the
@@ -53,7 +53,7 @@ impl Jump {
         let primary = self.selection.primary_index();
         let mut to = self.version;
         let mut work = 0;
-        for (id, map) in maps.take(budget) {
+        for (id, map) in maps {
             for region in &mut regions {
                 region.a = map.transform_point(region.a, Bias::Right);
                 region.b = map.transform_point(region.b, Bias::Right);

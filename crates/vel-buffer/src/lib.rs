@@ -6,8 +6,8 @@ pub use region::{Region, Selection};
 mod buffer;
 mod change;
 pub use buffer::{
-    Buffer, BufferId, EditKind, HistoryError, HistoryLimits, HistorySnapshot, RegionSet, Settings,
-    UndoMarker, ViewId, ViewState,
+    Buffer, BufferId, EditKind, HistoryBudget, HistoryError, HistoryLimits, HistorySnapshot,
+    RegionSet, Settings, UndoMarker, ViewId, ViewState,
 };
 pub use change::{Bias, Change, ChangeId, ChangeSet};
 pub use vel_text::Edit;

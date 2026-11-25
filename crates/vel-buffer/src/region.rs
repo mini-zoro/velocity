@@ -377,6 +377,12 @@ impl Selection {
     pub(crate) fn header_bytes() -> usize {
         std::mem::size_of::<Regions>() + 2 * std::mem::size_of::<usize>()
     }
+    pub(crate) fn history_allocation(&self) -> (usize, usize) {
+        (
+            Arc::as_ptr(&self.data) as usize,
+            self.storage_bytes() + Self::header_bytes(),
+        )
+    }
     pub(crate) fn push(&mut self, r: Region) {
         let d = Arc::make_mut(&mut self.data);
         if d.anchors.is_empty() && !r.empty() {

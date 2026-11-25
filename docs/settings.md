@@ -1,5 +1,29 @@
 # Editing, input, find and completion settings
 
+## Undo history memory
+
+Velocity keeps up to 256 MiB of accounted history across open buffers, with a
+64 MiB limit per buffer. The limits include undo, redo, selection changes such
+as Find All, and the edit maps used to rebase older positions. Split views of
+one file share the same buffer limit.
+
+To change either limit, start a new Velocity process with these environment
+variables set to a nonnegative integer number of bytes:
+
+| Environment variable | Default |
+| --- | ---: |
+| `VELOCITY_HISTORY_PROCESS_BYTES` | `268435456` (256 MiB) |
+| `VELOCITY_HISTORY_BUFFER_BYTES` | `67108864` (64 MiB) |
+
+Unset or invalid values use the defaults. Zero disables retained history for
+the corresponding scope. The oldest eligible entries are discarded first;
+text undo groups are kept or discarded whole. A selection too large to record
+still becomes the active selection. An unrecordable edit still changes the
+document, but undo cannot cross that edit. These are history limits, not a
+limit on the size of a file or its active selections.
+
+## Editor preferences
+
 Settings use the normal live view layers, including project, syntax and view overrides.
 These rows belong to Lane A, round 18; scrolling and display settings belong to Lane B.
 Descriptions and implementations are original. Public sources were checked on 2026-11-17;

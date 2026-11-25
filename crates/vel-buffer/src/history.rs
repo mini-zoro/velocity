@@ -36,8 +36,24 @@ pub struct HistorySnapshot {
 }
 #[derive(Debug, Clone)]
 enum Repr {
-    Live(Arc<Buffer>),
+    Live(Arc<Capture>),
     Packed(Wire),
+}
+// An owned export is independent of the live buffer and its budget registration.
+#[derive(Debug)]
+struct Capture {
+    text: Text,
+    views: BTreeMap<ViewId, ViewState>,
+    undo: VecDeque<Group>,
+    redo: VecDeque<Group>,
+    soft: BTreeMap<ViewId, super::history_budget::SoftHistory>,
+    log: VecDeque<LoggedChange>,
+    change: ChangeId,
+    limits: HistoryLimits,
+    state: u64,
+    next_state: u64,
+    saved: u64,
+    group_open: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Wire {
@@ -104,7 +120,7 @@ impl HistorySnapshot {
     /// Attached old view IDs to map to fresh process-local identities on restore.
     pub fn view_ids(&self) -> Vec<ViewId> {
         match &self.repr {
-            Repr::Live(b) => b.views().collect(),
+            Repr::Live(b) => b.views.keys().copied().collect(),
             Repr::Packed(w) => w.views.clone(),
         }
     }
@@ -136,7 +152,7 @@ impl HistorySnapshot {
                 } => {
                     SavedEvent::Selection(before.clone(), after.clone(), b.change.0 - at.0, *state)
                 }
-                SoftEvent::Edit(s) => SavedEvent::Edit(indices[&s.after_state]),
+                SoftEvent::Edit(state) => SavedEvent::Edit(indices[state]),
             }
         };
         let group = |g: &Group| SavedGroup {
@@ -195,13 +211,24 @@ impl HistorySnapshot {
             views: b
                 .views
                 .values()
-                .map(|v| SavedView {
-                    id: v.id,
-                    selection: v.selection.clone(),
-                    settings: v.settings.clone(),
-                    regions: v.regions.clone(),
-                    soft: v.soft.iter().map(event).collect(),
-                    soft_redo: v.soft_redo.iter().map(event).collect(),
+                .map(|v| {
+                    let soft = b.soft.get(&v.id);
+                    SavedView {
+                        id: v.id,
+                        selection: v.selection.clone(),
+                        settings: v.settings.clone(),
+                        regions: v.regions.clone(),
+                        soft: soft
+                            .into_iter()
+                            .flat_map(|s| &s.undo)
+                            .map(|r| event(&r.event))
+                            .collect(),
+                        soft_redo: soft
+                            .into_iter()
+                            .flat_map(|s| &s.redo)
+                            .map(|r| event(&r.event))
+                            .collect(),
+                    }
                 })
                 .collect(),
             log: b
@@ -218,7 +245,7 @@ impl HistorySnapshot {
             version: VERSION,
             text_len: b.text.len_bytes(),
             text_hash: digest(&b.text),
-            views: b.views().collect(),
+            views: b.views.keys().copied().collect(),
             data: STANDARD.encode(encoder.finish().map_err(invalid)?),
         })
     }
@@ -254,24 +281,22 @@ impl Buffer {
     /// Captures owned history without copying document text or extracting edit strings.
     /// Serialization is deliberately deferred, allowing Hot Exit to encode on its writer.
     pub fn export_history(&self) -> HistorySnapshot {
+        let budget = self.budget.lock();
+        let history = budget.get(self.id);
         HistorySnapshot {
-            repr: Repr::Live(Arc::new(Self {
-                id: self.id,
+            repr: Repr::Live(Arc::new(Capture {
                 text: self.text.clone(),
                 views: self.views.clone(),
-                undo: self.undo.clone(),
-                redo: self.redo.clone(),
-                log: self.log.clone(),
-                log_bytes: self.log_bytes,
+                undo: history.undo.clone(),
+                redo: history.redo.clone(),
+                soft: history.soft.clone(),
+                log: history.log.clone(),
                 change: self.change,
-                limits: self.limits,
-                retained: self.retained,
-                entries: self.entries,
+                limits: history.limits,
                 state: self.state,
                 next_state: self.next_state,
                 saved: self.saved,
                 group_open: self.group_open,
-                live: self.live.clone(),
             })),
         }
     }
@@ -314,7 +339,7 @@ impl Buffer {
         let mut body: Body = postcard::from_bytes(&raw).map_err(invalid)?;
         body.delta_code(true);
         let Body {
-            limits,
+            mut limits,
             state,
             next_state,
             saved,
@@ -334,6 +359,12 @@ impl Buffer {
         {
             return Err(invalid("limits or revision identities"));
         }
+        // Keep the version-1 payload compatible. A launch override takes
+        // precedence; an older session cannot raise the default cap.
+        limits.bytes = history_budget::buffer_bytes_override()
+            .unwrap_or_else(|| limits.bytes.min(default_buffer_bytes()));
+        let budget = HistoryBudget::process();
+        let stamp = budget.lock().next_age();
         let mut used = BTreeSet::new();
         let mut order = Vec::new();
         let cursor = undo.iter().map(|g| g.steps.len()).sum::<usize>();
@@ -430,12 +461,6 @@ impl Buffer {
                 },
                 |v| v.len() + 2 * std::mem::size_of::<usize>(),
             );
-            let bytes = retained_text
-                + changes[i].storage_bytes()
-                + s.before_selection.storage_bytes()
-                + s.after_selection.storage_bytes()
-                + std::mem::size_of::<Step>()
-                + 256;
             built[i] = Some(Arc::new(Step {
                 before: inserted.is_none().then_some(before),
                 after: inserted.is_none().then(|| root.clone()),
@@ -446,7 +471,8 @@ impl Buffer {
                 changes: Arc::new(changes[i].clone()),
                 before_state: s.before_state,
                 after_state: s.after_state,
-                bytes,
+                age: stamp,
+                bytes: Step::fixed_bytes(retained_text),
             }));
         }
         if cursor == order.len() && (revision != state || root != text) {
@@ -458,17 +484,18 @@ impl Buffer {
             run: g.run,
             has_word: g.has_word,
         };
-        let mut b = Buffer::new(text);
-        b.limits = limits;
+        let mut b = Buffer::with_history_budget(text, budget);
+        let mut h = History::default();
+        h.limits = limits;
         b.state = state;
         b.next_state = next_state;
         b.saved = saved;
         b.group_open = group_open;
-        b.undo = undo.into_iter().map(group).collect();
-        b.redo = redo.into_iter().map(group).collect();
-        b.entries = built.len();
-        b.retained = built.iter().map(|s| s.bytes).sum();
-        b.live = states;
+        h.undo = undo.into_iter().map(group).collect();
+        h.redo = redo.into_iter().map(group).collect();
+        for step in &built {
+            h.record_step(step);
+        }
         // Keep all stored ages (including stale soft selections) without underflow.
         let age = log
             .iter()
@@ -503,18 +530,19 @@ impl Buffer {
                 return Err(invalid("noncontiguous change log"));
             }
             let map = Arc::new(checked_map(&cs, Some(old_len))?);
-            b.log_bytes = b
-                .log_bytes
-                .checked_add(map.storage_bytes() + std::mem::size_of::<LoggedChange>())
-                .ok_or_else(|| invalid("log size"))?;
-            b.log.push_back(LoggedChange { id, map, old_len });
+            h.record_map(LoggedChange {
+                id,
+                age: stamp,
+                map,
+                old_len,
+            });
             previous = Some(id.0);
         }
         if previous.is_some_and(|id| id != b.change.0) {
             return Err(invalid("change log cursor"));
         }
-        for (i, c) in b.log.iter().enumerate() {
-            let next_len = b.log.get(i + 1).map_or(b.text.len_bytes(), |c| c.old_len);
+        for (i, c) in h.log.iter().enumerate() {
+            let next_len = h.log.get(i + 1).map_or(b.text.len_bytes(), |c| c.old_len);
             if mapped_len(c.old_len, &c.map)? != next_len {
                 return Err(invalid("change log lengths"));
             }
@@ -544,7 +572,7 @@ impl Buffer {
                         if step.owner != owners[&v.id] {
                             return Err(invalid("soft event owner"));
                         }
-                        SoftEvent::Edit(step.clone())
+                        SoftEvent::Edit(step.after_state)
                     }
                     SavedEvent::Selection(before, after, age, state) => {
                         // These coordinates belong to an older revision, possibly an expired branch.
@@ -565,9 +593,9 @@ impl Buffer {
                             if let Some(text) = known_texts.get(&state) {
                                 selection_ok(selection, text)?;
                             }
-                            if b.retains(at) {
+                            if h.maps_from(at, b.change).is_some() {
                                 let mapped = b
-                                    .map_selection_from(selection, at)
+                                    .map_selection_from(&h, selection, at)
                                     .ok_or_else(|| invalid("soft event bounds"))?;
                                 selection_ok(&mapped, &b.text)?;
                             }
@@ -581,8 +609,21 @@ impl Buffer {
                     }
                 })
             };
-            if v.soft.len() > limits.selection_entries {
+            if v.soft.len() > limits.selection_entries
+                || v.soft_redo.len() > limits.selection_entries
+            {
                 return Err(invalid("soft history limit"));
+            }
+            let soft: Vec<_> = v.soft.into_iter().map(event).collect::<Result<_, _>>()?;
+            let soft_redo: Vec<_> = v
+                .soft_redo
+                .into_iter()
+                .map(event)
+                .collect::<Result<_, _>>()?;
+            for (queue, redo) in [(soft, false), (soft_redo, true)] {
+                for event in queue {
+                    h.record_soft(owners[&v.id], SoftRecord { age: stamp, event }, redo);
+                }
             }
             b.views.insert(
                 owners[&v.id],
@@ -591,44 +632,46 @@ impl Buffer {
                     selection: v.selection,
                     settings: v.settings,
                     regions: v.regions,
-                    soft: v.soft.into_iter().map(event).collect::<Result<_, _>>()?,
-                    soft_redo: v
-                        .soft_redo
-                        .into_iter()
-                        .map(event)
-                        .collect::<Result<_, _>>()?,
                     find: None,
                 },
             );
         }
+        b.budget.lock().insert(b.id, h);
         Ok(b)
     }
-    /// Borrows retained maps after a revision, without copying their edit arrays.
+    /// Gets shared retained maps after a revision, without copying their edit arrays.
     /// Returns `None` if that revision has already been evicted.
     pub fn retained_changes_since(
         &self,
         from: ChangeId,
-    ) -> Option<impl DoubleEndedIterator<Item = (ChangeId, &ChangeSet)> + ExactSizeIterator> {
-        self.retains(from).then(|| {
-            let first = self.log.partition_point(|c| c.id <= from);
-            self.log.range(first..).map(|c| (c.id, c.map.as_ref()))
-        })
+    ) -> Option<impl DoubleEndedIterator<Item = (ChangeId, Arc<ChangeSet>)> + ExactSizeIterator>
+    {
+        self.retained_changes_up_to(from, usize::MAX)
+    }
+    /// As `retained_changes_since`, reading at most the first `limit` maps.
+    pub fn retained_changes_up_to(
+        &self,
+        from: ChangeId,
+        limit: usize,
+    ) -> Option<impl DoubleEndedIterator<Item = (ChangeId, Arc<ChangeSet>)> + ExactSizeIterator>
+    {
+        let budget = self.budget.lock();
+        let maps = budget.get(self.id).maps_from(from, self.change)?;
+        let entries: Vec<_> = maps.take(limit).map(|c| (c.id, c.map.clone())).collect();
+        Some(entries.into_iter())
     }
     /// Whether retained change maps are approaching either configured eviction limit.
     /// Incremental clients can advance old anchors before the oldest maps are lost.
     pub fn change_log_pressure(&self) -> bool {
-        self.log.len() >= self.limits.changes / 2 || self.log_bytes >= self.limits.bytes / 2
+        let budget = self.budget.lock();
+        let h = budget.get(self.id);
+        h.log.len() >= h.limits.changes / 2 || h.bytes() >= h.limits.bytes.min(budget.limit()) / 2
     }
     /// Retained maps after an ID, in publication order, including individual undo/redo steps.
     /// `None` means the caller must reset its incremental service from the current snapshot.
     pub fn changes_since(&self, from: ChangeId) -> Option<Vec<(ChangeId, ChangeSet)>> {
-        self.retains(from).then(|| {
-            self.log
-                .iter()
-                .filter(|c| c.id > from)
-                .map(|c| (c.id, c.map.as_ref().clone()))
-                .collect()
-        })
+        self.retained_changes_since(from)
+            .map(|maps| maps.map(|(id, map)| (id, map.as_ref().clone())).collect())
     }
 }
 fn region_ok(r: Region, text: &Text) -> Result<(), HistoryError> {
