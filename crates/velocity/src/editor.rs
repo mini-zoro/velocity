@@ -2525,13 +2525,25 @@ mod round15_details {
     }
     #[test]
     fn smart_home_streams_a_huge_unicode_logical_line() {
-        let e = Editor::new(Text::from(
+        let mut e = Editor::new(Text::from(
             format!(" \t  {}", "界".repeat(400_000)).as_str(),
         ));
+        // Auto wrapping is on for a long line in a modest document: Home first lands on
+        // the wrapped row that holds the caret, then walks to the logical first
+        // non-whitespace and finally to column zero.
+        let at = e.text.floor_char_boundary(500);
+        let row = crate::view::visual_line_boundary(&e, at, false, false);
         assert_eq!(
-            crate::view::visual_line_boundary(&e, e.text.floor_char_boundary(500), false, false),
-            4
+            row,
+            e.layout.borrow().visual_at(&e.text, at).1.bytes.start,
+            "home keeps the caret on its wrapped row"
         );
+        assert_eq!(crate::view::visual_line_boundary(&e, row, false, false), 4);
+        assert_eq!(crate::view::visual_line_boundary(&e, 4, false, false), 0);
+        // With wrapping off the whole 1.2 MB line is one row; the same answers come from
+        // the line-local whitespace scan, never from a full-line walk.
+        e.settings.set(Layer::View, "word_wrap", json!(false));
+        assert_eq!(crate::view::visual_line_boundary(&e, at, false, false), 4);
         assert_eq!(crate::view::visual_line_boundary(&e, 4, false, false), 0);
     }
     #[test]

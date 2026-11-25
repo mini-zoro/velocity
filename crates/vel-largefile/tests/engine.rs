@@ -211,6 +211,7 @@ fn policy_thresholds_are_inclusive_and_overflow_safe() {
         .highlighting,
         HighlightMode::Full
     );
+    // Huge documents keep every expensive feature off, wrapping included.
     for m in [
         DocumentMetrics {
             bytes: p.viewport_bytes,
@@ -222,16 +223,21 @@ fn policy_thresholds_are_inclusive_and_overflow_safe() {
             lines: p.viewport_lines,
             longest_line_bytes: 1,
         },
-        DocumentMetrics {
-            bytes: 1,
-            lines: 1,
-            longest_line_bytes: p.long_line_bytes,
-        },
     ] {
         let f = p.evaluate(m);
         assert_eq!(f.highlighting, HighlightMode::Viewport);
         assert!(!f.indexing && !f.word_wrap && !f.spell_check && !f.diff_against_disk);
     }
+    // A lone long line in a modest document still wraps: `word_wrap: auto` exists to wrap
+    // lines wider than the viewport, and an unwrapped 100k-column line shows nothing.
+    let f = p.evaluate(DocumentMetrics {
+        bytes: 1,
+        lines: 1,
+        longest_line_bytes: p.long_line_bytes,
+    });
+    assert_eq!(f.highlighting, HighlightMode::Viewport);
+    assert!(f.word_wrap);
+    assert!(!f.indexing && !f.spell_check && !f.diff_against_disk);
     let f = p.evaluate(DocumentMetrics {
         bytes: u64::MAX,
         lines: u64::MAX,

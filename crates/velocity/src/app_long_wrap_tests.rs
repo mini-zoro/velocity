@@ -51,6 +51,9 @@ fn wrapped_four_mib_repaints_row_slices_and_matches_fresh_layout_after_typing() 
     };
     set(&mut a, "index_files", json!(false));
     open_ready(&mut a, &file);
+    // A lone long line now wraps by default, so start from the unwrapped state: the
+    // toggle below still has to opt a 4 MiB line into wrapping.
+    set(&mut a, "word_wrap", json!(false));
     named(&mut a, "toggle_setting", json!({"setting":"word_wrap"}));
     let _ = a.scene();
     assert!(a.workspace.editor().features.word_wrap);

@@ -128,6 +128,9 @@ fn indexed_long_line_geometry_selection_motion_and_ime_share_columns_after_edits
     let mut e = Editor::new(Text::from(
         format!("{prefix}target next\nfollowing").as_str(),
     ));
+    // This test covers the windowed long-line index, which is the unwrapped geometry
+    // path; auto wrapping (the default for a modest document) would bypass it.
+    e.settings.set(Layer::View, "word_wrap", json!(false));
     e.sync();
     let mut v = view();
     e.set_caret(prefix.len(), false);
@@ -216,8 +219,9 @@ fn document_policy_and_explicit_feature_override_are_per_view() {
         e.features.highlighting,
         vel_largefile::HighlightMode::Viewport
     );
+    // A lone long line keeps automatic wrapping: it is long, not huge.
     assert!(
-        !e.features.word_wrap
+        e.features.word_wrap
             && !e.features.indexing
             && !e.features.spell_check
             && !e.features.diff_against_disk
@@ -229,11 +233,20 @@ fn document_policy_and_explicit_feature_override_are_per_view() {
     )
     .unwrap();
     assert_eq!(e.language.borrow().as_ref().unwrap().policy, e.features);
+    // The policy is per view, and an explicit override belongs to its own view: turning
+    // wrapping off here leaves the untouched view on the policy default.
+    let other = Editor::new(e.text.clone());
+    assert!(other.features.word_wrap);
+    e.settings.set(Layer::View, "word_wrap", json!(false));
+    e.sync();
+    assert!(!e.features.word_wrap);
+    assert!(other.features.word_wrap);
+    e.settings.set(Layer::View, "word_wrap", json!(true));
+    e.sync();
+    // An explicit opt-in survives every threshold, including huge documents.
     e.run("large_file_enable_feature", &json!({"feature":"word_wrap"}))
         .unwrap();
     assert!(e.features.word_wrap);
-    let other = Editor::new(e.text.clone());
-    assert!(!other.features.word_wrap);
     e.run("large_file_enable_feature", &json!({"feature":"indexing"}))
         .unwrap();
     assert!(e.features.indexing);
@@ -244,15 +257,22 @@ fn document_policy_and_explicit_feature_override_are_per_view() {
     e.settings
         .set(Layer::View, "large_file.viewport_bytes", json!(1));
     e.sync();
-    assert!(!e.features.diff_against_disk);
+    assert!(e.features.word_wrap && e.features.indexing && !e.features.diff_against_disk);
+    // Without an explicit opt-in a huge document keeps wrapping and disk diffing off.
+    let mut huge = Editor::new(e.text.clone());
+    huge.settings
+        .set(Layer::View, "large_file.viewport_bytes", json!(1));
+    huge.sync();
+    assert!(!huge.features.word_wrap && !huge.features.diff_against_disk);
 }
 
 #[test]
 fn long_line_multi_caret_motion_deletion_and_lf_crossing_preserve_selections() {
     use vel_buffer::{Region, Selection};
     let mut e = Editor::new(Text::from(format!("{}\nend", "a".repeat(40_000)).as_str()));
+    // Auto wrapping is on by default for a long line in a modest document, so this is the
+    // wrapped path: motion and edits stay buffer-local and must not wait for any index.
     let mut v = view();
-    crate::large_bench::wait_index(&e, &mut v, 0).unwrap();
     e.set_selection(Selection::from_regions([
         Region::caret(10_000),
         Region::caret(20_000),
@@ -270,6 +290,9 @@ fn long_line_multi_caret_motion_deletion_and_lf_crossing_preserve_selections() {
     assert_eq!(e.caret, 39_999);
     e.command(vel_platform::Command::Left(false));
     assert_eq!(e.caret, 39_998);
+    // The wrapped row paints without a long-line index on the caret row.
+    v.scene(&e);
+    assert!(!e.layout.borrow().long.ready(0));
 }
 
 #[test]

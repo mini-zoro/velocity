@@ -81,7 +81,11 @@ impl LargeDocumentPolicy {
                 HighlightMode::Full
             },
             indexing: !huge && !long && m.bytes < self.indexing_bytes,
-            word_wrap: !huge && !long && m.bytes < self.wrap_bytes,
+            // A long line does not disable wrapping: `word_wrap: auto` exists precisely to
+            // wrap lines wider than the viewport, and an unwrapped 100k-column line leaves
+            // the viewport at its far end with nothing visible. Wrap cost is bounded by the
+            // document bytes, and `huge` documents still keep wrapping off.
+            word_wrap: !huge && m.bytes < self.wrap_bytes,
             minimap_stride: if self.minimap_lines == 0 {
                 u64::MAX
             } else {

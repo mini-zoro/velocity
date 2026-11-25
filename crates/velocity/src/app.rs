@@ -7106,6 +7106,10 @@ mod app_chrome;
 mod lane_b_round18_tests;
 
 #[cfg(test)]
+#[path = "app_paste_tests.rs"]
+mod paste_tests;
+
+#[cfg(test)]
 #[path = "app_lane_b_round19_perf.rs"]
 mod lane_b_round19_perf;
 
