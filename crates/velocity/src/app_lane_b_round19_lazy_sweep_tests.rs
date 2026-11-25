@@ -572,7 +572,11 @@ fn sweep_seed(seed: u64, steps: usize, stats: &mut Stats, materialize: bool, fai
                     a.scene();
                     let target = rng.below(count);
                     let tab = a.tab_hits.first().copied();
-                    let bounds = a.group_bounds.get(target).copied();
+                    let bounds = a
+                        .tab_strips
+                        .iter()
+                        .find(|strip| strip.group == target)
+                        .map(|strip| strip.bounds);
                     if let (Some((_, r)), Some(b)) = (tab, bounds) {
                         mouse(&mut a, r.x + 4., r.y + 4., 0, 0, MouseKind::Down);
                         mouse(

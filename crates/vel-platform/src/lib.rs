@@ -100,6 +100,44 @@ pub enum Appearance {
     #[default]
     Dark,
 }
+/// The cursor for a logical point in the client area, independent of IME hit testing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    /// Window chrome, controls, and other non-text regions.
+    #[default]
+    Arrow,
+    /// Selectable text.
+    IBeam,
+    /// Drag a vertical divider left or right.
+    ResizeHorizontal,
+    /// Drag a horizontal divider up or down.
+    ResizeVertical,
+}
+
+/// Fallback time between caret inversions when the platform supplies no rate.
+pub const DEFAULT_CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(any(windows, test))]
+fn windows_caret_blink_interval(milliseconds: u32) -> Option<std::time::Duration> {
+    match milliseconds {
+        u32::MAX => None, // GetCaretBlinkTime: INFINITE means no blinking.
+        0 => Some(DEFAULT_CARET_BLINK_INTERVAL), // Query failed.
+        time => Some(std::time::Duration::from_millis(u64::from(time))),
+    }
+}
+
+#[test]
+fn windows_caret_blink_rate_maps_time_between_inversions() {
+    assert_eq!(windows_caret_blink_interval(u32::MAX), None);
+    assert_eq!(
+        windows_caret_blink_interval(0),
+        Some(DEFAULT_CARET_BLINK_INTERVAL)
+    );
+    assert_eq!(
+        windows_caret_blink_interval(275),
+        Some(std::time::Duration::from_millis(275))
+    );
+}
 /// What a native window is for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowKind {
@@ -121,6 +159,9 @@ pub struct WindowOptions {
     pub min_size: Option<Size>,
     /// Editor or utility window.
     pub kind: WindowKind,
+    /// Desired top-left at a point from `WindowHandle::screen_point`. Native hosts
+    /// adjust it to keep the new window on screen.
+    pub position: Option<Point>,
 }
 impl Default for WindowOptions {
     fn default() -> Self {
@@ -132,6 +173,7 @@ impl Default for WindowOptions {
             },
             min_size: None,
             kind: WindowKind::Document,
+            position: None,
         }
     }
 }
@@ -350,9 +392,9 @@ pub trait AppHandler: 'static {
     fn on_command(&mut self, _window: &WindowHandle, _command: Command) {}
     /// Receive mouse button/drag events.
     fn on_mouse(&mut self, _window: &WindowHandle, _event: MouseEvent) {}
-    /// Returns a window token and tab group when a tab may be dropped at this point.
-    fn tab_drop_destination(&self, _point: Point) -> Option<(u64, usize)> {
-        None
+    /// Cursor for a point in the client area.
+    fn cursor_at(&self, _point: Point) -> CursorShape {
+        CursorShape::Arrow
     }
     /// Receive precise scroll deltas and both gesture and momentum phases.
     fn on_scroll(&mut self, _window: &WindowHandle, _event: ScrollEvent) {}

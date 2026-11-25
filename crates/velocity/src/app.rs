@@ -18,6 +18,9 @@ mod mouse_adapter;
 #[cfg(target_os = "macos")]
 #[path = "performance_bench.rs"]
 pub(crate) mod performance_bench;
+#[cfg(test)]
+#[path = "app_pointer_tests.rs"]
+mod pointer_tests;
 #[path = "app_print.rs"]
 mod printing;
 #[cfg(target_os = "macos")]
@@ -63,6 +66,8 @@ mod startup_tests;
 pub(crate) mod status_adapter;
 #[path = "app_tabs.rs"]
 mod tab_adapter;
+#[path = "app_tab_drag.rs"]
+mod tab_drag;
 #[path = "app_tab_rename.rs"]
 mod tab_rename;
 #[path = "app_terminal.rs"]
@@ -211,6 +216,8 @@ pub struct App {
     highlighted_scanout: Option<Instant>,
     language_warmed: bool,
     window_focused: bool,
+    caret_observed: Option<CommandState>,
+    caret_deadline: Option<Instant>,
     panels: crate::panels::Panels,
     window_size: Size,
     content: Rect,
@@ -224,6 +231,12 @@ pub struct App {
     /// Tab bar of each group and its largest scroll offset, for clicks on its empty part and
     /// for clamping wheel scrolling.
     tab_bars: Vec<(usize, Rect, f64)>,
+    tab_strips: Vec<tab_drag::TabStrip>,
+    tab_painted: Vec<(u64, usize, f64)>,
+    tab_press: Option<tab_drag::TabPress>,
+    tab_slides: Option<tab_drag::TabSlides>,
+    #[cfg(test)]
+    torn_off_windows: Vec<App>,
     tab_button_hits: Vec<(usize, &'static str, Rect)>,
     absent_tab_buttons: Option<((usize, u64, u64), [bool; 3])>,
     keyboard_center: Option<u64>,
@@ -244,6 +257,7 @@ pub struct App {
     /// Per group, the focused sheet whose tab was last scrolled into view.
     revealed_tabs: Vec<Option<u64>>,
     dragging_splitter: Option<vel_ui::workbench::Splitter>,
+    dragging_sidebar: Option<f64>,
     /// Text selection gesture between a press in the text area and its release.
     drag_select: Option<crate::mouse_select::DragSelect>,
     scrollbar_binding_button: Option<usize>,
@@ -427,6 +441,8 @@ impl App {
             highlighted_scanout: None,
             language_warmed: false,
             window_focused: true,
+            caret_observed: None,
+            caret_deadline: None,
             panels: {
                 let mut panels =
                     crate::panels::Panels::new(&workspace, options.mode == Mode::Interactive);
@@ -457,6 +473,12 @@ impl App {
             native_pane_minimum: None,
             tab_hits: Vec::new(),
             tab_bars: Vec::new(),
+            tab_strips: Vec::new(),
+            tab_painted: Vec::new(),
+            tab_press: None,
+            tab_slides: None,
+            #[cfg(test)]
+            torn_off_windows: Vec::new(),
             tab_button_hits: Vec::new(),
             absent_tab_buttons: None,
             keyboard_center: None,
@@ -472,6 +494,7 @@ impl App {
             revealed_tabs: Vec::new(),
             print_jobs: Default::default(),
             dragging_splitter: None,
+            dragging_sidebar: None,
             drag_select: None,
             scrollbar_binding_button: None,
             drag_text: None,
@@ -1088,18 +1111,55 @@ impl App {
         incoming: crate::instance::Incoming,
     ) -> Result<(), String> {
         let app = self.app_for_new_window(incoming)?;
-        w.new_window(
-            WindowOptions {
-                title: "Velocity".into(),
-                size: Size {
-                    width: app.options.width as f64,
-                    height: app.options.height as f64,
-                },
-                ..Default::default()
+        w.new_window(app.new_window_options(None), app).map(|_| ())
+    }
+    fn new_window_options(&self, position: Option<Point>) -> WindowOptions {
+        WindowOptions {
+            size: Size {
+                width: self.options.width as f64,
+                height: self.options.height as f64,
             },
-            app,
-        )
-        .map(|_| ())
+            position,
+            ..Default::default()
+        }
+    }
+    fn tear_off_tab(
+        &mut self,
+        window: Option<&WindowHandle>,
+        sheet: u64,
+        position: Option<Point>,
+    ) -> Result<(), String> {
+        let index = self
+            .workspace
+            .sheet_index(sheet)
+            .ok_or("The tab is no longer open")?;
+        self.workspace.prepare_sheet(index)?;
+        if !self.transferable_tab(index) {
+            return Err("Finish loading or close the other views before moving this tab".into());
+        }
+        let mut request = crate::instance::Request::new(&Options::default(), None)?;
+        request.new_window = true;
+        let app = self.app_for_new_window(crate::instance::Incoming::local(request))?;
+        let destination = app.session_id;
+        if let Some(window) = window {
+            // A native launch can fail. Do not take the live editor out of its
+            // source window until the destination is ready to receive it.
+            let target = window.new_window(app.new_window_options(position), app)?;
+            self.move_tab_to_window(Some(window), sheet, destination, 0)?;
+            target.request_frame();
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            let mut app = app;
+            self.move_tab_to_window(None, sheet, destination, 0)?;
+            assert!(app.receive_tabs());
+            app.sync_active_view();
+            self.torn_off_windows.push(app);
+            Ok(())
+        }
+        #[cfg(not(test))]
+        Err("Tearing off a tab requires a native window".into())
     }
     fn folder_window_request(
         path: Option<PathBuf>,
@@ -1592,6 +1652,9 @@ impl App {
         viewport: std::ops::Range<usize>,
     ) -> bool {
         self.ensure_startup_services();
+        if key.name == "escape" && self.cancel_tab_drag(window) {
+            return true;
+        }
         if self.tab_rename.is_some() {
             return self.tab_rename_key(window, key);
         }
@@ -3689,6 +3752,7 @@ impl App {
         }
         let switched = self.view_buffer != Some(current) || replaced;
         if switched {
+            self.caret_observed = None;
             let system_overlay = self.view.system_scroller_overlay;
             // An image's size or decode-failure note belongs to the document it was shown for.
             if let Some(status) = self.image_status.take()
@@ -3974,6 +4038,7 @@ impl App {
     fn render_scene(&mut self) -> vel_render::scene::Scene {
         if self.workspace.settings_page.is_none() {
             self.sync_active_view();
+            self.observe_caret_input(Instant::now());
         }
         if !self.workspace.themes.ui.borrow().metrics.native_enabled() {
             let result = self
@@ -4100,6 +4165,12 @@ impl App {
             tab.sync_image_file(&self.workspace.folders);
         }
         self.tab_bars.clear();
+        self.tab_strips.clear();
+        self.tab_painted.clear();
+        let now = Instant::now();
+        if !self.tab_slides_active(now) {
+            self.tab_slides = None;
+        }
         self.tab_button_hits.clear();
         self.tab_close_hits.clear();
         self.workspace
@@ -4110,6 +4181,7 @@ impl App {
         let mut theme_animating = false;
         let active = self.workspace.active;
         let focused = self.workspace.tabs[active].sheet;
+        let editor_caret = self.editor_caret_has_focus();
         let focused_tab = if self.workspace.tabs[active].goto_preview {
             self.workspace.workbench.groups[self.workspace.workbench.active].focused
         } else {
@@ -4117,6 +4189,7 @@ impl App {
         };
         let mut scene = vel_render::scene::Scene::default();
         let mut chrome = SceneLayer::default();
+        let mut lifted_tab = SceneLayer::default();
         // Tab strip backgrounds sit below the tabs' layer, so a card tab's shadow (drawn first
         // within its layer) falls on the strip instead of behind it.
         let mut strip = SceneLayer::default();
@@ -4202,11 +4275,9 @@ impl App {
                     Appearance::Light
                 };
                 view.tab_height = if !show_tabs { 0. } else { tab_height };
-                view.focused = *sheet == focused
-                    && self.window_focused
-                    && self.tab_rename.is_none()
-                    && self.panels.input().is_none()
-                    && !self.panels.side_focused;
+                view.focused = *sheet == focused && editor_caret && self.window_focused;
+                view.show_inactive_caret =
+                    *sheet == focused && editor_caret && !self.window_focused;
                 view.find_matches.clear();
                 view.find_scroll_matches.clear();
                 view.find_result_matches.clear();
@@ -4317,6 +4388,9 @@ impl App {
                     height: tab_height,
                     ..group_bounds
                 };
+                let strip_bounds = bar;
+                let preview = self.tab_preview_order(group_index, &group.sheets);
+                let tabs = preview.as_deref().unwrap_or(&group.sheets);
                 let mut theme = self.workspace.themes.ui.borrow_mut();
                 let bar_path = [
                     vel_theme::Element::new("window", &[]),
@@ -4329,13 +4403,8 @@ impl App {
                 );
                 theme.surface(&mut strip, &bar_style, bar, bar);
                 drop(theme);
-                let bar = self.paint_tab_buttons(
-                    &mut chrome,
-                    group_index,
-                    bar,
-                    group.sheets.len(),
-                    tab_width,
-                );
+                let bar =
+                    self.paint_tab_buttons(&mut chrome, group_index, bar, tabs.len(), tab_width);
                 // https://www.sublimetext.com/docs/themes.html#settings
                 let tab_width = if self
                     .workspace
@@ -4345,9 +4414,9 @@ impl App {
                 {
                     tab_width
                 } else {
-                    tab_width.min(bar.width / group.sheets.len().max(1) as f64)
+                    tab_width.min(bar.width / tabs.len().max(1) as f64)
                 };
-                let max_scroll = (group.sheets.len() as f64 * tab_width - bar.width).max(0.);
+                let max_scroll = (tabs.len() as f64 * tab_width - bar.width).max(0.);
                 self.tab_bars.push((group_index, bar, max_scroll));
                 let mut scroll = group.tab_scroll.clamp(0., max_scroll);
                 // When a group's focused sheet changes, scroll its tab into view once;
@@ -4356,6 +4425,7 @@ impl App {
                     self.revealed_tabs.resize(group_index + 1, None);
                 }
                 if let Some(target) = group.focused
+                    && preview.is_none()
                     && self.revealed_tabs[group_index] != Some(target)
                     && let Some(position) = group.sheets.iter().position(|s| *s == target)
                 {
@@ -4365,17 +4435,32 @@ impl App {
                     self.workspace.workbench.groups[group_index].tab_scroll = scroll;
                     self.revealed_tabs[group_index] = Some(target);
                 }
-                for (position, sheet) in group.sheets.iter().enumerate() {
+                self.tab_strips.push(tab_drag::TabStrip {
+                    group: group_index,
+                    bounds: strip_bounds,
+                    clip: bar,
+                    step: tab_width,
+                    scroll,
+                });
+                for (position, sheet) in tabs.iter().enumerate() {
                     let Some(index) = self.workspace.sheet_index(*sheet) else {
                         continue;
                     };
                     let tab = &self.workspace.tabs[index];
-                    let rect = Rect {
+                    let mut rect = Rect {
                         x: bar.x + position as f64 * tab_width - scroll,
                         y: bar.y,
                         width: (tab_width - 1.).max(tab_width * 0.5),
                         height: bar.height,
                     };
+                    let lifted = self.lifted_tab_x(*sheet, bar, rect.width);
+                    if let Some(x) = lifted {
+                        rect.x = x;
+                        rect.y -= 2. * self.panels.ui_scale;
+                        rect.width = rect.width.min(bar.width);
+                    } else {
+                        rect.x = self.sliding_tab_x(*sheet, group_index, rect.x, now);
+                    }
                     if rect.x + rect.width <= bar.x || rect.x >= bar.x + bar.width {
                         continue;
                     }
@@ -4385,14 +4470,21 @@ impl App {
                         ..rect
                     };
                     self.tab_hits.push((*sheet, hit));
+                    self.tab_painted.push((*sheet, group_index, rect.x));
+                    let paint = if lifted.is_some() {
+                        &mut lifted_tab
+                    } else {
+                        &mut chrome
+                    };
                     let selected = group.selected.contains(sheet);
                     let mut attrs = [""; 8];
                     let mut n = 0;
                     for (enabled, attr) in [
-                        (selected, "selected"),
-                        (Some(*sheet) == focused_tab, "focused"),
+                        (selected || lifted.is_some(), "selected"),
+                        (Some(*sheet) == focused_tab || lifted.is_some(), "focused"),
                         (tab.dirty(), "dirty"),
                         (tab.transient, "transient"),
+                        (lifted.is_some(), "dragging"),
                     ] {
                         if enabled {
                             attrs[n] = attr;
@@ -4435,7 +4527,7 @@ impl App {
                     } else {
                         rect
                     };
-                    theme.surface(&mut chrome, &tab_style, surface, bar);
+                    theme.surface(paint, &tab_style, surface, bar);
                     let label_path = [
                         path[0],
                         path[1],
@@ -4525,7 +4617,7 @@ impl App {
                         .filter(|rename| rename.sheet == *sheet);
                     if let Some(rename) = renaming {
                         rename.paint(
-                            &mut chrome,
+                            paint,
                             &theme,
                             &label,
                             (
@@ -4543,6 +4635,11 @@ impl App {
                             width: rect.width.min(bar.x + bar.width - rect.x).max(0.),
                             ..rect
                         };
+                        let label_clip = if lifted.is_some() {
+                            vel_ui::minihtml::intersection(label_clip, bar)
+                        } else {
+                            label_clip
+                        };
                         let label_end = if bullet {
                             // Right-aligned before the label's end; in a tab too narrow for that,
                             // centred in the visible part, and only when it fits there at all.
@@ -4553,7 +4650,7 @@ impl App {
                                 hit.x + (hit.width - width) / 2.
                             };
                             if width <= hit.width {
-                                theme.text(&mut chrome, &label, "•", x, baseline, label_clip);
+                                theme.text(paint, &label, "•", x, baseline, label_clip);
                             }
                             x - 3. * s
                         } else {
@@ -4562,7 +4659,7 @@ impl App {
                         // "Preferences.sublime-settings (Default)" keeps its "(Default)".
                         let shown = theme.fit_label(&label, &caption, label_end - label_x);
                         if !shown.is_empty() {
-                            theme.text(&mut chrome, &label, &shown, label_x, baseline, label_clip);
+                            theme.text(paint, &label, &shown, label_x, baseline, label_clip);
                         }
                         let close_path = [
                             path[0],
@@ -4584,13 +4681,13 @@ impl App {
                         );
                         if has_close {
                             self.tab_close_hits.push((*sheet, close_rect));
-                            theme.icon_surface(&mut chrome, &close, close_rect, hit);
+                            theme.icon_surface(paint, &close, close_rect, hit);
                         }
                     }
                     // The file icon stays in its label inset, above an editing field's fill.
                     if let Some(icon) = icon.filter(|_| !narrow) {
                         theme.icon(
-                            &mut chrome,
+                            paint,
                             icon,
                             Rect {
                                 x: rect.x + if close_left { 30. } else { 10. } * s,
@@ -4627,7 +4724,7 @@ impl App {
                         node.attributes.insert("transient");
                     }
                     self.panels.tree.roots.insert(0, id);
-                    if selected && group.selected.len() > 1 {
+                    if selected && group.selected.len() > 1 && lifted.is_none() {
                         let connector = Rect {
                             y: rect.y + rect.height - 2.,
                             height: 2.,
@@ -4707,6 +4804,13 @@ impl App {
             scene.layers.push(strip);
         }
         scene.layers.push(chrome);
+        if self
+            .tab_press
+            .as_ref()
+            .is_some_and(|press| press.drag.is_some())
+        {
+            scene.layers.push(lifted_tab);
+        }
         self.panels.paint(&self.workspace, &mut scene);
         self.paint_accessibility_focus(&mut scene);
         self.capture_format_hits(&scene);
@@ -4771,23 +4875,61 @@ impl App {
     fn changed_state(&mut self, received: Instant, reveal: bool) {
         self.next_utf8_save();
         let reveal = self.panels.should_reveal(reveal);
-        if reveal {
-            self.view.reset_caret();
-        }
         self.sync_workspace_after_panels();
         if self.options.mode == Mode::Interactive {
             self.session_due
                 .get_or_insert_with(|| Instant::now() + Duration::from_millis(300));
         }
         self.sync_active_view();
+        self.observe_caret_input(Instant::now());
         self.input_at.get_or_insert(received);
         if reveal {
             self.view.reveal(self.workspace.editor());
         }
     }
+    fn editor_caret_has_focus(&self) -> bool {
+        self.workspace.settings_page.is_none()
+            && self.tab_rename.is_none()
+            && self.panels.input().is_none()
+            && !self.panels.side_focused
+    }
+    // Selection snapshots share storage; moving one caret or just polling an idle
+    // window does not allocate or enumerate selections.
+    fn observe_caret_input(&mut self, now: Instant) -> bool {
+        let tab = &self.workspace.tabs[self.workspace.active];
+        let change = tab.editor.buffer.change_id();
+        let selection = tab.editor.buffer.view(tab.editor.id).sel();
+        if self
+            .caret_observed
+            .as_ref()
+            .is_some_and(|(sheet, previous, sel)| {
+                *sheet == tab.sheet
+                    && *previous == change
+                    && (sel.same_snapshot(selection) || sel == selection)
+            })
+        {
+            return false;
+        }
+        self.caret_observed = Some((tab.sheet, change, selection.clone()));
+        self.view.reset_caret_after_input(now);
+        true
+    }
+    fn update_caret_policy(
+        &mut self,
+        active: bool,
+        interval: Option<Duration>,
+        now: Instant,
+    ) -> bool {
+        self.view.configure_caret(
+            interval.filter(|_| active && self.editor_caret_has_focus()),
+            self.accessibility_preferences.reduce_motion,
+            now,
+        )
+    }
     fn input(&mut self, w: &WindowHandle, input: TextInput, received: Instant) {
         self.log_input("text", &input);
         self.workspace.editor_mut().text_input(input);
+        self.view.reset_caret_after_input(Instant::now());
         self.changed(w, received, true);
     }
     fn handle_text_input(&mut self, window: Option<&WindowHandle>, event: TextInput) {
@@ -4839,6 +4981,7 @@ impl App {
                 self.input(w, event, Instant::now());
             } else {
                 self.workspace.editor_mut().text_input(event);
+                self.view.reset_caret_after_input(Instant::now());
                 self.changed_state(Instant::now(), true);
             }
         }
@@ -5592,6 +5735,9 @@ impl AppHandler for App {
         self.handle_text_input(Some(w), event);
     }
     fn on_command(&mut self, w: &WindowHandle, command: Command) {
+        if command == Command::Cancel && self.cancel_tab_drag(Some(w)) {
+            return;
+        }
         self.cancel_context(w);
         self.log_input("command", command);
         if self.options.mode.automatic() {
@@ -5651,38 +5797,7 @@ impl AppHandler for App {
         self.run_editor_selector(Some(w), command);
     }
     fn on_mouse(&mut self, w: &WindowHandle, event: MouseEvent) {
-        // https://www.sublimetext.com/download (4131): tabs can be dragged to a window.
-        if event.kind == MouseKind::Up
-            && event.button == 0
-            && let Some(index) = self.panels.dragging_tab
-            && !vel_ui::contains(
-                Rect {
-                    x: 0.,
-                    y: 0.,
-                    width: self.window_size.width,
-                    height: self.window_size.height,
-                },
-                event.position,
-            )
-            && let Some((target, destination, group)) = w.tab_drop_destination()
-            && let Some(sheet) = self.workspace.tabs.get(index).map(|tab| tab.sheet)
-        {
-            self.panels.dragging_tab = None;
-            self.run_named(
-                Some(w),
-                "move_tab_to_window",
-                &json!({"sheet":sheet,"window":destination,"group":group}),
-            );
-            target.request_frame();
-            return;
-        }
         self.handle_mouse_event(Some(w), event);
-    }
-    fn tab_drop_destination(&self, point: Point) -> Option<(u64, usize)> {
-        self.tab_bars
-            .iter()
-            .find(|(_, bounds, _)| vel_ui::contains(*bounds, point))
-            .map(|(group, _, _)| (self.session_id, *group))
     }
     // Native and headless events share UI hit testing, focus, binding lookup and gestures.
     fn on_scroll(&mut self, w: &WindowHandle, event: ScrollEvent) {
@@ -5770,6 +5885,7 @@ impl AppHandler for App {
         let focused = w.is_focused();
         let focus_changed = self.window_focused != focused;
         if focus_changed && !focused {
+            self.cancel_tab_drag(Some(w));
             self.save_on_focus_lost(None);
         }
         // Take the menu bar as soon as this window is key, also during its startup frames
@@ -5852,7 +5968,7 @@ impl AppHandler for App {
                 self.run_named(Some(w), &invocation.command, &invocation.args);
             }
             self.replacement_confirmation(w);
-            if self.releases.busy()
+            let busy = self.releases.busy()
                 || self.workspace.resources_busy()
                 || self.panels.busy()
                 || self.view.image_preview.busy()
@@ -5861,9 +5977,7 @@ impl AppHandler for App {
                 || self.workspace.editor().completion.busy()
                 || self.builds.task.is_some()
                 || self.workspace.themes.ui.borrow().metrics.images_pending()
-            {
-                w.request_frame_at(Instant::now() + Duration::from_millis(8));
-            }
+                || self.workspace.language_busy();
             if active_was_loading && self.workspace.tabs[self.workspace.active].loading.is_none() {
                 self.view.reveal(self.workspace.editor());
             }
@@ -5914,39 +6028,38 @@ impl AppHandler for App {
                 self.status_error(UiText::command_error(&message));
                 changed = true;
             }
-            let caret_animation = self
-                .workspace
-                .editor()
-                .settings
-                .string("caret_style", "solid")
-                != "solid";
-            w.request_frame_at(
-                Instant::now()
-                    + Duration::from_millis(
-                        if caret_animation
-                            || self.view.scrolling()
-                            || self.workspace.themes.ui.borrow().animating()
-                        {
-                            16
-                        } else if self.workspace.language_busy()
-                            || self.panels.busy()
-                            || self.builds.task.is_some()
-                        {
-                            8
-                        } else {
-                            200
-                        },
-                    ),
-            );
+            let now = Instant::now();
+            changed |= self.observe_caret_input(now);
+            let caret_active = w.caret_is_active();
+            let interval = caret_active.then(|| w.caret_blink_interval()).flatten();
+            changed |= self.update_caret_policy(caret_active, interval, now);
+            let caret_deadline = self.view.next_caret_frame(self.workspace.editor(), now);
+            let animating = self.view.scrolling()
+                || self.workspace.themes.ui.borrow().animating()
+                || self.tab_slides.is_some();
+            let poll_at = now
+                + Duration::from_millis(if busy {
+                    8
+                } else if animating {
+                    16
+                } else {
+                    200
+                });
+            w.request_frame_at(caret_deadline.map_or(poll_at, |due| due.min(poll_at)));
+            let caret_due = match (self.caret_deadline, caret_deadline) {
+                (None, None) => false,
+                (Some(due), Some(_)) => due <= now,
+                _ => true,
+            };
             if ctx.reason == FrameReason::Timer
                 && !changed
                 && !loading_before
-                && !caret_animation
-                && !self.view.scrolling()
-                && !self.workspace.themes.ui.borrow().animating()
+                && !caret_due
+                && !animating
             {
                 return Ok(());
             }
+            self.caret_deadline = caret_deadline;
         }
         if self.font_face != self.workspace.editor().preferences.font_face {
             let name = self.workspace.editor().preferences.font_face.clone();
@@ -6332,6 +6445,9 @@ impl AppHandler for App {
                     },
                 )),
         )
+    }
+    fn cursor_at(&self, point: Point) -> CursorShape {
+        self.pointer_cursor(point)
     }
 }
 

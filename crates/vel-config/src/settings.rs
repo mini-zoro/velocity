@@ -334,7 +334,7 @@ impl Default for EditorSettings {
             default_encoding: "UTF-8".into(),
             fallback_encoding: "Western (Windows 1252)".into(),
             scroll_past_end: 0.,
-            caret_style: "solid".into(),
+            caret_style: "blink".into(),
             highlight_line: true,
             auto_match_enabled: true,
             // HTML/CSS defaults are enabled unless the syntax or user opts out.

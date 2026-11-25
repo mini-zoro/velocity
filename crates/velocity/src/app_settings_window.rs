@@ -101,6 +101,7 @@ impl App {
                     size: SETTINGS_SIZE,
                     min_size: Some(SETTINGS_MINIMUM),
                     kind: vel_platform::WindowKind::Utility,
+                    ..Default::default()
                 },
                 app,
             )?;

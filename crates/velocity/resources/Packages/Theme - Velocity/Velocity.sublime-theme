@@ -397,6 +397,7 @@
 {"class": "tab_control", "attributes": ["selected"], "settings": {"file_tab_style": "rounded"}, "border_color": "var(card_line)", "border_size": 0.5, "layer0.opacity": 0.55},
 {"class": "tab_control", "attributes": ["selected", "focused"], "settings": {"file_tab_style": "rounded"}, "shadow_color": "var(card_shadow)", "shadow_offset": [0, 1], "shadow_blur": 6, "shadow_spread": 0, "layer0.opacity": 1.0, "layer2.opacity": 0.0},
 {"class": "tab_close_button", "settings": {"file_tab_style": "rounded"}, "pill": true},
-{"class": "tab_connector", "attributes": ["selected"], "settings": {"file_tab_style": "rounded"}, "surface_inset": [56, 0], "pill": true}
+{"class": "tab_connector", "attributes": ["selected"], "settings": {"file_tab_style": "rounded"}, "surface_inset": [56, 0], "pill": true},
+{"class": "tab_control", "attributes": ["dragging"], "radius": 8, "surface_inset": [3, 4], "border_color": "var(card_line)", "border_size": 0.5, "shadow_color": "var(card_shadow)", "shadow_offset": [0, 2], "shadow_blur": 8, "shadow_spread": 0, "layer0.opacity": 1.0, "layer1.opacity": 0.0, "layer2.opacity": 0.0}
 ]
 }

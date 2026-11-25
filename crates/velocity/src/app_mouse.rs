@@ -21,6 +21,7 @@ impl App {
             self.ensure_startup_services();
             self.receive_file_renames();
             self.end_mouse_gesture();
+            self.cancel_tab_drag(w);
             if self.workspace.editor().marked.is_some() {
                 // Headless events do not pass through AppKit's discard. Hit-test
                 // the restored document, not offsets in the provisional text.
@@ -31,7 +32,9 @@ impl App {
         if self.tab_rename.is_some() && self.tab_rename_mouse(w, &event) {
             return;
         }
-        self.route_mouse_event(w, event, keep_focus);
+        if !self.handle_tab_gesture(w, &event) {
+            self.route_mouse_event(w, event, keep_focus);
+        }
         if up {
             self.end_mouse_gesture();
         }
@@ -43,6 +46,7 @@ impl App {
         self.text_drag_origin = None;
         self.text_drag_pressed = None;
         self.dragging_splitter = None;
+        self.dragging_sidebar = None;
     }
     fn route_mouse_event(&mut self, w: Option<&WindowHandle>, event: MouseEvent, keep_focus: bool) {
         if self.settings_page_has_focus() {
@@ -197,6 +201,24 @@ impl App {
             }
         }
 
+        if event.kind == MouseKind::Down
+            && event.button == 0
+            && self.panels.hit_sidebar_edge(event.position)
+        {
+            self.dragging_sidebar = Some(event.position.x - self.panels.sidebar_edge());
+            return;
+        }
+        if event.kind == MouseKind::Drag
+            && let Some(grab) = self.dragging_sidebar
+        {
+            let min = self.pane_minimum_extent().0;
+            self.panels.resize_sidebar(event.position.x - grab, min);
+            if let Some(w) = w {
+                w.invalidate_character_coordinates();
+                w.request_frame();
+            }
+            return;
+        }
         if event.kind == MouseKind::Down {
             self.dragging_splitter =
                 self.workspace
@@ -389,10 +411,11 @@ impl App {
                             event.modifiers.shift(),
                         );
                     }
-                    self.panels.dragging_tab = Some(index);
                     self.tab_click = Some((event.position, sheet));
                     if event.button == 0 && event.click_count >= 2 {
                         self.double_click_tab(w, index, event.click_count);
+                    } else if event.button == 0 {
+                        self.press_tab(sheet, event.position);
                     }
                 }
                 self.named_changed(w, false);
@@ -414,39 +437,6 @@ impl App {
             self.run_named(w, "new_file", &json!({}));
             self.named_changed(w, false);
             return;
-        }
-        if event.kind == MouseKind::Drag
-            && let Some(from) = self.panels.dragging_tab
-        {
-            if let Some(target) = self
-                .group_bounds
-                .iter()
-                .position(|b| vel_ui::contains(*b, event.position))
-            {
-                if target != self.workspace.workbench.active {
-                    let _ = self.workspace.workbench.move_selected(target);
-                    let _ = self.workspace.focus_current_group();
-                } else if let Some((sheet, _)) = self
-                    .tab_hits
-                    .iter()
-                    .find(|(_, rect)| vel_ui::contains(*rect, event.position))
-                {
-                    let moved = self.workspace.tabs.get(from).map(|t| t.sheet);
-                    let group = &mut self.workspace.workbench.groups[target];
-                    if let Some(moved) = moved
-                        && moved != *sheet
-                        && let Some(to) = group.sheets.iter().position(|s| s == sheet)
-                    {
-                        group.sheets.retain(|s| *s != moved);
-                        group.sheets.insert(to.min(group.sheets.len()), moved);
-                    }
-                }
-                self.named_changed(w, false);
-            }
-            return;
-        }
-        if event.kind == MouseKind::Up {
-            self.panels.dragging_tab = None;
         }
         if event.kind == MouseKind::Down
             && let Some((&sheet, _)) = self
@@ -574,6 +564,15 @@ impl App {
                     return;
                 }
                 _ => {}
+            }
+        }
+        if event.kind == MouseKind::Down
+            && event.button == 0
+            && self.view.text_cursor_at(self.workspace.editor(), local)
+        {
+            self.view.reset_caret_after_input(Instant::now());
+            if let Some(w) = w {
+                w.request_frame();
             }
         }
         let at = self.view.hit_test(self.workspace.editor(), local);
@@ -814,6 +813,87 @@ impl App {
             x: point.x - self.content.x,
             y: point.y - self.content.y,
         })
+    }
+    pub(super) fn pointer_cursor(&self, point: Point) -> CursorShape {
+        use CursorShape::*;
+        if self
+            .tab_press
+            .as_ref()
+            .is_some_and(|press| press.drag.is_some())
+        {
+            return Arrow;
+        }
+        if self.settings_page_has_focus() {
+            return if self
+                .workspace
+                .settings_page
+                .as_ref()
+                .is_some_and(|page| page.text_field_at(point))
+            {
+                IBeam
+            } else {
+                Arrow
+            };
+        }
+        if self.panels.text_field_at(point) {
+            return IBeam;
+        }
+        if self.panels.overlay.is_some() || self.panels.popup_at(point) {
+            return Arrow;
+        }
+        if let Some(rename) = &self.tab_rename
+            && vel_ui::contains(rename.bounds, point)
+        {
+            return IBeam;
+        }
+        if self.dragging_sidebar.is_some() || self.panels.hit_sidebar_edge(point) {
+            return ResizeHorizontal;
+        }
+        if let Some(splitter) = self.dragging_splitter.or_else(|| {
+            self.workspace
+                .workbench
+                .layout
+                .splitter(point, self.workbench_bounds, 4.)
+        }) {
+            return if splitter.vertical {
+                ResizeHorizontal
+            } else {
+                ResizeVertical
+            };
+        }
+        let active = self.workspace.tabs[self.workspace.active].sheet;
+        let (sheet, bounds) = self
+            .sheet_bounds
+            .iter()
+            .find(|(_, bounds)| vel_ui::contains(**bounds, point))
+            .map_or((active, self.content), |(&sheet, &bounds)| (sheet, bounds));
+        if !vel_ui::contains(bounds, point) {
+            return Arrow;
+        }
+        let Some(index) = self
+            .workspace
+            .sheet_index(sheet)
+            .or_else(|| (sheet == active).then_some(self.workspace.active))
+        else {
+            return Arrow;
+        };
+        let view = if sheet == active {
+            &self.view
+        } else if let Some(view) = self.sheet_views.get(&sheet) {
+            view
+        } else {
+            return Arrow;
+        };
+        let editor = &self.workspace.tabs[index].editor;
+        let local = Point {
+            x: point.x - bounds.x,
+            y: point.y - bounds.y,
+        };
+        if view.text_cursor_at(editor, local) {
+            IBeam
+        } else {
+            Arrow
+        }
     }
 
     fn mouse_binding(

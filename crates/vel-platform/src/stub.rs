@@ -20,8 +20,8 @@ impl WindowHandle {
     pub fn is_closed(&self) -> bool {
         false
     }
-    /// Unsupported platforms have no native drop targets.
-    pub fn tab_drop_destination(&self) -> Option<(Self, u64, usize)> {
+    /// Unsupported platforms have no native screen geometry.
+    pub fn screen_point(&self, _point: crate::Point) -> Option<crate::Point> {
         None
     }
     /// Unsupported platforms have no system document controller.
@@ -69,6 +69,14 @@ impl WindowHandle {
     /// Unsupported platforms have no focused native window.
     pub fn is_focused(&self) -> bool {
         false
+    }
+    /// There is no native caret animation on unsupported platforms.
+    pub fn caret_is_active(&self) -> bool {
+        false
+    }
+    /// No native system preference.
+    pub fn caret_blink_interval(&self) -> Option<std::time::Duration> {
+        Some(crate::DEFAULT_CARET_BLINK_INTERVAL)
     }
     /// No native menus on this platform.
     pub fn set_menu(&self, _entries: &[crate::MenuEntry]) {}

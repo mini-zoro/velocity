@@ -82,6 +82,7 @@ NOTES = {
     "indent_guide_options": "[Active-guide default](https://www.sublimetext.com/updates/2/stable/release_notes.html)",
     "always_show_minimap_viewport": f"[Visual settings]({SETTINGS_REFERENCE}#visual-settings)",
     "block_caret": f"[Settings reference]({SETTINGS_REFERENCE}); [archived reference]({ARCHIVED_REFERENCE})",
+    "caret_style": 'On/off by default: half-second phases on macOS, and the system blink interval on Windows. [User decision D7](behavior.md#decisions-user-2026-11-20).',
     "mouse_wheel_switches_tabs": f"[Global settings]({SETTINGS_REFERENCE}#global-settings)",
     "result_file_regex": "[Build system options](https://www.sublimetext.com/docs/build_systems.html#exec-target-options)",
     "update_system_recent_files": f"[Build 4143]({CHANGELOG})",

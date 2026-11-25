@@ -1760,6 +1760,21 @@ mod model {
                 .rev()
                 .find_map(|(bounds, target)| vel_ui::contains(*bounds, point).then_some(*target))
         }
+        pub(crate) fn text_field_at(&self, point: Point) -> bool {
+            if self.popup.is_some() {
+                return false;
+            }
+            match self.target_at(point) {
+                Some(Target::Search) => true,
+                Some(Target::Control(row)) if self.writable() && self.rows[row].editable() => {
+                    matches!(
+                        self.rows[row].control(),
+                        Control::Text | Control::Number | Control::Array
+                    )
+                }
+                _ => false,
+            }
+        }
 
         pub(crate) fn ax_focus(&mut self, workspace: &mut Workspace, point: Point) {
             let Some(target) = self.target_at(point) else {

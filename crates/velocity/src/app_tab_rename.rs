@@ -212,7 +212,7 @@ impl App {
         self.workspace.activate_sheet(index);
         self.leave_region_focus();
         self.panels.focus_editor_for_context();
-        self.panels.dragging_tab = None;
+        self.cancel_tab_drag(window);
         self.tab_click = None;
         self.hovered_close = None;
         self.workspace.editor_mut().completion.hide();

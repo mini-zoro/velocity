@@ -9,7 +9,7 @@ mod window;
 use crate::requests::{ContextRequest, OpenHost, WindowTitle, open_target};
 use crate::{
     AppHandler, Appearance, Command, FrameContext, FrameReason, MenuEntry, MouseEvent, MouseKind,
-    Presentation, Rect, ScrollEvent, Size, TextInput, WindowOptions,
+    Point, Presentation, Rect, ScrollEvent, Size, TextInput, WindowOptions,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -26,7 +26,7 @@ use windows_sys::Win32::{
     Foundation::{
         CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WAIT_FAILED, WPARAM,
     },
-    Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
+    Graphics::Gdi::{BeginPaint, ClientToScreen, EndPaint, PAINTSTRUCT},
     System::{
         LibraryLoader::GetModuleHandleW,
         Threading::{
@@ -175,6 +175,36 @@ impl WindowHandle {
         self.hwnd().is_some_and(|hwnd| {
             // SAFETY: GetFocus only queries the calling thread's GUI queue.
             unsafe { GetFocus() == hwnd.as_ptr() }
+        })
+    }
+
+    /// Animates only in a visible, foreground editor that has keyboard focus.
+    pub fn caret_is_active(&self) -> bool {
+        self.0.is_drawable()
+            && self.is_focused()
+            // SAFETY: A read-only query for the current foreground HWND.
+            && unsafe { GetForegroundWindow() == self.0.hwnd.get() }
+            && !window::caret_occluded(self.0.hwnd.get())
+    }
+
+    /// Time between inversions, or `None` when Windows disables caret blinking.
+    pub fn caret_blink_interval(&self) -> Option<Duration> {
+        // SAFETY: This system preference query takes no arguments.
+        crate::windows_caret_blink_interval(unsafe { GetCaretBlinkTime() })
+    }
+
+    /// Converts a logical client point to physical virtual-desktop coordinates.
+    pub fn screen_point(&self, point: Point) -> Option<Point> {
+        let hwnd = self.hwnd()?;
+        let scale = self.scale_factor();
+        let mut point = POINT {
+            x: (point.x * scale).round() as i32,
+            y: (point.y * scale).round() as i32,
+        };
+        // SAFETY: Windows writes the converted point through the valid pointer.
+        (unsafe { ClientToScreen(hwnd.as_ptr(), &mut point) } != 0).then_some(Point {
+            x: point.x.into(),
+            y: point.y.into(),
         })
     }
 
@@ -545,8 +575,12 @@ impl Runtime {
                 CLASS,
                 title.as_ptr(),
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
+                options
+                    .position
+                    .map_or(CW_USEDEFAULT, |p| p.x.round() as i32),
+                options
+                    .position
+                    .map_or(CW_USEDEFAULT, |p| p.y.round() as i32),
                 bounds.right - bounds.left,
                 bounds.bottom - bounds.top,
                 null_mut(),
@@ -560,6 +594,13 @@ impl Runtime {
         }
         self.windows.borrow_mut().push(Rc::clone(&host));
         host.initialize_geometry(options.size);
+        if let (Some(p), Some(frame)) = (options.position, host.normal_frame.get()) {
+            host.handle().restore_frame(Rect {
+                x: p.x,
+                y: p.y,
+                ..frame
+            });
+        }
         host.apply_title_theme(None, None);
         // SAFETY: The HWND is live and owned by the calling thread.
         unsafe { DragAcceptFiles(hwnd, 1) };
@@ -1092,7 +1133,7 @@ impl Host {
                 }
                 return None;
             }
-            WM_SETFOCUS => self.request(FrameReason::Resize),
+            WM_ACTIVATE | WM_SETFOCUS => self.request(FrameReason::Resize),
             WM_KILLFOCUS => {
                 self.finish_ime(hwnd);
                 self.context.borrow_mut().cancel();

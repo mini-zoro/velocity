@@ -490,6 +490,10 @@ rule("tab_control", attributes=["selected", "focused"], settings=ROUNDED,
 rule("tab_close_button", settings=ROUNDED, pill=True)
 # Several selected sheets (split view in one group): a short capsule under each card.
 rule("tab_connector", attributes=["selected"], settings=ROUNDED, surface_inset=[56, 0], pill=True)
+# Lift only the moving tab; the ordinary square, angled and rounded rules stay intact.
+rule("tab_control", attributes=["dragging"], radius=RADIUS["card"], surface_inset=[3, 4],
+     border_color="var(card_line)", border_size=HAIRLINE, shadow_color="var(card_shadow)",
+     shadow_offset=[0, 2], shadow_blur=8, shadow_spread=0, **{"layer0.opacity": 1.0, "layer1.opacity": 0.0, "layer2.opacity": 0.0})
 
 def compact(value):
     return json.dumps(value, separators=(", ", ": "))

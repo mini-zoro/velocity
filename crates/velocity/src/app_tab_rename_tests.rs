@@ -472,7 +472,7 @@ fn field_edits_scroll_and_undo_without_editor_bindings_or_tab_dragging() {
     mouse(&mut app, center(field), 1, MouseKind::Down);
     mouse(&mut app, editor, 1, MouseKind::Drag);
     mouse(&mut app, editor, 1, MouseKind::Up);
-    assert!(app.panels.dragging_tab.is_none());
+    assert!(app.tab_press.is_none());
     assert_eq!(app.workspace.tabs[app.workspace.active].sheet, sheet);
     assert!(key(&mut app, "super+w"));
     assert!(app.tab_rename.is_some());

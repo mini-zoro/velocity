@@ -48,7 +48,7 @@
   "reload_file_on_change": true,
   // Turn this off to wait until activation before reloading a clean inactive document.
   "reload_file_in_background": true,
-  "caret_style": "solid",
+  "caret_style": "blink",
   "highlight_line": false,
   "auto_match_enabled": true,
   // Write through a temporary file and rename it over the original. Even when true, files with

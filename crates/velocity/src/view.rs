@@ -258,6 +258,7 @@ pub struct View {
     pub(crate) anchor_queries: std::cell::Cell<usize>,
     pub appearance: Appearance,
     pub focused: bool,
+    pub(crate) show_inactive_caret: bool,
     pub minimap_hover: bool,
     pub minimap_drag: bool,
     minimap_gesture: Option<MinimapDrag>,
@@ -284,7 +285,10 @@ pub struct View {
     device_scale: f64,
     line_padding: (f64, f64),
     pub ligatures: bool,
-    started: Instant,
+    caret_started: Instant,
+    caret_interval: Option<std::time::Duration>,
+    caret_reduce_motion: bool,
+    caret_show_after_input: bool,
     scroll_animation: Option<ScrollAnimation>,
     caret_lines: std::collections::BTreeSet<usize>,
     bar_style_key: Option<(usize, u64, u64)>,
@@ -981,8 +985,58 @@ impl View {
             + e.settings.number("line_padding_top", 0.).max(0.)
             + if self.font_metrics.is_none() { 3. } else { 0. }
     }
+    #[cfg(test)]
     pub fn reset_caret(&mut self) {
-        self.started = Instant::now();
+        self.caret_started = Instant::now();
+    }
+    pub(crate) fn reset_caret_after_input(&mut self, now: Instant) {
+        self.caret_started = now;
+        self.caret_show_after_input = true;
+    }
+    pub(crate) fn configure_caret(
+        &mut self,
+        interval: Option<std::time::Duration>,
+        reduce_motion: bool,
+        now: Instant,
+    ) -> bool {
+        if (self.caret_interval, self.caret_reduce_motion) == (interval, reduce_motion) {
+            return false;
+        }
+        self.caret_interval = interval;
+        self.caret_reduce_motion = reduce_motion;
+        self.reset_caret_after_input(now);
+        true
+    }
+    fn animated_caret(&self, e: &Editor) -> Option<CaretAnimation> {
+        let interval = self.caret_interval?;
+        let modes = e.settings.string("caret_style", "blink");
+        let style = match modes {
+            "blink" => CaretStyle::Blink,
+            "smooth" if self.caret_reduce_motion => CaretStyle::Blink,
+            "smooth" => CaretStyle::Smooth,
+            "phase" => CaretStyle::Phase,
+            _ => return None,
+        };
+        let inverse = e.settings.bool("inverse_caret_state", false);
+        Some(CaretAnimation {
+            style,
+            interval,
+            inverse,
+            // Even an inverted caret is visible while typing. Its inverted cycle then
+            // starts with the hidden phase at the first deadline.
+            start: self.caret_started
+                + if inverse && self.caret_show_after_input {
+                    interval
+                } else {
+                    std::time::Duration::ZERO
+                },
+        })
+    }
+    pub(crate) fn next_caret_frame(&self, e: &Editor, now: Instant) -> Option<Instant> {
+        self.animated_caret(e).map(|caret| caret.next_frame(now))
+    }
+    pub(crate) fn caret_opacity(&self, e: &Editor, now: Instant) -> f32 {
+        self.animated_caret(e).map_or(1., |caret| caret.alpha(now))
     }
     pub fn new(size: Size, cell: f64, ascent: f64) -> Self {
         Self {
@@ -1005,6 +1059,7 @@ impl View {
             scroll_x: 0.,
             scroll_y: 0.,
             appearance: Appearance::Dark,
+            show_inactive_caret: false,
             focused: true,
             minimap_hover: false,
             minimap_drag: false,
@@ -1035,7 +1090,10 @@ impl View {
             device_scale: 1.,
             line_padding: (0., 0.),
             ligatures: false,
-            started: Instant::now(),
+            caret_started: Instant::now(),
+            caret_interval: Some(vel_platform::DEFAULT_CARET_BLINK_INTERVAL),
+            caret_reduce_motion: false,
+            caret_show_after_input: false,
             scroll_animation: None,
             caret_lines: Default::default(),
             bar_style_key: None,
@@ -3724,18 +3782,11 @@ impl View {
         drop(layout);
         self.profile_step(&mut phase, 3);
         self.paint_brackets(e, language, scheme, clip, &mut layer);
-        let mut alpha = caret_alpha(
-            e.settings.string("caret_style", "solid"),
-            self.started.elapsed().as_secs_f64(),
-        );
-        if e.settings.bool("inverse_caret_state", false)
-            && matches!(
-                e.preferences.caret_style.as_str(),
-                "blink" | "smooth" | "phase"
-            )
-        {
-            alpha = 1. - alpha;
-        }
+        let alpha = if self.focused {
+            self.caret_opacity(e, Instant::now())
+        } else {
+            1.
+        };
         // Carets are ordered: those on one row share its display columns.
         let mut caret_row = None;
         for r in visible_carets {
@@ -3746,7 +3797,7 @@ impl View {
             let caret = self.drawn_caret_in(e, r.b, &mut caret_row);
             let mut color = global("caret");
             color[3] *= alpha * if e.command_mode() { 0.45 } else { 1. };
-            if self.focused {
+            if self.focused || self.show_inactive_caret {
                 // Block fills share the text background pass, below glyphs. Thin
                 // insertion carets retain their existing foreground layer.
                 let block = e.command_mode()
@@ -3845,6 +3896,23 @@ impl View {
     }
     pub(crate) fn hit_scrollbar(&self, point: Point) -> bool {
         vel_ui::contains(self.scroll_bar, point)
+    }
+    pub(crate) fn text_cursor_at(&self, e: &Editor, point: Point) -> bool {
+        e.binary.is_none()
+            && self.image_preview.image.is_none()
+            && e.settings.get("velocity_html_sheet").is_none()
+            && point.y >= self.tab_height
+            && point.y < self.size.height
+            && point.x >= self.gutter(e)
+            && point.x < self.right(e)
+            && !self.hit_scrollbar(point)
+            && !(e.completion.visible() && vel_ui::contains(e.completion.bounds.get(), point))
+            && !e
+                .html
+                .borrow()
+                .popup
+                .as_ref()
+                .is_some_and(|popup| popup.visible && vel_ui::contains(popup.html.clip, point))
     }
     #[cfg(test)]
     pub(crate) fn minimap_rects(&self, e: &Editor) -> (Rect, Rect) {
@@ -4544,13 +4612,46 @@ const GUTTER_MARKS: f64 = 12.;
 /// Gutter space right of the line numbers: 4 of gap and the 12-point fold column, whose
 /// 16-point buttons end 1 point before the gutter edge.
 const GUTTER_FOLD: f64 = 16.;
-pub fn caret_alpha(style: &str, seconds: f64) -> f32 {
-    let phase = seconds.rem_euclid(1.);
-    match style {
-        "blink" => f32::from(phase < 0.5),
-        "phase" => (1. - phase * 2.).clamp(0., 1.) as f32,
-        "smooth" => ((seconds * std::f64::consts::TAU).cos() * 0.5 + 0.5) as f32,
-        _ => 1.,
+#[derive(Clone, Copy)]
+enum CaretStyle {
+    Blink,
+    Smooth,
+    Phase,
+}
+
+struct CaretAnimation {
+    style: CaretStyle,
+    interval: std::time::Duration,
+    inverse: bool,
+    start: Instant,
+}
+
+impl CaretAnimation {
+    fn next_frame(&self, now: Instant) -> Instant {
+        if now < self.start {
+            return self.start;
+        }
+        if matches!(self.style, CaretStyle::Blink) {
+            let remainder = now.duration_since(self.start).as_nanos() % self.interval.as_nanos();
+            now + self.interval - std::time::Duration::from_nanos(remainder as u64)
+        } else {
+            now + std::time::Duration::from_millis(16)
+        }
+    }
+
+    fn alpha(&self, now: Instant) -> f32 {
+        if now < self.start {
+            return 1.;
+        }
+        let elapsed = now.duration_since(self.start).as_nanos();
+        let half = self.interval.as_nanos();
+        let phase = (elapsed % (2 * half)) as f64 / (2 * half) as f64;
+        let alpha = match self.style {
+            CaretStyle::Blink => f32::from((elapsed / half).is_multiple_of(2)),
+            CaretStyle::Phase => (1. - phase * 2.).clamp(0., 1.) as f32,
+            CaretStyle::Smooth => ((phase * std::f64::consts::TAU).cos() * 0.5 + 0.5) as f32,
+        };
+        if self.inverse { 1. - alpha } else { alpha }
     }
 }
 
@@ -5222,10 +5323,38 @@ mod tests {
         assert!(r.y >= v.tab_height && r.y + r.height <= v.size.height);
     }
     #[test]
+    fn blink_deadline_is_the_next_phase_boundary_even_after_a_late_frame() {
+        let start = Instant::now();
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        let mut caret = CaretAnimation {
+            style: CaretStyle::Blink,
+            interval: std::time::Duration::from_millis(275),
+            start,
+            inverse: false,
+        };
+        assert_eq!(caret.next_frame(start), at(275));
+        assert_eq!(caret.next_frame(at(274)), at(275));
+        assert_eq!(caret.next_frame(at(275)), at(550));
+        assert_eq!(caret.next_frame(at(418)), at(550));
+        assert_eq!(caret.alpha(at(275)), 0.);
+        assert_eq!(caret.alpha(at(550)), 1.);
+        caret.style = CaretStyle::Smooth;
+        assert_eq!(caret.next_frame(at(274)), at(290));
+    }
+
+    #[test]
     fn caret_modes_and_whitespace_selection_have_distinct_output() {
-        assert_eq!(caret_alpha("solid", 0.75), 1.);
-        assert_eq!(caret_alpha("blink", 0.75), 0.);
-        assert!(caret_alpha("smooth", 0.5) < 0.01);
+        let now = Instant::now();
+        let after = |ms| now + std::time::Duration::from_millis(ms);
+        let mut caret = CaretAnimation {
+            style: CaretStyle::Blink,
+            interval: std::time::Duration::from_millis(500),
+            start: now,
+            inverse: false,
+        };
+        assert_eq!(caret.alpha(after(750)), 0.);
+        caret.style = CaretStyle::Smooth;
+        assert!(caret.alpha(after(500)) < 0.01);
         let mut e = Editor::new(Text::from("  x \n"));
         e.settings.set(
             vel_config::settings::Layer::View,

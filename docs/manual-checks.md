@@ -252,6 +252,30 @@ Compare side by side with Typora's Preferences window.
 - [ ] Windows (VM or CI artifact): Ctrl+, opens the window (no menu bar), Ctrl+K, Ctrl+, opens the
       JSON pair, Ctrl+Shift+. jumps to the previous modification, Ctrl+F6 skips the Settings window.
 
+## Caret, tab dragging and pointer cursors (2026-11-25)
+
+- [ ] With default settings, watch the caret blink. Type continuously, then click or move the
+      caret with the keyboard while it is hidden: it should immediately reappear and wait for
+      a full visible phase. Try all styles, switch to another window/app, minimize or cover the
+      window, and return. On macOS, enable Reduce Motion and try `smooth`, then enable Prefer
+      Non-Blinking Cursor (where available). On Windows, change the keyboard cursor blink rate
+      and set it to None; check that Velocity follows both.
+- [ ] Click and slightly wiggle a tab without moving it. Drag past a neighbouring tab's edge
+      and then midpoint: the order should change only at the midpoint. Pause or reverse near
+      that point with partially scrolled tabs. The lifted card should follow within the strip;
+      neighbours should slide briefly, or jump with Reduce Motion. Repeat in light and dark.
+- [ ] Drag across a second group's editor and then over its strip. Only the strip is a group
+      target. Press Escape after the preview moves and check that both groups are unchanged;
+      repeat and release to commit. Double-click and inline rename should still work.
+- [ ] Tear off a dirty tab by releasing over the editor and again outside the window. Check
+      the new window is placed near the pointer, has the original selection and undo history,
+      and the old window has no copy. Repeat with the last tab and both values of
+      `close_windows_when_empty`.
+- [ ] On macOS and Windows, hover the editor, Find/Replace, command palette, inline rename, and
+      Settings search/text fields for I-beams; test tabs, buttons, status bar, gutter, minimap,
+      scrollbars, and menus for arrows. Drag the sidebar edge and each orientation of pane
+      divider with its resize cursor. Verify a native IME candidate still anchors to the caret.
+
 ## Tab rename field (2026-11-23, native review pending)
 
 - [ ] Double-click a file tab, then an untitled tab: the rounded field starts right of the file icon,

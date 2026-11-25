@@ -1,7 +1,7 @@
 //! Window geometry, monitor policy, and DWM decoration.
 use super::{Event, Host, WindowHandle, model};
 use crate::{
-    Appearance, DisplayStatus, FrameReason, Point, Rect, Size, accessibility, clamp_window_frame,
+    Appearance, DisplayStatus, FrameReason, Rect, Size, accessibility, clamp_window_frame,
 };
 use std::{
     mem::size_of,
@@ -11,8 +11,8 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, RECT, WPARAM},
     Graphics::{
         Dwm::{
-            DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            DwmSetWindowAttribute,
+            DWMWA_CAPTION_COLOR, DWMWA_CLOAKED, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DwmGetWindowAttribute, DwmSetWindowAttribute,
         },
         Gdi::*,
     },
@@ -25,6 +25,31 @@ use windows_sys::Win32::{
     },
 };
 use windows_sys::w;
+
+pub(super) fn caret_occluded(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: The caller owns a live HWND. DWMWA_CLOAKED writes a DWORD, and the
+    // cached DC is released on this thread after querying its visible region.
+    unsafe {
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        ) >= 0
+            && cloaked != 0
+        {
+            return true;
+        }
+        let dc = GetDCEx(hwnd, null_mut(), DCX_CACHE | DCX_CLIPSIBLINGS);
+        if dc.is_null() {
+            return false;
+        }
+        let clipped = GetClipBox(dc, &mut RECT::default());
+        ReleaseDC(hwnd, dc);
+        clipped == NULLREGION
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Fullscreen {
@@ -430,35 +455,6 @@ impl WindowHandle {
                 .set_bounds(info.monitorInfo.rcMonitor, SWP_FRAMECHANGED);
         }
         self.0.sync_geometry(true);
-    }
-
-    /// Finds the editor below a cross-window tab drag, in client coordinates.
-    pub fn tab_drop_destination(&self) -> Option<(Self, u64, usize)> {
-        let runtime = self.0.runtime.upgrade()?;
-        let mut at = windows_sys::Win32::Foundation::POINT::default();
-        // SAFETY: The point is writable. WindowFromPoint and GetAncestor only query it.
-        let target = unsafe {
-            if GetCursorPos(&mut at) == 0 {
-                return None;
-            }
-            GetAncestor(WindowFromPoint(at), GA_ROOT)
-        };
-        let host = runtime.lookup(target)?;
-        if host.id == self.0.id || host.closing.get() {
-            return None;
-        }
-        // SAFETY: The target is one of our live windows. Convert the point in place.
-        if unsafe { ScreenToClient(target, &mut at) } == 0 {
-            return None;
-        }
-        let point: Point = model::logical_point(at.x, at.y, host.dpi.get());
-        let (session, group) = host
-            .app
-            .try_borrow()
-            .ok()?
-            .as_ref()?
-            .tab_drop_destination(point)?;
-        Some((host.handle(), session, group))
     }
 }
 

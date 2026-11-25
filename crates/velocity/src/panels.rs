@@ -573,6 +573,7 @@ pub struct Panels {
     pub tree: Tree,
     pub side_visible: bool,
     pub(crate) sidebar_on_right: bool,
+    sidebar_width: Option<f64>,
     pub open_files_visible: bool,
     pub side_focused: bool,
     pub side_selected: usize,
@@ -595,7 +596,6 @@ pub struct Panels {
     pub(crate) chrome_auto_hidden: bool,
     choice_items: Vec<vel_config::ui::PaletteItem>,
     side_anchor: Option<PathBuf>,
-    pub dragging_tab: Option<usize>,
     pub options: text::Options,
     files_use_gitignore: bool,
     files_use_buffer: bool,
@@ -774,6 +774,7 @@ impl Default for Panels {
             tree: Tree::default(),
             side_visible: true,
             sidebar_on_right: false,
+            sidebar_width: None,
             side_focused: false,
             open_files_visible: false,
             side_selected: 0,
@@ -796,7 +797,6 @@ impl Default for Panels {
             chrome_auto_hidden: false,
             choice_items: Vec::new(),
             side_anchor: None,
-            dragging_tab: None,
             result_view: files::Results::default(),
             quick_pending: false,
             options: text::Options::default(),
@@ -1761,6 +1761,54 @@ impl Panels {
         } else {
             None
         }
+    }
+    pub(crate) fn text_field_at(&self, point: Point) -> bool {
+        if self.overlay.is_some() {
+            return contains(self.quick_bounds, point) && contains(self.quick_input.bounds, point);
+        }
+        contains(self.panel_bounds, point)
+            && ((self.show_build_input()
+                && self
+                    .build_input
+                    .as_ref()
+                    .is_some_and(|input| contains(input.bounds, point)))
+                || self.panel.is_some_and(|panel| {
+                    [&self.query, &self.replace, &self.where_input]
+                        .into_iter()
+                        .take(Self::find_fields(panel))
+                        .any(|input| contains(input.bounds, point))
+                }))
+    }
+
+    pub(crate) fn popup_at(&self, point: Point) -> bool {
+        (!self.hover.is_empty() && contains(self.hover_bounds, point))
+            || (!self.review.items.is_empty() && contains(self.review.bounds, point))
+    }
+
+    pub(crate) fn sidebar_edge(&self) -> f64 {
+        if self.sidebar_on_right {
+            self.side_bounds.x
+        } else {
+            self.side_bounds.x + self.side_bounds.width
+        }
+    }
+
+    pub(crate) fn hit_sidebar_edge(&self, point: Point) -> bool {
+        self.side_visible
+            && self.side_bounds.width > 0.
+            && point.y >= self.side_bounds.y
+            && point.y < self.side_bounds.y + self.side_bounds.height
+            && (point.x - self.sidebar_edge()).abs() <= 4.
+    }
+
+    pub(crate) fn resize_sidebar(&mut self, edge: f64, editor_minimum: f64) {
+        let max = (self.size.width - editor_minimum).max(0.);
+        let width = if self.sidebar_on_right {
+            self.size.width - edge
+        } else {
+            edge
+        };
+        self.sidebar_width = Some(width.clamp(96f64.min(max), max));
     }
     pub fn input_mut(&mut self) -> Option<&mut Input> {
         if self.overlay.is_some() {
@@ -6147,7 +6195,10 @@ impl Panels {
         self.replace.scale = self.ui_scale;
         self.where_input.scale = self.ui_scale;
         let side = if self.side_visible {
-            220f64.min(size.width * 0.3)
+            self.sidebar_width.map_or_else(
+                || 220f64.min(size.width * 0.3),
+                |width| width.min((size.width - 120.).max(0.)),
+            )
         } else {
             0.
         };

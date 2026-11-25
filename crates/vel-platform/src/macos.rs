@@ -47,8 +47,8 @@ pub(super) fn activate_pid(pid: i32) {
 }
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSFileManager, NSNotification,
-    NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop,
-    NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL,
+    NSObject, NSObjectNSDelayedPerforming, NSObjectProtocol, NSPoint, NSPointInRect, NSRange,
+    NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_metal::MTLDrawable;
 use objc2_quartz_core::{
@@ -121,28 +121,13 @@ impl WindowHandle {
     pub fn is_closed(&self) -> bool {
         self.0.stopped.get()
     }
-    /// Finds the frontmost eligible Velocity tab strip under the mouse.
-    pub fn tab_drop_destination(&self) -> Option<(WindowHandle, u64, usize)> {
-        let point = NSEvent::mouseLocation();
-        let number =
-            NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, self.0.mtm);
-        for host in lifecycle::live_hosts() {
-            let (Some(window), Some(view)) = (host.window.get(), host.view.get()) else {
-                continue;
-            };
-            if host.id == self.0.id || window.windowNumber() != number {
-                continue;
-            }
-            let p = view.convertPoint_fromView(window.convertPointFromScreen(point), None);
-            let (token, group) = host
-                .app
-                .try_borrow()
-                .ok()?
-                .as_ref()?
-                .tab_drop_destination(Point { x: p.x, y: p.y })?;
-            return Some((host.handle(), token, group));
-        }
-        None
+    /// Converts a point in the flipped client view to native screen coordinates.
+    pub fn screen_point(&self, point: Point) -> Option<Point> {
+        let window = self.0.window.get()?;
+        let view = self.0.view.get()?;
+        let p = view.convertPoint_toView(NSPoint::new(point.x, point.y), None);
+        let p = window.convertPointToScreen(p);
+        Some(Point { x: p.x, y: p.y })
     }
     /// Notifies macOS of a completed document open, or clears system recents.
     pub fn system_recent_document(&self, path: Option<&Path>) {
@@ -364,6 +349,39 @@ impl WindowHandle {
     /// Whether this native window currently receives keyboard input.
     pub fn is_focused(&self) -> bool {
         self.0.window.get().is_some_and(|w| w.isKeyWindow())
+    }
+    /// Insertion indicators animate only in a key, active, visible window.
+    pub fn caret_is_active(&self) -> bool {
+        NSApplication::sharedApplication(self.0.mtm).isActive()
+            && self.0.window.get().is_some_and(|w| {
+                w.isKeyWindow() && w.occlusionState().contains(NSWindowOcclusionState::Visible)
+            })
+    }
+    /// Honors Accessibility > Motion > Prefer Non-Blinking Cursor on macOS 15+.
+    pub fn caret_blink_interval(&self) -> Option<std::time::Duration> {
+        type Preference = unsafe extern "C" fn() -> objc2::runtime::Bool;
+        static PREFERENCE: std::sync::OnceLock<Option<Preference>> = std::sync::OnceLock::new();
+        let preference = PREFERENCE.get_or_init(|| {
+            // SAFETY: Keep this public framework loaded for the life of the process.
+            // Resolving the C API dynamically preserves macOS 14 support.
+            unsafe {
+                let framework = libc::dlopen(
+                    c"/System/Library/Frameworks/Accessibility.framework/Accessibility".as_ptr(),
+                    libc::RTLD_LAZY | libc::RTLD_LOCAL,
+                );
+                if framework.is_null() {
+                    return None;
+                }
+                let symbol = libc::dlsym(
+                    framework,
+                    c"AXPrefersNonBlinkingTextInsertionIndicator".as_ptr(),
+                );
+                (!symbol.is_null()).then(|| std::mem::transmute::<*mut c_void, Preference>(symbol))
+            }
+        });
+        // SAFETY: The resolved function has no arguments and returns Objective-C BOOL.
+        (!preference.is_some_and(|prefer_solid| unsafe { prefer_solid().as_bool() }))
+            .then_some(DEFAULT_CARET_BLINK_INTERVAL)
     }
     /// Coalesces a redraw and wakes the paused display link.
     pub fn request_frame(&self) {
@@ -821,6 +839,7 @@ struct Host {
     context: RefCell<ContextRequest<Retained<NSEvent>>>,
     context_scheduled: Cell<bool>,
     context_tracking: Cell<bool>,
+    cursor: Cell<Option<CursorShape>>,
     input: RefCell<TextInputState>,
     ax_elements: RefCell<std::collections::HashMap<accessibility::Id, Retained<a11y::AxElement>>>,
     ax_cache: accessibility::TreeCache,
@@ -831,6 +850,28 @@ struct Host {
     ax_layout: Cell<u64>,
 }
 impl Host {
+    fn update_pointer_cursor(&self, point: Point) {
+        let Some(shape) = self
+            .app
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|app| app.cursor_at(point)))
+        else {
+            return;
+        };
+        if self.cursor.replace(Some(shape)) != Some(shape) {
+            // The directional divider cursor APIs require macOS 15.
+            #[allow(deprecated)]
+            let cursor = match shape {
+                CursorShape::Arrow => NSCursor::arrowCursor(),
+                CursorShape::IBeam => NSCursor::IBeamCursor(),
+                CursorShape::ResizeHorizontal => NSCursor::resizeLeftRightCursor(),
+                CursorShape::ResizeVertical => NSCursor::resizeUpDownCursor(),
+            };
+            cursor.set();
+        }
+    }
+
     fn handle(self: &Rc<Self>) -> WindowHandle {
         WindowHandle(Rc::clone(self))
     }
@@ -1355,8 +1396,13 @@ define_class!(
         #[unsafe(method(otherMouseDown:))] fn other_down(&self, e: &NSEvent) { self.mouse(e, MouseKind::Down); }
         #[unsafe(method(otherMouseDragged:))] fn other_dragged(&self, e: &NSEvent) { self.mouse(e, MouseKind::Drag); }
         #[unsafe(method(otherMouseUp:))] fn other_up(&self, e: &NSEvent) { self.mouse(e, MouseKind::Up); }
-        #[unsafe(method(resetCursorRects))] fn reset_cursor_rects(&self) {
-            self.addCursorRect_cursor(self.bounds(), &NSCursor::IBeamCursor());
+        #[unsafe(method(cursorUpdate:))] fn cursor_update(&self, e: &NSEvent) {
+            self.update_pointer_cursor(e);
+        }
+        #[unsafe(method(mouseExited:))] fn mouse_exited(&self, _e: &NSEvent) {
+            if let Some(h) = self.ivars().host.upgrade() {
+                h.cursor.set(None);
+            }
         }
         #[unsafe(method(scrollWheel:))] fn scroll(&self, e: &NSEvent) {
             if let Some(h) = self.ivars().host.upgrade() {
@@ -1515,6 +1561,15 @@ impl EditorView {
             context.discardMarkedText();
         }
     }
+    fn update_pointer_cursor(&self, e: &NSEvent) {
+        let Some(h) = self.ivars().host.upgrade() else {
+            return;
+        };
+        // AppKit may have restored a cursor outside this tracking area.
+        h.cursor.set(None);
+        let p = self.convertPoint_fromView(e.locationInWindow(), None);
+        h.update_pointer_cursor(Point { x: p.x, y: p.y });
+    }
     fn mouse(&self, e: &NSEvent, kind: MouseKind) {
         if let Some(h) = self.ivars().host.upgrade() {
             if kind == MouseKind::Down {
@@ -1534,6 +1589,11 @@ impl EditorView {
             };
             let native = (kind == MouseKind::Down).then(|| e.retain());
             h.dispatch(Event::Mouse(event, native));
+            if matches!(kind, MouseKind::Move | MouseKind::Drag)
+                || kind == MouseKind::Up && NSPointInRect(p, self.bounds())
+            {
+                h.update_pointer_cursor(Point { x: p.x, y: p.y });
+            }
             // Clicks draw immediately; moves and drags arrive faster than the display refreshes,
             // so their frames are coalesced onto the display link.
             if matches!(kind, MouseKind::Down | MouseKind::Up) {
@@ -1862,6 +1922,26 @@ impl Delegate {
                 None => window.center(),
             }
             window.setExcludedFromWindowsMenu(true);
+        } else if let Some(point) = self.ivars().options.position {
+            let size = window.frame().size;
+            let screen = NSScreen::screens(mtm)
+                .into_iter()
+                .find(|s| NSPointInRect(NSPoint::new(point.x, point.y), s.frame()))
+                .or_else(|| NSScreen::mainScreen(mtm));
+            let (x, top) = screen.map_or((point.x, point.y), |screen| {
+                let s = screen.visibleFrame();
+                (
+                    point
+                        .x
+                        .min(s.origin.x + s.size.width - size.width)
+                        .max(s.origin.x),
+                    point
+                        .y
+                        .max(s.origin.y + size.height)
+                        .min(s.origin.y + s.size.height),
+                )
+            });
+            window.setFrameTopLeftPoint(NSPoint::new(x, top));
         } else if let Some(previous) = key {
             // ST4 build 4152: cascade from the front window's top-left corner.
             // https://www.sublimetext.com/download
@@ -1888,6 +1968,20 @@ impl Delegate {
         let view: Retained<EditorView> = unsafe {
             msg_send![super(view), initWithFrame: NSRect::new(NSPoint::new(0., 0.), window.contentLayoutRect().size)]
         };
+        // SAFETY: The view owns the area, which tracks its live visible rect after resize.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                view.bounds(),
+                NSTrackingAreaOptions::InVisibleRect
+                    | NSTrackingAreaOptions::ActiveInActiveApp
+                    | NSTrackingAreaOptions::CursorUpdate
+                    | NSTrackingAreaOptions::MouseEnteredAndExited,
+                Some(&view),
+                None,
+            )
+        };
+        view.addTrackingArea(&tracking);
         let layer = ObservedLayer::alloc().set_ivars(LayerIvars {
             sequence: AtomicU64::new(0),
             observations: Arc::clone(&h.presentations),
@@ -2522,6 +2616,7 @@ fn create_host(
         context: RefCell::new(ContextRequest::default()),
         context_scheduled: Cell::new(false),
         context_tracking: Cell::new(false),
+        cursor: Cell::new(None),
         input: RefCell::new(TextInputState::default()),
         ax_elements: RefCell::new(Default::default()),
         ax_cache: Default::default(),

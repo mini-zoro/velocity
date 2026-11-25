@@ -1,7 +1,8 @@
 //! Unicode input and Win32 pointer messages.
 use super::{Event, Host, WindowHandle, model};
 use crate::{
-    FrameReason, KeyEvent, KeyState, MouseEvent, MouseKind, ScrollEvent, TextInput, Utf16Range,
+    CursorShape, FrameReason, KeyEvent, KeyState, MouseEvent, MouseKind, ScrollEvent, TextInput,
+    Utf16Range,
 };
 use std::{ptr::null_mut, rc::Rc, time::Instant};
 use windows_sys::Win32::{
@@ -222,23 +223,42 @@ impl Host {
                         null_mut()
                     } else {
                         let mut point = POINT::default();
-                        let over_text = GetCursorPos(&mut point) != 0
+                        let shape = if GetCursorPos(&mut point) != 0
                             && ScreenToClient(hwnd, &mut point) != 0
-                            && self.app.try_borrow().ok().is_some_and(|slot| {
-                                slot.as_ref().is_some_and(|app| {
-                                    app.character_index_for_point(model::logical_point(
-                                        point.x,
-                                        point.y,
-                                        self.dpi.get(),
-                                    ))
-                                    .is_some()
+                        {
+                            self.app
+                                .try_borrow()
+                                .ok()
+                                .and_then(|slot| {
+                                    slot.as_ref().map(|app| {
+                                        app.cursor_at(model::logical_point(
+                                            point.x,
+                                            point.y,
+                                            self.dpi.get(),
+                                        ))
+                                    })
                                 })
-                            });
-                        LoadCursorW(null_mut(), if over_text { IDC_IBEAM } else { IDC_ARROW })
+                                .unwrap_or_default()
+                        } else {
+                            CursorShape::Arrow
+                        };
+                        LoadCursorW(
+                            null_mut(),
+                            match shape {
+                                CursorShape::Arrow => IDC_ARROW,
+                                CursorShape::IBeam => IDC_IBEAM,
+                                CursorShape::ResizeHorizontal => IDC_SIZEWE,
+                                CursorShape::ResizeVertical => IDC_SIZENS,
+                            },
+                        )
                     }
                 };
                 // SAFETY: null hides the cursor; otherwise use a borrowed standard cursor.
-                unsafe { SetCursor(cursor) };
+                unsafe {
+                    if GetCursor() != cursor {
+                        SetCursor(cursor);
+                    }
+                }
                 return Some(1);
             }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_LBUTTONUP | WM_RBUTTONDOWN
