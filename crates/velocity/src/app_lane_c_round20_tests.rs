@@ -39,7 +39,10 @@ fn poll(app: &mut App) {
 }
 #[track_caller]
 fn until(app: &mut App, predicate: impl Fn(&App) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(12);
+    // A 25-megapixel image decode runs on a worker beside every other test in the suite;
+    // on a loaded CI runner it has taken longer than 12 s (see the project's watchdog
+    // guidance of 20-30 s for worker scheduling).
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         poll(app);
         if predicate(app) {
