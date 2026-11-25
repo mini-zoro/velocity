@@ -77,8 +77,8 @@ pub(super) fn focused(host: &Rc<Host>) -> Option<Retained<AnyObject>> {
     tree(host).focused().map(|id| object(host, id))
 }
 pub(super) fn hit(host: &Rc<Host>, point: NSPoint) -> Option<Retained<AnyObject>> {
-    let view = host.view.get()?;
-    let window = host.window.get()?;
+    let view = host.view()?;
+    let window = host.window()?;
     let p = view.convertPoint_fromView(window.convertPointFromScreen(point), None);
     tree(host)
         .hit(Point { x: p.x, y: p.y })
@@ -89,12 +89,11 @@ fn screen_rect(host: &Host, rect: Rect) -> NSRect {
         NSPoint::new(rect.x, rect.y),
         NSSize::new(rect.width, rect.height),
     );
-    let Some(view) = host.view.get() else {
+    let Some(view) = host.view() else {
         return rect;
     };
     let window_rect = view.convertRect_toView(rect, None);
-    host.window
-        .get()
+    host.window()
         .map_or(window_rect, |w| w.convertRectToScreen(window_rect))
 }
 /// Post notifications only to queried accessibility clients. Ordinary editing keeps O(1) snapshots.
@@ -188,7 +187,7 @@ pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextI
             }
         }
     }
-    if let Some(view) = host.view.get() {
+    if let Some(view) = host.view() {
         for message in announcements {
             // https://developer.apple.com/documentation/appkit/nsaccessibility-swift.struct/notification/announcementrequested
             // SAFETY: notification constants and keys are immutable AppKit exports.
@@ -200,7 +199,7 @@ pub(super) fn notify(host: &Rc<Host>, previous: &TextInputState, current: &TextI
                     &[text.as_ref() as &AnyObject, priority.as_ref() as &AnyObject],
                 );
                 NSAccessibilityPostNotificationWithUserInfo(
-                    view,
+                    &view,
                     NSAccessibilityAnnouncementRequestedNotification,
                     Some(&info),
                 );
@@ -308,7 +307,7 @@ impl AxElement {
         if let Some(id) = self.node()?.parent {
             Some(object(&host, id))
         } else {
-            host.view.get().map(|view| {
+            host.view().map(|view| {
                 // SAFETY: EditorView inherits AnyObject and cloning retains it.
                 unsafe { Retained::cast_unchecked(view.clone()) }
             })
@@ -327,7 +326,7 @@ impl AxElement {
     }
     fn window_object(&self) -> Option<Retained<AnyObject>> {
         self.ivars().host.upgrade().and_then(|h| {
-            h.window.get().map(|w| {
+            h.window().map(|w| {
                 // SAFETY: NSWindow inherits AnyObject; cloning retains it.
                 unsafe { Retained::cast_unchecked(w.clone()) }
             })

@@ -79,7 +79,7 @@ pub(super) fn popup(host: &Rc<Host>, entries: &[MenuEntry], event: &NSEvent) {
         };
         menu_snapshot(&**app, entries)
     };
-    let Some(view) = host.view.get() else {
+    let Some(view) = host.view() else {
         return;
     };
     let menu = NSMenu::new(host.mtm);
@@ -90,7 +90,7 @@ pub(super) fn popup(host: &Rc<Host>, entries: &[MenuEntry], event: &NSEvent) {
         // Nested native tracking begins here. There is no app, host-state RefCell,
         // command-map, or snapshot borrow across this call. Targets only save a
         // command; app dispatch occurs after tracking has completely returned.
-        NSMenu::popUpContextMenu_withEvent_forView(&menu, event, view);
+        NSMenu::popUpContextMenu_withEvent_forView(&menu, event, &view);
     }
     drop(menu);
     drop(targets);
@@ -112,7 +112,7 @@ pub(super) fn item_title<'a>(
     )
 }
 
-pub(super) fn update_menu_bar(host: &Rc<Host>, menu: &NSMenu) {
+pub(super) fn update_menu_bar(host: &Host, menu: &NSMenu, commands: &RefCell<MenuBarActions>) {
     let states = {
         let Ok(slot) = host.app.try_borrow() else {
             return;
@@ -120,15 +120,14 @@ pub(super) fn update_menu_bar(host: &Rc<Host>, menu: &NSMenu) {
         let Some(app) = slot.as_ref() else {
             return;
         };
-        let commands = host.menu_commands.borrow();
+        let commands = commands.borrow();
         menu.itemArray()
             .iter()
             .filter_map(|item| {
                 if item.action() != Some(sel!(velocityCommand:)) {
                     return None;
                 }
-                let index = usize::try_from(item.tag()).ok()?;
-                let command = commands.get(index)?;
+                let command = commands.get(item.tag())?;
                 let (name, args) = (&command.name, &command.args);
                 Some((
                     item,

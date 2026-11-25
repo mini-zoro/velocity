@@ -215,6 +215,11 @@ impl<E: Clone> ContextRequest<E> {
 pub(crate) struct MenuInstallation(Option<(u64, Vec<MenuEntry>)>);
 #[cfg(any(target_os = "macos", test))]
 impl MenuInstallation {
+    #[cfg(target_os = "macos")]
+    pub fn owner(&self) -> Option<u64> {
+        self.0.as_ref().map(|(id, _)| *id)
+    }
+
     pub fn update(&mut self, owner: u64, entries: &[MenuEntry]) -> bool {
         if self
             .0
