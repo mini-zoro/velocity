@@ -1267,10 +1267,16 @@ define_class!(
     // SAFETY: NSObjectProtocol has no additional requirements.
     unsafe impl NSObjectProtocol for EditorView {}
     impl EditorView {
-        #[unsafe(method(acceptsFirstMouse:))] fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+        #[unsafe(method(acceptsFirstMouse:))] fn accepts_first_mouse(&self, event: Option<&NSEvent>) -> bool {
+            let point = event.map(|e| self.convertPoint_fromView(e.locationInWindow(), None));
             self.ivars().host.upgrade().is_some_and(|host| {
                 host.app.try_borrow().ok().is_some_and(|app| {
-                    app.as_ref().is_some_and(|app| app.accepts_first_mouse())
+                    app.as_ref().is_some_and(|app| {
+                        app.accepts_first_mouse()
+                            || point.is_some_and(|p| {
+                                app.accepts_first_mouse_at(Point { x: p.x, y: p.y })
+                            })
+                    })
                 })
             })
         }

@@ -5471,6 +5471,18 @@ impl AppHandler for App {
     fn accepts_first_mouse(&self) -> bool {
         self.workspace.settings.bool("click_through", false)
     }
+    // A file tab is a one-click control: clicking it while the window is inactive should
+    // select that sheet, not spend the click on activation. The rects are the ones painted
+    // for hit testing, so this adds no layout work and no storage beyond the frame.
+    fn accepts_first_mouse_at(&self, point: Point) -> bool {
+        self.tab_hits
+            .iter()
+            .any(|(_, rect)| vel_ui::contains(*rect, point))
+            || self
+                .tab_button_hits
+                .iter()
+                .any(|(_, _, rect)| vel_ui::contains(*rect, point))
+    }
     fn inline_text_input(&self) -> bool {
         self.tab_rename.is_some()
     }

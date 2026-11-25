@@ -329,6 +329,13 @@ pub trait AppHandler: 'static {
     fn accepts_first_mouse(&self) -> bool {
         false
     }
+    /// Whether a click at this view point acts while it activates an inactive window.
+    /// Chrome that a single click is expected to operate (a file tab) answers true
+    /// regardless of [`Self::accepts_first_mouse`]; text and drag surfaces answer
+    /// false so the activating click does not also move a caret.
+    fn accepts_first_mouse_at(&self, _point: Point) -> bool {
+        false
+    }
     /// Initialize the renderer while the native window is still hidden.
     fn on_start(&mut self, _window: &WindowHandle) -> Result<(), String> {
         Ok(())

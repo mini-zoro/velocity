@@ -187,6 +187,28 @@ fn r34_typing_chrome_and_native_pointer_policy() {
     let mut a = app("editor", None, None);
     assert!(!a.accepts_first_mouse());
     assert!(!a.hide_pointer_while_typing());
+    // A file tab is a one-click control: a click that activates an inactive window acts
+    // on the tab it lands on, while the same click in the text only activates.
+    a.scene();
+    let (sheet, tab) = a
+        .tab_hits
+        .first()
+        .copied()
+        .expect("the open tab is painted");
+    assert!(a.accepts_first_mouse_at(Point {
+        x: tab.x + tab.width / 2.,
+        y: tab.y + tab.height / 2.,
+    }));
+    let text = a.sheet_bounds[&sheet];
+    assert!(!a.accepts_first_mouse_at(Point {
+        x: text.x + text.width / 2.,
+        y: text.y + text.height / 2.,
+    }));
+    let (_, _, button) = a.tab_button_hits.first().copied().expect("tab bar buttons");
+    assert!(a.accepts_first_mouse_at(Point {
+        x: button.x + button.width / 2.,
+        y: button.y + button.height / 2.,
+    }));
     pref(&mut a, "click_through", json!(true));
     pref(&mut a, "hide_pointer_while_typing", json!(true));
     assert!(a.accepts_first_mouse());
