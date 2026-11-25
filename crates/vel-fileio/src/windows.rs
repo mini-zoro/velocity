@@ -132,7 +132,30 @@ pub(super) fn publish(stage: &Path, target: &Path, replace: bool) -> io::Result<
     if unsafe { SetFileAttributesW(name.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    move_file(stage, target, replace)
+    // Antivirus, the search indexer and backup agents briefly hold files they just saw
+    // written, and Windows reports that as Access denied or a sharing/lock violation.
+    // Retry for about 0.3 s before failing a save. Genuine permission errors are already
+    // rejected by the read-only and DACL checks before publication; they cost the same
+    // short delay and then report unchanged.
+    let mut delay = std::time::Duration::from_millis(10);
+    let mut attempt = 0;
+    loop {
+        match move_file(stage, target, replace) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 5 && transient_publication(&error) => {
+                std::thread::sleep(delay);
+                delay *= 2;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// A publication error another process can cause for a moment: Access denied, sharing
+/// violation or lock violation.
+fn transient_publication(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
 }
 
 struct Descriptor(PSECURITY_DESCRIPTOR);
@@ -244,4 +267,19 @@ pub fn trash(path: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_provisional_holder_errors_are_retried() {
+        for code in [5, 32, 33] {
+            assert!(transient_publication(&io::Error::from_raw_os_error(code)));
+        }
+        for code in [2, 3, 112, 183] {
+            assert!(!transient_publication(&io::Error::from_raw_os_error(code)));
+        }
+    }
 }
